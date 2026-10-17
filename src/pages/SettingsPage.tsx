@@ -1,5 +1,5 @@
-// Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01)
-// and update checks (FD-14). The theme switch is in the top bar.
+// Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
+// power action limits (VM-06) and update checks (FD-14). The theme switch is in the top bar.
 
 import { useEffect, useState } from "react";
 import { FolderIcon, XIcon } from "lucide-react";
@@ -33,6 +33,8 @@ export function SettingsPage({ onChanged }: Props) {
   const [updateMessage, setUpdateMessage] = useState<Message>(null);
   const [newFolder, setNewFolder] = useState("");
   const [folderMessage, setFolderMessage] = useState<Message>(null);
+  const [powerOnLimit, setPowerOnLimit] = useState("");
+  const [powerMessage, setPowerMessage] = useState<Message>(null);
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
@@ -40,6 +42,7 @@ export function SettingsPage({ onChanged }: Props) {
       (s) => {
         setSettings(s);
         setPath(s.vmrunPathSaved ?? "");
+        setPowerOnLimit(String(s.powerOnLimit));
       },
       (err) => setVmrunMessage({ ok: false, text: errorMessage(err) }),
     );
@@ -69,6 +72,17 @@ export function SettingsPage({ onChanged }: Props) {
       onChanged();
     } catch (err) {
       setFolderMessage({ ok: false, text: errorMessage(err) });
+    }
+  }
+
+  async function savePowerActions() {
+    try {
+      const s = await api.setPowerOnLimit(Number(powerOnLimit));
+      setSettings(s);
+      setPowerOnLimit(String(s.powerOnLimit));
+      setPowerMessage({ ok: true, text: "Saved. Applies from the next action on." });
+    } catch (err) {
+      setPowerMessage({ ok: false, text: errorMessage(err) });
     }
   }
 
@@ -184,6 +198,34 @@ export function SettingsPage({ onChanged }: Props) {
           </form>
           <StatusLine message={folderMessage} />
         </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Power actions</CardTitle>
+          <CardDescription>
+            Starting many VMs at once can saturate the host&apos;s disk and CPU. Bulk starts power on this many at a
+            time; the rest wait their turn.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-2">
+          <Label htmlFor="power-on-limit">VMs powered on at once</Label>
+          <Input
+            id="power-on-limit"
+            type="number"
+            min={1}
+            max={32}
+            className="w-28"
+            value={powerOnLimit}
+            onChange={(e) => setPowerOnLimit(e.currentTarget.value)}
+          />
+          <StatusLine message={powerMessage} />
+        </CardContent>
+        <CardFooter>
+          <Button onClick={() => void savePowerActions()} disabled={!settings}>
+            Save
+          </Button>
+        </CardFooter>
       </Card>
 
       <Card>

@@ -201,6 +201,8 @@ export interface Settings {
   updateChecks: boolean;
   /** VM-01: folders scanned for .vmx files, besides Workstation's library. */
   scanFolders: string[];
+  /** VM-06: how many VMs may power on at once (1 to 32, default 3). */
+  powerOnLimit: number;
 }
 
 /** FD-14: a newer signed release on GitHub. */
@@ -270,6 +272,7 @@ export const api = {
   setUpdateChecks: (enabled: boolean) => invoke<Settings>("settings_set_update_checks", { enabled }),
   /** VM-01: each folder must exist. */
   setScanFolders: (folders: string[]) => invoke<Settings>("settings_set_scan_folders", { folders }),
+  setPowerOnLimit: (limit: number) => invoke<Settings>("settings_set_power_on_limit", { limit }),
   /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
 

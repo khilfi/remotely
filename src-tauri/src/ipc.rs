@@ -180,6 +180,8 @@ pub struct Settings {
     update_checks: bool,
     /// VM-01: folders scanned for .vmx files, besides Workstation's library.
     scan_folders: Vec<String>,
+    /// VM-06: how many VMs may power on at once.
+    power_on_limit: usize,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -193,6 +195,7 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
             .iter()
             .map(|p| p.display().to_string())
             .collect(),
+        power_on_limit: core.power_on_limit(),
     })
 }
 
@@ -222,6 +225,13 @@ pub async fn settings_set_scan_folders(state: State<'_, AppState>, folders: Vec<
         .map(PathBuf::from)
         .collect();
     state.core.set_scan_folders(folders).await?;
+    settings(&state.core).await
+}
+
+/// VM-06: how many VMs may power on at once.
+#[tauri::command]
+pub async fn settings_set_power_on_limit(state: State<'_, AppState>, limit: usize) -> IpcResult<Settings> {
+    state.core.set_power_on_limit(limit).await?;
     settings(&state.core).await
 }
 

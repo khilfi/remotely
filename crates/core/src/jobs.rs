@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -95,6 +95,11 @@ pub struct JobLimits {
     pub remote: usize,
 }
 
+impl JobLimits {
+    /// VM-06: the most power-ons the setting allows at once.
+    pub const MAX_POWER_ON: usize = 32;
+}
+
 impl Default for JobLimits {
     fn default() -> Self {
         Self {
@@ -166,7 +171,8 @@ pub struct JobRunner {
     vmware: Arc<dyn VmwareAdapter>,
     remote: Arc<dyn RemoteAdapter>,
     updater: Arc<dyn UpdaterAdapter>,
-    limits: JobLimits,
+    /// Read when a job starts, so a changed setting applies to the next job.
+    limits: RwLock<JobLimits>,
     events: broadcast::Sender<JobEvent>,
     /// Open jobs (queued, in countdown or running) and their cancel tokens.
     running: Mutex<HashMap<Uuid, CancellationToken>>,
@@ -188,11 +194,20 @@ impl JobRunner {
             vmware,
             remote,
             updater,
-            limits,
+            limits: RwLock::new(limits),
             events,
             running: Mutex::new(HashMap::new()),
             idle: Notify::new(),
         })
+    }
+
+    pub fn limits(&self) -> JobLimits {
+        *locks::read(&self.limits)
+    }
+
+    /// VM-06: how many VMs may power on at once, from the next job on. At least 1.
+    pub fn set_power_on_limit(&self, limit: usize) {
+        locks::write(&self.limits).power_on = limit.max(1);
     }
 
     /// Number of open jobs.
@@ -496,13 +511,14 @@ impl JobRunner {
     }
 
     fn parallelism(&self, command: &Command) -> usize {
+        let limits = self.limits();
         let n = match command {
             Command::VmPower {
                 op: PowerOp::Start { .. },
                 ..
-            } => self.limits.power_on,
-            Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => self.limits.vm_ops,
-            Command::RemoteExec { .. } => self.limits.remote,
+            } => limits.power_on,
+            Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => limits.vm_ops,
+            Command::RemoteExec { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
         };
         n.max(1)

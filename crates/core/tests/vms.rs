@@ -7,16 +7,17 @@
 mod common;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use common::{temp_folder, vm, vmx, wait_finished, Setup};
 use remotely_core::adapters::vmware::VmxInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, SubmitOutcome};
 use remotely_core::domain::{PowerState, Target};
-use remotely_core::fakes::FakeVmware;
+use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::inventory::VmFilter;
-use remotely_core::jobs::JobStatus;
+use remotely_core::jobs::{JobLimits, JobStatus};
 use remotely_core::policy::Tier;
-use remotely_core::CoreError;
+use remotely_core::{Adapters, Core, CoreError};
 
 fn names(targets: &[Target]) -> Vec<&str> {
     targets.iter().map(|t| t.name.as_str()).collect()
@@ -308,4 +309,72 @@ async fn a_saved_filter_picks_the_stopped_lab_vms_which_start_with_a_console_win
     );
     // The list shows them running before the next refresh.
     assert!(core.inventory.list(&core.ctx, &saved.filter).await.unwrap().is_empty());
+}
+
+// ---- VM-06: parallel power-on limit ------------------------------------------------------------
+
+async fn start_all(core: &Core, names: &[&str]) -> JobStatus {
+    let mut events = core.jobs.subscribe();
+    let start = Command::VmPower {
+        targets: names.iter().map(|n| vm(n)).collect(),
+        op: PowerOp::Start { gui: false },
+    };
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, start).await.unwrap() else {
+        panic!("starting VMs is Low");
+    };
+    wait_finished(&mut events, job_id).await
+}
+
+const SIX: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+
+#[tokio::test]
+async fn at_most_three_vms_power_on_at_once_by_default() {
+    let setup = Setup::new(FakeVmware::default().with_power_delay(Duration::from_millis(60)));
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    assert_eq!(core.power_on_limit(), 3);
+
+    assert_eq!(start_all(&core, &SIX).await, JobStatus::Succeeded);
+    assert_eq!(fake.max_in_flight(), 3);
+    assert_eq!(fake.running().len(), 6);
+}
+
+#[tokio::test]
+async fn the_power_on_limit_is_a_saved_setting() {
+    let setup = Setup::new(FakeVmware::default().with_power_delay(Duration::from_millis(40)));
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+
+    core.set_power_on_limit(1).await.unwrap();
+    assert_eq!(start_all(&core, &SIX).await, JobStatus::Succeeded);
+    assert_eq!(fake.max_in_flight(), 1);
+
+    // Kept across a restart.
+    let again = Core::assemble(
+        core.store.clone(),
+        core.ctx,
+        Adapters {
+            vmware: Arc::new(FakeVmware::default()),
+            remote: Arc::new(FakeRemote::default()),
+            vault: Arc::new(FakeVault::with_password("x")),
+            host_counters: Arc::new(FakeHostCounters::default()),
+            updater: Arc::new(FakeUpdater::default()),
+        },
+        JobLimits::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(again.power_on_limit(), 1);
+
+    for bad in [0, JobLimits::MAX_POWER_ON + 1] {
+        assert!(matches!(
+            core.set_power_on_limit(bad).await,
+            Err(CoreError::InvalidSetting(_))
+        ));
+    }
+    assert_eq!(core.power_on_limit(), 1);
+    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    assert!(audit
+        .iter()
+        .any(|e| e.event == "setting_changed" && e.detail.as_deref() == Some("1")));
 }

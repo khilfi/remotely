@@ -128,6 +128,9 @@ impl Core {
             store.clone(),
             Arc::clone(&adapters.vault),
         );
+        if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
+            jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
+        }
         Ok(Self {
             ctx,
             inventory: Inventory::new(store.clone(), vmware_dyn),
@@ -206,6 +209,27 @@ impl Core {
         };
         self.audit_setting("Set the VM folders to scan", &detail).await?;
         Ok(kept)
+    }
+
+    /// VM-06: how many VMs may power on at once (default 3).
+    pub fn power_on_limit(&self) -> usize {
+        self.jobs.limits().power_on
+    }
+
+    /// VM-06: 1 to [`JobLimits::MAX_POWER_ON`]. Applies from the next job on. Audited.
+    pub async fn set_power_on_limit(&self, limit: usize) -> Result<()> {
+        if !(1..=JobLimits::MAX_POWER_ON).contains(&limit) {
+            return Err(CoreError::InvalidSetting(format!(
+                "VMs powered on at once must be 1 to {}",
+                JobLimits::MAX_POWER_ON
+            )));
+        }
+        self.store
+            .put_setting(&self.ctx, store::POWER_ON_LIMIT_KEY, &limit)
+            .await?;
+        self.jobs.set_power_on_limit(limit);
+        self.audit_setting("Set the parallel power-on limit", &limit.to_string())
+            .await
     }
 
     /// FD-14: whether update checks are on. Defaults to on.
