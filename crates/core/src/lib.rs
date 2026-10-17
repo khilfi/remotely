@@ -16,6 +16,7 @@
 //! runner (changes) or [`inventory::Inventory`] and [`metrics`] (reads).
 
 pub mod adapters;
+pub mod capacity;
 pub mod command_bus;
 pub mod domain;
 pub mod error;
@@ -36,6 +37,7 @@ use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::remote::{RemoteAdapter, RusshAdapter, ShellHandle};
 use adapters::updater::{UpdateInfo, UpdaterAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
+use capacity::CapacityChecker;
 use command_bus::CommandBus;
 use domain::Context;
 use inventory::{Inventory, StoreDirectory};
@@ -127,6 +129,11 @@ impl Core {
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
+            CapacityChecker::new(
+                store.clone(),
+                Arc::clone(&vmware_dyn),
+                Arc::clone(&adapters.host_counters),
+            ),
         );
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));

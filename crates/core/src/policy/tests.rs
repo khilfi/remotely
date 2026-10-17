@@ -497,3 +497,39 @@ fn tier_bump_caps_at_critical() {
     assert_eq!(Tier::Critical.bump(), Tier::Critical);
     assert!(Tier::Low < Tier::Medium && Tier::High < Tier::Critical);
 }
+
+// ---- Warnings before an action (VM-07) ---------------------------------------------------------
+
+#[test]
+fn a_warning_adds_one_confirm_to_an_action_without_a_dialog() {
+    let t = vms(2);
+    let mut d = engine().evaluate(&power(PowerOp::Start { gui: false }, &t), &t);
+    d.add_warnings(vec!["not enough RAM".into()]);
+    assert_eq!(d.tier, Tier::Low, "the tier stays");
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+    assert_eq!(d.warnings, ["not enough RAM"]);
+}
+
+#[test]
+fn a_warning_leaves_the_steps_of_a_tier_with_a_dialog_alone() {
+    let mut t = vms(2);
+    t[0].environment = Environment::Prod;
+    let start = power(PowerOp::Start { gui: false }, &t);
+    let stop = power(PowerOp::Stop { mode: SOFT }, &t);
+    for command in [start, stop] {
+        let mut d = engine().evaluate(&command, &t);
+        let before = d.steps.clone();
+        d.add_warnings(vec!["low disk".into()]);
+        assert_eq!(d.steps, before);
+        assert_eq!(d.warnings.len(), 1);
+    }
+}
+
+#[test]
+fn no_warnings_change_nothing() {
+    let t = vms(1);
+    let mut d = engine().evaluate(&power(PowerOp::Start { gui: false }, &t), &t);
+    d.add_warnings(vec![]);
+    assert!(d.steps.is_empty());
+    assert!(d.warnings.is_empty());
+}

@@ -120,6 +120,8 @@ export interface ApprovalRequest {
   targets: Target[];
   skipped: Target[];
   reasons: string[];
+  /** Problems to read before approving, e.g. the capacity check before a power-on (VM-07). */
+  warnings: string[];
 }
 
 export type SubmitOutcome =

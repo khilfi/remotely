@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::capacity::CapacityChecker;
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::jobs::{JobRunner, JobSpec};
@@ -165,6 +166,8 @@ pub struct ApprovalRequest {
     pub targets: Vec<Target>,
     pub skipped: Vec<Target>,
     pub reasons: Vec<String>,
+    /// Problems to read before approving, e.g. the capacity check before a power-on (VM-07).
+    pub warnings: Vec<String>,
 }
 
 /// The user's answers to the approval steps (AP-03, AP-06).
@@ -207,6 +210,7 @@ pub struct CommandBus {
     jobs: Arc<JobRunner>,
     store: Store,
     vault: Arc<dyn Vault>,
+    capacity: CapacityChecker,
     pending: Mutex<HashMap<Uuid, Pending>>,
 }
 
@@ -217,6 +221,7 @@ impl CommandBus {
         jobs: Arc<JobRunner>,
         store: Store,
         vault: Arc<dyn Vault>,
+        capacity: CapacityChecker,
     ) -> Self {
         Self {
             policy: RwLock::new(policy),
@@ -224,6 +229,7 @@ impl CommandBus {
             jobs,
             store,
             vault,
+            capacity,
             pending: Mutex::new(HashMap::new()),
         }
     }
@@ -251,9 +257,18 @@ impl CommandBus {
             targets.push(self.directory.resolve(ctx, target).await?);
         }
 
-        let decision = locks::read(&self.policy).evaluate(&command, &targets);
+        let mut decision = locks::read(&self.policy).evaluate(&command, &targets);
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
+        }
+        if let Command::VmPower {
+            op: PowerOp::Start { .. },
+            ..
+        } = &command
+        {
+            // VM-07: capacity check before power-on.
+            let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
+            decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
         }
         let summary = command.summary(decision.targets.len());
 
@@ -288,7 +303,15 @@ impl CommandBus {
             targets: decision.targets.clone(),
             skipped: decision.skipped.clone(),
             reasons: decision.reasons.clone(),
+            warnings: decision.warnings.clone(),
         };
+        let detail = decision
+            .reasons
+            .iter()
+            .chain(&decision.warnings)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
         self.store
             .append_audit(
                 ctx,
@@ -300,7 +323,7 @@ impl CommandBus {
                     targets: &decision.targets,
                     approval: None,
                     result: None,
-                    detail: Some(&decision.reasons.join("; ")),
+                    detail: Some(&detail),
                 },
             )
             .await?;

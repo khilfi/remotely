@@ -16,7 +16,7 @@ use remotely_core::domain::{PowerState, Target};
 use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::inventory::VmFilter;
 use remotely_core::jobs::{JobLimits, JobStatus};
-use remotely_core::policy::Tier;
+use remotely_core::policy::{ApprovalStep, Tier};
 use remotely_core::{Adapters, Core, CoreError};
 
 fn names(targets: &[Target]) -> Vec<&str> {
@@ -377,4 +377,106 @@ async fn the_power_on_limit_is_a_saved_setting() {
     assert!(audit
         .iter()
         .any(|e| e.event == "setting_changed" && e.detail.as_deref() == Some("1")));
+}
+
+// ---- VM-07: capacity check before power-on -----------------------------------------------------
+
+fn with_ram(fake: FakeVmware, name: &str, gb: u32) -> FakeVmware {
+    fake.with_vmx(
+        &vmx(name),
+        VmxInfo {
+            display_name: Some(name.into()),
+            memsize_mb: Some(gb * 1024),
+            ..Default::default()
+        },
+    )
+}
+
+fn start(names: &[&str]) -> Command {
+    Command::VmPower {
+        targets: names.iter().map(|n| vm(n)).collect(),
+        op: PowerOp::Start { gui: false },
+    }
+}
+
+#[tokio::test]
+async fn starting_vms_that_would_overcommit_host_ram_asks_for_a_confirm() {
+    let mut fake = FakeVmware::with_running([vmx("a")]);
+    for (name, gb) in [("a", 16), ("b", 20), ("c", 8)] {
+        fake = with_ram(fake, name, gb);
+    }
+    let setup = Setup::new(fake); // the fake host has 32 GB
+    let vmware = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    let mut events = core.jobs.subscribe();
+
+    // 16 GB running + 8 GB fits.
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, start(&["c"])).await.unwrap() else {
+        panic!("enough RAM: no dialog");
+    };
+    wait_finished(&mut events, job_id).await;
+
+    // 24 GB running + 20 GB does not. Starting is still Low, but the warning needs a confirm.
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, start(&["a", "b"])).await.unwrap() else {
+        panic!("over the host's RAM: a confirm");
+    };
+    assert_eq!(request.tier, Tier::Low);
+    assert_eq!(request.steps, [ApprovalStep::Confirm]);
+    assert_eq!(
+        request.warnings,
+        ["Running VMs would be assigned 44.0 GB of RAM, more than this host's 32.0 GB."],
+        "a is already running, so only b counts as starting"
+    );
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].event, "approval_requested");
+    assert!(audit[0].detail.as_deref().unwrap().contains("44.0 GB"));
+
+    assert!(core.bus.approve(request.id, ApprovalAnswers::default()).await.is_err());
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
+    assert_eq!(common::running(&vmware), ["a", "b", "c"]);
+}
+
+#[tokio::test]
+async fn a_nearly_full_vm_drive_asks_for_a_confirm() {
+    let mut setup = Setup::new(FakeVmware::default());
+    setup.host.free_disk_pct = 5.0;
+    let core = setup.build().await;
+
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, start(&["a", "b"])).await.unwrap() else {
+        panic!("low disk: a confirm");
+    };
+    assert_eq!(
+        request.warnings,
+        ["Drive C: has 5.0% free space, under 10%."],
+        "one per drive"
+    );
+}
+
+#[tokio::test]
+async fn a_capacity_check_that_cannot_run_is_a_warning_too() {
+    let mut setup = Setup::new(FakeVmware::default());
+    setup.host.unavailable = true;
+    let core = setup.build().await;
+
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, start(&["a"])).await.unwrap() else {
+        panic!("unchecked capacity: a confirm");
+    };
+    assert!(request.warnings.iter().all(|w| w.starts_with("Capacity not checked")));
+    assert_eq!(request.warnings.len(), 2, "RAM and disk");
+}
+
+#[tokio::test]
+async fn other_actions_skip_the_capacity_check() {
+    let mut setup = Setup::new(FakeVmware::with_running([vmx("a")]));
+    setup.host.free_disk_pct = 1.0;
+    let core = setup.build().await;
+    let unpause = Command::VmPower {
+        targets: vec![vm("a")],
+        op: PowerOp::Unpause,
+    };
+    assert!(matches!(
+        core.bus.submit(&core.ctx, unpause).await.unwrap(),
+        SubmitOutcome::Queued { .. }
+    ));
 }

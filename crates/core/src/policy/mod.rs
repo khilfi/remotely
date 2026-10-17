@@ -214,6 +214,23 @@ pub struct Decision {
     pub skipped: Vec<Target>,
     /// Why the tier is what it is, for the impact preview and the audit log.
     pub reasons: Vec<String>,
+    /// Problems found before the action, e.g. not enough host RAM (VM-07). The user must see them.
+    pub warnings: Vec<String>,
+}
+
+impl Decision {
+    /// VM-07: warnings must reach the user before the action runs, so an action that would run
+    /// without a dialog gets one confirm. The tier, and the steps of a tier that has a dialog anyway,
+    /// stay as they are.
+    pub fn add_warnings(&mut self, warnings: Vec<String>) {
+        if warnings.is_empty() {
+            return;
+        }
+        if self.steps.is_empty() {
+            self.steps.push(ApprovalStep::Confirm);
+        }
+        self.warnings.extend(warnings);
+    }
 }
 
 pub struct PolicyEngine {
@@ -343,6 +360,7 @@ impl PolicyEngine {
             targets: active,
             skipped,
             reasons,
+            warnings: Vec::new(),
         }
     }
 

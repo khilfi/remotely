@@ -32,6 +32,12 @@ russh = { version = "0.64", default-features = false, features = ["ring", "flate
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+# Host RAM, CPUs and free disk (VM-07, MO-04). 0.62 is the version Tauri already pulls in.
+windows = { version = "0.62", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # Integration tests in tests/ use the fake adapters.

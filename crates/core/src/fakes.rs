@@ -332,10 +332,12 @@ impl Vault for FakeVault {
 }
 
 /// Fixed host counters: no VM processes, 32 GB RAM, 16 logical CPUs, 50% free disk by default.
+/// With `unavailable`, every read fails.
 pub struct FakeHostCounters {
     pub processes: Vec<VmProcess>,
     pub totals: HostTotals,
     pub free_disk_pct: f64,
+    pub unavailable: bool,
 }
 
 impl Default for FakeHostCounters {
@@ -347,6 +349,17 @@ impl Default for FakeHostCounters {
                 logical_cpus: 16,
             },
             free_disk_pct: 50.0,
+            unavailable: false,
+        }
+    }
+}
+
+impl FakeHostCounters {
+    fn available(&self) -> Result<()> {
+        if self.unavailable {
+            Err(CoreError::Io(std::io::Error::other("counters unavailable")))
+        } else {
+            Ok(())
         }
     }
 }
@@ -358,10 +371,12 @@ impl HostCounters for FakeHostCounters {
     }
 
     async fn host_totals(&self) -> Result<HostTotals> {
+        self.available()?;
         Ok(self.totals)
     }
 
     async fn free_disk_pct(&self, _path: &Path) -> Result<f64> {
+        self.available()?;
         Ok(self.free_disk_pct)
     }
 }

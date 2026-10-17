@@ -3608,6 +3608,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+ "windows",
  "winreg",
 ]
 

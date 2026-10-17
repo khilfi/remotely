@@ -1,8 +1,9 @@
-// Approval dialog (AP-02, AP-03, AP-06, VM-05): draws the steps the policy engine asked for. The
-// core checks every answer again; these fields only help the user get them right first time.
+// Approval dialog (AP-02, AP-03, AP-06, VM-05, VM-07): draws the steps the policy engine asked for and
+// any warnings found before the action. The core checks every answer again; these fields only help
+// the user get them right first time.
 
 import { useState } from "react";
-import { ShieldAlertIcon } from "lucide-react";
+import { ShieldAlertIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -109,7 +110,7 @@ export function ApprovalDialog({ request, onClose }: Props) {
             <TableBody>
               {request.targets.map((t) => (
                 <TableRow key={JSON.stringify(t.target)}>
-                  <TableCell>
+                  <TableCell className="whitespace-normal">
                     <div className="font-medium">{t.name}</div>
                     {t.target.kind === "vm" && (
                       <div className="font-mono text-xs break-all text-muted-foreground">{t.target.vmxPath}</div>
@@ -123,6 +124,20 @@ export function ApprovalDialog({ request, onClose }: Props) {
             </TableBody>
           </Table>
         </div>
+
+        {request.warnings.length > 0 && (
+          <Alert className="border-tier-medium/40">
+            <TriangleAlertIcon className="text-tier-medium" />
+            <AlertTitle>Read this before you go on</AlertTitle>
+            <AlertDescription>
+              <ul className="list-disc pl-5">
+                {request.warnings.map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+              </ul>
+            </AlertDescription>
+          </Alert>
+        )}
 
         {request.skipped.length > 0 && (
           <Alert>
@@ -200,7 +215,7 @@ export function ApprovalDialog({ request, onClose }: Props) {
             disabled={!ready || busy}
             autoFocus={tier === "medium"}
           >
-            {tier === "medium" ? "Confirm" : "Approve"}
+            {risky ? "Approve" : "Confirm"}
           </Button>
         </DialogFooter>
       </DialogContent>
