@@ -7,9 +7,12 @@ multi-step approvals on every high-impact action.
 The requirements are in [docs/PRD.md](docs/PRD.md); project rules for contributors (and Claude Code) are in
 [CLAUDE.md](CLAUDE.md). This repository is public: read "Public repository rules" in CLAUDE.md before committing.
 
-**Status:** MVP skeleton. The app lists running Workstation VMs, and every VM action goes through the command bus, policy
-engine, approval dialog and job runner with a hash-chained audit log. Auto-update checks this repo's GitHub Releases. SSH,
-the vault and metrics are stubs behind their interfaces.
+**Status:** MVP milestone 1 (VMs and power). The app lists every Workstation VM (the library, chosen folders and
+running VMs) with its OS, CPU, RAM, IP and VMware Tools state; selects by click, shift-click, tag or saved filter; starts,
+shuts down (then forces off only after a separate Critical approval), suspends, pauses and resets them in bulk; checks
+host capacity before a power-on; and skips protected VMs. Every action goes through the command bus, policy engine,
+approval dialog and job runner with a hash-chained audit log. Auto-update checks this repo's GitHub Releases. SSH, the
+vault and metrics are stubs behind their interfaces.
 
 ## Prerequisites
 
@@ -27,7 +30,9 @@ git config core.hooksPath .githooks   # once per clone: gitleaks runs before eve
 npm run tauri dev                     # the app, with hot reload for the UI
 ```
 
-The app keeps its database under `%LOCALAPPDATA%\com.remotely.desktop\`, never in the working directory. It finds
+The app keeps its database under `%LOCALAPPDATA%\com.remotely.desktop\`, never in the working directory. A
+development build shares that folder with the installed app, so its database migrations would reach the installed app's
+database too; set `REMOTELY_DATA_DIR` to another folder outside the repository to keep them apart. It finds
 `vmrun.exe` from Settings, then the `REMOTELY_VMRUN` environment variable, then the registry, then the default install
 folders.
 
@@ -41,8 +46,8 @@ folders.
 | Format the UI                        | `npm run format`                                                                      |
 | Opt-in test against real Workstation | `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`                     |
 
-Tests use the fake adapters in `crates/core/src/fakes.rs` and never touch a real VM or host. The opt-in test only runs
-`vmrun list`.
+Tests use the fake adapters in `crates/core/src/fakes.rs` and never touch a real VM or host. The opt-in test only reads:
+Workstation's library, `vmrun list`, and the Tools state and IP address of running VMs.
 
 ## Release
 
@@ -93,19 +98,20 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 
 ## Modules and requirements
 
-| Module            | Path                                                | PRD requirements                                                           | State                                                                                                                   |
-| ----------------- | --------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| Command bus       | `crates/core/src/command_bus.rs`                    | AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, FD-14                     | Working: the only way to enqueue a job                                                                                  |
-| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), BX-06                          | Working; every tier rule has a unit test                                                                                |
-| Job runner        | `crates/core/src/jobs.rs`                           | VM-05, VM-06, AP-03 (countdown), BX-02, BX-04 (cancel), FD-14 (runs alone) | Working; BX-04 retry is a stub                                                                                          |
-| VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04                                                 | `vmrun` list, power and snapshots; vmrest later                                                                         |
-| Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                          | Stub; the terminal uses a loopback shell                                                                                |
-| Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                        | Stub                                                                                                                    |
-| Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                      | Works: checks GitHub Releases; install is a Medium-tier job that runs alone; real adapter in `src-tauri/src/updater.rs` |
-| Inventory         | `crates/core/src/inventory.rs`                      | VM-01                                                                      | Running VMs from `vmrun list`                                                                                           |
-| Metrics collector | `crates/core/src/metrics.rs`                        | MO-01, MO-02, MO-03, MO-04                                                 | Polling loop works; sources are stubs                                                                                   |
-| Vault             | `crates/core/src/vault.rs`                          | SS-04, AP-06                                                               | Stub, always locked, so Critical actions are refused                                                                    |
-| Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, SS-01, NFR Reliability                                       | Working: hash-chained audit log, job journal                                                                            |
-| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                         | One fake per outside system                                                                                             |
-| Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                    | Working                                                                                                                 |
-| UI                | `src/`                                              | FD-01, VM-01, VM-02, AP-02, AP-03, AP-05                                   | VM list, approval dialog, terminal, activity, settings                                                                  |
+| Module            | Path                                                | PRD requirements                                                                                         | State                                                                                                                           |
+| ----------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Command bus       | `crates/core/src/command_bus.rs`                    | AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, FD-14                                                   | Working: the only way to enqueue a job                                                                                          |
+| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), BX-06, VM-07 (warnings add a confirm)                        | Working; every tier rule has a unit test                                                                                        |
+| Job runner        | `crates/core/src/jobs.rs`                           | VM-03 (shutdown wait), VM-05, VM-06, AP-03 (countdown), AP-04, BX-02, BX-04 (cancel), FD-14 (runs alone) | Working; BX-04 retry is a stub                                                                                                  |
+| VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04                                                                               | Library (`inventory.vmls`), folder scan, `.vmx` reading, `vmrun` list, Tools state, guest IP, power and snapshots; vmrest later |
+| Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                                                        | Stub; the terminal uses a loopback shell                                                                                        |
+| Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                                                      | Host RAM, CPUs and free disk work; per-VM process counters (MO-01) are a stub                                                   |
+| Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                                                    | Works: checks GitHub Releases; install is a Medium-tier job that runs alone; real adapter in `src-tauri/src/updater.rs`         |
+| Inventory         | `crates/core/src/inventory.rs`                      | VM-01, VM-02                                                                                             | Every VM from the library, chosen folders and `vmrun list`; filters                                                             |
+| Capacity check    | `crates/core/src/capacity.rs`                       | VM-07                                                                                                    | Working: host RAM vs assigned RAM, free disk on VM drives                                                                       |
+| Metrics collector | `crates/core/src/metrics.rs`                        | MO-01, MO-02, MO-03, MO-04                                                                               | Polling loop works; sources are stubs                                                                                           |
+| Vault             | `crates/core/src/vault.rs`                          | SS-04, AP-06                                                                                             | Stub, always locked, so Critical actions are refused                                                                            |
+| Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, VM-02, SS-01, NFR Reliability                                                              | Working: hash-chained audit log, job journal, inventory, tags, saved filters                                                    |
+| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                                                       | One fake per outside system                                                                                                     |
+| Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                                                  | Working                                                                                                                         |
+| UI                | `src/`                                              | FD-01, VM-01, VM-02, VM-03, VM-06, AP-02, AP-03, AP-04, AP-05                                            | VM list with filters and bulk actions, approval dialog, terminal, activity, settings                                            |
