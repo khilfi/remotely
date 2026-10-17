@@ -39,6 +39,7 @@ support-bundles/
 START_HERE.md
 STARTER_PROMPT.md
 CLAUDE.local.md
+.claude/worktrees/
 vm-ssh-manager-starter/
 vm-ssh-manager-starter.zip
 

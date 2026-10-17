@@ -35,7 +35,7 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching the Rust side; the workspace builds into ./target
-      ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**"],
+      ignored: ["**/src-tauri/**", "**/crates/**", "**/target/**", "**/.claude/**"],
     },
   },
 }));

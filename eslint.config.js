@@ -9,7 +9,17 @@ import globals from "globals";
 export default tseslint.config(
   // src/components/ui and src/hooks/use-mobile.ts are shadcn/ui output, kept as generated.
   {
-    ignores: ["dist", "node_modules", "src-tauri", "target", "crates", "src/components/ui", "src/hooks/use-mobile.ts"],
+    ignores: [
+      "dist",
+      "node_modules",
+      "src-tauri",
+      "target",
+      "crates",
+      // Claude Code session worktrees: full copies of this repo.
+      ".claude",
+      "src/components/ui",
+      "src/hooks/use-mobile.ts",
+    ],
   },
   {
     files: ["**/*.{ts,tsx}"],

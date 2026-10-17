@@ -52,7 +52,8 @@ Workstation's library, `vmrun list`, and the Tools state and IP address of runni
 ## Release
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (they must match).
-2. Commit, then `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
+2. Commit, then `git tag -a vX.Y.Z -m "<release notes>"` and `git push origin vX.Y.Z`. The tag message becomes the
+   release notes, which installed apps show in their update banner.
 3. `.github/workflows/release.yml` builds the NSIS installer on Windows (per-user, so installing and updating need no
    admin rights), signs the update artifacts and creates a **draft** release
    with the installer, its `.sig` file and `latest.json`. It stops if the tag and the three versions differ, or if the

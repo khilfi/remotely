@@ -105,7 +105,7 @@ src/                  React + TypeScript UI
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - Format: `cargo fmt --all`, `npm run format`
 - Build the installer: `npm run tauri build`
-- Release: bump the version in all three files, commit, then `git tag vX.Y.Z` and `git push origin vX.Y.Z`; publish the draft release on GitHub after a smoke test
+- Release: bump the version in all three files, commit, then `git tag -a vX.Y.Z -m "<release notes>"` and `git push origin vX.Y.Z`; publish the draft release on GitHub after a smoke test. The tag message is the release notes users see in the update banner, so write it for them.
 
 ## Conventions
 
