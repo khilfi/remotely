@@ -29,8 +29,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // %LOCALAPPDATA%\com.remotely.desktop: app data never lives in the working directory, so
-            // nothing private can land in the public repo (CLAUDE.md).
-            let data_dir = app.path().app_local_data_dir()?;
+            // nothing private can land in the public repo (CLAUDE.md). REMOTELY_DATA_DIR points a
+            // development build at its own folder, so its migrations never reach the installed app's
+            // database; keep it outside the repository too.
+            let data_dir = match std::env::var_os("REMOTELY_DATA_DIR") {
+                Some(dir) => std::path::PathBuf::from(dir),
+                None => app.path().app_local_data_dir()?,
+            };
             std::fs::create_dir_all(&data_dir)?;
             let config = CoreConfig {
                 db_path: data_dir.join("remotely.db"),
