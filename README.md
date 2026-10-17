@@ -8,8 +8,8 @@ The requirements are in [docs/PRD.md](docs/PRD.md); project rules for contributo
 [CLAUDE.md](CLAUDE.md). This repository is public: read "Public repository rules" in CLAUDE.md before committing.
 
 **Status:** MVP skeleton. The app lists running Workstation VMs, and every VM action goes through the command bus, policy
-engine, approval dialog and job runner with a hash-chained audit log. SSH, the vault, metrics and auto-update are stubs
-behind their interfaces.
+engine, approval dialog and job runner with a hash-chained audit log. Auto-update checks this repo's GitHub Releases. SSH,
+the vault and metrics are stubs behind their interfaces.
 
 ## Prerequisites
 
@@ -48,10 +48,23 @@ Tests use the fake adapters in `crates/core/src/fakes.rs` and never touch a real
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (they must match).
 2. Commit, then `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
-3. GitHub Actions builds a draft release with the installer, its `.sig` file and `latest.json`. Publish the draft after a
-   smoke test; installed apps only see published releases (FD-14).
+3. `.github/workflows/release.yml` builds the MSI on Windows, signs the update artifacts and creates a **draft** release
+   with the installer, its `.sig` file and `latest.json`. It stops if the tag and the three versions differ, or if the
+   updater public key in `tauri.conf.json` is still the placeholder.
+4. Smoke-test the installer from the draft, then publish it. Installed apps only see published releases; they check at
+   start and every 24 hours (FD-14), and installing asks first.
 
-The CI and release workflows and the update-signing setup come next; see CLAUDE.md "Releases and auto-update".
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request: a gitleaks scan of the full history, UI
+lint and build, and Rust fmt, clippy and tests.
+
+### Update signing
+
+Updates are signed with a key pair. Only the public key is in the repo (`plugins.updater.pubkey` in
+`src-tauri/tauri.conf.json`). The private key and its password live outside the repo, in a password manager and in the
+GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Losing them means installed
+apps can no longer verify updates, so each machine would need a manual reinstall.
+
+A local `npm run tauri build` needs the same two values as environment variables, because `createUpdaterArtifacts` is on.
 
 ## Layout
 
@@ -77,19 +90,19 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 
 ## Modules and requirements
 
-| Module            | Path                                                | PRD requirements                                                           | State                                                             |
-| ----------------- | --------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| Command bus       | `crates/core/src/command_bus.rs`                    | AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, FD-14                     | Working: the only way to enqueue a job                            |
-| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), BX-06                          | Working; every tier rule has a unit test                          |
-| Job runner        | `crates/core/src/jobs.rs`                           | VM-05, VM-06, AP-03 (countdown), BX-02, BX-04 (cancel), FD-14 (runs alone) | Working; BX-04 retry is a stub                                    |
-| VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04                                                 | `vmrun` list, power and snapshots; vmrest later                   |
-| Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                          | Stub; the terminal uses a loopback shell                          |
-| Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                        | Stub                                                              |
-| Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                      | Command path works; the Tauri updater comes with the GitHub setup |
-| Inventory         | `crates/core/src/inventory.rs`                      | VM-01                                                                      | Running VMs from `vmrun list`                                     |
-| Metrics collector | `crates/core/src/metrics.rs`                        | MO-01, MO-02, MO-03, MO-04                                                 | Polling loop works; sources are stubs                             |
-| Vault             | `crates/core/src/vault.rs`                          | SS-04, AP-06                                                               | Stub, always locked, so Critical actions are refused              |
-| Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, SS-01, NFR Reliability                                       | Working: hash-chained audit log, job journal                      |
-| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                         | One fake per outside system                                       |
-| Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                    | Working                                                           |
-| UI                | `src/`                                              | FD-01, VM-01, VM-02, AP-02, AP-03, AP-05                                   | VM list, approval dialog, terminal, activity, settings            |
+| Module            | Path                                                | PRD requirements                                                           | State                                                                                                                   |
+| ----------------- | --------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Command bus       | `crates/core/src/command_bus.rs`                    | AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, FD-14                     | Working: the only way to enqueue a job                                                                                  |
+| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), BX-06                          | Working; every tier rule has a unit test                                                                                |
+| Job runner        | `crates/core/src/jobs.rs`                           | VM-05, VM-06, AP-03 (countdown), BX-02, BX-04 (cancel), FD-14 (runs alone) | Working; BX-04 retry is a stub                                                                                          |
+| VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04                                                 | `vmrun` list, power and snapshots; vmrest later                                                                         |
+| Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                          | Stub; the terminal uses a loopback shell                                                                                |
+| Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                        | Stub                                                                                                                    |
+| Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                      | Works: checks GitHub Releases; install is a Medium-tier job that runs alone; real adapter in `src-tauri/src/updater.rs` |
+| Inventory         | `crates/core/src/inventory.rs`                      | VM-01                                                                      | Running VMs from `vmrun list`                                                                                           |
+| Metrics collector | `crates/core/src/metrics.rs`                        | MO-01, MO-02, MO-03, MO-04                                                 | Polling loop works; sources are stubs                                                                                   |
+| Vault             | `crates/core/src/vault.rs`                          | SS-04, AP-06                                                               | Stub, always locked, so Critical actions are refused                                                                    |
+| Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, SS-01, NFR Reliability                                       | Working: hash-chained audit log, job journal                                                                            |
+| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                         | One fake per outside system                                                                                             |
+| Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                    | Working                                                                                                                 |
+| UI                | `src/`                                              | FD-01, VM-01, VM-02, AP-02, AP-03, AP-05                                   | VM list, approval dialog, terminal, activity, settings                                                                  |

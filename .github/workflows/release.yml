@@ -1,0 +1,71 @@
+# Release: push a tag vX.Y.Z (CLAUDE.md "Releases and auto-update"). Builds the Windows installer,
+# signs the update artifacts and creates a DRAFT GitHub Release with the installer, its .sig file and
+# latest.json. Publish the draft after a smoke test; installed apps only see published releases.
+# Third-party actions are pinned to full commit SHAs; the comment names the release.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, sign and draft the release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag matches the version in all three files
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $want = $env:TAG.TrimStart("v")
+          $npm = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $conf = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $cargo = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          if ($npm -ne $want -or $conf -ne $want -or $cargo -ne $want) {
+            Write-Error "Tag $env:TAG does not match package.json ($npm), tauri.conf.json ($conf) and src-tauri/Cargo.toml ($cargo)"
+            exit 1
+          }
+
+      - name: Refuse to release without the update-signing public key
+        shell: pwsh
+        run: |
+          if (Select-String -Path src-tauri/tauri.conf.json -Pattern 'REPLACE_WITH_UPDATE_SIGNING_PUBLIC_KEY' -Quiet) {
+            Write-Error "plugins.updater.pubkey in src-tauri/tauri.conf.json is still the placeholder; installed apps could not verify this release"
+            exit 1
+          }
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Set by the repo owner with `gh secret set`; never committed (CLAUDE.md).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Remotely ${{ github.ref_name }}
+          releaseBody: Draft. Smoke-test the installer, then publish; installed apps only see published releases.
+          releaseDraft: true
+          prerelease: false
