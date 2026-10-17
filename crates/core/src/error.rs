@@ -54,6 +54,13 @@ pub enum CoreError {
     #[error("invalid setting: {0}")]
     InvalidSetting(String),
 
+    #[error("{0}")]
+    InvalidInput(String),
+
+    /// VM-03: a soft stop did not finish in time. Forcing it off is a separate, Critical command.
+    #[error("still running after {seconds}s; power it off (hard) to force it, which needs its own approval")]
+    StillRunning { seconds: u64 },
+
     #[error("cancelled")]
     Cancelled,
 
@@ -83,6 +90,8 @@ impl CoreError {
             CoreError::ApprovalRejected(_) => "approval_rejected",
             CoreError::VaultLocked => "vault_locked",
             CoreError::InvalidSetting(_) => "invalid_setting",
+            CoreError::InvalidInput(_) => "invalid_input",
+            CoreError::StillRunning { .. } => "still_running",
             CoreError::Cancelled => "cancelled",
             CoreError::Update(_) => "update_failed",
             CoreError::NotImplemented(_) => "not_implemented",

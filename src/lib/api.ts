@@ -17,19 +17,40 @@ export interface Target {
   protected: boolean;
 }
 
+export type PowerState = "unknown" | "running" | "not_running" | "suspended" | "paused";
+
+/** VMware Tools state from `vmrun checkToolsState`; null when the VM is not running. */
+export type ToolsState = "running" | "installed" | "notInstalled" | "unknown";
+
 export interface VmRecord {
   id: string;
   vmxPath: string;
   displayName: string;
+  /** Workstation's guest OS id, e.g. "ubuntu-64". */
   guestOs: string | null;
+  /** What the guest calls itself through VMware Tools, e.g. "Ubuntu 24.04 LTS". */
+  guestOsName: string | null;
   numVcpus: number | null;
   memsizeMb: number | null;
-  powerState: "unknown" | "running" | "not_running" | "suspended" | "paused";
+  powerState: PowerState;
   ipAddress: string | null;
-  toolsState: string | null;
+  toolsState: ToolsState | null;
   environment: Environment;
   protected: boolean;
+  /** VM-02 tag names, sorted. */
+  tags: string[];
   lastSeenAt: string | null;
+}
+
+/** Something a refresh could not read (vmrun missing, a folder gone). The rest still lists. */
+export interface InventoryWarning {
+  code: string;
+  message: string;
+}
+
+export interface RefreshReport {
+  vms: VmRecord[];
+  warnings: InventoryWarning[];
 }
 
 export type StopMode = "soft" | "hard";
@@ -147,6 +168,8 @@ export interface Settings {
   vmrunPathInUse: string | null;
   /** FD-14: check GitHub Releases for updates (off at air-gapped sites). */
   updateChecks: boolean;
+  /** VM-01: folders scanned for .vmx files, besides Workstation's library. */
+  scanFolders: string[];
 }
 
 /** FD-14: a newer signed release on GitHub. */
@@ -183,9 +206,9 @@ export function errorCode(err: unknown): string | undefined {
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
 
-  /** VM-01: asks Workstation for running VMs (via the core's VMware adapter). */
-  vmListRunning: () => invoke<VmRecord[]>("vm_list_running"),
-  /** VM-01: every VM the inventory knows, without asking Workstation. */
+  /** VM-01: finds every VM (Workstation's library, chosen folders, vmrun list) via the core. */
+  vmRefresh: () => invoke<RefreshReport>("vm_refresh"),
+  /** VM-01: the VMs the last refresh found, without asking Workstation. */
   vmList: () => invoke<VmRecord[]>("vm_list"),
 
   /** The one way in for changes: command bus -> policy engine -> job runner. */
@@ -204,6 +227,8 @@ export const api = {
   /** null or "" goes back to finding vmrun.exe automatically. */
   setVmrunPath: (path: string | null) => invoke<Settings>("settings_set_vmrun_path", { path }),
   setUpdateChecks: (enabled: boolean) => invoke<Settings>("settings_set_update_checks", { enabled }),
+  /** VM-01: each folder must exist. */
+  setScanFolders: (folders: string[]) => invoke<Settings>("settings_set_scan_folders", { folders }),
   /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
 

@@ -1,0 +1,141 @@
+//! Milestone 1 (VMs and power) end to end, with fake adapters: discovery (VM-01), tags, saved filters
+//! and start (VM-02), graceful-then-forced shutdown (VM-03), the power-on limit (VM-06), the capacity
+//! check (VM-07) and protected VMs (AP-04).
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+mod common;
+
+use common::{temp_folder, vmx, Setup};
+use remotely_core::adapters::vmware::VmxInfo;
+use remotely_core::domain::PowerState;
+use remotely_core::fakes::FakeVmware;
+use remotely_core::CoreError;
+
+// ---- VM-01: discover every VM ------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_lists_the_library_chosen_folders_and_running_vms() {
+    let folder = temp_folder("lab");
+    let app = folder.join(r"app\app.vmx").display().to_string();
+    let fake = FakeVmware::with_running([vmx("web").to_uppercase(), r"E:\Other\tmp\tmp.vmx".into()])
+        .in_library(&vmx("web"), Some("web"))
+        .in_library(&vmx("db"), Some("db"))
+        .in_library(&vmx("gone"), Some("gone"))
+        .without_file(&vmx("gone"))
+        .in_folder(&folder.display().to_string(), &app)
+        .with_vmx(
+            &vmx("web"),
+            VmxInfo {
+                display_name: Some("web".into()),
+                guest_os: Some("ubuntu-64".into()),
+                guest_os_name: Some("Ubuntu 24.04 LTS".into()),
+                num_vcpus: Some(2),
+                memsize_mb: Some(4096),
+                suspended: false,
+            },
+        )
+        .with_vmx(
+            &vmx("db"),
+            VmxInfo {
+                display_name: Some("db".into()),
+                suspended: true,
+                ..Default::default()
+            },
+        )
+        .with_ip(&vmx("web"), "192.0.2.10");
+    let core = Setup::new(fake).build().await;
+    core.set_scan_folders(vec![folder.clone()]).await.unwrap();
+
+    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let names: Vec<_> = report.vms.iter().map(|v| v.display_name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["app", "db", "tmp", "web"],
+        "a library entry whose file is gone is left out"
+    );
+
+    let by_name = |n: &str| report.vms.iter().find(|v| v.display_name == n).unwrap();
+    let web = by_name("web");
+    assert_eq!(web.power_state, PowerState::Running, "path case does not matter");
+    assert_eq!(web.ip_address.as_deref(), Some("192.0.2.10"));
+    assert_eq!(web.tools_state.as_deref(), Some("running"));
+    assert_eq!(web.guest_os_name.as_deref(), Some("Ubuntu 24.04 LTS"));
+    assert_eq!(web.memsize_mb, Some(4096));
+    assert_eq!(by_name("db").power_state, PowerState::Suspended);
+    assert_eq!(by_name("app").power_state, PowerState::NotRunning);
+    assert_eq!(by_name("app").tools_state, None, "no Tools query for a VM that is off");
+    assert_eq!(
+        by_name("tmp").power_state,
+        PowerState::Running,
+        "running but in no library"
+    );
+
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[tokio::test]
+async fn without_vmrun_the_library_still_lists_with_a_warning() {
+    let fake = FakeVmware::default()
+        .in_library(&vmx("web"), Some("web"))
+        .without_vmrun();
+    let core = Setup::new(fake).build().await;
+
+    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    assert_eq!(report.vms.len(), 1);
+    assert_eq!(report.vms[0].power_state, PowerState::Unknown);
+    assert_eq!(report.warnings.len(), 1);
+    assert_eq!(report.warnings[0].code, "vmrun_not_found");
+}
+
+#[tokio::test]
+async fn a_folder_that_cannot_be_scanned_is_a_warning_not_a_failure() {
+    let folder = temp_folder("unplugged");
+    let fake = FakeVmware::default().in_library(&vmx("web"), None);
+    let core = Setup::new(fake).build().await;
+    core.set_scan_folders(vec![folder.clone()]).await.unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
+
+    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    assert_eq!(report.vms.len(), 1);
+    assert_eq!(report.warnings.len(), 1);
+    assert!(report.warnings[0].message.contains("Could not scan"));
+}
+
+#[tokio::test]
+async fn vms_no_longer_found_drop_out_of_the_list() {
+    let folder = temp_folder("lab");
+    let app = folder.join(r"app\app.vmx").display().to_string();
+    let fake = FakeVmware::default().in_folder(&folder.display().to_string(), &app);
+    let core = Setup::new(fake).build().await;
+
+    core.set_scan_folders(vec![folder.clone()]).await.unwrap();
+    assert_eq!(core.inventory.refresh(&core.ctx).await.unwrap().vms.len(), 1);
+    core.set_scan_folders(vec![]).await.unwrap();
+    assert!(core.inventory.refresh(&core.ctx).await.unwrap().vms.is_empty());
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+#[tokio::test]
+async fn scan_folders_must_exist_are_deduplicated_and_audited() {
+    let folder = temp_folder("lab");
+    let core = Setup::new(FakeVmware::default()).build().await;
+
+    let missing = core
+        .set_scan_folders(vec![folder.join("does-not-exist")])
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, CoreError::InvalidSetting(_)));
+    assert!(core.scan_folders().await.unwrap().is_empty());
+
+    let upper = std::path::PathBuf::from(folder.display().to_string().to_uppercase());
+    let kept = core.set_scan_folders(vec![folder.clone(), upper]).await.unwrap();
+    assert_eq!(kept, std::slice::from_ref(&folder));
+    assert_eq!(core.scan_folders().await.unwrap(), std::slice::from_ref(&folder));
+
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].event, "setting_changed");
+    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    std::fs::remove_dir_all(&folder).unwrap();
+}

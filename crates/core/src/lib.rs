@@ -173,6 +173,40 @@ impl Core {
         Ok(in_use)
     }
 
+    /// VM-01: folders scanned for .vmx files, besides Workstation's library.
+    pub async fn scan_folders(&self) -> Result<Vec<PathBuf>> {
+        self.inventory.scan_folders(&self.ctx).await
+    }
+
+    /// VM-01: replaces the folders to scan. Each must be an existing folder; duplicates (any letter
+    /// case) are dropped. Audited.
+    pub async fn set_scan_folders(&self, folders: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut kept = Vec::new();
+        for folder in folders {
+            if !folder.is_dir() {
+                return Err(CoreError::InvalidSetting(format!(
+                    "{} is not an existing folder",
+                    folder.display()
+                )));
+            }
+            if seen.insert(adapters::vmware::path_key(&folder)) {
+                kept.push(folder);
+            }
+        }
+        let as_text: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
+        self.store
+            .put_setting(&self.ctx, store::SCAN_FOLDERS_KEY, &as_text)
+            .await?;
+        let detail = if as_text.is_empty() {
+            "none".to_owned()
+        } else {
+            as_text.join("; ")
+        };
+        self.audit_setting("Set the VM folders to scan", &detail).await?;
+        Ok(kept)
+    }
+
     /// FD-14: whether update checks are on. Defaults to on.
     pub async fn update_checks_enabled(&self) -> Result<bool> {
         Ok(self

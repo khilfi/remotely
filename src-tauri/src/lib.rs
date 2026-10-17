@@ -66,7 +66,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::app_info,
-            ipc::vm_list_running,
+            ipc::vm_refresh,
             ipc::vm_list,
             ipc::command_submit,
             ipc::command_approve,
@@ -78,6 +78,7 @@ pub fn run() {
             ipc::audit_verify,
             ipc::settings_get,
             ipc::settings_set_vmrun_path,
+            ipc::settings_set_scan_folders,
             ipc::settings_set_update_checks,
             ipc::update_check,
             terminal::terminal_open,

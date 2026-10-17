@@ -80,9 +80,10 @@ async fn wait_finished(rx: &mut tokio::sync::broadcast::Receiver<JobEvent>, job:
 async fn inventory_refresh_lists_running_vms() {
     let fake = fake_vmware();
     let core = core(fake, None).await;
-    let vms = core.inventory.refresh_running(&core.ctx).await.unwrap();
-    let names: Vec<_> = vms.iter().map(|v| v.display_name.as_str()).collect();
+    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let names: Vec<_> = report.vms.iter().map(|v| v.display_name.as_str()).collect();
     assert_eq!(names, ["a", "b"]);
+    assert!(report.warnings.is_empty());
 }
 
 #[tokio::test]

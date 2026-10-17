@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
+use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::policy::PolicyRules;
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, VmRecord};
 use remotely_core::{Core, CoreError};
@@ -52,20 +53,25 @@ pub fn app_info(state: State<'_, AppState>) -> AppInfo {
     }
 }
 
-/// VM-01: running VMs from `vmrun list`, saved to the inventory.
+/// VM-01: finds every VM (Workstation's library, the chosen folders, `vmrun list`), saves the result
+/// and returns it with any sources that could not be read.
 #[tauri::command]
-pub async fn vm_list_running(state: State<'_, AppState>) -> IpcResult<Vec<VmRecord>> {
+pub async fn vm_refresh(state: State<'_, AppState>) -> IpcResult<RefreshReport> {
     let core = &state.core;
-    let vms = core.inventory.refresh_running(&core.ctx).await?;
-    tracing::info!(running = vms.len(), "vmrun list");
-    Ok(vms)
+    let report = core.inventory.refresh(&core.ctx).await?;
+    tracing::info!(
+        vms = report.vms.len(),
+        warnings = report.warnings.len(),
+        "inventory refresh"
+    );
+    Ok(report)
 }
 
-/// VM-01: every VM the inventory knows, without asking Workstation.
+/// VM-01: the VMs the last refresh found, without asking Workstation.
 #[tauri::command]
 pub async fn vm_list(state: State<'_, AppState>) -> IpcResult<Vec<VmRecord>> {
     let core = &state.core;
-    Ok(core.inventory.list(&core.ctx).await?)
+    Ok(core.inventory.list(&core.ctx, &VmFilter::default()).await?)
 }
 
 /// The one way in for changes: command bus -> policy engine -> (approval) -> job runner.
@@ -126,6 +132,8 @@ pub struct Settings {
     vmrun_path_in_use: Option<String>,
     /// FD-14: check GitHub Releases for updates (off at air-gapped sites).
     update_checks: bool,
+    /// VM-01: folders scanned for .vmx files, besides Workstation's library.
+    scan_folders: Vec<String>,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -133,6 +141,12 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
         vmrun_path_saved: core.saved_vmrun_path().await?.map(|p| p.display().to_string()),
         vmrun_path_in_use: core.vmrun_path().map(|p| p.display().to_string()),
         update_checks: core.update_checks_enabled().await?,
+        scan_folders: core
+            .scan_folders()
+            .await?
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
     })
 }
 
@@ -149,6 +163,19 @@ pub async fn settings_set_vmrun_path(state: State<'_, AppState>, path: Option<St
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
     state.core.set_vmrun_path(path).await?;
+    settings(&state.core).await
+}
+
+/// VM-01: the folders to scan for .vmx files. Each must exist.
+#[tauri::command]
+pub async fn settings_set_scan_folders(state: State<'_, AppState>, folders: Vec<String>) -> IpcResult<Settings> {
+    let folders = folders
+        .iter()
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    state.core.set_scan_folders(folders).await?;
     settings(&state.core).await
 }
 

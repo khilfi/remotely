@@ -22,7 +22,7 @@ use crate::adapters::remote::RemoteAdapter;
 use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::VmwareAdapter;
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp};
-use crate::domain::{Context, Target, TargetRef};
+use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::policy::{ApprovalStep, Decision, Tier};
@@ -435,6 +435,10 @@ impl JobRunner {
                     self.safety_snapshot(job_id, vmx).await?;
                 }
                 self.vmware.power(vmx, *op).await?;
+                // The VM list shows the new state before the next refresh asks vmrun.
+                self.store
+                    .set_vm_power_state(&spec.ctx, vmx_path, state_after(*op))
+                    .await?;
                 Ok(TargetOutcome::done())
             }
             (Command::VmSnapshot { op, .. }, TargetRef::Vm { vmx_path }) => {
@@ -529,5 +533,15 @@ impl JobRunner {
     fn emit(&self, event: JobEvent) {
         // No subscribers is fine (e.g. in tests).
         let _ = self.events.send(event);
+    }
+}
+
+/// The power state a VM is in once `op` has succeeded.
+fn state_after(op: PowerOp) -> PowerState {
+    match op {
+        PowerOp::Start { .. } | PowerOp::Reset { .. } | PowerOp::Unpause => PowerState::Running,
+        PowerOp::Stop { .. } => PowerState::NotRunning,
+        PowerOp::Suspend => PowerState::Suspended,
+        PowerOp::Pause => PowerState::Paused,
     }
 }

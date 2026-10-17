@@ -1,6 +1,6 @@
 use super::*;
 use crate::adapters::vmware::VmxInfo;
-use crate::domain::{Environment, Target, TargetRef};
+use crate::domain::{Environment, PowerState, Target, TargetRef};
 use crate::policy::Tier;
 
 async fn store_with_identity() -> (Store, Context) {
@@ -146,44 +146,90 @@ async fn verify_catches_a_removed_entry() {
     assert_eq!(check.first_bad_seq, Some(3));
 }
 
-#[tokio::test]
-async fn running_vms_are_recorded_and_others_marked_not_running() {
-    let (store, ctx) = store_with_identity().await;
-    let vm = |path: &str, name: Option<&str>| DiscoveredVm {
+fn found(path: &str, name: &str, state: PowerState) -> DiscoveredVm {
+    DiscoveredVm {
         vmx_path: path.into(),
+        display_name: name.into(),
         info: VmxInfo {
-            display_name: name.map(String::from),
+            display_name: Some(name.into()),
             guest_os: Some("ubuntu-64".into()),
+            guest_os_name: Some("Ubuntu 24.04 LTS".into()),
             num_vcpus: Some(2),
             memsize_mb: Some(4096),
+            suspended: state == PowerState::Suspended,
         },
-    };
+        power_state: state,
+        tools_state: state.is_on().then(|| "running".to_owned()),
+        ip_address: state.is_on().then(|| "192.0.2.20".to_owned()),
+    }
+}
 
-    let first = store
-        .record_running_vms(
+#[tokio::test]
+async fn refreshes_record_every_vm_and_hide_ones_no_longer_found() {
+    let (store, ctx) = store_with_identity().await;
+    store
+        .record_inventory(
             &ctx,
-            &[vm(r"C:\VMs\web\web.vmx", Some("web")), vm(r"C:\VMs\db\db.vmx", None)],
+            &[
+                found(r"C:\VMs\web\web.vmx", "web", PowerState::Running),
+                found(r"C:\VMs\db\db.vmx", "db", PowerState::NotRunning),
+            ],
         )
         .await
         .unwrap();
-    assert_eq!(first.len(), 2);
-    assert!(
-        first.iter().any(|v| v.display_name == "db"),
-        "falls back to the file name"
-    );
+    let all = store.list_vms(&ctx).await.unwrap();
+    assert_eq!(all.len(), 2);
+    let web = all.iter().find(|v| v.display_name == "web").unwrap();
+    assert_eq!(web.power_state, PowerState::Running);
+    assert_eq!(web.ip_address.as_deref(), Some("192.0.2.20"));
+    assert_eq!(web.guest_os_name.as_deref(), Some("Ubuntu 24.04 LTS"));
 
-    // Same VM, different path case: still one row (Windows paths are case-insensitive).
-    let second = store
-        .record_running_vms(&ctx, &[vm(r"c:\vms\WEB\web.vmx", Some("web"))])
+    // Same VM, different path case: still one row (Windows paths are case-insensitive). db is gone.
+    store
+        .record_inventory(&ctx, &[found(r"c:\vms\WEB\web.vmx", "web", PowerState::Suspended)])
         .await
         .unwrap();
-    assert_eq!(second.len(), 1);
-    assert_eq!(second[0].power_state, "running");
+    let now = store.list_vms(&ctx).await.unwrap();
+    assert_eq!(now.len(), 1);
+    assert_eq!(now[0].power_state, PowerState::Suspended);
+    assert_eq!(now[0].ip_address, None);
 
-    let all = store.list_vms(&ctx, None).await.unwrap();
-    assert_eq!(all.len(), 2);
-    let db = all.iter().find(|v| v.display_name == "db").unwrap();
-    assert_eq!(db.power_state, "not_running");
+    // The missing VM keeps its row, so protection and tags come back with it.
+    let db = store.find_vm(&ctx, r"C:\VMs\db\db.vmx").await.unwrap().unwrap();
+    assert_eq!(db.display_name, "db");
+    store
+        .record_inventory(&ctx, &[found(r"C:\VMs\db\db.vmx", "db", PowerState::NotRunning)])
+        .await
+        .unwrap();
+    assert_eq!(store.list_vms(&ctx).await.unwrap()[0].id, db.id);
+}
+
+#[tokio::test]
+async fn a_paused_vm_stays_paused_while_vmrun_lists_it_as_running() {
+    let (store, ctx) = store_with_identity().await;
+    let path = r"C:\VMs\web\web.vmx";
+    store
+        .record_inventory(&ctx, &[found(path, "web", PowerState::Running)])
+        .await
+        .unwrap();
+    store.set_vm_power_state(&ctx, path, PowerState::Paused).await.unwrap();
+
+    let mut again = found(path, "web", PowerState::Running);
+    again.ip_address = None;
+    again.tools_state = None;
+    store.record_inventory(&ctx, &[again]).await.unwrap();
+    let vm = store.find_vm(&ctx, path).await.unwrap().unwrap();
+    assert_eq!(vm.power_state, PowerState::Paused);
+    assert_eq!(vm.ip_address.as_deref(), Some("192.0.2.20"), "keeps the last IP");
+
+    store
+        .set_vm_power_state(&ctx, path, PowerState::NotRunning)
+        .await
+        .unwrap();
+    let vm = store.find_vm(&ctx, path).await.unwrap().unwrap();
+    assert_eq!(vm.power_state, PowerState::NotRunning);
+    assert_eq!(vm.ip_address, None, "an off VM has no IP");
+    assert_eq!(vm.tools_state, None);
 }
 
 #[tokio::test]
