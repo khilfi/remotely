@@ -10,3 +10,4 @@ START_HERE.md
 STARTER_PROMPT.md
 src/components/ui/
 src/hooks/use-mobile.ts
+.claude/
