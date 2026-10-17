@@ -69,6 +69,8 @@ export type SnapshotOp =
 export type Command =
   | { type: "vmPower"; targets: TargetRef[]; op: PowerOp }
   | { type: "vmSnapshot"; targets: TargetRef[]; op: SnapshotOp }
+  /** AP-04: protected VMs ("do not touch") are skipped by every other action. */
+  | { type: "vmProtect"; targets: TargetRef[]; protected: boolean }
   | { type: "remoteExec"; targets: TargetRef[]; script: string; sudo?: boolean }
   | { type: "appUpdate"; version: string };
 
@@ -93,7 +95,8 @@ export interface ApprovalRequest {
 }
 
 export type SubmitOutcome =
-  | { status: "queued"; jobId: string; tier: Tier; summary: string }
+  /** `skipped`: protected targets left alone (AP-04). */
+  | { status: "queued"; jobId: string; tier: Tier; summary: string; skipped: Target[] }
   | { status: "needsApproval"; request: ApprovalRequest };
 
 export interface ApprovalAnswers {

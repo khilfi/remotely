@@ -186,6 +186,19 @@ impl Store {
         Ok(())
     }
 
+    /// AP-04. Only the job runner calls this, for a command the bus cleared. False when the VM is not
+    /// in the inventory.
+    pub(crate) async fn set_vm_protected(&self, ctx: &Context, vmx_path: &str, protected: bool) -> Result<bool> {
+        let done = sqlx::query("UPDATE vms SET protected = ?, updated_at = ? WHERE workspace_id = ? AND vmx_path = ?")
+            .bind(i64::from(protected))
+            .bind(now_rfc3339())
+            .bind(ctx.workspace_id.to_string())
+            .bind(vmx_path)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
     /// Name, label and protection of a saved session.
     pub async fn find_session_target(&self, ctx: &Context, id: Uuid) -> Result<Option<(String, Environment, bool)>> {
         let row = sqlx::query("SELECT name, environment, protected FROM sessions WHERE workspace_id = ? AND id = ?")

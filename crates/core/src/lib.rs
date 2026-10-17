@@ -106,10 +106,11 @@ impl Core {
 
     /// Wires the modules together. Tests pass fake adapters here.
     pub async fn assemble(store: Store, ctx: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
-        let rules = store
+        let mut rules = store
             .get_setting::<PolicyRules>(&ctx, store::POLICY_RULES_KEY)
             .await?
             .unwrap_or_default();
+        rules.fill_missing_tiers();
         let policy = PolicyEngine::new(rules)?;
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();

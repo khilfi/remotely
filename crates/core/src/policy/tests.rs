@@ -346,6 +346,72 @@ fn a_protected_prod_target_does_not_bump() {
     assert_eq!(tier(power(PowerOp::Start { gui: false }, &t), &t), Tier::Low);
 }
 
+fn protect(protected: bool, targets: &[Target]) -> Command {
+    Command::VmProtect {
+        targets: refs(targets),
+        protected,
+    }
+}
+
+#[test]
+fn protecting_vms_is_low_and_unprotecting_them_is_medium() {
+    for n in [1, 3] {
+        let t = vms(n);
+        assert_eq!(tier(protect(true, &t), &t), Tier::Low, "protect {n}");
+        assert_eq!(tier(protect(false, &t), &t), Tier::Medium, "unprotect {n}");
+    }
+    let t = vms(2);
+    let d = engine().evaluate(&protect(false, &t), &t);
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+}
+
+#[test]
+fn changing_protection_never_skips_protected_targets() {
+    let mut t = vms(2);
+    t[0].protected = true;
+    t[1].protected = true;
+    for protected in [true, false] {
+        let d = engine().evaluate(&protect(protected, &t), &t);
+        assert_eq!(d.targets.len(), 2);
+        assert!(d.skipped.is_empty());
+    }
+}
+
+#[test]
+fn unprotecting_a_prod_vm_is_high_without_a_safety_snapshot() {
+    let mut t = vms(1);
+    t[0].environment = Environment::Prod;
+    let d = engine().evaluate(&protect(false, &t), &t);
+    assert_eq!(d.tier, Tier::High);
+    assert!(
+        !d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })),
+        "changing protection does not touch the VM"
+    );
+}
+
+#[test]
+fn rules_saved_before_protection_existed_still_load() {
+    let mut saved = PolicyRules::default();
+    saved.tiers.remove(&ActionKind::VmProtect);
+    saved.tiers.remove(&ActionKind::VmUnprotect);
+    saved.tiers.insert(ActionKind::VmStart, TierRule::same(Tier::Medium));
+    assert!(PolicyEngine::new(saved.clone()).is_err());
+
+    saved.fill_missing_tiers();
+    let e = PolicyEngine::new(saved).unwrap();
+    let t = vms(1);
+    assert_eq!(
+        e.evaluate(&protect(false, &t), &t).tier,
+        Tier::Medium,
+        "default filled in"
+    );
+    assert_eq!(
+        e.evaluate(&power(PowerOp::Start { gui: false }, &t), &t).tier,
+        Tier::Medium,
+        "the user's own tier is kept"
+    );
+}
+
 // ---- Rules are editable (AP-01) ----------------------------------------------------------------
 
 #[test]

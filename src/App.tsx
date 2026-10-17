@@ -150,6 +150,11 @@ export default function App() {
 
   function submitted(outcome: SubmitOutcome) {
     if (outcome.status === "needsApproval") setApproval(outcome.request);
+    else if (outcome.skipped.length > 0) {
+      // AP-04: a Low action has no dialog, so say which protected targets it left alone.
+      const names = outcome.skipped.map((t) => t.name).join(", ");
+      toast.info(`Skipped ${outcome.skipped.length} protected: ${names}`, { duration: 8000 });
+    }
   }
 
   const current = PAGES.find((p) => p.id === page) ?? PAGES[0];

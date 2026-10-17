@@ -449,6 +449,13 @@ impl JobRunner {
                 self.vmware.snapshot(vmx, op).await?;
                 Ok(TargetOutcome::done())
             }
+            (Command::VmProtect { protected, .. }, TargetRef::Vm { vmx_path }) => {
+                // AP-04: the app's own flag; the VM itself is not touched.
+                if !self.store.set_vm_protected(&spec.ctx, vmx_path, *protected).await? {
+                    return Err(CoreError::UnknownTarget(vmx_path.clone()));
+                }
+                Ok(TargetOutcome::done())
+            }
             (Command::RemoteExec { script, sudo, .. }, TargetRef::Session { session_id }) => {
                 let session = self
                     .store
@@ -494,7 +501,7 @@ impl JobRunner {
                 op: PowerOp::Start { .. },
                 ..
             } => self.limits.power_on,
-            Command::VmPower { .. } | Command::VmSnapshot { .. } => self.limits.vm_ops,
+            Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => self.limits.vm_ops,
             Command::RemoteExec { .. } => self.limits.remote,
             Command::AppUpdate { .. } => 1,
         };

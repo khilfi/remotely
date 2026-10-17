@@ -3,17 +3,26 @@
 // the command bus, never a vmrun call.
 
 import { useEffect, useState, type MouseEvent } from "react";
-import { FolderPlusIcon, MonitorOffIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
+import {
+  FolderPlusIcon,
+  MonitorOffIcon,
+  RefreshCwIcon,
+  ShieldIcon,
+  ShieldOffIcon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EnvBadge, StateBadge, ToolsLabel } from "@/components/Badges";
 import {
   api,
   errorCode,
   errorMessage,
+  type Command,
   type InventoryWarning,
   type PowerOp,
   type PowerState,
@@ -118,17 +127,20 @@ export function VmsPage({ onSubmitted, onOpenSettings, refreshKey }: Props) {
     return selectedVms.filter((v) => v.powerState === "unknown" || appliesTo.includes(v.powerState));
   }
 
-  async function run(op: PowerOp, targets: VmRecord[]) {
+  async function submit(command: Command) {
     setSubmitting(true);
     try {
-      const refs = targets.map((v) => ({ kind: "vm" as const, vmxPath: v.vmxPath }));
-      onSubmitted(await api.submit({ type: "vmPower", targets: refs, op }));
+      onSubmitted(await api.submit(command));
     } catch (err) {
       setError({ code: errorCode(err), message: errorMessage(err) });
     } finally {
       setSubmitting(false);
     }
   }
+
+  const refs = (targets: VmRecord[]) => targets.map((v) => ({ kind: "vm" as const, vmxPath: v.vmxPath }));
+  const toProtect = selectedVms.filter((v) => !v.protected);
+  const toUnprotect = selectedVms.filter((v) => v.protected);
 
   const missingWorkstation = warnings.some((w) => w.code === "vmrun_not_found");
 
@@ -149,12 +161,28 @@ export function VmsPage({ onSubmitted, onOpenSettings, refreshKey }: Props) {
               key={a.label}
               variant={a.destructive ? "destructive" : "outline"}
               disabled={targets.length === 0 || submitting}
-              onClick={() => void run(a.op, targets)}
+              onClick={() => void submit({ type: "vmPower", targets: refs(targets), op: a.op })}
             >
               {a.label}
             </Button>
           );
         })}
+        <Button
+          variant="outline"
+          disabled={toProtect.length === 0 || submitting}
+          onClick={() => void submit({ type: "vmProtect", targets: refs(toProtect), protected: true })}
+        >
+          <ShieldIcon data-icon="inline-start" />
+          Protect
+        </Button>
+        <Button
+          variant="outline"
+          disabled={toUnprotect.length === 0 || submitting}
+          onClick={() => void submit({ type: "vmProtect", targets: refs(toUnprotect), protected: false })}
+        >
+          <ShieldOffIcon data-icon="inline-start" />
+          Unprotect
+        </Button>
       </div>
 
       {error && (
@@ -242,7 +270,17 @@ export function VmsPage({ onSubmitted, onOpenSettings, refreshKey }: Props) {
                     <Checkbox aria-label={`Select ${vm.displayName}`} checked={selected.has(vm.vmxPath)} />
                   </TableCell>
                   <TableCell>
-                    <div className="font-medium">{vm.displayName}</div>
+                    <div className="flex items-center gap-1.5 font-medium">
+                      {vm.displayName}
+                      {vm.protected && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
+                          </TooltipTrigger>
+                          <TooltipContent>Protected: actions skip this VM until it is unprotected</TooltipContent>
+                        </Tooltip>
+                      )}
+                    </div>
                     <div className="font-mono text-xs break-all whitespace-normal text-muted-foreground">
                       {vm.vmxPath}
                     </div>

@@ -6,11 +6,20 @@
 
 mod common;
 
-use common::{temp_folder, vmx, Setup};
+use std::sync::Arc;
+
+use common::{temp_folder, vm, vmx, wait_finished, Setup};
 use remotely_core::adapters::vmware::VmxInfo;
-use remotely_core::domain::PowerState;
+use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, SubmitOutcome};
+use remotely_core::domain::{PowerState, Target};
 use remotely_core::fakes::FakeVmware;
+use remotely_core::jobs::JobStatus;
+use remotely_core::policy::Tier;
 use remotely_core::CoreError;
+
+fn names(targets: &[Target]) -> Vec<&str> {
+    targets.iter().map(|t| t.name.as_str()).collect()
+}
 
 // ---- VM-01: discover every VM ------------------------------------------------------------------
 
@@ -138,4 +147,114 @@ async fn scan_folders_must_exist_are_deduplicated_and_audited() {
     assert_eq!(audit[0].event, "setting_changed");
     assert!(core.store.verify_audit_chain().await.unwrap().ok);
     std::fs::remove_dir_all(&folder).unwrap();
+}
+
+// ---- AP-04: protected VMs ----------------------------------------------------------------------
+
+fn protect(names: &[&str], protected: bool) -> Command {
+    Command::VmProtect {
+        targets: names.iter().map(|n| vm(n)).collect(),
+        protected,
+    }
+}
+
+fn confirm() -> ApprovalAnswers {
+    ApprovalAnswers {
+        confirmed: true,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn protected_vms_are_skipped_until_they_are_unprotected() {
+    let setup = Setup::new(FakeVmware::with_running([vmx("a"), vmx("b")]));
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    core.inventory.refresh(&core.ctx).await.unwrap();
+    let mut events = core.jobs.subscribe();
+
+    // Protecting is Low: logged, no approval, and no VM is touched.
+    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx, protect(&["a"], true)).await.unwrap()
+    else {
+        panic!("protecting is Low");
+    };
+    assert_eq!(tier, Tier::Low);
+    assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Succeeded);
+    assert!(
+        core.store
+            .find_vm(&core.ctx, &vmx("a"))
+            .await
+            .unwrap()
+            .unwrap()
+            .protected
+    );
+
+    // A bulk suspend leaves the protected VM alone: one VM left, so Medium.
+    let suspend = Command::VmPower {
+        targets: vec![vm("a"), vm("b")],
+        op: PowerOp::Suspend,
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+        panic!("suspending one VM is Medium");
+    };
+    assert_eq!(request.tier, Tier::Medium);
+    assert_eq!(names(&request.skipped), ["a"]);
+    assert_eq!(names(&request.targets), ["b"]);
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
+    assert_eq!(fake.calls(), [r"power Suspend C:\VMs\b\b.vmx"]);
+
+    // A Low action reports what it skipped, and an action on only protected VMs is refused.
+    let start = |names: &[&str]| Command::VmPower {
+        targets: names.iter().map(|n| vm(n)).collect(),
+        op: PowerOp::Start { gui: false },
+    };
+    let SubmitOutcome::Queued { skipped, job_id, .. } = core.bus.submit(&core.ctx, start(&["a", "b"])).await.unwrap()
+    else {
+        panic!("starting is Low");
+    };
+    assert_eq!(names(&skipped), ["a"]);
+    wait_finished(&mut events, job_id).await;
+    assert!(matches!(
+        core.bus.submit(&core.ctx, start(&["a"])).await,
+        Err(CoreError::AllTargetsProtected)
+    ));
+
+    // Unlocking needs one confirm, and reaches the protected VM.
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, protect(&["a"], false)).await.unwrap()
+    else {
+        panic!("unprotecting is Medium");
+    };
+    assert_eq!(names(&request.targets), ["a"]);
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
+    assert!(
+        !core
+            .store
+            .find_vm(&core.ctx, &vmx("a"))
+            .await
+            .unwrap()
+            .unwrap()
+            .protected
+    );
+
+    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    for action in ["Protect 1 VM", "Unprotect 1 VM"] {
+        assert!(
+            audit.iter().any(|e| e.event == "job_finished" && e.action == action),
+            "{action}"
+        );
+    }
+    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+}
+
+#[tokio::test]
+async fn protecting_a_vm_not_in_the_inventory_fails() {
+    let core = Setup::new(FakeVmware::default()).build().await;
+    let mut events = core.jobs.subscribe();
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, protect(&["nope"], true)).await.unwrap()
+    else {
+        panic!("protecting is Low");
+    };
+    assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Failed);
 }

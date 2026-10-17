@@ -71,6 +71,10 @@ pub enum ActionKind {
     SnapshotTake,
     SnapshotRevert,
     SnapshotDelete,
+    /// Mark VMs "do not touch" (AP-04).
+    VmProtect,
+    /// Unlock protected VMs (AP-04), so other actions reach them again.
+    VmUnprotect,
     /// Every part of the command starts with a word on the read-only list.
     ExecReadOnly,
     /// Not read-only, not dangerous.
@@ -134,6 +138,16 @@ pub struct PolicyRules {
     pub safety_snapshot_default: bool,
 }
 
+impl PolicyRules {
+    /// Rules saved before an action existed have no tier for it; give those the default tier, so an
+    /// update that adds an action does not stop the app from loading the user's rules.
+    pub fn fill_missing_tiers(&mut self) {
+        for (kind, rule) in PolicyRules::default().tiers {
+            self.tiers.entry(kind).or_insert(rule);
+        }
+    }
+}
+
 impl Default for PolicyRules {
     fn default() -> Self {
         use ActionKind::*;
@@ -168,6 +182,8 @@ impl Default for PolicyRules {
             (SnapshotTake, TierRule::same(Low)),
             (SnapshotRevert, TierRule::same(High)),
             (SnapshotDelete, TierRule::same(High)),
+            (VmProtect, TierRule::same(Low)),
+            (VmUnprotect, TierRule::same(Medium)),
             (ExecReadOnly, TierRule::same(Low)),
             (ExecOther, TierRule::same(Medium)),
             (ExecDangerous, TierRule::same(High)),
@@ -267,6 +283,8 @@ impl PolicyEngine {
                 SnapshotOp::Revert { .. } => ActionKind::SnapshotRevert,
                 SnapshotOp::Delete { .. } => ActionKind::SnapshotDelete,
             },
+            Command::VmProtect { protected: true, .. } => ActionKind::VmProtect,
+            Command::VmProtect { protected: false, .. } => ActionKind::VmUnprotect,
             Command::RemoteExec { script, .. } => {
                 if !self.dangerous_matches(script).is_empty() {
                     ActionKind::ExecDangerous
@@ -283,7 +301,10 @@ impl PolicyEngine {
     /// `targets` are the command's targets after lookup, in the same order.
     pub fn evaluate(&self, command: &Command, targets: &[Target]) -> Decision {
         let action = self.classify(command);
-        let (skipped, active): (Vec<Target>, Vec<Target>) = targets.iter().cloned().partition(|t| t.protected);
+        // AP-04: actions skip protected targets, except the one that changes protection.
+        let skips_protected = !matches!(action, ActionKind::VmProtect | ActionKind::VmUnprotect);
+        let (skipped, active): (Vec<Target>, Vec<Target>) =
+            targets.iter().cloned().partition(|t| skips_protected && t.protected);
         let mut reasons = Vec::new();
 
         let rule = self.rules.tiers[&action];
@@ -350,20 +371,21 @@ impl PolicyEngine {
     }
 }
 
-/// VM-05 applies to VM targets, except taking a snapshot (which is itself the safety net).
+/// VM-05 applies to VM targets, except taking a snapshot (which is itself the safety net) and
+/// changing protection (which does not touch the VM).
 fn wants_safety_snapshot(command: &Command) -> bool {
     let on_vms = command.targets().iter().any(|t| matches!(t, TargetRef::Vm { .. }));
-    let is_take = matches!(
+    let leaves_vm_alone = matches!(
         command,
         Command::VmSnapshot {
             op: SnapshotOp::Take { .. },
             ..
-        }
+        } | Command::VmProtect { .. }
     );
-    on_vms && !is_take
+    on_vms && !leaves_vm_alone
 }
 
-const ALL_ACTIONS: [ActionKind; 15] = [
+const ALL_ACTIONS: [ActionKind; 17] = [
     ActionKind::VmStart,
     ActionKind::VmUnpause,
     ActionKind::VmPause,
@@ -375,6 +397,8 @@ const ALL_ACTIONS: [ActionKind; 15] = [
     ActionKind::SnapshotTake,
     ActionKind::SnapshotRevert,
     ActionKind::SnapshotDelete,
+    ActionKind::VmProtect,
+    ActionKind::VmUnprotect,
     ActionKind::ExecReadOnly,
     ActionKind::ExecOther,
     ActionKind::ExecDangerous,

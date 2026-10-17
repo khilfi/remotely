@@ -28,6 +28,9 @@ pub enum Command {
     VmPower { targets: Vec<TargetRef>, op: PowerOp },
     /// VM-04 bulk snapshot take, revert and delete.
     VmSnapshot { targets: Vec<TargetRef>, op: SnapshotOp },
+    /// AP-04 mark VMs "do not touch" (`protected: true`) or unlock them. Other actions skip
+    /// protected targets; this one is the way to change that, so it never skips them.
+    VmProtect { targets: Vec<TargetRef>, protected: bool },
     /// BX-02 run a command or script on many hosts; BX-07 with sudo from the vault.
     RemoteExec {
         targets: Vec<TargetRef>,
@@ -83,6 +86,7 @@ impl Command {
         match self {
             Command::VmPower { targets, .. }
             | Command::VmSnapshot { targets, .. }
+            | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
@@ -116,6 +120,8 @@ impl Command {
                 SnapshotOp::Revert { name } => format!("Revert {} to '{name}'", noun("VM")),
                 SnapshotOp::Delete { name } => format!("Delete snapshot '{name}' on {}", noun("VM")),
             },
+            Command::VmProtect { protected: true, .. } => format!("Protect {}", noun("VM")),
+            Command::VmProtect { protected: false, .. } => format!("Unprotect {}", noun("VM")),
             Command::RemoteExec { script, sudo, .. } => {
                 let first_line = script.lines().next().unwrap_or_default();
                 let sudo = if *sudo { "sudo " } else { "" };
@@ -136,8 +142,13 @@ pub trait TargetDirectory: Send + Sync {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SubmitOutcome {
-    /// Low tier: logged and queued straight away.
-    Queued { job_id: Uuid, tier: Tier, summary: String },
+    /// Low tier: logged and queued straight away. `skipped` are protected targets left alone (AP-04).
+    Queued {
+        job_id: Uuid,
+        tier: Tier,
+        summary: String,
+        skipped: Vec<Target>,
+    },
     /// Medium and above: collect the answers for `steps`, then call [`CommandBus::approve`].
     NeedsApproval { request: ApprovalRequest },
 }
@@ -249,6 +260,7 @@ impl CommandBus {
         if decision.steps.is_empty() {
             // Low tier: no approval, logged only.
             let tier = decision.tier;
+            let skipped = decision.skipped.clone();
             let job_id = self
                 .jobs
                 .enqueue(JobSpec {
@@ -259,7 +271,12 @@ impl CommandBus {
                     safety_snapshot: false,
                 })
                 .await?;
-            return Ok(SubmitOutcome::Queued { job_id, tier, summary });
+            return Ok(SubmitOutcome::Queued {
+                job_id,
+                tier,
+                summary,
+                skipped,
+            });
         }
 
         let request = ApprovalRequest {
