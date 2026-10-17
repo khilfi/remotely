@@ -1,6 +1,8 @@
 use super::*;
 use crate::adapters::vmware::VmxInfo;
 use crate::domain::{Environment, PowerState, Target, TargetRef};
+use crate::error::CoreError;
+use crate::inventory::VmFilter;
 use crate::policy::Tier;
 
 async fn store_with_identity() -> (Store, Context) {
@@ -239,4 +241,112 @@ async fn settings_round_trip() {
     store.put_setting(&ctx, "x", &7u32).await.unwrap();
     store.put_setting(&ctx, "x", &8u32).await.unwrap();
     assert_eq!(store.get_setting::<u32>(&ctx, "x").await.unwrap(), Some(8));
+}
+
+// ---- VM-02: tags and saved filters -------------------------------------------------------------
+
+#[tokio::test]
+async fn tags_attach_to_vms_without_regard_to_letter_case() {
+    let (store, ctx) = store_with_identity().await;
+    let web = r"C:\VMs\web\web.vmx".to_owned();
+    let db = r"C:\VMs\db\db.vmx".to_owned();
+    store
+        .record_inventory(
+            &ctx,
+            &[
+                found(&web, "web", PowerState::Running),
+                found(&db, "db", PowerState::NotRunning),
+            ],
+        )
+        .await
+        .unwrap();
+
+    store
+        .tag_vms(&ctx, &[web.clone(), db.clone()], " lab-a ")
+        .await
+        .unwrap();
+    store.tag_vms(&ctx, std::slice::from_ref(&web), "LAB-A").await.unwrap();
+    store
+        .tag_vms(&ctx, std::slice::from_ref(&web), "frontend")
+        .await
+        .unwrap();
+
+    let tags = store.list_tags(&ctx).await.unwrap();
+    let summary: Vec<_> = tags.iter().map(|t| (t.name.as_str(), t.vm_count)).collect();
+    assert_eq!(summary, [("frontend", 1), ("lab-a", 2)], "one lab-a tag, trimmed");
+    let web_tags = store.find_vm(&ctx, &web).await.unwrap().unwrap().tags;
+    assert_eq!(web_tags, ["frontend", "lab-a"]);
+
+    // Removing a tag from its last VM deletes the tag.
+    store
+        .untag_vms(&ctx, std::slice::from_ref(&web), "Frontend")
+        .await
+        .unwrap();
+    let names: Vec<_> = store
+        .list_tags(&ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(names, ["lab-a"]);
+
+    store.delete_tag(&ctx, "lab-a").await.unwrap();
+    assert!(store.list_tags(&ctx).await.unwrap().is_empty());
+    assert!(store.find_vm(&ctx, &db).await.unwrap().unwrap().tags.is_empty());
+}
+
+#[tokio::test]
+async fn tag_names_are_checked_and_vms_must_be_known() {
+    let (store, ctx) = store_with_identity().await;
+    let web = r"C:\VMs\web\web.vmx".to_owned();
+    store
+        .record_inventory(&ctx, &[found(&web, "web", PowerState::Running)])
+        .await
+        .unwrap();
+    for bad in ["", "   ", "tab\there", &"x".repeat(41)] {
+        let err = store.tag_vms(&ctx, std::slice::from_ref(&web), bad).await.unwrap_err();
+        assert!(matches!(err, CoreError::InvalidInput(_)), "{bad:?}");
+    }
+    let unknown = store
+        .tag_vms(&ctx, &[r"C:\VMs\nope\nope.vmx".to_owned()], "lab")
+        .await
+        .unwrap_err();
+    assert!(matches!(unknown, CoreError::UnknownTarget(_)));
+    assert!(
+        store.list_tags(&ctx).await.unwrap().is_empty(),
+        "nothing saved on failure"
+    );
+}
+
+#[tokio::test]
+async fn saved_filters_round_trip_and_replace_by_name() {
+    let (store, ctx) = store_with_identity().await;
+    let lab = VmFilter {
+        tags: vec!["lab-a".into()],
+        power_states: vec![PowerState::NotRunning],
+        ..Default::default()
+    };
+    let saved = store.save_filter(&ctx, "Lab A, off", &lab).await.unwrap();
+    assert_eq!(saved.filter, lab);
+
+    let prod = VmFilter {
+        environments: vec![Environment::Prod],
+        ..Default::default()
+    };
+    let replaced = store.save_filter(&ctx, "Lab A, off", &prod).await.unwrap();
+    assert_eq!(replaced.id, saved.id, "same name replaces");
+    store
+        .save_filter(&ctx, "Everything", &VmFilter::default())
+        .await
+        .unwrap();
+
+    let all = store.list_saved_filters(&ctx).await.unwrap();
+    let names: Vec<_> = all.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(names, ["Everything", "Lab A, off"]);
+    assert_eq!(all[1].filter, prod);
+
+    store.delete_saved_filter(&ctx, &saved.id).await.unwrap();
+    assert_eq!(store.list_saved_filters(&ctx).await.unwrap().len(), 1);
+    assert!(store.save_filter(&ctx, " ", &prod).await.is_err());
 }

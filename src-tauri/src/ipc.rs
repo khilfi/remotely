@@ -7,7 +7,7 @@ use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
 use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::policy::PolicyRules;
-use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, VmRecord};
+use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, SavedFilter, Tag, VmRecord};
 use remotely_core::{Core, CoreError};
 use serde::Serialize;
 use tauri::State;
@@ -67,11 +67,57 @@ pub async fn vm_refresh(state: State<'_, AppState>) -> IpcResult<RefreshReport> 
     Ok(report)
 }
 
-/// VM-01: the VMs the last refresh found, without asking Workstation.
+/// VM-01, VM-02: the VMs the last refresh found that match the filter (all of them without one),
+/// without asking Workstation.
 #[tauri::command]
-pub async fn vm_list(state: State<'_, AppState>) -> IpcResult<Vec<VmRecord>> {
+pub async fn vm_list(state: State<'_, AppState>, filter: Option<VmFilter>) -> IpcResult<Vec<VmRecord>> {
     let core = &state.core;
-    Ok(core.inventory.list(&core.ctx, &VmFilter::default()).await?)
+    Ok(core.inventory.list(&core.ctx, &filter.unwrap_or_default()).await?)
+}
+
+/// VM-02: tags are the app's own labels for picking VMs; they change no VM, so they skip the bus.
+#[tauri::command]
+pub async fn tags_list(state: State<'_, AppState>) -> IpcResult<Vec<Tag>> {
+    let core = &state.core;
+    Ok(core.store.list_tags(&core.ctx).await?)
+}
+
+#[tauri::command]
+pub async fn vm_tag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.tag_vms(&core.ctx, &vmx_paths, &tag).await?)
+}
+
+#[tauri::command]
+pub async fn vm_untag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.untag_vms(&core.ctx, &vmx_paths, &tag).await?)
+}
+
+#[tauri::command]
+pub async fn tag_delete(state: State<'_, AppState>, tag: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.delete_tag(&core.ctx, &tag).await?)
+}
+
+/// VM-02: saved filters, for selecting the same VMs again.
+#[tauri::command]
+pub async fn filters_list(state: State<'_, AppState>) -> IpcResult<Vec<SavedFilter>> {
+    let core = &state.core;
+    Ok(core.store.list_saved_filters(&core.ctx).await?)
+}
+
+/// Saving under an existing name replaces that filter.
+#[tauri::command]
+pub async fn filter_save(state: State<'_, AppState>, name: String, filter: VmFilter) -> IpcResult<SavedFilter> {
+    let core = &state.core;
+    Ok(core.store.save_filter(&core.ctx, &name, &filter).await?)
+}
+
+#[tauri::command]
+pub async fn filter_delete(state: State<'_, AppState>, id: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.delete_saved_filter(&core.ctx, &id).await?)
 }
 
 /// The one way in for changes: command bus -> policy engine -> (approval) -> job runner.

@@ -53,6 +53,34 @@ export interface RefreshReport {
   warnings: InventoryWarning[];
 }
 
+/**
+ * VM-02: which VMs to show or select. Empty fields match everything; a VM must match every field that
+ * is set, and any one of the values listed in a field.
+ */
+export interface VmFilter {
+  /** Case-insensitive text in the name, .vmx path, guest OS, IP address or a tag. */
+  text?: string;
+  tags?: string[];
+  powerStates?: PowerState[];
+  environments?: Environment[];
+  /** true: only protected VMs; false: only unprotected ones. */
+  protected?: boolean | null;
+}
+
+export interface Tag {
+  id: string;
+  name: string;
+  color: string | null;
+  vmCount: number;
+}
+
+export interface SavedFilter {
+  id: string;
+  name: string;
+  filter: VmFilter;
+  updatedAt: string;
+}
+
 export type StopMode = "soft" | "hard";
 
 export type PowerOp =
@@ -211,8 +239,18 @@ export const api = {
 
   /** VM-01: finds every VM (Workstation's library, chosen folders, vmrun list) via the core. */
   vmRefresh: () => invoke<RefreshReport>("vm_refresh"),
-  /** VM-01: the VMs the last refresh found, without asking Workstation. */
-  vmList: () => invoke<VmRecord[]>("vm_list"),
+  /** VM-01, VM-02: the VMs the last refresh found that match the filter, without asking Workstation. */
+  vmList: (filter?: VmFilter) => invoke<VmRecord[]>("vm_list", { filter: filter ?? null }),
+
+  /** VM-02: tags are the app's own labels for picking VMs; they change no VM. */
+  tags: () => invoke<Tag[]>("tags_list"),
+  tagVms: (vmxPaths: string[], tag: string) => invoke<void>("vm_tag", { vmxPaths, tag }),
+  untagVms: (vmxPaths: string[], tag: string) => invoke<void>("vm_untag", { vmxPaths, tag }),
+  deleteTag: (tag: string) => invoke<void>("tag_delete", { tag }),
+  savedFilters: () => invoke<SavedFilter[]>("filters_list"),
+  /** Saving under an existing name replaces that filter. */
+  saveFilter: (name: string, filter: VmFilter) => invoke<SavedFilter>("filter_save", { name, filter }),
+  deleteFilter: (id: string) => invoke<void>("filter_delete", { id }),
 
   /** The one way in for changes: command bus -> policy engine -> job runner. */
   submit: (command: Command) => invoke<SubmitOutcome>("command_submit", { command }),

@@ -13,6 +13,7 @@ use remotely_core::adapters::vmware::VmxInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, SubmitOutcome};
 use remotely_core::domain::{PowerState, Target};
 use remotely_core::fakes::FakeVmware;
+use remotely_core::inventory::VmFilter;
 use remotely_core::jobs::JobStatus;
 use remotely_core::policy::Tier;
 use remotely_core::CoreError;
@@ -257,4 +258,54 @@ async fn protecting_a_vm_not_in_the_inventory_fails() {
         panic!("protecting is Low");
     };
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Failed);
+}
+
+// ---- VM-02: tags, saved filters and start -------------------------------------------------------
+
+#[tokio::test]
+async fn a_saved_filter_picks_the_stopped_lab_vms_which_start_with_a_console_window() {
+    let setup = Setup::new(
+        FakeVmware::with_running([vmx("c")])
+            .in_library(&vmx("a"), None)
+            .in_library(&vmx("b"), None)
+            .in_library(&vmx("c"), None)
+            .in_library(&vmx("other"), None),
+    );
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    core.inventory.refresh(&core.ctx).await.unwrap();
+    let lab: Vec<String> = ["a", "b", "c"].iter().map(|n| vmx(n)).collect();
+    core.store.tag_vms(&core.ctx, &lab, "lab").await.unwrap();
+
+    let filter = VmFilter {
+        tags: vec!["lab".into()],
+        power_states: vec![PowerState::NotRunning],
+        ..Default::default()
+    };
+    let saved = core.store.save_filter(&core.ctx, "Lab, off", &filter).await.unwrap();
+    let picked = core.inventory.list(&core.ctx, &saved.filter).await.unwrap();
+    let names: Vec<_> = picked.iter().map(|v| v.display_name.as_str()).collect();
+    assert_eq!(names, ["a", "b"]);
+
+    let mut events = core.jobs.subscribe();
+    let start = Command::VmPower {
+        targets: picked.iter().map(|v| vm(&v.display_name)).collect(),
+        op: PowerOp::Start { gui: true },
+    };
+    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx, start).await.unwrap() else {
+        panic!("starting VMs is Low");
+    };
+    assert_eq!(tier, Tier::Low);
+    assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Succeeded);
+    let mut calls = fake.calls();
+    calls.sort();
+    assert_eq!(
+        calls,
+        [
+            r"power Start { gui: true } C:\VMs\a\a.vmx",
+            r"power Start { gui: true } C:\VMs\b\b.vmx"
+        ]
+    );
+    // The list shows them running before the next refresh.
+    assert!(core.inventory.list(&core.ctx, &saved.filter).await.unwrap().is_empty());
 }

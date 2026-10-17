@@ -7,6 +7,7 @@ mod audit;
 mod inventory;
 mod jobs;
 mod metrics;
+mod tags;
 #[cfg(test)]
 mod tests;
 
@@ -27,6 +28,7 @@ pub use audit::{AuditEntry, ChainCheck, NewAuditEntry};
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, TargetResult};
+pub use tags::{SavedFilter, Tag};
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";
 /// Full path to vmrun.exe chosen in Settings; JSON null means "find it automatically".
