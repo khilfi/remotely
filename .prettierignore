@@ -1,0 +1,12 @@
+dist/
+node_modules/
+target/
+src-tauri/
+crates/
+docs/
+package-lock.json
+CLAUDE.md
+START_HERE.md
+STARTER_PROMPT.md
+src/components/ui/
+src/hooks/use-mobile.ts

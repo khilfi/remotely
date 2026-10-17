@@ -1,0 +1,13 @@
+#!/bin/sh
+# Secret scan on staged changes. This repository is public: a finding blocks the commit.
+# Never bypass this hook with --no-verify. See "Public repository rules" in CLAUDE.md.
+#
+# Enabled per clone with: git config core.hooksPath .githooks
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+    echo "pre-commit: gitleaks is not installed, so the secret scan cannot run." >&2
+    echo "Install it (for example: winget install Gitleaks.Gitleaks), then commit again." >&2
+    exit 1
+fi
+
+exec gitleaks git --pre-commit --staged --redact --no-banner --verbose

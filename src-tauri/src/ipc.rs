@@ -1,0 +1,149 @@
+//! IPC commands the UI can call. Actions on VMs, hosts and the app go to the command bus; the rest
+//! are reads, plus app settings (which are audited by the core).
+
+use std::path::PathBuf;
+
+use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
+use remotely_core::policy::PolicyRules;
+use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, VmRecord};
+use remotely_core::{Core, CoreError};
+use serde::Serialize;
+use tauri::State;
+use uuid::Uuid;
+
+use crate::AppState;
+
+/// Error shape the UI receives: a stable code plus a readable message.
+#[derive(Debug, Serialize)]
+pub struct IpcError {
+    code: &'static str,
+    message: String,
+}
+
+impl From<CoreError> for IpcError {
+    fn from(err: CoreError) -> Self {
+        Self {
+            code: err.code(),
+            message: err.to_string(),
+        }
+    }
+}
+
+type IpcResult<T> = Result<T, IpcError>;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInfo {
+    version: &'static str,
+    workspace_id: String,
+    user_id: String,
+    vmrun_path: Option<String>,
+}
+
+#[tauri::command]
+pub fn app_info(state: State<'_, AppState>) -> AppInfo {
+    let core = &state.core;
+    AppInfo {
+        version: env!("CARGO_PKG_VERSION"),
+        workspace_id: core.ctx.workspace_id.to_string(),
+        user_id: core.ctx.user_id.to_string(),
+        vmrun_path: core.vmrun_path().map(|p| p.display().to_string()),
+    }
+}
+
+/// VM-01: running VMs from `vmrun list`, saved to the inventory.
+#[tauri::command]
+pub async fn vm_list_running(state: State<'_, AppState>) -> IpcResult<Vec<VmRecord>> {
+    let core = &state.core;
+    let vms = core.inventory.refresh_running(&core.ctx).await?;
+    tracing::info!(running = vms.len(), "vmrun list");
+    Ok(vms)
+}
+
+/// VM-01: every VM the inventory knows, without asking Workstation.
+#[tauri::command]
+pub async fn vm_list(state: State<'_, AppState>) -> IpcResult<Vec<VmRecord>> {
+    let core = &state.core;
+    Ok(core.inventory.list(&core.ctx).await?)
+}
+
+/// The one way in for changes: command bus -> policy engine -> (approval) -> job runner.
+#[tauri::command]
+pub async fn command_submit(state: State<'_, AppState>, command: Command) -> IpcResult<SubmitOutcome> {
+    let core = &state.core;
+    Ok(core.bus.submit(&core.ctx, command).await?)
+}
+
+#[tauri::command]
+pub async fn command_approve(
+    state: State<'_, AppState>,
+    request_id: Uuid,
+    answers: ApprovalAnswers,
+) -> IpcResult<Uuid> {
+    Ok(state.core.bus.approve(request_id, answers).await?)
+}
+
+#[tauri::command]
+pub async fn command_cancel_approval(state: State<'_, AppState>, request_id: Uuid) -> IpcResult<()> {
+    Ok(state.core.bus.cancel_approval(request_id).await?)
+}
+
+#[tauri::command]
+pub fn job_cancel(state: State<'_, AppState>, job_id: Uuid) -> bool {
+    state.core.jobs.cancel(job_id)
+}
+
+#[tauri::command]
+pub async fn jobs_recent(state: State<'_, AppState>, limit: Option<u32>) -> IpcResult<Vec<JobSummary>> {
+    let core = &state.core;
+    Ok(core.store.recent_jobs(&core.ctx, limit.unwrap_or(50)).await?)
+}
+
+#[tauri::command]
+pub fn policy_rules(state: State<'_, AppState>) -> PolicyRules {
+    state.core.bus.rules()
+}
+
+/// AP-05: newest audit entries first.
+#[tauri::command]
+pub async fn audit_recent(state: State<'_, AppState>, limit: Option<u32>) -> IpcResult<Vec<AuditEntry>> {
+    let core = &state.core;
+    Ok(core.store.recent_audit(&core.ctx, limit.unwrap_or(100)).await?)
+}
+
+#[tauri::command]
+pub async fn audit_verify(state: State<'_, AppState>) -> IpcResult<ChainCheck> {
+    Ok(state.core.store.verify_audit_chain().await?)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    /// What the user chose; `None` means "find vmrun.exe automatically".
+    vmrun_path_saved: Option<String>,
+    /// What the app is using now; `None` means Workstation was not found.
+    vmrun_path_in_use: Option<String>,
+}
+
+async fn settings(core: &Core) -> IpcResult<Settings> {
+    Ok(Settings {
+        vmrun_path_saved: core.saved_vmrun_path().await?.map(|p| p.display().to_string()),
+        vmrun_path_in_use: core.vmrun_path().map(|p| p.display().to_string()),
+    })
+}
+
+#[tauri::command]
+pub async fn settings_get(state: State<'_, AppState>) -> IpcResult<Settings> {
+    settings(&state.core).await
+}
+
+/// `None` or an empty string goes back to finding vmrun.exe automatically.
+#[tauri::command]
+pub async fn settings_set_vmrun_path(state: State<'_, AppState>, path: Option<String>) -> IpcResult<Settings> {
+    let path = path
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    state.core.set_vmrun_path(path).await?;
+    settings(&state.core).await
+}

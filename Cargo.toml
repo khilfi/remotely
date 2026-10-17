@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "src-tauri"]
+
+[workspace.package]
+# Version of the internal core crate. The app's release version lives in src-tauri/Cargo.toml,
+# package.json and src-tauri/tauri.conf.json, which must match (see CLAUDE.md).
+version = "0.1.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+remotely-core = { path = "crates/core" }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "sync", "time", "fs"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# CLAUDE.md: no unwrap()/expect() outside tests. clippy.toml allows them in tests.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+# Small installer and low idle RAM matter here (NFR Footprint): the app shares the host with the VMs.
+# https://tauri.app/concept/size/#cargo-configuration
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

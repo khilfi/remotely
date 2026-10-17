@@ -1,0 +1,205 @@
+// Typed wrappers over the Tauri IPC commands in src-tauri/src/ipc.rs and terminal.rs.
+// The UI talks to the Rust core only through these; it never runs vmrun or SSH itself.
+// Types mirror the serde shapes in crates/core.
+
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+
+export type Environment = "none" | "lab" | "staging" | "prod";
+export type Tier = "low" | "medium" | "high" | "critical";
+
+export type TargetRef = { kind: "vm"; vmxPath: string } | { kind: "session"; sessionId: string } | { kind: "app" };
+
+export interface Target {
+  target: TargetRef;
+  name: string;
+  environment: Environment;
+  protected: boolean;
+}
+
+export interface VmRecord {
+  id: string;
+  vmxPath: string;
+  displayName: string;
+  guestOs: string | null;
+  numVcpus: number | null;
+  memsizeMb: number | null;
+  powerState: "unknown" | "running" | "not_running" | "suspended" | "paused";
+  ipAddress: string | null;
+  toolsState: string | null;
+  environment: Environment;
+  protected: boolean;
+  lastSeenAt: string | null;
+}
+
+export type StopMode = "soft" | "hard";
+
+export type PowerOp =
+  | { kind: "start"; gui?: boolean }
+  | { kind: "stop"; mode: StopMode }
+  | { kind: "reset"; mode: StopMode }
+  | { kind: "suspend" }
+  | { kind: "pause" }
+  | { kind: "unpause" };
+
+export type SnapshotOp =
+  { kind: "take"; name: string } | { kind: "revert"; name: string } | { kind: "delete"; name: string };
+
+export type Command =
+  | { type: "vmPower"; targets: TargetRef[]; op: PowerOp }
+  | { type: "vmSnapshot"; targets: TargetRef[]; op: SnapshotOp }
+  | { type: "remoteExec"; targets: TargetRef[]; script: string; sudo?: boolean }
+  | { type: "appUpdate"; version: string };
+
+export type ApprovalStep =
+  | { step: "confirm" }
+  | { step: "impactPreview" }
+  | { step: "safetySnapshot"; defaultOn: boolean }
+  | { step: "typeTargetCount"; expected: number }
+  | { step: "reason" }
+  | { step: "countdown"; seconds: number }
+  | { step: "vaultReauth" };
+
+export interface ApprovalRequest {
+  id: string;
+  action: string;
+  tier: Tier;
+  summary: string;
+  steps: ApprovalStep[];
+  targets: Target[];
+  skipped: Target[];
+  reasons: string[];
+}
+
+export type SubmitOutcome =
+  | { status: "queued"; jobId: string; tier: Tier; summary: string }
+  | { status: "needsApproval"; request: ApprovalRequest };
+
+export interface ApprovalAnswers {
+  confirmed: boolean;
+  typedTargetCount?: number;
+  reason?: string;
+  safetySnapshot?: boolean;
+  vaultPassword?: string;
+}
+
+export type JobStatus =
+  "queued" | "countdown" | "running" | "succeeded" | "failed" | "partially_failed" | "cancelled" | "interrupted";
+
+export type TargetStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
+
+export type JobEvent =
+  | { event: "queued"; jobId: string; summary: string; tier: Tier; targets: number }
+  | { event: "countdown"; jobId: string; seconds: number }
+  | { event: "started"; jobId: string }
+  | {
+      event: "targetFinished";
+      jobId: string;
+      target: string;
+      name: string;
+      status: TargetStatus;
+      message: string | null;
+      durationMs: number;
+    }
+  | { event: "finished"; jobId: string; status: JobStatus };
+
+export interface JobSummary {
+  id: string;
+  summary: string;
+  action: string;
+  tier: Tier;
+  status: JobStatus;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  targetsTotal: number;
+  targetsSucceeded: number;
+  targetsFailed: number;
+}
+
+export interface ChainCheck {
+  entries: number;
+  ok: boolean;
+  firstBadSeq: number | null;
+  problem: string | null;
+}
+
+export interface AuditEntry {
+  seq: number;
+  id: string;
+  ts: string;
+  event: string;
+  action: string;
+  tier: Tier | null;
+  jobId: string | null;
+  targetsJson: string;
+  approvalJson: string | null;
+  result: string | null;
+  detail: string | null;
+  prevHash: string;
+  hash: string;
+}
+
+export interface Settings {
+  /** What the user chose; null means "find vmrun.exe automatically". */
+  vmrunPathSaved: string | null;
+  /** What the app is using now; null means Workstation was not found. */
+  vmrunPathInUse: string | null;
+}
+
+export interface AppInfo {
+  version: string;
+  workspaceId: string;
+  userId: string;
+  vmrunPath: string | null;
+}
+
+/** Error shape from src-tauri/src/ipc.rs. */
+export interface IpcError {
+  code: string;
+  message: string;
+}
+
+export function errorMessage(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && "message" in err) return String((err as IpcError).message);
+  return "Unexpected error";
+}
+
+export function errorCode(err: unknown): string | undefined {
+  return err && typeof err === "object" && "code" in err ? String((err as IpcError).code) : undefined;
+}
+
+export const api = {
+  appInfo: () => invoke<AppInfo>("app_info"),
+
+  /** VM-01: asks Workstation for running VMs (via the core's VMware adapter). */
+  vmListRunning: () => invoke<VmRecord[]>("vm_list_running"),
+  /** VM-01: every VM the inventory knows, without asking Workstation. */
+  vmList: () => invoke<VmRecord[]>("vm_list"),
+
+  /** The one way in for changes: command bus -> policy engine -> job runner. */
+  submit: (command: Command) => invoke<SubmitOutcome>("command_submit", { command }),
+  approve: (requestId: string, answers: ApprovalAnswers) => invoke<string>("command_approve", { requestId, answers }),
+  cancelApproval: (requestId: string) => invoke<void>("command_cancel_approval", { requestId }),
+
+  cancelJob: (jobId: string) => invoke<boolean>("job_cancel", { jobId }),
+  recentJobs: (limit = 50) => invoke<JobSummary[]>("jobs_recent", { limit }),
+  recentAudit: (limit = 100) => invoke<AuditEntry[]>("audit_recent", { limit }),
+  verifyAudit: () => invoke<ChainCheck>("audit_verify"),
+  onJobEvent: (handler: (event: JobEvent) => void): Promise<UnlistenFn> =>
+    listen<JobEvent>("job://event", (e) => handler(e.payload)),
+
+  settings: () => invoke<Settings>("settings_get"),
+  /** null or "" goes back to finding vmrun.exe automatically. */
+  setVmrunPath: (path: string | null) => invoke<Settings>("settings_set_vmrun_path", { path }),
+
+  terminalOpen: (onOutput: (data: string) => void) => {
+    const channel = new Channel<string>();
+    channel.onmessage = onOutput;
+    return invoke<string>("terminal_open", { onOutput: channel });
+  },
+  terminalWrite: (id: string, data: string) => invoke<void>("terminal_write", { id, data }),
+  terminalResize: (id: string, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
+  terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
+};

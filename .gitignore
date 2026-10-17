@@ -1,0 +1,55 @@
+# This repository is public. See "Public repository rules" in CLAUDE.md.
+
+# ---- Build output ----
+node_modules/
+dist/
+dist-ssr/
+target/
+src-tauri/target/
+src-tauri/gen/schemas/
+*.local
+
+# ---- Secrets and keys: never commit ----
+.env*
+*.key
+*.pem
+*.pfx
+*.p12
+*.ppk
+id_rsa*
+id_ed25519*
+id_ecdsa*
+
+# ---- Real session exports (PuTTY, MobaXterm) ----
+*.reg
+*.mxtsessions
+
+# ---- App data: databases, logs, recordings, exports ----
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
+*.log
+logs/
+*.cast
+exports/
+support-bundles/
+
+# ---- Local setup files (kept out of git) ----
+START_HERE.md
+STARTER_PROMPT.md
+CLAUDE.local.md
+vm-ssh-manager-starter/
+vm-ssh-manager-starter.zip
+
+# ---- Editors and OS ----
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

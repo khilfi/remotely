@@ -1,0 +1,9 @@
+# LF everywhere, whatever core.autocrlf says: Prettier and rustfmt check for LF, so a CRLF checkout
+# (the Windows default) would fail `npm run lint` and CI.
+* text=auto eol=lf
+
+# Binary files: never touch line endings.
+*.png binary
+*.ico binary
+*.icns binary
+*.woff2 binary

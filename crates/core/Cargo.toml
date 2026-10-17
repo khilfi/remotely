@@ -1,0 +1,39 @@
+[package]
+name = "remotely-core"
+description = "Core of Remotely: command bus, policy engine, job runner, adapters, vault and store. No Tauri types."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Fake adapters (VMware, remote, vault, host counters, updater) for tests. Never enabled in the app.
+fakes = []
+
+[dependencies]
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+hex = "0.4"
+regex = "1"
+sha2 = "0.11"
+time = { version = "0.3", features = ["formatting", "serde"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+# SSH (SS-03, BX-02, MO-02). `ring` instead of the default aws-lc-rs so Windows builds need no CMake/NASM.
+russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.56"
+
+[dev-dependencies]
+# Integration tests in tests/ use the fake adapters.
+remotely-core = { path = ".", features = ["fakes"] }
+tokio = { workspace = true, features = ["test-util"] }
