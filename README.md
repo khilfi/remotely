@@ -48,7 +48,8 @@ Tests use the fake adapters in `crates/core/src/fakes.rs` and never touch a real
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (they must match).
 2. Commit, then `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
-3. `.github/workflows/release.yml` builds the MSI on Windows, signs the update artifacts and creates a **draft** release
+3. `.github/workflows/release.yml` builds the NSIS installer on Windows (per-user, so installing and updating need no
+   admin rights), signs the update artifacts and creates a **draft** release
    with the installer, its `.sig` file and `latest.json`. It stops if the tag and the three versions differ, or if the
    updater public key in `tauri.conf.json` is still the placeholder. Afterwards it checks the update signatures against
    that public key (`scripts/verify-update-signature.mjs`); if this step fails, the signing secret and the public key
