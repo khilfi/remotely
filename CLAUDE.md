@@ -32,7 +32,7 @@ Everything committed here is public forever, including git history.
 
 - The version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` must match. Release by pushing a tag `vX.Y.Z`.
 - `.github/workflows/ci.yml` runs on every push and pull request: `cargo fmt --all --check`, clippy, `cargo test --workspace`, `npm run lint`, and gitleaks over the full history.
-- `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`. It uses `tauri-apps/tauri-action` to build, sign the update artifacts and create a **draft** GitHub Release with the installer, its `.sig` file and `latest.json`. The user publishes the draft after a smoke test; installed apps only see published releases.
+- `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`. It uses `tauri-apps/tauri-action` to build, sign the update artifacts and create a **draft** GitHub Release with the installer, its `.sig` file and `latest.json`, then checks the signatures against `plugins.updater.pubkey` with `scripts/verify-update-signature.mjs` (a failure means the signing secret and the public key don't pair: don't publish). The user publishes the draft after a smoke test; installed apps only see published releases.
 - `tauri.conf.json`: `bundle.createUpdaterArtifacts: true`; `plugins.updater.pubkey` holds the public key; `plugins.updater.endpoints` is `["https://github.com/<owner>/<repo>/releases/latest/download/latest.json"]`; `plugins.updater.windows.installMode: "passive"`.
 - In the app (FD-14): check at start and every 24 hours, and show the new version and its release notes. Installing is a Medium-tier command through the command bus, and it waits until no job is running. A setting turns update checks off for air-gapped sites.
 

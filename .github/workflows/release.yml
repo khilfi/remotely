@@ -69,3 +69,8 @@ jobs:
           releaseBody: Draft. Smoke-test the installer, then publish; installed apps only see published releases.
           releaseDraft: true
           prerelease: false
+
+      # Fails the run (the draft stays unpublished) if the private key in the secrets does not pair
+      # with plugins.updater.pubkey, which installed apps use to verify updates.
+      - name: Verify the update signatures against the app's public key
+        run: node scripts/verify-update-signature.mjs
