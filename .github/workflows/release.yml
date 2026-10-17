@@ -57,6 +57,23 @@ jobs:
 
       - run: npm ci
 
+      # The release notes are the annotated tag's message (`git tag -a vX.Y.Z -m "notes"`). They also
+      # go into latest.json, which installed apps show in their update banner (FD-14).
+      - name: Release notes from the tag message
+        id: notes
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          git fetch --force --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          notes="$(git tag -l --format='%(contents)' "$TAG")"
+          if [ -z "$notes" ]; then notes="Remotely ${TAG}"; fi
+          {
+            echo "body<<__RELEASE_NOTES__"
+            echo "$notes"
+            echo "__RELEASE_NOTES__"
+          } >> "$GITHUB_OUTPUT"
+
       - uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -66,7 +83,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: Remotely ${{ github.ref_name }}
-          releaseBody: Draft. Smoke-test the installer, then publish; installed apps only see published releases.
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: true
           prerelease: false
 
