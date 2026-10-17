@@ -3,10 +3,10 @@
 
 mod ipc;
 mod terminal;
+mod updater;
 
 use std::sync::Arc;
 
-use remotely_core::adapters::updater::DisabledUpdater;
 use remotely_core::{Core, CoreConfig};
 use tauri::{Emitter, Manager};
 use tokio::sync::broadcast::error::RecvError;
@@ -26,6 +26,7 @@ pub fn run() {
         .init();
 
     let result = tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // %LOCALAPPDATA%\com.remotely.desktop: app data never lives in the working directory, so
             // nothing private can land in the public repo (CLAUDE.md).
@@ -36,8 +37,8 @@ pub fn run() {
                 vmrun_path: None,
                 account: windows_account(),
                 display_name: std::env::var("USERNAME").unwrap_or_else(|_| "user".into()),
-                // FD-14: replaced by the signed GitHub Releases updater once the repo exists.
-                updater: Arc::new(DisabledUpdater),
+                // FD-14: signed updates from the public repo's GitHub Releases.
+                updater: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
             };
             tracing::info!("starting core");
             let core = Arc::new(tauri::async_runtime::block_on(Core::init(config))?);
@@ -77,6 +78,8 @@ pub fn run() {
             ipc::audit_verify,
             ipc::settings_get,
             ipc::settings_set_vmrun_path,
+            ipc::settings_set_update_checks,
+            ipc::update_check,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,

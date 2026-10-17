@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
 use remotely_core::policy::PolicyRules;
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, VmRecord};
@@ -123,12 +124,15 @@ pub struct Settings {
     vmrun_path_saved: Option<String>,
     /// What the app is using now; `None` means Workstation was not found.
     vmrun_path_in_use: Option<String>,
+    /// FD-14: check GitHub Releases for updates (off at air-gapped sites).
+    update_checks: bool,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
     Ok(Settings {
         vmrun_path_saved: core.saved_vmrun_path().await?.map(|p| p.display().to_string()),
         vmrun_path_in_use: core.vmrun_path().map(|p| p.display().to_string()),
+        update_checks: core.update_checks_enabled().await?,
     })
 }
 
@@ -146,4 +150,18 @@ pub async fn settings_set_vmrun_path(state: State<'_, AppState>, path: Option<St
         .map(PathBuf::from);
     state.core.set_vmrun_path(path).await?;
     settings(&state.core).await
+}
+
+/// FD-14: turn update checks off (air-gapped sites) or back on.
+#[tauri::command]
+pub async fn settings_set_update_checks(state: State<'_, AppState>, enabled: bool) -> IpcResult<Settings> {
+    state.core.set_update_checks(enabled).await?;
+    settings(&state.core).await
+}
+
+/// FD-14: asks GitHub Releases for a newer signed version. `None` when up to date or when checks
+/// are off. Installing is the `appUpdate` command, through the command bus.
+#[tauri::command]
+pub async fn update_check(state: State<'_, AppState>) -> IpcResult<Option<UpdateInfo>> {
+    Ok(state.core.check_for_update().await?)
 }

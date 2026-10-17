@@ -31,6 +31,8 @@ pub use jobs::{JobSummary, TargetResult};
 pub const POLICY_RULES_KEY: &str = "policy.rules";
 /// Full path to vmrun.exe chosen in Settings; JSON null means "find it automatically".
 pub const VMRUN_PATH_KEY: &str = "vmware.vmrunPath";
+/// FD-14: whether the app checks GitHub Releases for updates; off for air-gapped sites. Default on.
+pub const UPDATE_CHECKS_KEY: &str = "updates.checkEnabled";
 pub const DEFAULT_WORKSPACE: &str = "Default";
 
 #[derive(Clone)]

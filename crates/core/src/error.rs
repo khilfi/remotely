@@ -57,6 +57,9 @@ pub enum CoreError {
     #[error("cancelled")]
     Cancelled,
 
+    #[error("update failed: {0}")]
+    Update(String),
+
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
 }
@@ -81,6 +84,7 @@ impl CoreError {
             CoreError::VaultLocked => "vault_locked",
             CoreError::InvalidSetting(_) => "invalid_setting",
             CoreError::Cancelled => "cancelled",
+            CoreError::Update(_) => "update_failed",
             CoreError::NotImplemented(_) => "not_implemented",
         }
     }

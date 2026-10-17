@@ -40,7 +40,8 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
-import { api, type AppInfo, type ApprovalRequest, type SubmitOutcome } from "@/lib/api";
+import { UpdateBanner } from "@/components/UpdateBanner";
+import { api, errorMessage, type AppInfo, type ApprovalRequest, type SubmitOutcome, type UpdateInfo } from "@/lib/api";
 import { useTheme, type ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
@@ -49,6 +50,8 @@ import { TerminalPage } from "@/pages/TerminalPage";
 import { VmsPage } from "@/pages/VmsPage";
 
 type PageId = "vms" | "terminal" | "activity" | "settings";
+
+const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon },
@@ -75,13 +78,44 @@ export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [jobsVersion, setJobsVersion] = useState(0);
+  const [settingsVersion, setSettingsVersion] = useState(0);
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [laterFor, setLaterFor] = useState<string | null>(null);
   const { preference, setPreference, resolved } = useTheme();
 
   const loadInfo = useCallback(() => {
     api.appInfo().then(setInfo, () => setInfo(null));
   }, []);
 
-  useEffect(loadInfo, [loadInfo]);
+  useEffect(loadInfo, [loadInfo, settingsVersion]);
+
+  // FD-14: check for a newer release at start and every 24 hours, and again when settings change.
+  // The core skips the network call when update checks are turned off.
+  useEffect(() => {
+    let stopped = false;
+    const check = () =>
+      api.checkForUpdate().then(
+        (found) => {
+          if (!stopped) setUpdate(found);
+        },
+        // No release yet, offline or blocked: not worth interrupting anyone for.
+        (err) => console.warn("update check failed", err),
+      );
+    void check();
+    const timer = window.setInterval(() => void check(), UPDATE_CHECK_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [settingsVersion]);
+
+  async function installUpdate(version: string) {
+    try {
+      submitted(await api.submit({ type: "appUpdate", version }));
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
 
   // Job progress from the core -> toasts (one per job, updated in place) and an Activity refresh.
   useEffect(() => {
@@ -209,6 +243,13 @@ export default function App() {
             </ToggleGroup>
           </header>
           <div className="min-h-0 flex-1 overflow-auto p-6">
+            {update && laterFor !== update.version && (
+              <UpdateBanner
+                update={update}
+                onInstall={() => void installUpdate(update.version)}
+                onLater={() => setLaterFor(update.version)}
+              />
+            )}
             <section hidden={page !== "vms"}>
               <VmsPage onSubmitted={submitted} onOpenSettings={() => setPage("settings")} />
             </section>
@@ -219,7 +260,7 @@ export default function App() {
               <ActivityPage version={jobsVersion} />
             </section>
             <section hidden={page !== "settings"}>
-              <SettingsPage onChanged={loadInfo} />
+              <SettingsPage onChanged={() => setSettingsVersion((v) => v + 1)} />
             </section>
           </div>
         </SidebarInset>

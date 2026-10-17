@@ -169,27 +169,54 @@ impl Core {
                 .as_ref()
                 .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
         );
+        self.audit_setting("Set the vmrun.exe path", &detail).await?;
+        Ok(in_use)
+    }
+
+    /// FD-14: whether update checks are on. Defaults to on.
+    pub async fn update_checks_enabled(&self) -> Result<bool> {
+        Ok(self
+            .store
+            .get_setting::<bool>(&self.ctx, store::UPDATE_CHECKS_KEY)
+            .await?
+            .unwrap_or(true))
+    }
+
+    /// FD-14: turns update checks off (air-gapped sites) or back on. Audited.
+    pub async fn set_update_checks(&self, enabled: bool) -> Result<()> {
+        self.store
+            .put_setting(&self.ctx, store::UPDATE_CHECKS_KEY, &enabled)
+            .await?;
+        let detail = if enabled { "on" } else { "off" };
+        self.audit_setting("Set update checks", detail).await
+    }
+
+    /// FD-14: a read, so it skips the bus. Installing is [`command_bus::Command::AppUpdate`]. With
+    /// update checks turned off this makes no network call and returns `None`.
+    pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>> {
+        if !self.update_checks_enabled().await? {
+            return Ok(None);
+        }
+        self.updater.check().await
+    }
+
+    async fn audit_setting(&self, action: &str, detail: &str) -> Result<()> {
         self.store
             .append_audit(
                 &self.ctx,
                 NewAuditEntry {
                     event: "setting_changed",
-                    action: "Set the vmrun.exe path",
+                    action,
                     tier: None,
                     job_id: None,
                     targets: &[],
                     approval: None,
                     result: None,
-                    detail: Some(&detail),
+                    detail: Some(detail),
                 },
             )
-            .await?;
-        Ok(in_use)
-    }
-
-    /// FD-14: a read, so it skips the bus. Installing is [`command_bus::Command::AppUpdate`].
-    pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>> {
-        self.updater.check().await
+            .await
+            .map(drop)
     }
 
     /// Opens a terminal. Until SS-03 this is a local loopback shell, not SSH.

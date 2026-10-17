@@ -145,6 +145,16 @@ export interface Settings {
   vmrunPathSaved: string | null;
   /** What the app is using now; null means Workstation was not found. */
   vmrunPathInUse: string | null;
+  /** FD-14: check GitHub Releases for updates (off at air-gapped sites). */
+  updateChecks: boolean;
+}
+
+/** FD-14: a newer signed release on GitHub. */
+export interface UpdateInfo {
+  currentVersion: string;
+  version: string;
+  notes: string | null;
+  pubDate: string | null;
 }
 
 export interface AppInfo {
@@ -193,6 +203,9 @@ export const api = {
   settings: () => invoke<Settings>("settings_get"),
   /** null or "" goes back to finding vmrun.exe automatically. */
   setVmrunPath: (path: string | null) => invoke<Settings>("settings_set_vmrun_path", { path }),
+  setUpdateChecks: (enabled: boolean) => invoke<Settings>("settings_set_update_checks", { enabled }),
+  /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
+  checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
 
   terminalOpen: (onOutput: (data: string) => void) => {
     const channel = new Channel<string>();

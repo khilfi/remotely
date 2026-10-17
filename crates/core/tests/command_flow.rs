@@ -400,3 +400,20 @@ async fn the_vmrun_path_must_be_a_real_vmrun_exe() {
     assert_eq!(audit[0].event, "setting_changed");
     assert!(core.store.verify_audit_chain().await.unwrap().ok);
 }
+
+#[tokio::test]
+async fn update_checks_can_be_turned_off_for_air_gapped_sites() {
+    let updater = Arc::new(FakeUpdater::offering("0.1.0", "0.1.1"));
+    let core = core_with(fake_vmware(), None, Arc::new(UnimplementedVault), Arc::clone(&updater)).await;
+
+    assert!(core.update_checks_enabled().await.unwrap(), "checks are on by default");
+    assert!(core.check_for_update().await.unwrap().is_some());
+
+    core.set_update_checks(false).await.unwrap();
+    assert!(!core.update_checks_enabled().await.unwrap());
+    assert_eq!(core.check_for_update().await.unwrap(), None);
+
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].event, "setting_changed");
+    assert_eq!(audit[0].detail.as_deref(), Some("off"));
+}
