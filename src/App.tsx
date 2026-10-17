@@ -138,6 +138,25 @@ export default function App() {
         case "started":
           toast.loading("Running…", { id });
           break;
+        case "stillRunning": {
+          // VM-03: offer the hard power-off, which goes through the bus and its own Critical approval.
+          const names = event.targets.map((t) => t.name).join(", ");
+          const targets = event.targets.map((t) => t.target);
+          toast.warning(`Still running after the shutdown: ${names}`, {
+            id: `${id}-still-running`,
+            description: "The guest did not shut down in time. Forcing it off needs its own approval.",
+            duration: Infinity,
+            closeButton: true,
+            action: {
+              label: "Force off…",
+              onClick: () =>
+                void api
+                  .submit({ type: "vmPower", targets, op: { kind: "stop", mode: "hard" } })
+                  .then(submitted, (err) => toast.error(errorMessage(err))),
+            },
+          });
+          break;
+        }
         case "finished":
           setJobsFinished((v) => v + 1);
           if (event.status === "succeeded") toast.success("Job succeeded", { id, duration: 5000 });

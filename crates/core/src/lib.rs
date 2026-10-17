@@ -32,6 +32,7 @@ pub mod vault;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::remote::{RemoteAdapter, RusshAdapter, ShellHandle};
@@ -138,6 +139,9 @@ impl Core {
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
         }
+        if let Some(secs) = store.get_setting::<u64>(&ctx, store::SHUTDOWN_WAIT_KEY).await? {
+            jobs.set_shutdown_wait(Duration::from_secs(secs.clamp(1, JobLimits::MAX_SHUTDOWN_WAIT_SECS)));
+        }
         Ok(Self {
             ctx,
             inventory: Inventory::new(store.clone(), vmware_dyn),
@@ -237,6 +241,26 @@ impl Core {
         self.jobs.set_power_on_limit(limit);
         self.audit_setting("Set the parallel power-on limit", &limit.to_string())
             .await
+    }
+
+    /// VM-03: seconds a soft stop may take before the VM counts as still running (default 120).
+    pub fn shutdown_wait_secs(&self) -> u64 {
+        self.jobs.limits().shutdown_wait.as_secs()
+    }
+
+    /// VM-03: 1 to [`JobLimits::MAX_SHUTDOWN_WAIT_SECS`]. Applies from the next stop on. Audited.
+    pub async fn set_shutdown_wait_secs(&self, secs: u64) -> Result<()> {
+        if !(1..=JobLimits::MAX_SHUTDOWN_WAIT_SECS).contains(&secs) {
+            return Err(CoreError::InvalidSetting(format!(
+                "the shutdown wait must be 1 to {} seconds",
+                JobLimits::MAX_SHUTDOWN_WAIT_SECS
+            )));
+        }
+        self.store
+            .put_setting(&self.ctx, store::SHUTDOWN_WAIT_KEY, &secs)
+            .await?;
+        self.jobs.set_shutdown_wait(Duration::from_secs(secs));
+        self.audit_setting("Set the shutdown wait", &format!("{secs} s")).await
     }
 
     /// FD-14: whether update checks are on. Defaults to on.

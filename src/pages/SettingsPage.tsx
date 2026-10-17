@@ -1,5 +1,5 @@
 // Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
-// power action limits (VM-06) and update checks (FD-14). The theme switch is in the top bar.
+// power-on limit (VM-06), shutdown wait (VM-03) and update checks (FD-14). The theme switch is in the top bar.
 
 import { useEffect, useState } from "react";
 import { FolderIcon, XIcon } from "lucide-react";
@@ -34,6 +34,7 @@ export function SettingsPage({ onChanged }: Props) {
   const [newFolder, setNewFolder] = useState("");
   const [folderMessage, setFolderMessage] = useState<Message>(null);
   const [powerOnLimit, setPowerOnLimit] = useState("");
+  const [shutdownWait, setShutdownWait] = useState("");
   const [powerMessage, setPowerMessage] = useState<Message>(null);
   const [checking, setChecking] = useState(false);
 
@@ -43,6 +44,7 @@ export function SettingsPage({ onChanged }: Props) {
         setSettings(s);
         setPath(s.vmrunPathSaved ?? "");
         setPowerOnLimit(String(s.powerOnLimit));
+        setShutdownWait(String(s.shutdownWaitSecs));
       },
       (err) => setVmrunMessage({ ok: false, text: errorMessage(err) }),
     );
@@ -77,9 +79,11 @@ export function SettingsPage({ onChanged }: Props) {
 
   async function savePowerActions() {
     try {
-      const s = await api.setPowerOnLimit(Number(powerOnLimit));
+      await api.setPowerOnLimit(Number(powerOnLimit));
+      const s = await api.setShutdownWait(Number(shutdownWait));
       setSettings(s);
       setPowerOnLimit(String(s.powerOnLimit));
+      setShutdownWait(String(s.shutdownWaitSecs));
       setPowerMessage({ ok: true, text: "Saved. Applies from the next action on." });
     } catch (err) {
       setPowerMessage({ ok: false, text: errorMessage(err) });
@@ -204,21 +208,36 @@ export function SettingsPage({ onChanged }: Props) {
         <CardHeader>
           <CardTitle>Power actions</CardTitle>
           <CardDescription>
-            Starting many VMs at once can saturate the host&apos;s disk and CPU. Bulk starts power on this many at a
-            time; the rest wait their turn.
+            Starting many VMs at once can saturate the host&apos;s disk and CPU, so bulk starts power on a few at a
+            time. Shut down asks each guest to stop and waits; a VM still running after the wait is reported and left
+            running, and forcing it off needs its own approval.
           </CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-2">
-          <Label htmlFor="power-on-limit">VMs powered on at once</Label>
-          <Input
-            id="power-on-limit"
-            type="number"
-            min={1}
-            max={32}
-            className="w-28"
-            value={powerOnLimit}
-            onChange={(e) => setPowerOnLimit(e.currentTarget.value)}
-          />
+        <CardContent className="grid gap-4">
+          <div className="grid gap-2">
+            <Label htmlFor="power-on-limit">VMs powered on at once</Label>
+            <Input
+              id="power-on-limit"
+              type="number"
+              min={1}
+              max={32}
+              className="w-28"
+              value={powerOnLimit}
+              onChange={(e) => setPowerOnLimit(e.currentTarget.value)}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="shutdown-wait">Shutdown wait (seconds)</Label>
+            <Input
+              id="shutdown-wait"
+              type="number"
+              min={1}
+              max={3600}
+              className="w-28"
+              value={shutdownWait}
+              onChange={(e) => setShutdownWait(e.currentTarget.value)}
+            />
+          </div>
           <StatusLine message={powerMessage} />
         </CardContent>
         <CardFooter>

@@ -57,9 +57,9 @@ pub enum CoreError {
     #[error("{0}")]
     InvalidInput(String),
 
-    /// VM-03: a soft stop did not finish in time. Forcing it off is a separate, Critical command.
-    #[error("still running after {seconds}s; power it off (hard) to force it, which needs its own approval")]
-    StillRunning { seconds: u64 },
+    /// VM-03: a soft stop did not shut the VM down. Forcing it off is a separate, Critical command.
+    #[error("still running: {reason}. Power it off (hard) to force it; that needs its own approval")]
+    StillRunning { reason: String },
 
     #[error("cancelled")]
     Cancelled,

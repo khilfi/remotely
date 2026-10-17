@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use common::{temp_folder, vm, vmx, wait_finished, Setup};
 use remotely_core::adapters::vmware::VmxInfo;
-use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, SubmitOutcome};
+use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, StopMode, SubmitOutcome};
 use remotely_core::domain::{PowerState, Target};
 use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::inventory::VmFilter;
-use remotely_core::jobs::{JobLimits, JobStatus};
+use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::{ApprovalStep, Tier};
+use remotely_core::vault::SecretString;
 use remotely_core::{Adapters, Core, CoreError};
 
 fn names(targets: &[Target]) -> Vec<&str> {
@@ -479,4 +480,153 @@ async fn other_actions_skip_the_capacity_check() {
         core.bus.submit(&core.ctx, unpause).await.unwrap(),
         SubmitOutcome::Queued { .. }
     ));
+}
+
+// ---- VM-03: graceful-then-forced shutdown ------------------------------------------------------
+
+/// Reads job events until `job` finishes: its status and the VMs it reported still running.
+async fn finish_with_still_running(
+    rx: &mut tokio::sync::broadcast::Receiver<JobEvent>,
+    job: uuid::Uuid,
+) -> (JobStatus, Vec<String>) {
+    let mut still_running = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match rx.recv().await.unwrap() {
+                JobEvent::StillRunning { job_id, targets } if job_id == job => {
+                    still_running = targets.into_iter().map(|t| t.name).collect();
+                }
+                JobEvent::Finished { job_id, status } if job_id == job => return (status, still_running.clone()),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("job finished in time")
+}
+
+fn high_answers(count: usize) -> ApprovalAnswers {
+    ApprovalAnswers {
+        confirmed: true,
+        typed_target_count: Some(count),
+        reason: Some("CHG-1001".into()),
+        safety_snapshot: Some(false),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_vm_that_will_not_shut_down_is_left_running_until_a_separate_critical_force_off() {
+    let setup = Setup::new(FakeVmware::with_running([vmx("a"), vmx("b")]).unresponsive(&vmx("b")));
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    let mut events = core.jobs.subscribe();
+
+    // Step 1: soft stop both (High: 2 VMs).
+    let soft = Command::VmPower {
+        targets: vec![vm("a"), vm("b")],
+        op: PowerOp::Stop { mode: StopMode::Soft },
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+        panic!("stopping 2 VMs is High");
+    };
+    let job = core.bus.approve(request.id, high_answers(2)).await.unwrap();
+    let (status, still_running) = finish_with_still_running(&mut events, job).await;
+    assert_eq!(status, JobStatus::PartiallyFailed);
+    assert_eq!(still_running, ["b"]);
+    assert_eq!(common::running(&fake), ["b"], "never forced off by the soft stop");
+    assert!(!fake.calls().iter().any(|c| c.contains("Hard")));
+
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert!(audit[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("still running after the soft stop: b"));
+
+    // Step 2: forcing it off is its own command, at Critical, with the vault password again.
+    let hard = Command::VmPower {
+        targets: vec![vm("b")],
+        op: PowerOp::Stop { mode: StopMode::Hard },
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, hard).await.unwrap() else {
+        panic!("a hard power-off is Critical");
+    };
+    assert_eq!(request.tier, Tier::Critical);
+    assert!(request.steps.contains(&ApprovalStep::VaultReauth));
+    let answers = ApprovalAnswers {
+        vault_password: Some(SecretString::new(common::VAULT_PASSWORD)),
+        ..high_answers(1)
+    };
+    let job = core.bus.approve(request.id, answers).await.unwrap();
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
+    assert!(common::running(&fake).is_empty());
+    assert_eq!(
+        fake.calls().last().unwrap(),
+        r"power Stop { mode: Hard } C:\VMs\b\b.vmx"
+    );
+}
+
+#[tokio::test]
+async fn a_soft_stop_that_outlasts_the_wait_counts_as_still_running() {
+    let setup = Setup::new(FakeVmware::with_running([vmx("a")]).slow_shutdown(&vmx("a")));
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    core.set_shutdown_wait_secs(1).await.unwrap();
+    let mut events = core.jobs.subscribe();
+
+    let soft = Command::VmPower {
+        targets: vec![vm("a")],
+        op: PowerOp::Stop { mode: StopMode::Soft },
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+        panic!("stopping one VM is Medium");
+    };
+    let started = std::time::Instant::now();
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    let (status, still_running) = finish_with_still_running(&mut events, job).await;
+    assert!(started.elapsed() >= Duration::from_secs(1), "waited the set time");
+    assert_eq!(status, JobStatus::Failed);
+    assert_eq!(still_running, ["a"]);
+    assert_eq!(common::running(&fake), ["a"]);
+
+    let jobs = core.store.recent_jobs(&core.ctx, 1).await.unwrap();
+    assert_eq!(jobs[0].targets_failed, 1);
+}
+
+#[tokio::test]
+async fn a_clean_shutdown_reports_nothing_still_running() {
+    let setup = Setup::new(FakeVmware::with_running([vmx("a")]));
+    let core = setup.build().await;
+    let mut events = core.jobs.subscribe();
+    let soft = Command::VmPower {
+        targets: vec![vm("a")],
+        op: PowerOp::Stop { mode: StopMode::Soft },
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+        panic!("stopping one VM is Medium");
+    };
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    assert_eq!(
+        finish_with_still_running(&mut events, job).await,
+        (JobStatus::Succeeded, vec![])
+    );
+    let vm = core.store.find_vm(&core.ctx, &vmx("a")).await.unwrap();
+    assert!(vm.is_none() || vm.unwrap().power_state == PowerState::NotRunning);
+}
+
+#[tokio::test]
+async fn the_shutdown_wait_is_a_checked_saved_setting() {
+    let core = Setup::new(FakeVmware::default()).build().await;
+    assert_eq!(core.shutdown_wait_secs(), 120, "default");
+    for bad in [0, JobLimits::MAX_SHUTDOWN_WAIT_SECS + 1] {
+        assert!(matches!(
+            core.set_shutdown_wait_secs(bad).await,
+            Err(CoreError::InvalidSetting(_))
+        ));
+    }
+    core.set_shutdown_wait_secs(300).await.unwrap();
+    assert_eq!(core.shutdown_wait_secs(), 300);
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].detail.as_deref(), Some("300 s"));
 }

@@ -92,6 +92,7 @@ pub fn run() {
             ipc::settings_set_vmrun_path,
             ipc::settings_set_scan_folders,
             ipc::settings_set_power_on_limit,
+            ipc::settings_set_shutdown_wait,
             ipc::settings_set_update_checks,
             ipc::update_check,
             terminal::terminal_open,

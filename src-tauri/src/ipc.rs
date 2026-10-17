@@ -182,6 +182,8 @@ pub struct Settings {
     scan_folders: Vec<String>,
     /// VM-06: how many VMs may power on at once.
     power_on_limit: usize,
+    /// VM-03: seconds a soft stop may take before the VM counts as still running.
+    shutdown_wait_secs: u64,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -196,6 +198,7 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
             .map(|p| p.display().to_string())
             .collect(),
         power_on_limit: core.power_on_limit(),
+        shutdown_wait_secs: core.shutdown_wait_secs(),
     })
 }
 
@@ -232,6 +235,13 @@ pub async fn settings_set_scan_folders(state: State<'_, AppState>, folders: Vec<
 #[tauri::command]
 pub async fn settings_set_power_on_limit(state: State<'_, AppState>, limit: usize) -> IpcResult<Settings> {
     state.core.set_power_on_limit(limit).await?;
+    settings(&state.core).await
+}
+
+/// VM-03: seconds a soft stop may take before the VM counts as still running.
+#[tauri::command]
+pub async fn settings_set_shutdown_wait(state: State<'_, AppState>, secs: u64) -> IpcResult<Settings> {
+    state.core.set_shutdown_wait_secs(secs).await?;
     settings(&state.core).await
 }
 

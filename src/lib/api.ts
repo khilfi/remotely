@@ -155,6 +155,8 @@ export type JobEvent =
       message: string | null;
       durationMs: number;
     }
+  /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
+  | { event: "stillRunning"; jobId: string; targets: Target[] }
   | { event: "finished"; jobId: string; status: JobStatus };
 
 export interface JobSummary {
@@ -205,6 +207,8 @@ export interface Settings {
   scanFolders: string[];
   /** VM-06: how many VMs may power on at once (1 to 32, default 3). */
   powerOnLimit: number;
+  /** VM-03: seconds a soft stop may take before the VM counts as still running (default 120). */
+  shutdownWaitSecs: number;
 }
 
 /** FD-14: a newer signed release on GitHub. */
@@ -275,6 +279,7 @@ export const api = {
   /** VM-01: each folder must exist. */
   setScanFolders: (folders: string[]) => invoke<Settings>("settings_set_scan_folders", { folders }),
   setPowerOnLimit: (limit: number) => invoke<Settings>("settings_set_power_on_limit", { limit }),
+  setShutdownWait: (secs: number) => invoke<Settings>("settings_set_shutdown_wait", { secs }),
   /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
 
