@@ -1,5 +1,6 @@
 // Session editor (SS-01, SS-06): where to connect, how to log in (a password or key from the vault, or
-// the SSH agent), a jump host, a startup command, folder, tags, colour and environment label. Saving
+// the SSH agent), a jump host, the VM it reaches (BX-01), a startup command, folder, tags, colour and
+// environment label. Saving
 // changes only the app's own data: the core checks it and audits it, with no approval step. Taking the
 // Prod label off asks first, since it lowers the tier of later actions on the session.
 
@@ -32,6 +33,7 @@ import {
   type SessionInput,
   type SessionRecord,
   type VaultInfo,
+  type VmRecord,
 } from "@/lib/api";
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { cn } from "@/lib/utils";
@@ -57,6 +59,8 @@ interface Props {
   session?: SessionRecord;
   /** Where a new session goes. */
   folderId: string | null;
+  /** BX-01: the VM a new session reaches, e.g. when linking one from the Bulk run page. */
+  vmId?: string | null;
   folders: SessionFolder[];
   /** Candidates for the jump host. */
   sessions: SessionRecord[];
@@ -87,6 +91,7 @@ export function SessionDialog({
   vault,
   session,
   folderId,
+  vmId: presetVm,
   folders,
   sessions,
   tagSuggestions,
@@ -108,6 +113,8 @@ export function SessionDialog({
   const [environment, setEnvironment] = useState<Environment>(session?.environment ?? "none");
   const [color, setColor] = useState<SessionColor | null>(session?.color ?? null);
   const [tags, setTags] = useState((session?.tags ?? []).join(", "));
+  const [vm, setVm] = useState(session ? (session.vmId ?? NONE) : (presetVm ?? NONE));
+  const [vms, setVms] = useState<VmRecord[]>([]);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [adding, setAdding] = useState<SecretKind | null>(null);
   /** Taking the Prod label off lowers the tier of later actions on the session, so saving asks first. */
@@ -117,6 +124,7 @@ export function SessionDialog({
 
   useEffect(() => {
     api.secrets().then(setSecrets, () => setSecrets([]));
+    api.vmList().then(setVms, () => setVms([]));
   }, []);
 
   const of = (kind: SecretKind) => secrets.filter((s) => s.kind === kind);
@@ -150,6 +158,7 @@ export function SessionDialog({
       environment,
       color,
       tags: tagList,
+      vmId: vm === NONE ? null : vm,
     };
     onSaved(session ? await api.updateSession(session.id, input) : await api.createSession(input));
     onClose();
@@ -368,6 +377,33 @@ export function SessionDialog({
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="session-vm">VM it reaches</Label>
+              <Select value={vm} onValueChange={setVm}>
+                <SelectTrigger id="session-vm" className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>None</SelectItem>
+                  {vms.length > 0 && <SelectSeparator />}
+                  {vms.map((v) => (
+                    <SelectItem key={v.id} value={v.id}>
+                      {v.displayName}
+                    </SelectItem>
+                  ))}
+                  {vm !== NONE && !vms.some((v) => v.id === vm) && (
+                    <SelectItem value={vm} disabled>
+                      Not in the VM list now
+                    </SelectItem>
+                  )}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Lets a bulk run pick this VM and run commands on it through this session. A Prod or protected VM makes
+                the session count as Prod or protected too.
+              </p>
             </div>
 
             <div className="grid gap-2">

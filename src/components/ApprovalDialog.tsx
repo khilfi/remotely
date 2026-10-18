@@ -1,11 +1,13 @@
 // Approval dialog (AP-02, AP-03, AP-06, VM-05, VM-07): draws the steps the policy engine asked for, the
-// impact preview of each VM target and any warnings found before the action. A Critical action asks for
+// impact preview of each VM target and any warnings found before the action. For a remote command it
+// shows the whole script, how it runs (sudo, host keys, time limit) and the dangerous-command rules it
+// matched (BX-02, BX-06, BX-07). A Critical action asks for
 // the vault password again; without a vault it points to the Vault page. After approval it shows
 // the countdown, which can be cancelled until it ends. The core checks every answer again; these
 // fields only help the user get them right first time.
 
 import { useEffect, useRef, useState } from "react";
-import { InfoIcon, KeyRoundIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
+import { InfoIcon, KeyRoundIcon, OctagonAlertIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -42,6 +44,8 @@ interface Props {
   onOpenVault: () => void;
   /** Called with the job id once approved, or null when the user cancels before approving. */
   onClose: (jobId: string | null) => void;
+  /** Called as soon as the job is queued, before any countdown ends. */
+  onApproved?: (jobId: string) => void;
 }
 
 function find<S extends ApprovalStep["step"]>(steps: ApprovalStep[], step: S) {
@@ -57,7 +61,7 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
 /** After approval: the job waits until `until` and can be cancelled meanwhile (AP-03). */
 type Countdown = { jobId: string; until: number; seconds: number };
 
-export function ApprovalDialog({ request, vault, onOpenVault, onClose }: Props) {
+export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApproved }: Props) {
   const { steps, tier } = request;
   const snapshot = find(steps, "safetySnapshot");
   const typeCount = find(steps, "typeTargetCount");
@@ -96,6 +100,7 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose }: Props) 
         vaultPassword: reauth ? password : undefined,
       });
       setPassword("");
+      onApproved?.(jobId);
       if (countdownStep && countdownStep.seconds > 0) {
         const seconds = countdownStep.seconds;
         setCountdown({ jobId, seconds, until: Date.now() + seconds * 1000 });
@@ -148,6 +153,8 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose }: Props) 
             </ul>
           </DialogDescription>
         </DialogHeader>
+
+        {request.exec && <ExecSummary exec={request.exec} />}
 
         <div className="grid gap-1.5">
           <div className="max-h-64 overflow-auto rounded-md border">
@@ -355,6 +362,51 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose }: Props) 
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** BX-02, BX-06, BX-07: what a remote command will run, and how. */
+function ExecSummary({ exec }: { exec: NonNullable<ApprovalRequest["exec"]> }) {
+  const how = [
+    exec.sudo &&
+      (exec.sudoPasswordLabel
+        ? `With sudo, password '${exec.sudoPasswordLabel}' from the vault`
+        : "With sudo, each session's login password from the vault"),
+    exec.trustNewHostKeys && "Trusts host keys it has not seen before",
+    exec.timeoutSecs != null && `Time limit ${exec.timeoutSecs} s per host`,
+    exec.retryOf && "Retries the hosts that failed in an earlier run",
+  ].filter((x): x is string => Boolean(x));
+  return (
+    <div className="grid gap-2">
+      <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+        {exec.script}
+      </pre>
+      {how.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {how.map((h) => (
+            <Badge key={h} variant="outline" className="font-normal">
+              {h}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {exec.dangerous.length > 0 && (
+        <Alert className="border-tier-high/40">
+          <OctagonAlertIcon className="text-tier-high" />
+          <AlertTitle>Flagged dangerous</AlertTitle>
+          <AlertDescription>
+            <ul className="grid gap-1">
+              {exec.dangerous.map((d) => (
+                <li key={d.rule}>
+                  Line {d.line}: <code className="font-mono text-xs">{d.text}</code> matches the rule &ldquo;{d.rule}
+                  &rdquo;
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
   );
 }
 

@@ -7,7 +7,14 @@
 //! the connection is dead. The shell is a toy that echoes what is typed and understands a few
 //! commands (`exit [code]`, `whoami`, `split-utf8`, `echo <text>`, and for trying the app by hand,
 //! `drop-connection` and `change-host-key`). The server logs what clients ask for
-//! (`pty xterm-256color 80x24`, `resize 120x40`, `shell`, `line whoami`) for tests to check.
+//! (`pty xterm-256color 80x24`, `resize 120x40`, `shell`, `line whoami`, `exec uptime`) for tests to
+//! check; it never logs what arrives on stdin.
+//!
+//! Exec channels (BX-02) run a toy POSIX shell ([`ToyShell`]): `;`, `&&`, `||` and new lines, quotes,
+//! `>&2`, and `echo`, `hostname`, `whoami`, `uptime`, `cat` (files set with
+//! [`TestSshServer::with_file`], or stdin), `seq`, `sleep`, `exit`, `true`, `false`, `exec </dev/null`,
+//! `sh -c` and `sudo` (BX-07: `-S` reads the password from stdin, `-p` sets the prompt, asked up to
+//! three times like the real one; see [`SudoMode`]).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -54,9 +61,30 @@ pub fn fingerprint(key: &PrivateKey) -> String {
     key.public_key().fingerprint(HashAlg::Sha256).to_string()
 }
 
+/// How `sudo` behaves on the test server (BX-07).
+#[derive(Debug, Clone, Default)]
+pub enum SudoMode {
+    /// No sudo installed.
+    #[default]
+    Missing,
+    /// Asks for this password.
+    Password(String),
+    /// NOPASSWD in sudoers: never asks, never reads stdin.
+    NoPassword,
+    /// A broken sudo that prints the password it read on stdout, to check the client scrubs it.
+    EchoesPassword(String),
+}
+
 #[derive(Default)]
 struct State {
     host_key: Mutex<Option<PrivateKey>>,
+    hostname: Mutex<Option<String>>,
+    files: Mutex<HashMap<String, String>>,
+    sudo: Mutex<SudoMode>,
+    /// Every exec waits this long before it answers.
+    exec_delay: Mutex<Option<Duration>>,
+    /// When each exec sent its exit status.
+    exits: Mutex<Vec<std::time::Instant>>,
     passwords: Mutex<HashMap<String, String>>,
     keys: Mutex<HashMap<String, Vec<PublicKey>>>,
     /// A second factor asked by keyboard-interactive after a password or key.
@@ -155,6 +183,29 @@ impl TestSshServer {
         self
     }
 
+    /// What `hostname` prints (default `test-host`).
+    pub fn with_hostname(self, name: &str) -> Self {
+        *locks::lock(&self.state.hostname) = Some(name.into());
+        self
+    }
+
+    /// A file `cat` can read.
+    pub fn with_file(self, path: &str, contents: &str) -> Self {
+        locks::lock(&self.state.files).insert(path.into(), contents.into());
+        self
+    }
+
+    pub fn with_sudo(self, mode: SudoMode) -> Self {
+        *locks::lock(&self.state.sudo) = mode;
+        self
+    }
+
+    /// Every command waits this long before it answers, like a slow host.
+    pub fn with_exec_delay(self, delay: Duration) -> Self {
+        *locks::lock(&self.state.exec_delay) = Some(delay);
+        self
+    }
+
     pub fn host_key_fingerprint(&self) -> String {
         locks::lock(&self.state.host_key)
             .as_ref()
@@ -177,6 +228,11 @@ impl TestSshServer {
         for link in locks::lock(&self.state.links).iter() {
             let _ = link.freeze.send(true);
         }
+    }
+
+    /// When the last command run here sent its exit status.
+    pub fn last_exit(&self) -> Option<std::time::Instant> {
+        locks::lock(&self.state.exits).last().copied()
     }
 
     /// TCP connections accepted so far.
@@ -226,6 +282,7 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             user: String::new(),
             first_factor: false,
             lines: HashMap::new(),
+            execs: HashMap::new(),
         };
         let session = tokio::spawn(async move {
             if let Ok(running) = server::run_stream(config, server_end, handler).await {
@@ -268,6 +325,8 @@ struct ServerHandler {
     /// The password or key was accepted; a one-time code may still be due.
     first_factor: bool,
     lines: HashMap<ChannelId, Vec<u8>>,
+    /// Exec channels: the command, and stdin until the client ends it.
+    execs: HashMap<ChannelId, (String, Vec<u8>)>,
 }
 
 impl ServerHandler {
@@ -450,7 +509,55 @@ impl server::Handler for ServerHandler {
         Ok(())
     }
 
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let command = String::from_utf8_lossy(data).into_owned();
+        self.state.note(format!("exec {command}"));
+        self.execs.insert(channel, (command, Vec::new()));
+        session.channel_success(channel)
+    }
+
+    /// The command runs once stdin has ended, like `sh -c` reading a script that is all there.
+    async fn channel_eof(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
+        if let Some((command, stdin)) = self.execs.remove(&channel) {
+            let state = Arc::clone(&self.state);
+            let user = self.user.clone();
+            let handle = session.handle();
+            tokio::spawn(async move {
+                let delay = *locks::lock(&state.exec_delay);
+                let mut shell = ToyShell::new(&state, &user, stdin);
+                let status = shell.run(&command);
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                if !shell.sleep.is_zero() {
+                    tokio::time::sleep(shell.sleep).await;
+                }
+                // In pieces, so the client sees output arrive over several reads.
+                for chunk in shell.stdout.chunks(4096) {
+                    let _ = handle.data(channel, chunk.to_vec()).await;
+                }
+                for chunk in shell.stderr.chunks(4096) {
+                    let _ = handle.extended_data(channel, 1, chunk.to_vec()).await;
+                }
+                locks::lock(&state.exits).push(std::time::Instant::now());
+                let _ = handle.exit_status_request(channel, status).await;
+                let _ = handle.eof(channel).await;
+                let _ = handle.close(channel).await;
+            });
+        }
+        Ok(())
+    }
+
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+        if let Some((_, stdin)) = self.execs.get_mut(&channel) {
+            stdin.extend_from_slice(data);
+            return Ok(());
+        }
         for &byte in data {
             if byte == b'\r' || byte == b'\n' {
                 session.data(channel, b"\r\n".to_vec())?;
@@ -462,6 +569,331 @@ impl server::Handler for ServerHandler {
             }
         }
         Ok(())
+    }
+}
+
+/// A word or an operator of a toy shell command line.
+#[derive(Debug, PartialEq)]
+enum Token {
+    Word(String),
+    /// `;` or a new line.
+    Then,
+    And,
+    Or,
+}
+
+/// Splits a script into words and operators: single and double quotes, backslash escapes, `;`,
+/// new lines, `&&` and `||`.
+fn tokenize(script: &str) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut chars = script.chars().peekable();
+    let end_word = |tokens: &mut Vec<Token>, word: &mut String, in_word: &mut bool| {
+        if *in_word {
+            tokens.push(Token::Word(std::mem::take(word)));
+            *in_word = false;
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                in_word = true;
+                for q in chars.by_ref() {
+                    if q == '\'' {
+                        break;
+                    }
+                    word.push(q);
+                }
+            }
+            '"' => {
+                in_word = true;
+                while let Some(q) = chars.next() {
+                    match q {
+                        '"' => break,
+                        '\\' => {
+                            if let Some(next) = chars.next() {
+                                word.push(next);
+                            }
+                        }
+                        _ => word.push(q),
+                    }
+                }
+            }
+            '\\' => {
+                in_word = true;
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            ';' | '\n' => {
+                end_word(&mut tokens, &mut word, &mut in_word);
+                tokens.push(Token::Then);
+            }
+            '&' if chars.peek() == Some(&'&') => {
+                chars.next();
+                end_word(&mut tokens, &mut word, &mut in_word);
+                tokens.push(Token::And);
+            }
+            '|' if chars.peek() == Some(&'|') => {
+                chars.next();
+                end_word(&mut tokens, &mut word, &mut in_word);
+                tokens.push(Token::Or);
+            }
+            c if c.is_whitespace() => end_word(&mut tokens, &mut word, &mut in_word),
+            c => {
+                in_word = true;
+                word.push(c);
+            }
+        }
+    }
+    end_word(&mut tokens, &mut word, &mut in_word);
+    tokens
+}
+
+/// Runs a script the way a small POSIX shell would, collecting stdout and stderr. `sleep` adds up
+/// instead of blocking; the caller waits that long before it answers.
+struct ToyShell<'a> {
+    state: &'a State,
+    user: String,
+    stdin: Vec<u8>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    sleep: Duration,
+    exited: bool,
+}
+
+impl<'a> ToyShell<'a> {
+    fn new(state: &'a State, user: &str, stdin: Vec<u8>) -> Self {
+        Self {
+            state,
+            user: user.to_owned(),
+            stdin,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            sleep: Duration::ZERO,
+            exited: false,
+        }
+    }
+
+    fn err(&mut self, text: &str) {
+        self.stderr.extend_from_slice(text.as_bytes());
+    }
+
+    /// One line of stdin, without its line break. `None` at the end of stdin.
+    fn read_line(&mut self) -> Option<String> {
+        if self.stdin.is_empty() {
+            return None;
+        }
+        let end = self.stdin.iter().position(|&b| b == b'\n');
+        let line: Vec<u8> = match end {
+            Some(at) => {
+                let line = self.stdin[..at].to_vec();
+                self.stdin.drain(..=at);
+                line
+            }
+            None => std::mem::take(&mut self.stdin),
+        };
+        Some(String::from_utf8_lossy(&line).into_owned())
+    }
+
+    /// Runs a whole script; returns the status of the last command run.
+    fn run(&mut self, script: &str) -> u32 {
+        let mut status = 0;
+        let mut words = Vec::new();
+        let mut skip = false;
+        let tokens = tokenize(script);
+        let count = tokens.len();
+        for (i, token) in tokens.into_iter().enumerate() {
+            let op = match token {
+                Token::Word(w) => {
+                    words.push(w);
+                    if i + 1 < count {
+                        continue;
+                    }
+                    None
+                }
+                other => Some(other),
+            };
+            if !words.is_empty() && !skip {
+                status = self.command(&std::mem::take(&mut words));
+                if self.exited {
+                    return status;
+                }
+            }
+            words.clear();
+            skip = match op {
+                Some(Token::And) => status != 0,
+                Some(Token::Or) => status == 0,
+                _ => false,
+            };
+        }
+        status
+    }
+
+    fn command(&mut self, words: &[String]) -> u32 {
+        let mut words = words.to_vec();
+        let to_stderr = words.last().is_some_and(|w| w == ">&2");
+        if to_stderr {
+            words.pop();
+        }
+        let before = self.stdout.len();
+        let status = self.builtin(&words);
+        if to_stderr {
+            let printed = self.stdout.split_off(before);
+            self.stderr.extend_from_slice(&printed);
+        }
+        status
+    }
+
+    fn builtin(&mut self, words: &[String]) -> u32 {
+        let args = &words[1..];
+        match words[0].as_str() {
+            "echo" => {
+                self.stdout
+                    .extend_from_slice(format!("{}\n", args.join(" ")).as_bytes());
+                0
+            }
+            "hostname" => {
+                let name = locks::lock(&self.state.hostname)
+                    .clone()
+                    .unwrap_or_else(|| "test-host".into());
+                self.stdout.extend_from_slice(format!("{name}\n").as_bytes());
+                0
+            }
+            "whoami" => {
+                self.stdout.extend_from_slice(format!("{}\n", self.user).as_bytes());
+                0
+            }
+            "uptime" => {
+                self.stdout
+                    .extend_from_slice(b" 10:00:00 up 3 days,  2:01,  1 user,  load average: 0.00, 0.01, 0.05\n");
+                0
+            }
+            "cat" if args.is_empty() => {
+                let stdin = std::mem::take(&mut self.stdin);
+                self.stdout.extend_from_slice(&stdin);
+                0
+            }
+            "cat" => {
+                let mut status = 0;
+                for path in args {
+                    let found = locks::lock(&self.state.files).get(path).cloned();
+                    match found {
+                        Some(text) => self.stdout.extend_from_slice(text.as_bytes()),
+                        None => {
+                            self.err(&format!("cat: {path}: No such file or directory\n"));
+                            status = 1;
+                        }
+                    }
+                }
+                status
+            }
+            "seq" => {
+                let n: u64 = args.first().and_then(|n| n.parse().ok()).unwrap_or(0);
+                for i in 1..=n {
+                    self.stdout.extend_from_slice(format!("{i}\n").as_bytes());
+                }
+                0
+            }
+            "sleep" => {
+                let secs: f64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+                self.sleep += Duration::from_secs_f64(secs.max(0.0));
+                0
+            }
+            "exit" => {
+                self.exited = true;
+                args.first().and_then(|c| c.parse().ok()).unwrap_or(0)
+            }
+            "true" => 0,
+            "false" => 1,
+            "exec" if args.iter().any(|a| a == "</dev/null") => {
+                self.stdin.clear();
+                0
+            }
+            "sh" if args.first().is_some_and(|a| a == "-c") => {
+                let script = args.get(1).cloned().unwrap_or_default();
+                let status = self.run(&script);
+                self.exited = false;
+                status
+            }
+            "sudo" => self.sudo(args),
+            other => {
+                self.err(&format!("sh: 1: {other}: not found\n"));
+                127
+            }
+        }
+    }
+
+    /// Like sudo: `-S` reads the password from stdin, `-p` sets the prompt (printed on stderr, with no
+    /// line break after it), three tries, then the command as root. Logs whether it took the
+    /// password, never the password.
+    fn sudo(&mut self, args: &[String]) -> u32 {
+        let mut i = 0;
+        let mut from_stdin = false;
+        let mut prompt = format!("[sudo] password for {}: ", self.user);
+        while let Some(flag) = args.get(i).filter(|a| a.starts_with('-')) {
+            match flag.as_str() {
+                "-S" => from_stdin = true,
+                "-p" => {
+                    i += 1;
+                    prompt = args.get(i).cloned().unwrap_or_default();
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        let command = &args[i..];
+        if command.is_empty() {
+            self.err("usage: sudo -h | -K | -k | -V\n");
+            return 1;
+        }
+        let mode = locks::lock(&self.state.sudo).clone();
+        let (password, echoes) = match mode {
+            SudoMode::Missing => {
+                self.err("sh: 1: sudo: not found\n");
+                return 127;
+            }
+            SudoMode::NoPassword => (None, false),
+            SudoMode::Password(p) => (Some(p), false),
+            SudoMode::EchoesPassword(p) => (Some(p), true),
+        };
+        if let Some(password) = password {
+            if !from_stdin {
+                self.err("sudo: a terminal is required to read the password; either use the -S option to read from standard input or configure an askpass helper\n");
+                return 1;
+            }
+            let mut wrong = 0;
+            loop {
+                self.err(&prompt);
+                let Some(typed) = self.read_line() else {
+                    self.err("sudo: no password was provided\n");
+                    if wrong > 0 {
+                        self.err(&format!("sudo: {wrong} incorrect password attempt\n"));
+                    }
+                    self.state.note("sudo refused");
+                    return 1;
+                };
+                if echoes {
+                    self.stdout.extend_from_slice(format!("{typed}\n").as_bytes());
+                }
+                if typed == password {
+                    self.state.note("sudo ok");
+                    break;
+                }
+                wrong += 1;
+                if wrong == 3 {
+                    self.err("sudo: 3 incorrect password attempts\n");
+                    self.state.note("sudo refused");
+                    return 1;
+                }
+                self.err("Sorry, try again.\n");
+            }
+        }
+        let user = std::mem::replace(&mut self.user, "root".into());
+        let status = self.command(command);
+        self.user = user;
+        status
     }
 }
 

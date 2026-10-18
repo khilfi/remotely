@@ -17,12 +17,12 @@ use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
 use crate::impact::{ImpactPreviewer, TargetImpact};
-use crate::jobs::{JobRunner, JobSpec};
+use crate::jobs::{JobRunner, JobSpec, TargetStatus};
 use crate::locks;
-use crate::policy::{ActionKind, ApprovalStep, Decision, PolicyEngine, PolicyRules, Tier};
+use crate::policy::{ActionKind, ApprovalStep, DangerousMatch, Decision, PolicyEngine, PolicyRules, Tier};
 use crate::snapshots::{is_safety_name, SAFETY_PREFIX};
 use crate::store::{NewAuditEntry, Store};
-use crate::vault::{SecretString, Vault};
+use crate::vault::{SecretId, SecretKind, SecretString, Vault};
 
 /// A state-changing request. Reads (inventory, metrics) do not go through the bus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,6 +41,16 @@ pub enum Command {
         script: String,
         #[serde(default)]
         sudo: bool,
+        /// BX-07: the vault password sudo gets. `None`: each session's own login password.
+        #[serde(default)]
+        sudo_password_id: Option<SecretId>,
+        /// SS-05 for bulk runs: trust (and save, audited) the key of a host never seen before. A bulk
+        /// run can't ask; without this such a host fails. A changed key always blocks.
+        #[serde(default)]
+        trust_new_host_keys: bool,
+        /// Seconds each host may take before it counts as failed. `None`: no limit.
+        #[serde(default)]
+        timeout_secs: Option<u64>,
     },
     /// FD-14 install a checked, signed update. Runs once no other job is open.
     AppUpdate { version: String },
@@ -95,6 +105,10 @@ pub enum SnapshotOp {
 
 /// Longest snapshot name the app takes (VM-04).
 pub const MAX_SNAPSHOT_NAME: usize = 120;
+/// BX-02: the longest script a bulk run takes.
+pub const MAX_SCRIPT_BYTES: usize = 64 * 1024;
+/// BX-02: the longest per-host time limit, a day.
+pub const MAX_EXEC_TIMEOUT_SECS: u64 = 24 * 60 * 60;
 
 impl SnapshotOp {
     pub fn name(&self) -> &str {
@@ -138,13 +152,51 @@ impl SnapshotOp {
     }
 }
 
+/// BX-02: a script the hosts' shells can take.
+fn validate_script(script: &str, timeout_secs: Option<u64>) -> Result<()> {
+    let invalid = |message: String| Err(CoreError::InvalidInput(message));
+    if script.trim().is_empty() {
+        return invalid("Type a command or script to run.".into());
+    }
+    if script.len() > MAX_SCRIPT_BYTES {
+        return invalid(format!("A script can be at most {} KB.", MAX_SCRIPT_BYTES / 1024));
+    }
+    if script.contains('\0') {
+        return invalid("A script can't hold NUL characters.".into());
+    }
+    if let Some(secs) = timeout_secs {
+        if !(1..=MAX_EXEC_TIMEOUT_SECS).contains(&secs) {
+            return invalid(format!(
+                "The time limit must be 1 to {MAX_EXEC_TIMEOUT_SECS} seconds (a day)."
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Command {
     /// Checks what the caller typed, before any target is looked up.
     pub fn validate(&self) -> Result<()> {
         match self {
             Command::VmSnapshot { op, .. } => op.validate(),
+            Command::RemoteExec {
+                script, timeout_secs, ..
+            } => validate_script(script, *timeout_secs),
             _ => Ok(()),
         }
+    }
+
+    /// The same command on other targets (BX-04 retry). `None` for commands with a fixed target.
+    pub fn with_targets(&self, new: Vec<TargetRef>) -> Option<Command> {
+        let mut command = self.clone();
+        match &mut command {
+            Command::VmPower { targets, .. }
+            | Command::VmSnapshot { targets, .. }
+            | Command::VmProtect { targets, .. }
+            | Command::RemoteExec { targets, .. } => *targets = new,
+            Command::AppUpdate { .. } => return None,
+        }
+        Some(command)
     }
 
     pub fn targets(&self) -> &[TargetRef] {
@@ -235,6 +287,40 @@ pub struct ApprovalRequest {
     pub warnings: Vec<String>,
     /// AP-02: each VM target's state, uptime and snapshot count right now.
     pub impact: Vec<TargetImpact>,
+    /// BX-02, BX-06, BX-07: for a remote command, what will run and how.
+    pub exec: Option<Box<ExecDetails>>,
+}
+
+/// A remote command as the approval dialog and the bulk run editor show it (BX-02, BX-06, BX-07).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecDetails {
+    /// The whole script, as typed.
+    pub script: String,
+    pub sudo: bool,
+    /// The vault item sudo gets, by label. `None` with sudo: each session's login password.
+    pub sudo_password_label: Option<String>,
+    pub trust_new_host_keys: bool,
+    pub timeout_secs: Option<u64>,
+    /// BX-06: the dangerous-command rules the script matched, and what matched.
+    pub dangerous: Vec<DangerousMatch>,
+    /// BX-04: the job whose failed hosts this one retries.
+    pub retry_of: Option<Uuid>,
+}
+
+/// What a command would need, without submitting it (BX-06: the bulk run editor shows the tier and
+/// the matched rules before anything runs). A read: nothing is audited or queued.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandPreview {
+    pub action: ActionKind,
+    pub tier: Tier,
+    pub steps: Vec<ApprovalStep>,
+    /// Targets it would run on (protected ones left out).
+    pub targets: usize,
+    pub skipped: Vec<Target>,
+    pub reasons: Vec<String>,
+    pub dangerous: Vec<DangerousMatch>,
 }
 
 /// The user's answers to the approval steps (AP-03, AP-06).
@@ -269,6 +355,7 @@ struct Pending {
     command: Command,
     decision: Decision,
     request: ApprovalRequest,
+    retry_of: Option<Uuid>,
 }
 
 pub struct CommandBus {
@@ -343,10 +430,131 @@ impl CommandBus {
     }
 
     pub async fn submit(&self, ctx: &Context, command: Command) -> Result<SubmitOutcome> {
+        self.submit_job(ctx, command, None).await
+    }
+
+    /// BX-04: runs the same command again on the targets that failed in `job_id`, as a new job that
+    /// points back at it. It goes through the policy engine like any command, so its tier and approval
+    /// steps are decided again for the targets it has now.
+    pub async fn retry_failed(&self, ctx: &Context, job_id: Uuid) -> Result<SubmitOutcome> {
+        let (job, command) = self
+            .store
+            .job_detail(ctx, job_id)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget(format!("job {job_id}")))?;
+        if job.is_open() {
+            return Err(CoreError::InvalidInput(
+                "That job is still running. Retry its failed targets once it has ended.".into(),
+            ));
+        }
+        let failed: Vec<TargetRef> = self
+            .store
+            .job_targets(ctx, job_id)
+            .await?
+            .iter()
+            .filter(|t| t.status == TargetStatus::Failed.as_str())
+            .filter_map(|t| t.target_ref())
+            .collect();
+        if failed.is_empty() {
+            return Err(CoreError::InvalidInput("No target failed in that job.".into()));
+        }
+        let retry = command
+            .with_targets(failed)
+            .ok_or_else(|| CoreError::InvalidInput("That job can't be retried.".into()))?;
+        self.submit_job(ctx, retry, Some(job_id)).await
+    }
+
+    /// BX-06: the tier, steps and matched dangerous-command rules the command would get now. Targets
+    /// may be empty while the user is still choosing them.
+    pub async fn preview(&self, ctx: &Context, command: &Command) -> Result<CommandPreview> {
+        let mut targets = Vec::with_capacity(command.targets().len());
+        for target in command.targets() {
+            targets.push(self.directory.resolve(ctx, target).await?);
+        }
+        let policy = locks::read(&self.policy);
+        let decision = policy.evaluate(command, &targets);
+        let dangerous = match command {
+            Command::RemoteExec { script, .. } => policy.dangerous_details(script),
+            _ => Vec::new(),
+        };
+        Ok(CommandPreview {
+            action: decision.action,
+            tier: decision.tier,
+            steps: decision.steps,
+            targets: decision.targets.len(),
+            skipped: decision.skipped,
+            reasons: decision.reasons,
+            dangerous,
+        })
+    }
+
+    /// For a remote command: what the approval dialog shows about it.
+    async fn exec_details(
+        &self,
+        ctx: &Context,
+        command: &Command,
+        retry_of: Option<Uuid>,
+    ) -> Result<Option<Box<ExecDetails>>> {
+        let Command::RemoteExec {
+            script,
+            sudo,
+            sudo_password_id,
+            trust_new_host_keys,
+            timeout_secs,
+            ..
+        } = command
+        else {
+            return Ok(None);
+        };
+        let sudo_password_label = match (sudo, sudo_password_id) {
+            (true, Some(id)) => self
+                .vault
+                .list(ctx)
+                .await?
+                .into_iter()
+                .find(|s| s.id == *id)
+                .map(|s| s.label),
+            _ => None,
+        };
+        Ok(Some(Box::new(ExecDetails {
+            script: script.clone(),
+            sudo: *sudo,
+            sudo_password_label,
+            trust_new_host_keys: *trust_new_host_keys,
+            timeout_secs: *timeout_secs,
+            dangerous: locks::read(&self.policy).dangerous_details(script),
+            retry_of,
+        })))
+    }
+
+    /// BX-07: a sudo password chosen from the vault must be a password that is there.
+    async fn check_sudo_password(&self, ctx: &Context, command: &Command) -> Result<()> {
+        if let Command::RemoteExec {
+            sudo: true,
+            sudo_password_id: Some(id),
+            ..
+        } = command
+        {
+            match self.store.vault_item_kind(ctx, *id).await? {
+                Some(SecretKind::Password) => {}
+                Some(other) => {
+                    return Err(CoreError::InvalidInput(format!(
+                        "sudo needs a password, and that vault item is a {}.",
+                        other.label()
+                    )))
+                }
+                None => return Err(CoreError::InvalidInput("The sudo password is not in the vault.".into())),
+            }
+        }
+        Ok(())
+    }
+
+    async fn submit_job(&self, ctx: &Context, command: Command, retry_of: Option<Uuid>) -> Result<SubmitOutcome> {
         if command.targets().is_empty() {
             return Err(CoreError::NoTargets);
         }
         command.validate()?;
+        self.check_sudo_password(ctx, &command).await?;
         let mut targets = Vec::with_capacity(command.targets().len());
         for target in command.targets() {
             targets.push(self.directory.resolve(ctx, target).await?);
@@ -379,6 +587,7 @@ impl CommandBus {
                     decision,
                     approval: None,
                     safety_snapshot: false,
+                    retry_of,
                 })
                 .await?;
             return Ok(SubmitOutcome::Queued {
@@ -400,6 +609,7 @@ impl CommandBus {
             reasons: decision.reasons.clone(),
             warnings: decision.warnings.clone(),
             impact: self.impact.preview(ctx, &decision.targets).await,
+            exec: self.exec_details(ctx, &command, retry_of).await?,
         };
         let detail = decision
             .reasons
@@ -430,6 +640,7 @@ impl CommandBus {
                 command,
                 decision,
                 request: request.clone(),
+                retry_of,
             },
         );
         Ok(SubmitOutcome::NeedsApproval { request })
@@ -468,6 +679,7 @@ impl CommandBus {
                         decision: pending.decision,
                         approval: Some(record),
                         safety_snapshot,
+                        retry_of: pending.retry_of,
                     })
                     .await
             }

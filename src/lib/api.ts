@@ -143,7 +143,19 @@ export type Command =
   | { type: "vmSnapshot"; targets: TargetRef[]; op: SnapshotOp }
   /** AP-04: protected VMs ("do not touch") are skipped by every other action. */
   | { type: "vmProtect"; targets: TargetRef[]; protected: boolean }
-  | { type: "remoteExec"; targets: TargetRef[]; script: string; sudo?: boolean }
+  | {
+      type: "remoteExec";
+      targets: TargetRef[];
+      script: string;
+      /** BX-07: run under sudo with a password from the vault. */
+      sudo?: boolean;
+      /** BX-07: the vault password sudo gets; null: each session's login password. */
+      sudoPasswordId?: string | null;
+      /** SS-05: trust (and save, audited) host keys never seen before. A changed key always blocks. */
+      trustNewHostKeys?: boolean;
+      /** Seconds each host may take; null: no limit. */
+      timeoutSecs?: number | null;
+    }
   | { type: "appUpdate"; version: string };
 
 /** AP-02: a VM target as it is now, read without a guest login. */
@@ -169,6 +181,26 @@ export type ApprovalStep =
   | { step: "countdown"; seconds: number }
   | { step: "vaultReauth" };
 
+/** BX-06: a dangerous-command rule a script matched, and the line it matched. */
+export interface DangerousMatch {
+  rule: string;
+  text: string;
+  line: number;
+}
+
+/** BX-02, BX-06, BX-07: a remote command as the approval dialog shows it. */
+export interface ExecDetails {
+  script: string;
+  sudo: boolean;
+  /** The vault item sudo gets; null with sudo: each session's login password. */
+  sudoPasswordLabel: string | null;
+  trustNewHostKeys: boolean;
+  timeoutSecs: number | null;
+  dangerous: DangerousMatch[];
+  /** BX-04: the job whose failed hosts this retries. */
+  retryOf: string | null;
+}
+
 export interface ApprovalRequest {
   id: string;
   action: string;
@@ -182,6 +214,8 @@ export interface ApprovalRequest {
   warnings: string[];
   /** AP-02: each VM target's state, uptime and snapshot count right now. */
   impact: TargetImpact[];
+  /** BX-02: for a remote command, what will run and how. */
+  exec: ExecDetails | null;
 }
 
 export type SubmitOutcome =
@@ -207,6 +241,8 @@ export type JobEvent =
   /** AP-03: the job waits until `until` and can be cancelled until then. */
   | { event: "countdown"; jobId: string; seconds: number; until: string }
   | { event: "started"; jobId: string }
+  /** BX-02: work on a target began. */
+  | { event: "targetStarted"; jobId: string; target: string; name: string }
   | {
       event: "targetFinished";
       jobId: string;
@@ -214,6 +250,8 @@ export type JobEvent =
       name: string;
       status: TargetStatus;
       message: string | null;
+      /** BX-02: a remote command's exit code. */
+      exitCode: number | null;
       durationMs: number;
       /** VM-05: the safety snapshot taken on this target first. */
       safetySnapshot: string | null;
@@ -236,6 +274,8 @@ export interface JobSummary {
   targetsFailed: number;
   /** AP-03: when the countdown ends, while the job is in it. */
   countdownUntil: string | null;
+  /** BX-04: the job whose failed targets this one retries. */
+  retryOf: string | null;
 }
 
 /** One target of a job and how it went. */
@@ -252,6 +292,14 @@ export interface JobTarget {
   durationMs: number | null;
   /** VM-05: the safety snapshot taken before the action. */
   safetySnapshot: string | null;
+  /** BX-02: stderr, capped like `output` (stdout). */
+  stderr: string | null;
+  stdoutBytes: number | null;
+  stderrBytes: number | null;
+  /** The middle of a long output was cut; the start and the end are kept. */
+  outputTruncated: boolean;
+  /** Why it failed, as a stable code. */
+  errorCode: string | null;
 }
 
 export interface ChainCheck {
@@ -353,6 +401,8 @@ export interface Settings {
   powerOnLimit: number;
   /** VM-03: seconds a soft stop may take before the VM counts as still running (default 120). */
   shutdownWaitSecs: number;
+  /** BX-02: how many hosts a bulk run reaches at once (1 to 50, default 10). */
+  bulkParallelLimit: number;
 }
 
 /** SS-04. */
@@ -407,6 +457,8 @@ export interface SessionInput {
   environment: Environment;
   color: SessionColor | null;
   tags: string[];
+  /** BX-01: the VM this session reaches (its id), so a bulk run can pick the VM. */
+  vmId: string | null;
 }
 
 export interface SessionRecord extends SessionInput {
@@ -545,6 +597,164 @@ export interface ImportReport {
   problems: ImportSkipped[];
 }
 
+/** BX-01: what is picked on the Bulk run page. */
+export interface TargetPicks {
+  sessionIds?: string[];
+  vmPaths?: string[];
+  tags?: string[];
+  /** Saved VM filters, by id. */
+  filterIds?: string[];
+}
+
+/** BX-01: a host a run reaches (a saved session). */
+export interface BulkHost {
+  sessionId: string;
+  name: string;
+  /** user@host:port */
+  address: string;
+  /** As the policy engine sees it: Prod when the session or its VM is. */
+  environment: Environment;
+  /** AP-04: skipped by the run. */
+  protected: boolean;
+  vmName: string | null;
+  /** How it was picked: "session", "VM 'web01'", "tag 'web'", "filter 'Lab'". */
+  via: string[];
+}
+
+export interface VmWithoutSession {
+  vmxPath: string;
+  name: string;
+  via: string[];
+}
+
+export interface ResolvedTargets {
+  hosts: BulkHost[];
+  /** Picked VMs no session reaches; guest commands without SSH (VM-09) come in v2. */
+  vmsWithoutSession: VmWithoutSession[];
+  notes: string[];
+}
+
+/** BX-06: what a command would need, without submitting it. */
+export interface CommandPreview {
+  action: ActionKind;
+  tier: Tier;
+  steps: ApprovalStep[];
+  targets: number;
+  skipped: Target[];
+  reasons: string[];
+  dangerous: DangerousMatch[];
+}
+
+export interface GroupOptions {
+  /** Spaces and tabs at line ends, and blank lines at the end, don't make outputs differ. */
+  ignoreTrailingWhitespace?: boolean;
+}
+
+export interface RunInfo {
+  script: string;
+  sudo: boolean;
+  trustNewHostKeys: boolean;
+  timeoutSecs: number | null;
+}
+
+export interface HostResult {
+  targetKey: string;
+  name: string;
+  status: TargetStatus;
+  exitCode: number | null;
+  durationMs: number | null;
+  error: string | null;
+  errorCode: string | null;
+  stdoutBytes: number | null;
+  stderrBytes: number | null;
+  truncated: boolean;
+  /** Index into the groups; null while it waits or runs, or when cancelled. */
+  group: number | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+/** BX-03: hosts with the same result. */
+export interface OutputGroup {
+  /** "A", "B", ... largest first. */
+  label: string;
+  /** output: the command ran; error: it failed before or around it (connection, login, sudo, time limit). */
+  kind: "output" | "error";
+  ok: boolean;
+  exitCode: number | null;
+  error: string | null;
+  errorCode: string | null;
+  messagesDiffer: boolean;
+  /** Target keys. */
+  hosts: string[];
+  /** The host whose output stands for the group. */
+  sample: string;
+  /** null: too large to send with the results; load it with bulkHostOutput. */
+  stdout: string | null;
+  stderr: string | null;
+  truncated: boolean;
+}
+
+export interface BulkCounts {
+  total: number;
+  pending: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+}
+
+export interface BulkResults {
+  job: JobSummary;
+  run: RunInfo | null;
+  counts: BulkCounts;
+  hosts: HostResult[];
+  groups: OutputGroup[];
+  /** "48 hosts same, 2 differ". */
+  headline: string;
+  ignoreTrailingWhitespace: boolean;
+}
+
+export interface HostOutput {
+  targetKey: string;
+  name: string;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  exitCode: number | null;
+  error: string | null;
+}
+
+export interface DiffLine {
+  kind: "same" | "removed" | "added";
+  text: string;
+}
+
+export interface OutputDiff {
+  left: string;
+  right: string;
+  leftExitCode: number | null;
+  rightExitCode: number | null;
+  stdout: DiffLine[];
+  stderr: DiffLine[];
+}
+
+export type ExportFormat = "csv" | "json" | "html";
+
+export interface BulkExport {
+  path: string;
+  format: ExportFormat;
+  hosts: number;
+  /** Texts where something that looked like a secret was replaced by [redacted]. */
+  redacted: number;
+}
+
+export interface BulkLimits {
+  maxScriptBytes: number;
+  maxTimeoutSecs: number;
+  maxParallel: number;
+}
+
 /** FD-14: a newer signed release on GitHub. */
 export interface UpdateInfo {
   currentVersion: string;
@@ -637,6 +847,8 @@ export const api = {
   setScanFolders: (folders: string[]) => invoke<Settings>("settings_set_scan_folders", { folders }),
   setPowerOnLimit: (limit: number) => invoke<Settings>("settings_set_power_on_limit", { limit }),
   setShutdownWait: (secs: number) => invoke<Settings>("settings_set_shutdown_wait", { secs }),
+  /** BX-02: how many hosts a bulk run reaches at once. */
+  setBulkParallel: (limit: number) => invoke<Settings>("settings_set_bulk_parallel", { limit }),
   /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
 
@@ -688,6 +900,22 @@ export const api = {
   /** Saves the picked rows of a preview; key files go into the vault when addKeys. */
   importCommit: (request: { previewId: string; rows: number[]; folderId: string | null; addKeys: boolean }) =>
     invoke<ImportReport>("import_commit", { request }),
+
+  /** BX-01 to BX-07. Running is `submit` with a remoteExec command, through the approval flow. */
+  bulkLimits: () => invoke<BulkLimits>("bulk_limits"),
+  bulkTargets: (picks: TargetPicks) => invoke<ResolvedTargets>("bulk_targets", { picks }),
+  /** BX-06: tier and matched dangerous-command rules, without submitting. */
+  bulkPreview: (command: Command) => invoke<CommandPreview>("bulk_preview", { command }),
+  bulkRuns: (limit = 20) => invoke<JobSummary[]>("bulk_runs", { limit }),
+  bulkResults: (jobId: string, options: GroupOptions) => invoke<BulkResults>("bulk_results", { jobId, options }),
+  bulkHostOutput: (jobId: string, targetKey: string) => invoke<HostOutput>("bulk_host_output", { jobId, targetKey }),
+  bulkDiff: (jobId: string, left: string, right: string, options: GroupOptions) =>
+    invoke<OutputDiff>("bulk_diff", { jobId, left, right, options }),
+  /** BX-04: the failed hosts again, as a new job through the bus (it may need approval). */
+  bulkRetryFailed: (jobId: string) => invoke<SubmitOutcome>("bulk_retry_failed", { jobId }),
+  /** BX-05: asks where to save, then writes the results; null when the user cancels. */
+  bulkExport: (jobId: string, format: ExportFormat, options: GroupOptions) =>
+    invoke<BulkExport | null>("bulk_export", { jobId, format, options }),
 
   /**
    * SS-03: opens a pane to a saved session. Output arrives as raw bytes (xterm.js decodes them, so a

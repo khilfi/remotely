@@ -59,6 +59,9 @@ fn exec(script: &str, targets: &[Target]) -> Command {
         targets: refs(targets),
         script: script.into(),
         sudo: false,
+        sudo_password_id: None,
+        trust_new_host_keys: false,
+        timeout_secs: None,
     }
 }
 
@@ -780,4 +783,39 @@ fn reasons_name_the_action_in_words() {
     let t = vms(2);
     let d = engine().evaluate(&power(PowerOp::Suspend, &t), &t);
     assert_eq!(d.reasons[0], "Suspend VMs on 2 targets: high");
+}
+
+// ---- BX-06: which rule matched, for the editor and the approval dialog ----------------------------
+
+#[test]
+fn dangerous_details_name_each_rule_with_the_line_it_matched() {
+    let e = engine();
+    let found = e.dangerous_details("cd /srv\nsudo rm -rf /var/cache/app\nmkfs.ext4 /dev/sdb1\nrm -rf /tmp/x");
+    assert_eq!(
+        found,
+        vec![
+            DangerousMatch {
+                rule: "rm -r / rm -rf".into(),
+                text: "sudo rm -rf /var/cache/app".into(),
+                line: 2,
+            },
+            DangerousMatch {
+                rule: "mkfs".into(),
+                text: "mkfs.ext4 /dev/sdb1".into(),
+                line: 3,
+            },
+        ],
+        "one entry per rule, at its first match"
+    );
+    let first_line = e.dangerous_details("shutdown -r now");
+    assert_eq!(
+        (first_line[0].line, first_line[0].text.as_str()),
+        (1, "shutdown -r now")
+    );
+    let joined = e.dangerous_details("echo bye; reboot");
+    assert_eq!(
+        (joined[0].rule.as_str(), joined[0].text.as_str()),
+        ("shutdown / reboot", "echo bye; reboot")
+    );
+    assert!(e.dangerous_details("uptime\ndf -h").is_empty());
 }

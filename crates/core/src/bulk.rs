@@ -1,0 +1,1270 @@
+//! Bulk execution (BX-01, BX-03, BX-05): which hosts a run reaches, its results grouped by output, the
+//! diff between two groups, and exports. Running a command is `Command::RemoteExec` through the
+//! command bus; everything here reads, except an export, which writes the file the user chose and is
+//! audited.
+//!
+//! * BX-01: hosts are saved sessions. A VM is reached through a session linked to it
+//!   (`sessions.vm_id`); a VM with none can't run commands yet (guest operations, VM-09, are v2).
+//!   Tags pick sessions and VMs; saved filters pick VMs.
+//! * BX-03: finished hosts group by exit code and output (stdout and stderr, hashed whole as they
+//!   arrived, so a cut output still groups right), optionally ignoring trailing whitespace. Hosts that
+//!   failed before their command ran group by cause.
+//! * BX-05: CSV, JSON or HTML. The run's vault secrets were scrubbed from the output before it was
+//!   stored (BX-07), and every text an export writes goes through [`redact_secrets`] as well.
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use similar::{ChangeTag, TextDiff};
+use uuid::Uuid;
+
+use crate::adapters::vmware::path_key;
+use crate::command_bus::Command;
+use crate::domain::{Context, Environment};
+use crate::error::{CoreError, Result};
+use crate::export::{push_row, redact_secrets};
+use crate::jobs::TargetStatus;
+use crate::sessions::SessionRecord;
+use crate::store::{JobSummary, JobTargetRecord, NewAuditEntry, Store, VmRecord};
+
+// ---- BX-01: targets ----------------------------------------------------------------------------
+
+/// What the user picked on the Bulk run page. Every list may be empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TargetPicks {
+    pub session_ids: Vec<Uuid>,
+    /// VMs by .vmx path; each is reached through its linked session.
+    pub vm_paths: Vec<String>,
+    /// Sessions and VMs with any of these tags.
+    pub tags: Vec<String>,
+    /// Saved VM filters (VM-02), by id.
+    pub filter_ids: Vec<String>,
+}
+
+/// A host a run will reach: a saved session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkHost {
+    pub session_id: Uuid,
+    pub name: String,
+    /// `user@host:port`.
+    pub address: String,
+    /// As the policy engine sees it: Prod when the session or its VM is labelled Prod.
+    pub environment: Environment,
+    /// AP-04: skipped by the run (the session or its VM is protected).
+    pub protected: bool,
+    /// The VM the session reaches, if one is linked.
+    pub vm_name: Option<String>,
+    /// How it was picked, e.g. "session", "VM 'web01'", "tag 'web'", "filter 'Lab'".
+    pub via: Vec<String>,
+}
+
+/// BX-01: a picked VM that no session reaches.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmWithoutSession {
+    pub vmx_path: String,
+    pub name: String,
+    pub via: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedTargets {
+    /// By name. Submit these as the run's session targets.
+    pub hosts: Vec<BulkHost>,
+    /// Picked VMs a run can't reach yet: commands go over SSH, through a session linked to the VM.
+    /// Running them through VMware Tools without SSH (VM-09) comes in v2.
+    pub vms_without_session: Vec<VmWithoutSession>,
+    /// Worth knowing, e.g. a VM with two linked sessions (the first by name is used).
+    pub notes: Vec<String>,
+}
+
+/// Collects picked sessions and VMs, keeping the order they were first picked and every reason.
+#[derive(Default)]
+struct Picked {
+    sessions: Vec<Uuid>,
+    via: HashMap<Uuid, Vec<String>>,
+    vms: Vec<String>,
+    vm_via: HashMap<String, Vec<String>>,
+    notes: Vec<String>,
+}
+
+impl Picked {
+    fn session(&mut self, id: Uuid, via: String) {
+        let reasons = self.via.entry(id).or_default();
+        if reasons.is_empty() {
+            self.sessions.push(id);
+        }
+        if !reasons.contains(&via) {
+            reasons.push(via);
+        }
+    }
+
+    fn vm(&mut self, vm: &VmRecord, linked: &HashMap<String, Vec<Uuid>>, names: &HashMap<Uuid, &str>, via: String) {
+        match linked.get(&vm.id).map(Vec::as_slice) {
+            Some([first, rest @ ..]) => {
+                if !rest.is_empty() {
+                    let note = format!(
+                        "VM '{}' has {} linked sessions; the run uses '{}'",
+                        vm.display_name,
+                        rest.len() + 1,
+                        names.get(first).copied().unwrap_or("the first")
+                    );
+                    if !self.notes.contains(&note) {
+                        self.notes.push(note);
+                    }
+                }
+                self.session(*first, via);
+            }
+            _ => {
+                let reasons = self.vm_via.entry(vm.id.clone()).or_default();
+                if reasons.is_empty() {
+                    self.vms.push(vm.id.clone());
+                }
+                if !reasons.contains(&via) {
+                    reasons.push(via);
+                }
+            }
+        }
+    }
+}
+
+fn address(s: &SessionRecord) -> String {
+    let user = s.username.as_deref().map(|u| format!("{u}@")).unwrap_or_default();
+    format!("{user}{}", crate::known_hosts::address(&s.host, s.port))
+}
+
+// ---- BX-03: results ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GroupOptions {
+    /// Spaces, tabs and `\r` at line ends, and blank lines at the end, don't make outputs differ.
+    pub ignore_trailing_whitespace: bool,
+}
+
+/// What a remote command run was asked to do, for the results view (no secret: a vault id at most).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInfo {
+    pub script: String,
+    pub sudo: bool,
+    pub trust_new_host_keys: bool,
+    pub timeout_secs: Option<u64>,
+}
+
+/// One host of a run, without its output (that is in its group, or [`BulkRuns::host_output`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostResult {
+    pub target_key: String,
+    pub name: String,
+    pub status: String,
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub error: Option<String>,
+    pub error_code: Option<String>,
+    pub stdout_bytes: Option<i64>,
+    pub stderr_bytes: Option<i64>,
+    pub truncated: bool,
+    /// Index into the groups; `None` while it waits or runs, and when it was cancelled.
+    pub group: Option<usize>,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GroupKind {
+    /// The command ran: same exit code and output.
+    Output,
+    /// It failed before or around the command (connection, login, sudo, time limit): same cause.
+    Error,
+}
+
+/// Hosts with the same result (BX-03).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputGroup {
+    /// "A", "B", … by size, largest first.
+    pub label: String,
+    pub kind: GroupKind,
+    /// Every host in it succeeded.
+    pub ok: bool,
+    pub exit_code: Option<i64>,
+    /// An error group's cause: the first host's message, and its code.
+    pub error: Option<String>,
+    pub error_code: Option<String>,
+    /// The hosts' messages are not all the same (they often name their own address).
+    pub messages_differ: bool,
+    /// Target keys, in the run's order.
+    pub hosts: Vec<String>,
+    /// The host whose output stands for the group.
+    pub sample: String,
+    /// The sample's output, unless the reply was already large (then load it with
+    /// [`BulkRuns::host_output`]).
+    pub stdout: Option<String>,
+    pub stderr: Option<String>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Counts {
+    pub total: usize,
+    pub pending: usize,
+    pub running: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub cancelled: usize,
+}
+
+/// A run's results, grouped (BX-03).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkResults {
+    pub job: JobSummary,
+    /// `None` for a job that was not a remote command.
+    pub run: Option<RunInfo>,
+    pub counts: Counts,
+    pub hosts: Vec<HostResult>,
+    pub groups: Vec<OutputGroup>,
+    /// "48 hosts same, 2 differ".
+    pub headline: String,
+    pub ignore_trailing_whitespace: bool,
+}
+
+/// One host's whole stored output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostOutput {
+    pub target_key: String,
+    pub name: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    pub exit_code: Option<i64>,
+    pub error: Option<String>,
+}
+
+/// Sample outputs sent with the results, at most; the rest load on demand.
+const SAMPLE_BUDGET: usize = 4 * 1024 * 1024;
+
+/// "A".."Z", "AA".., like spreadsheet columns.
+pub fn group_label(index: usize) -> String {
+    let mut n = index + 1;
+    let mut label = Vec::new();
+    while n > 0 {
+        let rem = (n - 1) % 26;
+        label.push(char::from(b'A' + rem as u8));
+        n = (n - 1) / 26;
+    }
+    label.iter().rev().collect()
+}
+
+/// The group a finished target belongs to, or `None` while it waits or runs, or when it was cancelled.
+fn group_key(t: &JobTargetRecord, opts: GroupOptions) -> Option<String> {
+    if t.status != TargetStatus::Succeeded.as_str() && t.status != TargetStatus::Failed.as_str() {
+        return None;
+    }
+    let hash = if opts.ignore_trailing_whitespace {
+        &t.output_hash_loose
+    } else {
+        &t.output_hash
+    };
+    let exit = t.exit_code.map_or_else(|| "-".to_owned(), |c| c.to_string());
+    Some(match hash {
+        Some(hash) => format!("out:{exit}:{hash}"),
+        None if t.status == TargetStatus::Failed.as_str() => {
+            format!("err:{}", t.error_code.as_deref().unwrap_or("failed"))
+        }
+        // A target with no output that worked (a VM action).
+        None => "done".to_owned(),
+    })
+}
+
+/// BX-03: groups finished targets; returns the groups (without output yet) and each target's group.
+fn group_targets(targets: &[JobTargetRecord], opts: GroupOptions) -> (Vec<OutputGroup>, Vec<Option<usize>>) {
+    let mut order: Vec<String> = Vec::new();
+    let mut members: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, t) in targets.iter().enumerate() {
+        if let Some(key) = group_key(t, opts) {
+            let list = members.entry(key.clone()).or_default();
+            if list.is_empty() {
+                order.push(key);
+            }
+            list.push(i);
+        }
+    }
+    let mut groups: Vec<(String, Vec<usize>)> = order
+        .into_iter()
+        .map(|key| {
+            let list = members.remove(&key).unwrap_or_default();
+            (key, list)
+        })
+        .collect();
+    // Largest first; then what worked, then by exit code; ties keep the run's order.
+    groups.sort_by_key(|(key, list)| {
+        let first = &targets[list[0]];
+        (
+            std::cmp::Reverse(list.len()),
+            key.starts_with("err:"),
+            first.status != TargetStatus::Succeeded.as_str(),
+            first.exit_code,
+        )
+    });
+    let mut of_target = vec![None; targets.len()];
+    let groups = groups
+        .into_iter()
+        .enumerate()
+        .map(|(index, (key, list))| {
+            for &i in &list {
+                of_target[i] = Some(index);
+            }
+            let first = &targets[list[0]];
+            let error_group = key.starts_with("err:");
+            let messages: HashSet<Option<&str>> = list.iter().map(|&i| targets[i].error.as_deref()).collect();
+            OutputGroup {
+                label: group_label(index),
+                kind: if error_group {
+                    GroupKind::Error
+                } else {
+                    GroupKind::Output
+                },
+                ok: list
+                    .iter()
+                    .all(|&i| targets[i].status == TargetStatus::Succeeded.as_str()),
+                exit_code: first.exit_code,
+                error: if error_group { first.error.clone() } else { None },
+                error_code: if error_group { first.error_code.clone() } else { None },
+                messages_differ: error_group && messages.len() > 1,
+                hosts: list.iter().map(|&i| targets[i].target_key.clone()).collect(),
+                sample: first.target_key.clone(),
+                stdout: None,
+                stderr: None,
+                truncated: first.output_truncated,
+            }
+        })
+        .collect();
+    (groups, of_target)
+}
+
+fn count(targets: &[JobTargetRecord]) -> Counts {
+    let mut counts = Counts {
+        total: targets.len(),
+        ..Counts::default()
+    };
+    for t in targets {
+        match t.status.as_str() {
+            "pending" => counts.pending += 1,
+            "running" => counts.running += 1,
+            "succeeded" => counts.succeeded += 1,
+            "failed" => counts.failed += 1,
+            _ => counts.cancelled += 1,
+        }
+    }
+    counts
+}
+
+fn hosts(n: usize) -> String {
+    if n == 1 {
+        "1 host".into()
+    } else {
+        format!("{n} hosts")
+    }
+}
+
+/// BX-03: the one line that sums up a run, e.g. "48 hosts same, 2 differ".
+pub fn headline(groups: &[OutputGroup], counts: &Counts) -> String {
+    let done: usize = groups.iter().map(|g| g.hosts.len()).sum();
+    let largest = groups.first().map_or(0, |g| g.hosts.len());
+    let mut text = match groups.len() {
+        0 if counts.pending + counts.running > 0 => "Waiting for the first host".to_owned(),
+        0 => "No host ran the command".to_owned(),
+        1 if done == 1 => "1 host finished".to_owned(),
+        1 => format!("All {done} hosts the same"),
+        _ if largest == 1 => format!("{done} hosts, all different"),
+        _ => format!("{} same, {} differ", hosts(largest), done - largest),
+    };
+    let open = counts.pending + counts.running;
+    if open > 0 {
+        text.push_str(&format!("; {} still to finish", hosts(open)));
+    }
+    if counts.cancelled > 0 {
+        text.push_str(&format!("; {} cancelled", counts.cancelled));
+    }
+    text
+}
+
+fn run_info(command: &Command) -> Option<RunInfo> {
+    match command {
+        Command::RemoteExec {
+            script,
+            sudo,
+            trust_new_host_keys,
+            timeout_secs,
+            ..
+        } => Some(RunInfo {
+            script: script.clone(),
+            sudo: *sudo,
+            trust_new_host_keys: *trust_new_host_keys,
+            timeout_secs: *timeout_secs,
+        }),
+        _ => None,
+    }
+}
+
+// ---- BX-03: diff -------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DiffKind {
+    Same,
+    /// Only in the left output.
+    Removed,
+    /// Only in the right output.
+    Added,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffLine {
+    pub kind: DiffKind,
+    pub text: String,
+}
+
+/// Two hosts' outputs, line by line (BX-03: the UI passes two groups' samples).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputDiff {
+    pub left: String,
+    pub right: String,
+    pub left_exit_code: Option<i64>,
+    pub right_exit_code: Option<i64>,
+    pub stdout: Vec<DiffLine>,
+    pub stderr: Vec<DiffLine>,
+}
+
+/// Lines with trailing whitespace and trailing blank lines dropped.
+fn trim_trailing(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().map(str::trim_end).collect();
+    let keep = lines.iter().rposition(|l| !l.is_empty()).map_or(0, |i| i + 1);
+    let mut out = lines[..keep].join("\n");
+    if keep > 0 {
+        out.push('\n');
+    }
+    out
+}
+
+/// A line diff of two texts.
+pub fn diff_lines(left: &str, right: &str, opts: GroupOptions) -> Vec<DiffLine> {
+    let (left, right) = if opts.ignore_trailing_whitespace {
+        (trim_trailing(left), trim_trailing(right))
+    } else {
+        (left.to_owned(), right.to_owned())
+    };
+    let diff = TextDiff::configure()
+        .timeout(Duration::from_secs(2))
+        .diff_lines(left.as_str(), right.as_str());
+    diff.iter_all_changes()
+        .map(|change| DiffLine {
+            kind: match change.tag() {
+                ChangeTag::Equal => DiffKind::Same,
+                ChangeTag::Delete => DiffKind::Removed,
+                ChangeTag::Insert => DiffKind::Added,
+            },
+            text: change.value().trim_end_matches(['\n', '\r']).to_owned(),
+        })
+        .collect()
+}
+
+// ---- BX-05: export -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Csv,
+    Json,
+    Html,
+}
+
+impl ExportFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "csv",
+            ExportFormat::Json => "json",
+            ExportFormat::Html => "html",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Csv => "CSV",
+            ExportFormat::Json => "JSON",
+            ExportFormat::Html => "HTML",
+        }
+    }
+}
+
+/// What an export wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkExport {
+    pub path: String,
+    pub format: ExportFormat,
+    pub hosts: usize,
+    /// Texts where something that looked like a secret was replaced by `[redacted]`.
+    pub redacted: usize,
+}
+
+/// The file name the save dialog offers, e.g. `remotely-run-2026-10-18-1a2b3c4d.html`.
+pub fn export_file_name(job_id: Uuid, format: ExportFormat) -> String {
+    let today = time::OffsetDateTime::now_utc().date();
+    let short: String = job_id.simple().to_string().chars().take(8).collect();
+    format!("remotely-run-{today}-{short}.{}", format.extension())
+}
+
+/// Redacts texts and counts the ones it changed.
+#[derive(Default)]
+struct Redactor {
+    changed: usize,
+}
+
+impl Redactor {
+    fn clean(&mut self, text: &str) -> String {
+        let (clean, changed) = redact_secrets(text);
+        self.changed += usize::from(changed);
+        clean
+    }
+
+    fn opt(&mut self, text: Option<&str>) -> String {
+        text.map(|t| self.clean(t)).unwrap_or_default()
+    }
+}
+
+/// Everything an export holds, already redacted.
+struct ExportData {
+    job: JobSummary,
+    run: Option<RunInfo>,
+    headline: String,
+    grouped_by: &'static str,
+    groups: Vec<ExportGroup>,
+    rows: Vec<ExportRow>,
+}
+
+struct ExportGroup {
+    label: String,
+    kind: GroupKind,
+    ok: bool,
+    exit_code: Option<i64>,
+    error: String,
+    hosts: Vec<String>,
+    stdout: String,
+    stderr: String,
+}
+
+struct ExportRow {
+    name: String,
+    group: String,
+    status: String,
+    exit_code: Option<i64>,
+    duration_ms: Option<i64>,
+    stdout: String,
+    stderr: String,
+    truncated: bool,
+    error: String,
+}
+
+fn opt_num(n: Option<i64>) -> String {
+    n.map(|n| n.to_string()).unwrap_or_default()
+}
+
+fn to_csv(data: &ExportData) -> String {
+    let mut out = String::from("\u{FEFF}");
+    let header = [
+        "host",
+        "group",
+        "status",
+        "exit_code",
+        "duration_ms",
+        "stdout",
+        "stderr",
+        "output_truncated",
+        "error",
+    ];
+    push_row(&mut out, header.iter().map(|h| (*h).to_owned()));
+    for r in &data.rows {
+        push_row(
+            &mut out,
+            [
+                r.name.clone(),
+                r.group.clone(),
+                r.status.clone(),
+                opt_num(r.exit_code),
+                opt_num(r.duration_ms),
+                r.stdout.clone(),
+                r.stderr.clone(),
+                r.truncated.to_string(),
+                r.error.clone(),
+            ]
+            .into_iter(),
+        );
+    }
+    out
+}
+
+fn to_json(data: &ExportData) -> Result<String> {
+    let job = &data.job;
+    let value = json!({
+        "job": {
+            "id": job.id,
+            "summary": job.summary,
+            "status": job.status,
+            "tier": job.tier,
+            "createdAt": job.created_at,
+            "startedAt": job.started_at,
+            "finishedAt": job.finished_at,
+            "retryOf": job.retry_of,
+        },
+        "command": data.run.as_ref().map(|r| json!({
+            "script": r.script,
+            "sudo": r.sudo,
+            "trustNewHostKeys": r.trust_new_host_keys,
+            "timeoutSecs": r.timeout_secs,
+        })),
+        "groupedBy": data.grouped_by,
+        "headline": data.headline,
+        "groups": data.groups.iter().map(|g| json!({
+            "label": g.label,
+            "kind": g.kind,
+            "ok": g.ok,
+            "exitCode": g.exit_code,
+            "error": if g.error.is_empty() { None } else { Some(&g.error) },
+            "hosts": g.hosts,
+            "stdout": g.stdout,
+            "stderr": g.stderr,
+        })).collect::<Vec<_>>(),
+        "hosts": data.rows.iter().map(|r| json!({
+            "name": r.name,
+            "group": if r.group.is_empty() { None } else { Some(&r.group) },
+            "status": r.status,
+            "exitCode": r.exit_code,
+            "durationMs": r.duration_ms,
+            "stdout": r.stdout,
+            "stderr": r.stderr,
+            "outputTruncated": r.truncated,
+            "error": if r.error.is_empty() { None } else { Some(&r.error) },
+        })).collect::<Vec<_>>(),
+    });
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
+fn html_escape(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A self-contained page: no script, no outside resource, every text escaped.
+fn to_html(data: &ExportData) -> String {
+    let e = html_escape;
+    let job = &data.job;
+    let mut out = String::new();
+    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+    out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    out.push_str(&format!("<title>Remotely run: {}</title>\n", e(&job.summary)));
+    out.push_str(
+        "<style>\n\
+         :root{color-scheme:light dark;--fg:#1b1b1f;--muted:#5f6068;--bg:#fff;--line:#d9d9de;--ok:#1a7f37;--bad:#c62828;--code:#f4f4f6}\n\
+         @media (prefers-color-scheme:dark){:root{--fg:#e8e8ec;--muted:#a0a1a8;--bg:#161618;--line:#34343a;--ok:#4ac26b;--bad:#ff6b6b;--code:#202024}}\n\
+         body{font:14px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--fg);background:var(--bg);margin:0 auto;padding:24px 16px;max-width:1100px}\n\
+         h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 8px}.muted{color:var(--muted)}\n\
+         table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}\n\
+         pre{background:var(--code);padding:10px 12px;border-radius:6px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:6px 0}\n\
+         .group{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:12px 0}.ok{color:var(--ok)}.bad{color:var(--bad)}\n\
+         .label{display:inline-block;min-width:22px;text-align:center;font-weight:600;border:1px solid var(--line);border-radius:4px;margin-right:6px}\n\
+         </style>\n</head>\n<body>\n",
+    );
+    out.push_str(&format!("<h1>{}</h1>\n", e(&job.summary)));
+    out.push_str(&format!(
+        "<p class=\"muted\">Exported from Remotely. Job {} &middot; {} &middot; tier {} &middot; started {} &middot; finished {}</p>\n",
+        e(&job.id),
+        e(&job.status.replace('_', " ")),
+        e(&job.tier),
+        e(job.started_at.as_deref().unwrap_or("not yet")),
+        e(job.finished_at.as_deref().unwrap_or("not yet"))
+    ));
+    out.push_str(&format!(
+        "<p><strong>{}</strong> <span class=\"muted\">(grouped by {})</span></p>\n",
+        e(&data.headline),
+        e(data.grouped_by)
+    ));
+    if let Some(run) = &data.run {
+        let mut how = Vec::new();
+        if run.sudo {
+            how.push("with sudo".to_owned());
+        }
+        if run.trust_new_host_keys {
+            how.push("trusting new host keys".to_owned());
+        }
+        if let Some(secs) = run.timeout_secs {
+            how.push(format!("time limit {secs} s per host"));
+        }
+        out.push_str("<h2>Command</h2>\n");
+        if !how.is_empty() {
+            out.push_str(&format!("<p class=\"muted\">{}</p>\n", e(&how.join(", "))));
+        }
+        out.push_str(&format!("<pre>{}</pre>\n", e(&run.script)));
+    }
+    out.push_str("<h2>Groups</h2>\n");
+    for g in &data.groups {
+        let state = if g.ok {
+            "<span class=\"ok\">succeeded</span>".to_owned()
+        } else {
+            "<span class=\"bad\">failed</span>".to_owned()
+        };
+        let exit = g
+            .exit_code
+            .map(|c| format!(" &middot; exit code {c}"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "<div class=\"group\"><p><span class=\"label\">{}</span><strong>{}</strong> &middot; {}{}</p>\n<p class=\"muted\">{}</p>\n",
+            e(&g.label),
+            hosts(g.hosts.len()),
+            state,
+            exit,
+            e(&g.hosts.join(", "))
+        ));
+        if g.kind == GroupKind::Error && !g.error.is_empty() {
+            out.push_str(&format!("<p class=\"bad\">{}</p>\n", e(&g.error)));
+        }
+        if !g.stdout.is_empty() {
+            out.push_str(&format!("<pre>{}</pre>\n", e(&g.stdout)));
+        }
+        if !g.stderr.is_empty() {
+            out.push_str(&format!("<p class=\"muted\">stderr</p><pre>{}</pre>\n", e(&g.stderr)));
+        }
+        out.push_str("</div>\n");
+    }
+    out.push_str("<h2>Hosts</h2>\n<table>\n<thead><tr><th>Host</th><th>Group</th><th>Status</th><th>Exit code</th><th>Duration</th><th>Error</th></tr></thead>\n<tbody>\n");
+    for r in &data.rows {
+        let duration = r
+            .duration_ms
+            .map(|ms| format!("{:.1} s", ms as f64 / 1000.0))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+            e(&r.name),
+            e(&r.group),
+            e(&r.status),
+            opt_num(r.exit_code),
+            duration,
+            e(&r.error)
+        ));
+    }
+    out.push_str("</tbody>\n</table>\n</body>\n</html>\n");
+    out
+}
+
+// ---- The service -------------------------------------------------------------------------------
+
+pub struct BulkRuns {
+    store: Store,
+}
+
+impl BulkRuns {
+    pub fn new(store: Store) -> Self {
+        Self { store }
+    }
+
+    /// BX-01: the hosts a run on these picks reaches, and the picked VMs it can't reach.
+    pub async fn resolve(&self, ctx: &Context, picks: &TargetPicks) -> Result<ResolvedTargets> {
+        let sessions = self.store.list_sessions(ctx).await?;
+        let by_id: HashMap<Uuid, &SessionRecord> = sessions.iter().map(|s| (s.id, s)).collect();
+        let names: HashMap<Uuid, &str> = sessions.iter().map(|s| (s.id, s.name.as_str())).collect();
+        let vms = self.store.list_vms(ctx).await?;
+        let vm_by_id: HashMap<&str, &VmRecord> = vms.iter().map(|v| (v.id.as_str(), v)).collect();
+        let linked = self.store.sessions_by_vm(ctx).await?;
+        let mut picked = Picked::default();
+
+        for id in &picks.session_ids {
+            if by_id.contains_key(id) {
+                picked.session(*id, "session".into());
+            } else {
+                picked.notes.push("A picked session no longer exists.".into());
+            }
+        }
+        for path in &picks.vm_paths {
+            let key = path_key(Path::new(path));
+            match vms.iter().find(|v| path_key(Path::new(&v.vmx_path)) == key) {
+                Some(vm) => picked.vm(vm, &linked, &names, format!("VM '{}'", vm.display_name)),
+                None => picked.notes.push(format!("{path} is not in the VM list.")),
+            }
+        }
+        for tag in &picks.tags {
+            let tag = tag.trim();
+            let via = format!("tag '{tag}'");
+            for s in sessions
+                .iter()
+                .filter(|s| s.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+            {
+                picked.session(s.id, via.clone());
+            }
+            for vm in vms
+                .iter()
+                .filter(|v| v.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
+            {
+                picked.vm(vm, &linked, &names, via.clone());
+            }
+        }
+        if !picks.filter_ids.is_empty() {
+            let filters = self.store.list_saved_filters(ctx).await?;
+            for id in &picks.filter_ids {
+                let Some(saved) = filters.iter().find(|f| &f.id == id) else {
+                    picked.notes.push("A picked saved filter no longer exists.".into());
+                    continue;
+                };
+                for vm in vms.iter().filter(|v| saved.filter.matches(v)) {
+                    picked.vm(vm, &linked, &names, format!("filter '{}'", saved.name));
+                }
+            }
+        }
+
+        let mut hosts: Vec<BulkHost> = picked
+            .sessions
+            .iter()
+            .filter_map(|id| by_id.get(id))
+            .map(|s| {
+                let vm = s.vm_id.as_deref().and_then(|v| vm_by_id.get(v));
+                let environment = match vm {
+                    Some(vm) if vm.environment == Environment::Prod => Environment::Prod,
+                    _ => s.environment,
+                };
+                BulkHost {
+                    session_id: s.id,
+                    name: s.name.clone(),
+                    address: address(s),
+                    environment,
+                    protected: s.protected || vm.is_some_and(|vm| vm.protected),
+                    vm_name: vm.map(|vm| vm.display_name.clone()),
+                    via: picked.via.get(&s.id).cloned().unwrap_or_default(),
+                }
+            })
+            .collect();
+        hosts.sort_by_key(|h| h.name.to_lowercase());
+        let vms_without_session = picked
+            .vms
+            .iter()
+            .filter_map(|id| vm_by_id.get(id.as_str()))
+            .map(|vm| VmWithoutSession {
+                vmx_path: vm.vmx_path.clone(),
+                name: vm.display_name.clone(),
+                via: picked.vm_via.get(&vm.id).cloned().unwrap_or_default(),
+            })
+            .collect();
+        Ok(ResolvedTargets {
+            hosts,
+            vms_without_session,
+            notes: picked.notes,
+        })
+    }
+
+    /// BX-02: the newest bulk runs, newest first.
+    pub async fn recent(&self, ctx: &Context, limit: u32) -> Result<Vec<JobSummary>> {
+        self.store.recent_exec_jobs(ctx, limit).await
+    }
+
+    async fn job(&self, ctx: &Context, job_id: Uuid) -> Result<(JobSummary, Command)> {
+        self.store
+            .job_detail(ctx, job_id)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget(format!("job {job_id}")))
+    }
+
+    /// BX-03: a run's results so far, grouped. Cheap enough to call after every host that finishes.
+    pub async fn results(&self, ctx: &Context, job_id: Uuid, opts: GroupOptions) -> Result<BulkResults> {
+        let (job, command) = self.job(ctx, job_id).await?;
+        let targets = self.store.job_targets_brief(ctx, job_id).await?;
+        let (mut groups, of_target) = group_targets(&targets, opts);
+        let mut budget = SAMPLE_BUDGET;
+        for group in &mut groups {
+            let Some(sample) = self.store.job_target(ctx, job_id, &group.sample).await? else {
+                continue;
+            };
+            let size = sample.output.as_ref().map_or(0, String::len) + sample.stderr.as_ref().map_or(0, String::len);
+            if size > budget {
+                continue;
+            }
+            budget -= size;
+            group.stdout = Some(sample.output.unwrap_or_default());
+            group.stderr = Some(sample.stderr.unwrap_or_default());
+        }
+        let counts = count(&targets);
+        let hosts = targets
+            .into_iter()
+            .zip(of_target)
+            .map(|(t, group)| HostResult {
+                target_key: t.target_key,
+                name: t.target_name,
+                status: t.status,
+                exit_code: t.exit_code,
+                duration_ms: t.duration_ms,
+                error: t.error,
+                error_code: t.error_code,
+                stdout_bytes: t.stdout_bytes,
+                stderr_bytes: t.stderr_bytes,
+                truncated: t.output_truncated,
+                group,
+                started_at: t.started_at,
+                finished_at: t.finished_at,
+            })
+            .collect();
+        Ok(BulkResults {
+            headline: headline(&groups, &counts),
+            run: run_info(&command),
+            job,
+            counts,
+            hosts,
+            groups,
+            ignore_trailing_whitespace: opts.ignore_trailing_whitespace,
+        })
+    }
+
+    /// One host's stored output.
+    pub async fn host_output(&self, ctx: &Context, job_id: Uuid, target_key: &str) -> Result<HostOutput> {
+        let t = self
+            .store
+            .job_target(ctx, job_id, target_key)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget(format!("host {target_key} of job {job_id}")))?;
+        Ok(HostOutput {
+            target_key: t.target_key,
+            name: t.target_name,
+            stdout: t.output.unwrap_or_default(),
+            stderr: t.stderr.unwrap_or_default(),
+            truncated: t.output_truncated,
+            exit_code: t.exit_code,
+            error: t.error,
+        })
+    }
+
+    /// BX-03: the line diff between two hosts' outputs (two groups' samples).
+    pub async fn diff(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        left: &str,
+        right: &str,
+        opts: GroupOptions,
+    ) -> Result<OutputDiff> {
+        let a = self.host_output(ctx, job_id, left).await?;
+        let b = self.host_output(ctx, job_id, right).await?;
+        Ok(OutputDiff {
+            stdout: diff_lines(&a.stdout, &b.stdout, opts),
+            stderr: diff_lines(&a.stderr, &b.stderr, opts),
+            left: a.name,
+            right: b.name,
+            left_exit_code: a.exit_code,
+            right_exit_code: b.exit_code,
+        })
+    }
+
+    /// BX-05: the run's results as a file's text. Returns it with how many texts were redacted.
+    pub async fn render(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        format: ExportFormat,
+        opts: GroupOptions,
+    ) -> Result<(String, usize, usize)> {
+        let (job, command) = self.job(ctx, job_id).await?;
+        let targets = self.store.job_targets(ctx, job_id).await?;
+        let (groups, of_target) = group_targets(&targets, opts);
+        let counts = count(&targets);
+        let mut r = Redactor::default();
+        let names: HashMap<&str, &str> = targets
+            .iter()
+            .map(|t| (t.target_key.as_str(), t.target_name.as_str()))
+            .collect();
+        let by_key: HashMap<&str, &JobTargetRecord> = targets.iter().map(|t| (t.target_key.as_str(), t)).collect();
+        let export_groups = groups
+            .iter()
+            .map(|g| {
+                let sample = by_key.get(g.sample.as_str());
+                ExportGroup {
+                    label: g.label.clone(),
+                    kind: g.kind,
+                    ok: g.ok,
+                    exit_code: g.exit_code,
+                    error: r.opt(g.error.as_deref()),
+                    hosts: g
+                        .hosts
+                        .iter()
+                        .map(|k| names.get(k.as_str()).copied().unwrap_or(k).to_owned())
+                        .collect(),
+                    stdout: r.opt(sample.and_then(|s| s.output.as_deref())),
+                    stderr: r.opt(sample.and_then(|s| s.stderr.as_deref())),
+                }
+            })
+            .collect();
+        let rows = targets
+            .iter()
+            .zip(&of_target)
+            .map(|(t, group)| ExportRow {
+                name: t.target_name.clone(),
+                group: group.map(group_label).unwrap_or_default(),
+                status: t.status.clone(),
+                exit_code: t.exit_code,
+                duration_ms: t.duration_ms,
+                stdout: r.opt(t.output.as_deref()),
+                stderr: r.opt(t.stderr.as_deref()),
+                truncated: t.output_truncated,
+                error: r.opt(t.error.as_deref()),
+            })
+            .collect();
+        let mut run = run_info(&command);
+        if let Some(run) = &mut run {
+            run.script = r.clean(&run.script);
+        }
+        let data = ExportData {
+            headline: headline(&groups, &counts),
+            grouped_by: if opts.ignore_trailing_whitespace {
+                "exit code and output, ignoring trailing whitespace"
+            } else {
+                "exit code and output"
+            },
+            job,
+            run,
+            groups: export_groups,
+            rows,
+        };
+        let text = match format {
+            ExportFormat::Csv => to_csv(&data),
+            ExportFormat::Json => to_json(&data)?,
+            ExportFormat::Html => to_html(&data),
+        };
+        Ok((text, r.changed, targets.len()))
+    }
+
+    /// BX-05: writes the export to `path` (chosen by the user in a save dialog) and logs that it did.
+    pub async fn export(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        format: ExportFormat,
+        opts: GroupOptions,
+        path: &Path,
+    ) -> Result<BulkExport> {
+        let (text, redacted, hosts_count) = self.render(ctx, job_id, format, opts).await?;
+        tokio::fs::write(path, text).await?;
+        let file = path
+            .file_name()
+            .map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "job_exported",
+                    action: &format!("Exported a bulk run's results to {}", format.label()),
+                    tier: None,
+                    job_id: Some(job_id),
+                    targets: &[],
+                    approval: None,
+                    result: None,
+                    detail: Some(&format!("{} to {file}", hosts(hosts_count))),
+                },
+            )
+            .await?;
+        Ok(BulkExport {
+            path: path.display().to_string(),
+            format,
+            hosts: hosts_count,
+            redacted,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(key: &str, status: &str, exit: Option<i64>, hash: Option<&str>, loose: Option<&str>) -> JobTargetRecord {
+        JobTargetRecord {
+            target_kind: "session".into(),
+            target_key: key.into(),
+            target_name: format!("host-{key}"),
+            status: status.into(),
+            exit_code: exit,
+            output: None,
+            error: None,
+            started_at: None,
+            finished_at: None,
+            duration_ms: Some(10),
+            safety_snapshot: None,
+            stderr: None,
+            stdout_bytes: None,
+            stderr_bytes: None,
+            output_truncated: false,
+            output_hash: hash.map(String::from),
+            output_hash_loose: loose.map(String::from),
+            error_code: None,
+        }
+    }
+
+    fn failed(key: &str, code: &str, message: &str) -> JobTargetRecord {
+        let mut t = target(key, "failed", None, None, None);
+        t.error_code = Some(code.into());
+        t.error = Some(message.into());
+        t
+    }
+
+    #[test]
+    fn identical_outputs_collapse_into_one_group_largest_first() {
+        let mut targets: Vec<JobTargetRecord> = (0..48)
+            .map(|i| target(&format!("s{i}"), "succeeded", Some(0), Some("same"), Some("same")))
+            .collect();
+        targets.insert(3, target("odd1", "succeeded", Some(0), Some("other"), Some("other")));
+        targets.push(target("odd2", "failed", Some(2), Some("same"), Some("same")));
+        let (groups, of) = group_targets(&targets, GroupOptions::default());
+        assert_eq!(groups.len(), 3);
+        assert_eq!(groups[0].hosts.len(), 48);
+        assert_eq!(groups[0].label, "A");
+        assert!(groups[0].ok);
+        // Same output, other exit code: a group of its own.
+        assert!(groups
+            .iter()
+            .any(|g| g.exit_code == Some(2) && !g.ok && g.hosts == ["odd2"]));
+        assert_eq!(of[3], Some(groups.iter().position(|g| g.hosts == ["odd1"]).unwrap()));
+        let counts = count(&targets);
+        assert_eq!(headline(&groups, &counts), "48 hosts same, 2 differ");
+    }
+
+    #[test]
+    fn ignoring_trailing_whitespace_uses_the_loose_hash() {
+        let targets = vec![
+            target("a", "succeeded", Some(0), Some("x1"), Some("x")),
+            target("b", "succeeded", Some(0), Some("x2"), Some("x")),
+        ];
+        assert_eq!(group_targets(&targets, GroupOptions::default()).0.len(), 2);
+        let loose = GroupOptions {
+            ignore_trailing_whitespace: true,
+        };
+        let (groups, _) = group_targets(&targets, loose);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(headline(&groups, &count(&targets)), "All 2 hosts the same");
+    }
+
+    #[test]
+    fn failures_before_the_command_group_by_cause() {
+        let targets = vec![
+            failed("a", "ssh", "can't connect to 192.0.2.10:22: refused"),
+            failed("b", "ssh", "can't connect to 192.0.2.11:22: refused"),
+            failed("c", "sudo_password_refused", "sudo refused the password from the vault"),
+            target("d", "succeeded", Some(0), Some("h"), Some("h")),
+        ];
+        let (groups, _) = group_targets(&targets, GroupOptions::default());
+        assert_eq!(groups.len(), 3);
+        let ssh = groups.iter().find(|g| g.error_code.as_deref() == Some("ssh")).unwrap();
+        assert_eq!(ssh.kind, GroupKind::Error);
+        assert_eq!(ssh.hosts, ["a", "b"]);
+        assert!(ssh.messages_differ);
+        assert_eq!(groups[0].hosts, ["a", "b"], "the largest group comes first");
+        let sudo = groups
+            .iter()
+            .find(|g| g.error_code.as_deref() == Some("sudo_password_refused"))
+            .unwrap();
+        assert!(!sudo.messages_differ);
+    }
+
+    #[test]
+    fn hosts_still_running_or_cancelled_are_not_grouped_but_counted() {
+        let targets = vec![
+            target("a", "succeeded", Some(0), Some("h"), Some("h")),
+            target("b", "running", None, None, None),
+            target("c", "pending", None, None, None),
+            target("d", "cancelled", None, None, None),
+        ];
+        let (groups, of) = group_targets(&targets, GroupOptions::default());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(of, [Some(0), None, None, None]);
+        let counts = count(&targets);
+        assert_eq!((counts.running, counts.pending, counts.cancelled), (1, 1, 1));
+        assert_eq!(
+            headline(&groups, &counts),
+            "1 host finished; 2 hosts still to finish; 1 cancelled"
+        );
+        assert_eq!(
+            headline(&[], &counts),
+            "Waiting for the first host; 2 hosts still to finish; 1 cancelled"
+        );
+    }
+
+    #[test]
+    fn every_host_different_reads_that_way() {
+        let targets: Vec<JobTargetRecord> = (0..3)
+            .map(|i| {
+                let h = format!("h{i}");
+                target(&format!("s{i}"), "succeeded", Some(0), Some(&h), Some(&h))
+            })
+            .collect();
+        let (groups, _) = group_targets(&targets, GroupOptions::default());
+        assert_eq!(headline(&groups, &count(&targets)), "3 hosts, all different");
+    }
+
+    #[test]
+    fn group_labels_run_like_spreadsheet_columns() {
+        assert_eq!(group_label(0), "A");
+        assert_eq!(group_label(25), "Z");
+        assert_eq!(group_label(26), "AA");
+        assert_eq!(group_label(27), "AB");
+    }
+
+    #[test]
+    fn diffs_show_added_and_removed_lines() {
+        let diff = diff_lines("a\nb\nc\n", "a\nB\nc\nd\n", GroupOptions::default());
+        let shown: Vec<(DiffKind, &str)> = diff.iter().map(|l| (l.kind, l.text.as_str())).collect();
+        assert_eq!(
+            shown,
+            [
+                (DiffKind::Same, "a"),
+                (DiffKind::Removed, "b"),
+                (DiffKind::Added, "B"),
+                (DiffKind::Same, "c"),
+                (DiffKind::Added, "d"),
+            ]
+        );
+        let loose = GroupOptions {
+            ignore_trailing_whitespace: true,
+        };
+        assert!(diff_lines("a  \nb\n\n", "a\nb\n", loose)
+            .iter()
+            .all(|l| l.kind == DiffKind::Same));
+    }
+
+    #[test]
+    fn html_export_escapes_everything() {
+        assert_eq!(html_escape("<script>&\"'"), "&lt;script&gt;&amp;&quot;&#39;");
+    }
+
+    #[test]
+    fn export_names_carry_the_date_and_the_job() {
+        let id = Uuid::parse_str("1a2b3c4d-0000-4000-8000-000000000000").unwrap();
+        let name = export_file_name(id, ExportFormat::Html);
+        assert!(name.starts_with("remotely-run-"), "{name}");
+        assert!(name.ends_with("-1a2b3c4d.html"), "{name}");
+    }
+}

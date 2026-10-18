@@ -175,7 +175,7 @@ pub fn audit_csv(entries: &[AuditEntry]) -> (String, usize) {
     (out, redacted_rows)
 }
 
-fn push_row(out: &mut String, cells: impl Iterator<Item = String>) {
+pub(crate) fn push_row(out: &mut String, cells: impl Iterator<Item = String>) {
     let mut first = true;
     for cell in cells {
         if !first {

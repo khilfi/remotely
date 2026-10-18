@@ -421,6 +421,18 @@ impl Default for PolicyRules {
     }
 }
 
+/// BX-06: a dangerous-command rule a script matched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DangerousMatch {
+    /// The rule's name, as in Settings.
+    pub rule: String,
+    /// The script line it first matched, trimmed (at most 200 characters).
+    pub text: String,
+    /// That line's number, from 1.
+    pub line: usize,
+}
+
 /// The engine's answer for one command.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -487,6 +499,28 @@ impl PolicyEngine {
             .iter()
             .filter(|(_, re)| re.is_match(script))
             .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// BX-06: each rule the script matches, with the line of its first match, so the editor and the
+    /// approval dialog can show why the command needs approval.
+    pub fn dangerous_details(&self, script: &str) -> Vec<DangerousMatch> {
+        self.dangerous
+            .iter()
+            .filter_map(|(name, re)| {
+                let found = re.find(script)?;
+                // A match may start on the separator before the command (`\n`, `;`), so the line
+                // is the one where its text begins.
+                let start = found.start() + (found.as_str().len() - found.as_str().trim_start().len());
+                let line_start = script[..start].rfind('\n').map_or(0, |i| i + 1);
+                let line_end = script[start..].find('\n').map_or(script.len(), |i| start + i);
+                let text: String = script[line_start..line_end].trim().chars().take(200).collect();
+                Some(DangerousMatch {
+                    rule: name.clone(),
+                    text,
+                    line: script[..line_start].matches('\n').count() + 1,
+                })
+            })
             .collect()
     }
 

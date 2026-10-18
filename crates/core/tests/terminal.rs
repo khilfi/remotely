@@ -66,6 +66,7 @@ fn session(server: &TestSshServer, auth: SessionAuth) -> SessionInput {
         environment: Environment::Lab,
         color: None,
         tags: vec![],
+        vm_id: None,
     }
 }
 
@@ -697,6 +698,7 @@ async fn sessions_with_a_jump_host_are_not_connected_directly() {
         environment: Environment::None,
         color: None,
         tags: vec![],
+        vm_id: None,
     };
     let bastion_id = create(&core, bastion.clone()).await;
     bastion.name = "inner".into();

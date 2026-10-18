@@ -46,6 +46,8 @@ pub const SCAN_FOLDERS_KEY: &str = "vmware.scanFolders";
 pub const POWER_ON_LIMIT_KEY: &str = "jobs.powerOnLimit";
 /// VM-03: seconds a soft stop may take before the VM counts as still running.
 pub const SHUTDOWN_WAIT_KEY: &str = "vmware.shutdownWaitSecs";
+/// BX-02: how many hosts a bulk run reaches at once.
+pub const REMOTE_LIMIT_KEY: &str = "jobs.remoteLimit";
 pub const DEFAULT_WORKSPACE: &str = "Default";
 
 #[derive(Clone)]

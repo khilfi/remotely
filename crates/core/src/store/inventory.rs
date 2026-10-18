@@ -133,6 +133,20 @@ impl Store {
         rows.iter().map(row_to_vm).collect()
     }
 
+    /// A VM by its id, including one the last refresh did not find (BX-01: a session's VM).
+    pub async fn vm_by_id(&self, ctx: &Context, id: &str) -> Result<Option<VmRecord>> {
+        let row = sqlx::query(concat!(
+            "SELECT ",
+            vm_columns!(),
+            " FROM vms WHERE workspace_id = ? AND id = ?"
+        ))
+        .bind(ctx.workspace_id.to_string())
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(row_to_vm).transpose()
+    }
+
     /// A VM by .vmx path (any letter case), including one the last refresh did not find.
     pub async fn find_vm(&self, ctx: &Context, vmx_path: &str) -> Result<Option<VmRecord>> {
         let row = sqlx::query(concat!(

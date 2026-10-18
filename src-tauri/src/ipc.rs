@@ -5,10 +5,16 @@
 use std::path::PathBuf;
 
 use remotely_core::adapters::updater::UpdateInfo;
-use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome, MAX_SNAPSHOT_NAME};
+use remotely_core::bulk::{
+    self, BulkExport, BulkResults, ExportFormat, GroupOptions, HostOutput, OutputDiff, ResolvedTargets, TargetPicks,
+};
+use remotely_core::command_bus::{
+    ApprovalAnswers, Command, CommandPreview, SubmitOutcome, MAX_EXEC_TIMEOUT_SECS, MAX_SCRIPT_BYTES, MAX_SNAPSHOT_NAME,
+};
 use remotely_core::domain::Environment;
 use remotely_core::import::{self, ImportPreview, ImportReport, ImportRequest, ImportSource};
 use remotely_core::inventory::{RefreshReport, VmFilter};
+use remotely_core::jobs::JobLimits;
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
@@ -321,6 +327,8 @@ pub struct Settings {
     power_on_limit: usize,
     /// VM-03: seconds a soft stop may take before the VM counts as still running.
     shutdown_wait_secs: u64,
+    /// BX-02: how many hosts a bulk run reaches at once.
+    bulk_parallel_limit: usize,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -336,6 +344,7 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
             .collect(),
         power_on_limit: core.power_on_limit(),
         shutdown_wait_secs: core.shutdown_wait_secs(),
+        bulk_parallel_limit: core.bulk_parallel_limit(),
     })
 }
 
@@ -379,6 +388,13 @@ pub async fn settings_set_power_on_limit(state: State<'_, AppState>, limit: usiz
 #[tauri::command]
 pub async fn settings_set_shutdown_wait(state: State<'_, AppState>, secs: u64) -> IpcResult<Settings> {
     state.core.set_shutdown_wait_secs(secs).await?;
+    settings(&state.core).await
+}
+
+/// BX-02: how many hosts a bulk run reaches at once (1 to 50).
+#[tauri::command]
+pub async fn settings_set_bulk_parallel(state: State<'_, AppState>, limit: usize) -> IpcResult<Settings> {
+    state.core.set_bulk_parallel_limit(limit).await?;
     settings(&state.core).await
 }
 
@@ -692,4 +708,131 @@ pub async fn import_commit(state: State<'_, AppState>, request: ImportRequest) -
         .import
         .commit(&core.ctx, &request, &core.sessions, &core.vault)
         .await?)
+}
+
+// ---- Bulk run (BX-01 to BX-07) --------------------------------------------------------------------
+// Running is `command_submit` with a `remoteExec` command, so the policy engine and the approval flow
+// decide as for any change. These are reads, plus retry (back through the bus) and export (a file the
+// user chooses in a dialog opened here, audited by the core).
+
+/// Fixed limits the Bulk run page checks against.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkLimits {
+    max_script_bytes: usize,
+    max_timeout_secs: u64,
+    max_parallel: usize,
+}
+
+#[tauri::command]
+pub fn bulk_limits() -> BulkLimits {
+    BulkLimits {
+        max_script_bytes: MAX_SCRIPT_BYTES,
+        max_timeout_secs: MAX_EXEC_TIMEOUT_SECS,
+        max_parallel: JobLimits::MAX_REMOTE,
+    }
+}
+
+/// BX-01: the hosts (sessions) the picks reach, and the picked VMs no session reaches.
+#[tauri::command]
+pub async fn bulk_targets(state: State<'_, AppState>, picks: TargetPicks) -> IpcResult<ResolvedTargets> {
+    let core = &state.core;
+    Ok(core.bulk.resolve(&core.ctx, &picks).await?)
+}
+
+/// BX-06: the tier and the dangerous-command rules the command would get, without submitting it.
+#[tauri::command]
+pub async fn bulk_preview(state: State<'_, AppState>, command: Command) -> IpcResult<CommandPreview> {
+    let core = &state.core;
+    Ok(core.bus.preview(&core.ctx, &command).await?)
+}
+
+/// BX-02: the newest bulk runs.
+#[tauri::command]
+pub async fn bulk_runs(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> IpcResult<Vec<remotely_core::store::JobSummary>> {
+    let core = &state.core;
+    Ok(core.bulk.recent(&core.ctx, limit.unwrap_or(20)).await?)
+}
+
+/// BX-03: a run's results so far, grouped by output.
+#[tauri::command]
+pub async fn bulk_results(
+    state: State<'_, AppState>,
+    job_id: Uuid,
+    options: Option<GroupOptions>,
+) -> IpcResult<BulkResults> {
+    let core = &state.core;
+    Ok(core
+        .bulk
+        .results(&core.ctx, job_id, options.unwrap_or_default())
+        .await?)
+}
+
+/// One host's stored output.
+#[tauri::command]
+pub async fn bulk_host_output(state: State<'_, AppState>, job_id: Uuid, target_key: String) -> IpcResult<HostOutput> {
+    let core = &state.core;
+    Ok(core.bulk.host_output(&core.ctx, job_id, &target_key).await?)
+}
+
+/// BX-03: the line diff between two hosts' outputs (the UI passes two groups' samples).
+#[tauri::command]
+pub async fn bulk_diff(
+    state: State<'_, AppState>,
+    job_id: Uuid,
+    left: String,
+    right: String,
+    options: Option<GroupOptions>,
+) -> IpcResult<OutputDiff> {
+    let core = &state.core;
+    Ok(core
+        .bulk
+        .diff(&core.ctx, job_id, &left, &right, options.unwrap_or_default())
+        .await?)
+}
+
+/// BX-04: the same command on the hosts that failed, as a new job through the bus (it may need approval).
+#[tauri::command]
+pub async fn bulk_retry_failed(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<SubmitOutcome> {
+    let core = &state.core;
+    Ok(core.bus.retry_failed(&core.ctx, job_id).await?)
+}
+
+/// BX-05: asks where to save, then writes the run's results there. `None` when the user closed the
+/// dialog.
+#[tauri::command]
+pub async fn bulk_export(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    job_id: Uuid,
+    format: ExportFormat,
+    options: Option<GroupOptions>,
+) -> IpcResult<Option<BulkExport>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Export the run's results")
+        .set_file_name(bulk::export_file_name(job_id, format))
+        .add_filter(format.label(), &[format.extension()])
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't save there: {err}")))?;
+    let core = &state.core;
+    let export = core
+        .bulk
+        .export(&core.ctx, job_id, format, options.unwrap_or_default(), &path)
+        .await?;
+    tracing::info!(hosts = export.hosts, "bulk run exported");
+    Ok(Some(export))
 }
