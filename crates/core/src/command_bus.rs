@@ -472,7 +472,29 @@ impl CommandBus {
                     .await
             }
             Err(err) => {
+                let ctx = pending.ctx;
+                let summary = pending.request.summary.clone();
+                let tier = pending.decision.tier;
+                let targets = pending.decision.targets.clone();
                 locks::lock(&self.pending).insert(request_id, pending);
+                if matches!(err, CoreError::WrongVaultPassword) {
+                    // AP-06: failed re-authentication shows in the audit log, so guessing does too.
+                    self.store
+                        .append_audit(
+                            &ctx,
+                            NewAuditEntry {
+                                event: "approval_rejected",
+                                action: &summary,
+                                tier: Some(tier),
+                                job_id: None,
+                                targets: &targets,
+                                approval: None,
+                                result: None,
+                                detail: Some("wrong vault password"),
+                            },
+                        )
+                        .await?;
+                }
                 Err(err)
             }
         }
@@ -530,13 +552,16 @@ impl CommandBus {
                 }
                 // Enforced by the job runner: the job waits this long and can be cancelled meanwhile.
                 ApprovalStep::Countdown { .. } => {}
+                // AP-06: the vault's master password, whichever way the vault is unlocked day to day. A
+                // vault that is not set up has no password, so the action cannot be approved yet.
                 ApprovalStep::VaultReauth => {
                     let password = answers
                         .vault_password
                         .as_ref()
+                        .filter(|p| !p.is_empty())
                         .ok_or_else(|| CoreError::ApprovalRejected("the vault password is required".into()))?;
                     if !self.vault.verify_password(password).await? {
-                        return Err(CoreError::ApprovalRejected("wrong vault password".into()));
+                        return Err(CoreError::WrongVaultPassword);
                     }
                     vault_reauth = true;
                 }

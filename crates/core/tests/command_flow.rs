@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, SnapshotOp, StopMode, SubmitOutcome};
 use remotely_core::domain::TargetRef;
-use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
+use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::{PolicyRules, Tier};
 use remotely_core::store::Store;
-use remotely_core::vault::{SecretString, UnimplementedVault, Vault};
+use remotely_core::vault::{LocalVault, SecretString, Vault, VaultOptions};
 use remotely_core::{Adapters, Core, CoreError};
 
 fn fake_vmware() -> Arc<FakeVmware> {
@@ -21,23 +21,31 @@ fn fake_vmware() -> Arc<FakeVmware> {
 }
 
 async fn core(fake: Arc<FakeVmware>, rules: Option<PolicyRules>) -> Core {
-    core_with(
-        fake,
-        rules,
-        Arc::new(UnimplementedVault),
-        Arc::new(FakeUpdater::default()),
-    )
-    .await
+    core_with(fake, rules, None, Arc::new(FakeUpdater::default())).await
 }
 
+/// `vault: None` is the app's own vault, not set up yet.
 async fn core_with(
     fake: Arc<FakeVmware>,
     rules: Option<PolicyRules>,
-    vault: Arc<dyn Vault>,
+    vault: Option<Arc<dyn Vault>>,
     updater: Arc<FakeUpdater>,
 ) -> Core {
     let store = Store::open_in_memory().await.unwrap();
     let ctx = store.ensure_identity(r"LAB\tester", "Tester").await.unwrap();
+    let vault = match vault {
+        Some(vault) => vault,
+        None => Arc::new(
+            LocalVault::open(
+                store.clone(),
+                ctx,
+                Arc::new(FakeKeyProtector::new()),
+                VaultOptions::insecure_fast(),
+            )
+            .await
+            .unwrap(),
+        ),
+    };
     if let Some(rules) = rules {
         store
             .put_setting(&ctx, remotely_core::store::POLICY_RULES_KEY, &rules)
@@ -233,7 +241,7 @@ async fn cancelling_during_the_countdown_touches_no_target() {
 }
 
 #[tokio::test]
-async fn critical_is_refused_while_the_vault_is_not_built() {
+async fn critical_is_refused_until_the_vault_is_set_up() {
     let fake = fake_vmware();
     let core = core(Arc::clone(&fake), None).await;
     let cmd = Command::VmPower {
@@ -251,9 +259,10 @@ async fn critical_is_refused_while_the_vault_is_not_built() {
         vault_password: Some(SecretString::new("whatever")),
         ..Default::default()
     };
+    // AP-06: no vault, no password to ask for again, so the action can't be approved yet.
     assert!(matches!(
         core.bus.approve(request.id, answers).await,
-        Err(CoreError::NotImplemented(_))
+        Err(CoreError::VaultNotSetUp)
     ));
     assert!(fake.calls().is_empty());
 }
@@ -279,7 +288,13 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
         countdown_seconds: 0,
         ..Default::default()
     };
-    let core = core_with(Arc::clone(&fake), Some(rules), vault, Arc::new(FakeUpdater::default())).await;
+    let core = core_with(
+        Arc::clone(&fake),
+        Some(rules),
+        Some(vault),
+        Arc::new(FakeUpdater::default()),
+    )
+    .await;
     let mut events = core.jobs.subscribe();
 
     let cmd = Command::VmPower {
@@ -297,12 +312,15 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
         vault_password: Some(SecretString::new(password)),
     };
 
-    // AP-06: a wrong password is refused and nothing runs.
+    // AP-06: a wrong password is refused, nothing runs, and the audit log shows the attempt.
     assert!(matches!(
         core.bus.approve(request.id, answers("wrong")).await,
-        Err(CoreError::ApprovalRejected(_))
+        Err(CoreError::WrongVaultPassword)
     ));
     assert!(fake.calls().is_empty());
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].event, "approval_rejected");
+    assert_eq!(audit[0].detail.as_deref(), Some("wrong vault password"));
 
     let job_id = core.bus.approve(request.id, answers("correct horse")).await.unwrap();
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Succeeded);
@@ -321,13 +339,7 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
 async fn an_update_installs_only_once_no_other_job_is_open() {
     let fake = fake_vmware();
     let updater = Arc::new(FakeUpdater::offering("0.1.0", "0.1.1"));
-    let core = core_with(
-        Arc::clone(&fake),
-        None,
-        Arc::new(UnimplementedVault),
-        Arc::clone(&updater),
-    )
-    .await;
+    let core = core_with(Arc::clone(&fake), None, None, Arc::clone(&updater)).await;
     let mut events = core.jobs.subscribe();
 
     let offered = core.check_for_update().await.unwrap().unwrap();
@@ -405,7 +417,7 @@ async fn the_vmrun_path_must_be_a_real_vmrun_exe() {
 #[tokio::test]
 async fn update_checks_can_be_turned_off_for_air_gapped_sites() {
     let updater = Arc::new(FakeUpdater::offering("0.1.0", "0.1.1"));
-    let core = core_with(fake_vmware(), None, Arc::new(UnimplementedVault), Arc::clone(&updater)).await;
+    let core = core_with(fake_vmware(), None, None, Arc::clone(&updater)).await;
 
     assert!(core.update_checks_enabled().await.unwrap(), "checks are on by default");
     assert!(core.check_for_update().await.unwrap().is_some());

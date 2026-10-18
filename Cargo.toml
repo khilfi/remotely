@@ -27,6 +27,14 @@ uuid = { version = "1", features = ["v4", "serde"] }
 unwrap_used = "deny"
 expect_used = "deny"
 
+# Argon2id (SS-04) is slow by design; unoptimised it takes many seconds per unlock in debug builds and
+# tests. Optimise it and its hash even there.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
 # Small installer and low idle RAM matter here (NFR Footprint): the app shares the host with the VMs.
 # https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

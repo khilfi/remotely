@@ -1,5 +1,6 @@
 //! IPC commands the UI can call. Actions on VMs, hosts and the app go to the command bus; the rest
-//! are reads, plus app settings (which are audited by the core).
+//! are reads, plus the app's own data (settings, the vault, the session library), which the core
+//! audits.
 
 use std::path::PathBuf;
 
@@ -7,13 +8,16 @@ use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome, MAX_SNAPSHOT_NAME};
 use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
+use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
+use remotely_core::vault::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, VaultInfo, MAX_SECRET_BYTES};
 use remotely_core::{AuditExport, Core, CoreError};
 use serde::Serialize;
 use tauri::{State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::AppState;
 
@@ -373,4 +377,233 @@ pub async fn settings_set_update_checks(state: State<'_, AppState>, enabled: boo
 #[tauri::command]
 pub async fn update_check(state: State<'_, AppState>) -> IpcResult<Option<UpdateInfo>> {
     Ok(state.core.check_for_update().await?)
+}
+
+// ---- Vault (SS-04, AP-06) ----------------------------------------------------------------------
+// Secret values come in as `SecretString`, which never prints and is zeroized when dropped, and go
+// straight to the vault. Nothing here returns one: the UI gets IDs, labels and kinds only.
+
+#[tauri::command]
+pub fn vault_info(state: State<'_, AppState>) -> VaultInfo {
+    state.core.vault.info()
+}
+
+/// SS-04: creates the vault, unlocked. The vault password is always set: Critical actions ask for
+/// it again (AP-06). `windows_login` also lets the Windows login unlock it day to day.
+#[tauri::command]
+pub async fn vault_setup(
+    state: State<'_, AppState>,
+    password: SecretString,
+    windows_login: bool,
+) -> IpcResult<VaultInfo> {
+    let core = &state.core;
+    Ok(core.vault.setup(&core.ctx, password, windows_login).await?)
+}
+
+/// With a password, unlocks with it; without, with the Windows login.
+#[tauri::command]
+pub async fn vault_unlock(state: State<'_, AppState>, password: Option<SecretString>) -> IpcResult<VaultInfo> {
+    let core = &state.core;
+    let method = match password {
+        Some(password) => UnlockMethod::MasterPassword(password),
+        None => UnlockMethod::WindowsLogin,
+    };
+    Ok(core.vault.unlock(&core.ctx, method).await?)
+}
+
+#[tauri::command]
+pub async fn vault_lock(state: State<'_, AppState>) -> IpcResult<VaultInfo> {
+    let core = &state.core;
+    Ok(core.vault.lock(&core.ctx).await?)
+}
+
+#[tauri::command]
+pub async fn vault_change_password(
+    state: State<'_, AppState>,
+    current: SecretString,
+    new: SecretString,
+) -> IpcResult<VaultInfo> {
+    let core = &state.core;
+    Ok(core.vault.change_password(&core.ctx, &current, new).await?)
+}
+
+#[tauri::command]
+pub async fn vault_set_windows_login(
+    state: State<'_, AppState>,
+    password: SecretString,
+    enabled: bool,
+) -> IpcResult<VaultInfo> {
+    let core = &state.core;
+    Ok(core.vault.set_windows_login(&core.ctx, &password, enabled).await?)
+}
+
+/// Labels and kinds, with how many sessions use each. Works while the vault is locked.
+#[tauri::command]
+pub async fn secrets_list(state: State<'_, AppState>) -> IpcResult<Vec<SecretMeta>> {
+    let core = &state.core;
+    Ok(core.vault.list(&core.ctx).await?)
+}
+
+#[tauri::command]
+pub async fn secret_add(
+    state: State<'_, AppState>,
+    kind: SecretKind,
+    label: String,
+    value: SecretString,
+) -> IpcResult<SecretMeta> {
+    let core = &state.core;
+    Ok(core.vault.add(&core.ctx, kind, &label, value).await?)
+}
+
+/// SS-04: asks for a private key file, then stores it in the vault. The dialog opens here and the
+/// file is read here, so the key never passes through the UI. `label` empty: the file name. `None`
+/// when the user closed the dialog.
+#[tauri::command]
+pub async fn secret_import_key(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    label: String,
+) -> IpcResult<Option<SecretMeta>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Choose a private key file")
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't read that file: {err}")))?;
+    let label = match label.trim() {
+        "" => path
+            .file_name()
+            .map_or_else(|| "private key".to_owned(), |n| n.to_string_lossy().into_owned()),
+        given => given.to_owned(),
+    };
+    let key = read_key_file(&path).await?;
+    let core = &state.core;
+    Ok(Some(
+        core.vault.add(&core.ctx, SecretKind::PrivateKey, &label, key).await?,
+    ))
+}
+
+/// Reads a key file of at most [`MAX_SECRET_BYTES`] into a zeroizing secret.
+async fn read_key_file(path: &std::path::Path) -> Result<SecretString, CoreError> {
+    let size = tokio::fs::metadata(path).await?.len();
+    if size > MAX_SECRET_BYTES as u64 {
+        return Err(CoreError::InvalidInput(format!(
+            "That file is larger than {} KB, too large for a private key.",
+            MAX_SECRET_BYTES / 1024
+        )));
+    }
+    let bytes = tokio::fs::read(path).await?;
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(SecretString::new(text)),
+        Err(err) => {
+            err.into_bytes().zeroize();
+            Err(CoreError::InvalidInput(
+                "That file is not a text key file (OpenSSH, PEM or PuTTY .ppk).".into(),
+            ))
+        }
+    }
+}
+
+/// A new value for a secret; its label and the sessions using it stay.
+#[tauri::command]
+pub async fn secret_replace(state: State<'_, AppState>, id: SecretId, value: SecretString) -> IpcResult<SecretMeta> {
+    let core = &state.core;
+    Ok(core.vault.replace(&core.ctx, id, value).await?)
+}
+
+#[tauri::command]
+pub async fn secret_rename(state: State<'_, AppState>, id: SecretId, label: String) -> IpcResult<SecretMeta> {
+    let core = &state.core;
+    Ok(core.vault.rename(&core.ctx, id, &label).await?)
+}
+
+/// Sessions that used it lose it.
+#[tauri::command]
+pub async fn secret_delete(state: State<'_, AppState>, id: SecretId) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.vault.delete(&core.ctx, id).await?)
+}
+
+// ---- Session library (SS-01, SS-06) -------------------------------------------------------------
+// The app's own data: changes skip the command bus and are audited by the core.
+
+#[tauri::command]
+pub async fn sessions_list(state: State<'_, AppState>, filter: Option<SessionFilter>) -> IpcResult<Vec<SessionRecord>> {
+    let core = &state.core;
+    Ok(core.sessions.list(&core.ctx, &filter.unwrap_or_default()).await?)
+}
+
+#[tauri::command]
+pub async fn session_folders(state: State<'_, AppState>) -> IpcResult<Vec<SessionFolder>> {
+    let core = &state.core;
+    Ok(core.sessions.folders(&core.ctx).await?)
+}
+
+#[tauri::command]
+pub async fn session_create(state: State<'_, AppState>, input: SessionInput) -> IpcResult<SessionRecord> {
+    let core = &state.core;
+    Ok(core.sessions.create(&core.ctx, input).await?)
+}
+
+#[tauri::command]
+pub async fn session_update(state: State<'_, AppState>, id: Uuid, input: SessionInput) -> IpcResult<SessionRecord> {
+    let core = &state.core;
+    Ok(core.sessions.update(&core.ctx, id, input).await?)
+}
+
+#[tauri::command]
+pub async fn session_duplicate(state: State<'_, AppState>, id: Uuid) -> IpcResult<SessionRecord> {
+    let core = &state.core;
+    Ok(core.sessions.duplicate(&core.ctx, id).await?)
+}
+
+#[tauri::command]
+pub async fn session_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.sessions.delete(&core.ctx, id).await?)
+}
+
+/// `folder_id: None` moves them to the top level.
+#[tauri::command]
+pub async fn sessions_move(state: State<'_, AppState>, ids: Vec<Uuid>, folder_id: Option<Uuid>) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.sessions.move_to(&core.ctx, &ids, folder_id).await?)
+}
+
+#[tauri::command]
+pub async fn folder_create(
+    state: State<'_, AppState>,
+    name: String,
+    parent_id: Option<Uuid>,
+) -> IpcResult<SessionFolder> {
+    let core = &state.core;
+    Ok(core.sessions.create_folder(&core.ctx, &name, parent_id).await?)
+}
+
+#[tauri::command]
+pub async fn folder_rename(state: State<'_, AppState>, id: Uuid, name: String) -> IpcResult<SessionFolder> {
+    let core = &state.core;
+    Ok(core.sessions.rename_folder(&core.ctx, id, &name).await?)
+}
+
+#[tauri::command]
+pub async fn folder_move(state: State<'_, AppState>, id: Uuid, parent_id: Option<Uuid>) -> IpcResult<SessionFolder> {
+    let core = &state.core;
+    Ok(core.sessions.move_folder(&core.ctx, id, parent_id).await?)
+}
+
+/// Its sessions and subfolders move up to its parent.
+#[tauri::command]
+pub async fn folder_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.sessions.delete_folder(&core.ctx, id).await?)
 }

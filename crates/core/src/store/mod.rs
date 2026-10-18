@@ -1,5 +1,5 @@
-//! Store: one local SQLite file (WAL mode, via sqlx) for inventory, sessions, jobs, metrics and the
-//! audit log. Reads (inventory, metrics) go straight here and skip the command bus.
+//! Store: one local SQLite file (WAL mode, via sqlx) for inventory, sessions, the vault's ciphertext,
+//! jobs, metrics and the audit log. Reads (inventory, metrics) go straight here and skip the command bus.
 //!
 //! Queries are checked at runtime, not with `query!`, so building needs no `DATABASE_URL`.
 
@@ -7,9 +7,11 @@ mod audit;
 mod inventory;
 mod jobs;
 mod metrics;
+mod sessions;
 mod tags;
 #[cfg(test)]
 mod tests;
+mod vault;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -28,7 +30,9 @@ pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, JobTargetRecord, TargetResult};
+pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
+pub(crate) use vault::VaultMetaRow;
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";
 /// Full path to vmrun.exe chosen in Settings; JSON null means "find it automatically".

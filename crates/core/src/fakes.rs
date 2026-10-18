@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use time::OffsetDateTime;
+use tokio::sync::watch;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::adapters::host_counters::{HostCounters, HostTotals, VmProcess};
 use crate::adapters::remote::{loopback_shell, ExecResult, RemoteAdapter, SessionSpec, ShellHandle};
@@ -23,7 +25,9 @@ use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::snapshots::is_safety_name;
-use crate::vault::{SecretId, SecretKind, SecretString, UnlockMethod, Vault, VaultStatus};
+use crate::vault::{
+    self, KeyProtector, SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultStatus,
+};
 
 /// Workstation in memory. VMs can sit in the library, in scanned folders and in the running list;
 /// power calls change the running list and snapshot calls change each VM's snapshot tree the way
@@ -466,10 +470,12 @@ impl RemoteAdapter for FakeRemote {
     }
 }
 
-/// An unlocked vault with a known password, holding secrets in memory.
+/// An unlocked vault with a known password, holding secrets in memory. Tests of the vault itself use
+/// [`vault::LocalVault`] with [`FakeKeyProtector`] instead.
 pub struct FakeVault {
     password: String,
-    items: Mutex<HashMap<SecretId, SecretString>>,
+    items: Mutex<HashMap<SecretId, (SecretMeta, SecretString)>>,
+    status: watch::Sender<VaultStatus>,
 }
 
 impl FakeVault {
@@ -477,14 +483,28 @@ impl FakeVault {
         Self {
             password: password.to_owned(),
             items: Mutex::default(),
+            status: watch::channel(VaultStatus::Unlocked).0,
         }
     }
 }
 
 #[async_trait]
 impl Vault for FakeVault {
-    fn status(&self) -> VaultStatus {
-        VaultStatus::Unlocked
+    fn info(&self) -> VaultInfo {
+        VaultInfo {
+            status: VaultStatus::Unlocked,
+            windows_login: false,
+            windows_login_available: false,
+            idle_lock_minutes: 15,
+        }
+    }
+
+    fn watch(&self) -> watch::Receiver<VaultStatus> {
+        self.status.subscribe()
+    }
+
+    async fn setup(&self, _: &Context, _: SecretString, _: bool) -> Result<()> {
+        Err(CoreError::InvalidInput("The vault is already set up.".into()))
     }
 
     async fn unlock(&self, _method: UnlockMethod) -> Result<()> {
@@ -497,17 +517,120 @@ impl Vault for FakeVault {
         Ok(password.expose() == self.password)
     }
 
-    async fn put(&self, _: &Context, _: SecretKind, _: &str, secret: SecretString) -> Result<SecretId> {
+    async fn change_password(&self, _: &SecretString, _: SecretString) -> Result<()> {
+        Err(CoreError::NotImplemented("FakeVault password change"))
+    }
+
+    async fn set_windows_login(&self, _: &SecretString, _: bool) -> Result<()> {
+        Err(CoreError::NotImplemented("FakeVault Windows login"))
+    }
+
+    async fn list(&self, _: &Context) -> Result<Vec<SecretMeta>> {
+        let mut items: Vec<SecretMeta> = locks::lock(&self.items).values().map(|(m, _)| m.clone()).collect();
+        items.sort_by(|a, b| a.label.cmp(&b.label));
+        Ok(items)
+    }
+
+    async fn put(&self, _: &Context, kind: SecretKind, label: &str, secret: SecretString) -> Result<SecretId> {
         let id = SecretId(Uuid::new_v4());
-        locks::lock(&self.items).insert(id, secret);
+        let meta = SecretMeta {
+            id,
+            kind,
+            label: label.to_owned(),
+            used_by: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        locks::lock(&self.items).insert(id, (meta, secret));
         Ok(id)
+    }
+
+    async fn replace(&self, _: &Context, id: SecretId, secret: SecretString) -> Result<()> {
+        let mut items = locks::lock(&self.items);
+        let item = items
+            .get_mut(&id)
+            .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))?;
+        item.1 = secret;
+        Ok(())
+    }
+
+    async fn rename(&self, _: &Context, id: SecretId, label: &str) -> Result<()> {
+        let mut items = locks::lock(&self.items);
+        let item = items
+            .get_mut(&id)
+            .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))?;
+        label.clone_into(&mut item.0.label);
+        Ok(())
+    }
+
+    async fn delete(&self, _: &Context, id: SecretId) -> Result<()> {
+        locks::lock(&self.items)
+            .remove(&id)
+            .map(drop)
+            .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))
     }
 
     async fn get(&self, _: &Context, id: SecretId) -> Result<SecretString> {
         locks::lock(&self.items)
             .get(&id)
-            .cloned()
-            .ok_or_else(|| CoreError::UnknownTarget(format!("secret {}", id.0)))
+            .map(|(_, s)| s.clone())
+            .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))
+    }
+}
+
+/// Stands in for DPAPI: wraps with a key of its own, so a vault opened with another instance (another
+/// Windows user, or the same user after a password reset) cannot use the Windows login.
+pub struct FakeKeyProtector {
+    key: vault::Key,
+    available: bool,
+}
+
+impl FakeKeyProtector {
+    pub fn new() -> Self {
+        let mut key = [0u8; 32];
+        key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        Self {
+            key: vault::Key::from_array(key),
+            available: true,
+        }
+    }
+
+    /// A machine without DPAPI.
+    pub fn unavailable() -> Self {
+        Self {
+            available: false,
+            ..Self::new()
+        }
+    }
+}
+
+impl Default for FakeKeyProtector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeyProtector for FakeKeyProtector {
+    fn available(&self) -> bool {
+        self.available
+    }
+
+    fn protect(&self, data: &[u8], entropy: &[u8]) -> Result<Vec<u8>> {
+        if !self.available {
+            return Err(CoreError::NotImplemented("DPAPI on this machine"));
+        }
+        let (nonce, ciphertext) = vault::encrypt(&self.key, data, entropy)?;
+        Ok([&nonce[..], &ciphertext].concat())
+    }
+
+    fn unprotect(&self, blob: &[u8], entropy: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        if blob.len() < 12 {
+            return Err(CoreError::Vault("blob too short".into()));
+        }
+        let (nonce, ciphertext) = blob.split_at(12);
+        vault::decrypt(&self.key, nonce, ciphertext, entropy)?
+            .ok_or_else(|| CoreError::Vault("the key could not be decrypted (another Windows user?)".into()))
     }
 }
 

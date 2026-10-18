@@ -707,3 +707,8 @@
 .terminal-host .xterm {
   height: 100%;
 }
+
+/* SS-04: secrets are write-only, so password fields get no reveal button (WebView2 adds one). */
+input[type="password"]::-ms-reveal {
+  display: none;
+}

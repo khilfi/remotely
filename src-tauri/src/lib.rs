@@ -78,6 +78,16 @@ pub fn run() {
                 }
             });
 
+            // SS-04: vault status -> UI, so the idle lock shows at once.
+            let mut vault_status = core.vault.watch();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while vault_status.changed().await.is_ok() {
+                    let status = *vault_status.borrow_and_update();
+                    let _ = handle.emit("vault://status", status);
+                }
+            });
+
             app.manage(AppState {
                 core,
                 terminals: terminal::Terminals::default(),
@@ -116,6 +126,29 @@ pub fn run() {
             ipc::settings_set_shutdown_wait,
             ipc::settings_set_update_checks,
             ipc::update_check,
+            ipc::vault_info,
+            ipc::vault_setup,
+            ipc::vault_unlock,
+            ipc::vault_lock,
+            ipc::vault_change_password,
+            ipc::vault_set_windows_login,
+            ipc::secrets_list,
+            ipc::secret_add,
+            ipc::secret_import_key,
+            ipc::secret_replace,
+            ipc::secret_rename,
+            ipc::secret_delete,
+            ipc::sessions_list,
+            ipc::session_folders,
+            ipc::session_create,
+            ipc::session_update,
+            ipc::session_duplicate,
+            ipc::session_delete,
+            ipc::sessions_move,
+            ipc::folder_create,
+            ipc::folder_rename,
+            ipc::folder_move,
+            ipc::folder_delete,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,

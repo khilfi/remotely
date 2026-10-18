@@ -6,10 +6,13 @@
 //!        ▼                               ▼
 //!   inventory, snapshots,          command_bus ──► policy (tier + steps)
 //!   metrics ──► store                    │  impact preview, approvals, audit
+//!                                        │  vault (AP-06 re-auth)
 //!                                        ▼
 //!                                   jobs (runner) ──► adapters::vmware (vmrun)
 //!                                                 ├─► adapters::remote (russh)
 //!                                                 └─► adapters::updater (FD-14)
+//!
+//!   sessions (SS-01), vault (SS-04): the app's own data; changes are audited like settings
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -29,6 +32,7 @@ pub mod jobs;
 pub mod locks;
 pub mod metrics;
 pub mod policy;
+pub mod sessions;
 pub mod snapshots;
 pub mod store;
 pub mod vault;
@@ -49,9 +53,10 @@ use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
 use policy::{PolicyEngine, PolicyRules};
 use serde::Serialize;
+use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
 use store::{NewAuditEntry, Store};
-use vault::{UnimplementedVault, Vault};
+use vault::{Dpapi, LocalVault, Vault, VaultOptions, VaultService};
 
 pub use error::{CoreError, Result};
 
@@ -94,7 +99,10 @@ pub struct Core {
     pub snapshots: SnapshotReader,
     pub bus: CommandBus,
     pub jobs: Arc<JobRunner>,
-    pub vault: Arc<dyn Vault>,
+    /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
+    pub vault: VaultService,
+    /// SS-01, SS-06: saved sessions and their folders.
+    pub sessions: SessionLibrary,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -110,13 +118,15 @@ impl Core {
         let ctx = store.ensure_identity(&config.account, &config.display_name).await?;
         let saved = saved_vmrun_path(&store, &ctx).await?;
         let vmware: Arc<dyn VmwareAdapter> = Arc::from(adapters::vmware::connect(config.vmrun_path.or(saved)));
+        // SS-04: the vault in this database, unlocked by the Windows login (DPAPI) or the master password.
+        let vault = LocalVault::open(store.clone(), ctx, Arc::new(Dpapi), VaultOptions::default()).await?;
         Self::assemble(
             store,
             ctx,
             Adapters {
                 vmware,
                 remote: Arc::new(RusshAdapter::new()),
-                vault: Arc::new(UnimplementedVault),
+                vault: Arc::new(vault),
                 host_counters: Arc::new(WindowsCounters),
                 updater: config.updater,
             },
@@ -160,10 +170,11 @@ impl Core {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
             inventory: Inventory::new(store.clone(), vmware_dyn),
+            vault: VaultService::new(adapters.vault, store.clone()),
+            sessions: SessionLibrary::new(store.clone()),
             store,
             bus,
             jobs,
-            vault: adapters.vault,
             host_counters: adapters.host_counters,
             updater: adapters.updater,
             vmware,

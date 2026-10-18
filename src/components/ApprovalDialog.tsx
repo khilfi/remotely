@@ -1,11 +1,12 @@
 // Approval dialog (AP-02, AP-03, AP-06, VM-05, VM-07): draws the steps the policy engine asked for, the
-// impact preview of each VM target and any warnings found before the action. After approval it shows
+// impact preview of each VM target and any warnings found before the action. A Critical action asks for
+// the vault password again; without a vault it points to the Vault page. After approval it shows
 // the countdown, which can be cancelled until it ends. The core checks every answer again; these
 // fields only help the user get them right first time.
 
 import { useEffect, useRef, useState } from "react";
-import { InfoIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { InfoIcon, KeyRoundIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -21,12 +22,24 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { api, errorMessage, type ApprovalRequest, type ApprovalStep, type TargetImpact } from "@/lib/api";
+import {
+  api,
+  errorCode,
+  errorMessage,
+  type ApprovalRequest,
+  type ApprovalStep,
+  type TargetImpact,
+  type VaultInfo,
+} from "@/lib/api";
 import { formatDuration, plural } from "@/lib/format";
 import { EnvBadge, StateBadge, TierBadge } from "./Badges";
 
 interface Props {
   request: ApprovalRequest;
+  /** AP-06: Critical actions need the vault password, so the vault must be set up. */
+  vault: VaultInfo | null;
+  /** Cancels this approval and opens the Vault page. */
+  onOpenVault: () => void;
   /** Called with the job id once approved, or null when the user cancels before approving. */
   onClose: (jobId: string | null) => void;
 }
@@ -44,7 +57,7 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
 /** After approval: the job waits until `until` and can be cancelled meanwhile (AP-03). */
 type Countdown = { jobId: string; until: number; seconds: number };
 
-export function ApprovalDialog({ request, onClose }: Props) {
+export function ApprovalDialog({ request, vault, onOpenVault, onClose }: Props) {
   const { steps, tier } = request;
   const snapshot = find(steps, "safetySnapshot");
   const typeCount = find(steps, "typeTargetCount");
@@ -60,8 +73,10 @@ export function ApprovalDialog({ request, onClose }: Props) {
   const [reason, setReason] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [noVault, setNoVault] = useState(false);
   const [busy, setBusy] = useState(false);
   const [countdown, setCountdown] = useState<Countdown | null>(null);
+  const vaultMissing = reauth && (noVault || vault?.status === "notSetUp");
 
   const ready =
     (!typeCount || Number(typed) === typeCount.expected) &&
@@ -90,6 +105,7 @@ export function ApprovalDialog({ request, onClose }: Props) {
     } catch (err) {
       // The request stays pending on a wrong answer, so the user can correct it.
       setError(errorMessage(err));
+      setNoVault(errorCode(err) === "vault_not_set_up");
       setPassword("");
     } finally {
       setBusy(false);
@@ -101,6 +117,14 @@ export function ApprovalDialog({ request, onClose }: Props) {
       await api.cancelApproval(request.id);
     } finally {
       onClose(null);
+    }
+  }
+
+  async function openVault() {
+    try {
+      await api.cancelApproval(request.id);
+    } finally {
+      onOpenVault();
     }
   }
 
@@ -270,9 +294,25 @@ export function ApprovalDialog({ request, onClose }: Props) {
             </div>
           )}
 
-          {reauth && (
+          {reauth && vaultMissing && (
+            <Alert>
+              <KeyRoundIcon />
+              <AlertTitle>Set up the vault first</AlertTitle>
+              <AlertDescription>
+                Critical actions ask for the vault password again, and there is no vault yet. Setting it up takes a
+                minute; then start this action again.
+              </AlertDescription>
+              <AlertAction>
+                <Button size="sm" variant="outline" onClick={() => void openVault()}>
+                  Open the vault
+                </Button>
+              </AlertAction>
+            </Alert>
+          )}
+
+          {reauth && !vaultMissing && (
             <div className="grid gap-2">
-              <Label htmlFor="approval-password">Vault password (Critical actions ask for it again)</Label>
+              <Label htmlFor="approval-password">Vault password</Label>
               <Input
                 id="approval-password"
                 type="password"
@@ -280,6 +320,9 @@ export function ApprovalDialog({ request, onClose }: Props) {
                 value={password}
                 onChange={(e) => setPassword(e.currentTarget.value)}
               />
+              <p className="text-xs text-muted-foreground">
+                Critical actions ask for it again (AP-06), even when your Windows login unlocked the vault.
+              </p>
             </div>
           )}
 

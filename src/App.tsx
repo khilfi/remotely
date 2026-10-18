@@ -1,14 +1,17 @@
-// App shell (shadcn/ui): sidebar navigation, top bar with the theme switch (FD-01), pages, the
-// approval dialog and job toasts. Pages stay mounted while hidden so the terminal session survives
-// a page switch.
+// App shell (shadcn/ui): sidebar navigation with the vault status (SS-04), top bar with the theme switch
+// (FD-01), pages, the approval dialog and job toasts. Pages stay mounted while hidden so the terminal
+// session survives a page switch.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   CameraIcon,
   HistoryIcon,
+  KeyRoundIcon,
   LayoutDashboardIcon,
   ListTreeIcon,
+  LockIcon,
+  LockOpenIcon,
   MonitorIcon,
   MoonIcon,
   ServerIcon,
@@ -42,30 +45,41 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { UpdateBanner } from "@/components/UpdateBanner";
-import { api, errorMessage, type AppInfo, type ApprovalRequest, type SubmitOutcome, type UpdateInfo } from "@/lib/api";
+import {
+  api,
+  errorMessage,
+  type AppInfo,
+  type ApprovalRequest,
+  type SubmitOutcome,
+  type UpdateInfo,
+  type VaultInfo,
+} from "@/lib/api";
 import { useTheme, type ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { SnapshotsPage } from "@/pages/SnapshotsPage";
 import { TerminalPage } from "@/pages/TerminalPage";
+import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage } from "@/pages/VmsPage";
 
-type PageId = "vms" | "snapshots" | "terminal" | "activity" | "settings";
+type PageId = "vms" | "snapshots" | "sessions" | "terminal" | "vault" | "activity" | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon },
   { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon },
+  { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon },
   { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon },
+  { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon },
   { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon },
   { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon },
 ];
 
 /** MVP pages that are not built yet, shown so the roadmap is visible in the app. */
 const LATER: { label: string; req: string; icon: LucideIcon }[] = [
-  { label: "Sessions", req: "SS-01", icon: ListTreeIcon },
   { label: "Bulk run", req: "BX-02", icon: SquareTerminalIcon },
   { label: "Dashboard", req: "MO-03", icon: LayoutDashboardIcon },
 ];
@@ -88,7 +102,20 @@ export default function App() {
   const [laterFor, setLaterFor] = useState<string | null>(null);
   // VMs picked on the VMs page to open in the snapshot manager (VM-04).
   const [snapshotPick, setSnapshotPick] = useState<{ paths: string[]; n: number } | null>(null);
+  // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
+  const [vault, setVault] = useState<VaultInfo | null>(null);
   const { preference, setPreference, resolved } = useTheme();
+
+  const loadVault = useCallback(() => {
+    api.vaultInfo().then(setVault, () => setVault(null));
+  }, []);
+
+  useEffect(() => {
+    loadVault();
+    // The vault locks itself after the idle time; the core says so.
+    const unlisten = api.onVaultStatus(() => loadVault());
+    return () => void unlisten.then((stop) => stop());
+  }, [loadVault]);
 
   const loadInfo = useCallback(() => {
     api.appInfo().then(setInfo, () => setInfo(null));
@@ -238,6 +265,12 @@ export default function App() {
           <SidebarFooter>
             <SidebarMenu>
               <SidebarMenuItem>
+                <SidebarMenuButton tooltip={vaultLabel(vault)} onClick={() => setPage("vault")}>
+                  {vault?.status === "unlocked" ? <LockOpenIcon className="text-success" /> : <LockIcon />}
+                  <span>{vaultLabel(vault)}</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+              <SidebarMenuItem>
                 <SidebarMenuButton
                   tooltip={info?.vmrunPath ?? "vmrun.exe was not found"}
                   onClick={() => setPage("settings")}
@@ -302,8 +335,19 @@ export default function App() {
                 preselect={snapshotPick}
               />
             </section>
+            <section hidden={page !== "sessions"}>
+              <SessionsPage
+                vault={vault}
+                onVaultChanged={setVault}
+                onOpenVault={() => setPage("vault")}
+                active={page === "sessions"}
+              />
+            </section>
             <section hidden={page !== "terminal"} className="h-full">
               <TerminalPage active={page === "terminal"} theme={resolved} />
+            </section>
+            <section hidden={page !== "vault"}>
+              <VaultPage vault={vault} onVaultChanged={setVault} active={page === "vault"} />
             </section>
             <section hidden={page !== "activity"}>
               <ActivityPage version={jobsVersion} />
@@ -318,6 +362,11 @@ export default function App() {
       {approval && (
         <ApprovalDialog
           request={approval}
+          vault={vault}
+          onOpenVault={() => {
+            setApproval(null);
+            setPage("vault");
+          }}
           onClose={(jobId) => {
             setApproval(null);
             if (jobId) setJobsVersion((v) => v + 1);
@@ -327,4 +376,17 @@ export default function App() {
       <Toaster theme={resolved} position="bottom-right" />
     </TooltipProvider>
   );
+}
+
+function vaultLabel(vault: VaultInfo | null) {
+  switch (vault?.status) {
+    case "unlocked":
+      return "Vault unlocked";
+    case "locked":
+      return "Vault locked";
+    case "notSetUp":
+      return "Vault not set up";
+    default:
+      return "Vault";
+  }
 }

@@ -27,13 +27,22 @@ regex = "1"
 sha2 = "0.11"
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+# SS-04 vault: AES-256-GCM per item and Argon2id for the master password, with keys zeroized on drop.
+# The versions russh already pulls in.
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"] }
+argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = "0.4"
+zeroize = "1"
 # SSH (SS-03, BX-02, MO-02). `ring` instead of the default aws-lc-rs so Windows builds need no CMake/NASM.
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
-# Host RAM, CPUs and free disk (VM-07, MO-04). 0.62 is the version Tauri already pulls in.
+# Host RAM, CPUs and free disk (VM-07, MO-04), and DPAPI for the vault key (SS-04). 0.62 is the version
+# Tauri already pulls in.
 windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
