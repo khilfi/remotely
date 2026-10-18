@@ -11,12 +11,15 @@
 //! check; it never logs what arrives on stdin.
 //!
 //! Exec channels (BX-02) run a toy POSIX shell ([`ToyShell`]): `;`, `&&`, `||` and new lines, quotes,
-//! `>&2`, and `echo`, `hostname`, `whoami`, `uptime`, `cat` (files set with
-//! [`TestSshServer::with_file`], or stdin), `seq`, `sleep`, `exit`, `true`, `false`, `exec </dev/null`,
-//! `sh -c` and `sudo` (BX-07: `-S` reads the password from stdin, `-p` sets the prompt, asked up to
-//! three times like the real one; see [`SudoMode`]).
+//! `#` comments, `$(...)`, `~`, the redirections `>`, `>>`, `>&2`, `2>&1` and `>/dev/null`, and `echo`,
+//! `printf`, `hostname`, `whoami`, `uptime`, `cat` (files set with [`TestSshServer::with_file`], or
+//! stdin), `head`, `tail`, `grep` (fixed strings), `[`/`test`, `seq`, `sleep`, `exit`, `true`, `false`,
+//! `exec </dev/null`, `sh -c`, `command -v`, `cd`, and `sudo` (BX-07: `-S` reads the password from
+//! stdin, `-p` sets the prompt, asked up to three times like the real one; see [`SudoMode`]). For
+//! SS-09's key push it keeps a tiny file system: `umask`, `mkdir [-p]`, `touch` and `chmod` (octal),
+//! with each file's and folder's mode ([`TestSshServer::file`], [`TestSshServer::mode`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -80,6 +83,10 @@ struct State {
     host_key: Mutex<Option<PrivateKey>>,
     hostname: Mutex<Option<String>>,
     files: Mutex<HashMap<String, String>>,
+    /// Folders made by `mkdir` or `with_dir` (system folders, homes and folders holding a file exist anyway).
+    dirs: Mutex<HashSet<String>>,
+    /// Modes of files and folders the toy shell created or `chmod` set (`with_mode` too).
+    modes: Mutex<HashMap<String, u32>>,
     /// Programs that print a fixed text (`with_program`).
     programs: Mutex<HashMap<String, String>>,
     sudo: Mutex<SudoMode>,
@@ -200,6 +207,28 @@ impl TestSshServer {
     /// Adds or replaces a file while the server runs (MO-02: counters that move between rounds).
     pub fn set_file(&self, path: &str, contents: &str) {
         locks::lock(&self.state.files).insert(path.into(), contents.into());
+    }
+
+    /// An empty folder.
+    pub fn with_dir(self, path: &str) -> Self {
+        locks::lock(&self.state.dirs).insert(path.into());
+        self
+    }
+
+    /// The mode of a file or folder, e.g. 0o664 for a file others may write (SS-09 tests).
+    pub fn with_mode(self, path: &str, mode: u32) -> Self {
+        locks::lock(&self.state.modes).insert(path.into(), mode);
+        self
+    }
+
+    /// A file's text as the toy shell left it (`~` is `/home/<user>`).
+    pub fn file(&self, path: &str) -> Option<String> {
+        locks::lock(&self.state.files).get(path).cloned()
+    }
+
+    /// A file's or folder's mode, once created by the toy shell or set by `chmod` or `with_mode`.
+    pub fn mode(&self, path: &str) -> Option<u32> {
+        locks::lock(&self.state.modes).get(path).copied()
     }
 
     /// A program that prints `stdout` whatever its arguments, e.g. `df`.
@@ -431,9 +460,23 @@ impl server::Handler for ServerHandler {
 
     async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
         self.user = user.to_owned();
-        let ok = locks::lock(&self.state.keys)
-            .get(user)
-            .is_some_and(|keys| keys.iter().any(|k| k.key_data() == key.key_data()));
+        // Keys set with `with_key`, and (SS-09) keys a push wrote to the user's authorized_keys.
+        let home = if user == "root" {
+            "/root".to_owned()
+        } else {
+            format!("/home/{user}")
+        };
+        let authorized = locks::lock(&self.state.files)
+            .get(&format!("{home}/.ssh/authorized_keys"))
+            .is_some_and(|text| {
+                text.lines()
+                    .filter_map(|line| PublicKey::from_openssh(line.trim()).ok())
+                    .any(|k| k.key_data() == key.key_data())
+            });
+        let ok = authorized
+            || locks::lock(&self.state.keys)
+                .get(user)
+                .is_some_and(|keys| keys.iter().any(|k| k.key_data() == key.key_data()));
         self.state
             .note(format!("publickey {user} {}", if ok { "ok" } else { "refused" }));
         Ok(if ok { self.first_factor_ok() } else { Auth::reject() })
@@ -585,33 +628,93 @@ impl server::Handler for ServerHandler {
     }
 }
 
+/// A piece of a toy shell word.
+#[derive(Debug, Clone, PartialEq)]
+enum Part {
+    Text(String),
+    /// `~` at the start of a word: the user's home folder.
+    Home,
+    /// `$(...)`: replaced by what the inner script prints, without its trailing line breaks.
+    Output(String),
+}
+
 /// A word or an operator of a toy shell command line.
 #[derive(Debug, PartialEq)]
 enum Token {
-    Word(String),
+    Word(Vec<Part>),
     /// `;` or a new line.
     Then,
     And,
     Or,
 }
 
-/// Splits a script into words and operators: single and double quotes, backslash escapes, `;`,
-/// new lines, `&&` and `||`.
+/// Collects the parts of the word being read.
+#[derive(Default)]
+struct WordBuilder {
+    parts: Vec<Part>,
+    text: String,
+    started: bool,
+}
+
+impl WordBuilder {
+    fn push(&mut self, c: char) {
+        self.started = true;
+        self.text.push(c);
+    }
+
+    fn part(&mut self, part: Part) {
+        self.started = true;
+        if !self.text.is_empty() {
+            self.parts.push(Part::Text(std::mem::take(&mut self.text)));
+        }
+        self.parts.push(part);
+    }
+
+    fn finish(&mut self, tokens: &mut Vec<Token>) {
+        if self.started {
+            if !self.text.is_empty() {
+                self.parts.push(Part::Text(std::mem::take(&mut self.text)));
+            }
+            tokens.push(Token::Word(std::mem::take(&mut self.parts)));
+            self.started = false;
+        }
+    }
+}
+
+/// The script inside `$(...)`, after the `$(` was read: up to the matching `)`.
+fn read_substitution(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut inner = String::new();
+    let mut depth = 1;
+    let mut quote: Option<char> = None;
+    for c in chars.by_ref() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '(') => depth += 1,
+            (None, ')') => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        inner.push(c);
+    }
+    inner
+}
+
+/// Splits a script into words and operators: single and double quotes, backslash escapes, `$(...)`,
+/// `~` at the start of a word, `#` comments, `;`, new lines, `&&` and `||`.
 fn tokenize(script: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
-    let mut word = String::new();
-    let mut in_word = false;
+    let mut word = WordBuilder::default();
     let mut chars = script.chars().peekable();
-    let end_word = |tokens: &mut Vec<Token>, word: &mut String, in_word: &mut bool| {
-        if *in_word {
-            tokens.push(Token::Word(std::mem::take(word)));
-            *in_word = false;
-        }
-    };
     while let Some(c) = chars.next() {
         match c {
             '\'' => {
-                in_word = true;
+                word.started = true;
                 for q in chars.by_ref() {
                     if q == '\'' {
                         break;
@@ -620,7 +723,7 @@ fn tokenize(script: &str) -> Vec<Token> {
                 }
             }
             '"' => {
-                in_word = true;
+                word.started = true;
                 while let Some(q) = chars.next() {
                     match q {
                         '"' => break,
@@ -629,43 +732,84 @@ fn tokenize(script: &str) -> Vec<Token> {
                                 word.push(next);
                             }
                         }
+                        '$' if chars.peek() == Some(&'(') => {
+                            chars.next();
+                            let inner = read_substitution(&mut chars);
+                            word.part(Part::Output(inner));
+                        }
                         _ => word.push(q),
                     }
                 }
             }
             '\\' => {
-                in_word = true;
                 if let Some(next) = chars.next() {
                     word.push(next);
                 }
             }
+            '$' if chars.peek() == Some(&'(') => {
+                chars.next();
+                let inner = read_substitution(&mut chars);
+                word.part(Part::Output(inner));
+            }
+            '#' if !word.started => {
+                while chars.peek().is_some_and(|&n| n != '\n') {
+                    chars.next();
+                }
+            }
+            '~' if !word.started && chars.peek().is_none_or(|&n| n == '/' || n.is_whitespace()) => {
+                word.part(Part::Home);
+            }
             ';' | '\n' => {
-                end_word(&mut tokens, &mut word, &mut in_word);
+                word.finish(&mut tokens);
                 tokens.push(Token::Then);
             }
             '&' if chars.peek() == Some(&'&') => {
                 chars.next();
-                end_word(&mut tokens, &mut word, &mut in_word);
+                word.finish(&mut tokens);
                 tokens.push(Token::And);
             }
             '|' if chars.peek() == Some(&'|') => {
                 chars.next();
-                end_word(&mut tokens, &mut word, &mut in_word);
+                word.finish(&mut tokens);
                 tokens.push(Token::Or);
             }
-            c if c.is_whitespace() => end_word(&mut tokens, &mut word, &mut in_word),
-            c => {
-                in_word = true;
-                word.push(c);
-            }
+            c if c.is_whitespace() => word.finish(&mut tokens),
+            c => word.push(c),
         }
     }
-    end_word(&mut tokens, &mut word, &mut in_word);
+    word.finish(&mut tokens);
     tokens
 }
 
+/// Folders every toy host has.
+const SYSTEM_DIRS: [&str; 6] = ["/", "/home", "/root", "/tmp", "/etc", "/proc"];
+
+/// What `command -v` finds besides the fake programs.
+const BUILTINS: [&str; 25] = [
+    "echo", "hostname", "whoami", "uptime", "cat", "head", "seq", "sleep", "exit", "true", "false", "exec", "sh",
+    "sudo", "umask", "cd", "mkdir", "chmod", "touch", "grep", "tail", "[", "test", "printf", "command",
+];
+
+/// Where a command's output goes (`>`, `>>`, `2>&1`, `>/dev/null`, ...).
+#[derive(Debug, Clone)]
+enum Sink {
+    Stdout,
+    Stderr,
+    Null,
+    File { path: String, append: bool },
+}
+
+/// `/a/b` for `/a/b/c`; `/` for `/a`.
+fn parent_of(path: &str) -> String {
+    match path.rsplit_once('/') {
+        Some(("", _)) | None => "/".to_owned(),
+        Some((parent, _)) => parent.to_owned(),
+    }
+}
+
 /// Runs a script the way a small POSIX shell would, collecting stdout and stderr. `sleep` adds up
-/// instead of blocking; the caller waits that long before it answers.
+/// instead of blocking; the caller waits that long before it answers. Files live in the server's
+/// state (paths as given, `~` is `/home/<user>` or `/root`), with their modes once set or created.
 struct ToyShell<'a> {
     state: &'a State,
     user: String,
@@ -674,6 +818,7 @@ struct ToyShell<'a> {
     stderr: Vec<u8>,
     sleep: Duration,
     exited: bool,
+    umask: u32,
 }
 
 impl<'a> ToyShell<'a> {
@@ -686,11 +831,16 @@ impl<'a> ToyShell<'a> {
             stderr: Vec::new(),
             sleep: Duration::ZERO,
             exited: false,
+            umask: 0o022,
         }
     }
 
     fn err(&mut self, text: &str) {
         self.stderr.extend_from_slice(text.as_bytes());
+    }
+
+    fn print(&mut self, text: &str) {
+        self.stdout.extend_from_slice(text.as_bytes());
     }
 
     /// One line of stdin, without its line break. `None` at the end of stdin.
@@ -710,10 +860,94 @@ impl<'a> ToyShell<'a> {
         Some(String::from_utf8_lossy(&line).into_owned())
     }
 
+    fn home(&self) -> String {
+        if self.user == "root" {
+            "/root".to_owned()
+        } else {
+            format!("/home/{}", self.user)
+        }
+    }
+
+    /// An absolute path: relative ones start in the home folder, where SSH commands start.
+    fn path(&self, p: &str) -> String {
+        let full = if p.starts_with('/') {
+            p.to_owned()
+        } else {
+            format!("{}/{p}", self.home())
+        };
+        let trimmed = full.trim_end_matches('/');
+        if trimmed.is_empty() {
+            "/".to_owned()
+        } else {
+            trimmed.to_owned()
+        }
+    }
+
+    fn is_dir(&self, path: &str) -> bool {
+        let below = format!("{path}/");
+        SYSTEM_DIRS.contains(&path)
+            || path == self.home()
+            || locks::lock(&self.state.dirs).contains(path)
+            || locks::lock(&self.state.files).keys().any(|f| f.starts_with(&below))
+    }
+
+    /// A file's text, looked up by its absolute path, then as given (files set by tests).
+    fn read_file(&self, p: &str) -> Option<String> {
+        let files = locks::lock(&self.state.files);
+        files.get(&self.path(p)).or_else(|| files.get(p)).cloned()
+    }
+
+    /// Writes or appends to a file, creating it (mode 0666 less the umask) in an existing folder.
+    fn write_file(&mut self, p: &str, text: &str, append: bool) -> Result<(), &'static str> {
+        let path = self.path(p);
+        if self.is_dir(&path) {
+            return Err("Is a directory");
+        }
+        let mut files = locks::lock(&self.state.files);
+        if !files.contains_key(&path) {
+            drop(files);
+            if !self.is_dir(&parent_of(&path)) {
+                return Err("Directory nonexistent");
+            }
+            locks::lock(&self.state.modes).insert(path.clone(), 0o666 & !self.umask);
+            files = locks::lock(&self.state.files);
+        }
+        let file = files.entry(path).or_default();
+        if !append {
+            file.clear();
+        }
+        file.push_str(text);
+        Ok(())
+    }
+
+    fn make_dir(&self, path: &str) {
+        locks::lock(&self.state.dirs).insert(path.to_owned());
+        locks::lock(&self.state.modes).insert(path.to_owned(), 0o777 & !self.umask);
+    }
+
+    fn expand(&mut self, parts: &[Part]) -> String {
+        let mut word = String::new();
+        for part in parts {
+            match part {
+                Part::Text(text) => word.push_str(text),
+                Part::Home => word.push_str(&self.home()),
+                Part::Output(script) => {
+                    let saved = std::mem::take(&mut self.stdout);
+                    let exited = self.exited;
+                    self.run(script);
+                    self.exited = exited;
+                    let printed = std::mem::replace(&mut self.stdout, saved);
+                    word.push_str(String::from_utf8_lossy(&printed).trim_end_matches('\n'));
+                }
+            }
+        }
+        word
+    }
+
     /// Runs a whole script; returns the status of the last command run.
     fn run(&mut self, script: &str) -> u32 {
         let mut status = 0;
-        let mut words = Vec::new();
+        let mut words: Vec<Vec<Part>> = Vec::new();
         let mut skip = false;
         let tokens = tokenize(script);
         let count = tokens.len();
@@ -729,7 +963,8 @@ impl<'a> ToyShell<'a> {
                 other => Some(other),
             };
             if !words.is_empty() && !skip {
-                status = self.command(&std::mem::take(&mut words));
+                let expanded: Vec<String> = std::mem::take(&mut words).iter().map(|w| self.expand(w)).collect();
+                status = self.command(&expanded);
                 if self.exited {
                     return status;
                 }
@@ -744,17 +979,81 @@ impl<'a> ToyShell<'a> {
         status
     }
 
+    /// One command with its redirections: `>`, `>>`, `2>`, `>&2`, `2>&1`, `>/dev/null`.
     fn command(&mut self, words: &[String]) -> u32 {
-        let mut words = words.to_vec();
-        let to_stderr = words.last().is_some_and(|w| w == ">&2");
-        if to_stderr {
-            words.pop();
+        let mut args = Vec::new();
+        let mut out = Sink::Stdout;
+        let mut errs = Sink::Stderr;
+        let mut i = 0;
+        while i < words.len() {
+            let w = words[i].as_str();
+            let (fd, target) = match w {
+                ">&2" | "1>&2" => {
+                    out = errs.clone();
+                    i += 1;
+                    continue;
+                }
+                "2>&1" => {
+                    errs = out.clone();
+                    i += 1;
+                    continue;
+                }
+                ">" | ">>" | "2>" | "2>>" => {
+                    i += 1;
+                    match words.get(i) {
+                        Some(target) => (w, target.as_str()),
+                        None => {
+                            self.err("sh: 1: Syntax error: newline unexpected\n");
+                            return 2;
+                        }
+                    }
+                }
+                _ if w.starts_with("2>>") => ("2>>", &w[3..]),
+                _ if w.starts_with("2>") => ("2>", &w[2..]),
+                _ if w.starts_with(">>") => (">>", &w[2..]),
+                _ if w.starts_with('>') => (">", &w[1..]),
+                _ => {
+                    args.push(w.to_owned());
+                    i += 1;
+                    continue;
+                }
+            };
+            let sink = if target == "/dev/null" {
+                Sink::Null
+            } else {
+                Sink::File {
+                    path: target.to_owned(),
+                    append: fd.ends_with(">>"),
+                }
+            };
+            if fd.starts_with('2') {
+                errs = sink;
+            } else {
+                out = sink;
+            }
+            i += 1;
         }
-        let before = self.stdout.len();
-        let status = self.builtin(&words);
-        if to_stderr {
-            let printed = self.stdout.split_off(before);
-            self.stderr.extend_from_slice(&printed);
+        if args.is_empty() {
+            return 0;
+        }
+        let (out_before, err_before) = (self.stdout.len(), self.stderr.len());
+        let mut status = self.builtin(&args);
+        let printed = [
+            (self.stdout.split_off(out_before), out),
+            (self.stderr.split_off(err_before), errs),
+        ];
+        for (bytes, sink) in printed {
+            match sink {
+                Sink::Stdout => self.stdout.extend_from_slice(&bytes),
+                Sink::Stderr => self.stderr.extend_from_slice(&bytes),
+                Sink::Null => {}
+                Sink::File { path, append } => {
+                    if let Err(why) = self.write_file(&path, &String::from_utf8_lossy(&bytes), append) {
+                        self.err(&format!("sh: 1: cannot create {path}: {why}\n"));
+                        status = 2;
+                    }
+                }
+            }
         }
         status
     }
@@ -763,24 +1062,23 @@ impl<'a> ToyShell<'a> {
         let args = &words[1..];
         match words[0].as_str() {
             "echo" => {
-                self.stdout
-                    .extend_from_slice(format!("{}\n", args.join(" ")).as_bytes());
+                self.print(&format!("{}\n", args.join(" ")));
                 0
             }
             "hostname" => {
                 let name = locks::lock(&self.state.hostname)
                     .clone()
                     .unwrap_or_else(|| "test-host".into());
-                self.stdout.extend_from_slice(format!("{name}\n").as_bytes());
+                self.print(&format!("{name}\n"));
                 0
             }
             "whoami" => {
-                self.stdout.extend_from_slice(format!("{}\n", self.user).as_bytes());
+                let user = self.user.clone();
+                self.print(&format!("{user}\n"));
                 0
             }
             "uptime" => {
-                self.stdout
-                    .extend_from_slice(b" 10:00:00 up 3 days,  2:01,  1 user,  load average: 0.00, 0.01, 0.05\n");
+                self.print(" 10:00:00 up 3 days,  2:01,  1 user,  load average: 0.00, 0.01, 0.05\n");
                 0
             }
             "cat" if args.is_empty() => {
@@ -791,9 +1089,8 @@ impl<'a> ToyShell<'a> {
             "cat" => {
                 let mut status = 0;
                 for path in args {
-                    let found = locks::lock(&self.state.files).get(path).cloned();
-                    match found {
-                        Some(text) => self.stdout.extend_from_slice(text.as_bytes()),
+                    match self.read_file(path) {
+                        Some(text) => self.print(&text),
                         None => {
                             self.err(&format!("cat: {path}: No such file or directory\n"));
                             status = 1;
@@ -812,11 +1109,10 @@ impl<'a> ToyShell<'a> {
                         return 1;
                     }
                 };
-                let found = locks::lock(&self.state.files).get(path).cloned();
-                match found {
+                match self.read_file(path) {
                     Some(text) => {
                         for line in text.split_inclusive('\n').take(lines) {
-                            self.stdout.extend_from_slice(line.as_bytes());
+                            self.print(line);
                         }
                         0
                     }
@@ -828,10 +1124,37 @@ impl<'a> ToyShell<'a> {
                     }
                 }
             }
+            "tail" => {
+                // `tail -c N file` and `tail -n N file`.
+                let (bytes, n, path) = match args {
+                    [flag, n, path] if flag == "-c" || flag == "-n" => (flag == "-c", n.parse().unwrap_or(10), path),
+                    [path] => (false, 10, path),
+                    _ => {
+                        self.err("tail: usage: tail [-c N | -n N] file\n");
+                        return 1;
+                    }
+                };
+                let Some(text) = self.read_file(path) else {
+                    self.err(&format!(
+                        "tail: cannot open '{path}' for reading: No such file or directory\n"
+                    ));
+                    return 1;
+                };
+                if bytes {
+                    let start = text.len().saturating_sub(n);
+                    self.stdout.extend_from_slice(&text.as_bytes()[start..]);
+                } else {
+                    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+                    for line in &lines[lines.len().saturating_sub(n)..] {
+                        self.print(line);
+                    }
+                }
+                0
+            }
             "seq" => {
                 let n: u64 = args.first().and_then(|n| n.parse().ok()).unwrap_or(0);
                 for i in 1..=n {
-                    self.stdout.extend_from_slice(format!("{i}\n").as_bytes());
+                    self.print(&format!("{i}\n"));
                 }
                 0
             }
@@ -844,7 +1167,7 @@ impl<'a> ToyShell<'a> {
                 self.exited = true;
                 args.first().and_then(|c| c.parse().ok()).unwrap_or(0)
             }
-            "true" => 0,
+            "true" | "cd" => 0,
             "false" => 1,
             "exec" if args.iter().any(|a| a == "</dev/null") => {
                 self.stdin.clear();
@@ -857,12 +1180,225 @@ impl<'a> ToyShell<'a> {
                 status
             }
             "sudo" => self.sudo(args),
+            "umask" => {
+                match args.first() {
+                    Some(mask) => match u32::from_str_radix(mask, 8) {
+                        Ok(mask) => self.umask = mask & 0o777,
+                        Err(_) => {
+                            self.err(&format!("sh: 1: umask: Illegal mode: {mask}\n"));
+                            return 2;
+                        }
+                    },
+                    None => {
+                        let mask = self.umask;
+                        self.print(&format!("{mask:04o}\n"));
+                    }
+                }
+                0
+            }
+            "mkdir" => {
+                let parents = args.iter().any(|a| a == "-p");
+                let mut status = 0;
+                for dir in args.iter().filter(|a| !a.starts_with('-')) {
+                    let path = self.path(dir);
+                    if self.is_dir(&path) || self.read_file(&path).is_some() {
+                        if !parents || !self.is_dir(&path) {
+                            self.err(&format!("mkdir: cannot create directory '{dir}': File exists\n"));
+                            status = 1;
+                        }
+                        continue;
+                    }
+                    let mut missing = vec![path.clone()];
+                    let mut up = parent_of(&path);
+                    while !self.is_dir(&up) {
+                        missing.push(up.clone());
+                        up = parent_of(&up);
+                    }
+                    if missing.len() > 1 && !parents {
+                        self.err(&format!(
+                            "mkdir: cannot create directory '{dir}': No such file or directory\n"
+                        ));
+                        status = 1;
+                        continue;
+                    }
+                    for folder in missing.iter().rev() {
+                        self.make_dir(folder);
+                    }
+                }
+                status
+            }
+            "chmod" => {
+                let Some((mode, paths)) = args.split_first() else {
+                    self.err("chmod: missing operand\n");
+                    return 1;
+                };
+                let Ok(mode) = u32::from_str_radix(mode, 8) else {
+                    self.err(&format!("chmod: invalid mode: '{mode}'\n"));
+                    return 1;
+                };
+                let mut status = 0;
+                for p in paths {
+                    let path = self.path(p);
+                    if self.is_dir(&path) || self.read_file(&path).is_some() {
+                        locks::lock(&self.state.modes).insert(path, mode);
+                    } else {
+                        self.err(&format!("chmod: cannot access '{p}': No such file or directory\n"));
+                        status = 1;
+                    }
+                }
+                status
+            }
+            "touch" => {
+                let mut status = 0;
+                for p in args {
+                    let path = self.path(p);
+                    if self.is_dir(&path) || self.read_file(&path).is_some() {
+                        continue;
+                    }
+                    if let Err(why) = self.write_file(p, "", true) {
+                        self.err(&format!("touch: cannot touch '{p}': {why}\n"));
+                        status = 1;
+                    }
+                }
+                status
+            }
+            "grep" => {
+                // Fixed strings only: `grep [-q] [-F] [-x] [-e PATTERN | PATTERN] [FILE]`.
+                let mut quiet = false;
+                let mut whole_line = false;
+                let mut pattern = None;
+                let mut files = Vec::new();
+                let mut rest = args.iter();
+                while let Some(arg) = rest.next() {
+                    if arg == "-e" {
+                        pattern = rest.next().cloned();
+                    } else if arg.starts_with('-') && arg.len() > 1 && pattern.is_none() {
+                        quiet |= arg.contains('q');
+                        whole_line |= arg.contains('x');
+                    } else if pattern.is_none() {
+                        pattern = Some(arg.clone());
+                    } else {
+                        files.push(arg.clone());
+                    }
+                }
+                let Some(pattern) = pattern else {
+                    self.err("grep: no pattern\n");
+                    return 2;
+                };
+                let text = match files.first() {
+                    None => String::from_utf8_lossy(&std::mem::take(&mut self.stdin)).into_owned(),
+                    Some(file) => match self.read_file(file) {
+                        Some(text) => text,
+                        None => {
+                            self.err(&format!("grep: {file}: No such file or directory\n"));
+                            return 2;
+                        }
+                    },
+                };
+                let hits: Vec<&str> = text
+                    .lines()
+                    .filter(|l| {
+                        if whole_line {
+                            *l == pattern
+                        } else {
+                            l.contains(&pattern)
+                        }
+                    })
+                    .collect();
+                if !quiet {
+                    for hit in &hits {
+                        self.print(&format!("{hit}\n"));
+                    }
+                }
+                u32::from(hits.is_empty())
+            }
+            name @ ("[" | "test") => {
+                let mut a: Vec<&str> = args.iter().map(String::as_str).collect();
+                if name == "[" {
+                    if a.last() != Some(&"]") {
+                        self.err("sh: 1: [: missing ]\n");
+                        return 2;
+                    }
+                    a.pop();
+                }
+                let negate = a.first() == Some(&"!");
+                if negate {
+                    a.remove(0);
+                }
+                let result = match a.as_slice() {
+                    [] => false,
+                    [s] => !s.is_empty(),
+                    ["-z", s] => s.is_empty(),
+                    ["-n", s] => !s.is_empty(),
+                    ["-s", f] => self.read_file(f).is_some_and(|t| !t.is_empty()),
+                    ["-f", f] => self.read_file(f).is_some(),
+                    ["-d", d] => self.is_dir(&self.path(d)),
+                    ["-e", p] => self.read_file(p).is_some() || self.is_dir(&self.path(p)),
+                    [x, "=", y] => x == y,
+                    [x, "!=", y] => x != y,
+                    _ => {
+                        self.err("sh: 1: [: unexpected operator\n");
+                        return 2;
+                    }
+                };
+                u32::from(result == negate)
+            }
+            "printf" => {
+                let Some((format, rest)) = args.split_first() else {
+                    return 0;
+                };
+                // Like POSIX printf, the format is used again while arguments are left.
+                let mut rest = rest.iter();
+                loop {
+                    let mut used = false;
+                    let mut out = String::new();
+                    let mut chars = format.chars();
+                    while let Some(c) = chars.next() {
+                        match c {
+                            '\\' => match chars.next() {
+                                Some('n') => out.push('\n'),
+                                Some('t') => out.push('\t'),
+                                Some(other) => out.push(other),
+                                None => out.push('\\'),
+                            },
+                            '%' => match chars.next() {
+                                Some('s') => {
+                                    used = true;
+                                    out.push_str(rest.next().map_or("", String::as_str));
+                                }
+                                Some(other) => out.push(other),
+                                None => out.push('%'),
+                            },
+                            c => out.push(c),
+                        }
+                    }
+                    self.print(&out);
+                    if !used || rest.len() == 0 {
+                        break;
+                    }
+                }
+                0
+            }
+            "command" => match args {
+                [flag, name] if flag == "-v" => {
+                    let known = BUILTINS.contains(&name.as_str())
+                        || locks::lock(&self.state.programs).contains_key(name.as_str());
+                    if known {
+                        self.print(&format!("{name}\n"));
+                    }
+                    u32::from(!known)
+                }
+                _ => {
+                    self.err("sh: 1: command: only -v NAME is supported here\n");
+                    2
+                }
+            },
             other if locks::lock(&self.state.programs).contains_key(other) => {
                 let text = locks::lock(&self.state.programs)
                     .get(other)
                     .cloned()
                     .unwrap_or_default();
-                self.stdout.extend_from_slice(text.as_bytes());
+                self.print(&text);
                 0
             }
             other => {

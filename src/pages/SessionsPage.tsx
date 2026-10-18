@@ -4,16 +4,20 @@
 // (or a double-click) opens the session in a terminal tab (SS-03); Import reads PuTTY, MobaXterm,
 // OpenSSH and CSV session lists (SS-02). The VM column shows the VM each session reaches (QL-01),
 // linked automatically by IP address or by hand, and lets the user keep, change or remove the link.
+// Export and "Import from another laptop" move the library between the owner's laptops in one encrypted
+// file (FD-07).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   EllipsisIcon,
+  FileLockIcon,
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
   ImportIcon,
   KeyRoundIcon,
+  LaptopIcon,
   LibraryIcon,
   ListTreeIcon,
   PlusIcon,
@@ -44,9 +48,11 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ColorDot, EnvBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ExportDialog } from "@/components/ExportDialog";
 import { ImportDialog } from "@/components/ImportDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { SessionDialog } from "@/components/SessionDialog";
+import { TransferImportDialog } from "@/components/TransferImportDialog";
 import { SessionVmLink } from "@/components/VmLinkControls";
 import {
   api,
@@ -81,6 +87,8 @@ type DialogState =
   | { kind: "renameFolder"; folder: SessionFolder }
   | { kind: "deleteFolder"; folder: SessionFolder }
   | { kind: "import" }
+  | { kind: "export" }
+  | { kind: "importExport" }
   | null;
 
 const LABELS: { value: Environment; label: string; className: string }[] = [
@@ -360,9 +368,27 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               ? `${shown.length} of ${plural(all.length, "session")}`
               : plural(all.length, "session")}
           </span>
-          <Button variant="outline" className="ml-auto" onClick={() => setDialog({ kind: "import" })}>
-            <ImportIcon data-icon="inline-start" />
-            Import
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" className="ml-auto">
+                <ImportIcon data-icon="inline-start" />
+                Import
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuItem onSelect={() => setDialog({ kind: "import" })}>
+                <ImportIcon />
+                From PuTTY, MobaXterm, OpenSSH or CSV…
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setDialog({ kind: "importExport" })}>
+                <LaptopIcon />
+                From another laptop (Remotely export)…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <Button variant="outline" disabled={all.length === 0} onClick={() => setDialog({ kind: "export" })}>
+            <FileLockIcon data-icon="inline-start" />
+            Export
           </Button>
           <Button onClick={() => setDialog({ kind: "editSession" })}>
             <PlusIcon data-icon="inline-start" />
@@ -400,6 +426,10 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               <Button variant="outline" onClick={() => setDialog({ kind: "import" })}>
                 <ImportIcon data-icon="inline-start" />
                 Import from PuTTY, MobaXterm…
+              </Button>
+              <Button variant="outline" onClick={() => setDialog({ kind: "importExport" })}>
+                <LaptopIcon data-icon="inline-start" />
+                Import from another laptop…
               </Button>
             </EmptyContent>
           </Empty>
@@ -624,6 +654,26 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
           vault={vault}
           onVaultChanged={onVaultChanged}
           onOpenVault={onOpenVault}
+          onImported={reload}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "export" && (
+        <ExportDialog
+          sessions={all.length}
+          folders={folders.length}
+          vault={vault}
+          onVaultChanged={onVaultChanged}
+          onExported={(report) =>
+            toast.success(`Exported ${plural(report.sessions, "session")}`, { description: report.path })
+          }
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "importExport" && (
+        <TransferImportDialog
+          vault={vault}
+          onVaultChanged={onVaultChanged}
           onImported={reload}
           onClose={() => setDialog(null)}
         />

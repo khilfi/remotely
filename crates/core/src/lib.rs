@@ -14,6 +14,8 @@
 //!                                                       └─► adapters::github (token from the vault)
 //!
 //!   sessions (SS-01), vault (SS-04), known_hosts (SS-05): the app's own data; changes are audited
+//!   transfer (FD-07): encrypted export and import of that data; ssh_keys (SS-09): keys in the vault
+//!   (pushing one to hosts is a command on the bus)
 //!   vm_links (QL-01): sessions linked to the VMs they reach, by IP (adapters::dns) or by hand
 //!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
@@ -41,8 +43,10 @@ pub mod metrics;
 pub mod policy;
 pub mod sessions;
 pub mod snapshots;
+pub mod ssh_keys;
 pub mod store;
 pub mod terminal;
+pub mod transfer;
 pub mod updates;
 pub mod vault;
 pub mod vm_links;
@@ -70,8 +74,10 @@ use policy::{PolicyEngine, PolicyRules};
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
+use ssh_keys::KeyManager;
 use store::{NewAuditEntry, Store};
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
+use transfer::Transfer;
 use vault::{Dpapi, LocalVault, Vault, VaultOptions, VaultService};
 use vm_links::VmLinks;
 
@@ -128,6 +134,10 @@ pub struct Core {
     pub import: Importer,
     /// SS-05: trusted SSH host keys.
     pub known_hosts: Arc<KnownHosts>,
+    /// SS-09: SSH keys in the vault. Pushing one to hosts goes through [`Core::bus`].
+    pub keys: KeyManager,
+    /// FD-07: encrypted export and import of the session library, known hosts and vault.
+    pub transfer: Transfer,
     /// SS-03: open terminal panes and their SSH connections.
     pub terminals: Terminals,
     /// BX-01, BX-03, BX-05: bulk run targets, results, diffs and exports. Running is the bus.
@@ -230,6 +240,7 @@ impl Core {
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::REMOTE_LIMIT_KEY).await? {
             jobs.set_remote_limit(limit.clamp(1, JobLimits::MAX_REMOTE));
         }
+        let keys = KeyManager::new(store.clone(), Arc::clone(&adapters.vault));
         Ok(Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
@@ -239,6 +250,8 @@ impl Core {
             links,
             import: Importer::new(store.clone()),
             known_hosts,
+            keys,
+            transfer: Transfer::new(store.clone()),
             terminals,
             bulk: BulkRuns::new(store.clone()),
             metrics,

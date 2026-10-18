@@ -1,6 +1,6 @@
 // Vault (SS-04, AP-06): set it up, unlock and lock it, change the vault password, choose whether the
 // Windows login unlocks it, and add, replace, rename or delete secrets. Values are write-only: this page
-// only ever holds labels, kinds and IDs.
+// only ever holds labels, kinds and IDs. SS-09's SSH keys live here too (public keys only).
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -48,8 +48,9 @@ import { SECRET_KIND_LABEL } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { SecretDialog } from "@/components/SecretDialog";
+import { SshKeysCard } from "@/components/SshKeysCard";
 import { VaultUnlock } from "@/components/VaultUnlock";
-import { api, errorMessage, type SecretKind, type SecretMeta, type VaultInfo } from "@/lib/api";
+import { api, errorMessage, type SecretKind, type SecretMeta, type SubmitOutcome, type VaultInfo } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 
 /** The vault password's minimum length, as the core checks it. */
@@ -60,6 +61,9 @@ interface Props {
   onVaultChanged: (info: VaultInfo) => void;
   /** True while the page is shown, so the list is read again when the user comes back. */
   active: boolean;
+  /** SS-09: a key push goes through the app, which opens the approval dialog. */
+  onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
+  onOpenSessions: () => void;
 }
 
 type DialogState =
@@ -76,7 +80,7 @@ const ADD: { kind: SecretKind; label: string }[] = [
   { kind: "passphrase", label: "Key passphrase" },
 ];
 
-export function VaultPage({ vault, onVaultChanged, active }: Props) {
+export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSessions }: Props) {
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [listVersion, setListVersion] = useState(0);
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -211,6 +215,14 @@ export function VaultPage({ vault, onVaultChanged, active }: Props) {
           )}
         </CardContent>
       </Card>
+
+      <SshKeysCard
+        vault={vault}
+        active={active}
+        version={listVersion}
+        onSubmit={onSubmitted}
+        onOpenSessions={onOpenSessions}
+      />
 
       <PasswordCard
         vault={vault}

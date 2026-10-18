@@ -9,6 +9,7 @@ mod jobs;
 mod known_hosts;
 mod metrics;
 mod sessions;
+mod ssh_keys;
 mod tags;
 #[cfg(test)]
 mod tests;

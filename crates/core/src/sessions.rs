@@ -213,7 +213,7 @@ impl SessionRecord {
     }
 
     /// The editor's view of this session, to start a copy or compare an edit.
-    fn input(&self) -> SessionInput {
+    pub(crate) fn input(&self) -> SessionInput {
         SessionInput {
             name: self.name.clone(),
             folder_id: self.folder_id,
@@ -515,6 +515,36 @@ impl SessionLibrary {
         self.store.insert_session(ctx, id, &input, Some(imported_from)).await?;
         if input.vm_id.is_some() {
             self.store.set_vm_link_kind(ctx, id, Some(VmLink::Manual)).await?;
+        }
+        let session = self.get(ctx, id).await?;
+        let detail = self.describe(ctx, &session).await?;
+        self.audit(
+            ctx,
+            &format!("Imported session {} from {source}", quoted(&session.name)),
+            &session,
+            Some(&detail),
+        )
+        .await?;
+        Ok(session)
+    }
+
+    /// FD-07: saves a session from a Remotely export under `id` (the one it had on the other laptop,
+    /// when that is free here, so a later import finds it again), checked like an edit and audited
+    /// like an SS-02 import. `imported_from` keeps where it first came from, if anywhere; `link` is how
+    /// its VM link was made there (QL-01), for a session that reaches a VM here too.
+    pub(crate) async fn restore(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        input: SessionInput,
+        imported_from: Option<&str>,
+        link: VmLink,
+        source: &str,
+    ) -> Result<SessionRecord> {
+        let input = self.check(ctx, None, input).await?;
+        self.store.insert_session(ctx, id, &input, imported_from).await?;
+        if input.vm_id.is_some() {
+            self.store.set_vm_link_kind(ctx, id, Some(link)).await?;
         }
         let session = self.get(ctx, id).await?;
         let detail = self.describe(ctx, &session).await?;

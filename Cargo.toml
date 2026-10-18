@@ -39,6 +39,16 @@ opt-level = 3
 [profile.dev.package.bcrypt-pbkdf]
 opt-level = 3
 
+# Generating an RSA 4096 key (SS-09) searches for large primes: minutes unoptimised, about a second here.
+[profile.dev.package.rsa]
+opt-level = 3
+
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+[profile.dev.package.crypto-primes]
+opt-level = 3
+
 # Small installer and low idle RAM matter here (NFR Footprint): the app shares the host with the VMs.
 # https://tauri.app/concept/size/#cargo-configuration
 [profile.release]

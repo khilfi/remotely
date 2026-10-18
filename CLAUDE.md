@@ -81,6 +81,10 @@ crates/core/          remotely-core: all app logic
     terminal.rs       SS-03 terminal panes: one supervised SSH connection each (keep-alive, auto-reconnect)
     bulk.rs           BX-01 targets, BX-03 grouped results and diff, BX-05 exports (running is RemoteExec on the bus)
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
+    ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
+                      authorized_keys push script (the push itself is Command::PushSshKey on the bus)
+    transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
+                      format version), preview with conflicts (skip, replace, keep both), commit; audited
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
     store/
