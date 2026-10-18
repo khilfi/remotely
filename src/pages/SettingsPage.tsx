@@ -1,6 +1,6 @@
 // Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
-// power-on limit (VM-06), shutdown wait (VM-03), hosts a bulk run reaches at once (BX-02) and update
-// checks (FD-14) under General, keep-alive,
+// power-on limit (VM-06), shutdown wait (VM-03), hosts a bulk run reaches at once (BX-02), and update
+// checks with the GitHub update token (FD-14) under General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
 // Approval rules. The theme switch is in the top bar.
 
@@ -14,11 +14,32 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
-import { api, errorMessage, type Settings } from "@/lib/api";
+import { UpdateTokenField } from "@/components/UpdateTokenField";
+import { api, errorMessage, type Settings, type UpdateCheck, type VaultInfo } from "@/lib/api";
 
 interface Props {
   /** Called after a setting changes, so the sidebar status and update banner refresh. */
   onChanged: () => void;
+  /** FD-14: the update token is kept in the vault. */
+  vault: VaultInfo | null;
+  onVaultChanged: (info: VaultInfo) => void;
+  onOpenVault: () => void;
+}
+
+/** FD-14: what "Check now" found, for the status line. */
+function checkResult(result: UpdateCheck) {
+  switch (result.status) {
+    case "available":
+      return `Version ${result.update.version} is available.`;
+    case "upToDate":
+      return "You have the latest version.";
+    case "noToken":
+      return "Add a GitHub update token below first: the releases are in a private repository.";
+    case "vaultLocked":
+      return "Unlock the vault first: the GitHub update token is kept there.";
+    case "off":
+      return "Update checks are off.";
+  }
 }
 
 type Message = { ok: boolean; text: string } | null;
@@ -32,7 +53,7 @@ function StatusLine({ message }: { message: Message }) {
   );
 }
 
-export function SettingsPage({ onChanged }: Props) {
+export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: Props) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [path, setPath] = useState("");
   const [vmrunMessage, setVmrunMessage] = useState<Message>(null);
@@ -123,12 +144,12 @@ export function SettingsPage({ onChanged }: Props) {
   async function checkNow() {
     setChecking(true);
     try {
-      const found = await api.checkForUpdate();
+      const result = await api.checkForUpdate();
       setUpdateMessage({
-        ok: true,
-        text: found ? `Version ${found.version} is available.` : "You have the latest version.",
+        ok: result.status === "available" || result.status === "upToDate",
+        text: checkResult(result),
       });
-      if (found) onChanged();
+      if (result.status === "available") onChanged();
     } catch (err) {
       setUpdateMessage({ ok: false, text: `Could not check for updates: ${errorMessage(err)}` });
     } finally {
@@ -331,6 +352,14 @@ export function SettingsPage({ onChanged }: Props) {
               <Label htmlFor="update-checks">Check for updates</Label>
             </div>
             <StatusLine message={updateMessage} />
+            <UpdateTokenField
+              settings={settings}
+              vault={vault}
+              onSettings={setSettings}
+              onChanged={onChanged}
+              onVaultChanged={onVaultChanged}
+              onOpenVault={onOpenVault}
+            />
           </CardContent>
           <CardFooter>
             <Button variant="outline" onClick={() => void checkNow()} disabled={checking || !settings?.updateChecks}>

@@ -395,6 +395,8 @@ export interface Settings {
   vmrunPathInUse: string | null;
   /** FD-14: check GitHub Releases for updates (off at air-gapped sites). */
   updateChecks: boolean;
+  /** FD-14: the GitHub update token in the vault. Never the token itself. */
+  updateToken: UpdateTokenInfo;
   /** VM-01: folders scanned for .vmx files, besides Workstation's library. */
   scanFolders: string[];
   /** VM-06: how many VMs may power on at once (1 to 32, default 3). */
@@ -902,6 +904,35 @@ export interface UpdateInfo {
   pubDate: string | null;
 }
 
+/** FD-14: what an update check found, or why it did not ask GitHub. */
+export type UpdateCheck =
+  | { status: "off" }
+  /** No GitHub update token in the vault: the private repository's releases can't be read. */
+  | { status: "noToken" }
+  /** The token is in the vault, which is locked. Check again once it is unlocked. */
+  | { status: "vaultLocked" }
+  | { status: "upToDate" }
+  | { status: "available"; update: UpdateInfo };
+
+/** FD-14: what Settings may know about the GitHub update token. */
+export interface UpdateTokenInfo {
+  stored: boolean;
+  /** YYYY-MM-DD, as GitHub last reported it; null before first use and for a token with no expiry. */
+  expiresOn: string | null;
+}
+
+/** FD-14: what testing the token found. */
+export interface TokenReport {
+  /** owner/name of the repository whose releases the token can read. */
+  repository: string;
+  /** Tag of the latest published release, if any. */
+  latestRelease: string | null;
+  expiresOn: string | null;
+}
+
+/** FD-14: error codes that mean the token needs attention in Settings. */
+export const UPDATE_TOKEN_ERRORS = ["update_token_refused", "update_token_no_access", "update_token_missing"];
+
 export interface AppInfo {
   version: string;
   workspaceId: string;
@@ -990,8 +1021,12 @@ export const api = {
   setShutdownWait: (secs: number) => invoke<Settings>("settings_set_shutdown_wait", { secs }),
   /** BX-02: how many hosts a bulk run reaches at once. */
   setBulkParallel: (limit: number) => invoke<Settings>("settings_set_bulk_parallel", { limit }),
-  /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
-  checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
+  /** FD-14: installing is the `appUpdate` command. */
+  checkForUpdate: () => invoke<UpdateCheck>("update_check"),
+  /** FD-14: write-only; stored in the vault, replacing the one there. Needs the vault unlocked. */
+  setUpdateToken: (token: string) => invoke<Settings>("update_token_set", { token }),
+  testUpdateToken: () => invoke<TokenReport>("update_token_test"),
+  removeUpdateToken: () => invoke<Settings>("update_token_remove"),
 
   /**
    * MO-01 to MO-04. Reads only: no approval. The core collects every 5 s and emits each round's cost;
