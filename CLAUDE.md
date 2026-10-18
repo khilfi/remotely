@@ -2,7 +2,7 @@
 
 A Windows desktop app for forward deployed engineers and IT admins: bulk control of VMware Workstation Pro VMs, a performance dashboard, a PuTTY/MobaXterm-style SSH session manager, and bulk command execution with grouped output, with multi-step approvals on every high-impact action.
 
-The source of truth is `docs/PRD.md`. Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
+The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work after the MVP (0.2.1 and 0.3.0), which moves some v2/v3 items into scope and replaces the Bulk run page with MultiExec and Compare in the Terminal page. Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx, and QL-xx for post-MVP quality-of-life items); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
 
 ## Locked decisions
 
@@ -12,12 +12,12 @@ The source of truth is `docs/PRD.md`. Requirements have IDs (VM-xx, SS-xx, BX-xx
 - Windows 10/11 x64 with VMware Workstation Pro 17 or later. No Linux host support.
 - RDP means launching `mstsc.exe` with a generated .rdp file (v3).
 - Ansible: inventory export only (v2). The app never runs playbooks.
-- **This repository is public.** Code and releases live in one public GitHub repo. Installed apps auto-update from its GitHub Releases (FD-14). See "Public repository rules" below.
-- MVP scope is locked at 32 requirements: VM-01 to VM-07, SS-01 to SS-06, BX-01 to BX-07, AP-01 to AP-06, MO-01 to MO-04, FD-01 and FD-14. Do not build v2/v3 items unless asked. If a change would move something into or out of the MVP, stop and say so.
+- **The repository is private while the app is field-tested** (since 0.2.0), but follow the "Public repository rules" below anyway: it may go public later, and git history is forever. Code and releases live in one GitHub repo, and installed apps auto-update from its GitHub Releases (FD-14); with the repo private, that needs a read-only token in each app's vault (`docs/post-mvp-plan.md`, P1).
+- The MVP (32 requirements: VM-01 to VM-07, SS-01 to SS-06, BX-01 to BX-07, AP-01 to AP-06, MO-01 to MO-04, FD-01 and FD-14) shipped in 0.2.0. Post-MVP scope is exactly what `docs/post-mvp-plan.md` lists. Do not build other v2/v3 items unless asked; if a change would add or drop scope, stop and say so.
 
 ## Public repository rules (no credentials, PII or secrets)
 
-Everything committed here is public forever, including git history.
+Everything committed here may become public, and git history is forever, so treat it as public now.
 
 - Never commit passwords, tokens, API keys, private keys (SSH, TLS, update-signing), certificates with private keys (`.pfx`, `.p12`), `.env` files, or real session exports (PuTTY `.reg`, MobaXterm `.mxtsessions`).
 - Never commit real hostnames, IP addresses, usernames, customer names, logs, terminal recordings, audit or job exports, or app databases. This applies to code, tests, fixtures, docs and screenshots.
