@@ -10,6 +10,7 @@ mod known_hosts;
 mod metrics;
 mod quick_connect;
 mod sessions;
+mod ssh_keys;
 mod tags;
 #[cfg(test)]
 mod tests;

@@ -182,7 +182,16 @@ export type Command =
       /** Seconds each host may take; null: no limit. */
       timeoutSecs?: number | null;
     }
-  | { type: "appUpdate"; version: string };
+  | { type: "appUpdate"; version: string }
+  /** SS-09: adds a public key to ~/.ssh/authorized_keys on each host, unless it is there already. */
+  | {
+      type: "pushSshKey";
+      targets: TargetRef[];
+      /** The OpenSSH public key line; the core writes its own form of it. */
+      publicKey: string;
+      trustNewHostKeys?: boolean;
+      timeoutSecs?: number | null;
+    };
 
 /** AP-02: a VM target as it is now, read without a guest login. */
 export interface TargetImpact {
@@ -368,6 +377,7 @@ export type ActionKind =
   | "execReadOnly"
   | "execOther"
   | "execDangerous"
+  | "sshKeyPush"
   | "appUpdate";
 
 export interface TierRule {
@@ -728,6 +738,98 @@ export interface ImportReport {
   keysAdded: number;
   foldersCreated: number;
   problems: ImportSkipped[];
+}
+
+/** SS-09: a public key in OpenSSH's one-line form. Not secret. */
+export interface PublicKeyInfo {
+  /** e.g. "ssh-ed25519", "ssh-rsa". */
+  algorithm: string;
+  /** "<algorithm> <base64> <comment>", as it goes into authorized_keys. */
+  line: string;
+  /** "SHA256:...", as ssh-keygen -l prints it. */
+  fingerprint: string;
+  comment: string;
+  /** RSA only. */
+  bits: number | null;
+}
+
+/** SS-09: a private key in the vault, as the key manager shows it. */
+export interface SshKey {
+  id: string;
+  label: string;
+  /** Sessions that log in with it. */
+  usedBy: number;
+  createdAt: string;
+  /** Remotely generated it. */
+  generated: boolean;
+  /** null until read from the private key (needs the vault unlocked). */
+  public: PublicKeyInfo | null;
+}
+
+export type KeyType = "ed25519" | "rsa";
+
+/** FD-07: what an export wrote. */
+export interface ExportReport {
+  path: string;
+  folders: number;
+  sessions: number;
+  knownHosts: number;
+  /** Vault items named in the file. */
+  secrets: number;
+  /** Their values are in the file too. */
+  secretValues: boolean;
+}
+
+export type TransferStatus = "new" | "same" | "conflict";
+export type TransferAction = "import" | "skip" | "replace" | "keepBoth";
+
+/** FD-07: one session, known host or secret of an export, compared with this laptop. */
+export interface TransferItem {
+  index: number;
+  name: string;
+  detail: string;
+  status: TransferStatus;
+  /** What it matches here, and how. */
+  conflict: string | null;
+  choices: TransferAction[];
+  defaultAction: TransferAction;
+  notes: string[];
+}
+
+export interface TransferPreview {
+  id: string;
+  file: string;
+  exportedAt: string;
+  exportedBy: string;
+  folders: number;
+  newFolders: number;
+  sessions: TransferItem[];
+  knownHosts: TransferItem[];
+  secrets: TransferItem[];
+  secretValues: boolean;
+  warnings: string[];
+}
+
+export interface TransferChoice {
+  index: number;
+  action: TransferAction;
+}
+
+export interface TransferCounts {
+  added: number;
+  replaced: number;
+  keptBoth: number;
+  skipped: number;
+}
+
+export interface TransferReport {
+  sessions: TransferCounts;
+  knownHosts: TransferCounts;
+  secrets: TransferCounts;
+  foldersAdded: number;
+  /** Sessions imported without the password or key they used. */
+  withoutCredentials: number;
+  problems: { name: string; reason: string }[];
 }
 
 /** BX-01: what is picked on the Bulk run page. */
@@ -1242,6 +1344,41 @@ export const api = {
   /** Saves the picked rows of a preview; key files go into the vault when addKeys. */
   importCommit: (request: { previewId: string; rows: number[]; folderId: string | null; addKeys: boolean }) =>
     invoke<ImportReport>("import_commit", { request }),
+
+  /**
+   * FD-07: asks where to save (Documents by default), then writes the encrypted export. Secret values go
+   * along only with includeSecrets, which needs the vault password. null when the user cancels.
+   */
+  transferExport: (request: {
+    passphrase: string;
+    includeKnownHosts: boolean;
+    includeSecrets: boolean;
+    vaultPassword: string | null;
+  }) => invoke<ExportReport | null>("transfer_export", { request }),
+  /** Asks for an export file in a dialog the core opens; its name, or null when cancelled. */
+  transferChoose: () => invoke<string | null>("transfer_choose"),
+  /** Opens the chosen file with its passphrase (wrong: code "wrong_passphrase") and compares it. */
+  transferOpen: (passphrase: string) => invoke<TransferPreview>("transfer_open", { passphrase }),
+  /** The opened file compared with the library again, e.g. after unlocking the vault. */
+  transferRefresh: (previewId: string) => invoke<TransferPreview>("transfer_refresh", { previewId }),
+  /** Drops the opened file. */
+  transferClose: (previewId: string) => invoke<boolean>("transfer_close", { previewId }),
+  /** Items not listed get their default action. */
+  transferCommit: (request: {
+    previewId: string;
+    sessions: TransferChoice[];
+    knownHosts: TransferChoice[];
+    secrets: TransferChoice[];
+  }) => invoke<TransferReport>("transfer_commit", { request }),
+
+  /** SS-09 SSH keys in the vault. Pushing one is `submit` with a pushSshKey command. */
+  sshKeys: () => invoke<SshKey[]>("ssh_keys_list"),
+  generateSshKey: (request: { label: string; keyType: KeyType; comment: string }) =>
+    invoke<SshKey>("ssh_key_generate", { request }),
+  /** Reads the public half from the private key when it is not known yet (vault unlocked). */
+  sshKeyPublic: (id: string) => invoke<SshKey>("ssh_key_public", { id }),
+  attachSshKey: (id: string, sessionIds: string[]) => invoke<SessionRecord[]>("ssh_key_attach", { id, sessionIds }),
+  parsePublicKey: (publicKey: string) => invoke<PublicKeyInfo>("ssh_public_key_parse", { publicKey }),
 
   /** BX-01 to BX-07. Running is `submit` with a remoteExec command, through the approval flow. */
   bulkLimits: () => invoke<BulkLimits>("bulk_limits"),

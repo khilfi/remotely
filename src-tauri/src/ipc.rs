@@ -20,13 +20,15 @@ use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHos
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
+use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
+use remotely_core::transfer::{self, ExportReport, ExportRequest, TransferCommit, TransferPreview, TransferReport};
 use remotely_core::updates::{UpdateCheck, UpdateTokenInfo};
 use remotely_core::vault::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, VaultInfo, MAX_SECRET_BYTES};
 use remotely_core::vm_links::AmbiguousLink;
 use remotely_core::{AuditExport, Core, CoreError};
 use serde::Serialize;
-use tauri::{State, WebviewWindow};
+use tauri::{Manager, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -760,6 +762,149 @@ pub async fn import_commit(state: State<'_, AppState>, request: ImportRequest) -
         .import
         .commit(&core.ctx, &request, &core.sessions, &core.vault)
         .await?)
+}
+
+// ---- Export and import between laptops (FD-07) ------------------------------------------------------
+// Files are chosen in dialogs opened here (Documents by default), so no path comes from the UI. The
+// opened file stays in the core; the commit names its items only.
+
+/// The Documents folder, where export dialogs start: never the repository or the app's own data.
+fn documents(window: &WebviewWindow) -> Option<PathBuf> {
+    window.path().document_dir().ok()
+}
+
+/// Asks where to save, then writes the encrypted export there. `None` when the user closed the
+/// dialog.
+#[tauri::command]
+pub async fn transfer_export(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    request: ExportRequest,
+) -> IpcResult<Option<ExportReport>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Export sessions to an encrypted file")
+        .set_file_name(transfer::default_file_name())
+        .add_filter("Remotely export", &[transfer::FILE_EXTENSION]);
+    if let Some(folder) = documents(&window) {
+        dialog = dialog.set_directory(folder);
+    }
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't save there: {err}")))?;
+    let core = &state.core;
+    let by = format!("Remotely {}", env!("CARGO_PKG_VERSION"));
+    let report = core
+        .transfer
+        .export(&core.ctx, &path, request, &core.vault, &by)
+        .await?;
+    tracing::info!(sessions = report.sessions, "sessions exported");
+    Ok(Some(report))
+}
+
+/// Asks for an export file to import. Returns its name, or `None` when the user closed the dialog;
+/// [`transfer_open`] then opens it with its passphrase.
+#[tauri::command]
+pub async fn transfer_choose(window: WebviewWindow, state: State<'_, AppState>) -> IpcResult<Option<String>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Choose a Remotely export")
+        .add_filter("Remotely export", &[transfer::FILE_EXTENSION]);
+    if let Some(folder) = documents(&window) {
+        dialog = dialog.set_directory(folder);
+    }
+    dialog.pick_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't read that file: {err}")))?;
+    Ok(Some(state.core.transfer.choose(path)))
+}
+
+/// Opens the chosen file with its passphrase and compares it with this laptop's library.
+#[tauri::command]
+pub async fn transfer_open(state: State<'_, AppState>, passphrase: SecretString) -> IpcResult<TransferPreview> {
+    let core = &state.core;
+    Ok(core.transfer.open_chosen(&core.ctx, passphrase, &core.vault).await?)
+}
+
+/// The opened file compared with the library again (after the vault was unlocked, say).
+#[tauri::command]
+pub async fn transfer_refresh(state: State<'_, AppState>, preview_id: Uuid) -> IpcResult<TransferPreview> {
+    let core = &state.core;
+    Ok(core.transfer.refresh(&core.ctx, preview_id, &core.vault).await?)
+}
+
+/// The import dialog was closed: the opened file (and any secrets in it) is dropped.
+#[tauri::command]
+pub fn transfer_close(state: State<'_, AppState>, preview_id: Uuid) -> bool {
+    state.core.transfer.close(preview_id)
+}
+
+#[tauri::command]
+pub async fn transfer_commit(state: State<'_, AppState>, request: TransferCommit) -> IpcResult<TransferReport> {
+    let core = &state.core;
+    Ok(core
+        .transfer
+        .commit(&core.ctx, request, &core.sessions, &core.vault, &core.known_hosts)
+        .await?)
+}
+
+// ---- SSH key manager (SS-09) ------------------------------------------------------------------------
+// Keys live in the vault; pushing one to hosts is `command_submit` with a `pushSshKey` command, so the
+// policy engine and the approval flow decide as for any remote command.
+
+/// Private keys in the vault, with their public halves when known. Works while the vault is locked.
+#[tauri::command]
+pub async fn ssh_keys_list(state: State<'_, AppState>) -> IpcResult<Vec<SshKey>> {
+    let core = &state.core;
+    Ok(core.keys.list(&core.ctx).await?)
+}
+
+#[tauri::command]
+pub async fn ssh_key_generate(state: State<'_, AppState>, request: GenerateKey) -> IpcResult<SshKey> {
+    let core = &state.core;
+    Ok(core.keys.generate(&core.ctx, request).await?)
+}
+
+/// The key with its public half, read from the private key if needed (the vault must be unlocked).
+#[tauri::command]
+pub async fn ssh_key_public(state: State<'_, AppState>, id: SecretId) -> IpcResult<SshKey> {
+    let core = &state.core;
+    Ok(core.keys.read_public_key(&core.ctx, id).await?)
+}
+
+/// Sessions log in with this key from now on. Returns the sessions changed.
+#[tauri::command]
+pub async fn ssh_key_attach(
+    state: State<'_, AppState>,
+    id: SecretId,
+    session_ids: Vec<Uuid>,
+) -> IpcResult<Vec<SessionRecord>> {
+    let core = &state.core;
+    Ok(core.keys.attach(&core.ctx, id, &session_ids, &core.sessions).await?)
+}
+
+/// Checks a pasted public key and returns it in OpenSSH form, for pushing a key from elsewhere.
+#[tauri::command]
+pub fn ssh_public_key_parse(public_key: String) -> IpcResult<PublicKeyInfo> {
+    Ok(ssh_keys::parse_public_key(&public_key)?)
 }
 
 // ---- Bulk run (BX-01 to BX-07) --------------------------------------------------------------------

@@ -20,7 +20,8 @@
 //!   holds secret IDs and labels only; values go one way, into the vault, and only adapters read them
 //!   back ([`Vault::get`]).
 
-mod crypto;
+/// Also seals FD-07 export files (`crate::transfer`), with a key from the user's passphrase.
+pub(crate) mod crypto;
 mod local;
 mod protector;
 mod service;

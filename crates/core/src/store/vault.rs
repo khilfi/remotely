@@ -226,6 +226,8 @@ impl Store {
         row.as_ref().map(kind_of).transpose()
     }
 
+    /// A new value for a secret. The public half saved for a private key (SS-09) no longer matches,
+    /// so it is dropped and read again from the new key when needed.
     pub(crate) async fn update_vault_item_cipher(
         &self,
         ctx: &Context,
@@ -233,6 +235,7 @@ impl Store {
         nonce: &[u8],
         ciphertext: &[u8],
     ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
         let done = sqlx::query(
             "UPDATE vault_items SET nonce = ?, ciphertext = ?, user_id = ?, updated_at = ?
              WHERE workspace_id = ? AND id = ?",
@@ -243,8 +246,14 @@ impl Store {
         .bind(now_rfc3339())
         .bind(ctx.workspace_id.to_string())
         .bind(id.0.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        sqlx::query("DELETE FROM ssh_keys WHERE workspace_id = ? AND secret_id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .bind(id.0.to_string())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
         Ok(done.rows_affected() > 0)
     }
 

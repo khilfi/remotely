@@ -48,6 +48,7 @@ use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
 use crate::locks;
 use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
 use crate::snapshots::safety_snapshot_name;
+use crate::ssh_keys;
 use crate::store::{NewAuditEntry, NewJob, Store, TargetResult};
 use crate::vault::{SecretId, SecretString, Vault};
 
@@ -267,6 +268,15 @@ impl Finished {
             error_code: err.map(CoreError::code),
         }
     }
+}
+
+/// A script to run on a host, and how (BX-02, BX-07; SS-09 pushes a key this way).
+struct RemoteRun<'a> {
+    script: &'a str,
+    sudo: bool,
+    sudo_password_id: Option<SecretId>,
+    trust_new_host_keys: bool,
+    timeout_secs: Option<u64>,
 }
 
 /// SS-05 for bulk runs: a trusted key passes; a changed key blocks, and that is audited; a key never
@@ -648,7 +658,7 @@ impl JobRunner {
             detail.push_str(&format!("; safety snapshot '{name}' taken on {safety_snapshots} VM(s)"));
         }
         if !cancelled_in_flight.is_empty() {
-            let what = if matches!(spec.command, Command::RemoteExec { .. }) {
+            let what = if matches!(spec.command, Command::RemoteExec { .. } | Command::PushSshKey { .. }) {
                 "cancelled while the command was running, so the host may still finish it"
             } else {
                 "cancelled while vmrun was running, so Workstation may still finish it"
@@ -727,76 +737,35 @@ impl JobRunner {
                 },
                 TargetRef::Session { session_id },
             ) => {
-                let session = self
-                    .store
-                    .session_spec(&spec.ctx, *session_id)
-                    .await?
-                    .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
-                if let Some(jump) = &session.jump {
-                    return Err(CoreError::JumpHostUnsupported {
-                        jump: jump.name.clone(),
-                    });
-                }
-                if token.is_cancelled() {
-                    return Err(CoreError::Cancelled);
-                }
-                let credentials = crate::sessions::credentials(&*self.vault, &spec.ctx, &session, None).await?;
-                let sudo_password = match sudo {
-                    true => Some(self.sudo_password(&spec.ctx, &session, *sudo_password_id).await?),
-                    false => None,
-                };
-                let tuning = locks::read(&self.exec_tuning).clone();
-                let options = ConnectOptions {
-                    connect_timeout: tuning.connect_timeout,
-                    keepalive_interval: Some(Duration::from_secs(30)),
-                    agent: tuning.agent,
-                    ..ConnectOptions::default()
-                };
-                let verifier = Arc::new(BulkVerifier {
-                    known_hosts: Arc::clone(&self.known_hosts),
-                    ctx: spec.ctx,
-                    target: target.clone(),
-                    trust_new: *trust_new_host_keys,
-                });
-                let run = self.remote.exec(ExecRequest {
-                    session: &session,
-                    credentials,
+                let run = RemoteRun {
                     script,
-                    sudo_password,
-                    options: &options,
-                    verifier,
-                    max_output: tuning.max_output,
-                });
-                let limited = async {
-                    match timeout_secs {
-                        Some(secs) => tokio::time::timeout(Duration::from_secs(*secs), run)
-                            .await
-                            .map_err(|_| CoreError::Timeout {
-                                command: "the command".into(),
-                                seconds: *secs,
-                            })?,
-                        None => run.await,
-                    }
+                    sudo: *sudo,
+                    sudo_password_id: *sudo_password_id,
+                    trust_new_host_keys: *trust_new_host_keys,
+                    timeout_secs: *timeout_secs,
                 };
-                // BX-04: cancel closes the connection; the host may still finish the command.
-                let result = tokio::select! {
-                    biased;
-                    _ = token.cancelled() => return Err(CoreError::CancelledRemote),
-                    result = limited => result?,
+                self.run_remote(spec, target, *session_id, run, token).await
+            }
+            (
+                Command::PushSshKey {
+                    public_key,
+                    trust_new_host_keys,
+                    timeout_secs,
+                    ..
+                },
+                TargetRef::Session { session_id },
+            ) => {
+                // SS-09: checked again here, so only Remotely's own form of the key reaches a host.
+                let key = ssh_keys::parse_public_key(public_key)?;
+                let script = ssh_keys::authorized_keys_script(&key);
+                let run = RemoteRun {
+                    script: &script,
+                    sudo: false,
+                    sudo_password_id: None,
+                    trust_new_host_keys: *trust_new_host_keys,
+                    timeout_secs: *timeout_secs,
                 };
-                let ok = result.exit_code == Some(0) && result.signal.is_none();
-                let failure = match (&result.signal, result.exit_code) {
-                    (Some(signal), _) => Some(format!("ended by signal {signal}")),
-                    (None, Some(0)) => None,
-                    (None, Some(code)) => Some(format!("exit code {code}")),
-                    (None, None) => Some("the host sent no exit code".to_owned()),
-                };
-                Ok(TargetOutcome {
-                    ok,
-                    exit_code: result.exit_code.map(i64::from),
-                    output: Some(result.output),
-                    failure,
-                })
+                self.run_remote(spec, target, *session_id, run, token).await
             }
             (Command::AppUpdate { version }, TargetRef::App) => {
                 // FD-14: never update under a running job.
@@ -813,6 +782,87 @@ impl JobRunner {
                 target: format!("a {} target", other.kind()),
             }),
         }
+    }
+
+    /// BX-02, SS-09: runs a script on one saved session's host over SSH.
+    async fn run_remote(
+        &self,
+        spec: &JobSpec,
+        target: &Target,
+        session_id: Uuid,
+        run: RemoteRun<'_>,
+        token: &CancellationToken,
+    ) -> Result<TargetOutcome> {
+        let session = self
+            .store
+            .session_spec(&spec.ctx, session_id)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
+        if let Some(jump) = &session.jump {
+            return Err(CoreError::JumpHostUnsupported {
+                jump: jump.name.clone(),
+            });
+        }
+        if token.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let credentials = crate::sessions::credentials(&*self.vault, &spec.ctx, &session, None).await?;
+        let sudo_password = match run.sudo {
+            true => Some(self.sudo_password(&spec.ctx, &session, run.sudo_password_id).await?),
+            false => None,
+        };
+        let tuning = locks::read(&self.exec_tuning).clone();
+        let options = ConnectOptions {
+            connect_timeout: tuning.connect_timeout,
+            keepalive_interval: Some(Duration::from_secs(30)),
+            agent: tuning.agent,
+            ..ConnectOptions::default()
+        };
+        let verifier = Arc::new(BulkVerifier {
+            known_hosts: Arc::clone(&self.known_hosts),
+            ctx: spec.ctx,
+            target: target.clone(),
+            trust_new: run.trust_new_host_keys,
+        });
+        let exec = self.remote.exec(ExecRequest {
+            session: &session,
+            credentials,
+            script: run.script,
+            sudo_password,
+            options: &options,
+            verifier,
+            max_output: tuning.max_output,
+        });
+        let limited = async {
+            match run.timeout_secs {
+                Some(secs) => tokio::time::timeout(Duration::from_secs(secs), exec)
+                    .await
+                    .map_err(|_| CoreError::Timeout {
+                        command: "the command".into(),
+                        seconds: secs,
+                    })?,
+                None => exec.await,
+            }
+        };
+        // BX-04: cancel closes the connection; the host may still finish the command.
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => return Err(CoreError::CancelledRemote),
+            result = limited => result?,
+        };
+        let ok = result.exit_code == Some(0) && result.signal.is_none();
+        let failure = match (&result.signal, result.exit_code) {
+            (Some(signal), _) => Some(format!("ended by signal {signal}")),
+            (None, Some(0)) => None,
+            (None, Some(code)) => Some(format!("exit code {code}")),
+            (None, None) => Some("the host sent no exit code".to_owned()),
+        };
+        Ok(TargetOutcome {
+            ok,
+            exit_code: result.exit_code.map(i64::from),
+            output: Some(result.output),
+            failure,
+        })
     }
 
     /// BX-07: the password sudo gets on this host: the one chosen for the run, or the session's own
@@ -932,7 +982,7 @@ impl JobRunner {
                 ..
             } => limits.power_on,
             Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => limits.vm_ops,
-            Command::RemoteExec { .. } => limits.remote,
+            Command::RemoteExec { .. } | Command::PushSshKey { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
         };
         n.max(1)
@@ -992,7 +1042,7 @@ fn safety_verb(command: &Command) -> &'static str {
             SnapshotOp::Take { .. } => "snapshot",
         },
         Command::VmProtect { .. } => "protect",
-        Command::RemoteExec { .. } => "command",
+        Command::RemoteExec { .. } | Command::PushSshKey { .. } => "command",
         Command::AppUpdate { .. } => "update",
     }
 }

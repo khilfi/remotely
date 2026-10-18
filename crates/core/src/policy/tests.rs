@@ -178,6 +178,38 @@ fn installing_an_update_is_medium_with_one_confirm() {
     assert_eq!(command.targets(), [TargetRef::App]);
 }
 
+fn push_key(targets: &[Target]) -> Command {
+    Command::PushSshKey {
+        targets: refs(targets),
+        // Only the classification is tested here; the key's text is checked by `Command::validate`.
+        public_key: "ssh-ed25519 AAAA alice@example.com".into(),
+        trust_new_host_keys: false,
+        timeout_secs: None,
+    }
+}
+
+#[test]
+fn pushing_an_ssh_key_is_medium_for_one_host_or_many() {
+    // SS-09: adding a key to authorized_keys grants a login, so it is a change with one confirm.
+    for n in [1, 2, 50] {
+        let t: Vec<Target> = (0..n).map(|_| host(Environment::Lab)).collect();
+        let d = engine().evaluate(&push_key(&t), &t);
+        assert_eq!(d.action, ActionKind::SshKeyPush);
+        assert_eq!(d.tier, Tier::Medium, "{n} hosts");
+        assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+    }
+}
+
+#[test]
+fn pushing_an_ssh_key_to_a_prod_host_is_high_without_a_safety_snapshot() {
+    let t = vec![host(Environment::Lab), host(Environment::Prod)];
+    let d = engine().evaluate(&push_key(&t), &t);
+    assert_eq!(d.tier, Tier::High);
+    assert!(d.reasons.iter().any(|r| r.contains("Prod")), "{:?}", d.reasons);
+    assert!(!d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })));
+    assert!(d.steps.contains(&ApprovalStep::TypeTargetCount { expected: 2 }));
+}
+
 // ---- High --------------------------------------------------------------------------------------
 
 #[test]
