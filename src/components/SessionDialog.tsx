@@ -1,6 +1,7 @@
 // Session editor (SS-01, SS-06): where to connect, how to log in (a password or key from the vault, or
 // the SSH agent), a jump host, a startup command, folder, tags, colour and environment label. Saving
-// changes only the app's own data: the core checks it and audits it, with no approval step.
+// changes only the app's own data: the core checks it and audits it, with no approval step. Taking the
+// Prod label off asks first, since it lowers the tier of later actions on the session.
 
 import { useEffect, useState } from "react";
 import { PlusIcon } from "lucide-react";
@@ -35,6 +36,7 @@ import {
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { cn } from "@/lib/utils";
 import { ColorDot, SESSION_COLORS } from "./Badges";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { SecretDialog } from "./SecretDialog";
 
 /** Radix Select can't hold an empty value, so "none" stands for no choice. */
@@ -70,6 +72,17 @@ function idOf(auth: SessionAuth, which: "credential" | "passphrase"): string | n
   return null;
 }
 
+function labelName(env: Environment) {
+  return ENVIRONMENTS.find((e) => e.value === env)?.label ?? env;
+}
+
+/** What the confirm says before a Prod session loses the label. */
+function lowerProdText(name: string, environment: Environment) {
+  const change =
+    environment === "none" ? "will lose the Prod label" : `will be labelled ${labelName(environment)} instead of Prod`;
+  return `'${name}' ${change}. Actions on it will no longer move up one approval tier, so they need fewer approval steps. The change is logged.`;
+}
+
 export function SessionDialog({
   vault,
   session,
@@ -97,6 +110,8 @@ export function SessionDialog({
   const [tags, setTags] = useState((session?.tags ?? []).join(", "));
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [adding, setAdding] = useState<SecretKind | null>(null);
+  /** Taking the Prod label off lowers the tier of later actions on the session, so saving asks first. */
+  const [lowerProd, setLowerProd] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -121,9 +136,8 @@ export function SessionDialog({
     return { method: "agent" };
   }
 
-  async function save() {
-    setBusy(true);
-    setError(null);
+  /** Throws, so the Prod confirm can show the error. */
+  async function persist() {
     const input: SessionInput = {
       name,
       folderId: folder === NONE ? null : folder,
@@ -137,14 +151,29 @@ export function SessionDialog({
       color,
       tags: tagList,
     };
+    onSaved(session ? await api.updateSession(session.id, input) : await api.createSession(input));
+    onClose();
+  }
+
+  async function save() {
+    setBusy(true);
+    setError(null);
     try {
-      onSaved(session ? await api.updateSession(session.id, input) : await api.createSession(input));
-      onClose();
+      await persist();
     } catch (err) {
       setError(errorMessage(err));
     } finally {
       setBusy(false);
     }
+  }
+
+  /** SS-06: saves at once, unless the edit takes the Prod label off. */
+  function submit() {
+    if (session?.environment === "prod" && environment !== "prod") {
+      setLowerProd(true);
+      return;
+    }
+    void save();
   }
 
   function secretPicker(kind: SecretKind, value: string, onChange: (v: string) => void, noneLabel: string) {
@@ -192,7 +221,7 @@ export function SessionDialog({
             className="grid gap-4"
             onSubmit={(e) => {
               e.preventDefault();
-              if (host.trim() && portOk) void save();
+              if (host.trim() && portOk) submit();
             }}
           >
             <DialogHeader>
@@ -454,6 +483,15 @@ export function SessionDialog({
             if (meta.kind === "passphrase") setPassphrase(meta.id);
           }}
           onClose={() => setAdding(null)}
+        />
+      )}
+      {lowerProd && session && (
+        <ConfirmDialog
+          title="Remove the Prod label?"
+          description={lowerProdText(session.name, environment)}
+          confirmLabel={environment === "none" ? "Remove label" : `Label ${labelName(environment)}`}
+          onConfirm={persist}
+          onClose={() => setLowerProd(false)}
         />
       )}
     </>
