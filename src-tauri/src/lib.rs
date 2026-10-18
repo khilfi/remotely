@@ -44,6 +44,8 @@ pub fn run() {
 
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // AP-05: the audit export's save dialog, opened from Rust (no dialog permission for the UI).
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             // %LOCALAPPDATA%\com.remotely.desktop, its `.dev` sibling for a debug build, or
             // REMOTELY_DATA_DIR (see `app_directories_override`). Never the working directory, so nothing
@@ -98,9 +100,15 @@ pub fn run() {
             ipc::command_cancel_approval,
             ipc::job_cancel,
             ipc::jobs_recent,
+            ipc::job_targets,
+            ipc::snapshots_list,
+            ipc::snapshot_limits,
             ipc::policy_rules,
+            ipc::policy_catalog,
+            ipc::policy_set_rules,
             ipc::audit_recent,
             ipc::audit_verify,
+            ipc::audit_export_csv,
             ipc::settings_get,
             ipc::settings_set_vmrun_path,
             ipc::settings_set_scan_folders,

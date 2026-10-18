@@ -1,20 +1,28 @@
-// Jobs and audit log (AP-03, AP-05). Open jobs can be cancelled here: a job in its countdown
-// touches nothing, and a running job stops targets that have not started.
+// Jobs and audit log (AP-03, AP-05, VM-05). Open jobs can be cancelled here: a job in its countdown
+// shows the time left and touches nothing if cancelled, and a running job stops targets that have
+// not started. A job's results show each target's outcome and the safety snapshot taken on it. The
+// audit log can be verified and exported to CSV.
 
 import { useEffect, useState } from "react";
-import { ListChecksIcon, ScrollTextIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
+import { CameraIcon, DownloadIcon, ListChecksIcon, ScrollTextIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
+import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge, TierBadge } from "@/components/Badges";
-import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary } from "@/lib/api";
+import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary, type JobTarget } from "@/lib/api";
+import { formatWhen, plural } from "@/lib/format";
 
 const OPEN = new Set(["queued", "countdown", "running"]);
 
-function when(ts: string | null) {
-  return ts ? new Date(ts).toLocaleString() : "—";
+/** Seconds left in a job's countdown, or null when it has none. */
+function secondsLeft(job: JobSummary, now: number) {
+  if (job.status !== "countdown" || !job.countdownUntil) return null;
+  return Math.max(0, Math.ceil((new Date(job.countdownUntil).getTime() - now) / 1000));
 }
 
 export function ActivityPage({ version }: { version: number }) {
@@ -23,6 +31,12 @@ export function ActivityPage({ version }: { version: number }) {
   const [check, setCheck] = useState<ChainCheck | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reloads, setReloads] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  // The job whose results are open; read from `jobs`, so its status stays current.
+  const [openedId, setOpenedId] = useState<string | null>(null);
+  const opened = jobs.find((j) => j.id === openedId);
+  const [exporting, setExporting] = useState(false);
+  const counting = jobs.some((j) => j.status === "countdown");
 
   // `version` changes on every job event, so the lists stay current.
   useEffect(() => {
@@ -43,6 +57,13 @@ export function ActivityPage({ version }: { version: number }) {
     };
   }, [version, reloads]);
 
+  // AP-03: the time left ticks while a job is in its countdown.
+  useEffect(() => {
+    if (!counting) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [counting]);
+
   async function verify() {
     try {
       setCheck(await api.verifyAudit());
@@ -51,9 +72,33 @@ export function ActivityPage({ version }: { version: number }) {
     }
   }
 
+  async function exportCsv() {
+    setExporting(true);
+    try {
+      const report = await api.exportAudit();
+      if (report) {
+        const redacted = report.redacted
+          ? ` ${plural(report.redacted, "row")} had something that looked like a secret, replaced by [redacted].`
+          : "";
+        toast.success(`Exported ${plural(report.entries, "entry")}`, {
+          description: `${report.path}.${redacted}`,
+          duration: 8000,
+        });
+        setReloads((n) => n + 1);
+      }
+    } catch (err) {
+      toast.error(`Could not export the audit log: ${errorMessage(err)}`);
+    } finally {
+      setExporting(false);
+    }
+  }
+
   async function cancel(jobId: string) {
-    await api.cancelJob(jobId);
-    setReloads((n) => n + 1);
+    try {
+      await api.cancelJob(jobId);
+    } finally {
+      setReloads((n) => n + 1);
+    }
   }
 
   return (
@@ -68,7 +113,9 @@ export function ActivityPage({ version }: { version: number }) {
       <Card>
         <CardHeader>
           <CardTitle>Jobs</CardTitle>
-          <CardDescription>Every action on VMs and hosts, newest first.</CardDescription>
+          <CardDescription>
+            Every action on VMs and hosts, newest first. Open a job to see each target&apos;s result.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {jobs.length === 0 ? (
@@ -94,29 +141,53 @@ export function ActivityPage({ version }: { version: number }) {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {jobs.map((job) => (
-                  <TableRow key={job.id}>
-                    <TableCell className="font-medium">{job.summary}</TableCell>
-                    <TableCell>
-                      <TierBadge tier={job.tier} />
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={job.status} />
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {job.targetsSucceeded}/{job.targetsTotal}
-                      {job.targetsFailed > 0 && <span className="text-destructive"> · {job.targetsFailed} failed</span>}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">{when(job.createdAt)}</TableCell>
-                    <TableCell className="text-right">
-                      {OPEN.has(job.status) && (
-                        <Button size="sm" variant="destructive" onClick={() => void cancel(job.id)}>
-                          Cancel
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {jobs.map((job) => {
+                  const left = secondsLeft(job, now);
+                  return (
+                    <TableRow key={job.id} className="cursor-pointer" onClick={() => setOpenedId(job.id)}>
+                      <TableCell className="font-medium whitespace-normal">{job.summary}</TableCell>
+                      <TableCell>
+                        <TierBadge tier={job.tier} />
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-2">
+                          <StatusBadge status={job.status} />
+                          {left !== null && (
+                            <span className="text-sm text-tier-high tabular-nums" role="timer">
+                              starts in {left} s
+                            </span>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">
+                        {job.targetsSucceeded}/{job.targetsTotal}
+                        {job.targetsFailed > 0 && (
+                          <span className="text-destructive"> · {job.targetsFailed} failed</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{formatWhen(job.createdAt)}</TableCell>
+                      <TableCell className="text-right">
+                        {OPEN.has(job.status) && (
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            title={
+                              job.status === "running"
+                                ? "Stops the targets that have not started; one in progress finishes"
+                                : "Nothing has been done yet; no target is touched"
+                            }
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void cancel(job.id);
+                            }}
+                          >
+                            Cancel
+                          </Button>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           )}
@@ -126,10 +197,17 @@ export function ActivityPage({ version }: { version: number }) {
       <Card>
         <CardHeader>
           <CardTitle>Audit log</CardTitle>
-          <CardDescription>Append-only and hash-chained, so any edit shows up when you verify it.</CardDescription>
-          <CardAction>
+          <CardDescription>
+            Append-only and hash-chained, so any edit shows up when you verify it. The CSV export holds every entry with
+            its hashes, and never a password or key.
+          </CardDescription>
+          <CardAction className="flex gap-2">
             <Button variant="outline" onClick={() => void verify()}>
               Verify the hash chain
+            </Button>
+            <Button variant="outline" onClick={() => void exportCsv()} disabled={exporting}>
+              <DownloadIcon data-icon="inline-start" />
+              {exporting ? "Exporting…" : "Export CSV…"}
             </Button>
           </CardAction>
         </CardHeader>
@@ -173,9 +251,9 @@ export function ActivityPage({ version }: { version: number }) {
                 {audit.map((e) => (
                   <TableRow key={e.id} title={e.detail ?? undefined}>
                     <TableCell className="text-right text-muted-foreground tabular-nums">{e.seq}</TableCell>
-                    <TableCell className="text-muted-foreground">{when(e.ts)}</TableCell>
+                    <TableCell className="text-muted-foreground">{formatWhen(e.ts)}</TableCell>
                     <TableCell className="font-mono text-xs">{e.event}</TableCell>
-                    <TableCell>{e.action}</TableCell>
+                    <TableCell className="whitespace-normal">{e.action}</TableCell>
                     <TableCell>
                       {e.tier ? <TierBadge tier={e.tier} /> : <span className="text-muted-foreground">—</span>}
                     </TableCell>
@@ -187,6 +265,98 @@ export function ActivityPage({ version }: { version: number }) {
           )}
         </CardContent>
       </Card>
+
+      {opened && <JobResults job={opened} version={version} onClose={() => setOpenedId(null)} />}
     </div>
+  );
+}
+
+/** One job's targets and how each went, with the safety snapshot taken first (VM-05). */
+function JobResults({ job, version, onClose }: { job: JobSummary; version: number; onClose: () => void }) {
+  const [targets, setTargets] = useState<JobTarget[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let stale = false;
+    api.jobTargets(job.id).then(
+      (t) => {
+        if (!stale) setTargets(t);
+      },
+      (err) => {
+        if (!stale) setError(errorMessage(err));
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [job.id, version]);
+
+  const safety = [...new Set((targets ?? []).flatMap((t) => (t.safetySnapshot ? [t.safetySnapshot] : [])))];
+
+  return (
+    <Sheet open onOpenChange={(open) => !open && onClose()}>
+      <SheetContent className="w-full gap-0 sm:max-w-2xl">
+        <SheetHeader>
+          <div className="flex items-center gap-2">
+            <TierBadge tier={job.tier} />
+            <StatusBadge status={job.status} />
+          </div>
+          <SheetTitle>{job.summary}</SheetTitle>
+          <SheetDescription>
+            Created {formatWhen(job.createdAt)}
+            {job.finishedAt && ` · finished ${formatWhen(job.finishedAt)}`}
+          </SheetDescription>
+        </SheetHeader>
+        <div className="flex flex-col gap-4 overflow-auto px-4 pb-4">
+          {safety.map((name) => (
+            <Alert key={name}>
+              <CameraIcon />
+              <AlertTitle>Safety snapshot taken first</AlertTitle>
+              <AlertDescription>
+                <p className="font-mono text-xs break-all">{name}</p>
+                <p>Revert to it on the Snapshots page to undo this job.</p>
+              </AlertDescription>
+            </Alert>
+          ))}
+          {error && <p className="text-sm text-destructive">{error}</p>}
+          {targets && (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Target</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead className="text-right">Took</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {targets.map((t) => (
+                  <TableRow key={t.targetKey}>
+                    <TableCell className="whitespace-normal">
+                      <div className="font-medium">{t.targetName}</div>
+                      {t.error && <div className="text-xs text-destructive">{t.error}</div>}
+                      {t.safetySnapshot && (
+                        <Badge variant="outline" className="mt-1 font-normal">
+                          <CameraIcon />
+                          Safety snapshot
+                        </Badge>
+                      )}
+                      {t.output && (
+                        <pre className="mt-1 max-h-32 overflow-auto rounded bg-muted p-2 font-mono text-xs whitespace-pre-wrap">
+                          {t.output}
+                        </pre>
+                      )}
+                    </TableCell>
+                    <TableCell className="capitalize">{t.status}</TableCell>
+                    <TableCell className="text-right text-muted-foreground tabular-nums">
+                      {t.durationMs != null ? `${(t.durationMs / 1000).toFixed(1)} s` : "—"}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }

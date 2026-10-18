@@ -1,23 +1,29 @@
 //! Opt-in test against the real VMware Workstation install (CLAUDE.md "Development safety").
 //!
-//! Runs only with `REMOTELY_IT=1`, and only reads: Workstation's library, `vmrun list`, and for running
-//! VMs `checkToolsState` and `getGuestIPAddress`. It never starts, stops or changes a VM. It prints
+//! Runs only with `REMOTELY_IT=1`, and only reads: Workstation's library, `vmrun list`, for running
+//! VMs `checkToolsState` and `getGuestIPAddress`, and each VM's snapshots (`vmrun listSnapshots`, the
+//! .vmsd file, the first line of vmware.log). It never starts, stops or changes a VM. It prints
 //! counts, not VM names or paths.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::path::Path;
 use std::sync::Arc;
 
 use remotely_core::adapters::updater::DisabledUpdater;
+use remotely_core::adapters::vmware;
 use remotely_core::domain::PowerState;
 use remotely_core::{Core, CoreConfig};
 
-#[tokio::test]
-async fn lists_every_vm_through_the_core() {
-    if std::env::var("REMOTELY_IT").as_deref() != Ok("1") {
+fn enabled() -> bool {
+    let on = std::env::var("REMOTELY_IT").as_deref() == Ok("1");
+    if !on {
         eprintln!("skipped: set REMOTELY_IT=1 to run against the real Workstation install");
-        return;
     }
+    on
+}
+
+async fn real_core() -> (Core, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("remotely-it-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir).unwrap();
     let core = Core::init(CoreConfig {
@@ -29,6 +35,62 @@ async fn lists_every_vm_through_the_core() {
     })
     .await
     .unwrap();
+    (core, dir)
+}
+
+/// VM-04: the snapshot manager reads the .vmsd; vmrun only knows names. Both must agree.
+#[tokio::test]
+async fn the_vmsd_lists_the_same_snapshots_as_vmrun() {
+    if !enabled() {
+        return;
+    }
+    let (core, dir) = real_core().await;
+    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let vmrun = vmware::connect(None);
+    let mut snapshots = 0;
+    for vm in &report.vms {
+        let vmx = Path::new(&vm.vmx_path);
+        let mut from_vmrun = vmrun.list_snapshots(vmx).await.unwrap();
+        let mut from_vmsd: Vec<String> = vmrun
+            .snapshots(vmx)
+            .await
+            .unwrap()
+            .snapshots
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        from_vmrun.sort();
+        from_vmsd.sort();
+        assert_eq!(from_vmsd, from_vmrun, "a VM's .vmsd and vmrun disagree");
+        snapshots += from_vmsd.len();
+        if vm.power_state == PowerState::Running {
+            assert!(
+                vmrun.running_since(vmx).await.unwrap().is_some(),
+                "a running VM has a vmware.log"
+            );
+        }
+    }
+    let listed: usize = core
+        .snapshots
+        .list(&core.ctx, None)
+        .await
+        .unwrap()
+        .iter()
+        .map(|v| v.snapshots.len())
+        .sum();
+    assert_eq!(listed, snapshots);
+    eprintln!("snapshots: {snapshots} across {} VM(s)", report.vms.len());
+
+    drop(core);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn lists_every_vm_through_the_core() {
+    if !enabled() {
+        return;
+    }
+    let (core, dir) = real_core().await;
 
     assert!(core.vmrun_path().is_some(), "vmrun.exe was not found");
     let report = core.inventory.refresh(&core.ctx).await.unwrap();

@@ -15,6 +15,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
+use tokio::io::AsyncReadExt;
 
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
 use crate::error::{CoreError, Result};
@@ -74,6 +77,28 @@ impl ToolsState {
     }
 }
 
+/// One snapshot as Workstation records it in the VM's `.vmsd` file (VM-04).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotInfo {
+    /// `snapshotN.uid`: stays the same for the life of the snapshot.
+    pub uid: u32,
+    /// The parent's uid; `None` for a snapshot taken before any other.
+    pub parent_uid: Option<u32>,
+    pub name: String,
+    pub description: Option<String>,
+    /// When it was taken. vmrun cannot tell; the .vmsd can.
+    pub created_at: Option<OffsetDateTime>,
+}
+
+/// A VM's snapshots (VM-04).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SnapshotTree {
+    /// In the order the .vmsd lists them.
+    pub snapshots: Vec<SnapshotInfo>,
+    /// `snapshot.current`: the snapshot the VM's current state was taken from ("you are here").
+    pub current_uid: Option<u32>,
+}
+
 #[async_trait]
 pub trait VmwareAdapter: Send + Sync {
     /// Path of the Workstation tool in use, for diagnostics.
@@ -93,7 +118,14 @@ pub trait VmwareAdapter: Send + Sync {
     async fn power(&self, vmx: &Path, op: PowerOp) -> Result<()>;
     /// VM-04, VM-05. Only the job runner calls this.
     async fn snapshot(&self, vmx: &Path, op: &SnapshotOp) -> Result<()>;
+    /// `vmrun listSnapshots`: names only. The snapshot manager reads [`VmwareAdapter::snapshots`].
     async fn list_snapshots(&self, vmx: &Path) -> Result<Vec<String>>;
+    /// VM-04: the snapshot tree with creation times, read from the VM's .vmsd file. A VM without
+    /// snapshots has no .vmsd, or an empty one.
+    async fn snapshots(&self, vmx: &Path) -> Result<SnapshotTree>;
+    /// AP-02: when the VM's running process started (its power-on or resume), from the first line of
+    /// its `vmware.log`. Needs no guest login. Only meaningful while the VM runs; `None` without a log.
+    async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>>;
 }
 
 /// Builds the adapter for this machine. When vmrun cannot be found the app still starts: the library,
@@ -287,6 +319,14 @@ impl VmwareAdapter for VmrunAdapter {
             .map(String::from)
             .collect())
     }
+
+    async fn snapshots(&self, vmx: &Path) -> Result<SnapshotTree> {
+        read_vmsd_file(vmx).await
+    }
+
+    async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
+        read_log_start(vmx).await
+    }
 }
 
 /// vmrun verb and optional mode argument for a power operation.
@@ -470,6 +510,125 @@ async fn read_library() -> Result<Vec<LibraryVm>> {
     }
 }
 
+/// Parses a VM's snapshot list (`<vm>.vmsd`, next to the .vmx), as Workstation 17 and later write it:
+///
+/// ```text
+/// snapshot.lastUID = "3"
+/// snapshot.current = "3"
+/// snapshot0.uid = "1"
+/// snapshot0.filename = "web01-Snapshot1.vmsn"
+/// snapshot0.displayName = "base"
+/// snapshot0.description = ""
+/// snapshot0.createTimeHigh = "417299"
+/// snapshot0.createTimeLow = "-1088677800"
+/// snapshot.numSnapshots = "2"
+/// snapshot1.uid = "2"
+/// snapshot1.parent = "1"
+/// ...
+/// ```
+///
+/// `parent` names the parent's uid and is missing on a first snapshot. The creation time is
+/// microseconds since 1970 (UTC), split into a high and a signed low 32-bit half. Entries without a
+/// uid are left out.
+pub fn parse_vmsd(text: &str) -> SnapshotTree {
+    #[derive(Default)]
+    struct Entry {
+        uid: Option<u32>,
+        parent: Option<u32>,
+        name: Option<String>,
+        description: Option<String>,
+        time_high: Option<i64>,
+        time_low: Option<i64>,
+    }
+    let mut entries: BTreeMap<u32, Entry> = BTreeMap::new();
+    let mut current_uid = None;
+    for (key, value) in text.lines().filter_map(config_line) {
+        if key == "snapshot.current" {
+            current_uid = value.trim().parse().ok();
+            continue;
+        }
+        // snapshot.lastUID, snapshot.numSnapshots, snapshot.mru0.uid: no index, so skipped here.
+        let Some((index, field)) = key.strip_prefix("snapshot").and_then(|rest| rest.split_once('.')) else {
+            continue;
+        };
+        let Ok(index) = index.parse::<u32>() else {
+            continue;
+        };
+        let entry = entries.entry(index).or_default();
+        match field {
+            "uid" => entry.uid = value.trim().parse().ok(),
+            "parent" => entry.parent = value.trim().parse().ok(),
+            "displayname" => entry.name = Some(value),
+            "description" => entry.description = Some(value).filter(|d| !d.trim().is_empty()),
+            "createtimehigh" => entry.time_high = value.trim().parse().ok(),
+            "createtimelow" => entry.time_low = value.trim().parse().ok(),
+            _ => {}
+        }
+    }
+    let snapshots = entries
+        .into_values()
+        .filter_map(|e| {
+            Some(SnapshotInfo {
+                uid: e.uid?,
+                parent_uid: e.parent,
+                name: e.name.unwrap_or_default(),
+                description: e.description,
+                created_at: e
+                    .time_high
+                    .zip(e.time_low)
+                    .and_then(|(high, low)| snapshot_time(high, low)),
+            })
+        })
+        .collect();
+    SnapshotTree { snapshots, current_uid }
+}
+
+/// `createTimeHigh` and `createTimeLow` are the two 32-bit halves of microseconds since 1970 (UTC).
+fn snapshot_time(high: i64, low: i64) -> Option<OffsetDateTime> {
+    // The low half is written as a signed 32-bit number; only its bits count.
+    let low = i64::from(u32::try_from(low & 0xFFFF_FFFF).ok()?);
+    let micros = high.checked_shl(32)?.checked_add(low)?;
+    OffsetDateTime::from_unix_timestamp_nanos(i128::from(micros) * 1000).ok()
+}
+
+/// The .vmsd sits next to the .vmx and has the same name.
+async fn read_vmsd_file(vmx: &Path) -> Result<SnapshotTree> {
+    match tokio::fs::read(vmx.with_extension("vmsd")).await {
+        Ok(bytes) => Ok(parse_vmsd(&String::from_utf8_lossy(&bytes))),
+        // Never had a snapshot.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(SnapshotTree::default()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+/// The time at the start of the first line of `vmware.log`, which the VM's process writes when it
+/// starts:
+///
+/// ```text
+/// 2026-08-08T15:19:28.598Z In(05) vmx Log for VMware Workstation pid=1234 version=17.6.0 ...
+/// 2026-08-08T15:19:28.598Z -INFO vmware-vmx.exe 1234 [ws@4413 threadName="vmx"] Log for VMware ...
+/// ```
+pub fn parse_log_start(first_line: &str) -> Option<OffsetDateTime> {
+    let token = first_line.split(|c: char| c.is_whitespace() || c == '|').next()?;
+    OffsetDateTime::parse(token, &Rfc3339).ok()
+}
+
+/// Reads only the start of `vmware.log` in the VM's folder; the running VM keeps writing the rest.
+async fn read_log_start(vmx: &Path) -> Result<Option<OffsetDateTime>> {
+    let Some(folder) = vmx.parent() else {
+        return Ok(None);
+    };
+    let mut file = match tokio::fs::File::open(folder.join("vmware.log")).await {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    let mut head = vec![0u8; 256];
+    let read = file.read(&mut head).await?;
+    let text = String::from_utf8_lossy(&head[..read]);
+    Ok(text.lines().next().and_then(parse_log_start))
+}
+
 /// .vmx files under `folder`, at most [`SCAN_DEPTH`] levels down. Symbolic links and Workstation's
 /// lock folders (`*.lck`) are not followed.
 pub async fn scan_for_vmx(folder: &Path) -> Result<Vec<PathBuf>> {
@@ -574,6 +733,12 @@ impl VmwareAdapter for SwitchableVmware {
     async fn list_snapshots(&self, vmx: &Path) -> Result<Vec<String>> {
         self.current().list_snapshots(vmx).await
     }
+    async fn snapshots(&self, vmx: &Path) -> Result<SnapshotTree> {
+        self.current().snapshots(vmx).await
+    }
+    async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
+        self.current().running_since(vmx).await
+    }
 }
 
 /// Checks a user-chosen vmrun path before it is saved: it must be an existing file named vmrun.exe.
@@ -628,6 +793,12 @@ impl VmwareAdapter for MissingWorkstation {
     }
     async fn list_snapshots(&self, _: &Path) -> Result<Vec<String>> {
         Err(CoreError::VmrunNotFound)
+    }
+    async fn snapshots(&self, vmx: &Path) -> Result<SnapshotTree> {
+        read_vmsd_file(vmx).await
+    }
+    async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
+        read_log_start(vmx).await
     }
 }
 
@@ -781,6 +952,129 @@ index.count = "1"
         assert!(matches!(err, CoreError::InvalidSetting(_)));
         let missing = validate_vmrun_path(Path::new(r"C:\does-not-exist\vmrun.exe")).unwrap_err();
         assert!(matches!(missing, CoreError::InvalidSetting(_)));
+    }
+
+    /// The shape Workstation 26 writes: "base", then "child one" on it, then a revert to "base" and
+    /// `branch "two"` taken from there.
+    const VMSD: &str = r#".encoding = "UTF-8"
+snapshot.lastUID = "3"
+snapshot.current = "3"
+snapshot0.uid = "1"
+snapshot0.filename = "web01-Snapshot1.vmsn"
+snapshot0.displayName = "base"
+snapshot0.description = ""
+snapshot0.createTimeHigh = "417299"
+snapshot0.createTimeLow = "-1088677800"
+snapshot.numSnapshots = "3"
+snapshot1.uid = "2"
+snapshot1.filename = "web01-Snapshot2.vmsn"
+snapshot1.parent = "1"
+snapshot1.displayName = "child one"
+snapshot1.description = "before the upgrade"
+snapshot1.createTimeHigh = "417299"
+snapshot1.createTimeLow = "-1088118800"
+snapshot2.uid = "3"
+snapshot2.filename = "web01-Snapshot3.vmsn"
+snapshot2.parent = "1"
+snapshot2.displayName = "branch |22two|22"
+snapshot2.description = ""
+snapshot2.createTimeHigh = "417299"
+snapshot2.createTimeLow = "-1087100800"
+snapshot2.numDisks = "1"
+snapshot2.disk0.fileName = "web01.vmdk"
+snapshot2.disk0.node = "scsi0:0"
+"#;
+
+    #[test]
+    fn parses_the_snapshot_tree_and_creation_times() {
+        let tree = parse_vmsd(VMSD);
+        assert_eq!(tree.current_uid, Some(3));
+        let summary: Vec<_> = tree
+            .snapshots
+            .iter()
+            .map(|s| (s.uid, s.parent_uid, s.name.as_str(), s.description.as_deref()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (1, None, "base", None),
+                (2, Some(1), "child one", Some("before the upgrade")),
+                (3, Some(1), "branch \"two\"", None),
+            ]
+        );
+        // (417299 << 32) + 3206289496 microseconds; Workstation showed 09:59:23 at UTC+8.
+        assert_eq!(
+            tree.snapshots[0].created_at,
+            Some(time::macros::datetime!(2026-10-18 01:59:23.943 UTC))
+        );
+        assert_eq!(
+            tree.snapshots[2].created_at,
+            Some(time::macros::datetime!(2026-10-18 01:59:25.520 UTC))
+        );
+    }
+
+    #[test]
+    fn an_empty_vmsd_has_no_snapshots() {
+        assert_eq!(parse_vmsd(""), SnapshotTree::default());
+        let only_counters = "snapshot.lastUID = \"4\"\nsnapshot.numSnapshots = \"0\"\nsnapshot.current = \"\"\n";
+        assert_eq!(parse_vmsd(only_counters), SnapshotTree::default());
+    }
+
+    #[test]
+    fn a_snapshot_without_a_time_still_lists() {
+        let tree =
+            parse_vmsd("snapshot0.uid = \"7\"\nsnapshot0.displayName = \"x\"\nsnapshot1.displayName = \"no uid\"\n");
+        assert_eq!(tree.snapshots.len(), 1, "an entry without a uid is left out");
+        assert_eq!(tree.snapshots[0].created_at, None);
+    }
+
+    #[tokio::test]
+    async fn reads_the_vmsd_next_to_the_vmx() {
+        let dir = std::env::temp_dir().join(format!("remotely-vmsd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vmx = dir.join("web01.vmx");
+        assert_eq!(
+            read_vmsd_file(&vmx).await.unwrap(),
+            SnapshotTree::default(),
+            "no .vmsd yet"
+        );
+        std::fs::write(dir.join("web01.vmsd"), "").unwrap();
+        assert!(read_vmsd_file(&vmx).await.unwrap().snapshots.is_empty());
+        std::fs::write(dir.join("web01.vmsd"), VMSD).unwrap();
+        assert_eq!(read_vmsd_file(&vmx).await.unwrap().snapshots.len(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_log_start_is_the_first_time_in_vmware_log() {
+        let ws26 = "2026-08-08T15:19:28.598Z -INFO vmware-vmx.exe 4242 [ws@4413 threadName=\"vmx\"] Log for VMware Workstation pid=4242";
+        assert_eq!(
+            parse_log_start(ws26),
+            Some(time::macros::datetime!(2026-08-08 15:19:28.598 UTC))
+        );
+        let ws17 = "2024-03-22T10:13:00.123+01:00| vmx| I005: Log for VMware Workstation pid=4242";
+        assert_eq!(
+            parse_log_start(ws17),
+            Some(time::macros::datetime!(2024-03-22 09:13:00.123 UTC))
+        );
+        assert_eq!(parse_log_start("not a time"), None);
+        assert_eq!(parse_log_start(""), None);
+    }
+
+    #[tokio::test]
+    async fn reads_only_the_first_line_of_vmware_log() {
+        let dir = std::env::temp_dir().join(format!("remotely-log-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vmx = dir.join("web01.vmx");
+        assert_eq!(read_log_start(&vmx).await.unwrap(), None, "no log yet");
+        let mut log = String::from("2026-08-08T15:19:28.598Z In(05) vmx Log for VMware Workstation\n");
+        log.push_str(&"2026-08-08T16:00:00.000Z In(05) vmx later line\n".repeat(1000));
+        std::fs::write(dir.join("vmware.log"), log).unwrap();
+        assert_eq!(
+            read_log_start(&vmx).await.unwrap(),
+            Some(time::macros::datetime!(2026-08-08 15:19:28.598 UTC))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

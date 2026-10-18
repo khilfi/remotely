@@ -4,8 +4,8 @@
 //!   UI / CLI / plugins
 //!        │ reads                         │ changes
 //!        ▼                               ▼
-//!   inventory, metrics ──► store    command_bus ──► policy (tier + steps)
-//!                                        │  approvals, audit
+//!   inventory, snapshots,          command_bus ──► policy (tier + steps)
+//!   metrics ──► store                    │  impact preview, approvals, audit
 //!                                        ▼
 //!                                   jobs (runner) ──► adapters::vmware (vmrun)
 //!                                                 ├─► adapters::remote (russh)
@@ -20,17 +20,20 @@ pub mod capacity;
 pub mod command_bus;
 pub mod domain;
 pub mod error;
+pub mod export;
 #[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
+pub mod impact;
 pub mod inventory;
 pub mod jobs;
 pub mod locks;
 pub mod metrics;
 pub mod policy;
+pub mod snapshots;
 pub mod store;
 pub mod vault;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,9 +44,12 @@ use adapters::vmware::{SwitchableVmware, VmwareAdapter};
 use capacity::CapacityChecker;
 use command_bus::CommandBus;
 use domain::Context;
+use impact::ImpactPreviewer;
 use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
 use policy::{PolicyEngine, PolicyRules};
+use serde::Serialize;
+use snapshots::SnapshotReader;
 use store::{NewAuditEntry, Store};
 use vault::{UnimplementedVault, Vault};
 
@@ -70,10 +76,22 @@ pub struct Adapters {
     pub updater: Arc<dyn UpdaterAdapter>,
 }
 
+/// AP-05: what an audit export wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuditExport {
+    pub path: String,
+    pub entries: usize,
+    /// Rows with something that looked like a secret, replaced by `[redacted]`.
+    pub redacted: usize,
+}
+
 pub struct Core {
     pub ctx: Context,
     pub store: Store,
     pub inventory: Inventory,
+    /// VM-04: snapshot trees, read from each VM's .vmsd. Changes go through [`Core::bus`].
+    pub snapshots: SnapshotReader,
     pub bus: CommandBus,
     pub jobs: Arc<JobRunner>,
     pub vault: Arc<dyn Vault>,
@@ -109,12 +127,7 @@ impl Core {
 
     /// Wires the modules together. Tests pass fake adapters here.
     pub async fn assemble(store: Store, ctx: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
-        let mut rules = store
-            .get_setting::<PolicyRules>(&ctx, store::POLICY_RULES_KEY)
-            .await?
-            .unwrap_or_default();
-        rules.fill_missing_tiers();
-        let policy = PolicyEngine::new(rules)?;
+        let policy = load_policy(&store, &ctx).await?;
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
         let jobs = JobRunner::new(
@@ -135,6 +148,7 @@ impl Core {
                 Arc::clone(&vmware_dyn),
                 Arc::clone(&adapters.host_counters),
             ),
+            ImpactPreviewer::new(store.clone(), Arc::clone(&vmware_dyn)),
         );
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
@@ -144,6 +158,7 @@ impl Core {
         }
         Ok(Self {
             ctx,
+            snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
             inventory: Inventory::new(store.clone(), vmware_dyn),
             store,
             bus,
@@ -290,6 +305,37 @@ impl Core {
         self.updater.check().await
     }
 
+    /// AP-05: writes the workspace's whole audit log to `path` as CSV (see [`export::audit_csv`]) and
+    /// logs that it did. A read, so it skips the bus.
+    pub async fn export_audit_csv(&self, path: &Path) -> Result<AuditExport> {
+        let entries = self.store.audit_for_export(&self.ctx).await?;
+        let (csv, redacted) = export::audit_csv(&entries);
+        tokio::fs::write(path, csv).await?;
+        let file = path
+            .file_name()
+            .map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
+        self.store
+            .append_audit(
+                &self.ctx,
+                NewAuditEntry {
+                    event: "audit_exported",
+                    action: "Exported the audit log to CSV",
+                    tier: None,
+                    job_id: None,
+                    targets: &[],
+                    approval: None,
+                    result: None,
+                    detail: Some(&format!("{} entries to {file}", entries.len())),
+                },
+            )
+            .await?;
+        Ok(AuditExport {
+            path: path.display().to_string(),
+            entries: entries.len(),
+            redacted,
+        })
+    }
+
     async fn audit_setting(&self, action: &str, detail: &str) -> Result<()> {
         self.store
             .append_audit(
@@ -312,6 +358,41 @@ impl Core {
     /// Opens a terminal. Until SS-03 this is a local loopback shell, not SSH.
     pub fn open_terminal(&self) -> ShellHandle {
         adapters::remote::loopback_shell()
+    }
+}
+
+/// AP-01: the saved rules, with defaults for actions added since they were saved. Saved rules that
+/// no longer pass the checks (say, a check added in an update) are replaced by the defaults rather
+/// than stopping the app from starting; the audit log says so.
+async fn load_policy(store: &Store, ctx: &Context) -> Result<PolicyEngine> {
+    let Some(mut rules) = store.get_setting::<PolicyRules>(ctx, store::POLICY_RULES_KEY).await? else {
+        return PolicyEngine::new(PolicyRules::default());
+    };
+    rules.fill_missing_tiers();
+    match PolicyEngine::new(rules) {
+        Ok(engine) => Ok(engine),
+        Err(err) => {
+            tracing::error!(error = %err, "saved approval rules are invalid; using the defaults");
+            let detail = format!("the saved rules were not valid ({err}); the default rules apply");
+            store
+                .append_audit(
+                    ctx,
+                    NewAuditEntry {
+                        event: "setting_changed",
+                        action: "Reset the approval rules to the defaults",
+                        tier: None,
+                        job_id: None,
+                        targets: &[],
+                        approval: None,
+                        result: None,
+                        detail: Some(&detail),
+                    },
+                )
+                .await?;
+            let defaults = PolicyRules::default();
+            store.put_setting(ctx, store::POLICY_RULES_KEY, &defaults).await?;
+            PolicyEngine::new(defaults)
+        }
     }
 }
 

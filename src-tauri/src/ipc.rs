@@ -4,13 +4,15 @@
 use std::path::PathBuf;
 
 use remotely_core::adapters::updater::UpdateInfo;
-use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
+use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome, MAX_SNAPSHOT_NAME};
 use remotely_core::inventory::{RefreshReport, VmFilter};
-use remotely_core::policy::PolicyRules;
-use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, SavedFilter, Tag, VmRecord};
-use remotely_core::{Core, CoreError};
+use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
+use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
+use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
+use remotely_core::{AuditExport, Core, CoreError};
 use serde::Serialize;
-use tauri::State;
+use tauri::{State, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -152,9 +154,96 @@ pub async fn jobs_recent(state: State<'_, AppState>, limit: Option<u32>) -> IpcR
     Ok(core.store.recent_jobs(&core.ctx, limit.unwrap_or(50)).await?)
 }
 
+/// A job's results per target, with the safety snapshot taken on each (VM-05).
+#[tauri::command]
+pub async fn job_targets(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<Vec<JobTargetRecord>> {
+    let core = &state.core;
+    Ok(core.store.job_targets(&core.ctx, job_id).await?)
+}
+
+/// VM-04: snapshot trees read from each VM's .vmsd (a read, so no bus). `None` lists every VM the
+/// last refresh found. Taking, reverting and deleting go through `command_submit`.
+#[tauri::command]
+pub async fn snapshots_list(state: State<'_, AppState>, vmx_paths: Option<Vec<String>>) -> IpcResult<Vec<VmSnapshots>> {
+    let core = &state.core;
+    Ok(core.snapshots.list(&core.ctx, vmx_paths.as_deref()).await?)
+}
+
+/// Fixed facts the snapshot manager shows and checks against.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnapshotLimits {
+    old_after_days: i64,
+    safety_prefix: &'static str,
+    max_name_length: usize,
+}
+
+#[tauri::command]
+pub fn snapshot_limits() -> SnapshotLimits {
+    SnapshotLimits {
+        old_after_days: OLD_AFTER_DAYS,
+        safety_prefix: SAFETY_PREFIX,
+        max_name_length: MAX_SNAPSHOT_NAME,
+    }
+}
+
 #[tauri::command]
 pub fn policy_rules(state: State<'_, AppState>) -> PolicyRules {
     state.core.bus.rules()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionInfo {
+    kind: ActionKind,
+    label: &'static str,
+}
+
+/// AP-01: what the rules editor needs besides the rules: every action with its label, the
+/// defaults (for "Reset to defaults") and the bounds the core checks.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyCatalog {
+    actions: Vec<ActionInfo>,
+    defaults: PolicyRules,
+    max_bulk_threshold: usize,
+    max_countdown_seconds: u32,
+}
+
+#[tauri::command]
+pub fn policy_catalog() -> PolicyCatalog {
+    PolicyCatalog {
+        actions: ActionKind::ALL
+            .iter()
+            .map(|&kind| ActionInfo {
+                kind,
+                label: kind.label(),
+            })
+            .collect(),
+        defaults: PolicyRules::default(),
+        max_bulk_threshold: MAX_BULK_THRESHOLD,
+        max_countdown_seconds: MAX_COUNTDOWN_SECONDS,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicySaved {
+    rules: PolicyRules,
+    /// What changed, as written to the audit log. Empty: nothing was saved.
+    changes: Vec<String>,
+}
+
+/// AP-01: saves edited tier rules through the command bus, which checks them (an invalid rule comes
+/// back as `invalid_rule` with the reason) and audits the change.
+#[tauri::command]
+pub async fn policy_set_rules(state: State<'_, AppState>, rules: PolicyRules) -> IpcResult<PolicySaved> {
+    let core = &state.core;
+    let changes = core.bus.set_rules(&core.ctx, rules).await?;
+    Ok(PolicySaved {
+        rules: core.bus.rules(),
+        changes,
+    })
 }
 
 /// AP-05: newest audit entries first.
@@ -167,6 +256,33 @@ pub async fn audit_recent(state: State<'_, AppState>, limit: Option<u32>) -> Ipc
 #[tauri::command]
 pub async fn audit_verify(state: State<'_, AppState>) -> IpcResult<ChainCheck> {
     Ok(state.core.store.verify_audit_chain().await?)
+}
+
+/// AP-05: asks where to save, then writes the whole audit log there as CSV. The save dialog opens
+/// here, not in the UI, so a file is only ever written where the user chose. `None` when the user
+/// closed the dialog.
+#[tauri::command]
+pub async fn audit_export_csv(window: WebviewWindow, state: State<'_, AppState>) -> IpcResult<Option<AuditExport>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Export the audit log")
+        .set_file_name(remotely_core::export::audit_file_name())
+        .add_filter("CSV", &["csv"])
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't save there: {err}")))?;
+    let report = state.core.export_audit_csv(&path).await?;
+    tracing::info!(entries = report.entries, "audit log exported");
+    Ok(Some(report))
 }
 
 #[derive(Serialize)]

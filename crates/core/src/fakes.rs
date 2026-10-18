@@ -11,22 +11,25 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::adapters::host_counters::{HostCounters, HostTotals, VmProcess};
 use crate::adapters::remote::{loopback_shell, ExecResult, RemoteAdapter, SessionSpec, ShellHandle};
 use crate::adapters::updater::{UpdateInfo, UpdaterAdapter};
-use crate::adapters::vmware::{path_key, LibraryVm, ToolsState, VmwareAdapter, VmxInfo};
+use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::locks;
+use crate::snapshots::is_safety_name;
 use crate::vault::{SecretId, SecretKind, SecretString, UnlockMethod, Vault, VaultStatus};
 
 /// Workstation in memory. VMs can sit in the library, in scanned folders and in the running list;
-/// power calls change the running list the way vmrun would. Records every power and snapshot call
-/// as text, e.g. `power Suspend C:\VMs\a\a.vmx`. Safety snapshot names carry a job id and a time, so
-/// they are recorded as `snapshot take safety <vmx>`.
+/// power calls change the running list and snapshot calls change each VM's snapshot tree the way
+/// vmrun would. Records every power and snapshot call as text, e.g. `power Suspend C:\VMs\a\a.vmx`.
+/// Safety snapshot names carry a job id and a time, so they are recorded as
+/// `snapshot take safety <vmx>`.
 #[derive(Default)]
 pub struct FakeVmware {
     library: Vec<LibraryVm>,
@@ -38,6 +41,10 @@ pub struct FakeVmware {
     slow_shutdown: HashSet<String>,
     no_vmrun: bool,
     power_delay: Duration,
+    started_at: HashMap<String, OffsetDateTime>,
+    failing_snapshots: HashSet<String>,
+    unreadable_snapshots: HashSet<String>,
+    snapshots: Mutex<HashMap<String, SnapshotTree>>,
     running: Mutex<Vec<PathBuf>>,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
@@ -112,8 +119,52 @@ impl FakeVmware {
         self
     }
 
+    /// VM-04: a snapshot taken at `at`, from the VM's current snapshot; it becomes the current one.
+    pub fn with_snapshot(mut self, vmx: &str, name: &str, at: OffsetDateTime) -> Self {
+        let trees = self
+            .snapshots
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        take_snapshot(trees.entry(path_key(Path::new(vmx))).or_default(), name, at);
+        self
+    }
+
+    /// AP-02: the VM's process started at `at` (what the first line of its vmware.log says).
+    pub fn with_started_at(mut self, vmx: &str, at: OffsetDateTime) -> Self {
+        self.started_at.insert(path_key(Path::new(vmx)), at);
+        self
+    }
+
+    /// Every snapshot call on this VM fails, e.g. its disk is full (VM-05).
+    pub fn failing_snapshots(mut self, vmx: &str) -> Self {
+        self.failing_snapshots.insert(path_key(Path::new(vmx)));
+        self
+    }
+
+    /// The VM's .vmsd cannot be read.
+    pub fn unreadable_snapshots(mut self, vmx: &str) -> Self {
+        self.unreadable_snapshots.insert(path_key(Path::new(vmx)));
+        self
+    }
+
     pub fn calls(&self) -> Vec<String> {
         locks::lock(&self.calls).clone()
+    }
+
+    /// The VM's snapshot names, in the order they were taken.
+    pub fn snapshot_names(&self, vmx: &str) -> Vec<String> {
+        locks::lock(&self.snapshots)
+            .get(&path_key(Path::new(vmx)))
+            .map(|tree| tree.snapshots.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// The name of the snapshot the VM's current state was taken from.
+    pub fn current_snapshot(&self, vmx: &str) -> Option<String> {
+        let trees = locks::lock(&self.snapshots);
+        let tree = trees.get(&path_key(Path::new(vmx)))?;
+        let uid = tree.current_uid?;
+        tree.snapshots.iter().find(|s| s.uid == uid).map(|s| s.name.clone())
     }
 
     pub fn running(&self) -> Vec<PathBuf> {
@@ -230,19 +281,104 @@ impl VmwareAdapter for FakeVmware {
     async fn snapshot(&self, vmx: &Path, op: &SnapshotOp) -> Result<()> {
         self.vmrun()?;
         let what = match op {
-            SnapshotOp::Take { name } if name.starts_with("safety-") => "take safety".to_owned(),
+            SnapshotOp::Take { name } if is_safety_name(name) => "take safety".to_owned(),
             SnapshotOp::Take { name } => format!("take {name}"),
             SnapshotOp::Revert { name } => format!("revert {name}"),
             SnapshotOp::Delete { name } => format!("delete {name}"),
         };
         self.record(format!("snapshot {what} {}", vmx.display()));
+        let key = path_key(vmx);
+        let failure = |command: &str, message: &str| CoreError::Vmrun {
+            command: command.into(),
+            message: message.into(),
+        };
+        if self.failing_snapshots.contains(&key) {
+            return Err(failure("snapshot", "Insufficient disk space"));
+        }
+        let mut trees = locks::lock(&self.snapshots);
+        let tree = trees.entry(key).or_default();
+        match op {
+            SnapshotOp::Take { name } => {
+                if tree.snapshots.iter().any(|s| &s.name == name) {
+                    return Err(failure("snapshot", "A snapshot with the name already exists"));
+                }
+                take_snapshot(tree, name, OffsetDateTime::now_utc());
+            }
+            SnapshotOp::Revert { name } => {
+                let uid = find_snapshot(tree, name)
+                    .ok_or_else(|| failure("revertToSnapshot", "The snapshot does not exist"))?;
+                tree.current_uid = Some(uid);
+            }
+            SnapshotOp::Delete { name } => {
+                let uid = find_snapshot(tree, name)
+                    .ok_or_else(|| failure("deleteSnapshot", "The snapshot does not exist"))?;
+                let parent = tree.snapshots.iter().find(|s| s.uid == uid).and_then(|s| s.parent_uid);
+                tree.snapshots.retain(|s| s.uid != uid);
+                // Workstation keeps the children and hangs them on the deleted snapshot's parent.
+                for child in tree.snapshots.iter_mut().filter(|s| s.parent_uid == Some(uid)) {
+                    child.parent_uid = parent;
+                }
+                if tree.current_uid == Some(uid) {
+                    tree.current_uid = parent;
+                }
+            }
+        }
         Ok(())
     }
 
-    async fn list_snapshots(&self, _: &Path) -> Result<Vec<String>> {
+    async fn list_snapshots(&self, vmx: &Path) -> Result<Vec<String>> {
         self.vmrun()?;
-        Ok(Vec::new())
+        Ok(self.snapshot_names(&vmx.to_string_lossy()))
     }
+
+    async fn snapshots(&self, vmx: &Path) -> Result<SnapshotTree> {
+        let key = path_key(vmx);
+        if self.unreadable_snapshots.contains(&key) {
+            return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into());
+        }
+        Ok(locks::lock(&self.snapshots).get(&key).cloned().unwrap_or_default())
+    }
+
+    async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
+        Ok(self.started_at.get(&path_key(vmx)).copied())
+    }
+}
+
+/// Adds a snapshot from the current one and makes it current, as `vmrun snapshot` does.
+fn take_snapshot(tree: &mut SnapshotTree, name: &str, at: OffsetDateTime) {
+    let uid = tree.snapshots.iter().map(|s| s.uid).max().unwrap_or(0) + 1;
+    tree.snapshots.push(SnapshotInfo {
+        uid,
+        parent_uid: tree.current_uid,
+        name: name.to_owned(),
+        description: None,
+        created_at: Some(at),
+    });
+    tree.current_uid = Some(uid);
+}
+
+/// By name, or by vmrun's path form (`base/child`).
+fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
+    let by_name: Vec<u32> = tree
+        .snapshots
+        .iter()
+        .filter(|s| s.name == name)
+        .map(|s| s.uid)
+        .collect();
+    if let [uid] = by_name[..] {
+        return Some(uid);
+    }
+    let mut parent = None;
+    let mut found = None;
+    for part in name.split('/') {
+        found = tree
+            .snapshots
+            .iter()
+            .find(|s| s.parent_uid == parent && s.name == part)
+            .map(|s| s.uid);
+        parent = Some(found?);
+    }
+    found
 }
 
 /// Remote hosts that answer every command with `ok from <host>` and exit code 0, unless a host is

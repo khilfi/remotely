@@ -24,10 +24,10 @@ use uuid::Uuid;
 use crate::domain::{now_rfc3339, Context, UserId, WorkspaceId};
 use crate::error::Result;
 
-pub use audit::{AuditEntry, ChainCheck, NewAuditEntry};
+pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
-pub use jobs::{JobSummary, TargetResult};
+pub use jobs::{JobSummary, JobTargetRecord, TargetResult};
 pub use tags::{SavedFilter, Tag};
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";

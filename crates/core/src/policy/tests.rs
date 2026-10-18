@@ -533,3 +533,251 @@ fn no_warnings_change_nothing() {
     assert!(d.steps.is_empty());
     assert!(d.warnings.is_empty());
 }
+
+// ---- Safety snapshot (VM-05) -------------------------------------------------------------------
+
+fn offers_safety_snapshot(e: &PolicyEngine, command: &Command, targets: &[Target]) -> Option<bool> {
+    e.evaluate(command, targets).steps.iter().find_map(|s| match s {
+        ApprovalStep::SafetySnapshot { default_on } => Some(*default_on),
+        _ => None,
+    })
+}
+
+#[test]
+fn stop_reset_suspend_and_revert_offer_a_safety_snapshot_on_by_default() {
+    let e = engine();
+    let t = vms(2);
+    for command in [
+        power(PowerOp::Stop { mode: SOFT }, &t),
+        power(PowerOp::Stop { mode: HARD }, &t),
+        power(PowerOp::Reset { mode: SOFT }, &t),
+        power(PowerOp::Reset { mode: HARD }, &t),
+        power(PowerOp::Suspend, &t),
+        snapshot(SnapshotOp::Revert { name: "base".into() }, &t),
+    ] {
+        assert_eq!(offers_safety_snapshot(&e, &command, &t), Some(true), "{command:?}");
+    }
+}
+
+#[test]
+fn a_prod_vm_gets_a_safety_snapshot_once_the_bump_makes_it_high() {
+    let mut t = vms(1);
+    t[0].environment = Environment::Prod;
+    let suspend = power(PowerOp::Suspend, &t);
+    assert_eq!(engine().evaluate(&suspend, &t).tier, Tier::High);
+    assert_eq!(offers_safety_snapshot(&engine(), &suspend, &t), Some(true));
+}
+
+#[test]
+fn actions_with_nothing_to_undo_get_no_safety_snapshot_even_when_high() {
+    // Every action High, so only the kind of action decides.
+    let mut rules = PolicyRules::default();
+    for rule in rules.tiers.values_mut() {
+        *rule = TierRule::same(Tier::High);
+    }
+    let e = PolicyEngine::new(rules).unwrap();
+    let t = vms(2);
+    for command in [
+        power(PowerOp::Start { gui: false }, &t),
+        power(PowerOp::Pause, &t),
+        power(PowerOp::Unpause, &t),
+        snapshot(SnapshotOp::Take { name: "x".into() }, &t),
+        // Deleting snapshots to free space would add one per VM, and the deleted one is not in it.
+        snapshot(SnapshotOp::Delete { name: "old".into() }, &t),
+        protect(true, &t),
+        protect(false, &t),
+    ] {
+        assert_eq!(e.evaluate(&command, &t).tier, Tier::High, "{command:?}");
+        assert_eq!(offers_safety_snapshot(&e, &command, &t), None, "{command:?}");
+    }
+}
+
+#[test]
+fn the_safety_snapshot_default_is_a_rule() {
+    let rules = PolicyRules {
+        safety_snapshot_default: false,
+        ..Default::default()
+    };
+    let e = PolicyEngine::new(rules).unwrap();
+    let t = vms(3);
+    assert_eq!(
+        offers_safety_snapshot(&e, &power(PowerOp::Stop { mode: SOFT }, &t), &t),
+        Some(false)
+    );
+}
+
+#[test]
+fn the_job_runner_and_the_dialog_share_one_safety_snapshot_rule() {
+    let t = vms(2);
+    assert!(safety_snapshot_applies(&power(PowerOp::Suspend, &t)));
+    assert!(!safety_snapshot_applies(&power(PowerOp::Start { gui: true }, &t)));
+    let hosts = vec![host(Environment::Lab)];
+    assert!(!safety_snapshot_applies(&exec("reboot", &hosts)), "not a VM");
+}
+
+// ---- Editable rules are checked (AP-01) ---------------------------------------------------------
+
+fn rule_error(rules: PolicyRules) -> String {
+    match rules.validate() {
+        Err(CoreError::InvalidRule { name, message }) => format!("{name}: {message}"),
+        other => panic!("expected an invalid rule, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_default_rules_are_valid() {
+    PolicyRules::default().validate().unwrap();
+}
+
+#[test]
+fn the_bulk_tier_cannot_be_lower_than_the_single_target_tier() {
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(
+        ActionKind::VmStopSoft,
+        TierRule {
+            single: Tier::High,
+            bulk: Tier::Medium,
+        },
+    );
+    let message = rule_error(rules);
+    assert!(message.starts_with("Shut down VMs: "), "{message}");
+    assert!(message.contains("can't be lower"), "{message}");
+}
+
+#[test]
+fn the_bulk_threshold_and_countdown_have_bounds() {
+    for threshold in [0, 1, MAX_BULK_THRESHOLD + 1] {
+        let rules = PolicyRules {
+            bulk_threshold: threshold,
+            ..Default::default()
+        };
+        assert!(rule_error(rules).starts_with("Bulk threshold"), "{threshold}");
+    }
+    let rules = PolicyRules {
+        countdown_seconds: MAX_COUNTDOWN_SECONDS + 1,
+        ..Default::default()
+    };
+    assert!(rule_error(rules).starts_with("Countdown"));
+    // 0 turns the countdown off; that is the user's call.
+    PolicyRules {
+        countdown_seconds: 0,
+        ..Default::default()
+    }
+    .validate()
+    .unwrap();
+}
+
+#[test]
+fn dangerous_patterns_need_a_unique_name_and_a_pattern_that_does_not_match_everything() {
+    let with = |name: &str, pattern: &str| {
+        let mut rules = PolicyRules::default();
+        rules.dangerous_commands.push(DangerousPattern {
+            name: name.into(),
+            pattern: pattern.into(),
+        });
+        rules
+    };
+    assert!(rule_error(with(" ", r"\bkubectl\b")).contains("give the pattern a name"));
+    assert!(rule_error(with("kubectl", "  ")).contains("the pattern is empty"));
+    assert!(rule_error(with("kubectl", "(")).contains("not a valid regular expression"));
+    assert!(rule_error(with("everything", ".*")).contains("matches every command"));
+    assert!(rule_error(with("MKFS", r"\bmkfs2\b")).contains("another dangerous-command rule has this name"));
+    with("kubectl delete", r"\bkubectl\s+delete\b").validate().unwrap();
+}
+
+#[test]
+fn read_only_entries_cannot_hold_shell_operators_or_repeat() {
+    let with = |entry: &str| {
+        let mut rules = PolicyRules::default();
+        rules.read_only_commands.push(entry.into());
+        rules
+    };
+    for entry in [
+        "cat x; rm -rf /",
+        "ls > out",
+        "echo $(id)",
+        "a && b",
+        "tee | x",
+        "sub (shell)",
+    ] {
+        assert!(rule_error(with(entry)).contains("shell operator"), "{entry}");
+    }
+    assert!(rule_error(with("  ")).contains("empty"));
+    assert!(rule_error(with("systemctl  status")).contains("listed twice"));
+    with("zfs list").validate().unwrap();
+}
+
+#[test]
+fn normalizing_trims_names_and_collapses_spaces() {
+    let rules = PolicyRules {
+        dangerous_commands: vec![DangerousPattern {
+            name: "  kubectl delete ".into(),
+            pattern: r" \bkubectl\s+delete\b ".into(),
+        }],
+        read_only_commands: vec!["  systemctl   status ".into()],
+        ..Default::default()
+    };
+    let n = rules.normalized();
+    assert_eq!(n.dangerous_commands[0].name, "kubectl delete");
+    assert_eq!(n.dangerous_commands[0].pattern, r"\bkubectl\s+delete\b");
+    assert_eq!(n.read_only_commands, ["systemctl status"]);
+}
+
+#[test]
+fn changes_say_what_differs_for_the_audit_log() {
+    let old = PolicyRules::default();
+    assert!(old.changes(&old.clone()).is_empty());
+
+    let mut new = old.clone();
+    new.tiers.insert(
+        ActionKind::VmPause,
+        TierRule {
+            single: Tier::Medium,
+            bulk: Tier::High,
+        },
+    );
+    new.countdown_seconds = 5;
+    new.prod_bump = false;
+    new.safety_snapshot_default = false;
+    new.bulk_threshold = 3;
+    new.dangerous_commands.retain(|p| p.name != "dd");
+    new.dangerous_commands.push(DangerousPattern {
+        name: "kubectl delete".into(),
+        pattern: r"\bkubectl\s+delete\b".into(),
+    });
+    new.read_only_commands.retain(|c| c != "w");
+    new.read_only_commands.push("zfs list".into());
+    assert_eq!(
+        old.changes(&new),
+        [
+            "Pause VMs: medium for one, medium in bulk -> medium for one, high in bulk",
+            "Bulk threshold: 2 -> 3 targets",
+            "Prod raises the tier: on -> off",
+            "Countdown: 10 -> 5 s",
+            "Safety snapshot by default: on -> off",
+            r"Dangerous command added: kubectl delete = \bkubectl\s+delete\b",
+            "Dangerous command removed: dd",
+            "Read-only command added: zfs list",
+            "Read-only command removed: w",
+        ]
+    );
+}
+
+#[test]
+fn every_action_is_listed_once_with_a_label_and_a_default_tier() {
+    let mut seen = std::collections::HashSet::new();
+    let defaults = PolicyRules::default();
+    for kind in ActionKind::ALL {
+        assert!(seen.insert(kind), "{kind:?} listed twice");
+        assert!(!kind.label().is_empty());
+        assert!(defaults.tiers.contains_key(&kind), "{kind:?} has no default");
+    }
+    assert_eq!(seen.len(), defaults.tiers.len());
+}
+
+#[test]
+fn reasons_name_the_action_in_words() {
+    let t = vms(2);
+    let d = engine().evaluate(&power(PowerOp::Suspend, &t), &t);
+    assert_eq!(d.reasons[0], "Suspend VMs on 2 targets: high");
+}
