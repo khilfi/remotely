@@ -414,12 +414,37 @@ impl SessionLibrary {
     pub async fn create(&self, ctx: &Context, input: SessionInput) -> Result<SessionRecord> {
         let input = self.check(ctx, None, input).await?;
         let id = Uuid::new_v4();
-        self.store.insert_session(ctx, id, &input).await?;
+        self.store.insert_session(ctx, id, &input, None).await?;
         let session = self.get(ctx, id).await?;
         let detail = self.describe(ctx, &session).await?;
         self.audit(
             ctx,
             &format!("Created session {}", quoted(&session.name)),
+            &session,
+            Some(&detail),
+        )
+        .await?;
+        Ok(session)
+    }
+
+    /// SS-02: saves an imported session, checked like an edit, with where it came from.
+    /// `imported_from` is the stable source name (`putty`, `mobaxterm`, `openssh`, `csv`); `source`
+    /// is how the audit log names it.
+    pub async fn import(
+        &self,
+        ctx: &Context,
+        input: SessionInput,
+        imported_from: &str,
+        source: &str,
+    ) -> Result<SessionRecord> {
+        let input = self.check(ctx, None, input).await?;
+        let id = Uuid::new_v4();
+        self.store.insert_session(ctx, id, &input, Some(imported_from)).await?;
+        let session = self.get(ctx, id).await?;
+        let detail = self.describe(ctx, &session).await?;
+        self.audit(
+            ctx,
+            &format!("Imported session {} from {source}", quoted(&session.name)),
             &session,
             Some(&detail),
         )

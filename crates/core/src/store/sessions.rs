@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::{parse_uuid, Store};
 use crate::adapters::remote::{AuthMethod, SessionSpec};
 use crate::domain::{now_rfc3339, Context, Environment};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionRecord};
 use crate::vault::SecretId;
 
@@ -169,15 +169,21 @@ impl Store {
         row.as_ref().map(row_to_session).transpose()
     }
 
-    /// `input` must already be checked (`crate::sessions`).
-    pub(crate) async fn insert_session(&self, ctx: &Context, id: Uuid, input: &SessionInput) -> Result<()> {
+    /// `input` must already be checked (`crate::sessions`). `imported_from`: SS-02's source name.
+    pub(crate) async fn insert_session(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        input: &SessionInput,
+        imported_from: Option<&str>,
+    ) -> Result<()> {
         let now = now_rfc3339();
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO sessions (id, workspace_id, user_id, folder_id, name, protocol, host, port, username,
                                    auth_method, credential_id, key_passphrase_id, jump_session_id, startup_command,
-                                   environment, color, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   environment, color, imported_from, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(ctx.workspace_id.to_string())
@@ -194,6 +200,7 @@ impl Store {
         .bind(&input.startup_command)
         .bind(input.environment.as_str())
         .bind(input.color.map(SessionColor::as_str))
+        .bind(imported_from)
         .bind(&now)
         .bind(&now)
         .execute(&mut *tx)
@@ -394,32 +401,57 @@ impl Store {
         .transpose()
     }
 
-    /// Connection details for the remote adapter. Jump hosts are resolved one level for now.
+    /// Connection details for the remote adapter. The jump host (SS-07, v2) is resolved one level, so
+    /// the terminal can name it. A key login with no key chosen can't connect, so it is an error here.
     pub async fn session_spec(&self, ctx: &Context, id: Uuid) -> Result<Option<SessionSpec>> {
         let Some(session) = self.get_session(ctx, id).await? else {
             return Ok(None);
         };
-        let auth = match session.auth {
-            SessionAuth::Password { password_id: Some(id) } => AuthMethod::Password(id),
-            SessionAuth::Key {
-                key_id: Some(key),
-                passphrase_id,
-            } => AuthMethod::PrivateKey {
-                key,
-                passphrase: passphrase_id,
-            },
-            // SS-03 decides what a session without its credential does (ask, or fail).
-            _ => AuthMethod::Agent,
+        let auth = match &session.auth {
+            SessionAuth::Key { key_id: None, .. } => {
+                return Err(CoreError::InvalidInput(format!(
+                    "'{}' logs in with a key, but no key is chosen. Edit the session to choose one.",
+                    session.name
+                )))
+            }
+            auth => auth_method(auth),
         };
-        Ok(Some(SessionSpec {
-            id,
-            name: session.name,
-            host: session.host,
-            port: session.port,
-            username: session.username.unwrap_or_default(),
-            auth,
-            jump: None,
-            environment: session.environment,
-        }))
+        let jump = match session.jump_session_id {
+            Some(jump) => self
+                .get_session(ctx, jump)
+                .await?
+                .map(|j| Box::new(spec_of(j, AuthMethod::Agent, None))),
+            None => None,
+        };
+        Ok(Some(spec_of(session, auth, jump)))
+    }
+}
+
+fn auth_method(auth: &SessionAuth) -> AuthMethod {
+    match auth {
+        SessionAuth::Password { password_id } => AuthMethod::Password(*password_id),
+        SessionAuth::Key {
+            key_id: Some(key),
+            passphrase_id,
+        } => AuthMethod::PrivateKey {
+            key: *key,
+            passphrase: *passphrase_id,
+        },
+        // Only for a jump host's spec, which is never connected to in the MVP.
+        SessionAuth::Key { key_id: None, .. } | SessionAuth::Agent => AuthMethod::Agent,
+    }
+}
+
+fn spec_of(session: SessionRecord, auth: AuthMethod, jump: Option<Box<SessionSpec>>) -> SessionSpec {
+    SessionSpec {
+        id: session.id,
+        name: session.name,
+        host: session.host,
+        port: session.port,
+        username: session.username.unwrap_or_default(),
+        auth,
+        jump,
+        environment: session.environment,
+        startup_command: session.startup_command,
     }
 }

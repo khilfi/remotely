@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
 use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
@@ -26,6 +27,8 @@ pub struct Setup {
     /// The app's own vault (fake DPAPI, fast key derivation), set up with [`VAULT_PASSWORD`] and the
     /// Windows login, and unlocked. Otherwise a [`FakeVault`] with that password.
     pub real_vault: bool,
+    /// [`FakeRemote`] unless a test talks SSH to its own local server ([`Setup::with_ssh`]).
+    pub remote: Arc<dyn RemoteAdapter>,
 }
 
 impl Setup {
@@ -39,7 +42,14 @@ impl Setup {
                 ..Default::default()
             },
             real_vault: false,
+            remote: Arc::new(FakeRemote::default()),
         }
+    }
+
+    /// The real russh adapter, for tests against `fakes::ssh_server::TestSshServer` on 127.0.0.1.
+    pub fn with_ssh(mut self) -> Self {
+        self.remote = Arc::new(RusshAdapter::new());
+        self
     }
 
     pub fn with_real_vault(mut self) -> Self {
@@ -73,7 +83,7 @@ impl Setup {
         };
         let adapters = Adapters {
             vmware: self.vmware,
-            remote: Arc::new(FakeRemote::default()),
+            remote: self.remote,
             vault,
             host_counters: Arc::new(self.host),
             updater: Arc::new(FakeUpdater::default()),

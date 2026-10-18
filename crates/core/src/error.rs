@@ -105,6 +105,34 @@ pub enum CoreError {
     #[error("update failed: {0}")]
     Update(String),
 
+    /// SS-03: reaching or talking to an SSH server failed. Never holds a secret.
+    #[error("{0}")]
+    Ssh(String),
+
+    /// SS-03: the server refused the login. Names the method and user, never a secret.
+    #[error("login failed: {0}")]
+    AuthFailed(String),
+
+    /// SS-03: agent login, but no agent (or no key in it).
+    #[error("{0}")]
+    AgentUnavailable(String),
+
+    /// SS-05: the server presented a different key than the one trusted for it. Blocked.
+    #[error(
+        "the host key of {address} has changed, so Remotely did not connect. Someone may be intercepting the connection, or the host was reinstalled"
+    )]
+    HostKeyChanged { address: String },
+
+    /// SS-05: the user did not trust a new host key.
+    #[error("the host key of {address} was not trusted, so Remotely did not connect")]
+    HostKeyRejected { address: String },
+
+    /// SS-07 is v2: a session with a jump host is not connected directly.
+    #[error(
+        "this session connects through the jump host '{jump}'. Jump hosts arrive in a later version (SS-07), so Remotely doesn't connect to it directly"
+    )]
+    JumpHostUnsupported { jump: String },
+
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
 }
@@ -139,6 +167,12 @@ impl CoreError {
             CoreError::Cancelled => "cancelled",
             CoreError::CancelledInFlight => "cancelled_in_flight",
             CoreError::Update(_) => "update_failed",
+            CoreError::Ssh(_) => "ssh",
+            CoreError::AuthFailed(_) => "auth_failed",
+            CoreError::AgentUnavailable(_) => "agent_unavailable",
+            CoreError::HostKeyChanged { .. } => "host_key_changed",
+            CoreError::HostKeyRejected { .. } => "host_key_rejected",
+            CoreError::JumpHostUnsupported { .. } => "jump_host_unsupported",
             CoreError::NotImplemented(_) => "not_implemented",
         }
     }

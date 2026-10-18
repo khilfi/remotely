@@ -16,7 +16,6 @@ use tokio::sync::broadcast::error::RecvError;
 
 pub struct AppState {
     pub core: Arc<Core>,
-    pub terminals: terminal::Terminals,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -88,10 +87,7 @@ pub fn run() {
                 }
             });
 
-            app.manage(AppState {
-                core,
-                terminals: terminal::Terminals::default(),
-            });
+            app.manage(AppState { core });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -150,17 +146,37 @@ pub fn run() {
             ipc::folder_rename,
             ipc::folder_move,
             ipc::folder_delete,
+            ipc::import_preview,
+            ipc::import_commit,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,
+            terminal::terminal_reconnect,
             terminal::terminal_close,
+            terminal::terminal_host_key_answer,
+            terminal::terminal_host_key_replace,
+            terminal::terminal_settings,
+            terminal::terminal_set_settings,
+            terminal::known_hosts_list,
+            terminal::known_host_remove,
         ])
-        .run(context);
+        .build(context);
 
-    if let Err(err) = result {
-        tracing::error!(error = %err, "the app stopped with an error");
-        std::process::exit(1);
-    }
+    let app = match result {
+        Ok(app) => app,
+        Err(err) => {
+            tracing::error!(error = %err, "the app stopped with an error");
+            std::process::exit(1);
+        }
+    };
+    app.run(|handle, event| {
+        // SS-03: terminals still open are closed (and their closing audited) before the app exits.
+        if let tauri::RunEvent::Exit = event {
+            if let Some(state) = handle.try_state::<AppState>() {
+                tauri::async_runtime::block_on(state.core.terminals.close_all());
+            }
+        }
+    });
 }
 
 /// DOMAIN\user, which keys the local user record.

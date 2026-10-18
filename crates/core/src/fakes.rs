@@ -4,6 +4,8 @@
 //! Compiled for the crate's own unit tests and, through the `fakes` feature, for the integration
 //! tests in `tests/`. The app never enables that feature.
 
+pub mod ssh_server;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,7 +19,9 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::adapters::host_counters::{HostCounters, HostTotals, VmProcess};
-use crate::adapters::remote::{loopback_shell, ExecResult, RemoteAdapter, SessionSpec, ShellHandle};
+use crate::adapters::remote::{
+    ExecResult, Prompter, RemoteAdapter, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
+};
 use crate::adapters::updater::{UpdateInfo, UpdaterAdapter};
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
@@ -465,8 +469,54 @@ impl RemoteAdapter for FakeRemote {
         })
     }
 
-    async fn open_shell(&self, _: &SessionSpec, _: u16, _: u16) -> Result<ShellHandle> {
+    async fn open_shell(&self, request: ShellRequest<'_>, _: &mut dyn Prompter) -> Result<ShellHandle> {
+        locks::lock(&self.calls).push(format!("{}: shell", request.session.host));
         Ok(loopback_shell())
+    }
+}
+
+/// A shell that echoes what is typed and answers each line with `not connected: <line>`; `exit`
+/// ends it.
+pub fn loopback_shell() -> ShellHandle {
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<ShellInput>(64);
+    let (output_tx, output_rx) = tokio::sync::mpsc::channel::<ShellOutput>(64);
+    tokio::spawn(async move {
+        let mut line = Vec::new();
+        while let Some(msg) = input_rx.recv().await {
+            let bytes = match msg {
+                ShellInput::Close => break,
+                ShellInput::Resize { .. } => continue,
+                ShellInput::Data(bytes) => bytes,
+            };
+            let mut out = Vec::new();
+            for byte in bytes {
+                if byte == b'\r' {
+                    let text = String::from_utf8_lossy(&line).into_owned();
+                    line.clear();
+                    if text == "exit" {
+                        let _ = output_tx.send(ShellOutput::Data(out)).await;
+                        let _ = output_tx
+                            .send(ShellOutput::Closed(ShellEnd::Exited { status: Some(0) }))
+                            .await;
+                        return;
+                    }
+                    out.extend_from_slice(format!("\r\nnot connected: {text}\r\n").as_bytes());
+                } else {
+                    line.push(byte);
+                    out.push(byte);
+                }
+            }
+            if output_tx.send(ShellOutput::Data(out)).await.is_err() {
+                return;
+            }
+        }
+        let _ = output_tx
+            .send(ShellOutput::Closed(ShellEnd::Exited { status: None }))
+            .await;
+    });
+    ShellHandle {
+        input: input_tx,
+        output: output_rx,
     }
 }
 
