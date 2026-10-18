@@ -1,5 +1,6 @@
 // Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
-// power-on limit (VM-06), shutdown wait (VM-03) and update checks (FD-14). The theme switch is in the top bar.
+// power-on limit (VM-06), shutdown wait (VM-03) and update checks (FD-14) under General, and the
+// editable approval rules (AP-01) under Approval rules. The theme switch is in the top bar.
 
 import { useEffect, useState } from "react";
 import { FolderIcon, XIcon } from "lucide-react";
@@ -8,6 +9,8 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { api, errorMessage, type Settings } from "@/lib/api";
 
 interface Props {
@@ -117,162 +120,171 @@ export function SettingsPage({ onChanged }: Props) {
   }
 
   return (
-    <div className="flex max-w-3xl flex-col gap-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>VMware Workstation</CardTitle>
-          <CardDescription>
-            Every VM action runs through vmrun.exe. Leave the path empty to find it automatically: the registry first,
-            then the default install folders.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-2">
-          <Label htmlFor="vmrun-path">vmrun.exe path</Label>
-          <Input
-            id="vmrun-path"
-            className="font-mono"
-            placeholder="Found automatically"
-            spellCheck={false}
-            value={path}
-            onChange={(e) => setPath(e.currentTarget.value)}
-          />
-          <p className="text-sm text-muted-foreground">
-            In use: <span className="font-mono">{settings?.vmrunPathInUse ?? "not found"}</span>
-          </p>
-          <StatusLine message={vmrunMessage} />
-        </CardContent>
-        <CardFooter className="gap-2">
-          <Button onClick={() => void saveVmrun(path)}>Save</Button>
-          <Button variant="outline" onClick={() => void saveVmrun(null)}>
-            Find automatically
-          </Button>
-        </CardFooter>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>VM folders</CardTitle>
-          <CardDescription>
-            Remotely lists every VM in VMware Workstation&apos;s library. Add folders that hold other VMs; they are
-            searched for .vmx files up to five folder levels down.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3">
-          {settings && settings.scanFolders.length > 0 && (
-            <ul className="grid gap-1">
-              {settings.scanFolders.map((folder) => (
-                <li key={folder} className="flex items-center gap-2 rounded-md border px-3 py-1.5">
-                  <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
-                  <span className="min-w-0 flex-1 truncate font-mono text-sm" title={folder}>
-                    {folder}
-                  </span>
-                  <Button
-                    size="icon-sm"
-                    variant="ghost"
-                    aria-label={`Stop scanning ${folder}`}
-                    onClick={() => void saveFolders(settings.scanFolders.filter((f) => f !== folder))}
-                  >
-                    <XIcon />
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
-          <form
-            className="flex gap-2"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (settings && newFolder.trim()) void saveFolders([...settings.scanFolders, newFolder.trim()]);
-            }}
-          >
-            <Label htmlFor="scan-folder" className="sr-only">
-              Folder to scan
-            </Label>
+    <Tabs defaultValue="general" className="max-w-3xl gap-4">
+      <TabsList>
+        <TabsTrigger value="general">General</TabsTrigger>
+        <TabsTrigger value="rules">Approval rules</TabsTrigger>
+      </TabsList>
+      <TabsContent value="rules">
+        <PolicyRulesEditor />
+      </TabsContent>
+      <TabsContent value="general" className="flex flex-col gap-6">
+        <Card>
+          <CardHeader>
+            <CardTitle>VMware Workstation</CardTitle>
+            <CardDescription>
+              Every VM action runs through vmrun.exe. Leave the path empty to find it automatically: the registry first,
+              then the default install folders.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2">
+            <Label htmlFor="vmrun-path">vmrun.exe path</Label>
             <Input
-              id="scan-folder"
+              id="vmrun-path"
               className="font-mono"
-              placeholder="D:\VMs"
+              placeholder="Found automatically"
               spellCheck={false}
-              value={newFolder}
-              onChange={(e) => setNewFolder(e.currentTarget.value)}
+              value={path}
+              onChange={(e) => setPath(e.currentTarget.value)}
             />
-            <Button type="submit" variant="outline" disabled={!settings || !newFolder.trim()}>
-              Add folder
+            <p className="text-sm text-muted-foreground">
+              In use: <span className="font-mono">{settings?.vmrunPathInUse ?? "not found"}</span>
+            </p>
+            <StatusLine message={vmrunMessage} />
+          </CardContent>
+          <CardFooter className="gap-2">
+            <Button onClick={() => void saveVmrun(path)}>Save</Button>
+            <Button variant="outline" onClick={() => void saveVmrun(null)}>
+              Find automatically
             </Button>
-          </form>
-          <StatusLine message={folderMessage} />
-        </CardContent>
-      </Card>
+          </CardFooter>
+        </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Power actions</CardTitle>
-          <CardDescription>
-            Starting many VMs at once can saturate the host&apos;s disk and CPU, so bulk starts power on a few at a
-            time. Shut down asks each guest to stop and waits; a VM still running after the wait is reported and left
-            running, and forcing it off needs its own approval.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4">
-          <div className="grid gap-2">
-            <Label htmlFor="power-on-limit">VMs powered on at once</Label>
-            <Input
-              id="power-on-limit"
-              type="number"
-              min={1}
-              max={32}
-              className="w-28"
-              value={powerOnLimit}
-              onChange={(e) => setPowerOnLimit(e.currentTarget.value)}
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor="shutdown-wait">Shutdown wait (seconds)</Label>
-            <Input
-              id="shutdown-wait"
-              type="number"
-              min={1}
-              max={3600}
-              className="w-28"
-              value={shutdownWait}
-              onChange={(e) => setShutdownWait(e.currentTarget.value)}
-            />
-          </div>
-          <StatusLine message={powerMessage} />
-        </CardContent>
-        <CardFooter>
-          <Button onClick={() => void savePowerActions()} disabled={!settings}>
-            Save
-          </Button>
-        </CardFooter>
-      </Card>
+        <Card>
+          <CardHeader>
+            <CardTitle>VM folders</CardTitle>
+            <CardDescription>
+              Remotely lists every VM in VMware Workstation&apos;s library. Add folders that hold other VMs; they are
+              searched for .vmx files up to five folder levels down.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {settings && settings.scanFolders.length > 0 && (
+              <ul className="grid gap-1">
+                {settings.scanFolders.map((folder) => (
+                  <li key={folder} className="flex items-center gap-2 rounded-md border px-3 py-1.5">
+                    <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm" title={folder}>
+                      {folder}
+                    </span>
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label={`Stop scanning ${folder}`}
+                      onClick={() => void saveFolders(settings.scanFolders.filter((f) => f !== folder))}
+                    >
+                      <XIcon />
+                    </Button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (settings && newFolder.trim()) void saveFolders([...settings.scanFolders, newFolder.trim()]);
+              }}
+            >
+              <Label htmlFor="scan-folder" className="sr-only">
+                Folder to scan
+              </Label>
+              <Input
+                id="scan-folder"
+                className="font-mono"
+                placeholder="D:\VMs"
+                spellCheck={false}
+                value={newFolder}
+                onChange={(e) => setNewFolder(e.currentTarget.value)}
+              />
+              <Button type="submit" variant="outline" disabled={!settings || !newFolder.trim()}>
+                Add folder
+              </Button>
+            </form>
+            <StatusLine message={folderMessage} />
+          </CardContent>
+        </Card>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Updates</CardTitle>
-          <CardDescription>
-            Remotely checks GitHub Releases at start and every 24 hours. Every update is signature-checked, and
-            installing always asks first. Turn checks off at air-gapped sites.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-3">
-          <div className="flex items-center gap-3">
-            <Switch
-              id="update-checks"
-              checked={settings?.updateChecks ?? true}
-              disabled={!settings}
-              onCheckedChange={(checked) => void setUpdateChecks(checked)}
-            />
-            <Label htmlFor="update-checks">Check for updates</Label>
-          </div>
-          <StatusLine message={updateMessage} />
-        </CardContent>
-        <CardFooter>
-          <Button variant="outline" onClick={() => void checkNow()} disabled={checking || !settings?.updateChecks}>
-            {checking ? "Checking…" : "Check now"}
-          </Button>
-        </CardFooter>
-      </Card>
-    </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Power actions</CardTitle>
+            <CardDescription>
+              Starting many VMs at once can saturate the host&apos;s disk and CPU, so bulk starts power on a few at a
+              time. Shut down asks each guest to stop and waits; a VM still running after the wait is reported and left
+              running, and forcing it off needs its own approval.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor="power-on-limit">VMs powered on at once</Label>
+              <Input
+                id="power-on-limit"
+                type="number"
+                min={1}
+                max={32}
+                className="w-28"
+                value={powerOnLimit}
+                onChange={(e) => setPowerOnLimit(e.currentTarget.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="shutdown-wait">Shutdown wait (seconds)</Label>
+              <Input
+                id="shutdown-wait"
+                type="number"
+                min={1}
+                max={3600}
+                className="w-28"
+                value={shutdownWait}
+                onChange={(e) => setShutdownWait(e.currentTarget.value)}
+              />
+            </div>
+            <StatusLine message={powerMessage} />
+          </CardContent>
+          <CardFooter>
+            <Button onClick={() => void savePowerActions()} disabled={!settings}>
+              Save
+            </Button>
+          </CardFooter>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Updates</CardTitle>
+            <CardDescription>
+              Remotely checks GitHub Releases at start and every 24 hours. Every update is signature-checked, and
+              installing always asks first. Turn checks off at air-gapped sites.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <div className="flex items-center gap-3">
+              <Switch
+                id="update-checks"
+                checked={settings?.updateChecks ?? true}
+                disabled={!settings}
+                onCheckedChange={(checked) => void setUpdateChecks(checked)}
+              />
+              <Label htmlFor="update-checks">Check for updates</Label>
+            </div>
+            <StatusLine message={updateMessage} />
+          </CardContent>
+          <CardFooter>
+            <Button variant="outline" onClick={() => void checkNow()} disabled={checking || !settings?.updateChecks}>
+              {checking ? "Checking…" : "Check now"}
+            </Button>
+          </CardFooter>
+        </Card>
+      </TabsContent>
+    </Tabs>
   );
 }

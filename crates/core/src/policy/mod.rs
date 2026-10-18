@@ -85,6 +85,52 @@ pub enum ActionKind {
     AppUpdate,
 }
 
+impl ActionKind {
+    /// Every action, in the order Settings lists them (AP-01).
+    pub const ALL: [ActionKind; 17] = [
+        ActionKind::VmStart,
+        ActionKind::VmUnpause,
+        ActionKind::VmPause,
+        ActionKind::VmSuspend,
+        ActionKind::VmResetSoft,
+        ActionKind::VmStopSoft,
+        ActionKind::VmResetHard,
+        ActionKind::VmStopHard,
+        ActionKind::SnapshotTake,
+        ActionKind::SnapshotRevert,
+        ActionKind::SnapshotDelete,
+        ActionKind::VmProtect,
+        ActionKind::VmUnprotect,
+        ActionKind::ExecReadOnly,
+        ActionKind::ExecOther,
+        ActionKind::ExecDangerous,
+        ActionKind::AppUpdate,
+    ];
+
+    /// What the user sees in Settings, approval reasons and the audit log.
+    pub fn label(self) -> &'static str {
+        match self {
+            ActionKind::VmStart => "Start VMs",
+            ActionKind::VmUnpause => "Unpause VMs",
+            ActionKind::VmPause => "Pause VMs",
+            ActionKind::VmSuspend => "Suspend VMs",
+            ActionKind::VmResetSoft => "Restart VMs",
+            ActionKind::VmStopSoft => "Shut down VMs",
+            ActionKind::VmResetHard => "Reset VMs (hard)",
+            ActionKind::VmStopHard => "Power off VMs (hard)",
+            ActionKind::SnapshotTake => "Take a snapshot",
+            ActionKind::SnapshotRevert => "Revert to a snapshot",
+            ActionKind::SnapshotDelete => "Delete a snapshot",
+            ActionKind::VmProtect => "Protect VMs",
+            ActionKind::VmUnprotect => "Unprotect VMs",
+            ActionKind::ExecReadOnly => "Run a read-only command",
+            ActionKind::ExecOther => "Run any other command",
+            ActionKind::ExecDangerous => "Run a dangerous command",
+            ActionKind::AppUpdate => "Install an app update",
+        }
+    }
+}
+
 /// Tier for one target and for a bulk action (`bulk_threshold` targets or more).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -138,13 +184,187 @@ pub struct PolicyRules {
     pub safety_snapshot_default: bool,
 }
 
+/// AP-01: the editable numbers stay within these bounds.
+pub const MAX_BULK_THRESHOLD: usize = 1000;
+pub const MAX_COUNTDOWN_SECONDS: u32 = 300;
+
+/// Characters that join or redirect shell commands. A read-only entry holding one would let a
+/// writing command ride along on a read-only one.
+const SHELL_SPECIAL: &[char] = &[';', '&', '|', '>', '<', '`', '$', '(', ')', '\n', '\r'];
+
 impl PolicyRules {
+    /// Trims names and patterns and collapses the spaces in read-only entries, so the same rule
+    /// typed twice compares equal. Changes nothing else.
+    pub fn normalized(mut self) -> Self {
+        for p in &mut self.dangerous_commands {
+            p.name = p.name.trim().to_owned();
+            p.pattern = p.pattern.trim().to_owned();
+        }
+        for entry in &mut self.read_only_commands {
+            *entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
+        }
+        self
+    }
+
+    /// AP-01: every problem that makes the rules unusable, or unsafe to save. Reported one at a time,
+    /// so the message names the rule to fix.
+    pub fn validate(&self) -> Result<()> {
+        let invalid = |name: &str, message: String| {
+            Err(CoreError::InvalidRule {
+                name: name.to_owned(),
+                message,
+            })
+        };
+        for kind in ActionKind::ALL {
+            let Some(rule) = self.tiers.get(&kind) else {
+                return invalid(kind.label(), "no tier set for this action".into());
+            };
+            if rule.bulk < rule.single {
+                return invalid(
+                    kind.label(),
+                    format!(
+                        "the tier for {} or more targets ({}) can't be lower than for one target ({})",
+                        self.bulk_threshold,
+                        rule.bulk.as_str(),
+                        rule.single.as_str()
+                    ),
+                );
+            }
+        }
+        if !(2..=MAX_BULK_THRESHOLD).contains(&self.bulk_threshold) {
+            return invalid("Bulk threshold", format!("must be 2 to {MAX_BULK_THRESHOLD} targets"));
+        }
+        if self.countdown_seconds > MAX_COUNTDOWN_SECONDS {
+            return invalid("Countdown", format!("must be 0 to {MAX_COUNTDOWN_SECONDS} seconds"));
+        }
+        let mut names = std::collections::HashSet::new();
+        for p in &self.dangerous_commands {
+            let label = if p.name.trim().is_empty() {
+                "Dangerous command"
+            } else {
+                p.name.as_str()
+            };
+            if p.name.trim().is_empty() {
+                return invalid(label, "give the pattern a name".into());
+            }
+            if !names.insert(p.name.trim().to_lowercase()) {
+                return invalid(label, "another dangerous-command rule has this name".into());
+            }
+            if p.pattern.trim().is_empty() {
+                return invalid(label, "the pattern is empty".into());
+            }
+            match Regex::new(&p.pattern) {
+                Err(err) => return invalid(label, format!("not a valid regular expression: {err}")),
+                // A pattern that matches the empty string matches every command.
+                Ok(re) if re.is_match("") => {
+                    return invalid(label, "the pattern matches every command".into());
+                }
+                Ok(_) => {}
+            }
+        }
+        let mut entries = std::collections::HashSet::new();
+        for entry in &self.read_only_commands {
+            let shown = entry.trim();
+            if shown.is_empty() {
+                return invalid("Read-only commands", "an entry is empty".into());
+            }
+            if shown.contains(SHELL_SPECIAL) {
+                return invalid(
+                    "Read-only commands",
+                    format!("'{shown}' holds a shell operator (; & | > < ` $ or brackets)"),
+                );
+            }
+            if !entries.insert(shown.split_whitespace().collect::<Vec<_>>().join(" ")) {
+                return invalid("Read-only commands", format!("'{shown}' is listed twice"));
+            }
+        }
+        Ok(())
+    }
+
+    /// What changed from `self` to `new`, one line per change, for the audit log (AP-01).
+    pub fn changes(&self, new: &PolicyRules) -> Vec<String> {
+        let mut out = Vec::new();
+        for kind in ActionKind::ALL {
+            let (before, after) = (self.tiers.get(&kind), new.tiers.get(&kind));
+            if before == after {
+                continue;
+            }
+            let show = |r: Option<&TierRule>| {
+                r.map_or_else(
+                    || "none".to_owned(),
+                    |r| format!("{} for one, {} in bulk", r.single.as_str(), r.bulk.as_str()),
+                )
+            };
+            out.push(format!("{}: {} -> {}", kind.label(), show(before), show(after)));
+        }
+        if self.bulk_threshold != new.bulk_threshold {
+            out.push(format!(
+                "Bulk threshold: {} -> {} targets",
+                self.bulk_threshold, new.bulk_threshold
+            ));
+        }
+        if self.prod_bump != new.prod_bump {
+            out.push(format!(
+                "Prod raises the tier: {} -> {}",
+                on_off(self.prod_bump),
+                on_off(new.prod_bump)
+            ));
+        }
+        if self.countdown_seconds != new.countdown_seconds {
+            out.push(format!(
+                "Countdown: {} -> {} s",
+                self.countdown_seconds, new.countdown_seconds
+            ));
+        }
+        if self.safety_snapshot_default != new.safety_snapshot_default {
+            out.push(format!(
+                "Safety snapshot by default: {} -> {}",
+                on_off(self.safety_snapshot_default),
+                on_off(new.safety_snapshot_default)
+            ));
+        }
+        for p in &new.dangerous_commands {
+            match self.dangerous_commands.iter().find(|old| old.name == p.name) {
+                None => out.push(format!("Dangerous command added: {} = {}", p.name, p.pattern)),
+                Some(old) if old.pattern != p.pattern => out.push(format!(
+                    "Dangerous command changed: {} = {} -> {}",
+                    p.name, old.pattern, p.pattern
+                )),
+                Some(_) => {}
+            }
+        }
+        for p in &self.dangerous_commands {
+            if !new.dangerous_commands.iter().any(|n| n.name == p.name) {
+                out.push(format!("Dangerous command removed: {}", p.name));
+            }
+        }
+        for entry in &new.read_only_commands {
+            if !self.read_only_commands.contains(entry) {
+                out.push(format!("Read-only command added: {entry}"));
+            }
+        }
+        for entry in &self.read_only_commands {
+            if !new.read_only_commands.contains(entry) {
+                out.push(format!("Read-only command removed: {entry}"));
+            }
+        }
+        out
+    }
+
     /// Rules saved before an action existed have no tier for it; give those the default tier, so an
     /// update that adds an action does not stop the app from loading the user's rules.
     pub fn fill_missing_tiers(&mut self) {
         for (kind, rule) in PolicyRules::default().tiers {
             self.tiers.entry(kind).or_insert(rule);
         }
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
     }
 }
 
@@ -239,8 +459,9 @@ pub struct PolicyEngine {
 }
 
 impl PolicyEngine {
-    /// Fails when a dangerous-command pattern is not a valid regex or an action has no tier.
+    /// Fails with the first problem [`PolicyRules::validate`] finds.
     pub fn new(rules: PolicyRules) -> Result<Self> {
+        rules.validate()?;
         let dangerous = rules
             .dangerous_commands
             .iter()
@@ -253,20 +474,6 @@ impl PolicyEngine {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        for kind in ALL_ACTIONS {
-            if !rules.tiers.contains_key(&kind) {
-                return Err(CoreError::InvalidRule {
-                    name: format!("{kind:?}"),
-                    message: "no tier set for this action".into(),
-                });
-            }
-        }
-        if rules.bulk_threshold < 2 {
-            return Err(CoreError::InvalidRule {
-                name: "bulkThreshold".into(),
-                message: "must be 2 or more".into(),
-            });
-        }
         Ok(Self { rules, dangerous })
     }
 
@@ -327,7 +534,11 @@ impl PolicyEngine {
         let rule = self.rules.tiers[&action];
         let bulk = active.len() >= self.rules.bulk_threshold;
         let mut tier = if bulk { rule.bulk } else { rule.single };
-        reasons.push(format!("{action:?} on {} target(s) is {}", active.len(), tier.as_str()));
+        let count = match active.len() {
+            1 => "1 target".to_owned(),
+            n => format!("{n} targets"),
+        };
+        reasons.push(format!("{} on {count}: {}", action.label(), tier.as_str()));
 
         if let Command::RemoteExec { script, .. } = command {
             let hits = self.dangerous_matches(script);
@@ -370,7 +581,7 @@ impl PolicyEngine {
             Tier::Medium => vec![ApprovalStep::Confirm],
             Tier::High | Tier::Critical => {
                 let mut steps = vec![ApprovalStep::ImpactPreview];
-                if wants_safety_snapshot(command) {
+                if safety_snapshot_applies(command) {
                     steps.push(ApprovalStep::SafetySnapshot {
                         default_on: self.rules.safety_snapshot_default,
                     });
@@ -389,36 +600,17 @@ impl PolicyEngine {
     }
 }
 
-/// VM-05 applies to VM targets, except taking a snapshot (which is itself the safety net) and
-/// changing protection (which does not touch the VM).
-fn wants_safety_snapshot(command: &Command) -> bool {
+/// VM-05: a safety snapshot is offered (when the tier is High or Critical) for the VM actions that
+/// can lose what the guest is doing: stop, reset, suspend and revert. The rest have nothing to undo
+/// (start, pause, unpause), are snapshots themselves (take), would undo their own purpose (deleting
+/// snapshots to free space would add one per VM; the deleted snapshot is not in it anyway) or do not
+/// touch the VM (protect). The job runner asks this too, so the dialog and the job always agree.
+pub fn safety_snapshot_applies(command: &Command) -> bool {
     let on_vms = command.targets().iter().any(|t| matches!(t, TargetRef::Vm { .. }));
-    let leaves_vm_alone = matches!(
-        command,
-        Command::VmSnapshot {
-            op: SnapshotOp::Take { .. },
-            ..
-        } | Command::VmProtect { .. }
-    );
-    on_vms && !leaves_vm_alone
+    let can_lose_state = match command {
+        Command::VmPower { op, .. } => matches!(op, PowerOp::Stop { .. } | PowerOp::Reset { .. } | PowerOp::Suspend),
+        Command::VmSnapshot { op, .. } => matches!(op, SnapshotOp::Revert { .. }),
+        Command::VmProtect { .. } | Command::RemoteExec { .. } | Command::AppUpdate { .. } => false,
+    };
+    on_vms && can_lose_state
 }
-
-const ALL_ACTIONS: [ActionKind; 17] = [
-    ActionKind::VmStart,
-    ActionKind::VmUnpause,
-    ActionKind::VmPause,
-    ActionKind::VmSuspend,
-    ActionKind::VmResetSoft,
-    ActionKind::VmResetHard,
-    ActionKind::VmStopSoft,
-    ActionKind::VmStopHard,
-    ActionKind::SnapshotTake,
-    ActionKind::SnapshotRevert,
-    ActionKind::SnapshotDelete,
-    ActionKind::VmProtect,
-    ActionKind::VmUnprotect,
-    ActionKind::ExecReadOnly,
-    ActionKind::ExecOther,
-    ActionKind::ExecDangerous,
-    ActionKind::AppUpdate,
-];

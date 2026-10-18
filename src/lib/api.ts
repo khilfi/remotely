@@ -91,8 +91,50 @@ export type PowerOp =
   | { kind: "pause" }
   | { kind: "unpause" };
 
+/** VM-04. Revert and delete take a name, or vmrun's path form ("base/child") when a VM has two snapshots with one name. */
 export type SnapshotOp =
   { kind: "take"; name: string } | { kind: "revert"; name: string } | { kind: "delete"; name: string };
+
+/** VM-04: one snapshot, read from the VM's .vmsd file. */
+export interface SnapshotNode {
+  uid: number;
+  parentUid: number | null;
+  name: string;
+  /** vmrun's path form, e.g. "base/child one". */
+  path: string;
+  description: string | null;
+  /** RFC 3339 UTC; null when the .vmsd has no time for it. */
+  createdAt: string | null;
+  ageDays: number | null;
+  /** Levels below a first snapshot. */
+  depth: number;
+  /** Older than 30 days. */
+  old: boolean;
+  /** VM-05: taken by Remotely before a high-risk action. */
+  safety: boolean;
+  /** The VM's current state was taken from this snapshot. */
+  current: boolean;
+}
+
+export interface VmSnapshots {
+  vmxPath: string;
+  displayName: string;
+  powerState: PowerState;
+  environment: Environment;
+  protected: boolean;
+  /** Tree order: each snapshot comes right after its parent. */
+  snapshots: SnapshotNode[];
+  oldCount: number;
+  safetyCount: number;
+  error: string | null;
+}
+
+export interface SnapshotLimits {
+  oldAfterDays: number;
+  /** Safety snapshot names start with this; names a user types may not. */
+  safetyPrefix: string;
+  maxNameLength: number;
+}
 
 export type Command =
   | { type: "vmPower"; targets: TargetRef[]; op: PowerOp }
@@ -101,6 +143,20 @@ export type Command =
   | { type: "vmProtect"; targets: TargetRef[]; protected: boolean }
   | { type: "remoteExec"; targets: TargetRef[]; script: string; sudo?: boolean }
   | { type: "appUpdate"; version: string };
+
+/** AP-02: a VM target as it is now, read without a guest login. */
+export interface TargetImpact {
+  /** The target's key (its .vmx path). */
+  target: string;
+  powerState: PowerState;
+  /** When the running VM's process started (power-on or resume). */
+  runningSince: string | null;
+  uptimeSecs: number | null;
+  snapshotCount: number | null;
+  oldSnapshotCount: number | null;
+  /** What could not be read. */
+  notes: string[];
+}
 
 export type ApprovalStep =
   | { step: "confirm" }
@@ -122,6 +178,8 @@ export interface ApprovalRequest {
   reasons: string[];
   /** Problems to read before approving, e.g. the capacity check before a power-on (VM-07). */
   warnings: string[];
+  /** AP-02: each VM target's state, uptime and snapshot count right now. */
+  impact: TargetImpact[];
 }
 
 export type SubmitOutcome =
@@ -144,7 +202,8 @@ export type TargetStatus = "pending" | "running" | "succeeded" | "failed" | "ski
 
 export type JobEvent =
   | { event: "queued"; jobId: string; summary: string; tier: Tier; targets: number }
-  | { event: "countdown"; jobId: string; seconds: number }
+  /** AP-03: the job waits until `until` and can be cancelled until then. */
+  | { event: "countdown"; jobId: string; seconds: number; until: string }
   | { event: "started"; jobId: string }
   | {
       event: "targetFinished";
@@ -154,6 +213,8 @@ export type JobEvent =
       status: TargetStatus;
       message: string | null;
       durationMs: number;
+      /** VM-05: the safety snapshot taken on this target first. */
+      safetySnapshot: string | null;
     }
   /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
   | { event: "stillRunning"; jobId: string; targets: Target[] }
@@ -171,6 +232,24 @@ export interface JobSummary {
   targetsTotal: number;
   targetsSucceeded: number;
   targetsFailed: number;
+  /** AP-03: when the countdown ends, while the job is in it. */
+  countdownUntil: string | null;
+}
+
+/** One target of a job and how it went. */
+export interface JobTarget {
+  targetKind: "vm" | "session" | "app";
+  targetKey: string;
+  targetName: string;
+  status: TargetStatus;
+  exitCode: number | null;
+  output: string | null;
+  error: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  /** VM-05: the safety snapshot taken before the action. */
+  safetySnapshot: string | null;
 }
 
 export interface ChainCheck {
@@ -194,6 +273,69 @@ export interface AuditEntry {
   detail: string | null;
   prevHash: string;
   hash: string;
+}
+
+export type ActionKind =
+  | "vmStart"
+  | "vmUnpause"
+  | "vmPause"
+  | "vmSuspend"
+  | "vmResetSoft"
+  | "vmResetHard"
+  | "vmStopSoft"
+  | "vmStopHard"
+  | "snapshotTake"
+  | "snapshotRevert"
+  | "snapshotDelete"
+  | "vmProtect"
+  | "vmUnprotect"
+  | "execReadOnly"
+  | "execOther"
+  | "execDangerous"
+  | "appUpdate";
+
+export interface TierRule {
+  single: Tier;
+  bulk: Tier;
+}
+
+export interface DangerousPattern {
+  name: string;
+  pattern: string;
+}
+
+/** AP-01: the editable approval rules (crates/core/src/policy). */
+export interface PolicyRules {
+  tiers: Record<ActionKind, TierRule>;
+  /** Targets from which the bulk tier applies. */
+  bulkThreshold: number;
+  /** A Prod-labelled target raises the tier by one. */
+  prodBump: boolean;
+  dangerousCommands: DangerousPattern[];
+  readOnlyCommands: string[];
+  countdownSeconds: number;
+  safetySnapshotDefault: boolean;
+}
+
+export interface PolicyCatalog {
+  actions: { kind: ActionKind; label: string }[];
+  defaults: PolicyRules;
+  maxBulkThreshold: number;
+  maxCountdownSeconds: number;
+}
+
+export interface PolicySaved {
+  rules: PolicyRules;
+  /** What changed, as written to the audit log. Empty: nothing was saved. */
+  changes: string[];
+}
+
+/** AP-05: what an audit export wrote. */
+export interface AuditExport {
+  path: string;
+  entries: number;
+  /** Rows where something that looked like a secret was replaced by [redacted]. */
+  redacted: number;
 }
 
 export interface Settings {
@@ -265,10 +407,24 @@ export const api = {
   approve: (requestId: string, answers: ApprovalAnswers) => invoke<string>("command_approve", { requestId, answers }),
   cancelApproval: (requestId: string) => invoke<void>("command_cancel_approval", { requestId }),
 
+  /** AP-03: cancels a job in its countdown, or the targets of a running job that have not started. */
   cancelJob: (jobId: string) => invoke<boolean>("job_cancel", { jobId }),
   recentJobs: (limit = 50) => invoke<JobSummary[]>("jobs_recent", { limit }),
+  jobTargets: (jobId: string) => invoke<JobTarget[]>("job_targets", { jobId }),
   recentAudit: (limit = 100) => invoke<AuditEntry[]>("audit_recent", { limit }),
   verifyAudit: () => invoke<ChainCheck>("audit_verify"),
+  /** AP-05: asks where to save, then writes the audit log there as CSV. null when the user cancels. */
+  exportAudit: () => invoke<AuditExport | null>("audit_export_csv"),
+
+  /** VM-04: snapshot trees read from each VM's .vmsd (no vmrun call). Changes go through `submit`. */
+  snapshots: (vmxPaths?: string[]) => invoke<VmSnapshots[]>("snapshots_list", { vmxPaths: vmxPaths ?? null }),
+  snapshotLimits: () => invoke<SnapshotLimits>("snapshot_limits"),
+
+  /** AP-01: the approval rules in force, and what the editor needs to change them. */
+  policyRules: () => invoke<PolicyRules>("policy_rules"),
+  policyCatalog: () => invoke<PolicyCatalog>("policy_catalog"),
+  /** Checked by the core (an invalid rule fails with code "invalid_rule") and audited. */
+  setPolicyRules: (rules: PolicyRules) => invoke<PolicySaved>("policy_set_rules", { rules }),
   onJobEvent: (handler: (event: JobEvent) => void): Promise<UnlistenFn> =>
     listen<JobEvent>("job://event", (e) => handler(e.payload)),
 

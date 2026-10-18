@@ -145,6 +145,15 @@ impl Store {
         rows.iter().map(row_to_entry).collect()
     }
 
+    /// AP-05: every entry of the workspace, oldest first, for an export.
+    pub async fn audit_for_export(&self, ctx: &Context) -> Result<Vec<AuditEntry>> {
+        let rows = sqlx::query("SELECT * FROM audit_log WHERE workspace_id = ? ORDER BY seq")
+            .bind(ctx.workspace_id.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(row_to_entry).collect()
+    }
+
     /// Walks the whole chain and recomputes every hash.
     pub async fn verify_audit_chain(&self) -> Result<ChainCheck> {
         // TODO: stream rows instead of loading them all once the log gets large.

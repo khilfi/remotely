@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
+  CameraIcon,
   HistoryIcon,
   LayoutDashboardIcon,
   ListTreeIcon,
@@ -46,15 +47,17 @@ import { useTheme, type ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { SnapshotsPage } from "@/pages/SnapshotsPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { VmsPage } from "@/pages/VmsPage";
 
-type PageId = "vms" | "terminal" | "activity" | "settings";
+type PageId = "vms" | "snapshots" | "terminal" | "activity" | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon },
+  { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon },
   { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon },
   { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon },
   { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon },
@@ -83,6 +86,8 @@ export default function App() {
   const [settingsVersion, setSettingsVersion] = useState(0);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [laterFor, setLaterFor] = useState<string | null>(null);
+  // VMs picked on the VMs page to open in the snapshot manager (VM-04).
+  const [snapshotPick, setSnapshotPick] = useState<{ paths: string[]; n: number } | null>(null);
   const { preference, setPreference, resolved } = useTheme();
 
   const loadInfo = useCallback(() => {
@@ -131,6 +136,7 @@ export default function App() {
         case "countdown":
           toast.warning(`Starts in ${event.seconds} seconds`, {
             id,
+            description: "Nothing has been done yet. Cancel here or in Activity.",
             duration: event.seconds * 1000 + 2000,
             action: { label: "Cancel", onClick: () => void api.cancelJob(id) },
           });
@@ -281,7 +287,19 @@ export default function App() {
               <VmsPage
                 onSubmitted={submitted}
                 onOpenSettings={() => setPage("settings")}
+                onOpenSnapshots={(paths) => {
+                  setSnapshotPick((prev) => ({ paths, n: (prev?.n ?? 0) + 1 }));
+                  setPage("snapshots");
+                }}
                 refreshKey={jobsFinished + settingsVersion}
+              />
+            </section>
+            <section hidden={page !== "snapshots"}>
+              <SnapshotsPage
+                active={page === "snapshots"}
+                onSubmitted={submitted}
+                refreshKey={jobsFinished + settingsVersion}
+                preselect={snapshotPick}
               />
             </section>
             <section hidden={page !== "terminal"} className="h-full">

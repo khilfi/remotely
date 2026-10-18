@@ -6,7 +6,8 @@
 //!   which the policy engine puts at Critical, so it gets its own approval.
 //! * Countdown with cancel after approval (AP-03); cancel stops targets that have not started (BX-04).
 //!   A vmrun call already in flight is left to finish rather than killed halfway.
-//! * Safety snapshot before each VM's action when the approval asked for one (VM-05).
+//! * Safety snapshot before each VM's action when the approval asked for one (VM-05). One name per
+//!   job, so a single bulk revert undoes it; a VM whose safety snapshot fails is left untouched.
 //! * Every job and target is journaled in the store, and the audit log gets an entry when the job
 //!   starts and when it ends (NFR Audit, NFR Reliability).
 
@@ -28,7 +29,8 @@ use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp, StopMode}
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::locks;
-use crate::policy::{ApprovalStep, Decision, Tier};
+use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
+use crate::snapshots::safety_snapshot_name;
 use crate::store::{NewAuditEntry, NewJob, Store, TargetResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -137,9 +139,11 @@ pub enum JobEvent {
         tier: Tier,
         targets: usize,
     },
+    /// AP-03: the job waits until `until` (RFC 3339) and can be cancelled until then.
     Countdown {
         job_id: Uuid,
         seconds: u32,
+        until: String,
     },
     Started {
         job_id: Uuid,
@@ -151,6 +155,8 @@ pub enum JobEvent {
         status: TargetStatus,
         message: Option<String>,
         duration_ms: u64,
+        /// VM-05: the safety snapshot taken on this target first, if one was.
+        safety_snapshot: Option<String>,
     },
     /// VM-03: these VMs did not shut down. Sent before `Finished`, so the UI can offer to force
     /// them off (a separate, Critical command).
@@ -284,6 +290,12 @@ impl JobRunner {
         } else {
             JobStatus::Queued
         };
+        let countdown_until = countdown.map(|seconds| {
+            let until = time::OffsetDateTime::now_utc() + time::Duration::seconds(seconds.into());
+            until
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default()
+        });
 
         self.store
             .insert_job(
@@ -297,6 +309,7 @@ impl JobRunner {
                     approval: spec.approval.as_ref(),
                     targets: &spec.decision.targets,
                     status,
+                    countdown_until: countdown_until.as_deref(),
                 },
             )
             .await?;
@@ -312,6 +325,7 @@ impl JobRunner {
 
         let this = Arc::clone(self);
         tokio::spawn(async move {
+            let countdown = countdown.zip(countdown_until);
             if let Err(err) = Arc::clone(&this).run(id, spec, summary, countdown, token).await {
                 tracing::error!(%id, error = %err, "job failed to run");
                 let _ = this.store.set_job_status(id, JobStatus::Failed).await;
@@ -331,13 +345,17 @@ impl JobRunner {
         id: Uuid,
         spec: JobSpec,
         summary: String,
-        countdown: Option<u32>,
+        countdown: Option<(u32, String)>,
         token: CancellationToken,
     ) -> Result<()> {
         let ctx = spec.ctx;
 
-        if let Some(seconds) = countdown {
-            self.emit(JobEvent::Countdown { job_id: id, seconds });
+        if let Some((seconds, until)) = countdown {
+            self.emit(JobEvent::Countdown {
+                job_id: id,
+                seconds,
+                until,
+            });
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(seconds.into())) => {}
                 _ = token.cancelled() => {
@@ -355,6 +373,9 @@ impl JobRunner {
         self.emit(JobEvent::Started { job_id: id });
 
         let semaphore = Arc::new(Semaphore::new(self.parallelism(&spec.command)));
+        // VM-05: named once, when the job starts, so every VM's safety snapshot has the same name.
+        let safety_name: Option<Arc<str>> = (spec.safety_snapshot && safety_snapshot_applies(&spec.command))
+            .then(|| safety_snapshot_name(safety_verb(&spec.command), time::OffsetDateTime::now_utc(), id).into());
         let spec = Arc::new(spec);
         let mut tasks = JoinSet::new();
         for target in spec.decision.targets.clone() {
@@ -362,28 +383,42 @@ impl JobRunner {
             let spec = Arc::clone(&spec);
             let semaphore = Arc::clone(&semaphore);
             let token = token.clone();
+            let safety_name = safety_name.clone();
             tasks.spawn(async move {
                 let permit = tokio::select! {
                     permit = semaphore.acquire_owned() => permit.ok(),
                     _ = token.cancelled() => None,
                 };
                 if permit.is_none() || token.is_cancelled() {
-                    return (target, Err(None), 0);
+                    return (target, Err(None), 0, None);
                 }
                 let key = target.target.key();
                 if let Err(err) = this.store.set_target_running(id, &key).await {
                     tracing::warn!(%id, error = %err, "could not journal target start");
                 }
                 let started = Instant::now();
+                let mut safety_taken = None;
+                if let (Some(name), TargetRef::Vm { vmx_path }) = (&safety_name, &target.target) {
+                    if let Err(err) = this.take_safety_snapshot(Path::new(vmx_path), name).await {
+                        return (target, Err(Some(err)), started.elapsed().as_millis() as u64, None);
+                    }
+                    safety_taken = Some(name.to_string());
+                }
                 let outcome = this.execute(id, &spec, &target, &token).await;
-                (target, outcome.map_err(Some), started.elapsed().as_millis() as u64)
+                (
+                    target,
+                    outcome.map_err(Some),
+                    started.elapsed().as_millis() as u64,
+                    safety_taken,
+                )
             });
         }
 
         let (mut succeeded, mut failed, mut cancelled) = (0usize, 0usize, 0usize);
         let mut still_running = Vec::new();
+        let mut safety_snapshots = 0usize;
         while let Some(joined) = tasks.join_next().await {
-            let (target, outcome, duration_ms) = match joined {
+            let (target, outcome, duration_ms, safety_snapshot) = match joined {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::error!(%id, error = %err, "target task panicked");
@@ -422,9 +457,11 @@ impl JobRunner {
                         output: output.as_deref(),
                         error: error.as_deref(),
                         duration_ms: i64::try_from(duration_ms).ok(),
+                        safety_snapshot: safety_snapshot.as_deref(),
                     },
                 )
                 .await?;
+            safety_snapshots += usize::from(safety_snapshot.is_some());
             self.emit(JobEvent::TargetFinished {
                 job_id: id,
                 target: key,
@@ -432,6 +469,7 @@ impl JobRunner {
                 status,
                 message: error,
                 duration_ms,
+                safety_snapshot,
             });
         }
 
@@ -446,6 +484,9 @@ impl JobRunner {
         };
         self.store.set_job_status(id, status).await?;
         let mut detail = format!("{succeeded} succeeded, {failed} failed, {cancelled} cancelled");
+        if let (Some(name), true) = (&safety_name, safety_snapshots > 0) {
+            detail.push_str(&format!("; safety snapshot '{name}' taken on {safety_snapshots} VM(s)"));
+        }
         if !still_running.is_empty() {
             let names: Vec<&str> = still_running.iter().map(|t: &Target| t.name.as_str()).collect();
             detail.push_str(&format!(
@@ -481,9 +522,6 @@ impl JobRunner {
         match (&spec.command, &target.target) {
             (Command::VmPower { op, .. }, TargetRef::Vm { vmx_path }) => {
                 let vmx = Path::new(vmx_path);
-                if spec.safety_snapshot && !matches!(op, PowerOp::Start { .. }) {
-                    self.safety_snapshot(job_id, vmx).await?;
-                }
                 if let PowerOp::Stop { mode: StopMode::Soft } = op {
                     self.soft_stop(vmx).await?;
                 } else {
@@ -496,11 +534,7 @@ impl JobRunner {
                 Ok(TargetOutcome::done())
             }
             (Command::VmSnapshot { op, .. }, TargetRef::Vm { vmx_path }) => {
-                let vmx = Path::new(vmx_path);
-                if spec.safety_snapshot && !matches!(op, SnapshotOp::Take { .. }) {
-                    self.safety_snapshot(job_id, vmx).await?;
-                }
-                self.vmware.snapshot(vmx, op).await?;
+                self.vmware.snapshot(Path::new(vmx_path), op).await?;
                 Ok(TargetOutcome::done())
             }
             (Command::VmProtect { protected, .. }, TargetRef::Vm { vmx_path }) => {
@@ -571,14 +605,14 @@ impl JobRunner {
         }
     }
 
-    /// VM-05: a named snapshot before the action, so it can be undone.
-    async fn safety_snapshot(&self, job_id: Uuid, vmx: &Path) -> Result<()> {
-        let name = format!(
-            "safety-{}-{}",
-            &job_id.simple().to_string()[..8],
-            time::OffsetDateTime::now_utc().unix_timestamp()
-        );
-        self.vmware.snapshot(vmx, &SnapshotOp::Take { name }).await
+    /// VM-05: a named snapshot before the action, so it can be undone. When it fails the action does
+    /// not run on that VM: no safety net, no change.
+    async fn take_safety_snapshot(&self, vmx: &Path, name: &str) -> Result<()> {
+        let op = SnapshotOp::Take { name: name.to_owned() };
+        self.vmware
+            .snapshot(vmx, &op)
+            .await
+            .map_err(|err| CoreError::SafetySnapshotFailed(err.to_string()))
     }
 
     fn parallelism(&self, command: &Command) -> usize {
@@ -627,6 +661,30 @@ impl JobRunner {
     fn emit(&self, event: JobEvent) {
         // No subscribers is fine (e.g. in tests).
         let _ = self.events.send(event);
+    }
+}
+
+/// Names the action in a safety snapshot's name ("before shut down").
+fn safety_verb(command: &Command) -> &'static str {
+    match command {
+        Command::VmPower { op, .. } => match op {
+            PowerOp::Stop { mode: StopMode::Soft } => "shut down",
+            PowerOp::Stop { mode: StopMode::Hard } => "power off",
+            PowerOp::Reset { mode: StopMode::Soft } => "restart",
+            PowerOp::Reset { mode: StopMode::Hard } => "reset",
+            PowerOp::Suspend => "suspend",
+            PowerOp::Pause => "pause",
+            PowerOp::Unpause => "unpause",
+            PowerOp::Start { .. } => "start",
+        },
+        Command::VmSnapshot { op, .. } => match op {
+            SnapshotOp::Revert { .. } => "revert",
+            SnapshotOp::Delete { .. } => "delete",
+            SnapshotOp::Take { .. } => "snapshot",
+        },
+        Command::VmProtect { .. } => "protect",
+        Command::RemoteExec { .. } => "command",
+        Command::AppUpdate { .. } => "update",
     }
 }
 

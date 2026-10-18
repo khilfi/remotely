@@ -29,3 +29,5 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 tauri = { version = "2.12", features = [] }
 tauri-plugin-updater = "2"
+# AP-05: the save dialog for audit exports, opened from Rust so the UI never picks a path itself.
+tauri-plugin-dialog = "2"

@@ -61,6 +61,10 @@ pub enum CoreError {
     #[error("still running: {reason}. Power it off (hard) to force it; that needs its own approval")]
     StillRunning { reason: String },
 
+    /// VM-05: the safety snapshot could not be taken, so the action did not run on this VM.
+    #[error("the safety snapshot failed, so nothing else was done to this VM: {0}")]
+    SafetySnapshotFailed(String),
+
     #[error("cancelled")]
     Cancelled,
 
@@ -92,6 +96,7 @@ impl CoreError {
             CoreError::InvalidSetting(_) => "invalid_setting",
             CoreError::InvalidInput(_) => "invalid_input",
             CoreError::StillRunning { .. } => "still_running",
+            CoreError::SafetySnapshotFailed(_) => "safety_snapshot_failed",
             CoreError::Cancelled => "cancelled",
             CoreError::Update(_) => "update_failed",
             CoreError::NotImplemented(_) => "not_implemented",

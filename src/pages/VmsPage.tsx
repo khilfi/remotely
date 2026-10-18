@@ -1,10 +1,11 @@
 // VM list (VM-01) with selection by click, shift-click, tag or saved filter and bulk power actions
-// (VM-02, VM-03), plus protect and unprotect (AP-04). Listing asks the core to read Workstation's
+// (VM-02, VM-03), plus protect and unprotect (AP-04). The selection opens in the snapshot manager (VM-04). Listing asks the core to read Workstation's
 // library, the chosen folders and `vmrun list`; every action is a command submitted to the command
 // bus, never a vmrun call.
 
 import { useEffect, useState, type MouseEvent } from "react";
 import {
+  CameraIcon,
   ChevronDownIcon,
   EllipsisIcon,
   FolderPlusIcon,
@@ -60,6 +61,8 @@ interface Props {
   /** Shows the approval dialog for commands the policy engine says need one. */
   onSubmitted: (outcome: SubmitOutcome) => void;
   onOpenSettings: () => void;
+  /** VM-04: opens the snapshot manager with these VMs selected. */
+  onOpenSnapshots: (vmxPaths: string[]) => void;
   /** Changes when the list should be read again: a job finished or a setting changed. */
   refreshKey: number;
 }
@@ -95,7 +98,7 @@ function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
-export function VmsPage({ onSubmitted, onOpenSettings, refreshKey }: Props) {
+export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshKey }: Props) {
   const [vms, setVms] = useState<VmRecord[]>([]);
   const [total, setTotal] = useState({ vms: 0, running: 0 });
   const [warnings, setWarnings] = useState<InventoryWarning[]>([]);
@@ -365,6 +368,15 @@ export function VmsPage({ onSubmitted, onOpenSettings, refreshKey }: Props) {
         </Button>
         <Button variant="destructive" disabled={powerOff.count === 0 || submitting} onClick={powerOff.run}>
           {POWER_OFF.label}
+        </Button>
+
+        <Button
+          variant="outline"
+          disabled={selected.size === 0}
+          onClick={() => onOpenSnapshots(selectedVms.map((v) => v.vmxPath))}
+        >
+          <CameraIcon data-icon="inline-start" />
+          Snapshots
         </Button>
 
         <DropdownMenu>

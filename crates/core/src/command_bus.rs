@@ -15,9 +15,12 @@ use uuid::Uuid;
 use crate::capacity::CapacityChecker;
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::export::redact_secrets;
+use crate::impact::{ImpactPreviewer, TargetImpact};
 use crate::jobs::{JobRunner, JobSpec};
 use crate::locks;
 use crate::policy::{ActionKind, ApprovalStep, Decision, PolicyEngine, PolicyRules, Tier};
+use crate::snapshots::{is_safety_name, SAFETY_PREFIX};
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretString, Vault};
 
@@ -77,12 +80,73 @@ pub enum StopMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SnapshotOp {
-    Take { name: String },
-    Revert { name: String },
-    Delete { name: String },
+    Take {
+        name: String,
+    },
+    /// `name` may be vmrun's path form (`base/child`) when the VM has two snapshots with that name.
+    Revert {
+        name: String,
+    },
+    /// Deletes that one snapshot; its children stay and move up to its parent.
+    Delete {
+        name: String,
+    },
+}
+
+/// Longest snapshot name the app takes (VM-04).
+pub const MAX_SNAPSHOT_NAME: usize = 120;
+
+impl SnapshotOp {
+    pub fn name(&self) -> &str {
+        match self {
+            SnapshotOp::Take { name } | SnapshotOp::Revert { name } | SnapshotOp::Delete { name } => name,
+        }
+    }
+
+    /// VM-04: a name vmrun will take and the snapshot manager can find again.
+    fn validate(&self) -> Result<()> {
+        let name = self.name();
+        let invalid = |message: String| Err(CoreError::InvalidInput(message));
+        if name.trim().is_empty() {
+            return invalid("Give the snapshot a name.".into());
+        }
+        if name.chars().any(char::is_control) {
+            return invalid("A snapshot name can't hold line breaks or tabs.".into());
+        }
+        if name.chars().count() > MAX_SNAPSHOT_NAME {
+            return invalid(format!(
+                "A snapshot name can be at most {MAX_SNAPSHOT_NAME} characters."
+            ));
+        }
+        if let SnapshotOp::Take { name } = self {
+            if name.trim() != name {
+                return invalid("A snapshot name can't start or end with a space.".into());
+            }
+            if name.contains('/') {
+                return invalid(
+                    "A snapshot name can't contain '/': vmrun reads it as the path to a child snapshot.".into(),
+                );
+            }
+            // VM-05: the prefix marks Remotely's own safety snapshots.
+            if is_safety_name(name) {
+                return invalid(format!(
+                    "Names starting with '{SAFETY_PREFIX}' are kept for safety snapshots."
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Command {
+    /// Checks what the caller typed, before any target is looked up.
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Command::VmSnapshot { op, .. } => op.validate(),
+            _ => Ok(()),
+        }
+    }
+
     pub fn targets(&self) -> &[TargetRef] {
         match self {
             Command::VmPower { targets, .. }
@@ -124,7 +188,8 @@ impl Command {
             Command::VmProtect { protected: true, .. } => format!("Protect {}", noun("VM")),
             Command::VmProtect { protected: false, .. } => format!("Unprotect {}", noun("VM")),
             Command::RemoteExec { script, sudo, .. } => {
-                let first_line = script.lines().next().unwrap_or_default();
+                // The summary is stored in the audit log for good: no secret typed into a command.
+                let (first_line, _) = redact_secrets(script.lines().next().unwrap_or_default());
                 let sudo = if *sudo { "sudo " } else { "" };
                 format!("Run `{sudo}{first_line}` on {}", noun("host"))
             }
@@ -168,6 +233,8 @@ pub struct ApprovalRequest {
     pub reasons: Vec<String>,
     /// Problems to read before approving, e.g. the capacity check before a power-on (VM-07).
     pub warnings: Vec<String>,
+    /// AP-02: each VM target's state, uptime and snapshot count right now.
+    pub impact: Vec<TargetImpact>,
 }
 
 /// The user's answers to the approval steps (AP-03, AP-06).
@@ -211,6 +278,7 @@ pub struct CommandBus {
     store: Store,
     vault: Arc<dyn Vault>,
     capacity: CapacityChecker,
+    impact: ImpactPreviewer,
     pending: Mutex<HashMap<Uuid, Pending>>,
 }
 
@@ -222,6 +290,7 @@ impl CommandBus {
         store: Store,
         vault: Arc<dyn Vault>,
         capacity: CapacityChecker,
+        impact: ImpactPreviewer,
     ) -> Self {
         Self {
             policy: RwLock::new(policy),
@@ -230,6 +299,7 @@ impl CommandBus {
             store,
             vault,
             capacity,
+            impact,
             pending: Mutex::new(HashMap::new()),
         }
     }
@@ -238,20 +308,45 @@ impl CommandBus {
         locks::read(&self.policy).rules().clone()
     }
 
-    /// AP-01: tier rules are editable. Invalid rules are rejected and the old ones stay.
-    pub async fn set_rules(&self, ctx: &Context, rules: PolicyRules) -> Result<()> {
+    /// AP-01: tier rules are editable. Invalid rules are rejected with the reason and the old ones
+    /// stay. A change is saved, applies to the next command, and is audited with what changed;
+    /// returns those changes (none: nothing saved or logged). Approvals already open keep the steps
+    /// they were asked with.
+    pub async fn set_rules(&self, ctx: &Context, rules: PolicyRules) -> Result<Vec<String>> {
+        let rules = rules.normalized();
         let engine = PolicyEngine::new(rules.clone())?;
+        let changes = self.rules().changes(&rules);
+        if changes.is_empty() {
+            return Ok(changes);
+        }
         self.store
             .put_setting(ctx, crate::store::POLICY_RULES_KEY, &rules)
             .await?;
         *locks::write(&self.policy) = engine;
-        Ok(())
+        let detail = changes.join("; ");
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "setting_changed",
+                    action: "Changed the approval rules",
+                    tier: None,
+                    job_id: None,
+                    targets: &[],
+                    approval: None,
+                    result: None,
+                    detail: Some(&detail),
+                },
+            )
+            .await?;
+        Ok(changes)
     }
 
     pub async fn submit(&self, ctx: &Context, command: Command) -> Result<SubmitOutcome> {
         if command.targets().is_empty() {
             return Err(CoreError::NoTargets);
         }
+        command.validate()?;
         let mut targets = Vec::with_capacity(command.targets().len());
         for target in command.targets() {
             targets.push(self.directory.resolve(ctx, target).await?);
@@ -304,6 +399,7 @@ impl CommandBus {
             skipped: decision.skipped.clone(),
             reasons: decision.reasons.clone(),
             warnings: decision.warnings.clone(),
+            impact: self.impact.preview(ctx, &decision.targets).await,
         };
         let detail = decision
             .reasons
@@ -450,7 +546,8 @@ impl CommandBus {
             request_id: pending.request.id,
             tier: pending.decision.tier,
             typed_target_count: answers.typed_target_count,
-            reason: answers.reason.as_ref().map(|r| r.trim().to_owned()),
+            // Kept in the audit log for good, so a secret typed into it by mistake is not.
+            reason: answers.reason.as_ref().map(|r| redact_secrets(r.trim()).0),
             safety_snapshot,
             vault_reauth,
             approved_at: now_rfc3339(),
