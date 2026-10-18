@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
+use remotely_core::adapters::updater::UpdaterAdapter;
 use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{
     FakeHostCounters, FakeKeyProtector, FakeRemote, FakeResolver, FakeUpdater, FakeVault, FakeVmware,
@@ -31,6 +32,8 @@ pub struct Setup {
     pub real_vault: bool,
     /// [`FakeRemote`] unless a test talks SSH to its own local server ([`Setup::with_ssh`]).
     pub remote: Arc<dyn RemoteAdapter>,
+    /// FD-14: a [`FakeUpdater`] that offers nothing, unless a test gives its own.
+    pub updater: Arc<dyn UpdaterAdapter>,
     /// QL-01: host names to addresses. Resolves nothing unless a test adds names.
     pub resolver: Arc<FakeResolver>,
 }
@@ -47,8 +50,14 @@ impl Setup {
             },
             real_vault: false,
             remote: Arc::new(FakeRemote::default()),
+            updater: Arc::new(FakeUpdater::default()),
             resolver: Arc::new(FakeResolver::default()),
         }
+    }
+
+    pub fn with_updater(mut self, updater: Arc<dyn UpdaterAdapter>) -> Self {
+        self.updater = updater;
+        self
     }
 
     /// The real russh adapter, for tests against `fakes::ssh_server::TestSshServer` on 127.0.0.1.
@@ -91,7 +100,7 @@ impl Setup {
             remote: self.remote,
             vault,
             host_counters: Arc::new(self.host),
-            updater: Arc::new(FakeUpdater::default()),
+            updater: self.updater,
             resolver: self.resolver,
         };
         Core::assemble(store, ctx, adapters, JobLimits::default())

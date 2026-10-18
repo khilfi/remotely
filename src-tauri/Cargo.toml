@@ -32,5 +32,12 @@ uuid.workspace = true
 zeroize = "1"
 tauri = { version = "2.12", features = [] }
 tauri-plugin-updater = "2"
+# FD-14: the GitHub API asset URLs the updater fetches from.
+url = "2"
 # AP-05: the save dialog for audit exports, opened from Rust so the UI never picks a path itself.
 tauri-plugin-dialog = "2"
+
+[dev-dependencies]
+# FD-14: the updater against a local fake GitHub, with a throwaway signing key, on Tauri's mock runtime.
+remotely-core = { workspace = true, features = ["fakes"] }
+tauri = { version = "2.12", features = ["test"] }
