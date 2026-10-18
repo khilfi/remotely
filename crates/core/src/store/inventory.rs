@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::Store;
 use crate::adapters::vmware::{path_key, VmxInfo};
 use crate::domain::{now_rfc3339, Context, Environment, PowerState};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -195,6 +195,37 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(done.rows_affected() > 0)
+    }
+
+    /// SS-06 for VMs: sets each VM's environment label, all or none. [`crate::inventory::Inventory`]
+    /// checks and audits the change; nothing else calls this. A refresh keeps the label.
+    pub(crate) async fn set_vm_environment(
+        &self,
+        ctx: &Context,
+        vmx_paths: &[String],
+        environment: Environment,
+    ) -> Result<()> {
+        if vmx_paths.is_empty() {
+            return Err(CoreError::NoTargets);
+        }
+        let ws = ctx.workspace_id.to_string();
+        let now = now_rfc3339();
+        let mut tx = self.pool.begin().await?;
+        for path in vmx_paths {
+            let done =
+                sqlx::query("UPDATE vms SET environment = ?, updated_at = ? WHERE workspace_id = ? AND vmx_path = ?")
+                    .bind(environment.as_str())
+                    .bind(&now)
+                    .bind(&ws)
+                    .bind(path)
+                    .execute(&mut *tx)
+                    .await?;
+            if done.rows_affected() == 0 {
+                return Err(CoreError::UnknownTarget(path.clone()));
+            }
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }
 

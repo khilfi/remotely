@@ -3,6 +3,9 @@
 //! A refresh finds every VM, not only running ones: Workstation's library (`inventory.vmls`), the
 //! folders chosen in Settings (scanned for .vmx files) and `vmrun list`. For running VMs it also asks
 //! vmrun for the VMware Tools state and the guest's IP address.
+//!
+//! A VM's environment label (SS-06, as for sessions) is the app's own data: setting it changes no VM,
+//! so it skips the bus too, and it is audited like a setting.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -17,7 +20,7 @@ use crate::adapters::vmware::{path_key, ToolsState, VmwareAdapter, VmxInfo};
 use crate::command_bus::TargetDirectory;
 use crate::domain::{Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
-use crate::store::{self, DiscoveredVm, Store, VmRecord};
+use crate::store::{self, DiscoveredVm, NewAuditEntry, Store, VmRecord};
 
 /// How the app names itself in dialogs, jobs and the audit log.
 pub const APP_NAME: &str = "Remotely";
@@ -263,12 +266,105 @@ impl Inventory {
         vms.retain(|vm| filter.matches(vm));
         Ok(vms)
     }
+
+    /// SS-06 for VMs: labels each VM Lab, Staging or Prod, or removes the label with `None`. The
+    /// policy engine reads it: a Prod target moves an action up one tier. The label is the app's own
+    /// data, so it skips the command bus and has no approval tier; the change is audited like a
+    /// setting, with what changed and each VM it changed as a target. VMs that already have the label
+    /// are left alone, and a change that changes nothing writes nothing. Every VM must be in the
+    /// inventory, or nothing changes. Returns the VMs it changed.
+    pub async fn set_environment(
+        &self,
+        ctx: &Context,
+        vmx_paths: &[String],
+        environment: Environment,
+    ) -> Result<Vec<VmRecord>> {
+        if vmx_paths.is_empty() {
+            return Err(CoreError::NoTargets);
+        }
+        let mut seen = HashSet::new();
+        let mut before = Vec::new();
+        for path in vmx_paths {
+            let vm = self
+                .store
+                .find_vm(ctx, path)
+                .await?
+                .ok_or_else(|| CoreError::UnknownTarget(path.clone()))?;
+            if seen.insert(vm.id.clone()) && vm.environment != environment {
+                before.push(vm);
+            }
+        }
+        if before.is_empty() {
+            return Ok(Vec::new());
+        }
+        let paths: Vec<String> = before.iter().map(|vm| vm.vmx_path.clone()).collect();
+        self.store.set_vm_environment(ctx, &paths, environment).await?;
+        let mut after = Vec::with_capacity(paths.len());
+        for path in &paths {
+            after.extend(self.store.find_vm(ctx, path).await?);
+        }
+
+        let targets: Vec<Target> = after.iter().map(vm_target).collect();
+        let action = match after.as_slice() {
+            [vm] => format!("Changed the label of VM '{}'", vm.display_name),
+            vms => format!("Changed the label of {} VMs", vms.len()),
+        };
+        let detail = label_change(&before, environment);
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "vm_label_changed",
+                    action: &action,
+                    tier: None,
+                    job_id: None,
+                    targets: &targets,
+                    approval: None,
+                    result: None,
+                    detail: Some(&detail),
+                },
+            )
+            .await?;
+        Ok(after)
+    }
 }
 
 fn file_stem(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn vm_target(vm: &VmRecord) -> Target {
+    Target {
+        target: TargetRef::Vm {
+            vmx_path: vm.vmx_path.clone(),
+        },
+        name: vm.display_name.clone(),
+        environment: vm.environment,
+        protected: vm.protected,
+    }
+}
+
+/// For the audit log: "label: none -> prod" when every VM had the same label before, otherwise one
+/// part per earlier label with the VMs that had it, "label: none -> prod (web01, web02); lab -> prod (db01)".
+fn label_change(before: &[VmRecord], to: Environment) -> String {
+    let mut groups: Vec<(Environment, Vec<&str>)> = Vec::new();
+    for vm in before {
+        match groups.iter_mut().find(|(from, _)| *from == vm.environment) {
+            Some((_, names)) => names.push(&vm.display_name),
+            None => groups.push((vm.environment, vec![&vm.display_name])),
+        }
+    }
+    let to = to.as_str();
+    if let [(from, _)] = groups.as_slice() {
+        return format!("label: {} -> {to}", from.as_str());
+    }
+    let parts: Vec<String> = groups
+        .iter()
+        .map(|(from, names)| format!("{} -> {to} ({})", from.as_str(), names.join(", ")))
+        .collect();
+    format!("label: {}", parts.join("; "))
 }
 
 /// Resolves targets from the store so the policy engine sees their labels and protection.
@@ -406,6 +502,22 @@ mod tests {
         assert!(!protected.matches(&web));
         web.protected = true;
         assert!(protected.matches(&web));
+    }
+
+    #[test]
+    fn a_label_change_names_the_vms_only_when_their_labels_differed() {
+        let unlabelled = |name: &str| VmRecord {
+            environment: Environment::None,
+            ..vm(name)
+        };
+        assert_eq!(
+            label_change(&[unlabelled("a"), unlabelled("b")], Environment::Prod),
+            "label: none -> prod"
+        );
+        assert_eq!(
+            label_change(&[unlabelled("a"), vm("lab01"), unlabelled("b")], Environment::Prod),
+            "label: none -> prod (a, b); lab -> prod (lab01)"
+        );
     }
 
     #[test]

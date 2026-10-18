@@ -1,5 +1,6 @@
-// Asks "are you sure?" before deleting the app's own data (a secret, a session, a folder). Actions on
-// VMs and hosts never use this: they go through the command bus and the approval dialog.
+// Asks "are you sure?" before deleting the app's own data (a secret, a session, a folder) or taking the
+// Prod label off VMs. Actions on VMs and hosts never use this: they go through the command bus and the
+// approval dialog.
 
 import { useState } from "react";
 import {

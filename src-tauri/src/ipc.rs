@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome, MAX_SNAPSHOT_NAME};
+use remotely_core::domain::Environment;
 use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
@@ -98,6 +99,21 @@ pub async fn vm_tag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: Str
 pub async fn vm_untag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: String) -> IpcResult<()> {
     let core = &state.core;
     Ok(core.store.untag_vms(&core.ctx, &vmx_paths, &tag).await?)
+}
+
+/// SS-06 for VMs: the environment label (none, lab, staging, prod) of each VM. A Prod VM moves
+/// actions on it up one tier. The app's own data: audited, no approval. Returns the VMs it changed.
+#[tauri::command]
+pub async fn vm_set_environment(
+    state: State<'_, AppState>,
+    vmx_paths: Vec<String>,
+    environment: Environment,
+) -> IpcResult<Vec<VmRecord>> {
+    let core = &state.core;
+    Ok(core
+        .inventory
+        .set_environment(&core.ctx, &vmx_paths, environment)
+        .await?)
 }
 
 #[tauri::command]
