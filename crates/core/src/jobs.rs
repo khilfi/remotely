@@ -4,8 +4,14 @@
 //! * Graceful shutdown (VM-03): a soft stop gets a set time; a VM still running after it is reported
 //!   ([`JobEvent::StillRunning`]) and left running. Forcing it off is a separate hard-stop command,
 //!   which the policy engine puts at Critical, so it gets its own approval.
-//! * Countdown with cancel after approval (AP-03); cancel stops targets that have not started (BX-04).
-//!   A vmrun call already in flight is left to finish rather than killed halfway.
+//! * Graceful power operations (soft stop, restart, suspend) go through VMware Tools, and vmrun waits
+//!   for Tools rather than failing when they are not running. So Tools are checked first, and a VM
+//!   without them fails at once with the reason (VM-02, VM-03).
+//! * Countdown with cancel after approval (AP-03); cancel stops targets that have not started (BX-04)
+//!   and stops waiting for a power call in flight, e.g. on a VM that waits for an answer in
+//!   Workstation. vmrun is killed, but Workstation may still finish the action, so that target is
+//!   reported as cancelled with its outcome unknown. A snapshot call in flight is left to finish: its
+//!   outcome must be known (VM-05).
 //! * Safety snapshot before each VM's action when the approval asked for one (VM-05). One name per
 //!   job, so a single bulk revert undoes it; a VM whose safety snapshot fails is left untouched.
 //! * Every job and target is journaled in the store, and the audit log gets an entry when the job
@@ -24,7 +30,7 @@ use uuid::Uuid;
 
 use crate::adapters::remote::RemoteAdapter;
 use crate::adapters::updater::UpdaterAdapter;
-use crate::adapters::vmware::{path_key, VmwareAdapter};
+use crate::adapters::vmware::{path_key, ToolsState, VmwareAdapter};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -416,6 +422,7 @@ impl JobRunner {
 
         let (mut succeeded, mut failed, mut cancelled) = (0usize, 0usize, 0usize);
         let mut still_running = Vec::new();
+        let mut cancelled_in_flight = Vec::new();
         let mut safety_snapshots = 0usize;
         while let Some(joined) = tasks.join_next().await {
             let (target, outcome, duration_ms, safety_snapshot) = match joined {
@@ -435,6 +442,10 @@ impl JobRunner {
                     Some("non-zero exit code".to_owned()),
                 ),
                 Err(Some(CoreError::Cancelled)) | Err(None) => (TargetStatus::Cancelled, None, None, None),
+                Err(Some(err @ CoreError::CancelledInFlight)) => {
+                    cancelled_in_flight.push(target.name.clone());
+                    (TargetStatus::Cancelled, None, None, Some(err.to_string()))
+                }
                 Err(Some(err @ CoreError::StillRunning { .. })) => {
                     still_running.push(target.clone());
                     (TargetStatus::Failed, None, None, Some(err.to_string()))
@@ -487,6 +498,12 @@ impl JobRunner {
         if let (Some(name), true) = (&safety_name, safety_snapshots > 0) {
             detail.push_str(&format!("; safety snapshot '{name}' taken on {safety_snapshots} VM(s)"));
         }
+        if !cancelled_in_flight.is_empty() {
+            detail.push_str(&format!(
+                "; cancelled while vmrun was running, so Workstation may still finish it: {}",
+                cancelled_in_flight.join(", ")
+            ));
+        }
         if !still_running.is_empty() {
             let names: Vec<&str> = still_running.iter().map(|t: &Target| t.name.as_str()).collect();
             detail.push_str(&format!(
@@ -522,10 +539,14 @@ impl JobRunner {
         match (&spec.command, &target.target) {
             (Command::VmPower { op, .. }, TargetRef::Vm { vmx_path }) => {
                 let vmx = Path::new(vmx_path);
-                if let PowerOp::Stop { mode: StopMode::Soft } = op {
-                    self.soft_stop(vmx).await?;
-                } else {
-                    self.vmware.power(vmx, *op).await?;
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                // BX-04: cancel stops waiting. Dropping the call kills vmrun (kill_on_drop).
+                tokio::select! {
+                    biased;
+                    result = self.power(vmx, *op) => result?,
+                    _ = token.cancelled() => return Err(CoreError::CancelledInFlight),
                 }
                 // The VM list shows the new state before the next refresh asks vmrun.
                 self.store
@@ -573,10 +594,56 @@ impl JobRunner {
         }
     }
 
+    /// VM-02, VM-03: one power operation on one VM. A graceful one that needs VMware Tools fails at
+    /// once when they are not running; it never falls back to the hard variant, which the policy
+    /// engine rates on its own (a hard stop or reset is Critical).
+    async fn power(&self, vmx: &Path, op: PowerOp) -> Result<()> {
+        let needs_tools = match op {
+            PowerOp::Stop { mode: StopMode::Soft } => return self.soft_stop(vmx).await,
+            PowerOp::Reset { mode: StopMode::Soft } => {
+                Some(("restart", "Reset (hard) forces it; that needs its own approval."))
+            }
+            PowerOp::Suspend => Some(("suspend", "Try again once VMware Tools runs in the guest.")),
+            _ => None,
+        };
+        if let Some((action, advice)) = needs_tools {
+            if let Some(tools) = self.tools_missing(vmx).await? {
+                return Err(CoreError::ToolsNotRunning {
+                    tools: tools.describe().to_owned(),
+                    action,
+                    advice,
+                });
+            }
+        }
+        self.vmware.power(vmx, op).await
+    }
+
+    /// VM-02, VM-03: the VMware Tools state of a running VM whose Tools are not running, or `None`
+    /// when a graceful operation can go ahead. vmrun's soft stop, restart and suspend wait for Tools
+    /// instead of failing (on Workstation 26, `suspend soft` waited until the VM was powered off from
+    /// outside). A VM that is not running has no Tools to wait for, so vmrun answers for it at once.
+    async fn tools_missing(&self, vmx: &Path) -> Result<Option<ToolsState>> {
+        let state = match self.vmware.tools_state(vmx).await {
+            Ok(ToolsState::Running) => return Ok(None),
+            other => other,
+        };
+        let key = path_key(vmx);
+        if !self.vmware.list_running().await?.iter().any(|p| path_key(p) == key) {
+            return Ok(None);
+        }
+        state.map(Some)
+    }
+
     /// VM-03: asks the guest to shut down and waits up to the shutdown wait. A VM that is still
     /// running then (the guest ignored it, or has no VMware Tools) is reported as
-    /// [`CoreError::StillRunning`] and left running: forcing it off is a separate command.
+    /// [`CoreError::StillRunning`] and left running: forcing it off is a separate command. Without
+    /// VMware Tools that is known before asking, so it is reported at once.
     async fn soft_stop(&self, vmx: &Path) -> Result<()> {
+        if let Some(tools) = self.tools_missing(vmx).await? {
+            return Err(CoreError::StillRunning {
+                reason: format!("{}, so it can't be asked to shut down", tools.describe()),
+            });
+        }
         let wait = self.limits().shutdown_wait;
         let op = PowerOp::Stop { mode: StopMode::Soft };
         let failure = match tokio::time::timeout(wait, self.vmware.power(vmx, op)).await {

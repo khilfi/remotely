@@ -94,6 +94,7 @@ src/                  React + TypeScript UI
 - A running VM's start time (power-on or resume) is the first token of the first line of `vmware.log` in its folder.
 - A suspended VM's `.vmx` has a non-empty `checkpoint.vmState`. `guestInfo.detailed.data` holds the guest's `prettyName` once VMware Tools has reported it. Values may escape characters as `|XX` (hex).
 - Power: `start <vmx> [gui|nogui]`, `stop <vmx> [soft|hard]`, `reset <vmx> [soft|hard]`, `suspend <vmx> [soft|hard]`, `pause <vmx>`, `unpause <vmx>`.
+- `soft` goes through VMware Tools. Without Tools running, vmrun waits instead of failing (Workstation 26: `suspend soft` waited until the VM was powered off from outside, then said "The VMware Tools are not running"), so the job runner checks `checkToolsState` first. vmrun power calls also wait while the VM shows a question or message in Workstation, so they get per-op timeouts (`adapters::vmware::power_timeout`) and job cancel kills an in-flight power call.
 - Snapshots: `snapshot`, `listSnapshots`, `revertToSnapshot`, `deleteSnapshot`.
 - Guest operations (`runProgramInGuest`, file copy) need `-gu`/`-gp` guest credentials on the command line, so other processes on the host can see them. Use guest operations only on demand, and never log the command line.
 - `vmrest.exe` (same folder) is a local REST API, by default on 127.0.0.1:8697. It needs a one-time credential setup (`vmrest -C`, which is interactive). Treat it as optional and fall back to `vmrun`.

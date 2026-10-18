@@ -27,7 +27,9 @@ use crate::vault::{SecretId, SecretKind, SecretString, UnlockMethod, Vault, Vaul
 
 /// Workstation in memory. VMs can sit in the library, in scanned folders and in the running list;
 /// power calls change the running list and snapshot calls change each VM's snapshot tree the way
-/// vmrun would. Records every power and snapshot call as text, e.g. `power Suspend C:\VMs\a\a.vmx`.
+/// vmrun would. Like vmrun, a soft stop, restart or suspend waits for as long as VMware Tools is not
+/// running in the guest. Records every power and snapshot call as text, e.g.
+/// `power Suspend C:\VMs\a\a.vmx`.
 /// Safety snapshot names carry a job id and a time, so they are recorded as
 /// `snapshot take safety <vmx>`.
 #[derive(Default)]
@@ -39,6 +41,8 @@ pub struct FakeVmware {
     ips: HashMap<String, String>,
     unresponsive: HashSet<String>,
     slow_shutdown: HashSet<String>,
+    tools: HashMap<String, ToolsState>,
+    questions: HashSet<String>,
     no_vmrun: bool,
     power_delay: Duration,
     started_at: HashMap<String, OffsetDateTime>,
@@ -89,15 +93,29 @@ impl FakeVmware {
         self
     }
 
-    /// The guest reports this IP address while running (Tools always runs in a running fake VM).
+    /// The guest reports this IP address while running.
     pub fn with_ip(mut self, vmx: &str, ip: &str) -> Self {
         self.ips.insert(path_key(Path::new(vmx)), ip.to_owned());
         self
     }
 
-    /// VM-03: a soft stop fails at once (no VMware Tools in the guest) and the VM keeps running.
+    /// VM-03: VMware Tools runs, but a soft stop fails at once and the VM keeps running.
     pub fn unresponsive(mut self, vmx: &str) -> Self {
         self.unresponsive.insert(path_key(Path::new(vmx)));
+        self
+    }
+
+    /// VM-02: VMware Tools state while the VM runs. Without this, Tools run in every running VM.
+    /// A soft stop, restart or suspend then waits for Tools forever, as vmrun does.
+    pub fn with_tools(mut self, vmx: &str, state: ToolsState) -> Self {
+        self.tools.insert(path_key(Path::new(vmx)), state);
+        self
+    }
+
+    /// VM-02: Workstation shows a question for this VM, so every power call on it waits for an
+    /// answer, here forever.
+    pub fn with_question(mut self, vmx: &str) -> Self {
+        self.questions.insert(path_key(Path::new(vmx)));
         self
     }
 
@@ -176,6 +194,12 @@ impl FakeVmware {
         self.max_in_flight.load(Ordering::SeqCst)
     }
 
+    /// Power calls in progress now. A call the job runner gave up on no longer counts: with the real
+    /// adapter, that kills vmrun.
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
     fn record(&self, call: String) {
         locks::lock(&self.calls).push(call);
     }
@@ -239,7 +263,7 @@ impl VmwareAdapter for FakeVmware {
     async fn tools_state(&self, vmx: &Path) -> Result<ToolsState> {
         self.vmrun()?;
         Ok(if self.is_running(vmx) {
-            ToolsState::Running
+            self.tools.get(&path_key(vmx)).copied().unwrap_or(ToolsState::Running)
         } else {
             ToolsState::Unknown
         })
@@ -255,18 +279,29 @@ impl VmwareAdapter for FakeVmware {
         self.record(format!("power {op:?} {}", vmx.display()));
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        let _done = InFlight(&self.in_flight);
         if !self.power_delay.is_zero() {
             tokio::time::sleep(self.power_delay).await;
         }
-        self.in_flight.fetch_sub(1, Ordering::SeqCst);
 
         let key = path_key(vmx);
+        if self.questions.contains(&key) {
+            std::future::pending::<()>().await;
+        }
+        let soft = matches!(
+            op,
+            PowerOp::Stop { mode: StopMode::Soft } | PowerOp::Reset { mode: StopMode::Soft } | PowerOp::Suspend
+        );
+        let tools = self.tools.get(&key).copied().unwrap_or(ToolsState::Running);
+        if soft && self.is_running(vmx) && tools != ToolsState::Running {
+            std::future::pending::<()>().await;
+        }
         match op {
             PowerOp::Start { .. } | PowerOp::Reset { .. } => self.set_running(vmx, true),
             PowerOp::Stop { mode: StopMode::Soft } if self.unresponsive.contains(&key) => {
                 return Err(CoreError::Vmrun {
                     command: "stop".into(),
-                    message: "The VMware Tools are not running in the virtual machine".into(),
+                    message: "The guest did not accept the shutdown request".into(),
                 });
             }
             PowerOp::Stop { mode: StopMode::Soft } if self.slow_shutdown.contains(&key) => {
@@ -341,6 +376,15 @@ impl VmwareAdapter for FakeVmware {
 
     async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
         Ok(self.started_at.get(&path_key(vmx)).copied())
+    }
+}
+
+/// Counts a power call as finished when it returns or is dropped.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 

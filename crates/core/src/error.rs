@@ -15,6 +15,24 @@ pub enum CoreError {
     #[error("{command} timed out after {seconds}s")]
     Timeout { command: String, seconds: u64 },
 
+    /// VM-02: a vmrun power call did not return in time. Workstation holds a VM's power calls while
+    /// that VM waits for an answer to a question or message.
+    #[error(
+        "vmrun {command} got no answer within {seconds} s. The VM may be waiting for a reply to a message in Workstation: open it there to check"
+    )]
+    PowerTimeout { command: String, seconds: u64 },
+
+    /// VM-02: a graceful restart or suspend goes through VMware Tools, and vmrun waits for Tools
+    /// rather than failing when they are not running, so the job runner checks first.
+    #[error("{tools}, so it can't {action} gracefully. {advice}")]
+    ToolsNotRunning {
+        /// What Workstation says about VMware Tools in the guest.
+        tools: String,
+        action: &'static str,
+        /// What the user can do instead.
+        advice: &'static str,
+    },
+
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
 
@@ -68,6 +86,11 @@ pub enum CoreError {
     #[error("cancelled")]
     Cancelled,
 
+    /// BX-04: cancelled while its vmrun power call was running. vmrun is stopped, but Workstation
+    /// may still carry out what it was asked.
+    #[error("cancelled while vmrun was running; Workstation may still finish the action, so check the VM's state")]
+    CancelledInFlight,
+
     #[error("update failed: {0}")]
     Update(String),
 
@@ -82,6 +105,8 @@ impl CoreError {
             CoreError::VmrunNotFound => "vmrun_not_found",
             CoreError::Vmrun { .. } => "vmrun_failed",
             CoreError::Timeout { .. } => "timeout",
+            CoreError::PowerTimeout { .. } => "power_timeout",
+            CoreError::ToolsNotRunning { .. } => "tools_not_running",
             CoreError::Db(_) | CoreError::Migrate(_) => "database",
             CoreError::Io(_) => "io",
             CoreError::Json(_) => "json",
@@ -98,6 +123,7 @@ impl CoreError {
             CoreError::StillRunning { .. } => "still_running",
             CoreError::SafetySnapshotFailed(_) => "safety_snapshot_failed",
             CoreError::Cancelled => "cancelled",
+            CoreError::CancelledInFlight => "cancelled_in_flight",
             CoreError::Update(_) => "update_failed",
             CoreError::NotImplemented(_) => "not_implemented",
         }
