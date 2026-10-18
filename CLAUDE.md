@@ -67,7 +67,7 @@ crates/core/          remotely-core: all app logic
     jobs.rs
     adapters/         vmware.rs, remote.rs (SSH shell and exec), exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs, updater.rs, github.rs (FD-14 GitHub Releases API with the
-                      update token), dns.rs (QL-01 host names to IPs), network.rs (QL-03 DNS, QL-04
+                      update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe)
     updates.rs        FD-14 update checks and the GitHub update token in the vault
     inventory.rs

@@ -19,9 +19,9 @@ use tokio::sync::watch;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::adapters::dns::Resolver;
 use crate::adapters::exec_output::OutputCollector;
 use crate::adapters::host_counters::{DiskSpace, HostCounters, HostTotals, SystemCpuTimes, VmProcess};
+use crate::adapters::network::{ip_literal, NetworkAdapter};
 use crate::adapters::remote::{
     ConnectRequest, Credentials, ExecRequest, ExecResult, ExecSession, Prompter, RemoteAdapter, ShellEnd, ShellHandle,
     ShellInput, ShellOutput, ShellRequest,
@@ -908,57 +908,6 @@ impl HostCounters for FakeHostCounters {
     }
 }
 
-/// Name resolution from a fixed table: no DNS server is asked. Names not in it do not resolve.
-/// Records every name looked up.
-#[derive(Default)]
-pub struct FakeResolver {
-    names: Mutex<HashMap<String, Vec<std::net::IpAddr>>>,
-    lookups: Mutex<Vec<String>>,
-    delay: Option<Duration>,
-}
-
-impl FakeResolver {
-    /// `name` resolves to `ips` (any letter case).
-    pub fn with(self, name: &str, ips: &[&str]) -> Self {
-        self.set(name, ips);
-        self
-    }
-
-    /// Changes what `name` resolves to, or makes it unresolvable with no `ips`.
-    pub fn set(&self, name: &str, ips: &[&str]) {
-        let parsed = ips.iter().filter_map(|ip| ip.parse().ok()).collect();
-        locks::lock(&self.names).insert(name.to_ascii_lowercase(), parsed);
-    }
-
-    /// Every lookup waits this long first, like a DNS server that does not answer.
-    pub fn with_delay(mut self, delay: Duration) -> Self {
-        self.delay = Some(delay);
-        self
-    }
-
-    pub fn lookups(&self) -> Vec<String> {
-        locks::lock(&self.lookups).clone()
-    }
-}
-
-#[async_trait]
-impl Resolver for FakeResolver {
-    async fn resolve(&self, host: &str) -> Result<Vec<std::net::IpAddr>> {
-        locks::lock(&self.lookups).push(host.to_owned());
-        if let Some(delay) = self.delay {
-            tokio::time::sleep(delay).await;
-        }
-        let found = locks::lock(&self.names).get(&host.to_ascii_lowercase()).cloned();
-        match found {
-            Some(ips) if !ips.is_empty() => Ok(ips),
-            _ => Err(CoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("could not resolve {host}"),
-            ))),
-        }
-    }
-}
-
 /// An update server that offers at most one version. Records the versions installed and the calls
 /// it got. With [`FakeUpdater::accepting`] it takes one token only and refuses any other the way
 /// GitHub refuses a revoked one; by default it takes any.
@@ -1044,30 +993,52 @@ impl UpdaterAdapter for FakeUpdater {
     }
 }
 
-/// DNS and reachability without the network (QL-03, QL-04): names and addresses the test sets, and
-/// ports that answer or not. Records every lookup and probe.
+/// DNS and reachability without the network (QL-01, QL-03, QL-04): names and addresses the test
+/// sets, and ports that answer or not. No DNS server is asked: names not in its table do not resolve.
+/// Records every lookup and probe.
 #[derive(Default)]
 pub struct FakeNetwork {
     forward: Mutex<HashMap<String, Vec<std::net::IpAddr>>>,
     reverse: Mutex<HashMap<std::net::IpAddr, String>>,
     open_ports: Mutex<HashSet<(String, u16)>>,
+    lookup_delay: Option<Duration>,
     probe_delay: Mutex<Option<Duration>>,
+    lookups: Mutex<Vec<String>>,
     calls: Mutex<Vec<String>>,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
 }
 
 impl FakeNetwork {
-    /// `host` resolves to `ip`, and `ip` back to `host`.
+    /// `host` resolves to `ip` (added to what it resolves to already), and `ip` back to `host`.
     pub fn with_name(self, host: &str, ip: &str) -> Self {
         let ip: std::net::IpAddr = ip
             .parse()
             .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
         locks::lock(&self.forward)
-            .entry(host.to_lowercase())
+            .entry(host.to_ascii_lowercase())
             .or_default()
             .push(ip);
         locks::lock(&self.reverse).insert(ip, host.to_owned());
+        self
+    }
+
+    /// `name` resolves to `ips` (any letter case); reverse DNS is left as it is.
+    pub fn with_addresses(self, name: &str, ips: &[&str]) -> Self {
+        self.set_addresses(name, ips);
+        self
+    }
+
+    /// Changes what `name` resolves to, or makes it unresolvable with no `ips`.
+    pub fn set_addresses(&self, name: &str, ips: &[&str]) {
+        let parsed = ips.iter().filter_map(|ip| ip.parse().ok()).collect();
+        locks::lock(&self.forward).insert(name.to_ascii_lowercase(), parsed);
+    }
+
+    /// Every DNS lookup (forward or reverse) waits this long first, like a DNS server that does not
+    /// answer.
+    pub fn with_lookup_delay(mut self, delay: Duration) -> Self {
+        self.lookup_delay = Some(delay);
         self
     }
 
@@ -1093,6 +1064,11 @@ impl FakeNetwork {
         self
     }
 
+    /// The hosts forward lookups were asked for, in order.
+    pub fn lookups(&self) -> Vec<String> {
+        locks::lock(&self.lookups).clone()
+    }
+
     /// `resolve <host>`, `reverse <ip>` and `probe <host>:<port>`, in order.
     pub fn calls(&self) -> Vec<String> {
         locks::lock(&self.calls).clone()
@@ -1102,23 +1078,33 @@ impl FakeNetwork {
     pub fn max_in_flight(&self) -> usize {
         self.max_in_flight.load(Ordering::SeqCst)
     }
+
+    async fn wait_for_dns(&self) {
+        if let Some(delay) = self.lookup_delay {
+            tokio::time::sleep(delay).await;
+        }
+    }
 }
 
 #[async_trait]
-impl crate::adapters::network::NetworkAdapter for FakeNetwork {
+impl NetworkAdapter for FakeNetwork {
     async fn resolve(&self, host: &str) -> Result<Vec<std::net::IpAddr>> {
         locks::lock(&self.calls).push(format!("resolve {host}"));
-        if let Some(ip) = crate::adapters::network::ip_literal(host) {
+        locks::lock(&self.lookups).push(host.to_owned());
+        if let Some(ip) = ip_literal(host) {
             return Ok(vec![ip]);
         }
-        locks::lock(&self.forward)
-            .get(&host.to_lowercase())
-            .cloned()
-            .ok_or_else(|| CoreError::Network(format!("{host} could not be found")))
+        self.wait_for_dns().await;
+        let found = locks::lock(&self.forward).get(&host.to_ascii_lowercase()).cloned();
+        match found {
+            Some(ips) if !ips.is_empty() => Ok(ips),
+            _ => Err(CoreError::Network(format!("{host} could not be found"))),
+        }
     }
 
     async fn reverse(&self, ip: std::net::IpAddr) -> Option<String> {
         locks::lock(&self.calls).push(format!("reverse {ip}"));
+        self.wait_for_dns().await;
         locks::lock(&self.reverse).get(&ip).cloned()
     }
 

@@ -12,7 +12,7 @@ use common::{vm, vmx, wait_finished, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::vmware::VmxInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, SnapshotOp, StopMode, SubmitOutcome};
 use remotely_core::domain::PowerState;
-use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeResolver, FakeUpdater, FakeVault, FakeVmware};
+use remotely_core::fakes::{FakeHostCounters, FakeNetwork, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::{ActionKind, PolicyRules, Tier, TierRule};
 use remotely_core::store::{Store, POLICY_RULES_KEY};
@@ -41,8 +41,7 @@ async fn core_on(store: Store, vmware: Arc<FakeVmware>) -> Core {
         vault: Arc::new(FakeVault::with_password(VAULT_PASSWORD)),
         host_counters: Arc::new(FakeHostCounters::default()),
         updater: Arc::new(FakeUpdater::default()),
-        resolver: Arc::new(FakeResolver::default()),
-        network: Arc::new(remotely_core::fakes::FakeNetwork::default()),
+        network: Arc::new(FakeNetwork::default()),
     };
     Core::assemble(store, ctx, adapters, JobLimits::default())
         .await

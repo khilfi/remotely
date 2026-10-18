@@ -26,7 +26,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::adapters::dns::{ip_literal, Resolver};
+use crate::adapters::network::{ip_literal, NetworkAdapter};
 use crate::domain::{Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::locks;
@@ -179,7 +179,8 @@ impl Resolved {
 /// Saved sessions' links to VMs: automatic ones and the user's choices.
 pub struct VmLinks {
     store: Store,
-    resolver: Arc<dyn Resolver>,
+    /// Forward DNS lookups of session host names.
+    network: Arc<dyn NetworkAdapter>,
     cache: Mutex<HashMap<String, Resolved>>,
     /// Sessions whose address several VMs have, from the latest pass.
     ambiguous: Mutex<HashMap<Uuid, Vec<String>>>,
@@ -198,10 +199,10 @@ impl VmLinks {
     pub const LOOKUPS_DEADLINE: Duration = Duration::from_secs(3);
     const LOOKUPS_AT_ONCE: usize = 16;
 
-    pub fn new(store: Store, resolver: Arc<dyn Resolver>) -> Self {
+    pub fn new(store: Store, network: Arc<dyn NetworkAdapter>) -> Self {
         Self {
             store,
-            resolver,
+            network,
             cache: Mutex::default(),
             ambiguous: Mutex::default(),
             pass: tokio::sync::Mutex::new(()),
@@ -349,7 +350,7 @@ impl VmLinks {
     }
 
     /// What each host is or resolves to. IP literals need no lookup; names come from the cache while
-    /// it is fresh, otherwise from the resolver, many at once, within [`Self::LOOKUPS_DEADLINE`].
+    /// it is fresh, otherwise from DNS, many at once, within [`Self::LOOKUPS_DEADLINE`].
     /// A name still unresolved by then maps to `None` and is tried again on the next pass.
     async fn resolve(&self, hosts: Vec<String>) -> HashMap<String, Option<Vec<IpAddr>>> {
         let mut out = HashMap::new();
@@ -379,11 +380,11 @@ impl VmLinks {
         let limit = Arc::new(Semaphore::new(Self::LOOKUPS_AT_ONCE));
         let mut tasks = JoinSet::new();
         for host in lookups {
-            let resolver = Arc::clone(&self.resolver);
+            let network = Arc::clone(&self.network);
             let limit = Arc::clone(&limit);
             tasks.spawn(async move {
                 let _permit = limit.acquire_owned().await.ok();
-                let found = tokio::time::timeout(Self::LOOKUP_TIMEOUT, resolver.resolve(&host)).await;
+                let found = tokio::time::timeout(Self::LOOKUP_TIMEOUT, network.resolve(&host)).await;
                 let addresses = match found {
                     Ok(Ok(addresses)) if !addresses.is_empty() => Some(addresses),
                     Ok(Ok(_)) => None,

@@ -1,8 +1,15 @@
-//! Network adapter: DNS lookups (QL-03: the address or name a session is missing, before connecting)
-//! and a cheap TCP reachability probe (QL-04, MO-08 lite: the dots in the Terminal page's session tree).
+//! Network adapter: DNS lookups and a cheap TCP reachability probe. Reads only, so it skips the
+//! command bus.
 //!
-//! The probe opens a TCP connection to the session's port and closes it at once: no SSH handshake,
-//! nothing sent, nothing logged in. Reads only, so it skips the command bus.
+//! * QL-01: the addresses a session's host name stands for, so the session can be linked to the VM
+//!   whose guest IP it reaches.
+//! * QL-03: the address or name a session is missing, before connecting.
+//! * QL-04, MO-08 lite: the probe behind the dots in the Terminal page's session tree. It opens a TCP
+//!   connection to the session's port and closes it at once: no SSH handshake, nothing sent, nothing
+//!   logged in.
+//!
+//! [`SystemNetwork`] asks Windows (the same resolver `ssh` and the browser use, hosts file included).
+//! A lookup never connects to the host itself.
 
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
@@ -17,7 +24,8 @@ pub const LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[async_trait]
 pub trait NetworkAdapter: Send + Sync {
-    /// The addresses `host` resolves to, in the resolver's order. An IP address resolves to itself.
+    /// The addresses `host` resolves to, in the resolver's order and without duplicates; never none.
+    /// An IP address ([`ip_literal`]) resolves to itself.
     async fn resolve(&self, host: &str) -> Result<Vec<IpAddr>>;
 
     /// The name reverse DNS gives `ip`, if it has one.
@@ -33,9 +41,12 @@ pub fn bare_host(host: &str) -> &str {
     host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
-/// The IP address `host` already is, if it is one.
+/// `host` as an IP address, when it is one: `192.0.2.10`, `2001:db8::1`, `[2001:db8::1]` or
+/// `fe80::1%eth0` (the zone is dropped). IPv4 written as IPv6 (`::ffff:192.0.2.10`) becomes IPv4.
 pub fn ip_literal(host: &str) -> Option<IpAddr> {
-    bare_host(host).parse().ok()
+    let host = bare_host(host.trim());
+    let host = host.split('%').next().unwrap_or(host);
+    host.parse::<IpAddr>().ok().map(|ip| ip.to_canonical())
 }
 
 /// The operating system's resolver and sockets.
@@ -53,8 +64,9 @@ impl NetworkAdapter for SystemNetwork {
             .map_err(|err| CoreError::Network(format!("{host} could not be found: {err}")))?;
         let mut ips: Vec<IpAddr> = Vec::new();
         for addr in found {
-            if !ips.contains(&addr.ip()) {
-                ips.push(addr.ip());
+            let ip = addr.ip().to_canonical();
+            if !ips.contains(&ip) {
+                ips.push(ip);
             }
         }
         if ips.is_empty() {
@@ -175,11 +187,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ip_literals_are_recognised_with_or_without_brackets() {
-        assert_eq!(ip_literal("192.0.2.10"), Some("192.0.2.10".parse().unwrap()));
-        assert_eq!(ip_literal("[2001:db8::1]"), Some("2001:db8::1".parse().unwrap()));
-        assert_eq!(ip_literal("2001:db8::1"), Some("2001:db8::1".parse().unwrap()));
+    fn ip_literals_are_recognised_in_every_spelling() {
+        let v4: IpAddr = "192.0.2.10".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert_eq!(ip_literal("192.0.2.10"), Some(v4));
+        assert_eq!(ip_literal(" 192.0.2.10 "), Some(v4));
+        assert_eq!(ip_literal("::ffff:192.0.2.10"), Some(v4));
+        assert_eq!(ip_literal("2001:db8::1"), Some(v6));
+        assert_eq!(ip_literal("[2001:db8::1]"), Some(v6));
+        assert_eq!(ip_literal("fe80::1%eth0"), "fe80::1".parse().ok());
         assert_eq!(ip_literal("web01.example.com"), None);
+        assert_eq!(ip_literal("192.0.2"), None);
         assert_eq!(bare_host("[2001:db8::1]"), "2001:db8::1");
     }
 
@@ -187,6 +205,14 @@ mod tests {
     async fn an_ip_address_resolves_to_itself_without_a_lookup() {
         let ips = SystemNetwork.resolve("192.0.2.10").await.unwrap();
         assert_eq!(ips, vec!["192.0.2.10".parse::<IpAddr>().unwrap()]);
+    }
+
+    // Resolves a name the hosts file always has; no network needed.
+    #[tokio::test]
+    async fn the_system_resolver_resolves_localhost() {
+        let found = SystemNetwork.resolve("localhost").await.unwrap();
+        assert!(found.iter().all(|ip| ip.is_loopback()), "{found:?}");
+        assert!(!found.is_empty());
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 //! QL-01: linking saved sessions to the VMs they reach, by IP address, end to end. Guest IPs come from
-//! the fake VMware adapter (as VMware Tools would report them) and host names resolve through a fake
-//! resolver, so no DNS server, VM or SSH host is touched. Linking is the app's own data: no job, no
+//! the fake VMware adapter (as VMware Tools would report them) and host names resolve through the fake
+//! network adapter, so no DNS server, VM or SSH host is touched. Linking is the app's own data: no job, no
 //! approval, an audit entry per change.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use common::{temp_folder, vmx, Setup};
 use remotely_core::bulk::TargetPicks;
 use remotely_core::domain::Environment;
-use remotely_core::fakes::{FakeResolver, FakeVmware};
+use remotely_core::fakes::{FakeNetwork, FakeVmware};
 use remotely_core::import::{ImportRequest, ImportSource};
 use remotely_core::sessions::{SessionAuth, SessionInput, SessionRecord};
 use remotely_core::vm_links::VmLink;
@@ -33,11 +33,10 @@ fn lab() -> FakeVmware {
         .with_ip(&vmx("clone-b"), "198.51.100.7")
 }
 
-async fn lab_core(resolver: FakeResolver) -> (Core, Arc<FakeResolver>) {
-    let mut setup = Setup::new(lab());
-    let resolver = Arc::new(resolver);
-    setup.resolver = Arc::clone(&resolver);
-    (setup.build().await, resolver)
+async fn lab_core(network: FakeNetwork) -> (Core, Arc<FakeNetwork>) {
+    let network = Arc::new(network);
+    let core = Setup::new(lab()).with_network(network.clone()).build().await;
+    (core, network)
 }
 
 fn session(name: &str, host: &str) -> SessionInput {
@@ -71,8 +70,8 @@ async fn audit_count(core: &Core) -> usize {
 
 #[tokio::test]
 async fn sessions_whose_host_is_or_resolves_to_a_vm_ip_are_linked_by_a_refresh() {
-    let (core, resolver) =
-        lab_core(FakeResolver::default().with("db01.example.com", &["203.0.113.9", "192.0.2.20"])).await;
+    let (core, network) =
+        lab_core(FakeNetwork::default().with_addresses("db01.example.com", &["203.0.113.9", "192.0.2.20"])).await;
     let ctx = &core.ctx;
     // Saved before the VMs were ever listed: nothing to link to yet.
     let web = core.sessions.create(ctx, session("web", "192.0.2.10")).await.unwrap();
@@ -156,17 +155,17 @@ async fn sessions_whose_host_is_or_resolves_to_a_vm_ip_are_linked_by_a_refresh()
 
     // Nothing changed since: the next refresh writes nothing, and the name is not looked up again.
     let before = audit_count(&core).await;
-    let lookups = resolver.lookups().len();
+    let lookups = network.lookups().len();
     let again = core.inventory.refresh(ctx).await.unwrap();
     assert!(again.links.linked.is_empty() && again.links.unlinked.is_empty());
     assert_eq!(audit_count(&core).await, before);
-    assert_eq!(resolver.lookups().len(), lookups, "resolved names are kept for a while");
+    assert_eq!(network.lookups().len(), lookups, "resolved names are kept for a while");
     assert!(core.store.verify_audit_chain().await.unwrap().ok);
 }
 
 #[tokio::test]
 async fn a_session_is_linked_as_soon_as_it_is_saved_and_follows_its_host() {
-    let (core, _) = lab_core(FakeResolver::default().with("web01.example.com", &["192.0.2.10"])).await;
+    let (core, _) = lab_core(FakeNetwork::default().with_addresses("web01.example.com", &["192.0.2.10"])).await;
     let ctx = &core.ctx;
     core.inventory.refresh(ctx).await.unwrap();
 
@@ -200,7 +199,7 @@ async fn a_session_is_linked_as_soon_as_it_is_saved_and_follows_its_host() {
 
 #[tokio::test]
 async fn hosts_that_match_no_vm_are_not_linked() {
-    let (core, resolver) = lab_core(FakeResolver::default().with("mail.example.org", &["203.0.113.25"])).await;
+    let (core, network) = lab_core(FakeNetwork::default().with_addresses("mail.example.org", &["203.0.113.25"])).await;
     let ctx = &core.ctx;
     let ids = [
         core.sessions
@@ -234,18 +233,18 @@ async fn hosts_that_match_no_vm_are_not_linked() {
     }
     assert_eq!(audit_count(&core).await, before, "nothing changed, nothing audited");
     // IP addresses are never looked up; names that don't resolve wait a while before another try.
-    let mut asked = resolver.lookups();
+    let mut asked = network.lookups();
     asked.sort();
     asked.dedup();
     assert_eq!(asked, ["mail.example.org", "nowhere.example.org"]);
-    let lookups = resolver.lookups().len();
+    let lookups = network.lookups().len();
     core.inventory.refresh(ctx).await.unwrap();
-    assert_eq!(resolver.lookups().len(), lookups);
+    assert_eq!(network.lookups().len(), lookups);
 }
 
 #[tokio::test]
 async fn several_matching_vms_are_left_for_the_user_to_pick() {
-    let (core, _) = lab_core(FakeResolver::default()).await;
+    let (core, _) = lab_core(FakeNetwork::default()).await;
     let ctx = &core.ctx;
     let clone = core
         .sessions
@@ -280,7 +279,7 @@ async fn several_matching_vms_are_left_for_the_user_to_pick() {
 
 #[tokio::test]
 async fn a_manual_link_is_never_overwritten() {
-    let (core, _) = lab_core(FakeResolver::default()).await;
+    let (core, _) = lab_core(FakeNetwork::default()).await;
     let ctx = &core.ctx;
     core.inventory.refresh(ctx).await.unwrap();
     let (web_vm, db_vm) = (vm_id(&core, "web").await, vm_id(&core, "db").await);
@@ -372,7 +371,7 @@ async fn a_manual_link_is_never_overwritten() {
 
 #[tokio::test]
 async fn imported_sessions_are_linked_in_one_pass() {
-    let (core, resolver) = lab_core(FakeResolver::default().with("web.example.com", &["192.0.2.10"])).await;
+    let (core, network) = lab_core(FakeNetwork::default().with_addresses("web.example.com", &["192.0.2.10"])).await;
     let ctx = &core.ctx;
     core.inventory.refresh(ctx).await.unwrap();
     let dir = temp_folder("vm-links-import");
@@ -409,16 +408,16 @@ async fn imported_sessions_are_linked_in_one_pass() {
         links,
         [("db", Some(VmLink::Auto)), ("other", None), ("web", Some(VmLink::Auto))]
     );
-    assert_eq!(resolver.lookups(), ["web.example.com"], "one lookup for the batch");
+    assert_eq!(network.lookups(), ["web.example.com"], "one lookup for the batch");
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[tokio::test]
 async fn a_dns_server_that_does_not_answer_does_not_hold_up_a_refresh() {
-    let resolver = FakeResolver::default()
-        .with("web01.example.com", &["192.0.2.10"])
-        .with_delay(Duration::from_secs(60));
-    let (core, resolver) = lab_core(resolver).await;
+    let network = FakeNetwork::default()
+        .with_addresses("web01.example.com", &["192.0.2.10"])
+        .with_lookup_delay(Duration::from_secs(60));
+    let (core, network) = lab_core(network).await;
     let ctx = &core.ctx;
     // Saved before any VM has an address: nothing could match, so nothing is looked up.
     let started = Instant::now();
@@ -427,7 +426,7 @@ async fn a_dns_server_that_does_not_answer_does_not_hold_up_a_refresh() {
         let name = format!("web{n:02}.example.com");
         ids.push(core.sessions.create(ctx, session(&name, &name)).await.unwrap().id);
     }
-    assert!(resolver.lookups().is_empty());
+    assert!(network.lookups().is_empty());
     assert!(
         started.elapsed() < Duration::from_secs(5),
         "took {:?}",
@@ -439,7 +438,7 @@ async fn a_dns_server_that_does_not_answer_does_not_hold_up_a_refresh() {
     let report = core.inventory.refresh(ctx).await.unwrap();
     let took = started.elapsed();
     assert!(took < Duration::from_secs(10), "took {took:?}");
-    assert_eq!(resolver.lookups().len(), 20);
+    assert_eq!(network.lookups().len(), 20);
     assert!(report.links.linked.is_empty());
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     for id in ids {
