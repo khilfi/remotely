@@ -21,6 +21,11 @@ Auto-update checks this repo's GitHub Releases. The vault keeps passwords, priva
 or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
 tier). The SSH terminal, imports and bulk runs with grouped output work over russh. The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts and a host capacity panel. Ctrl+K opens a command palette for pages, VMs, sessions and actions.
+Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
+encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
+both of each conflicting item. The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
+the vault, copies their public keys, lets sessions log in with them and pushes a public key to many hosts'
+`authorized_keys` through the approval flow.
 
 ## Prerequisites
 
@@ -126,7 +131,9 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Metrics collector | `crates/core/src/metrics/`                          | MO-01, MO-02, MO-03, MO-04                                                                               | Working: host-side and SSH guest sources every 5 s, 30 minutes of history in memory, collector cost                           |
 | Vault             | `crates/core/src/vault/`                            | SS-04, AP-06                                                                                             | Working: AES-256-GCM per item; DPAPI and Argon2id key wrapping; 15-minute idle lock; values never leave it except to adapters |
 | Session library   | `crates/core/src/sessions.rs`                       | SS-01, SS-06                                                                                             | Working: folders, tags, colours, search, credentials from the vault, jump host checks, audited changes                        |
+| Export and import | `crates/core/src/transfer/`                         | FD-07                                                                                                    | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path         |
+| SSH key manager   | `crates/core/src/ssh_keys.rs`                       | SS-09                                                                                                    | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command     |
 | Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                       | Working: hash-chained audit log, job journal, inventory, sessions, vault ciphertext, tags, saved filters                      |
 | Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                                                       | One fake per outside system                                                                                                   |
 | Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                                                  | Working                                                                                                                       |
-| UI                | `src/`                                              | FD-01, VM-01 to VM-06, AP-01 to AP-06, SS-01 to SS-06, BX-01 to BX-07, MO-01 to MO-04                    | All pages, the approval dialog with countdown, the dashboard with live uPlot charts, the Ctrl+K command palette               |
+| UI                | `src/`                                              | FD-01, FD-07, VM-01 to VM-06, AP-01 to AP-06, SS-01 to SS-06, SS-09, BX-01 to BX-07, MO-01 to MO-04      | All pages, the approval dialog with countdown, the dashboard with live uPlot charts, the Ctrl+K command palette               |
