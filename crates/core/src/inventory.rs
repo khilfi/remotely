@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::adapters::vmware::{path_key, ToolsState, VmwareAdapter, VmxInfo};
+use crate::adapters::vmware::{path_key, with_backslashes, ToolsState, VmwareAdapter, VmxInfo};
 use crate::command_bus::TargetDirectory;
 use crate::domain::{Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -138,7 +138,10 @@ impl Inventory {
         let mut seen: HashSet<String> = HashSet::new();
         let mut add = |path: PathBuf, library_name: Option<String>| {
             if seen.insert(path_key(&path)) {
-                candidates.push(Candidate { path, library_name });
+                candidates.push(Candidate {
+                    path: with_backslashes(&path),
+                    library_name,
+                });
             }
         };
 
