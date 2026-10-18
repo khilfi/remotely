@@ -66,8 +66,19 @@ pub enum CoreError {
     #[error("approval rejected: {0}")]
     ApprovalRejected(String),
 
-    #[error("the vault is locked")]
+    #[error("the vault is locked. Unlock it on the Vault page")]
     VaultLocked,
+
+    /// SS-04, AP-06: no vault yet, so there is no password for Critical actions to ask for.
+    #[error("the vault is not set up yet. Set it up on the Vault page: Critical actions ask for its password")]
+    VaultNotSetUp,
+
+    #[error("wrong vault password")]
+    WrongVaultPassword,
+
+    /// Never holds a secret: only what went wrong.
+    #[error("vault: {0}")]
+    Vault(String),
 
     #[error("invalid setting: {0}")]
     InvalidSetting(String),
@@ -118,6 +129,9 @@ impl CoreError {
             CoreError::UnknownApproval(_) => "unknown_approval",
             CoreError::ApprovalRejected(_) => "approval_rejected",
             CoreError::VaultLocked => "vault_locked",
+            CoreError::VaultNotSetUp => "vault_not_set_up",
+            CoreError::WrongVaultPassword => "wrong_vault_password",
+            CoreError::Vault(_) => "vault",
             CoreError::InvalidSetting(_) => "invalid_setting",
             CoreError::InvalidInput(_) => "invalid_input",
             CoreError::StillRunning { .. } => "still_running",

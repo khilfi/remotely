@@ -72,6 +72,8 @@ export interface Tag {
   name: string;
   color: string | null;
   vmCount: number;
+  /** SS-01: sessions carrying the tag. */
+  sessionCount: number;
 }
 
 export interface SavedFilter {
@@ -353,6 +355,88 @@ export interface Settings {
   shutdownWaitSecs: number;
 }
 
+/** SS-04. */
+export type VaultStatus = "notSetUp" | "locked" | "unlocked";
+
+/** SS-04: what the UI may know about the vault. Never a secret. */
+export interface VaultInfo {
+  status: VaultStatus;
+  /** The Windows login unlocks the vault. The vault password always does. */
+  windowsLogin: boolean;
+  /** This PC can protect the vault key with the Windows login (DPAPI). */
+  windowsLoginAvailable: boolean;
+  /** The vault locks itself after this many minutes without use. */
+  idleLockMinutes: number;
+}
+
+export type SecretKind = "password" | "privateKey" | "passphrase";
+
+/** A vault item as the UI sees it: its label and kind, never its value. */
+export interface SecretMeta {
+  id: string;
+  kind: SecretKind;
+  label: string;
+  /** Sessions that use it. */
+  usedBy: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** SS-01: a session's colour, named so each theme can draw it. */
+export type SessionColor = "red" | "orange" | "amber" | "green" | "teal" | "blue" | "violet" | "pink" | "slate";
+
+/** How a session logs in. Credentials are vault IDs. */
+export type SessionAuth =
+  /** No password chosen: the terminal asks when it connects (SS-03). */
+  | { method: "password"; passwordId: string | null }
+  | { method: "key"; keyId: string | null; passphraseId: string | null }
+  | { method: "agent" };
+
+/** What the session editor sends; the core checks and tidies it. */
+export interface SessionInput {
+  /** Empty: the host is used. */
+  name: string;
+  folderId: string | null;
+  host: string;
+  port: number;
+  username: string | null;
+  auth: SessionAuth;
+  jumpSessionId: string | null;
+  startupCommand: string | null;
+  /** SS-06: Prod raises the approval tier by one. */
+  environment: Environment;
+  color: SessionColor | null;
+  tags: string[];
+}
+
+export interface SessionRecord extends SessionInput {
+  id: string;
+  protocol: string;
+  /** AP-04: bulk actions skip it. */
+  protected: boolean;
+  importedFrom: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SessionFolder {
+  id: string;
+  /** null: at the top level. */
+  parentId: string | null;
+  name: string;
+  sortOrder: number;
+}
+
+/** SS-01 search. Empty fields match everything. */
+export interface SessionFilter {
+  /** Case-insensitive text in the name, host, user, startup command or a tag. */
+  text?: string;
+  tags?: string[];
+  environments?: Environment[];
+  /** Only sessions in this folder or the folders under it. */
+  folderId?: string | null;
+}
+
 /** FD-14: a newer signed release on GitHub. */
 export interface UpdateInfo {
   currentVersion: string;
@@ -441,6 +525,44 @@ export const api = {
   setShutdownWait: (secs: number) => invoke<Settings>("settings_set_shutdown_wait", { secs }),
   /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
+
+  /** SS-04 vault. Secret values go in and never come back; the UI holds IDs and labels only. */
+  vaultInfo: () => invoke<VaultInfo>("vault_info"),
+  /** The vault password is always set (Critical actions ask for it again, AP-06). */
+  vaultSetup: (password: string, windowsLogin: boolean) => invoke<VaultInfo>("vault_setup", { password, windowsLogin }),
+  /** No password: unlock with the Windows login. */
+  vaultUnlock: (password?: string) => invoke<VaultInfo>("vault_unlock", { password: password ?? null }),
+  vaultLock: () => invoke<VaultInfo>("vault_lock"),
+  vaultChangePassword: (current: string, next: string) =>
+    invoke<VaultInfo>("vault_change_password", { current, new: next }),
+  vaultSetWindowsLogin: (password: string, enabled: boolean) =>
+    invoke<VaultInfo>("vault_set_windows_login", { password, enabled }),
+  /** Status changes, including the lock after the idle time. */
+  onVaultStatus: (handler: (status: VaultStatus) => void): Promise<UnlistenFn> =>
+    listen<VaultStatus>("vault://status", (e) => handler(e.payload)),
+  secrets: () => invoke<SecretMeta[]>("secrets_list"),
+  addSecret: (kind: SecretKind, label: string, value: string) =>
+    invoke<SecretMeta>("secret_add", { kind, label, value }),
+  /** Opens a file dialog in the core and stores the chosen key file; null when cancelled. */
+  importKeyFile: (label: string) => invoke<SecretMeta | null>("secret_import_key", { label }),
+  replaceSecret: (id: string, value: string) => invoke<SecretMeta>("secret_replace", { id, value }),
+  renameSecret: (id: string, label: string) => invoke<SecretMeta>("secret_rename", { id, label }),
+  deleteSecret: (id: string) => invoke<void>("secret_delete", { id }),
+
+  /** SS-01, SS-06 session library. Changes are the app's own data: audited, no approval. */
+  sessions: (filter?: SessionFilter) => invoke<SessionRecord[]>("sessions_list", { filter: filter ?? null }),
+  sessionFolders: () => invoke<SessionFolder[]>("session_folders"),
+  createSession: (input: SessionInput) => invoke<SessionRecord>("session_create", { input }),
+  updateSession: (id: string, input: SessionInput) => invoke<SessionRecord>("session_update", { id, input }),
+  duplicateSession: (id: string) => invoke<SessionRecord>("session_duplicate", { id }),
+  deleteSession: (id: string) => invoke<void>("session_delete", { id }),
+  /** folderId null: the top level. */
+  moveSessions: (ids: string[], folderId: string | null) => invoke<void>("sessions_move", { ids, folderId }),
+  createFolder: (name: string, parentId: string | null) => invoke<SessionFolder>("folder_create", { name, parentId }),
+  renameFolder: (id: string, name: string) => invoke<SessionFolder>("folder_rename", { id, name }),
+  moveFolder: (id: string, parentId: string | null) => invoke<SessionFolder>("folder_move", { id, parentId }),
+  /** Its sessions and subfolders move up to its parent. */
+  deleteFolder: (id: string) => invoke<void>("folder_delete", { id }),
 
   terminalOpen: (onOutput: (data: string) => void) => {
     const channel = new Channel<string>();

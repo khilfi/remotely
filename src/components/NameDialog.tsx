@@ -1,5 +1,5 @@
-// Asks for one name: a tag to add (VM-02) or a name to save a filter under. Existing names are offered
-// as one-click choices.
+// Asks for one name: a tag to add (VM-02), a name to save a filter under, a folder or vault label to
+// create or rename (SS-01, SS-04). Existing names are offered as one-click choices.
 
 import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -22,13 +22,26 @@ interface Props {
   label: string;
   submitLabel: string;
   suggestions?: string[];
+  /** The name to start from, e.g. when renaming. */
+  initial?: string;
+  maxLength?: number;
   /** Throws to keep the dialog open and show the error. */
   onSubmit: (name: string) => Promise<void>;
   onClose: () => void;
 }
 
-export function NameDialog({ title, description, label, submitLabel, suggestions = [], onSubmit, onClose }: Props) {
-  const [name, setName] = useState("");
+export function NameDialog({
+  title,
+  description,
+  label,
+  submitLabel,
+  suggestions = [],
+  initial = "",
+  maxLength = 60,
+  onSubmit,
+  onClose,
+}: Props) {
+  const [name, setName] = useState(initial);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -65,7 +78,7 @@ export function NameDialog({ title, description, label, submitLabel, suggestions
               id="name-dialog-input"
               autoFocus
               autoComplete="off"
-              maxLength={60}
+              maxLength={maxLength}
               value={name}
               onChange={(e) => setName(e.currentTarget.value)}
             />

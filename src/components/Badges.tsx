@@ -2,7 +2,7 @@
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { Environment, JobStatus, PowerState, Tier, ToolsState } from "@/lib/api";
+import type { Environment, JobStatus, PowerState, SecretKind, SessionColor, Tier, ToolsState } from "@/lib/api";
 
 const TIER_CLASS: Record<Tier, string> = {
   low: "border-tier-low/40 text-tier-low",
@@ -85,3 +85,42 @@ export function StatusBadge({ status }: { status: JobStatus }) {
     </Badge>
   );
 }
+
+/** SS-01 session colours, in the order the editor offers them. */
+export const SESSION_COLORS: SessionColor[] = [
+  "red",
+  "orange",
+  "amber",
+  "green",
+  "teal",
+  "blue",
+  "violet",
+  "pink",
+  "slate",
+];
+
+const COLOR_CLASS: Record<SessionColor, string> = {
+  red: "bg-red-500",
+  orange: "bg-orange-500",
+  amber: "bg-amber-500",
+  green: "bg-green-500",
+  teal: "bg-teal-500",
+  blue: "bg-blue-500",
+  violet: "bg-violet-500",
+  pink: "bg-pink-500",
+  slate: "bg-slate-500",
+};
+
+/** A session's colour as a dot; nothing when it has none. */
+export function ColorDot({ color, className }: { color: SessionColor | null; className?: string }) {
+  if (!color) return null;
+  return (
+    <span className={cn("inline-block size-2.5 shrink-0 rounded-full", COLOR_CLASS[color], className)} aria-hidden />
+  );
+}
+
+export const SECRET_KIND_LABEL: Record<SecretKind, string> = {
+  password: "Password",
+  privateKey: "Private key",
+  passphrase: "Passphrase",
+};

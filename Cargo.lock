@@ -109,6 +109,7 @@ dependencies = [
  "blake2",
  "cpufeatures 0.3.1",
  "password-hash",
+ "zeroize",
 ]
 
 [[package]]
@@ -3588,13 +3589,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
 name = "remotely-core"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
+ "argon2",
  "async-trait",
+ "getrandom 0.4.3",
  "hex",
  "regex",
  "remotely-core",
@@ -3611,6 +3616,7 @@ dependencies = [
  "uuid",
  "windows",
  "winreg",
+ "zeroize",
 ]
 
 [[package]]

@@ -1,0 +1,274 @@
+//! Vault rows (SS-04): `vault_meta` holds the wrapped data key, `vault_items` the ciphertext of each
+//! secret. Nothing here ever sees a plaintext secret or an unwrapped key.
+
+use sqlx::Row;
+use uuid::Uuid;
+
+use super::Store;
+use crate::domain::{now_rfc3339, Context};
+use crate::error::{CoreError, Result};
+use crate::vault::{KdfParams, SecretId, SecretKind, SecretMeta};
+
+/// The workspace's vault, as stored.
+pub(crate) struct VaultMetaRow {
+    pub kdf_salt: Vec<u8>,
+    pub kdf_params: KdfParams,
+    /// The data key wrapped by the master key.
+    pub wrapped_key: Vec<u8>,
+    /// The data key protected by DPAPI, when the Windows login unlocks the vault.
+    pub dpapi_key: Option<Vec<u8>>,
+}
+
+/// One secret's ciphertext and what its AAD is built from.
+pub(crate) struct VaultCipher {
+    pub kind: SecretKind,
+    pub label: String,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+}
+
+fn kind_of(row: &sqlx::sqlite::SqliteRow) -> Result<SecretKind> {
+    let kind: String = row.try_get("kind")?;
+    SecretKind::parse(&kind).ok_or_else(|| CoreError::Vault(format!("unknown secret kind '{kind}'")))
+}
+
+fn unlock_method(dpapi_key: Option<&[u8]>) -> &'static str {
+    if dpapi_key.is_some() {
+        "dpapi"
+    } else {
+        "master_password"
+    }
+}
+
+impl Store {
+    pub(crate) async fn vault_meta(&self, ctx: &Context) -> Result<Option<VaultMetaRow>> {
+        let row =
+            sqlx::query("SELECT kdf_salt, kdf_params, wrapped_key, dpapi_key FROM vault_meta WHERE workspace_id = ?")
+                .bind(ctx.workspace_id.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|r| -> Result<_> {
+            let salt: Option<Vec<u8>> = r.try_get("kdf_salt")?;
+            let params: Option<String> = r.try_get("kdf_params")?;
+            let (Some(kdf_salt), Some(params)) = (salt, params) else {
+                return Err(CoreError::Vault("the vault has no master-password key".into()));
+            };
+            Ok(VaultMetaRow {
+                kdf_salt,
+                kdf_params: serde_json::from_str(&params)?,
+                wrapped_key: r.try_get("wrapped_key")?,
+                dpapi_key: r.try_get("dpapi_key")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Fails if the workspace already has a vault.
+    pub(crate) async fn insert_vault_meta(
+        &self,
+        ctx: &Context,
+        kdf_salt: &[u8],
+        kdf_params: &KdfParams,
+        wrapped_key: &[u8],
+        dpapi_key: Option<&[u8]>,
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        sqlx::query(
+            "INSERT INTO vault_meta (workspace_id, user_id, unlock_method, kdf_salt, kdf_params, wrapped_key,
+                                     dpapi_key, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(ctx.user_id.to_string())
+        .bind(unlock_method(dpapi_key))
+        .bind(kdf_salt)
+        .bind(serde_json::to_string(kdf_params)?)
+        .bind(wrapped_key)
+        .bind(dpapi_key)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A new master password: the same data key, wrapped by the new master key.
+    pub(crate) async fn set_vault_password(
+        &self,
+        ctx: &Context,
+        kdf_salt: &[u8],
+        kdf_params: &KdfParams,
+        wrapped_key: &[u8],
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE vault_meta SET kdf_salt = ?, kdf_params = ?, wrapped_key = ?, user_id = ?, updated_at = ?
+             WHERE workspace_id = ?",
+        )
+        .bind(kdf_salt)
+        .bind(serde_json::to_string(kdf_params)?)
+        .bind(wrapped_key)
+        .bind(ctx.user_id.to_string())
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// `None` stops the Windows login from unlocking the vault.
+    pub(crate) async fn set_vault_dpapi_key(&self, ctx: &Context, dpapi_key: Option<&[u8]>) -> Result<()> {
+        sqlx::query(
+            "UPDATE vault_meta SET unlock_method = ?, dpapi_key = ?, user_id = ?, updated_at = ?
+             WHERE workspace_id = ?",
+        )
+        .bind(unlock_method(dpapi_key))
+        .bind(dpapi_key)
+        .bind(ctx.user_id.to_string())
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Every secret's label and kind, by label, with the number of sessions using it.
+    pub async fn vault_items(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {
+        let rows = sqlx::query(
+            "SELECT v.id, v.kind, v.label, v.created_at, v.updated_at,
+                    (SELECT COUNT(*) FROM sessions s
+                     WHERE s.credential_id = v.id OR s.key_passphrase_id = v.id) AS used_by
+             FROM vault_items v WHERE v.workspace_id = ? ORDER BY v.label COLLATE NOCASE",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let id: String = r.try_get("id")?;
+                Ok(SecretMeta {
+                    id: SecretId(super::parse_uuid(&id)?),
+                    kind: kind_of(r)?,
+                    label: r.try_get("label")?,
+                    used_by: r.try_get("used_by")?,
+                    created_at: r.try_get("created_at")?,
+                    updated_at: r.try_get("updated_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether another secret has this label (letter case ignored).
+    pub(crate) async fn vault_label_taken(&self, ctx: &Context, label: &str, except: Option<SecretId>) -> Result<bool> {
+        let taken: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM vault_items WHERE workspace_id = ? AND label = ? COLLATE NOCASE AND id != ?",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(label)
+        .bind(except.map(|id| id.0.to_string()).unwrap_or_default())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(taken.is_some())
+    }
+
+    pub(crate) async fn insert_vault_item(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        kind: SecretKind,
+        label: &str,
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<()> {
+        let now = now_rfc3339();
+        sqlx::query(
+            "INSERT INTO vault_items (id, workspace_id, user_id, kind, label, nonce, ciphertext, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(ctx.workspace_id.to_string())
+        .bind(ctx.user_id.to_string())
+        .bind(kind.as_str())
+        .bind(label)
+        .bind(nonce)
+        .bind(ciphertext)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn vault_item_cipher(&self, ctx: &Context, id: SecretId) -> Result<Option<VaultCipher>> {
+        let row =
+            sqlx::query("SELECT kind, label, nonce, ciphertext FROM vault_items WHERE workspace_id = ? AND id = ?")
+                .bind(ctx.workspace_id.to_string())
+                .bind(id.0.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        row.map(|r| -> Result<_> {
+            Ok(VaultCipher {
+                kind: kind_of(&r)?,
+                label: r.try_get("label")?,
+                nonce: r.try_get("nonce")?,
+                ciphertext: r.try_get("ciphertext")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// The kind of a secret in this workspace, if there is one with that id.
+    pub async fn vault_item_kind(&self, ctx: &Context, id: SecretId) -> Result<Option<SecretKind>> {
+        let row = sqlx::query("SELECT kind FROM vault_items WHERE workspace_id = ? AND id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .bind(id.0.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(kind_of).transpose()
+    }
+
+    pub(crate) async fn update_vault_item_cipher(
+        &self,
+        ctx: &Context,
+        id: SecretId,
+        nonce: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE vault_items SET nonce = ?, ciphertext = ?, user_id = ?, updated_at = ?
+             WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(nonce)
+        .bind(ciphertext)
+        .bind(ctx.user_id.to_string())
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .bind(id.0.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    pub(crate) async fn rename_vault_item(&self, ctx: &Context, id: SecretId, label: &str) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE vault_items SET label = ?, user_id = ?, updated_at = ? WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(label)
+        .bind(ctx.user_id.to_string())
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .bind(id.0.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// Sessions that used it lose it (the foreign keys set NULL).
+    pub(crate) async fn delete_vault_item(&self, ctx: &Context, id: SecretId) -> Result<bool> {
+        let done = sqlx::query("DELETE FROM vault_items WHERE workspace_id = ? AND id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .bind(id.0.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected() > 0)
+    }
+}

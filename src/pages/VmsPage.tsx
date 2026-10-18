@@ -150,7 +150,8 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
       ([list, allTags, filters]) => {
         if (stale) return;
         setVms(list);
-        setTags(allTags);
+        // Tags are shared with sessions (SS-01); this page offers the ones on VMs.
+        setTags(allTags.filter((t) => t.vmCount > 0));
         setSavedFilters(filters);
         // Actions only reach VMs the user can see.
         setSelected((prev) => new Set(list.map((v) => v.vmxPath).filter((p) => prev.has(p))));

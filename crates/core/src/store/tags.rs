@@ -1,5 +1,5 @@
-//! Tags and saved filters for picking VMs (VM-02; sessions reuse the tables in BX-01). These are the
-//! app's own labels: they change no VM, so they skip the command bus.
+//! Tags and saved filters for picking VMs (VM-02) and sessions (SS-01; BX-01 reuses them). These are
+//! the app's own labels: they change no VM or host, so they skip the command bus.
 
 use serde::Serialize;
 use sqlx::Row;
@@ -18,6 +18,8 @@ pub struct Tag {
     pub color: Option<String>,
     /// VMs carrying the tag.
     pub vm_count: i64,
+    /// Sessions carrying the tag (SS-01).
+    pub session_count: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -29,11 +31,11 @@ pub struct SavedFilter {
     pub updated_at: String,
 }
 
-const MAX_TAG_LEN: usize = 40;
+pub(crate) const MAX_TAG_LEN: usize = 40;
 const MAX_FILTER_NAME_LEN: usize = 60;
 
 /// Trims a tag or filter name and checks it is 1 to `max` characters with no control characters.
-fn clean_name(what: &str, name: &str, max: usize) -> Result<String> {
+pub(crate) fn clean_name(what: &str, name: &str, max: usize) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         return Err(CoreError::InvalidInput(format!("a {what} name cannot be empty")));
@@ -57,7 +59,9 @@ impl Store {
         let rows = sqlx::query(
             "SELECT t.id, t.name, t.color,
                     (SELECT COUNT(*) FROM target_tags tt JOIN vms v ON v.id = tt.target_id
-                     WHERE tt.tag_id = t.id AND tt.target_kind = 'vm' AND v.missing = 0) AS vm_count
+                     WHERE tt.tag_id = t.id AND tt.target_kind = 'vm' AND v.missing = 0) AS vm_count,
+                    (SELECT COUNT(*) FROM target_tags tt
+                     WHERE tt.tag_id = t.id AND tt.target_kind = 'session') AS session_count
              FROM tags t WHERE t.workspace_id = ? ORDER BY t.name COLLATE NOCASE",
         )
         .bind(ctx.workspace_id.to_string())
@@ -70,6 +74,7 @@ impl Store {
                     name: r.try_get("name")?,
                     color: r.try_get("color")?,
                     vm_count: r.try_get("vm_count")?,
+                    session_count: r.try_get("session_count")?,
                 })
             })
             .collect()

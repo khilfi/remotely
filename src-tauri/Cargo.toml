@@ -27,6 +27,8 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+# Zeroes a key file's bytes when they are not text (SS-04).
+zeroize = "1"
 tauri = { version = "2.12", features = [] }
 tauri-plugin-updater = "2"
 # AP-05: the save dialog for audit exports, opened from Rust so the UI never picks a path itself.

@@ -70,7 +70,8 @@ crates/core/          remotely-core: all app logic
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction
     metrics.rs
-    vault.rs
+    sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier)
+    vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only)
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs

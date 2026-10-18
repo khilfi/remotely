@@ -1,4 +1,4 @@
-//! VM and session records (VM-01, SS-01).
+//! VM records (VM-01).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -8,11 +8,9 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::Store;
-use crate::adapters::remote::{AuthMethod, SessionSpec};
 use crate::adapters::vmware::{path_key, VmxInfo};
 use crate::domain::{now_rfc3339, Context, Environment, PowerState};
 use crate::error::Result;
-use crate::vault::SecretId;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -197,60 +195,6 @@ impl Store {
             .execute(&self.pool)
             .await?;
         Ok(done.rows_affected() > 0)
-    }
-
-    /// Name, label and protection of a saved session.
-    pub async fn find_session_target(&self, ctx: &Context, id: Uuid) -> Result<Option<(String, Environment, bool)>> {
-        let row = sqlx::query("SELECT name, environment, protected FROM sessions WHERE workspace_id = ? AND id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
-        row.map(|r| -> Result<_> {
-            let env: String = r.try_get("environment")?;
-            let protected: i64 = r.try_get("protected")?;
-            Ok((r.try_get("name")?, Environment::parse(&env), protected != 0))
-        })
-        .transpose()
-    }
-
-    /// Connection details for the remote adapter. Jump hosts are resolved one level for now.
-    pub async fn session_spec(&self, ctx: &Context, id: Uuid) -> Result<Option<SessionSpec>> {
-        let row = sqlx::query(
-            "SELECT id, name, host, port, username, auth_method, credential_id, key_passphrase_id, environment
-             FROM sessions WHERE workspace_id = ? AND id = ?",
-        )
-        .bind(ctx.workspace_id.to_string())
-        .bind(id.to_string())
-        .fetch_optional(&self.pool)
-        .await?;
-        let Some(r) = row else { return Ok(None) };
-
-        let secret = |col: &str| -> Result<Option<SecretId>> {
-            let v: Option<String> = r.try_get(col)?;
-            Ok(v.and_then(|s| Uuid::parse_str(&s).ok()).map(SecretId))
-        };
-        let auth_method: String = r.try_get("auth_method")?;
-        let auth = match (auth_method.as_str(), secret("credential_id")?) {
-            ("password", Some(id)) => AuthMethod::Password(id),
-            ("key", Some(key)) => AuthMethod::PrivateKey {
-                key,
-                passphrase: secret("key_passphrase_id")?,
-            },
-            _ => AuthMethod::Agent,
-        };
-        let port: i64 = r.try_get("port")?;
-        let env: String = r.try_get("environment")?;
-        Ok(Some(SessionSpec {
-            id,
-            name: r.try_get("name")?,
-            host: r.try_get("host")?,
-            port: u16::try_from(port).unwrap_or(22),
-            username: r.try_get::<Option<String>, _>("username")?.unwrap_or_default(),
-            auth,
-            jump: None,
-            environment: Environment::parse(&env),
-        }))
     }
 }
 

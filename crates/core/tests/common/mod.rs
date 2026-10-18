@@ -8,10 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use remotely_core::domain::TargetRef;
-use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
+use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::PolicyRules;
 use remotely_core::store::Store;
+use remotely_core::vault::{LocalVault, SecretString, Vault, VaultOptions};
 use remotely_core::{Adapters, Core};
 use tokio::sync::broadcast::Receiver;
 use uuid::Uuid;
@@ -22,6 +23,9 @@ pub struct Setup {
     pub vmware: Arc<FakeVmware>,
     pub host: FakeHostCounters,
     pub rules: PolicyRules,
+    /// The app's own vault (fake DPAPI, fast key derivation), set up with [`VAULT_PASSWORD`] and the
+    /// Windows login, and unlocked. Otherwise a [`FakeVault`] with that password.
+    pub real_vault: bool,
 }
 
 impl Setup {
@@ -34,7 +38,13 @@ impl Setup {
                 countdown_seconds: 0,
                 ..Default::default()
             },
+            real_vault: false,
         }
+    }
+
+    pub fn with_real_vault(mut self) -> Self {
+        self.real_vault = true;
+        self
     }
 
     pub async fn build(self) -> Core {
@@ -44,10 +54,27 @@ impl Setup {
             .put_setting(&ctx, remotely_core::store::POLICY_RULES_KEY, &self.rules)
             .await
             .unwrap();
+        let vault: Arc<dyn Vault> = if self.real_vault {
+            let vault = LocalVault::open(
+                store.clone(),
+                ctx,
+                Arc::new(FakeKeyProtector::new()),
+                VaultOptions::insecure_fast(),
+            )
+            .await
+            .unwrap();
+            vault
+                .setup(&ctx, SecretString::new(VAULT_PASSWORD), true)
+                .await
+                .unwrap();
+            Arc::new(vault)
+        } else {
+            Arc::new(FakeVault::with_password(VAULT_PASSWORD))
+        };
         let adapters = Adapters {
             vmware: self.vmware,
             remote: Arc::new(FakeRemote::default()),
-            vault: Arc::new(FakeVault::with_password(VAULT_PASSWORD)),
+            vault,
             host_counters: Arc::new(self.host),
             updater: Arc::new(FakeUpdater::default()),
         };
@@ -88,6 +115,14 @@ pub async fn wait_finished(rx: &mut Receiver<JobEvent>, job: Uuid) -> JobStatus 
     })
     .await
     .expect("job finished in time")
+}
+
+/// A made-up private key in OpenSSH's text form, new on every call. Only its shape is real: the vault
+/// does not parse keys, and no key is ever committed (CLAUDE.md "Public repository rules").
+pub fn fake_private_key() -> String {
+    let body: String = (0..3).map(|_| Uuid::new_v4().simple().to_string()).collect();
+    let kind = "OPENSSH PRIVATE KEY";
+    format!("-----BEGIN {kind}-----\n{body}\n-----END {kind}-----\n")
 }
 
 /// A fresh empty folder under the system temp folder.
