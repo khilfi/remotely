@@ -1,12 +1,23 @@
 # CI for every push to main and every pull request (CLAUDE.md "Releases and auto-update").
 # Third-party actions are pinned to full commit SHAs; the comment names the release.
+#
+# The repository is private, so Actions minutes come out of the owner's monthly allowance, and the
+# Rust job's Windows minutes count double. Changes to documentation only (Markdown anywhere, docs/)
+# skip this workflow, and a newer push cancels the run it supersedes. The secret scan is in
+# secrets.yml, which runs on every change, documentation included.
 
 name: CI
 
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
 
 permissions:
   contents: read
@@ -16,23 +27,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  secrets:
-    name: Secret scan (full history)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      # The gitleaks CLI rather than gitleaks-action, which only scans the pushed commits.
-      - name: Install gitleaks 8.30.1 (checksum-verified)
-        run: |
-          curl -sSfL -o gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum --check -
-          tar -xzf gitleaks.tar.gz gitleaks
-      - name: Scan every commit
-        run: ./gitleaks git --redact --verbose --exit-code 1 .
-
   ui:
     name: UI lint and build
     runs-on: ubuntu-latest
