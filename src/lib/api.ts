@@ -755,6 +755,145 @@ export interface BulkLimits {
   maxParallel: number;
 }
 
+/** MO-01 host side (vmware-vmx.exe process, no login) or MO-02 guest side (/proc over SSH). */
+export type MetricSource = "host" | "guest";
+
+/** MO-02: space used on one mounted disk, from `df`. */
+export interface MountUsage {
+  mount: string;
+  filesystem: string;
+  totalBytes: number;
+  usedBytes: number;
+  usedPct: number;
+}
+
+export interface MetricSample {
+  source: MetricSource;
+  target: TargetRef;
+  ts: string;
+  /** Busy share of the machine's own CPUs: a VM's vCPUs (host side) or the guest's CPUs. */
+  cpuPct: number | null;
+  /** Host side: the VM process's share of this whole host's CPU, as Task Manager shows it. */
+  hostCpuPct: number | null;
+  /** Host side: the VM process's working set. Guest side: memory in use. */
+  memBytes: number | null;
+  /** Host side: RAM assigned to the VM. Guest side: the guest's total memory. */
+  memTotalBytes: number | null;
+  diskReadBps: number | null;
+  diskWriteBps: number | null;
+  netRxBps: number | null;
+  netTxBps: number | null;
+  load1: number | null;
+  load5: number | null;
+  load15: number | null;
+  uptimeSecs: number | null;
+  mounts: MountUsage[];
+}
+
+/** MO-03 drill-down: one point of a chart. In memory only (history in SQLite is MO-06, v2). */
+export interface MetricPoint {
+  /** Unix time in milliseconds. */
+  t: number;
+  cpuPct: number | null;
+  memBytes: number | null;
+  diskReadBps: number | null;
+  diskWriteBps: number | null;
+  netRxBps: number | null;
+  netTxBps: number | null;
+  load1: number | null;
+  diskUsedPct: number | null;
+}
+
+export type GuestState =
+  "connecting" | "ok" | "vaultLocked" | "unreachable" | "loginFailed" | "hostKey" | "noData" | "error";
+
+/** MO-02: where guest polling stands for one watched session. */
+export interface GuestStatus {
+  sessionId: string;
+  state: GuestState;
+  /** What went wrong, for the user. Never holds a secret. */
+  message: string | null;
+  /** Seconds until the next try, while backing off. */
+  retryInSecs: number | null;
+  lastOk: string | null;
+}
+
+/** MO-01 NFR: what collecting costs. */
+export interface CollectorCost {
+  rounds: number;
+  intervalSecs: number;
+  roundMs: number;
+  hostMs: number;
+  guestMs: number;
+  /** This app's process over the last round, as a share of the whole host's CPU. */
+  appCpuPct: number | null;
+  vms: number;
+  guests: number;
+  collectedAt: string | null;
+}
+
+export interface LinkedSession {
+  id: string;
+  name: string;
+}
+
+/** MO-03: a VM (host-side metrics, plus a watched linked session's guest metrics) or a watched host. */
+export interface DashboardRow {
+  kind: "vm" | "session";
+  /** The .vmx path or the session id. */
+  key: string;
+  name: string;
+  environment: Environment;
+  protected: boolean;
+  tags: string[];
+  powerState: PowerState | null;
+  vcpus: number | null;
+  memsizeMb: number | null;
+  /** A VM's IP, or a session's user@host:port. */
+  address: string | null;
+  guestOs: string | null;
+  host: MetricSample | null;
+  guest: MetricSample | null;
+  sessions: LinkedSession[];
+  /** The session whose guest metrics the row shows. */
+  watchedSession: string | null;
+  guestStatus: GuestStatus | null;
+}
+
+export interface DashboardOverview {
+  rows: DashboardRow[];
+  cost: CollectorCost;
+}
+
+export type CapacityWarning =
+  | { kind: "ram"; assignedMb: number; physicalMb: number }
+  | { kind: "disk"; drive: string; freePct: number }
+  | { kind: "unchecked"; message: string };
+
+export interface DriveCapacity {
+  drive: string;
+  freeBytes: number;
+  totalBytes: number;
+  freePct: number;
+  /** Under 10% free. */
+  low: boolean;
+  vms: number;
+}
+
+/** MO-04: assigned vs physical resources on this machine. */
+export interface HostCapacity {
+  physicalRamMb: number;
+  availableRamMb: number | null;
+  assignedRamMb: number;
+  logicalCpus: number;
+  assignedVcpus: number;
+  hostCpuPct: number | null;
+  runningVms: number;
+  unsizedVms: number;
+  drives: DriveCapacity[];
+  warnings: CapacityWarning[];
+}
+
 /** FD-14: a newer signed release on GitHub. */
 export interface UpdateInfo {
   currentVersion: string;
@@ -812,6 +951,8 @@ export const api = {
 
   /** The one way in for changes: command bus -> policy engine -> job runner. */
   submit: (command: Command) => invoke<SubmitOutcome>("command_submit", { command }),
+  /** FD-01: the tier and approval steps a command would get, without submitting it. */
+  commandPreview: (command: Command) => invoke<CommandPreview>("command_preview", { command }),
   approve: (requestId: string, answers: ApprovalAnswers) => invoke<string>("command_approve", { requestId, answers }),
   cancelApproval: (requestId: string) => invoke<void>("command_cancel_approval", { requestId }),
 
@@ -851,6 +992,18 @@ export const api = {
   setBulkParallel: (limit: number) => invoke<Settings>("settings_set_bulk_parallel", { limit }),
   /** FD-14: null when up to date or when checks are off. Installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateInfo | null>("update_check"),
+
+  /**
+   * MO-01 to MO-04. Reads only: no approval. The core collects every 5 s and emits each round's cost;
+   * the dashboard reads what it shows when it hears one.
+   */
+  metricsOverview: () => invoke<DashboardOverview>("metrics_overview"),
+  metricsSeries: (source: MetricSource, key: string) => invoke<MetricPoint[]>("metrics_series", { source, key }),
+  metricsCapacity: () => invoke<HostCapacity>("metrics_capacity"),
+  /** MO-02: watching a session logs in to it over SSH every round. Audited; returns the watched ids. */
+  metricsWatch: (sessionId: string, watch: boolean) => invoke<string[]>("metrics_watch", { sessionId, watch }),
+  onMetricsRound: (handler: (cost: CollectorCost) => void): Promise<UnlistenFn> =>
+    listen<CollectorCost>("metrics://round", (e) => handler(e.payload)),
 
   /** SS-04 vault. Secret values go in and never come back; the UI holds IDs and labels only. */
   vaultInfo: () => invoke<VaultInfo>("vault_info"),

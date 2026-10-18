@@ -1,11 +1,16 @@
-// App shell (shadcn/ui): sidebar navigation with the vault status (SS-04), top bar with the theme switch
-// (FD-01), pages, the approval dialog and job toasts. Pages stay mounted while hidden so terminal
-// connections survive a page switch.
+// App shell (shadcn/ui): sidebar navigation with the vault status (SS-04), top bar with the command
+// palette and the theme switch (FD-01), pages, the approval dialog and job toasts. Pages stay mounted
+// while hidden so terminal connections survive a page switch.
+//
+// FD-01 keyboard: Ctrl+K opens the command palette (Ctrl+Shift+K inside a terminal, where Ctrl+K belongs
+// to the shell), Ctrl+1 to Ctrl+9 open the pages in sidebar order and Ctrl+, opens Settings.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   CameraIcon,
+  DownloadIcon,
+  GaugeIcon,
   HistoryIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -14,6 +19,8 @@ import {
   LockOpenIcon,
   MonitorIcon,
   MoonIcon,
+  RefreshCwIcon,
+  SearchIcon,
   ServerIcon,
   SettingsIcon,
   ShieldCheckIcon,
@@ -22,6 +29,8 @@ import {
   TerminalIcon,
   type LucideIcon,
 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Kbd } from "@/components/ui/kbd";
 import { Separator } from "@/components/ui/separator";
 import {
   Sidebar,
@@ -29,11 +38,9 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
-  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
-  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -45,12 +52,14 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
+import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import {
   api,
   errorMessage,
   type AppInfo,
   type ApprovalRequest,
+  type Command,
   type SubmitOutcome,
   type UpdateInfo,
   type VaultInfo,
@@ -59,6 +68,7 @@ import { useTheme, type ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { BulkRunPage } from "@/pages/BulkRunPage";
+import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -67,26 +77,38 @@ import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage } from "@/pages/VmsPage";
 
-type PageId = "vms" | "snapshots" | "sessions" | "terminal" | "bulk" | "knownHosts" | "vault" | "activity" | "settings";
+type PageId =
+  | "vms"
+  | "dashboard"
+  | "snapshots"
+  | "sessions"
+  | "terminal"
+  | "bulk"
+  | "knownHosts"
+  | "vault"
+  | "activity"
+  | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon }[] = [
-  { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon },
-  { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon },
-  { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon },
-  { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon },
-  { id: "bulk", label: "Bulk run", title: "Bulk run", icon: SquareTerminalIcon },
-  { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon },
-  { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon },
-  { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon },
-  { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon },
+/** In sidebar order; the first nine open with Ctrl+1 to Ctrl+9, Settings with Ctrl+,. */
+const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
+  { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
+  { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
+  { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon, shortcut: "Ctrl+3" },
+  { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
+  { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon, shortcut: "Ctrl+5" },
+  { id: "bulk", label: "Bulk run", title: "Bulk run", icon: SquareTerminalIcon, shortcut: "Ctrl+6" },
+  { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon, shortcut: "Ctrl+7" },
+  { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon, shortcut: "Ctrl+8" },
+  { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon, shortcut: "Ctrl+9" },
+  { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon, shortcut: "Ctrl+," },
 ];
 
-/** MVP pages that are not built yet, shown so the roadmap is visible in the app. */
-const LATER: { label: string; req: string; icon: LucideIcon }[] = [
-  { label: "Dashboard", req: "MO-03", icon: LayoutDashboardIcon },
-];
+/** Focus is in a terminal pane, where Ctrl+letter and Ctrl+digit keys belong to the remote shell. */
+function inTerminal(target: EventTarget | null) {
+  return target instanceof Element && target.closest(".xterm") !== null;
+}
 
 const THEMES: { value: ThemePreference; label: string; icon: LucideIcon }[] = [
   { value: "system", label: "Follow Windows", icon: MonitorIcon },
@@ -111,7 +133,52 @@ export default function App() {
   const [terminalOpen, setTerminalOpen] = useState<{ sessionId: string; n: number } | null>(null);
   // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
   const [vault, setVault] = useState<VaultInfo | null>(null);
+  // FD-01: the command palette, opened on everything or on one VM's actions.
+  // `n` counts openings: each one starts the palette afresh.
+  const [palette, setPalette] = useState<{ open: boolean; vm: string | null; n: number }>({
+    open: false,
+    vm: null,
+    n: 0,
+  });
+  const paletteOpen = useRef(false);
+  // MO-03: a row the palette asked the dashboard to open.
+  const [dashboardFocus, setDashboardFocus] = useState<{ key: string; n: number } | null>(null);
+  // Bumped when the palette refreshed the VM list.
+  const [inventoryVersion, setInventoryVersion] = useState(0);
   const { preference, setPreference, resolved } = useTheme();
+
+  const openPalette = useCallback((vm: string | null) => setPalette((p) => ({ open: true, vm, n: p.n + 1 })), []);
+
+  useEffect(() => {
+    paletteOpen.current = palette.open;
+  }, [palette.open]);
+
+  // FD-01: keyboard shortcuts, caught before a focused terminal sees them.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!e.ctrlKey || e.altKey || e.metaKey) return;
+      const terminal = inTerminal(e.target);
+      if (e.key.toLowerCase() === "k" && (e.shiftKey || !terminal)) {
+        // Not over another dialog (an approval in progress keeps the keyboard).
+        const otherDialog =
+          !paletteOpen.current &&
+          document.querySelector('[role="dialog"][data-state="open"], [role="alertdialog"][data-state="open"]');
+        if (otherDialog) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setPalette((p) => (p.open ? { ...p, open: false } : { open: true, vm: null, n: p.n + 1 }));
+        return;
+      }
+      if (terminal || e.shiftKey || paletteOpen.current) return;
+      const index = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : e.key === "," ? PAGES.length - 1 : -1;
+      if (index >= 0 && PAGES[index]) {
+        e.preventDefault();
+        setPage(PAGES[index].id);
+      }
+    }
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, []);
 
   const loadVault = useCallback(() => {
     api.vaultInfo().then(setVault, () => setVault(null));
@@ -221,6 +288,104 @@ export default function App() {
     }
   }
 
+  async function submitCommand(command: Command) {
+    try {
+      submitted(await api.submit(command));
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
+  function openTerminal(sessionId: string) {
+    setTerminalOpen((prev) => ({ sessionId, n: (prev?.n ?? 0) + 1 }));
+    setPage("terminal");
+  }
+
+  function openSnapshots(paths: string[]) {
+    setSnapshotPick((prev) => ({ paths, n: (prev?.n ?? 0) + 1 }));
+    setPage("snapshots");
+  }
+
+  // FD-01: the app's own actions in the palette. Changes to VMs and hosts are commands it submits.
+  const paletteActions: PaletteAction[] = [
+    {
+      id: "refresh",
+      label: "Refresh the VM list",
+      icon: RefreshCwIcon,
+      keywords: "reload discover inventory",
+      // The VM list refreshes itself when its key changes, and shows what it could not read.
+      run: () => {
+        setInventoryVersion((v) => v + 1);
+        setPage("vms");
+      },
+    },
+    {
+      id: "watch",
+      label: "Watch hosts on the dashboard",
+      icon: GaugeIcon,
+      keywords: "metrics monitoring guest",
+      run: () => setPage("dashboard"),
+    },
+    {
+      id: "bulk",
+      label: "New bulk run",
+      icon: SquareTerminalIcon,
+      keywords: "command script many hosts",
+      run: () => setPage("bulk"),
+    },
+    vault?.status === "unlocked"
+      ? {
+          id: "lock",
+          label: "Lock the vault",
+          icon: LockIcon,
+          run: async () => {
+            try {
+              setVault(await api.vaultLock());
+            } catch (err) {
+              toast.error(errorMessage(err));
+            }
+          },
+        }
+      : { id: "unlock", label: "Unlock the vault", icon: LockOpenIcon, run: () => setPage("vault") },
+    ...THEMES.map((t) => ({
+      id: `theme-${t.value}`,
+      label: `Theme: ${t.label}`,
+      icon: t.icon,
+      keywords: "appearance dark light colour",
+      run: () => setPreference(t.value),
+    })),
+    {
+      id: "update",
+      label: "Check for updates",
+      icon: DownloadIcon,
+      keywords: "version release",
+      run: async () => {
+        try {
+          const found = await api.checkForUpdate();
+          setUpdate(found);
+          setLaterFor(null);
+          if (!found) toast.info("Remotely is up to date (or update checks are off)");
+        } catch (err) {
+          toast.error(errorMessage(err));
+        }
+      },
+    },
+    {
+      id: "audit",
+      label: "Export the audit log…",
+      icon: HistoryIcon,
+      keywords: "csv download",
+      run: async () => {
+        try {
+          const report = await api.exportAudit();
+          if (report) toast.success(`Exported the audit log (${report.entries} entries)`);
+        } catch (err) {
+          toast.error(errorMessage(err));
+        }
+      },
+    },
+  ];
+
   const current = PAGES.find((p) => p.id === page) ?? PAGES[0];
 
   return (
@@ -247,26 +412,15 @@ export default function App() {
                 <SidebarMenu>
                   {PAGES.map((p) => (
                     <SidebarMenuItem key={p.id}>
-                      <SidebarMenuButton isActive={page === p.id} tooltip={p.label} onClick={() => setPage(p.id)}>
+                      <SidebarMenuButton
+                        isActive={page === p.id}
+                        tooltip={`${p.label} (${p.shortcut})`}
+                        aria-keyshortcuts={p.shortcut.replace("Ctrl", "Control")}
+                        onClick={() => setPage(p.id)}
+                      >
                         <p.icon />
                         <span>{p.label}</span>
                       </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
-            <SidebarGroup>
-              <SidebarGroupLabel>Coming in the MVP</SidebarGroupLabel>
-              <SidebarGroupContent>
-                <SidebarMenu>
-                  {LATER.map((p) => (
-                    <SidebarMenuItem key={p.req}>
-                      <SidebarMenuButton disabled tooltip={`${p.label} (${p.req})`}>
-                        <p.icon />
-                        <span>{p.label}</span>
-                      </SidebarMenuButton>
-                      <SidebarMenuBadge className="font-mono text-[10px]">{p.req}</SidebarMenuBadge>
                     </SidebarMenuItem>
                   ))}
                 </SidebarMenu>
@@ -304,11 +458,21 @@ export default function App() {
             <SidebarTrigger className="-ml-1" />
             <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
             <h1 className="text-sm font-semibold">{current.title}</h1>
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto w-64 justify-start text-muted-foreground"
+              aria-keyshortcuts="Control+K"
+              onClick={() => openPalette(null)}
+            >
+              <SearchIcon />
+              Search or run an action…
+              <Kbd className="ml-auto">Ctrl K</Kbd>
+            </Button>
             <ToggleGroup
               type="single"
               variant="outline"
               size="sm"
-              className="ml-auto"
               aria-label="Theme"
               value={preference}
               onValueChange={(value) => value && setPreference(value as ThemePreference)}
@@ -332,11 +496,19 @@ export default function App() {
               <VmsPage
                 onSubmitted={submitted}
                 onOpenSettings={() => setPage("settings")}
-                onOpenSnapshots={(paths) => {
-                  setSnapshotPick((prev) => ({ paths, n: (prev?.n ?? 0) + 1 }));
-                  setPage("snapshots");
-                }}
-                refreshKey={jobsFinished + settingsVersion}
+                onOpenSnapshots={openSnapshots}
+                refreshKey={jobsFinished + settingsVersion + inventoryVersion}
+              />
+            </section>
+            <section hidden={page !== "dashboard"}>
+              <DashboardPage
+                active={page === "dashboard"}
+                theme={resolved}
+                focus={dashboardFocus}
+                onConnect={openTerminal}
+                onActions={(vmxPath) => openPalette(vmxPath)}
+                onOpenVms={() => setPage("vms")}
+                onOpenSessions={() => setPage("sessions")}
               />
             </section>
             <section hidden={page !== "snapshots"}>
@@ -352,10 +524,7 @@ export default function App() {
                 vault={vault}
                 onVaultChanged={setVault}
                 onOpenVault={() => setPage("vault")}
-                onConnect={(sessionId) => {
-                  setTerminalOpen((prev) => ({ sessionId, n: (prev?.n ?? 0) + 1 }));
-                  setPage("terminal");
-                }}
+                onConnect={openTerminal}
                 active={page === "sessions"}
               />
             </section>
@@ -407,6 +576,22 @@ export default function App() {
           }}
         />
       )}
+      <CommandPalette
+        key={palette.n}
+        open={palette.open}
+        onOpenChange={(open) => setPalette((p) => ({ ...p, open }))}
+        vmFocus={palette.vm}
+        pages={PAGES}
+        onNavigate={(id) => setPage(id as PageId)}
+        actions={paletteActions}
+        onSubmit={submitCommand}
+        onConnect={openTerminal}
+        onShowMetrics={(key) => {
+          setDashboardFocus((prev) => ({ key, n: (prev?.n ?? 0) + 1 }));
+          setPage("dashboard");
+        }}
+        onOpenSnapshots={openSnapshots}
+      />
       <Toaster theme={resolved} position="bottom-right" />
     </TooltipProvider>
   );

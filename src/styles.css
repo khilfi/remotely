@@ -679,6 +679,10 @@
   --color-env-staging: var(--env-staging);
   --color-env-prod: var(--env-prod);
   --color-success: var(--success);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-status-warning: var(--status-warning);
+  --color-status-critical: var(--status-critical);
 }
 
 :root {
@@ -690,6 +694,15 @@
   --env-staging: oklch(0.6 0.14 75);
   --env-prod: oklch(0.55 0.21 25);
   --success: oklch(0.52 0.12 150);
+  /* MO-03 charts: two categorical series, checked with the dataviz validator against the card surface
+     (CVD and normal-vision separation, 3:1 contrast). Status fills for thresholds always come with an
+     icon and a label. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+  --chart-grid: oklch(0.922 0 0);
+  --chart-axis: oklch(0.556 0 0);
 }
 
 .dark {
@@ -701,6 +714,12 @@
   --env-staging: oklch(0.78 0.14 80);
   --env-prod: oklch(0.7 0.18 22);
   --success: oklch(0.72 0.14 150);
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+  --chart-grid: oklch(1 0 0 / 10%);
+  --chart-axis: oklch(0.708 0 0);
 }
 
 /* xterm.js fills the host element the terminal page gives it. The space below the last row shows the
@@ -716,4 +735,21 @@
 /* SS-04: secrets are write-only, so password fields get no reveal button (WebView2 adds one). */
 input[type="password"]::-ms-reveal {
   display: none;
+}
+
+/* MO-03: uPlot's live legend sits under each chart and doubles as the hover readout. */
+.metric-chart .u-legend {
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  text-align: left;
+}
+.metric-chart .u-legend .u-marker {
+  border-radius: 9999px;
+}
+.metric-chart .u-legend th {
+  font-weight: 500;
+}
+.metric-chart .u-legend td {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
 }

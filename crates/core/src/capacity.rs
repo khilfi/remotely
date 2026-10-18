@@ -1,5 +1,6 @@
 //! VM-07: capacity check before power-on. Warns when the RAM assigned to running VMs (each .vmx's
 //! `memsize`) would exceed the host's physical RAM, or when a VM folder's drive has under 10% free.
+//! MO-04: the same reads make the dashboard's host capacity panel ([`CapacityChecker::host_capacity`]).
 //!
 //! It only warns: the command bus shows the warnings and asks for a confirm (see
 //! [`crate::policy::Decision::add_warnings`]); the user decides. A check that cannot run is a
@@ -48,6 +49,42 @@ impl CapacityWarning {
             CapacityWarning::Unchecked { message } => format!("Capacity not checked: {message}"),
         }
     }
+}
+
+/// MO-04: assigned vs physical resources on this machine.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HostCapacity {
+    pub physical_ram_mb: u64,
+    /// RAM Windows has free right now; `None` when it could not be read.
+    pub available_ram_mb: Option<u64>,
+    /// RAM assigned to the running VMs (each .vmx's `memsize`).
+    pub assigned_ram_mb: u64,
+    pub logical_cpus: u32,
+    pub assigned_vcpus: u32,
+    /// The host's busy CPU share over the last metrics round, when there was one.
+    pub host_cpu_pct: Option<f64>,
+    pub running_vms: usize,
+    /// Running VMs whose RAM or vCPU count is unknown, so the totals leave them out.
+    pub unsized_vms: usize,
+    /// One entry per drive that holds a known VM's folder.
+    pub drives: Vec<DriveCapacity>,
+    /// RAM over-committed, drives under [`MIN_FREE_DISK_PCT`], and reads that failed.
+    pub warnings: Vec<CapacityWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DriveCapacity {
+    /// `C:`, or the share (`\\server\share`) for a network folder.
+    pub drive: String,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+    pub free_pct: f64,
+    /// Under [`MIN_FREE_DISK_PCT`] free.
+    pub low: bool,
+    /// Known VMs with their folder on this drive.
+    pub vms: usize,
 }
 
 /// The rule itself, without any reads: RAM over the host's, or a drive under [`MIN_FREE_DISK_PCT`].
@@ -158,15 +195,119 @@ impl CapacityChecker {
 
     /// The VM's assigned RAM: from the inventory, else its .vmx; 0 when neither says.
     async fn memsize_mb(&self, ctx: &Context, vmx_path: &str) -> u64 {
-        if let Ok(Some(vm)) = self.store.find_vm(ctx, vmx_path).await {
-            if let Some(mb) = vm.memsize_mb {
-                return mb.into();
+        self.size(ctx, vmx_path).await.0.map_or(0, u64::from)
+    }
+
+    /// The VM's assigned RAM (MB) and vCPUs: from the inventory, else its .vmx.
+    async fn size(&self, ctx: &Context, vmx_path: &str) -> (Option<u32>, Option<u32>) {
+        let (mut ram, mut cpus) = match self.store.find_vm(ctx, vmx_path).await {
+            Ok(Some(vm)) => (vm.memsize_mb, vm.num_vcpus),
+            _ => (None, None),
+        };
+        if ram.is_none() || cpus.is_none() {
+            if let Ok(info) = self.vmware.read_vmx(Path::new(vmx_path)).await {
+                ram = ram.or(info.memsize_mb);
+                // Workstation's default when the .vmx leaves numvcpus out.
+                cpus = cpus.or(info.num_vcpus).or(Some(1));
             }
         }
-        match self.vmware.read_vmx(Path::new(vmx_path)).await {
-            Ok(info) => info.memsize_mb.map_or(0, u64::from),
-            Err(_) => 0,
+        (ram, cpus)
+    }
+
+    /// MO-04: assigned RAM and vCPUs of the running VMs against the host's, and free space on each
+    /// drive that holds a VM folder. `running` is the .vmx paths running now (from the metrics
+    /// collector's process list); `None` asks vmrun, then falls back to the last inventory refresh.
+    /// Never fails: what cannot be read becomes a [`CapacityWarning::Unchecked`].
+    pub async fn host_capacity(&self, ctx: &Context, running: Option<Vec<String>>) -> HostCapacity {
+        let mut capacity = HostCapacity::default();
+        let inventory = match self.store.list_vms(ctx).await {
+            Ok(vms) => vms,
+            Err(err) => {
+                capacity.warnings.push(unchecked("the VM list", &err));
+                Vec::new()
+            }
+        };
+        let running = match running {
+            Some(paths) => paths,
+            None => match self.vmware.list_running().await {
+                Ok(paths) => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+                Err(_) => inventory
+                    .iter()
+                    .filter(|v| v.power_state.is_on())
+                    .map(|v| v.vmx_path.clone())
+                    .collect(),
+            },
+        };
+        capacity.running_vms = running.len();
+        for path in &running {
+            match self.size(ctx, path).await {
+                (Some(ram), Some(cpus)) => {
+                    capacity.assigned_ram_mb += u64::from(ram);
+                    capacity.assigned_vcpus += cpus;
+                }
+                _ => capacity.unsized_vms += 1,
+            }
         }
+        match self.host.host_totals().await {
+            Ok(totals) => {
+                capacity.physical_ram_mb = totals.physical_ram_mb;
+                capacity.available_ram_mb = Some(totals.available_ram_mb);
+                capacity.logical_cpus = totals.logical_cpus;
+                if capacity.assigned_ram_mb > totals.physical_ram_mb {
+                    capacity.warnings.push(CapacityWarning::Ram {
+                        assigned_mb: capacity.assigned_ram_mb,
+                        physical_mb: totals.physical_ram_mb,
+                    });
+                }
+            }
+            Err(err) => capacity.warnings.push(unchecked("the host's RAM and CPUs", &err)),
+        }
+
+        // One read per drive, through one of its VM folders. Running VMs count even when the
+        // inventory has not seen them.
+        let mut folders: BTreeMap<String, (&Path, usize)> = BTreeMap::new();
+        let mut seen = HashSet::new();
+        let paths = inventory
+            .iter()
+            .map(|v| v.vmx_path.as_str())
+            .chain(running.iter().map(String::as_str));
+        for path in paths {
+            if !seen.insert(path_key(Path::new(path))) {
+                continue;
+            }
+            if let Some(folder) = Path::new(path).parent() {
+                folders.entry(drive_of(folder)).or_insert((folder, 0)).1 += 1;
+            }
+        }
+        for (drive, (folder, vms)) in folders {
+            match self.host.disk_space(folder).await {
+                Ok(space) if space.total_bytes > 0 => {
+                    let free_pct = space.free_pct();
+                    let low = free_pct < MIN_FREE_DISK_PCT;
+                    if low {
+                        capacity.warnings.push(CapacityWarning::Disk {
+                            drive: drive.clone(),
+                            free_pct,
+                        });
+                    }
+                    capacity.drives.push(DriveCapacity {
+                        drive,
+                        free_bytes: space.free_bytes,
+                        total_bytes: space.total_bytes,
+                        free_pct,
+                        low,
+                        vms,
+                    });
+                }
+                Ok(_) => capacity.warnings.push(CapacityWarning::Unchecked {
+                    message: format!("{drive} reports a size of 0 bytes"),
+                }),
+                Err(err) => capacity
+                    .warnings
+                    .push(unchecked(&format!("free space on {drive}"), &err)),
+            }
+        }
+        capacity
     }
 }
 

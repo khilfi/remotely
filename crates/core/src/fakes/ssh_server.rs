@@ -80,6 +80,8 @@ struct State {
     host_key: Mutex<Option<PrivateKey>>,
     hostname: Mutex<Option<String>>,
     files: Mutex<HashMap<String, String>>,
+    /// Programs that print a fixed text (`with_program`).
+    programs: Mutex<HashMap<String, String>>,
     sudo: Mutex<SudoMode>,
     /// Every exec waits this long before it answers.
     exec_delay: Mutex<Option<Duration>>,
@@ -189,9 +191,20 @@ impl TestSshServer {
         self
     }
 
-    /// A file `cat` can read.
+    /// A file `cat` and `head` can read.
     pub fn with_file(self, path: &str, contents: &str) -> Self {
+        self.set_file(path, contents);
+        self
+    }
+
+    /// Adds or replaces a file while the server runs (MO-02: counters that move between rounds).
+    pub fn set_file(&self, path: &str, contents: &str) {
         locks::lock(&self.state.files).insert(path.into(), contents.into());
+    }
+
+    /// A program that prints `stdout` whatever its arguments, e.g. `df`.
+    pub fn with_program(self, name: &str, stdout: &str) -> Self {
+        locks::lock(&self.state.programs).insert(name.into(), stdout.into());
         self
     }
 
@@ -789,6 +802,32 @@ impl<'a> ToyShell<'a> {
                 }
                 status
             }
+            "head" => {
+                // `head -n N file`, the only form the guest metrics script uses.
+                let (lines, path) = match args {
+                    [flag, n, path] if flag == "-n" => (n.parse().unwrap_or(10), path),
+                    [path] => (10, path),
+                    _ => {
+                        self.err("head: usage: head [-n N] file\n");
+                        return 1;
+                    }
+                };
+                let found = locks::lock(&self.state.files).get(path).cloned();
+                match found {
+                    Some(text) => {
+                        for line in text.split_inclusive('\n').take(lines) {
+                            self.stdout.extend_from_slice(line.as_bytes());
+                        }
+                        0
+                    }
+                    None => {
+                        self.err(&format!(
+                            "head: cannot open '{path}' for reading: No such file or directory\n"
+                        ));
+                        1
+                    }
+                }
+            }
             "seq" => {
                 let n: u64 = args.first().and_then(|n| n.parse().ok()).unwrap_or(0);
                 for i in 1..=n {
@@ -818,6 +857,14 @@ impl<'a> ToyShell<'a> {
                 status
             }
             "sudo" => self.sudo(args),
+            other if locks::lock(&self.state.programs).contains_key(other) => {
+                let text = locks::lock(&self.state.programs)
+                    .get(other)
+                    .cloned()
+                    .unwrap_or_default();
+                self.stdout.extend_from_slice(text.as_bytes());
+                0
+            }
             other => {
                 self.err(&format!("sh: 1: {other}: not found\n"));
                 127

@@ -1,5 +1,5 @@
-//! SSH servers on 127.0.0.1 for trying the terminal (SS-03, SS-05) and bulk runs (BX-02 to BX-07)
-//! without a real host:
+//! SSH servers on 127.0.0.1 for trying the terminal (SS-03, SS-05), bulk runs (BX-02 to BX-07) and
+//! guest metrics (MO-02) without a real host:
 //!
 //! ```text
 //! cargo run -p remotely-core --example dev_ssh_server --features fakes [port] [count]
@@ -11,12 +11,28 @@
 //! failure (the terminal reconnects) and `change-host-key` gives the next connection a new host key (the
 //! terminal blocks it). Commands a bulk run can try: `hostname`, `uptime`, `cat /etc/os-release` (the
 //! last of 3 or more servers has another release, so the results show two groups), `seq <n>`,
-//! `sleep <s>`, `exit <code>`, and any of them with sudo. Nothing it prints is a real credential; it
-//! all goes away when it stops.
+//! `sleep <s>`, `exit <code>`, and any of them with sudo. Each server also serves an Ubuntu guest's
+//! /proc files and `df`, with counters that move every 5 seconds, so watching it on the dashboard shows
+//! moving charts. Nothing it prints is a real credential; it all goes away when it stops.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
+use remotely_core::metrics::procfs::samples;
+
+/// MO-02: the guest's /proc files as of `round`.
+fn serve_proc(server: &TestSshServer, round: u64) {
+    let s = samples::ubuntu(round);
+    server.set_file("/proc/stat", &s.stat);
+    server.set_file("/proc/meminfo", &s.meminfo);
+    server.set_file("/proc/loadavg", &s.loadavg);
+    server.set_file("/proc/uptime", &s.uptime);
+    server.set_file("/proc/diskstats", &s.diskstats);
+    server.set_file("/proc/net/dev", &s.netdev);
+}
 
 #[tokio::main]
 async fn main() {
@@ -36,7 +52,9 @@ async fn main() {
                 "/etc/os-release",
                 &format!("NAME=\"Ubuntu\"\nVERSION_ID=\"{release}\"\n"),
             )
+            .with_program("df", &samples::ubuntu(0).df)
             .with_banner("Remotely dev SSH server: a toy shell, not a real host.\n");
+        serve_proc(&server, 0);
         println!(
             "Listening on 127.0.0.1:{}  host key ssh-ed25519 {}",
             server.port(),
@@ -48,8 +66,16 @@ async fn main() {
     println!("Password:    {password} (sudo takes it too)");
     println!("Shell commands: whoami, echo <text>, exit [code], drop-connection, change-host-key");
     println!("Bulk run commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>, exit <code>");
+    println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");
     println!("Stop with Ctrl+C.");
     // Runs until the process is stopped; the servers go with it.
-    std::future::pending::<()>().await;
-    drop(servers);
+    let servers = Arc::new(servers);
+    let mut round = 0;
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        round += 1;
+        for server in servers.iter() {
+            serve_proc(server, round);
+        }
+    }
 }

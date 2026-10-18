@@ -5,7 +5,7 @@
 //!        │ reads                         │ changes
 //!        ▼                               ▼
 //!   inventory, snapshots,          command_bus ──► policy (tier + steps)
-//!   metrics ──► store                    │  impact preview, approvals, audit
+//!   metrics (in memory)                  │  impact preview, approvals, audit
 //!                                        │  vault (AP-06 re-auth)
 //!                                        ▼
 //!                                   jobs (runner) ──► adapters::vmware (vmrun)
@@ -60,6 +60,7 @@ use import::Importer;
 use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
+use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
 use serde::Serialize;
 use sessions::SessionLibrary;
@@ -121,6 +122,9 @@ pub struct Core {
     pub terminals: Terminals,
     /// BX-01, BX-03, BX-05: bulk run targets, results, diffs and exports. Running is the bus.
     pub bulk: BulkRuns,
+    /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
+    /// The shell starts its polling with [`Metrics::run`].
+    pub metrics: Arc<Metrics>,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -145,7 +149,7 @@ impl Core {
                 vmware,
                 remote: Arc::new(RusshAdapter::new()),
                 vault: Arc::new(vault),
-                host_counters: Arc::new(WindowsCounters),
+                host_counters: Arc::new(WindowsCounters::new()),
                 updater: config.updater,
             },
             JobLimits::default(),
@@ -165,6 +169,24 @@ impl Core {
             Arc::clone(&adapters.remote),
             Arc::clone(&known_hosts),
         );
+        // MO-01 to MO-04: reads only, so the collector holds adapters directly, not the job runner.
+        let metrics = Arc::new(Metrics::new(MetricsParts {
+            store: store.clone(),
+            ctx,
+            counters: Arc::clone(&adapters.host_counters),
+            guest: GuestSource::new(
+                store.clone(),
+                ctx,
+                Arc::clone(&adapters.remote),
+                Arc::clone(&adapters.vault),
+                Arc::clone(&known_hosts),
+            ),
+            capacity: CapacityChecker::new(
+                store.clone(),
+                Arc::clone(&vmware_dyn),
+                Arc::clone(&adapters.host_counters),
+            ),
+        }));
         let jobs = JobRunner::new(
             store.clone(),
             Arc::clone(&vmware_dyn),
@@ -206,6 +228,7 @@ impl Core {
             known_hosts,
             terminals,
             bulk: BulkRuns::new(store.clone()),
+            metrics,
             store,
             bus,
             jobs,
