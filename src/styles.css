@@ -703,9 +703,14 @@
   --success: oklch(0.72 0.14 150);
 }
 
-/* xterm.js fills the host element the terminal page gives it. */
+/* xterm.js fills the host element the terminal page gives it. The space below the last row shows the
+   host's background, and xterm's own scrollbar replaces the native one (WebView2 draws both otherwise). */
 .terminal-host .xterm {
   height: 100%;
+}
+.terminal-host .xterm .xterm-viewport {
+  background-color: transparent !important;
+  scrollbar-width: none;
 }
 
 /* SS-04: secrets are write-only, so password fields get no reveal button (WebView2 adds one). */

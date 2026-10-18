@@ -26,7 +26,11 @@ function secondsLeft(job: JobSummary, now: number) {
   return Math.max(0, Math.ceil((new Date(job.countdownUntil).getTime() - now) / 1000));
 }
 
-export function ActivityPage({ version }: { version: number }) {
+/**
+ * `version` changes on every job event; `active` is true while the page is shown, so entries written
+ * without a job (terminals, host keys, imports, settings) show up when the user comes back.
+ */
+export function ActivityPage({ version, active }: { version: number; active: boolean }) {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [check, setCheck] = useState<ChainCheck | null>(null);
@@ -39,8 +43,8 @@ export function ActivityPage({ version }: { version: number }) {
   const [exporting, setExporting] = useState(false);
   const counting = jobs.some((j) => j.status === "countdown");
 
-  // `version` changes on every job event, so the lists stay current.
   useEffect(() => {
+    if (!active) return;
     let stale = false;
     Promise.all([api.recentJobs(50), api.recentAudit(100)]).then(
       ([j, a]) => {
@@ -56,7 +60,7 @@ export function ActivityPage({ version }: { version: number }) {
     return () => {
       stale = true;
     };
-  }, [version, reloads]);
+  }, [version, reloads, active]);
 
   // AP-03: the time left ticks while a job is in its countdown.
   useEffect(() => {

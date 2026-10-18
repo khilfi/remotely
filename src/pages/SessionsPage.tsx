@@ -1,7 +1,8 @@
 // Session library (SS-01, SS-06): folders on the left; search, label and tag filters and the session list
 // on the right. Each session shows its colour, environment label, address, how it logs in and its jump
-// host. Creating, editing and organising sessions is the app's own data (audited, no approval);
-// connecting comes with the terminal (SS-03).
+// host. Creating, editing and organising sessions is the app's own data (audited, no approval). Connect
+// (or a double-click) opens the session in a terminal tab (SS-03); Import reads PuTTY, MobaXterm,
+// OpenSSH and CSV session lists (SS-02).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -10,6 +11,7 @@ import {
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
+  ImportIcon,
   KeyRoundIcon,
   LibraryIcon,
   ListTreeIcon,
@@ -17,6 +19,7 @@ import {
   SearchIcon,
   ShieldIcon,
   TagIcon,
+  TerminalIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,6 +43,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ColorDot, EnvBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { ImportDialog } from "@/components/ImportDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { SessionDialog } from "@/components/SessionDialog";
 import {
@@ -61,6 +65,8 @@ interface Props {
   vault: VaultInfo | null;
   onVaultChanged: (info: VaultInfo) => void;
   onOpenVault: () => void;
+  /** SS-03: opens the session in a new terminal tab. */
+  onConnect: (sessionId: string) => void;
   /** True while the page is shown, so the lists are read again when the user comes back. */
   active: boolean;
 }
@@ -71,6 +77,7 @@ type DialogState =
   | { kind: "newFolder"; parentId: string | null }
   | { kind: "renameFolder"; folder: SessionFolder }
   | { kind: "deleteFolder"; folder: SessionFolder }
+  | { kind: "import" }
   | null;
 
 const LABELS: { value: Environment; label: string; className: string }[] = [
@@ -83,7 +90,7 @@ function address(s: SessionRecord) {
   return `${s.username ? `${s.username}@` : ""}${s.host}${s.port === 22 ? "" : `:${s.port}`}`;
 }
 
-export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Props) {
+export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, active }: Props) {
   const [all, setAll] = useState<SessionRecord[]>([]);
   const [shown, setShown] = useState<SessionRecord[]>([]);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
@@ -168,6 +175,18 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Pro
     } catch (err) {
       toast.error(errorMessage(err));
     }
+  }
+
+  /** SS-07 is v2: a session with a jump host says so instead of connecting directly. */
+  function connect(session: SessionRecord) {
+    if (session.jumpSessionId) {
+      const jump = sessionName.get(session.jumpSessionId) ?? "a jump host";
+      toast.warning(`${session.name} connects through ${jump}`, {
+        description: "Jump hosts arrive in a later version (SS-07), so Remotely doesn't connect to it directly.",
+      });
+      return;
+    }
+    onConnect(session.id);
   }
 
   async function duplicate(session: SessionRecord) {
@@ -321,7 +340,11 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Pro
               ? `${shown.length} of ${plural(all.length, "session")}`
               : plural(all.length, "session")}
           </span>
-          <Button className="ml-auto" onClick={() => setDialog({ kind: "editSession" })}>
+          <Button variant="outline" className="ml-auto" onClick={() => setDialog({ kind: "import" })}>
+            <ImportIcon data-icon="inline-start" />
+            Import
+          </Button>
+          <Button onClick={() => setDialog({ kind: "editSession" })}>
             <PlusIcon data-icon="inline-start" />
             New session
           </Button>
@@ -349,10 +372,14 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Pro
                 them into folders, tag them and label Prod hosts so actions on them need more approval.
               </EmptyDescription>
             </EmptyHeader>
-            <EmptyContent>
+            <EmptyContent className="flex-row justify-center">
               <Button onClick={() => setDialog({ kind: "editSession" })}>
                 <PlusIcon data-icon="inline-start" />
                 New session
+              </Button>
+              <Button variant="outline" onClick={() => setDialog({ kind: "import" })}>
+                <ImportIcon data-icon="inline-start" />
+                Import from PuTTY, MobaXterm…
               </Button>
             </EmptyContent>
           </Empty>
@@ -374,7 +401,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Pro
                   <TableHead>Login</TableHead>
                   <TableHead>Via</TableHead>
                   <TableHead className="w-20">Label</TableHead>
-                  <TableHead className="w-10">
+                  <TableHead className="w-20">
                     <span className="sr-only">Actions</span>
                   </TableHead>
                 </TableRow>
@@ -384,7 +411,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Pro
                   <TableRow
                     key={s.id}
                     className={cn("select-none", s.environment === "prod" && "bg-env-prod/5")}
-                    onDoubleClick={() => setDialog({ kind: "editSession", session: s })}
+                    onDoubleClick={() => connect(s)}
                   >
                     <TableCell className="whitespace-normal">
                       <div className="flex flex-wrap items-center gap-1.5 font-medium">
@@ -423,48 +450,60 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Pro
                       <EnvBadge env={s.environment} />
                     </TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${s.name}`}>
-                            <EllipsisIcon />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-52">
-                          <DropdownMenuItem disabled>
-                            Connect
-                            <DropdownMenuShortcut>SS-03</DropdownMenuShortcut>
-                          </DropdownMenuItem>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem onSelect={() => setDialog({ kind: "editSession", session: s })}>
-                            Edit…
-                          </DropdownMenuItem>
-                          <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
-                          <DropdownMenuSub>
-                            <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
-                            <DropdownMenuSubContent>
-                              <DropdownMenuItem disabled={s.folderId === null} onSelect={() => void move(s, null)}>
-                                Top level
-                              </DropdownMenuItem>
-                              {rows.map(({ folder: f }) => (
-                                <DropdownMenuItem
-                                  key={f.id}
-                                  disabled={s.folderId === f.id}
-                                  onSelect={() => void move(s, f.id)}
-                                >
-                                  {folderPath(folders, f.id)}
+                      <div className="flex items-center justify-end gap-0.5">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={`Connect to ${s.name}`}
+                              onClick={() => connect(s)}
+                            >
+                              <TerminalIcon />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Connect (or double-click the row)</TooltipContent>
+                        </Tooltip>
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${s.name}`}>
+                              <EllipsisIcon />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-52">
+                            <DropdownMenuItem onSelect={() => connect(s)}>Connect</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem onSelect={() => setDialog({ kind: "editSession", session: s })}>
+                              Edit…
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
+                            <DropdownMenuSub>
+                              <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
+                              <DropdownMenuSubContent>
+                                <DropdownMenuItem disabled={s.folderId === null} onSelect={() => void move(s, null)}>
+                                  Top level
                                 </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuSubContent>
-                          </DropdownMenuSub>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            variant="destructive"
-                            onSelect={() => setDialog({ kind: "deleteSession", session: s })}
-                          >
-                            Delete…
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                                {rows.map(({ folder: f }) => (
+                                  <DropdownMenuItem
+                                    key={f.id}
+                                    disabled={s.folderId === f.id}
+                                    onSelect={() => void move(s, f.id)}
+                                  >
+                                    {folderPath(folders, f.id)}
+                                  </DropdownMenuItem>
+                                ))}
+                              </DropdownMenuSubContent>
+                            </DropdownMenuSub>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              variant="destructive"
+                              onSelect={() => setDialog({ kind: "deleteSession", session: s })}
+                            >
+                              Delete…
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -550,6 +589,17 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, active }: Pro
             if (folderId === dialog.folder.id) setFolderId(dialog.folder.parentId);
             reload();
           }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "import" && (
+        <ImportDialog
+          folders={folders}
+          folderId={folderId}
+          vault={vault}
+          onVaultChanged={onVaultChanged}
+          onOpenVault={onOpenVault}
+          onImported={reload}
           onClose={() => setDialog(null)}
         />
       )}
