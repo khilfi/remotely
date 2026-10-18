@@ -6,7 +6,7 @@
 // the countdown, which can be cancelled until it ends. The core checks every answer again; these
 // fields only help the user get them right first time.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { InfoIcon, KeyRoundIcon, OctagonAlertIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -86,6 +86,15 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
     (!typeCount || Number(typed) === typeCount.expected) &&
     (!needsReason || reason.trim() !== "") &&
     (!reauth || password !== "");
+  // FD-01: the first answer to type gets the focus, and Enter in any of them approves once all are
+  // right (the same as pressing Approve).
+  const firstField = typeCount ? "count" : needsReason ? "reason" : reauth ? "password" : null;
+  const enterApproves = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter" && ready && !busy) {
+      e.preventDefault();
+      void approve();
+    }
+  };
 
   async function approve() {
     setBusy(true);
@@ -290,6 +299,8 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
                 autoComplete="off"
                 value={typed}
                 onChange={(e) => setTyped(e.currentTarget.value)}
+                onKeyDown={enterApproves}
+                autoFocus={firstField === "count"}
               />
             </div>
           )}
@@ -297,7 +308,13 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
           {needsReason && (
             <div className="grid gap-2">
               <Label htmlFor="approval-reason">Reason or ticket number</Label>
-              <Input id="approval-reason" value={reason} onChange={(e) => setReason(e.currentTarget.value)} />
+              <Input
+                id="approval-reason"
+                value={reason}
+                onChange={(e) => setReason(e.currentTarget.value)}
+                onKeyDown={enterApproves}
+                autoFocus={firstField === "reason"}
+              />
             </div>
           )}
 
@@ -326,6 +343,8 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
                 autoComplete="off"
                 value={password}
                 onChange={(e) => setPassword(e.currentTarget.value)}
+                onKeyDown={enterApproves}
+                autoFocus={firstField === "password"}
               />
               <p className="text-xs text-muted-foreground">
                 Critical actions ask for it again (AP-06), even when your Windows login unlocked the vault.
