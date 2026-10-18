@@ -7,16 +7,19 @@ multi-step approvals on every high-impact action.
 The requirements are in [docs/PRD.md](docs/PRD.md); project rules for contributors (and Claude Code) are in
 [CLAUDE.md](CLAUDE.md). This repository is public: read "Public repository rules" in CLAUDE.md before committing.
 
-**Status:** MVP milestones 1 (VMs and power) and 2 (snapshots and approvals). The app lists every Workstation VM (the
-library, chosen folders and running VMs) with its OS, CPU, RAM, IP and VMware Tools state; selects by click, shift-click,
-tag or saved filter; starts, shuts down (then forces off only after a separate Critical approval), suspends, pauses and
-resets them in bulk; checks host capacity before a power-on; and skips protected VMs. The snapshot manager shows each
-VM's snapshot tree with creation times (read from its `.vmsd`), flags snapshots older than 30 days, and takes, reverts and
-deletes snapshots in bulk; high-risk VM actions take a named safety snapshot first. Approval rules are editable in
-Settings; the approval dialog previews each VM's state, uptime and snapshot count, and its countdown can be cancelled
-from the dialog or from Activity. The hash-chained audit log exports to CSV. Auto-update checks this repo's GitHub
-Releases. SSH, the vault and metrics are stubs behind their interfaces, so Critical actions are refused until the vault
-lands.
+**Status:** MVP milestones 1 (VMs and power), 2 (snapshots and approvals) and 3 (vault and session library). The app
+lists every Workstation VM (the library, chosen folders and running VMs) with its OS, CPU, RAM, IP and VMware Tools
+state; selects by click, shift-click, tag or saved filter; starts, shuts down (then forces off only after a separate
+Critical approval), suspends, pauses and resets them in bulk; checks host capacity before a power-on; and skips protected
+VMs. The snapshot manager shows each VM's snapshot tree with creation times (read from its `.vmsd`), flags snapshots
+older than 30 days, and takes, reverts and deletes snapshots in bulk; high-risk VM actions take a named safety snapshot
+first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
+and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
+Auto-update checks this repo's GitHub Releases. The vault keeps passwords, private keys and passphrases encrypted
+(AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
+or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
+library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
+tier). Connecting over SSH and metrics are stubs behind their interfaces.
 
 ## Prerequisites
 
@@ -86,7 +89,7 @@ A local `npm run tauri build` needs the same two values as environment variables
 ```text
 crates/core/          Rust core, no Tauri types (reusable by a future CLI or plugins, FD-12)
   migrations/         sqlx migrations (SQLite, WAL mode)
-  src/                command bus, policy engine, job runner, adapters, metrics, vault, store
+  src/                command bus, policy engine, job runner, adapters, metrics, vault, sessions, store
   tests/              end-to-end tests with fake adapters; opt-in Workstation test
 src-tauri/            Tauri 2 shell: window, IPC commands, terminal bridge
 src/                  React + TypeScript UI (shadcn/ui on Tailwind CSS)
@@ -105,23 +108,24 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 
 ## Modules and requirements
 
-| Module            | Path                                                | PRD requirements                                                                                         | State                                                                                                                       |
-| ----------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Command bus       | `crates/core/src/command_bus.rs`                    | AP-01 (saves rules), AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, FD-14                              | Working: the only way to enqueue a job; checks snapshot names; audits rule changes                                          |
-| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), BX-06, VM-05, VM-07 (warnings add a confirm)                 | Working; rules are checked before they are saved; every tier rule has a unit test                                           |
-| Impact preview    | `crates/core/src/impact.rs`                         | AP-02                                                                                                    | Working: state, uptime (from `vmware.log`) and snapshot count per VM; logged-in users and dependent VMs later               |
-| Snapshot reads    | `crates/core/src/snapshots.rs`                      | VM-04, VM-05                                                                                             | Working: tree order, 30-day flag, safety snapshot names                                                                     |
-| Audit export      | `crates/core/src/export.rs`                         | AP-05                                                                                                    | Working: CSV with hashes, secrets redacted, formula cells guarded                                                           |
-| Job runner        | `crates/core/src/jobs.rs`                           | VM-03 (shutdown wait), VM-05, VM-06, AP-03 (countdown), AP-04, BX-02, BX-04 (cancel), FD-14 (runs alone) | Working; BX-04 retry is a stub                                                                                              |
-| VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04, AP-02                                                                        | Library, folder scan, `.vmx` and `.vmsd` reading, `vmware.log` start time, `vmrun` list, power and snapshots; vmrest later  |
-| Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                                                        | Stub; the terminal uses a loopback shell                                                                                    |
-| Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                                                      | Host RAM, CPUs and free disk work; per-VM process counters (MO-01) are a stub                                               |
-| Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                                                    | Works: checks GitHub Releases; install is a Medium-tier job that runs alone; real adapter in `src-tauri/src/updater.rs`     |
-| Inventory         | `crates/core/src/inventory.rs`                      | VM-01, VM-02                                                                                             | Every VM from the library, chosen folders and `vmrun list`; filters                                                         |
-| Capacity check    | `crates/core/src/capacity.rs`                       | VM-07                                                                                                    | Working: host RAM vs assigned RAM, free disk on VM drives                                                                   |
-| Metrics collector | `crates/core/src/metrics.rs`                        | MO-01, MO-02, MO-03, MO-04                                                                               | Polling loop works; sources are stubs                                                                                       |
-| Vault             | `crates/core/src/vault.rs`                          | SS-04, AP-06                                                                                             | Stub, always locked, so Critical actions are refused                                                                        |
-| Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, VM-02, SS-01, NFR Reliability                                                              | Working: hash-chained audit log, job journal, inventory, tags, saved filters                                                |
-| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                                                       | One fake per outside system                                                                                                 |
-| Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                                                  | Working                                                                                                                     |
-| UI                | `src/`                                              | FD-01, VM-01 to VM-06, AP-01 to AP-05                                                                    | VM list, snapshot manager, approval dialog with countdown, terminal, activity with job results and CSV export, rules editor |
+| Module            | Path                                                | PRD requirements                                                                                         | State                                                                                                                         |
+| ----------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Command bus       | `crates/core/src/command_bus.rs`                    | AP-01 (saves rules), AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, FD-14                              | Working: the only way to enqueue a job; checks snapshot names; audits rule changes                                            |
+| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), BX-06, VM-05, VM-07 (warnings add a confirm)                 | Working; rules are checked before they are saved; every tier rule has a unit test                                             |
+| Impact preview    | `crates/core/src/impact.rs`                         | AP-02                                                                                                    | Working: state, uptime (from `vmware.log`) and snapshot count per VM; logged-in users and dependent VMs later                 |
+| Snapshot reads    | `crates/core/src/snapshots.rs`                      | VM-04, VM-05                                                                                             | Working: tree order, 30-day flag, safety snapshot names                                                                       |
+| Audit export      | `crates/core/src/export.rs`                         | AP-05                                                                                                    | Working: CSV with hashes, secrets redacted, formula cells guarded                                                             |
+| Job runner        | `crates/core/src/jobs.rs`                           | VM-03 (shutdown wait), VM-05, VM-06, AP-03 (countdown), AP-04, BX-02, BX-04 (cancel), FD-14 (runs alone) | Working; BX-04 retry is a stub                                                                                                |
+| VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04, AP-02                                                                        | Library, folder scan, `.vmx` and `.vmsd` reading, `vmware.log` start time, `vmrun` list, power and snapshots; vmrest later    |
+| Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                                                        | Stub; the terminal uses a loopback shell                                                                                      |
+| Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                                                      | Host RAM, CPUs and free disk work; per-VM process counters (MO-01) are a stub                                                 |
+| Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                                                    | Works: checks GitHub Releases; install is a Medium-tier job that runs alone; real adapter in `src-tauri/src/updater.rs`       |
+| Inventory         | `crates/core/src/inventory.rs`                      | VM-01, VM-02                                                                                             | Every VM from the library, chosen folders and `vmrun list`; filters                                                           |
+| Capacity check    | `crates/core/src/capacity.rs`                       | VM-07                                                                                                    | Working: host RAM vs assigned RAM, free disk on VM drives                                                                     |
+| Metrics collector | `crates/core/src/metrics.rs`                        | MO-01, MO-02, MO-03, MO-04                                                                               | Polling loop works; sources are stubs                                                                                         |
+| Vault             | `crates/core/src/vault/`                            | SS-04, AP-06                                                                                             | Working: AES-256-GCM per item; DPAPI and Argon2id key wrapping; 15-minute idle lock; values never leave it except to adapters |
+| Session library   | `crates/core/src/sessions.rs`                       | SS-01, SS-06                                                                                             | Working: folders, tags, colours, search, credentials from the vault, jump host checks, audited changes                        |
+| Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                       | Working: hash-chained audit log, job journal, inventory, sessions, vault ciphertext, tags, saved filters                      |
+| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                                                       | One fake per outside system                                                                                                   |
+| Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                                                  | Working                                                                                                                       |
+| UI                | `src/`                                              | FD-01, VM-01 to VM-06, AP-01 to AP-06, SS-01, SS-04, SS-06                                               | VM list, snapshot manager, sessions, vault, approval dialog with countdown, terminal, activity with CSV export, rules editor  |
