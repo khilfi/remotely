@@ -5,8 +5,9 @@
 //! cuts the TCP connections the way a network failure would (no SSH goodbye), and
 //! [`TestSshServer::freeze_connections`] silently swallows their traffic, so only keep-alives can tell
 //! the connection is dead. The shell is a toy that echoes what is typed and understands a few
-//! commands (`exit [code]`, `whoami`, `split-utf8`, `echo <text>`). The server logs what clients ask
-//! for (`pty xterm-256color 80x24`, `resize 120x40`, `shell`, `line whoami`) for tests to check.
+//! commands (`exit [code]`, `whoami`, `split-utf8`, `echo <text>`, and for trying the app by hand,
+//! `drop-connection` and `change-host-key`). The server logs what clients ask for
+//! (`pty xterm-256color 80x24`, `resize 120x40`, `shell`, `line whoami`) for tests to check.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -78,6 +79,14 @@ impl State {
     fn note(&self, line: impl Into<String>) {
         locks::lock(&self.log).push(line.into());
     }
+
+    fn drop_links(&self) {
+        for link in locks::lock(&self.links).drain(..) {
+            for task in link.tasks {
+                task.abort();
+            }
+        }
+    }
 }
 
 pub struct TestSshServer {
@@ -88,9 +97,14 @@ pub struct TestSshServer {
 
 impl TestSshServer {
     pub async fn start() -> Self {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
+        Self::start_on(0).await
+    }
+
+    /// On a given port of 127.0.0.1 (0: any free one).
+    pub async fn start_on(port: u16) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", port))
             .await
-            .unwrap_or_else(|err| panic!("can't listen on 127.0.0.1: {err}"));
+            .unwrap_or_else(|err| panic!("can't listen on 127.0.0.1:{port}: {err}"));
         let port = listener
             .local_addr()
             .unwrap_or_else(|err| panic!("no local address: {err}"))
@@ -155,11 +169,7 @@ impl TestSshServer {
 
     /// Cuts every open connection without an SSH goodbye, like a network failure.
     pub fn drop_connections(&self) {
-        for link in locks::lock(&self.state.links).drain(..) {
-            for task in link.tasks {
-                task.abort();
-            }
-        }
+        self.state.drop_links();
     }
 
     /// Swallows all traffic on the open connections from now on; the sockets stay open.
@@ -299,6 +309,20 @@ impl ServerHandler {
             Some("echo") => {
                 let rest: Vec<&str> = words.collect();
                 session.data(channel, format!("{}\r\n", rest.join(" ")).into_bytes())?;
+            }
+            // For trying the app by hand: a network failure, a moment later so this reply goes out.
+            Some("drop-connection") => {
+                session.data(channel, b"dropping every connection in a moment\r\n".to_vec())?;
+                let state = Arc::clone(&self.state);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    state.drop_links();
+                });
+            }
+            // For trying the app by hand: the next connection presents a new host key.
+            Some("change-host-key") => {
+                *locks::lock(&self.state.host_key) = Some(generate_key());
+                session.data(channel, b"new host key for the next connection\r\n".to_vec())?;
             }
             Some(other) => session.data(channel, format!("{other}: command not found\r\n").into_bytes())?,
             None => {}

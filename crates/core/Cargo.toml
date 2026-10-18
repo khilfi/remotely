@@ -52,6 +52,11 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
 ] }
 
+# Try the terminal without a real host (see the file).
+[[example]]
+name = "dev_ssh_server"
+required-features = ["fakes"]
+
 [dev-dependencies]
 # Integration tests in tests/ use the fake adapters.
 remotely-core = { path = ".", features = ["fakes"] }

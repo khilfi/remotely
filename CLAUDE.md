@@ -71,9 +71,14 @@ crates/core/          remotely-core: all app logic
     export.rs         AP-05 audit log CSV export and secret redaction
     metrics.rs
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier)
+    terminal.rs       SS-03 terminal panes: one supervised SSH connection each (keep-alive, auto-reconnect)
+    known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
+    import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only)
+    fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests
+  examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge
 src/                  React + TypeScript UI
@@ -105,13 +110,17 @@ src/                  React + TypeScript UI
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter.
 - Tests against real Workstation are opt-in: they run only when `REMOTELY_IT=1` is set, and only touch VMs whose display name starts with `it-`.
-- Don't connect to real SSH hosts in tests. Use a local test server or a fake.
+- Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
+  (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections), with
+  `common::Setup::with_ssh()` for the real russh adapter.
 
 ## Commands
 
 - Install: `npm install`
 - Run the app: `npm run tauri dev`. A debug build keeps its data (database, WebView2 profile) in `%LOCALAPPDATA%\com.remotely.desktop.dev`, apart from the installed app's `%LOCALAPPDATA%\com.remotely.desktop`, so its migrations never reach the installed app's database. `REMOTELY_DATA_DIR` (an absolute path outside the repo) overrides both.
 - Rust tests: `cargo test --workspace` (run at the repo root; `cargo test` inside `src-tauri/` only tests the shell crate)
+- Try the terminal without a real host: `cargo run -p remotely-core --example dev_ssh_server --features fakes [port]`
+  (default 2222; prints the user, a fresh password and the host key fingerprint).
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - Format: `cargo fmt --all`, `npm run format`

@@ -332,6 +332,16 @@ fn lost_reason(err: &russh::Error) -> String {
     match err {
         russh::Error::KeepaliveTimeout => "the server stopped answering keep-alives".into(),
         russh::Error::InactivityTimeout => "the connection was idle for too long".into(),
+        russh::Error::IO(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+            ) =>
+        {
+            "the connection was cut".into()
+        }
         russh::Error::IO(io) => format!("the connection was lost ({io})"),
         russh::Error::Disconnect | russh::Error::HUP => "the connection was closed".into(),
         other => format!("the connection was lost ({other})"),
@@ -712,37 +722,56 @@ async fn key_login(
 
 type DynAgent = AgentClient<Box<dyn russh::keys::agent::client::AgentStream + Send + Unpin + 'static>>;
 
+const NO_AGENT: &str = "no SSH agent is running. Start the \"OpenSSH Authentication Agent\" Windows service and add your key with ssh-add, or start Pageant";
+
+/// The agent and the keys it lists. An agent only counts once it answers: Pageant's client
+/// "connects" even when Pageant is not running.
+async fn listed(mut agent: DynAgent) -> std::result::Result<(DynAgent, Vec<AgentIdentity>), russh::keys::Error> {
+    let identities = agent.request_identities().await?;
+    Ok((agent, identities))
+}
+
 #[cfg(windows)]
-async fn open_agent(source: &AgentSource) -> Result<DynAgent> {
+async fn open_agent(source: &AgentSource) -> Result<(DynAgent, Vec<AgentIdentity>)> {
     match source {
-        AgentSource::NamedPipe(pipe) => AgentClient::connect_named_pipe(pipe)
-            .await
-            .map(AgentClient::dynamic)
-            .map_err(|err| CoreError::AgentUnavailable(format!("the SSH agent at {pipe} can't be reached: {err}"))),
+        AgentSource::NamedPipe(pipe) => {
+            let agent = AgentClient::connect_named_pipe(pipe).await.map_err(|err| {
+                CoreError::AgentUnavailable(format!("the SSH agent at {pipe} can't be reached: {err}"))
+            })?;
+            listed(agent.dynamic()).await.map_err(|err| {
+                CoreError::AgentUnavailable(format!("the SSH agent at {pipe} did not list its keys: {err}"))
+            })
+        }
         AgentSource::System => {
             if let Ok(agent) = AgentClient::connect_named_pipe(OPENSSH_AGENT_PIPE).await {
-                return Ok(agent.dynamic());
+                if let Ok(found) = listed(agent.dynamic()).await {
+                    return Ok(found);
+                }
             }
             if let Ok(agent) = AgentClient::connect_pageant().await {
-                return Ok(agent.dynamic());
+                if let Ok(found) = listed(agent.dynamic()).await {
+                    return Ok(found);
+                }
             }
-            Err(CoreError::AgentUnavailable(
-                "no SSH agent is running. Start the \"OpenSSH Authentication Agent\" Windows service and add your key with ssh-add, or start Pageant".into(),
-            ))
+            Err(CoreError::AgentUnavailable(NO_AGENT.into()))
         }
     }
 }
 
 #[cfg(not(windows))]
-async fn open_agent(source: &AgentSource) -> Result<DynAgent> {
+async fn open_agent(source: &AgentSource) -> Result<(DynAgent, Vec<AgentIdentity>)> {
     match source {
         AgentSource::NamedPipe(pipe) => Err(CoreError::AgentUnavailable(format!(
             "named pipe agents ({pipe}) need Windows"
         ))),
-        AgentSource::System => AgentClient::connect_env()
-            .await
-            .map(AgentClient::dynamic)
-            .map_err(|err| CoreError::AgentUnavailable(format!("no SSH agent is running: {err}"))),
+        AgentSource::System => {
+            let agent = AgentClient::connect_env()
+                .await
+                .map_err(|_| CoreError::AgentUnavailable(NO_AGENT.into()))?;
+            listed(agent.dynamic())
+                .await
+                .map_err(|_| CoreError::AgentUnavailable(NO_AGENT.into()))
+        }
     }
 }
 
@@ -759,11 +788,7 @@ async fn agent_login(
             method_names(methods)
         )));
     }
-    let mut agent = open_agent(source).await?;
-    let identities = agent
-        .request_identities()
-        .await
-        .map_err(|err| CoreError::AgentUnavailable(format!("the SSH agent did not list its keys: {err}")))?;
+    let (mut agent, identities) = open_agent(source).await?;
     let keys: Vec<_> = identities
         .into_iter()
         .filter_map(|identity| match identity {
