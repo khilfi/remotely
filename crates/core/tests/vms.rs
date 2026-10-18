@@ -1,6 +1,7 @@
 //! Milestone 1 (VMs and power) end to end, with fake adapters: discovery (VM-01), tags, saved filters
-//! and start (VM-02), graceful-then-forced shutdown (VM-03), the power-on limit (VM-06), the capacity
-//! check (VM-07) and protected VMs (AP-04).
+//! and start (VM-02), graceful-then-forced shutdown (VM-03), power calls that fail fast or can be
+//! cancelled instead of hanging (VM-02, VM-03), the power-on limit (VM-06), the capacity check (VM-07)
+//! and protected VMs (AP-04).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -10,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{temp_folder, vm, vmx, wait_finished, Setup};
-use remotely_core::adapters::vmware::VmxInfo;
+use remotely_core::adapters::vmware::{ToolsState, VmxInfo};
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, StopMode, SubmitOutcome};
 use remotely_core::domain::{PowerState, Target};
 use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
@@ -629,4 +630,195 @@ async fn the_shutdown_wait_is_a_checked_saved_setting() {
     assert_eq!(core.shutdown_wait_secs(), 300);
     let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
     assert_eq!(audit[0].detail.as_deref(), Some("300 s"));
+}
+
+// ---- VM-02, VM-03: no power call waits on VMware Tools or an unanswered question ----------------
+
+/// Each target's name and error, in the order the job lists them.
+async fn target_errors(core: &Core, job: uuid::Uuid) -> Vec<(String, Option<String>)> {
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    targets.into_iter().map(|t| (t.target_name, t.error)).collect()
+}
+
+#[tokio::test]
+async fn a_shutdown_without_vmware_tools_is_reported_at_once_instead_of_after_the_wait() {
+    let setup = Setup::new(FakeVmware::with_running([vmx("a")]).with_tools(&vmx("a"), ToolsState::Installed));
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    assert_eq!(core.shutdown_wait_secs(), 120);
+    let mut events = core.jobs.subscribe();
+
+    let soft = Command::VmPower {
+        targets: vec![vm("a")],
+        op: PowerOp::Stop { mode: StopMode::Soft },
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+        panic!("stopping one VM is Medium");
+    };
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    // The fake, like vmrun, would wait for Tools for good; the job finishes within the 10 s
+    // wait_finished allows, long before the 120 s shutdown wait.
+    let (status, still_running) = finish_with_still_running(&mut events, job).await;
+    assert_eq!(status, JobStatus::Failed);
+    assert_eq!(
+        still_running,
+        ["a"],
+        "so the UI offers the separate, Critical force-off"
+    );
+    assert!(fake.calls().is_empty(), "vmrun was never asked to stop it");
+    assert_eq!(common::running(&fake), ["a"]);
+    assert_eq!(
+        target_errors(&core, job).await,
+        [(
+            "a".to_owned(),
+            Some(
+                "still running: VMware Tools is installed in the guest but not running, so it can't be asked to \
+                 shut down. Power it off (hard) to force it; that needs its own approval"
+                    .to_owned()
+            )
+        )]
+    );
+}
+
+#[tokio::test]
+async fn suspend_and_restart_without_vmware_tools_fail_at_once_and_say_why() {
+    let setup = Setup::new(
+        FakeVmware::with_running([vmx("a"), vmx("b"), vmx("c")])
+            .with_tools(&vmx("b"), ToolsState::NotInstalled)
+            .with_tools(&vmx("c"), ToolsState::Unknown),
+    );
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    let mut events = core.jobs.subscribe();
+
+    let suspend = Command::VmPower {
+        targets: vec![vm("a"), vm("b"), vm("c")],
+        op: PowerOp::Suspend,
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+        panic!("suspending 3 VMs is High");
+    };
+    let job = core.bus.approve(request.id, high_answers(3)).await.unwrap();
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::PartiallyFailed);
+    assert_eq!(
+        common::running(&fake),
+        ["b", "c"],
+        "only a, whose Tools run, was suspended"
+    );
+    assert_eq!(fake.calls(), [r"power Suspend C:\VMs\a\a.vmx"], "no hard fallback");
+    let advice = "Try again once VMware Tools runs in the guest.";
+    assert_eq!(
+        target_errors(&core, job).await,
+        [
+            ("a".to_owned(), None),
+            (
+                "b".to_owned(),
+                Some(format!(
+                    "VMware Tools is not installed in the guest, so it can't suspend gracefully. {advice}"
+                ))
+            ),
+            (
+                "c".to_owned(),
+                Some(format!(
+                    "Workstation can't tell whether VMware Tools is running in the guest (it may still be \
+                     starting), so it can't suspend gracefully. {advice}"
+                ))
+            ),
+        ]
+    );
+
+    let restart = Command::VmPower {
+        targets: vec![vm("b")],
+        op: PowerOp::Reset { mode: StopMode::Soft },
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, restart).await.unwrap() else {
+        panic!("restarting one VM is Medium");
+    };
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Failed);
+    assert_eq!(fake.calls().len(), 1, "vmrun was never asked to restart it");
+    assert_eq!(
+        target_errors(&core, job).await[0].1.as_deref(),
+        Some(
+            "VMware Tools is not installed in the guest, so it can't restart gracefully. Reset (hard) forces it; \
+             that needs its own approval."
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_vm_that_is_not_running_goes_straight_to_vmrun() {
+    // No Tools to wait for: vmrun answers at once (the real one with "not powered on").
+    let setup = Setup::new(FakeVmware::default());
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    let mut events = core.jobs.subscribe();
+    let suspend = Command::VmPower {
+        targets: vec![vm("a")],
+        op: PowerOp::Suspend,
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+        panic!("suspending one VM is Medium");
+    };
+    let job = core.bus.approve(request.id, confirm()).await.unwrap();
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
+    assert_eq!(fake.calls(), [r"power Suspend C:\VMs\a\a.vmx"]);
+}
+
+/// Polls until `done` holds, for at most 5 s.
+async fn wait_until(mut done: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !done() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("condition met in time");
+}
+
+#[tokio::test]
+async fn cancel_stops_waiting_for_a_vm_that_waits_for_an_answer_in_workstation() {
+    let setup = Setup::new(FakeVmware::default().with_question(&vmx("b")));
+    let fake = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    let mut events = core.jobs.subscribe();
+
+    let start = Command::VmPower {
+        targets: vec![vm("a"), vm("b")],
+        op: PowerOp::Start { gui: false },
+    };
+    let SubmitOutcome::Queued { job_id: job, .. } = core.bus.submit(&core.ctx, start).await.unwrap() else {
+        panic!("starting VMs is Low");
+    };
+    // a starts; b's start waits for an answer that never comes.
+    wait_until(|| fake.running().len() == 1 && fake.in_flight() == 1).await;
+    assert!(core.jobs.cancel(job));
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Cancelled);
+    assert_eq!(fake.in_flight(), 0, "b's call was dropped, which kills vmrun");
+    assert_eq!(common::running(&fake), ["a"]);
+
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let outcomes: Vec<_> = targets
+        .iter()
+        .map(|t| (t.target_name.as_str(), t.status.as_str(), t.error.as_deref()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("a", "succeeded", None),
+            (
+                "b",
+                "cancelled",
+                Some("cancelled while vmrun was running; Workstation may still finish the action, so check the VM's state")
+            ),
+        ]
+    );
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].event, "job_finished");
+    assert_eq!(audit[0].result.as_deref(), Some("cancelled"));
+    assert!(audit[0]
+        .detail
+        .as_deref()
+        .unwrap()
+        .ends_with("; cancelled while vmrun was running, so Workstation may still finish it: b"));
 }

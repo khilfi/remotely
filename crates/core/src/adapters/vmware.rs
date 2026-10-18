@@ -75,6 +75,18 @@ impl ToolsState {
             _ => ToolsState::Unknown,
         }
     }
+
+    /// The state in words, for saying why a graceful power operation did not run (VM-02, VM-03).
+    pub fn describe(self) -> &'static str {
+        match self {
+            ToolsState::Running => "VMware Tools is running in the guest",
+            ToolsState::Installed => "VMware Tools is installed in the guest but not running",
+            ToolsState::NotInstalled => "VMware Tools is not installed in the guest",
+            ToolsState::Unknown => {
+                "Workstation can't tell whether VMware Tools is running in the guest (it may still be starting)"
+            }
+        }
+    }
 }
 
 /// One snapshot as Workstation records it in the VM's `.vmsd` file (VM-04).
@@ -192,7 +204,6 @@ pub struct VmrunAdapter {
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// checkToolsState and getGuestIPAddress: quick reads, run for every running VM on each refresh.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
-const POWER_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Folder levels searched below a chosen folder, e.g. `D:\VMs\lab\web01\web01.vmx` is 2 levels down.
 const SCAN_DEPTH: usize = 5;
@@ -296,7 +307,7 @@ impl VmwareAdapter for VmrunAdapter {
         let (verb, mode) = power_args(op);
         let mut args: Vec<OsString> = vec![verb.into(), vmx.into()];
         args.extend(mode.map(OsString::from));
-        self.run(args, POWER_TIMEOUT).await.map(drop)
+        self.run(args, power_timeout(op)).await.map(drop).map_err(no_answer)
     }
 
     async fn snapshot(&self, vmx: &Path, op: &SnapshotOp) -> Result<()> {
@@ -342,6 +353,37 @@ pub fn power_args(op: PowerOp) -> (&'static str, Option<&'static str>) {
         PowerOp::Suspend => ("suspend", Some("soft")),
         PowerOp::Pause => ("pause", None),
         PowerOp::Unpause => ("unpause", None),
+    }
+}
+
+/// How long a vmrun power call may run. Workstation holds a VM's power calls while it waits for an
+/// answer to a question or message (e.g. "No operating system was found"), so each call gets about
+/// as long as its operation can need and no more.
+pub fn power_timeout(op: PowerOp) -> Duration {
+    match op {
+        // Stops or restarts the virtual CPUs only.
+        PowerOp::Pause | PowerOp::Unpause => Duration::from_secs(60),
+        // Like the power button: nothing is written to disk.
+        PowerOp::Stop { mode: StopMode::Hard } | PowerOp::Reset { mode: StopMode::Hard } => Duration::from_secs(2 * 60),
+        // The job runner stops waiting after the shutdown wait setting (VM-03), which can be up to
+        // an hour; vmrun must not give up first.
+        PowerOp::Stop { mode: StopMode::Soft } => Duration::from_secs(60 * 60),
+        // A start may resume a suspended VM, and a suspend writes the VM's memory to disk: both can
+        // take minutes for a large VM. A restart waits for the guest to shut down.
+        PowerOp::Start { .. } | PowerOp::Suspend | PowerOp::Reset { mode: StopMode::Soft } => {
+            Duration::from_secs(10 * 60)
+        }
+    }
+}
+
+/// A power call that timed out says why it may have hung.
+fn no_answer(err: CoreError) -> CoreError {
+    match err {
+        CoreError::Timeout { command, seconds } => CoreError::PowerTimeout {
+            command: command.trim_start_matches("vmrun ").to_owned(),
+            seconds,
+        },
+        other => other,
     }
 }
 
@@ -1090,5 +1132,41 @@ snapshot2.disk0.node = "scsi0:0"
             ("reset", Some("soft"))
         );
         assert_eq!(power_args(PowerOp::Pause), ("pause", None));
+    }
+
+    #[test]
+    fn quick_power_ops_get_short_timeouts() {
+        let secs = |op| power_timeout(op).as_secs();
+        assert_eq!(secs(PowerOp::Pause), 60);
+        assert_eq!(secs(PowerOp::Unpause), 60);
+        assert_eq!(secs(PowerOp::Stop { mode: StopMode::Hard }), 120);
+        assert_eq!(secs(PowerOp::Reset { mode: StopMode::Hard }), 120);
+        assert_eq!(secs(PowerOp::Suspend), 600);
+        assert_eq!(secs(PowerOp::Start { gui: false }), 600);
+        assert_eq!(secs(PowerOp::Reset { mode: StopMode::Soft }), 600);
+        // VM-03: the shutdown wait setting, not vmrun, decides when a soft stop has taken too long.
+        assert!(
+            secs(PowerOp::Stop { mode: StopMode::Soft }) >= crate::jobs::JobLimits::MAX_SHUTDOWN_WAIT_SECS,
+            "vmrun must not give up before the longest shutdown wait"
+        );
+    }
+
+    #[test]
+    fn a_power_timeout_says_the_vm_may_be_waiting_for_an_answer() {
+        let err = no_answer(CoreError::Timeout {
+            command: "vmrun pause".into(),
+            seconds: 60,
+        });
+        assert_eq!(err.code(), "power_timeout");
+        assert_eq!(
+            err.to_string(),
+            "vmrun pause got no answer within 60 s. The VM may be waiting for a reply to a message in \
+             Workstation: open it there to check"
+        );
+        let failed = no_answer(CoreError::Vmrun {
+            command: "pause".into(),
+            message: "The virtual machine is not powered on".into(),
+        });
+        assert_eq!(failed.code(), "vmrun_failed", "other errors pass through");
     }
 }

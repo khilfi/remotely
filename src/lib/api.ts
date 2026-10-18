@@ -407,7 +407,10 @@ export const api = {
   approve: (requestId: string, answers: ApprovalAnswers) => invoke<string>("command_approve", { requestId, answers }),
   cancelApproval: (requestId: string) => invoke<void>("command_cancel_approval", { requestId }),
 
-  /** AP-03: cancels a job in its countdown, or the targets of a running job that have not started. */
+  /**
+   * AP-03: cancels a job in its countdown, or the targets of a running job that have not started. VM power
+   * actions in progress are no longer waited for (BX-04); Workstation may still finish them.
+   */
   cancelJob: (jobId: string) => invoke<boolean>("job_cancel", { jobId }),
   recentJobs: (limit = 50) => invoke<JobSummary[]>("jobs_recent", { limit }),
   jobTargets: (jobId: string) => invoke<JobTarget[]>("job_targets", { jobId }),
