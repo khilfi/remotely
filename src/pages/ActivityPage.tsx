@@ -350,6 +350,14 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
                           {t.output}
                         </pre>
                       )}
+                      {t.stderr && (
+                        <pre className="mt-1 max-h-32 overflow-auto rounded border border-destructive/30 bg-destructive/5 p-2 font-mono text-xs whitespace-pre-wrap">
+                          {t.stderr}
+                        </pre>
+                      )}
+                      {t.exitCode !== null && (
+                        <div className="mt-1 text-xs text-muted-foreground">exit code {t.exitCode}</div>
+                      )}
                     </TableCell>
                     <TableCell className="capitalize">{t.status}</TableCell>
                     <TableCell className="text-right text-muted-foreground tabular-nums">

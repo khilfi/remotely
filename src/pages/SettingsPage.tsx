@@ -1,5 +1,6 @@
 // Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
-// power-on limit (VM-06), shutdown wait (VM-03) and update checks (FD-14) under General, keep-alive,
+// power-on limit (VM-06), shutdown wait (VM-03), hosts a bulk run reaches at once (BX-02) and update
+// checks (FD-14) under General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
 // Approval rules. The theme switch is in the top bar.
 
@@ -41,6 +42,8 @@ export function SettingsPage({ onChanged }: Props) {
   const [powerOnLimit, setPowerOnLimit] = useState("");
   const [shutdownWait, setShutdownWait] = useState("");
   const [powerMessage, setPowerMessage] = useState<Message>(null);
+  const [bulkLimit, setBulkLimit] = useState("");
+  const [bulkMessage, setBulkMessage] = useState<Message>(null);
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
@@ -50,6 +53,7 @@ export function SettingsPage({ onChanged }: Props) {
         setPath(s.vmrunPathSaved ?? "");
         setPowerOnLimit(String(s.powerOnLimit));
         setShutdownWait(String(s.shutdownWaitSecs));
+        setBulkLimit(String(s.bulkParallelLimit));
       },
       (err) => setVmrunMessage({ ok: false, text: errorMessage(err) }),
     );
@@ -92,6 +96,17 @@ export function SettingsPage({ onChanged }: Props) {
       setPowerMessage({ ok: true, text: "Saved. Applies from the next action on." });
     } catch (err) {
       setPowerMessage({ ok: false, text: errorMessage(err) });
+    }
+  }
+
+  async function saveBulkLimit() {
+    try {
+      const s = await api.setBulkParallel(Number(bulkLimit));
+      setSettings(s);
+      setBulkLimit(String(s.bulkParallelLimit));
+      setBulkMessage({ ok: true, text: "Saved. Applies from the next run on." });
+    } catch (err) {
+      setBulkMessage({ ok: false, text: errorMessage(err) });
     }
   }
 
@@ -259,6 +274,39 @@ export function SettingsPage({ onChanged }: Props) {
           </CardContent>
           <CardFooter>
             <Button onClick={() => void savePowerActions()} disabled={!settings}>
+              Save
+            </Button>
+          </CardFooter>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Bulk runs</CardTitle>
+            <CardDescription>
+              A command run on many hosts reaches this many at a time; the rest wait their turn. More at once finishes
+              sooner but opens more SSH connections from this PC.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor="bulk-parallel">Hosts at once</Label>
+              <Input
+                id="bulk-parallel"
+                type="number"
+                min={1}
+                max={50}
+                className="w-28"
+                value={bulkLimit}
+                onChange={(e) => setBulkLimit(e.currentTarget.value)}
+              />
+            </div>
+            <StatusLine message={bulkMessage} />
+          </CardContent>
+          <CardFooter>
+            <Button
+              onClick={() => void saveBulkLimit()}
+              disabled={!settings || bulkLimit === String(settings.bulkParallelLimit)}
+            >
               Save
             </Button>
           </CardFooter>

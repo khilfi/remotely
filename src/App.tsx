@@ -58,6 +58,7 @@ import {
 import { useTheme, type ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { BulkRunPage } from "@/pages/BulkRunPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -66,7 +67,7 @@ import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage } from "@/pages/VmsPage";
 
-type PageId = "vms" | "snapshots" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
+type PageId = "vms" | "snapshots" | "sessions" | "terminal" | "bulk" | "knownHosts" | "vault" | "activity" | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -75,6 +76,7 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon }[] = 
   { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon },
   { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon },
+  { id: "bulk", label: "Bulk run", title: "Bulk run", icon: SquareTerminalIcon },
   { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon },
   { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon },
   { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon },
@@ -83,7 +85,6 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon }[] = 
 
 /** MVP pages that are not built yet, shown so the roadmap is visible in the app. */
 const LATER: { label: string; req: string; icon: LucideIcon }[] = [
-  { label: "Bulk run", req: "BX-02", icon: SquareTerminalIcon },
   { label: "Dashboard", req: "MO-03", icon: LayoutDashboardIcon },
 ];
 
@@ -96,7 +97,8 @@ const THEMES: { value: ThemePreference; label: string; icon: LucideIcon }[] = [
 export default function App() {
   const [page, setPage] = useState<PageId>("vms");
   const [info, setInfo] = useState<AppInfo | null>(null);
-  const [approval, setApproval] = useState<ApprovalRequest | null>(null);
+  // The open approval, and who wants the job id once it is approved (the Bulk run page follows its run).
+  const [approval, setApproval] = useState<{ request: ApprovalRequest; onJob?: (jobId: string) => void } | null>(null);
   const [jobsVersion, setJobsVersion] = useState(0);
   // Bumped when a job finishes, so the VM list shows the new power states.
   const [jobsFinished, setJobsFinished] = useState(0);
@@ -174,7 +176,8 @@ export default function App() {
           });
           break;
         case "started":
-          toast.loading("Running…", { id });
+          // Updates keep the earlier description unless it is cleared.
+          toast.loading("Running…", { id, description: null });
           break;
         case "stillRunning": {
           // VM-03: offer the hard power-off, which goes through the bus and its own Critical approval.
@@ -197,17 +200,21 @@ export default function App() {
         }
         case "finished":
           setJobsFinished((v) => v + 1);
-          if (event.status === "succeeded") toast.success("Job succeeded", { id, duration: 5000 });
-          else toast.error(`Job ${event.status.replace("_", " ")}`, { id, duration: 8000 });
+          if (event.status === "succeeded") toast.success("Job succeeded", { id, description: null, duration: 5000 });
+          else toast.error(`Job ${event.status.replace("_", " ")}`, { id, description: null, duration: 8000 });
           break;
       }
     });
     return () => void unlisten.then((stop) => stop());
   }, []);
 
-  function submitted(outcome: SubmitOutcome) {
-    if (outcome.status === "needsApproval") setApproval(outcome.request);
-    else if (outcome.skipped.length > 0) {
+  function submitted(outcome: SubmitOutcome, onJob?: (jobId: string) => void) {
+    if (outcome.status === "needsApproval") {
+      setApproval({ request: outcome.request, onJob });
+      return;
+    }
+    onJob?.(outcome.jobId);
+    if (outcome.skipped.length > 0) {
       // AP-04: a Low action has no dialog, so say which protected targets it left alone.
       const names = outcome.skipped.map((t) => t.name).join(", ");
       toast.info(`Skipped ${outcome.skipped.length} protected: ${names}`, { duration: 8000 });
@@ -360,6 +367,15 @@ export default function App() {
                 onOpenVault={() => setPage("vault")}
               />
             </section>
+            <section hidden={page !== "bulk"}>
+              <BulkRunPage
+                active={page === "bulk"}
+                vault={vault}
+                onSubmit={submitted}
+                onOpenVault={() => setPage("vault")}
+                onOpenSessions={() => setPage("sessions")}
+              />
+            </section>
             <section hidden={page !== "knownHosts"}>
               <KnownHostsPage active={page === "knownHosts"} />
             </section>
@@ -378,12 +394,13 @@ export default function App() {
 
       {approval && (
         <ApprovalDialog
-          request={approval}
+          request={approval.request}
           vault={vault}
           onOpenVault={() => {
             setApproval(null);
             setPage("vault");
           }}
+          onApproved={approval.onJob}
           onClose={(jobId) => {
             setApproval(null);
             if (jobId) setJobsVersion((v) => v + 1);
