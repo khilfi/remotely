@@ -12,6 +12,7 @@ use crate::domain::{now_rfc3339, Context, Environment};
 use crate::error::{CoreError, Result};
 use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionRecord};
 use crate::vault::SecretId;
+use crate::vm_links::VmLink;
 
 /// Separates tag names in the `tags` column (SQL `char(31)`); tag names cannot hold control characters.
 const TAG_SEPARATOR: char = '\u{1f}';
@@ -19,7 +20,8 @@ const TAG_SEPARATOR: char = '\u{1f}';
 macro_rules! session_columns {
     () => {
         "id, folder_id, name, protocol, host, port, username, auth_method, credential_id, key_passphrase_id,
-         jump_session_id, startup_command, environment, color, protected, vm_id, imported_from, created_at, updated_at,
+         jump_session_id, startup_command, environment, color, protected, vm_id, vm_link, imported_from, created_at,
+         updated_at,
          (SELECT group_concat(t.name, char(31)) FROM target_tags tt JOIN tags t ON t.id = tt.tag_id
           WHERE tt.target_kind = 'session' AND tt.target_id = sessions.id) AS tags"
     };
@@ -49,6 +51,7 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
     let env: String = row.try_get("environment")?;
     let color: Option<String> = row.try_get("color")?;
     let protected: i64 = row.try_get("protected")?;
+    let vm_link: Option<String> = row.try_get("vm_link")?;
     let tags: Option<String> = row.try_get("tags")?;
     let mut tags: Vec<String> = tags
         .unwrap_or_default()
@@ -73,6 +76,7 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         protected: protected != 0,
         tags,
         vm_id: row.try_get("vm_id")?,
+        vm_link: vm_link.as_deref().and_then(VmLink::parse),
         imported_from: row.try_get("imported_from")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -421,6 +425,60 @@ impl Store {
             ))
         })
         .transpose()
+    }
+
+    /// QL-01: how the session's VM link was made, after a create or an edit set `vm_id`.
+    pub(crate) async fn set_vm_link_kind(&self, ctx: &Context, id: Uuid, link: Option<VmLink>) -> Result<()> {
+        sqlx::query("UPDATE sessions SET vm_link = ? WHERE workspace_id = ? AND id = ?")
+            .bind(link.map(VmLink::as_str))
+            .bind(ctx.workspace_id.to_string())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// QL-01: auto-linking's write. Changes nothing when the user decided in the meantime (a manual
+    /// link or removal) or the link is no longer `expected`, so a manual link is never overwritten.
+    /// `vm_id: None` removes an automatic link. True when it changed the session.
+    pub(crate) async fn set_auto_vm_link(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        expected: Option<&str>,
+        vm_id: Option<&str>,
+    ) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE sessions SET vm_id = ?, vm_link = ?, updated_at = ?
+             WHERE workspace_id = ? AND id = ? AND vm_id IS ?
+               AND (vm_link = 'auto' OR (vm_link IS NULL AND vm_id IS NULL))",
+        )
+        .bind(vm_id)
+        .bind(vm_id.map(|_| VmLink::Auto.as_str()))
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .bind(id.to_string())
+        .bind(expected)
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// QL-01: the user's choice of VM, or none. Auto-linking leaves it alone. False when there is no
+    /// such session.
+    pub(crate) async fn set_manual_vm_link(&self, ctx: &Context, id: Uuid, vm_id: Option<&str>) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE sessions SET vm_id = ?, vm_link = 'manual', user_id = ?, updated_at = ?
+             WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(vm_id)
+        .bind(ctx.user_id.to_string())
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
     }
 
     /// BX-01: sessions that reach each VM, by VM id, in name order.

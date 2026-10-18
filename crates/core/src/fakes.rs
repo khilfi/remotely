@@ -18,6 +18,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::adapters::dns::Resolver;
 use crate::adapters::exec_output::OutputCollector;
 use crate::adapters::host_counters::{DiskSpace, HostCounters, HostTotals, SystemCpuTimes, VmProcess};
 use crate::adapters::remote::{
@@ -899,6 +900,57 @@ impl HostCounters for FakeHostCounters {
     async fn free_disk_pct(&self, _path: &Path) -> Result<f64> {
         self.available()?;
         Ok(self.free_disk_pct)
+    }
+}
+
+/// Name resolution from a fixed table: no DNS server is asked. Names not in it do not resolve.
+/// Records every name looked up.
+#[derive(Default)]
+pub struct FakeResolver {
+    names: Mutex<HashMap<String, Vec<std::net::IpAddr>>>,
+    lookups: Mutex<Vec<String>>,
+    delay: Option<Duration>,
+}
+
+impl FakeResolver {
+    /// `name` resolves to `ips` (any letter case).
+    pub fn with(self, name: &str, ips: &[&str]) -> Self {
+        self.set(name, ips);
+        self
+    }
+
+    /// Changes what `name` resolves to, or makes it unresolvable with no `ips`.
+    pub fn set(&self, name: &str, ips: &[&str]) {
+        let parsed = ips.iter().filter_map(|ip| ip.parse().ok()).collect();
+        locks::lock(&self.names).insert(name.to_ascii_lowercase(), parsed);
+    }
+
+    /// Every lookup waits this long first, like a DNS server that does not answer.
+    pub fn with_delay(mut self, delay: Duration) -> Self {
+        self.delay = Some(delay);
+        self
+    }
+
+    pub fn lookups(&self) -> Vec<String> {
+        locks::lock(&self.lookups).clone()
+    }
+}
+
+#[async_trait]
+impl Resolver for FakeResolver {
+    async fn resolve(&self, host: &str) -> Result<Vec<std::net::IpAddr>> {
+        locks::lock(&self.lookups).push(host.to_owned());
+        if let Some(delay) = self.delay {
+            tokio::time::sleep(delay).await;
+        }
+        let found = locks::lock(&self.names).get(&host.to_ascii_lowercase()).cloned();
+        match found {
+            Some(ips) if !ips.is_empty() => Ok(ips),
+            _ => Err(CoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("could not resolve {host}"),
+            ))),
+        }
     }
 }
 

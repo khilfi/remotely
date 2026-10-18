@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
 use remotely_core::domain::TargetRef;
-use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
+use remotely_core::fakes::{
+    FakeHostCounters, FakeKeyProtector, FakeRemote, FakeResolver, FakeUpdater, FakeVault, FakeVmware,
+};
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::PolicyRules;
 use remotely_core::store::Store;
@@ -29,6 +31,8 @@ pub struct Setup {
     pub real_vault: bool,
     /// [`FakeRemote`] unless a test talks SSH to its own local server ([`Setup::with_ssh`]).
     pub remote: Arc<dyn RemoteAdapter>,
+    /// QL-01: host names to addresses. Resolves nothing unless a test adds names.
+    pub resolver: Arc<FakeResolver>,
 }
 
 impl Setup {
@@ -43,6 +47,7 @@ impl Setup {
             },
             real_vault: false,
             remote: Arc::new(FakeRemote::default()),
+            resolver: Arc::new(FakeResolver::default()),
         }
     }
 
@@ -87,6 +92,7 @@ impl Setup {
             vault,
             host_counters: Arc::new(self.host),
             updater: Arc::new(FakeUpdater::default()),
+            resolver: self.resolver,
         };
         Core::assemble(store, ctx, adapters, JobLimits::default())
             .await

@@ -62,6 +62,8 @@ pub struct MetricSample {
     pub cpu_pct: Option<f64>,
     /// Host side: the VM process's share of this whole host's CPU, as Task Manager shows it.
     pub host_cpu_pct: Option<f64>,
+    /// Host side: the VM process's working set as a share of this host's physical RAM.
+    pub host_mem_pct: Option<f64>,
     /// Host side: the VM process's working set. Guest side: memory in use (total minus available).
     pub mem_bytes: Option<u64>,
     /// Host side: RAM assigned to the VM. Guest side: the guest's total memory.
@@ -83,6 +85,18 @@ impl MetricSample {
     pub fn fullest_mount_pct(&self) -> Option<f64> {
         self.mounts.iter().map(|m| m.used_pct).reduce(f64::max)
     }
+}
+
+/// MO-01: one running VM's share of this host, for the VM list. From the latest host-side sample.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmHostUsage {
+    pub vmx_path: String,
+    pub host_cpu_pct: Option<f64>,
+    pub host_mem_pct: Option<f64>,
+    /// The VM process's working set.
+    pub mem_bytes: Option<u64>,
+    pub ts: String,
 }
 
 /// One point of a drill-down chart (MO-03).
@@ -201,6 +215,12 @@ fn vcpu_share(host_pct: f64, logical_cpus: u32, vcpus: u32) -> Option<f64> {
     (vcpus > 0 && logical_cpus > 0).then(|| (host_pct * f64::from(logical_cpus) / f64::from(vcpus)).clamp(0.0, 100.0))
 }
 
+/// MO-01: a VM process's working set as a share of the host's physical RAM.
+fn host_ram_share(working_set_bytes: u64, physical_ram_mb: u64) -> Option<f64> {
+    let physical = physical_ram_mb.checked_mul(1024 * 1024).filter(|b| *b > 0)?;
+    Some((working_set_bytes as f64 * 100.0 / physical as f64).clamp(0.0, 100.0))
+}
+
 #[async_trait]
 impl MetricsSource for HostProcessSource {
     fn name(&self) -> &'static str {
@@ -210,7 +230,10 @@ impl MetricsSource for HostProcessSource {
     async fn collect(&self) -> Result<SourceRound> {
         let processes = self.counters.vm_processes().await?;
         let ts = now_rfc3339();
-        let cpus = self.counters.host_totals().await.ok().map(|t| t.logical_cpus);
+        // One read of the host's totals per round gives both shares of the host (MO-01).
+        let totals = self.counters.host_totals().await.ok();
+        let cpus = totals.map(|t| t.logical_cpus);
+        let ram_mb = totals.map(|t| t.physical_ram_mb);
         // The inventory names the VM and gives its size; a VM it has not seen still shows.
         let vms = self.store.list_vms(&self.ctx).await.unwrap_or_default();
         let by_path: HashMap<String, &crate::store::VmRecord> =
@@ -232,6 +255,10 @@ impl MetricsSource for HostProcessSource {
                         .zip(cpus.zip(vcpus))
                         .and_then(|(pct, (cpus, vcpus))| vcpu_share(pct, cpus, vcpus)),
                     host_cpu_pct: p.cpu_pct,
+                    host_mem_pct: p
+                        .working_set_bytes
+                        .zip(ram_mb)
+                        .and_then(|(bytes, mb)| host_ram_share(bytes, mb)),
                     mem_bytes: p.working_set_bytes,
                     mem_total_bytes: vm.and_then(|v| v.memsize_mb).map(|mb| u64::from(mb) * 1024 * 1024),
                     disk_read_bps: p.read_bps,
@@ -356,6 +383,26 @@ impl MetricsHub {
             .unwrap_or_default()
     }
 
+    /// MO-01: each VM process the last good host round saw, with its share of the host. Reads
+    /// memory only: no extra polling.
+    pub fn host_usage(&self) -> Vec<VmHostUsage> {
+        let state = locks::lock(&self.state);
+        let mut usage: Vec<VmHostUsage> = state
+            .latest
+            .iter()
+            .filter(|((source, _), _)| *source == MetricSource::Host)
+            .map(|((_, key), s)| VmHostUsage {
+                vmx_path: key.clone(),
+                host_cpu_pct: s.host_cpu_pct,
+                host_mem_pct: s.host_mem_pct,
+                mem_bytes: s.mem_bytes,
+                ts: s.ts.clone(),
+            })
+            .collect();
+        usage.sort_by(|a, b| a.vmx_path.cmp(&b.vmx_path));
+        usage
+    }
+
     pub fn statuses(&self) -> HashMap<Uuid, GuestStatus> {
         locks::lock(&self.state).statuses.clone()
     }
@@ -375,6 +422,8 @@ impl MetricsHub {
 pub struct LinkedSession {
     pub id: Uuid,
     pub name: String,
+    /// QL-01: linked automatically by IP address and not confirmed yet.
+    pub auto: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -608,6 +657,7 @@ impl Metrics {
                 .map(|s| LinkedSession {
                     id: s.id,
                     name: s.name.clone(),
+                    auto: s.vm_link == Some(crate::vm_links::VmLink::Auto),
                 })
                 .collect();
             let watched_session = linked.iter().map(|s| s.id).find(|id| watched.contains(id));
@@ -693,6 +743,7 @@ impl Metrics {
                 sessions: vec![LinkedSession {
                     id: session.id,
                     name: session.name.clone(),
+                    auto: false,
                 }],
                 watched_session: Some(session.id),
                 guest_status: statuses.get(&session.id).cloned(),
@@ -781,6 +832,7 @@ mod tests {
             ts: now_rfc3339(),
             cpu_pct: Some(cpu),
             host_cpu_pct: None,
+            host_mem_pct: None,
             mem_bytes: None,
             mem_total_bytes: None,
             disk_read_bps: None,
@@ -805,6 +857,70 @@ mod tests {
             "overhead threads can go past its vCPUs"
         );
         assert_eq!(vcpu_share(10.0, 16, 0), None);
+    }
+
+    #[test]
+    fn a_vm_process_working_set_becomes_a_share_of_host_ram() {
+        const GB: u64 = 1024 * 1024 * 1024;
+        assert_eq!(host_ram_share(8 * GB, 32 * 1024), Some(25.0));
+        assert_eq!(host_ram_share(GB / 2, 16 * 1024), Some(3.125));
+        assert_eq!(host_ram_share(0, 32 * 1024), Some(0.0));
+        assert_eq!(
+            host_ram_share(64 * GB, 32 * 1024),
+            Some(100.0),
+            "never past the whole host"
+        );
+        assert_eq!(host_ram_share(GB, 0), None, "host RAM unknown");
+        assert_eq!(host_ram_share(GB, u64::MAX), None, "nonsense totals");
+    }
+
+    #[test]
+    fn host_usage_lists_the_vms_the_last_host_round_saw() {
+        let hub = MetricsHub::new(Duration::from_secs(60));
+        let vm = |name: &str, cpu: f64, mem: f64| MetricSample {
+            host_cpu_pct: Some(cpu),
+            host_mem_pct: Some(mem),
+            mem_bytes: Some(1024),
+            ..sample(
+                MetricSource::Host,
+                TargetRef::Vm {
+                    vmx_path: format!(r"C:\VMs\{name}\{name}.vmx"),
+                },
+                cpu * 8.0,
+            )
+        };
+        let web = Uuid::new_v4();
+        hub.record(
+            0,
+            Some(vec![vm("web", 6.25, 12.5), vm("db", 1.0, 25.0)]),
+            Some(SourceRound {
+                samples: vec![sample(
+                    MetricSource::Guest,
+                    TargetRef::Session { session_id: web },
+                    50.0,
+                )],
+                statuses: vec![GuestStatus::new(web, GuestState::Ok, None)],
+            }),
+        );
+        let usage = hub.host_usage();
+        let shares: Vec<(&str, Option<f64>, Option<f64>)> = usage
+            .iter()
+            .map(|u| (u.vmx_path.as_str(), u.host_cpu_pct, u.host_mem_pct))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                (r"C:\VMs\db\db.vmx", Some(1.0), Some(25.0)),
+                (r"C:\VMs\web\web.vmx", Some(6.25), Some(12.5)),
+            ],
+            "VMs only, not guests"
+        );
+        // web stopped: no share any more, so the lists show a dash for it.
+        hub.record(5_000, Some(vec![vm("db", 2.0, 25.0)]), None);
+        assert_eq!(hub.host_usage().len(), 1);
+        // The host side failed to read: what it showed stays.
+        hub.record(10_000, None, None);
+        assert_eq!(hub.host_usage()[0].host_cpu_pct, Some(2.0));
     }
 
     #[test]

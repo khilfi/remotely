@@ -64,7 +64,7 @@ crates/core/          remotely-core: all app logic
     policy/
     jobs.rs
     adapters/         vmware.rs, remote.rs (SSH shell and exec), exec_output.rs (BX-02/BX-07 output cap, hashes,
-                      secret scrubbing), host_counters.rs, updater.rs
+                      secret scrubbing), host_counters.rs, updater.rs, dns.rs (QL-01 host names to IPs)
     inventory.rs
     capacity.rs       VM-07 capacity check before power-on
     snapshots.rs      VM-04 snapshot trees (from .vmsd), VM-05 safety snapshot names
@@ -73,6 +73,7 @@ crates/core/          remotely-core: all app logic
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows), guest.rs (MO-02 SSH
                       polling, kept connections, backoff), procfs.rs (/proc and df parsers)
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier)
+    vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
     terminal.rs       SS-03 terminal panes: one supervised SSH connection each (keep-alive, auto-reconnect)
     bulk.rs           BX-01 targets, BX-03 grouped results and diff, BX-05 exports (running is RemoteExec on the bus)
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
