@@ -153,6 +153,10 @@ pub enum CoreError {
     )]
     JumpHostUnsupported { jump: String },
 
+    /// QL-03, QL-04: a DNS lookup or a reachability probe failed. Never holds a secret.
+    #[error("{0}")]
+    Network(String),
+
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
 }
@@ -197,6 +201,7 @@ impl CoreError {
             CoreError::NoSudoPassword(_) => "no_sudo_password",
             CoreError::CancelledRemote => "cancelled_remote",
             CoreError::JumpHostUnsupported { .. } => "jump_host_unsupported",
+            CoreError::Network(_) => "network",
             CoreError::NotImplemented(_) => "not_implemented",
         }
     }

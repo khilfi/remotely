@@ -3,6 +3,7 @@
 
 pub mod exec_output;
 pub mod host_counters;
+pub mod network;
 pub mod remote;
 pub mod updater;
 pub mod vmware;

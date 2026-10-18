@@ -4,7 +4,8 @@
 //! the core passes in), BX-02 (a command or script on an exec channel: stdout, stderr, exit code and
 //! duration, capped and hashed by [`exec_output`](super::exec_output)), BX-07 (sudo with the password from the vault on
 //! stdin, never echoed or logged, and scrubbed from the output) and MO-02 (guest metrics from /proc, over
-//! a connection kept open between rounds: [`RemoteAdapter::connect`]). Jump hosts (SS-07, v2) will
+//! a connection kept open between rounds: [`RemoteAdapter::connect`]). A shell also reports the address
+//! it reached and what `hostname` prints on the same connection (QL-03). Jump hosts (SS-07, v2) will
 //! chain through russh's direct-tcpip channels.
 //!
 //! The core reads secrets from the vault just before a connection and hands them over as
@@ -13,6 +14,7 @@
 //! saved, a key's passphrase, a one-time code) asks through the [`Prompter`], which the terminal
 //! shows like PuTTY does.
 
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,7 +25,7 @@ use russh::keys::agent::AgentIdentity;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect, MethodKind, MethodSet};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::adapters::exec_output::{CollectedOutput, OutputCollector, Scrubber};
@@ -235,6 +237,31 @@ pub enum ShellEnd {
 pub struct ShellHandle {
     pub input: mpsc::Sender<ShellInput>,
     pub output: mpsc::Receiver<ShellOutput>,
+    /// QL-03: the address the connection actually reached.
+    pub peer_ip: Option<IpAddr>,
+    /// QL-03: the server's own name, from one `hostname` on the same connection, run beside the
+    /// shell so a server that won't run it never holds the shell up. `None` when it failed, took
+    /// longer than [`HOSTNAME_WAIT`] or printed something that is not a host name.
+    pub hostname: oneshot::Receiver<Option<String>>,
+}
+
+/// How long the `hostname` beside a new shell may take.
+pub const HOSTNAME_WAIT: Duration = Duration::from_secs(5);
+
+/// QL-03: the host name in what `hostname` printed: its first line, if that looks like one.
+/// Network gear answers with an error or a menu instead, which is no name.
+pub fn parse_hostname(stdout: &str, exit_code: Option<u32>) -> Option<String> {
+    if exit_code != Some(0) {
+        return None;
+    }
+    let name = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let name = name.trim_end_matches('.');
+    let plausible = name.len() <= 253
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+        && name.chars().any(|c| c.is_ascii_alphanumeric());
+    plausible.then(|| name.to_owned())
 }
 
 #[async_trait]
@@ -290,7 +317,7 @@ impl RemoteAdapter for RusshAdapter {
         if let Credentials::Password(Some(password)) = &credentials {
             secrets.push(password.clone());
         }
-        let (mut handle, shared) = connect(session, options, verifier).await?;
+        let (mut handle, shared, _) = connect(session, options, verifier).await?;
         let mut prompter = NoPrompter {
             session: &session.name,
             who: "a bulk run",
@@ -332,7 +359,7 @@ impl RemoteAdapter for RusshAdapter {
         if let Credentials::Password(Some(password)) = &credentials {
             secrets.push(password.clone());
         }
-        let (mut handle, shared) = connect(session, options, verifier).await?;
+        let (mut handle, shared, _) = connect(session, options, verifier).await?;
         let mut prompter = NoPrompter {
             session: &session.name,
             who: "the dashboard",
@@ -365,7 +392,7 @@ impl RemoteAdapter for RusshAdapter {
             options,
             verifier,
         } = request;
-        let (mut handle, shared) = connect(session, options, verifier).await?;
+        let (mut handle, shared, peer_ip) = connect(session, options, verifier).await?;
         show_banners(&shared, prompter).await;
         let user = match session.username.as_str() {
             "" => {
@@ -378,7 +405,7 @@ impl RemoteAdapter for RusshAdapter {
             return Err(CoreError::AuthFailed("no user name was given".into()));
         }
         authenticate(&mut handle, &user, credentials, options, prompter, &shared).await?;
-        open_pty(handle, shared, size, &options.term).await
+        open_pty(handle, shared, size, &options.term, peer_ip).await
     }
 }
 
@@ -512,11 +539,12 @@ fn dial_host(host: &str) -> &str {
     host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
+/// Reaches the host and agrees on keys. Also returns the address reached (QL-03).
 async fn connect(
     session: &SessionSpec,
     options: &ConnectOptions,
     verifier: Arc<dyn HostKeyVerifier>,
-) -> Result<(client::Handle<Handler>, Arc<Mutex<Shared>>)> {
+) -> Result<(client::Handle<Handler>, Arc<Mutex<Shared>>, Option<IpAddr>)> {
     let target = address(&session.host, session.port);
     let seconds = options.connect_timeout.as_secs().max(1);
     let stream = tokio::time::timeout(
@@ -531,6 +559,7 @@ async fn connect(
     .map_err(|err| CoreError::Ssh(format!("can't connect to {target}: {err}")))?;
     // Keystrokes are small; send each at once.
     let _ = stream.set_nodelay(true);
+    let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip().to_canonical());
 
     let config = Arc::new(client::Config {
         keepalive_interval: options.keepalive_interval,
@@ -564,7 +593,7 @@ async fn connect(
         }
     };
     match handle {
-        Ok(handle) => Ok((handle, shared)),
+        Ok(handle) => Ok((handle, shared, peer_ip)),
         Err(err) => {
             if let Some(refused) = locks::lock(&shared).verify_error.take() {
                 return Err(refused);
@@ -981,12 +1010,14 @@ async fn agent_login(
     )))
 }
 
-/// Opens a session channel with a PTY and a shell, then pumps it from a task of its own.
+/// Opens a session channel with a PTY and a shell, then pumps it from a task of its own. Beside it,
+/// the same task asks the server for its `hostname` once (QL-03).
 async fn open_pty(
     handle: client::Handle<Handler>,
     shared: Arc<Mutex<Shared>>,
     size: PtySize,
     term: &str,
+    peer_ip: Option<IpAddr>,
 ) -> Result<ShellHandle> {
     let mut channel = handle
         .channel_open_session()
@@ -1026,15 +1057,31 @@ async fn open_pty(
 
     let (input_tx, mut input_rx) = mpsc::channel::<ShellInput>(256);
     let (output_tx, output_rx) = mpsc::channel::<ShellOutput>(256);
+    let (hostname_tx, hostname_rx) = oneshot::channel();
     tokio::spawn(async move {
         for data in early {
             if output_tx.send(ShellOutput::Data(data)).await.is_err() {
                 return;
             }
         }
+        let mut hostname_tx = Some(hostname_tx);
+        let hostname = tokio::time::timeout(
+            HOSTNAME_WAIT,
+            run_command(&handle, &shared, "hostname", None, &[], 1024),
+        );
+        tokio::pin!(hostname);
         let mut exit_status: Option<u32> = None;
         let end = loop {
             tokio::select! {
+                answer = &mut hostname, if hostname_tx.is_some() => {
+                    let name = match answer {
+                        Ok(Ok((code, _, output))) => parse_hostname(&output.stdout, code),
+                        _ => None,
+                    };
+                    if let Some(tx) = hostname_tx.take() {
+                        let _ = tx.send(name);
+                    }
+                }
                 msg = input_rx.recv() => match msg {
                     Some(ShellInput::Data(bytes)) => {
                         // A failed write shows up as the channel closing below.
@@ -1076,6 +1123,8 @@ async fn open_pty(
     Ok(ShellHandle {
         input: input_tx,
         output: output_rx,
+        peer_ip,
+        hostname: hostname_rx,
     })
 }
 
@@ -1304,6 +1353,21 @@ mod tests {
             !sudo_refused(1, Some(1), "grep: no match\n"),
             "the script failed, not sudo"
         );
+    }
+
+    #[test]
+    fn only_a_plausible_first_line_counts_as_the_host_name() {
+        assert_eq!(parse_hostname("web01\n", Some(0)).as_deref(), Some("web01"));
+        assert_eq!(
+            parse_hostname("\n  web01.example.com.\r\n", Some(0)).as_deref(),
+            Some("web01.example.com")
+        );
+        assert_eq!(parse_hostname("web01\n", Some(1)), None, "failed");
+        assert_eq!(parse_hostname("web01\n", None), None, "killed");
+        assert_eq!(parse_hostname("", Some(0)), None);
+        assert_eq!(parse_hostname("% Invalid input detected\n", Some(0)), None);
+        assert_eq!(parse_hostname("---\n", Some(0)), None);
+        assert_eq!(parse_hostname(&"a".repeat(254), Some(0)), None);
     }
 
     #[test]

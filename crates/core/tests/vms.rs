@@ -550,6 +550,7 @@ async fn the_power_on_limit_is_a_saved_setting() {
             vault: Arc::new(FakeVault::with_password("x")),
             host_counters: Arc::new(FakeHostCounters::default()),
             updater: Arc::new(FakeUpdater::default()),
+            network: Arc::new(remotely_core::fakes::FakeNetwork::default()),
         },
         JobLimits::default(),
     )

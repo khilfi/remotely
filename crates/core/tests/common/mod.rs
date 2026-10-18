@@ -7,9 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use remotely_core::adapters::network::NetworkAdapter;
 use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
 use remotely_core::domain::TargetRef;
-use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
+use remotely_core::fakes::{
+    FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault, FakeVmware,
+};
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::PolicyRules;
 use remotely_core::store::Store;
@@ -29,6 +32,8 @@ pub struct Setup {
     pub real_vault: bool,
     /// [`FakeRemote`] unless a test talks SSH to its own local server ([`Setup::with_ssh`]).
     pub remote: Arc<dyn RemoteAdapter>,
+    /// QL-03 DNS and QL-04 probes: no real lookups unless a test asks for them.
+    pub network: Arc<dyn NetworkAdapter>,
 }
 
 impl Setup {
@@ -43,7 +48,13 @@ impl Setup {
             },
             real_vault: false,
             remote: Arc::new(FakeRemote::default()),
+            network: Arc::new(FakeNetwork::default()),
         }
+    }
+
+    pub fn with_network(mut self, network: Arc<dyn NetworkAdapter>) -> Self {
+        self.network = network;
+        self
     }
 
     /// The real russh adapter, for tests against `fakes::ssh_server::TestSshServer` on 127.0.0.1.
@@ -87,6 +98,7 @@ impl Setup {
             vault,
             host_counters: Arc::new(self.host),
             updater: Arc::new(FakeUpdater::default()),
+            network: Arc::clone(&self.network),
         };
         Core::assemble(store, ctx, adapters, JobLimits::default())
             .await

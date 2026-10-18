@@ -14,6 +14,8 @@
 //!
 //!   sessions (SS-01), vault (SS-04), known_hosts (SS-05): the app's own data; changes are audited
 //!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
+//!     quick connect (QL-02), host name and IP (QL-03 ──► adapters::network), output and logs (SS-11)
+//!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //! ```
 //!
@@ -37,6 +39,7 @@ pub mod known_hosts;
 pub mod locks;
 pub mod metrics;
 pub mod policy;
+pub mod reachability;
 pub mod sessions;
 pub mod snapshots;
 pub mod store;
@@ -48,6 +51,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adapters::host_counters::{HostCounters, WindowsCounters};
+use adapters::network::{NetworkAdapter, SystemNetwork};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::{UpdateInfo, UpdaterAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
@@ -62,6 +66,7 @@ use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
+use reachability::ReachabilityChecker;
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
@@ -90,6 +95,8 @@ pub struct Adapters {
     pub vault: Arc<dyn Vault>,
     pub host_counters: Arc<dyn HostCounters>,
     pub updater: Arc<dyn UpdaterAdapter>,
+    /// QL-03 DNS lookups and QL-04 reachability probes.
+    pub network: Arc<dyn NetworkAdapter>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -120,6 +127,9 @@ pub struct Core {
     pub known_hosts: Arc<KnownHosts>,
     /// SS-03: open terminal panes and their SSH connections.
     pub terminals: Terminals,
+    /// QL-04: background checks of the sessions the Terminal page's tree shows. Reads only. The shell
+    /// starts it with [`ReachabilityChecker::run`].
+    pub reachability: Arc<ReachabilityChecker>,
     /// BX-01, BX-03, BX-05: bulk run targets, results, diffs and exports. Running is the bus.
     pub bulk: BulkRuns,
     /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
@@ -151,6 +161,7 @@ impl Core {
                 vault: Arc::new(vault),
                 host_counters: Arc::new(WindowsCounters::new()),
                 updater: config.updater,
+                network: Arc::new(SystemNetwork),
             },
             JobLimits::default(),
         )
@@ -167,8 +178,14 @@ impl Core {
             store.clone(),
             Arc::clone(&adapters.vault),
             Arc::clone(&adapters.remote),
+            Arc::clone(&adapters.network),
             Arc::clone(&known_hosts),
         );
+        let reachability = Arc::new(ReachabilityChecker::new(
+            store.clone(),
+            ctx,
+            Arc::clone(&adapters.network),
+        ));
         // MO-01 to MO-04: reads only, so the collector holds adapters directly, not the job runner.
         let metrics = Arc::new(Metrics::new(MetricsParts {
             store: store.clone(),
@@ -227,6 +244,7 @@ impl Core {
             import: Importer::new(store.clone()),
             known_hosts,
             terminals,
+            reachability,
             bulk: BulkRuns::new(store.clone()),
             metrics,
             store,
@@ -445,17 +463,20 @@ impl Core {
             .map(drop)
     }
 
-    /// SS-03: keep-alive, auto-reconnect and copy-on-select.
+    /// SS-03, QL-04, QL-05: keep-alive, auto-reconnect, copy-on-select, font size, scrollback and
+    /// reachability checks.
     pub async fn terminal_settings(&self) -> Result<TerminalSettings> {
         self.terminals.settings(&self.ctx).await
     }
 
-    /// SS-03: applies to terminals opened from now on. Audited.
+    /// SS-03: connection settings apply to terminals opened from now on; QL-05's font size and
+    /// scrollback to open ones too (the UI applies them); QL-04's checks at once. Audited.
     pub async fn set_terminal_settings(&self, settings: TerminalSettings) -> Result<()> {
         settings.validate()?;
         self.store
             .put_setting(&self.ctx, TERMINAL_SETTINGS_KEY, &settings)
             .await?;
+        self.reachability.poke();
         self.audit_setting("Set the terminal settings", &settings.describe())
             .await
     }

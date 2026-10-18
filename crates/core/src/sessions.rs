@@ -9,6 +9,11 @@
 //!
 //! The environment label (SS-06) is what the policy engine reads for a session target: Prod raises
 //! the approval tier by one (see `inventory::StoreDirectory`).
+//!
+//! The Terminal page shows the same library as a tree ([`tree`], QL-04), and each session keeps what
+//! its last connection saw (QL-03) and when it was last opened (QL-02 Recent sessions).
+
+pub mod tree;
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,6 +25,7 @@ use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
+use tree::{SessionTree, TreeGrouping};
 
 /// Colour of a session's tab and list entry (SS-01). Named, so each theme can draw it legibly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -186,6 +192,15 @@ pub struct SessionRecord {
     pub imported_from: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// QL-03: the IP address the last connection reached.
+    pub last_ip: Option<String>,
+    /// QL-03: the server's own name at the last connection (`hostname`), or its DNS name when the
+    /// server did not say.
+    pub last_hostname: Option<String>,
+    /// QL-03: when `last_ip` and `last_hostname` were seen.
+    pub last_seen_at: Option<String>,
+    /// QL-02: when a terminal to it was last opened (the Recent sessions list).
+    pub last_opened_at: Option<String>,
 }
 
 impl SessionRecord {
@@ -441,6 +456,20 @@ impl SessionLibrary {
                     .is_none_or(|scope| s.folder_id.is_some_and(|f| scope.contains(&f)))
         });
         Ok(sessions)
+    }
+
+    /// QL-04: the Terminal page's session tree, grouped by folder, tag or label, holding the sessions
+    /// that match `filter`. While filtering, groups left empty are dropped.
+    pub async fn tree(&self, ctx: &Context, grouping: TreeGrouping, filter: &SessionFilter) -> Result<SessionTree> {
+        let sessions = self.list(ctx, filter).await?;
+        let folders = self.folders(ctx).await?;
+        let filtering = *filter != SessionFilter::default();
+        Ok(tree::build(grouping, &folders, sessions, filtering))
+    }
+
+    /// QL-02: the sessions opened most recently, newest first.
+    pub async fn recent(&self, ctx: &Context, limit: u32) -> Result<Vec<SessionRecord>> {
+        self.store.recent_sessions(ctx, limit).await
     }
 
     pub async fn get(&self, ctx: &Context, id: Uuid) -> Result<SessionRecord> {
@@ -738,8 +767,9 @@ impl SessionLibrary {
     }
 
     /// Everything that needs the database: the folder exists, credentials are in the vault with the
-    /// right kind, and the jump host exists and does not lead back to this session.
-    async fn check(&self, ctx: &Context, id: Option<Uuid>, input: SessionInput) -> Result<SessionInput> {
+    /// right kind, and the jump host exists and does not lead back to this session. QL-02 checks a
+    /// quick connection with it too, saved or not.
+    pub(crate) async fn check(&self, ctx: &Context, id: Option<Uuid>, input: SessionInput) -> Result<SessionInput> {
         let input = tidy(input)?;
         if let Some(folder) = input.folder_id {
             Self::find_folder(&self.folders(ctx).await?, folder)?;
@@ -994,6 +1024,10 @@ mod tests {
             imported_from: None,
             created_at: String::new(),
             updated_at: String::new(),
+            last_ip: None,
+            last_hostname: None,
+            last_seen_at: None,
+            last_opened_at: None,
         }
     }
 

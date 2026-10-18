@@ -58,6 +58,7 @@ async fn core_with(
         vault,
         host_counters: Arc::new(FakeHostCounters::default()),
         updater,
+        network: Arc::new(remotely_core::fakes::FakeNetwork::default()),
     };
     Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
