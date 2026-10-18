@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use remotely_core::adapters::network::NetworkAdapter;
 use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
+use remotely_core::adapters::updater::UpdaterAdapter;
 use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{
     FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault, FakeVmware,
@@ -32,6 +33,8 @@ pub struct Setup {
     pub real_vault: bool,
     /// [`FakeRemote`] unless a test talks SSH to its own local server ([`Setup::with_ssh`]).
     pub remote: Arc<dyn RemoteAdapter>,
+    /// FD-14: a [`FakeUpdater`] that offers nothing, unless a test gives its own.
+    pub updater: Arc<dyn UpdaterAdapter>,
     /// QL-03 DNS and QL-04 probes: no real lookups unless a test asks for them.
     pub network: Arc<dyn NetworkAdapter>,
 }
@@ -48,8 +51,14 @@ impl Setup {
             },
             real_vault: false,
             remote: Arc::new(FakeRemote::default()),
+            updater: Arc::new(FakeUpdater::default()),
             network: Arc::new(FakeNetwork::default()),
         }
+    }
+
+    pub fn with_updater(mut self, updater: Arc<dyn UpdaterAdapter>) -> Self {
+        self.updater = updater;
+        self
     }
 
     pub fn with_network(mut self, network: Arc<dyn NetworkAdapter>) -> Self {
@@ -97,8 +106,8 @@ impl Setup {
             remote: self.remote,
             vault,
             host_counters: Arc::new(self.host),
-            updater: Arc::new(FakeUpdater::default()),
-            network: Arc::clone(&self.network),
+            updater: self.updater,
+            network: self.network,
         };
         Core::assemble(store, ctx, adapters, JobLimits::default())
             .await

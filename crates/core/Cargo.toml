@@ -12,7 +12,7 @@ workspace = true
 [features]
 # Fake adapters (VMware, remote, vault, host counters, updater) and a local SSH server for tests.
 # Never enabled in the app.
-fakes = ["getrandom/sys_rng", "dep:futures"]
+fakes = ["getrandom/sys_rng", "dep:futures", "dep:base64", "dep:blake2", "dep:ed25519-dalek"]
 
 [dependencies]
 async-trait.workspace = true
@@ -42,6 +42,15 @@ csv = "1"
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
 # BX-03: the line diff between two output groups.
 similar = "3"
+# FD-14: the GitHub Releases API of the private repo, with the update token from the vault. The reqwest
+# and rustls that tauri-plugin-updater already uses: rustls with ring (no aws-lc-rs, so no CMake/NASM).
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+url = { version = "2", features = ["serde"] }
+# FD-14 tests (fakes only): minisign signatures from a throwaway key, made at run time.
+base64 = { version = "0.22", optional = true }
+blake2 = { version = "0.11", optional = true }
+ed25519-dalek = { version = "3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

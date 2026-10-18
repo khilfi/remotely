@@ -31,9 +31,11 @@ Everything committed here may become public, and git history is forever, so trea
 ## Releases and auto-update
 
 - The version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` must match. Release by pushing a tag `vX.Y.Z`.
-- `.github/workflows/ci.yml` runs on every push and pull request: `cargo fmt --all --check`, clippy, `cargo test --workspace`, `npm run lint`, and gitleaks over the full history.
+- `.github/workflows/ci.yml` runs on every push to main and every pull request, except documentation-only changes (`paths-ignore`: `**/*.md`, `docs/**`): `cargo fmt --all --check`, clippy, `cargo test --workspace`, `npm run lint`. `.github/workflows/secrets.yml` runs gitleaks over the full history on every push to main and every pull request, documentation included. Both cancel a run a newer push supersedes.
+- CI minutes: the repo is private, so Actions minutes come out of the owner's monthly allowance (2,000 on GitHub Free), and Windows minutes count double. A `ci.yml` run bills about 12 to 16 minutes, a release about 28. Don't push for every small commit, and keep `paths-ignore` working (README "CI minutes").
 - `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`. It uses `tauri-apps/tauri-action` to build, sign the update artifacts and create a **draft** GitHub Release with the installer, its `.sig` file and `latest.json`, then checks the signatures against `plugins.updater.pubkey` with `scripts/verify-update-signature.mjs` (a failure means the signing secret and the public key don't pair: don't publish). The user publishes the draft after a smoke test; installed apps only see published releases.
-- `tauri.conf.json`: `bundle.createUpdaterArtifacts: true`; `plugins.updater.pubkey` holds the public key; `plugins.updater.endpoints` is `["https://github.com/khilfi/remotely/releases/latest/download/latest.json"]`; `plugins.updater.windows.installMode: "passive"`.
+- `tauri.conf.json`: `bundle.createUpdaterArtifacts: true`; `plugins.updater.pubkey` holds the public key; `plugins.updater.endpoints` is `["https://github.com/khilfi/remotely/releases/latest/download/latest.json"]`, which names the repository the app updates from (the app doesn't fetch that URL, see the next point); `plugins.updater.windows.installMode: "passive"`.
+- Private repo (FD-14, `docs/post-mvp-plan.md` P1): update checks need the **GitHub update token**, a fine-grained token for this repository only with Contents: Read-only and an expiry, which the owner enters in Settings → Updates on each machine (README "GitHub update token" says how to create, enter and replace it). It is a vault secret (`password` kind, label "GitHub update token"; its id is the setting `updates.tokenId`, the expiry GitHub reports is `updates.tokenExpiresOn`), write-only in the UI with Test, Replace and Remove. The updater (`src-tauri/src/updater.rs`) finds the latest release through the GitHub API with it (`crates/core/src/adapters/github.rs`), then has `tauri-plugin-updater` fetch `latest.json` and the installer from their API asset URLs with `Authorization` and `Accept: application/octet-stream`; GitHub redirects to its storage, and reqwest drops the token on that redirect. tauri-action writes API asset URLs into `latest.json`; any other URL is mapped to the release's file of the same name, or refused, so the token only goes to the API. Signatures are verified against the public key exactly as before. Without a token, or with the vault locked, a check makes no network call and says why (`updates::UpdateCheck`). The token never reaches logs, errors, the UI state, the audit log or exports. Tests use `fakes::github_server::FakeGithub` (API and storage on 127.0.0.1) and `UpdateSigner` (a throwaway minisign key); never a real token. Copies on 0.2.0 or older can't update from the private repo and need one manual install of 0.2.1.
 - Windows installer: NSIS only (`bundle.targets: ["nsis"]`), installed per user (`bundle.windows.nsis.installMode: "currentUser"`), so installing and auto-updating never need admin rights. Decided before v0.1.0; switching installer type after release would strand existing installs.
 - In the app (FD-14): check at start and every 24 hours, and show the new version and its release notes. Installing is a Medium-tier command through the command bus, and it waits until no job is running. A setting turns update checks off for air-gapped sites.
 
@@ -54,7 +56,7 @@ A Cargo workspace: the core is its own crate with no Tauri types, so its tests b
 ```text
 CLAUDE.md
 Cargo.toml            workspace: crates/core + src-tauri; shared lints (no unwrap/expect)
-.github/workflows/    ci.yml, release.yml
+.github/workflows/    ci.yml, secrets.yml, release.yml
 .githooks/            pre-commit (gitleaks)
 docs/                 PRD.md, architecture.png, roadmap.png
 crates/core/          remotely-core: all app logic
@@ -64,7 +66,9 @@ crates/core/          remotely-core: all app logic
     policy/
     jobs.rs
     adapters/         vmware.rs, remote.rs (SSH shell and exec), exec_output.rs (BX-02/BX-07 output cap, hashes,
-                      secret scrubbing), host_counters.rs, updater.rs, network.rs (QL-03 DNS, QL-04 TCP probe)
+                      secret scrubbing), host_counters.rs, updater.rs, github.rs (FD-14 GitHub Releases API with the
+                      update token), network.rs (QL-03 DNS, QL-04 TCP probe)
+    updates.rs        FD-14 update checks and the GitHub update token in the vault
     inventory.rs
     capacity.rs       VM-07 capacity check before power-on
     snapshots.rs      VM-04 snapshot trees (from .vmsd), VM-05 safety snapshot names
@@ -85,6 +89,7 @@ crates/core/          remotely-core: all app logic
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests
+    fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge
