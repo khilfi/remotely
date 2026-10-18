@@ -415,6 +415,18 @@ fn run_info(command: &Command) -> Option<RunInfo> {
             trust_new_host_keys: *trust_new_host_keys,
             timeout_secs: *timeout_secs,
         }),
+        // SS-09: a key push is a remote command too; its results show like a run's.
+        Command::PushSshKey {
+            public_key,
+            trust_new_host_keys,
+            timeout_secs,
+            ..
+        } => crate::ssh_keys::parse_public_key(public_key).ok().map(|key| RunInfo {
+            script: crate::ssh_keys::authorized_keys_script(&key),
+            sudo: false,
+            trust_new_host_keys: *trust_new_host_keys,
+            timeout_secs: *timeout_secs,
+        }),
         _ => None,
     }
 }

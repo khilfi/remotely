@@ -76,6 +76,10 @@ pub enum CoreError {
     #[error("wrong vault password")]
     WrongVaultPassword,
 
+    /// FD-07: an export file did not open. AES-GCM can't tell a wrong passphrase from a changed file.
+    #[error("the passphrase is wrong, or the file was changed or damaged after it was exported")]
+    WrongPassphrase,
+
     /// Never holds a secret: only what went wrong.
     #[error("vault: {0}")]
     Vault(String),
@@ -197,6 +201,7 @@ impl CoreError {
             CoreError::VaultLocked => "vault_locked",
             CoreError::VaultNotSetUp => "vault_not_set_up",
             CoreError::WrongVaultPassword => "wrong_vault_password",
+            CoreError::WrongPassphrase => "wrong_passphrase",
             CoreError::Vault(_) => "vault",
             CoreError::InvalidSetting(_) => "invalid_setting",
             CoreError::InvalidInput(_) => "invalid_input",

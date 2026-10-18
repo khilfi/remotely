@@ -83,11 +83,13 @@ pub enum ActionKind {
     ExecDangerous,
     /// Install an app update (FD-14).
     AppUpdate,
+    /// Add a public key to hosts' `~/.ssh/authorized_keys` (SS-09): it grants a login.
+    SshKeyPush,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 17] = [
+    pub const ALL: [ActionKind; 18] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -104,6 +106,7 @@ impl ActionKind {
         ActionKind::ExecReadOnly,
         ActionKind::ExecOther,
         ActionKind::ExecDangerous,
+        ActionKind::SshKeyPush,
         ActionKind::AppUpdate,
     ];
 
@@ -127,6 +130,7 @@ impl ActionKind {
             ActionKind::ExecOther => "Run any other command",
             ActionKind::ExecDangerous => "Run a dangerous command",
             ActionKind::AppUpdate => "Install an app update",
+            ActionKind::SshKeyPush => "Add an SSH key to hosts",
         }
     }
 }
@@ -408,6 +412,8 @@ impl Default for PolicyRules {
             (ExecOther, TierRule::same(Medium)),
             (ExecDangerous, TierRule::same(High)),
             (AppUpdate, TierRule::same(Medium)),
+            // A key in authorized_keys lets its holder log in: a change like any other command.
+            (SshKeyPush, TierRule::same(Medium)),
         ]);
         Self {
             tiers,
@@ -553,6 +559,7 @@ impl PolicyEngine {
                 }
             }
             Command::AppUpdate { .. } => ActionKind::AppUpdate,
+            Command::PushSshKey { .. } => ActionKind::SshKeyPush,
         }
     }
 
@@ -644,7 +651,10 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
     let can_lose_state = match command {
         Command::VmPower { op, .. } => matches!(op, PowerOp::Stop { .. } | PowerOp::Reset { .. } | PowerOp::Suspend),
         Command::VmSnapshot { op, .. } => matches!(op, SnapshotOp::Revert { .. }),
-        Command::VmProtect { .. } | Command::RemoteExec { .. } | Command::AppUpdate { .. } => false,
+        Command::VmProtect { .. }
+        | Command::RemoteExec { .. }
+        | Command::AppUpdate { .. }
+        | Command::PushSshKey { .. } => false,
     };
     on_vms && can_lose_state
 }
