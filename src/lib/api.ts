@@ -481,6 +481,12 @@ export const api = {
   tagVms: (vmxPaths: string[], tag: string) => invoke<void>("vm_tag", { vmxPaths, tag }),
   untagVms: (vmxPaths: string[], tag: string) => invoke<void>("vm_untag", { vmxPaths, tag }),
   deleteTag: (tag: string) => invoke<void>("tag_delete", { tag }),
+  /**
+   * SS-06 for VMs: a Prod VM moves actions on it up one tier. The app's own data: audited, no approval.
+   * Returns the VMs whose label changed.
+   */
+  setVmEnvironment: (vmxPaths: string[], environment: Environment) =>
+    invoke<VmRecord[]>("vm_set_environment", { vmxPaths, environment }),
   savedFilters: () => invoke<SavedFilter[]>("filters_list"),
   /** Saving under an existing name replaces that filter. */
   saveFilter: (name: string, filter: VmFilter) => invoke<SavedFilter>("filter_save", { name, filter }),

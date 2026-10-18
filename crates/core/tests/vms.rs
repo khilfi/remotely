@@ -1,7 +1,7 @@
 //! Milestone 1 (VMs and power) end to end, with fake adapters: discovery (VM-01), tags, saved filters
 //! and start (VM-02), graceful-then-forced shutdown (VM-03), power calls that fail fast or can be
-//! cancelled instead of hanging (VM-02, VM-03), the power-on limit (VM-06), the capacity check (VM-07)
-//! and protected VMs (AP-04).
+//! cancelled instead of hanging (VM-02, VM-03), the power-on limit (VM-06), the capacity check (VM-07),
+//! protected VMs (AP-04) and environment labels on VMs (SS-06).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -13,7 +13,7 @@ use std::time::Duration;
 use common::{temp_folder, vm, vmx, wait_finished, Setup};
 use remotely_core::adapters::vmware::{ToolsState, VmxInfo};
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, StopMode, SubmitOutcome};
-use remotely_core::domain::{PowerState, Target};
+use remotely_core::domain::{Environment, PowerState, Target};
 use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::inventory::VmFilter;
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
@@ -261,6 +261,161 @@ async fn protecting_a_vm_not_in_the_inventory_fails() {
         panic!("protecting is Low");
     };
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Failed);
+}
+
+// ---- SS-06: environment labels on VMs -----------------------------------------------------------
+
+fn soft_stop(names: &[&str]) -> Command {
+    Command::VmPower {
+        targets: names.iter().map(|n| vm(n)).collect(),
+        op: PowerOp::Stop { mode: StopMode::Soft },
+    }
+}
+
+#[tokio::test]
+async fn a_prod_label_moves_a_shutdown_of_one_vm_from_medium_to_high_and_outlasts_a_refresh() {
+    let core = Setup::new(FakeVmware::with_running([vmx("a"), vmx("b")])).build().await;
+    core.inventory.refresh(&core.ctx).await.unwrap();
+
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft_stop(&["a"])).await.unwrap() else {
+        panic!("stopping one VM is Medium");
+    };
+    assert_eq!(request.tier, Tier::Medium);
+    core.bus.cancel_approval(request.id).await.unwrap();
+
+    // Labelling is the app's own data: no approval, and audited with what changed.
+    let changed = core
+        .inventory
+        .set_environment(&core.ctx, &[vmx("a")], Environment::Prod)
+        .await
+        .unwrap();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].environment, Environment::Prod);
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].event, "vm_label_changed");
+    assert_eq!(audit[0].action, "Changed the label of VM 'a'");
+    assert_eq!(audit[0].detail.as_deref(), Some("label: none -> prod"));
+    assert_eq!(audit[0].tier, None);
+    let targets: Vec<Target> = serde_json::from_str(&audit[0].targets_json).unwrap();
+    assert_eq!(names(&targets), ["a"]);
+    assert_eq!(targets[0].environment, Environment::Prod);
+
+    // A refresh keeps the label.
+    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let by_name = |n: &str| report.vms.iter().find(|v| v.display_name == n).unwrap();
+    assert_eq!(by_name("a").environment, Environment::Prod);
+    assert_eq!(by_name("b").environment, Environment::None);
+    let prod = VmFilter {
+        environments: vec![Environment::Prod],
+        ..Default::default()
+    };
+    let picked = core.inventory.list(&core.ctx, &prod).await.unwrap();
+    assert_eq!(picked.len(), 1);
+    assert_eq!(picked[0].display_name, "a");
+
+    // The same shutdown is now High, and says why.
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft_stop(&["a"])).await.unwrap() else {
+        panic!("stopping a Prod VM is High");
+    };
+    assert_eq!(request.tier, Tier::High);
+    assert!(
+        request
+            .reasons
+            .iter()
+            .any(|r| r == "a target is labelled Prod: medium -> high"),
+        "{:?}",
+        request.reasons
+    );
+    assert!(request.steps.contains(&ApprovalStep::Reason));
+    core.bus.cancel_approval(request.id).await.unwrap();
+
+    // The unlabelled VM is still Medium.
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft_stop(&["b"])).await.unwrap() else {
+        panic!("stopping one VM is Medium");
+    };
+    assert_eq!(request.tier, Tier::Medium);
+    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+}
+
+#[tokio::test]
+async fn labelling_checks_every_vm_first_and_logs_only_real_changes() {
+    let core = Setup::new(FakeVmware::with_running([vmx("a"), vmx("b")])).build().await;
+    core.inventory.refresh(&core.ctx).await.unwrap();
+    let label = |vm: &str| {
+        let core = &core;
+        let vmx = vmx(vm);
+        async move { core.store.find_vm(&core.ctx, &vmx).await.unwrap().unwrap().environment }
+    };
+    let audit_count = || async { core.store.recent_audit(&core.ctx, 100).await.unwrap().len() };
+    let before = audit_count().await;
+
+    assert!(matches!(
+        core.inventory.set_environment(&core.ctx, &[], Environment::Lab).await,
+        Err(CoreError::NoTargets)
+    ));
+    // A VM not in the inventory fails the whole change.
+    let unknown = core
+        .inventory
+        .set_environment(&core.ctx, &[vmx("a"), vmx("nope")], Environment::Lab)
+        .await
+        .unwrap_err();
+    assert!(matches!(unknown, CoreError::UnknownTarget(p) if p == vmx("nope")));
+    assert_eq!(label("a").await, Environment::None);
+    assert_eq!(audit_count().await, before);
+
+    // Path case does not matter, and a VM listed twice changes once.
+    let changed = core
+        .inventory
+        .set_environment(
+            &core.ctx,
+            &[vmx("a"), vmx("a").to_uppercase(), vmx("b")],
+            Environment::Lab,
+        )
+        .await
+        .unwrap();
+    assert_eq!(changed.len(), 2);
+    assert_eq!(audit_count().await, before + 1);
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].action, "Changed the label of 2 VMs");
+    assert_eq!(audit[0].detail.as_deref(), Some("label: none -> lab"));
+
+    // Nothing to change: nothing written.
+    let unchanged = core
+        .inventory
+        .set_environment(&core.ctx, &[vmx("a"), vmx("b")], Environment::Lab)
+        .await
+        .unwrap();
+    assert!(unchanged.is_empty());
+    assert_eq!(audit_count().await, before + 1);
+
+    // Mixed labels before: each VM's change is named. VMs that already have the label are left out.
+    core.inventory
+        .set_environment(&core.ctx, &[vmx("a")], Environment::Prod)
+        .await
+        .unwrap();
+    let changed = core
+        .inventory
+        .set_environment(&core.ctx, &[vmx("a"), vmx("b")], Environment::Prod)
+        .await
+        .unwrap();
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0].display_name, "b");
+    core.inventory
+        .set_environment(&core.ctx, &[vmx("a")], Environment::Staging)
+        .await
+        .unwrap();
+    core.inventory
+        .set_environment(&core.ctx, &[vmx("a"), vmx("b")], Environment::None)
+        .await
+        .unwrap();
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(
+        audit[0].detail.as_deref(),
+        Some("label: staging -> none (a); prod -> none (b)")
+    );
+    assert_eq!(label("a").await, Environment::None);
+    assert_eq!(label("b").await, Environment::None);
+    assert!(core.store.verify_audit_chain().await.unwrap().ok);
 }
 
 // ---- VM-02: tags, saved filters and start -------------------------------------------------------

@@ -10,8 +10,9 @@ The requirements are in [docs/PRD.md](docs/PRD.md); project rules for contributo
 **Status:** MVP milestones 1 (VMs and power), 2 (snapshots and approvals) and 3 (vault and session library). The app
 lists every Workstation VM (the library, chosen folders and running VMs) with its OS, CPU, RAM, IP and VMware Tools
 state; selects by click, shift-click, tag or saved filter; starts, shuts down (then forces off only after a separate
-Critical approval), suspends, pauses and resets them in bulk; checks host capacity before a power-on; and skips protected
-VMs. The snapshot manager shows each VM's snapshot tree with creation times (read from its `.vmsd`), flags snapshots
+Critical approval), suspends, pauses and resets them in bulk; checks host capacity before a power-on; skips protected
+VMs; and labels VMs Lab, Staging or Prod (Prod raises the approval tier). The snapshot manager shows each VM's snapshot
+tree with creation times (read from its `.vmsd`), flags snapshots
 older than 30 days, and takes, reverts and deletes snapshots in bulk; high-risk VM actions take a named safety snapshot
 first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
 and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
@@ -120,7 +121,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                                                        | Stub; the terminal uses a loopback shell                                                                                      |
 | Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                                                      | Host RAM, CPUs and free disk work; per-VM process counters (MO-01) are a stub                                                 |
 | Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                                                    | Works: checks GitHub Releases; install is a Medium-tier job that runs alone; real adapter in `src-tauri/src/updater.rs`       |
-| Inventory         | `crates/core/src/inventory.rs`                      | VM-01, VM-02                                                                                             | Every VM from the library, chosen folders and `vmrun list`; filters                                                           |
+| Inventory         | `crates/core/src/inventory.rs`                      | VM-01, VM-02, SS-06 (VM labels)                                                                          | Every VM from the library, chosen folders and `vmrun list`; filters; audited environment labels                               |
 | Capacity check    | `crates/core/src/capacity.rs`                       | VM-07                                                                                                    | Working: host RAM vs assigned RAM, free disk on VM drives                                                                     |
 | Metrics collector | `crates/core/src/metrics.rs`                        | MO-01, MO-02, MO-03, MO-04                                                                               | Polling loop works; sources are stubs                                                                                         |
 | Vault             | `crates/core/src/vault/`                            | SS-04, AP-06                                                                                             | Working: AES-256-GCM per item; DPAPI and Argon2id key wrapping; 15-minute idle lock; values never leave it except to adapters |

@@ -1,13 +1,15 @@
 // VM list (VM-01) with selection by click, shift-click, tag or saved filter and bulk power actions
-// (VM-02, VM-03), plus protect and unprotect (AP-04). The selection opens in the snapshot manager (VM-04). Listing asks the core to read Workstation's
-// library, the chosen folders and `vmrun list`; every action is a command submitted to the command
-// bus, never a vmrun call.
+// (VM-02, VM-03), plus protect and unprotect (AP-04) and environment labels (SS-06). The selection
+// opens in the snapshot manager (VM-04). Listing asks the core to read Workstation's library, the
+// chosen folders and `vmrun list`; every action is a command submitted to the command bus, never a
+// vmrun call. Tags and labels are the app's own data, so they skip the bus.
 
 import { useEffect, useState, type MouseEvent } from "react";
 import {
   CameraIcon,
   ChevronDownIcon,
   EllipsisIcon,
+  FlagIcon,
   FolderPlusIcon,
   ListChecksIcon,
   MonitorOffIcon,
@@ -29,6 +31,8 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuShortcut,
   DropdownMenuSub,
@@ -40,6 +44,7 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EnvBadge, StateBadge, ToolsLabel } from "@/components/Badges";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
 import {
@@ -47,6 +52,7 @@ import {
   errorCode,
   errorMessage,
   type Command,
+  type Environment,
   type InventoryWarning,
   type PowerOp,
   type PowerState,
@@ -86,8 +92,21 @@ const MORE: Action[] = [
   { label: "Restart", op: { kind: "reset", mode: "soft" }, appliesTo: ON },
 ];
 
+/** SS-06 labels, in the order the Label menu lists them. */
+const LABELS: { value: Environment; label: string }[] = [
+  { value: "none", label: "None" },
+  { value: "lab", label: "Lab" },
+  { value: "staging", label: "Staging" },
+  { value: "prod", label: "Prod" },
+];
+
 type LoadError = { code?: string; message: string };
-type Dialog = { kind: "addTag" } | { kind: "saveFilter" } | null;
+type Dialog =
+  | { kind: "addTag" }
+  | { kind: "saveFilter" }
+  /** Taking the Prod label off VMs lowers the tier of later actions on them, so it asks first. */
+  | { kind: "lowerProd"; vmxPaths: string[]; environment: Environment; prodNames: string[] }
+  | null;
 
 function formatRam(mb: number | null) {
   if (!mb) return "—";
@@ -96,6 +115,20 @@ function formatRam(mb: number | null) {
 
 function plural(n: number, word: string) {
   return `${n} ${word}${n === 1 ? "" : "s"}`;
+}
+
+function labelName(env: Environment) {
+  return LABELS.find((l) => l.value === env)?.label ?? env;
+}
+
+/** What the confirm says before Prod VMs lose the label. */
+function lowerProdText(prodNames: string[], environment: Environment) {
+  const shown = prodNames.slice(0, 5).join(", ") + (prodNames.length > 5 ? ", …" : "");
+  const who = prodNames.length === 1 ? prodNames[0] : `${prodNames.length} VMs (${shown})`;
+  const change =
+    environment === "none" ? "will lose the Prod label" : `will be labelled ${labelName(environment)} instead of Prod`;
+  const them = prodNames.length === 1 ? "it" : "them";
+  return `${who} ${change}. Actions on ${them} will no longer move up one approval tier, so they need fewer approval steps. The change is logged.`;
 }
 
 export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshKey }: Props) {
@@ -236,6 +269,24 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
     }
   }
 
+  async function applyLabel(vmxPaths: string[], environment: Environment) {
+    await api.setVmEnvironment(vmxPaths, environment);
+    setListVersion((v) => v + 1);
+  }
+
+  /** SS-06: labels the selected VMs. Taking Prod off any of them asks first. */
+  function chooseLabel(environment: Environment) {
+    const vmxPaths = selectedVms.map((v) => v.vmxPath);
+    const prodNames = selectedVms
+      .filter((v) => v.environment === "prod" && environment !== "prod")
+      .map((v) => v.displayName);
+    if (prodNames.length > 0) {
+      setDialog({ kind: "lowerProd", vmxPaths, environment, prodNames });
+      return;
+    }
+    applyLabel(vmxPaths, environment).catch((err: unknown) => toast.error(errorMessage(err)));
+  }
+
   async function deleteSaved(saved: SavedFilter) {
     try {
       await api.deleteFilter(saved.id);
@@ -251,6 +302,9 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
   const powerOff = power(POWER_OFF);
   const toProtect = selectedVms.filter((v) => !v.protected);
   const toUnprotect = selectedVms.filter((v) => v.protected);
+  const selectedLabels = new Set(selectedVms.map((v) => v.environment));
+  // Ticked in the Label menu when every selected VM has it.
+  const sharedLabel = selectedLabels.size === 1 ? [...selectedLabels][0] : "";
   const missingWorkstation = warnings.some((w) => w.code === "vmrun_not_found");
   const filtered = !isEmptyFilter(filter);
 
@@ -411,6 +465,26 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
                     {t}
                   </DropdownMenuItem>
                 ))}
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSeparator />
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <FlagIcon />
+                Label
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-44">
+                <DropdownMenuRadioGroup value={sharedLabel} onValueChange={(v) => chooseLabel(v as Environment)}>
+                  {LABELS.map((l) => {
+                    const changes = selectedVms.filter((v) => v.environment !== l.value).length;
+                    return (
+                      <DropdownMenuRadioItem key={l.value} value={l.value}>
+                        {l.label}
+                        <DropdownMenuShortcut>{changes || ""}</DropdownMenuShortcut>
+                      </DropdownMenuRadioItem>
+                    );
+                  })}
+                </DropdownMenuRadioGroup>
               </DropdownMenuSubContent>
             </DropdownMenuSub>
             <DropdownMenuSeparator />
@@ -596,6 +670,15 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
             await api.saveFilter(name, filter);
             setListVersion((v) => v + 1);
           }}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "lowerProd" && (
+        <ConfirmDialog
+          title="Remove the Prod label?"
+          description={lowerProdText(dialog.prodNames, dialog.environment)}
+          confirmLabel={dialog.environment === "none" ? "Remove label" : `Label ${labelName(dialog.environment)}`}
+          onConfirm={() => applyLabel(dialog.vmxPaths, dialog.environment)}
           onClose={() => setDialog(null)}
         />
       )}

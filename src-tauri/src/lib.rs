@@ -101,6 +101,7 @@ pub fn run() {
             ipc::tags_list,
             ipc::vm_tag,
             ipc::vm_untag,
+            ipc::vm_set_environment,
             ipc::tag_delete,
             ipc::filters_list,
             ipc::filter_save,
