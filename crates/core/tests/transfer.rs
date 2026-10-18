@@ -8,7 +8,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use common::{temp_folder, Setup, VAULT_PASSWORD};
+use common::{temp_folder, vmx, Setup, VAULT_PASSWORD};
 use remotely_core::domain::Environment;
 use remotely_core::fakes::FakeVmware;
 use remotely_core::known_hosts::HostKey;
@@ -19,13 +19,18 @@ use remotely_core::transfer::{
     ExportRequest, ItemAction, ItemChoice, ItemStatus, TransferCommit, TransferPreview, TransferReport,
 };
 use remotely_core::vault::{SecretKind, SecretString};
+use remotely_core::vm_links::VmLink;
 use remotely_core::Core;
 use uuid::Uuid;
 
 const PASSPHRASE: &str = "tulip anvil orbit";
 
 async fn laptop() -> Core {
-    let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    laptop_with(FakeVmware::default()).await
+}
+
+async fn laptop_with(vmware: FakeVmware) -> Core {
+    let core = Setup::new(vmware).with_real_vault().build().await;
     core.transfer.use_insecure_fast_kdf();
     core
 }
@@ -805,6 +810,40 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     let web_key = hosts.iter().find(|h| h.host == "web01.example.com").unwrap();
     assert_eq!(web_key.fingerprint, "SHA256:webwebwebwebweb");
     assert!(audit(&b).await.iter().any(|e| e.event == "host_key_retrusted"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_vm_link_comes_along_when_the_same_vm_is_here() {
+    // QL-01: a session reaches a VM by its .vmx path; another laptop with that VM links it again.
+    let dir = temp_folder("transfer");
+    let with_vm = || FakeVmware::default().in_library(&vmx("build"), Some("build"));
+    let a = laptop_with(with_vm()).await;
+    a.inventory.refresh(&a.ctx).await.unwrap();
+    let vm_a = a.store.find_vm(&a.ctx, &vmx("build")).await.unwrap().unwrap();
+    let mut linked = input("build01", "build01.example.com");
+    linked.vm_id = Some(vm_a.id.clone());
+    a.sessions.create(&a.ctx, linked).await.unwrap();
+    let path = export(&a, &dir, false).await;
+
+    let b = laptop_with(with_vm()).await;
+    b.inventory.refresh(&b.ctx).await.unwrap();
+    let vm_b = b.store.find_vm(&b.ctx, &vmx("build")).await.unwrap().unwrap();
+    let preview = open(&b, &path).await;
+    commit(&b, &preview, &[]).await;
+    let build = by_name(&b, "build01").await;
+    assert_eq!(build.vm_id.as_deref(), Some(vm_b.id.as_str()));
+    assert_eq!(
+        build.vm_link,
+        Some(VmLink::Manual),
+        "chosen by hand on the first laptop"
+    );
+
+    let c = laptop().await;
+    let preview = open(&c, &path).await;
+    commit(&c, &preview, &[]).await;
+    let build = by_name(&c, "build01").await;
+    assert_eq!((build.vm_id, build.vm_link), (None, None), "no such VM here");
     let _ = std::fs::remove_dir_all(dir);
 }
 

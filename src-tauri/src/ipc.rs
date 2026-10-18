@@ -16,7 +16,7 @@ use remotely_core::domain::Environment;
 use remotely_core::import::{self, ImportPreview, ImportReport, ImportRequest, ImportSource};
 use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::jobs::JobLimits;
-use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource};
+use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHostUsage};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
@@ -25,6 +25,7 @@ use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, 
 use remotely_core::transfer::{self, ExportReport, ExportRequest, TransferCommit, TransferPreview, TransferReport};
 use remotely_core::updates::{UpdateCheck, UpdateTokenInfo};
 use remotely_core::vault::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, VaultInfo, MAX_SECRET_BYTES};
+use remotely_core::vm_links::AmbiguousLink;
 use remotely_core::{AuditExport, Core, CoreError};
 use serde::Serialize;
 use tauri::{Manager, State, WebviewWindow};
@@ -633,6 +634,31 @@ pub async fn session_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<(
     Ok(core.sessions.delete(&core.ctx, id).await?)
 }
 
+/// QL-01: links the session to a VM by hand, or removes its link with `vm_id: None`. Auto-linking
+/// never changes it afterwards. The app's own data: audited, no approval.
+#[tauri::command]
+pub async fn session_link_vm(
+    state: State<'_, AppState>,
+    session_id: Uuid,
+    vm_id: Option<String>,
+) -> IpcResult<SessionRecord> {
+    let core = &state.core;
+    Ok(core.links.link(&core.ctx, session_id, vm_id).await?)
+}
+
+/// QL-01: keeps an automatic link, so auto-linking never changes it. Audited.
+#[tauri::command]
+pub async fn session_confirm_vm_link(state: State<'_, AppState>, session_id: Uuid) -> IpcResult<SessionRecord> {
+    let core = &state.core;
+    Ok(core.links.confirm(&core.ctx, session_id).await?)
+}
+
+/// QL-01: sessions whose address several VMs have, which auto-linking leaves for the user to pick.
+#[tauri::command]
+pub fn vm_links_ambiguous(state: State<'_, AppState>) -> Vec<AmbiguousLink> {
+    state.core.links.ambiguous()
+}
+
 /// `folder_id: None` moves them to the top level.
 #[tauri::command]
 pub async fn sessions_move(state: State<'_, AppState>, ids: Vec<Uuid>, folder_id: Option<Uuid>) -> IpcResult<()> {
@@ -1028,6 +1054,13 @@ pub async fn metrics_overview(state: State<'_, AppState>) -> IpcResult<Dashboard
 #[tauri::command]
 pub fn metrics_series(state: State<'_, AppState>, source: MetricSource, key: String) -> Vec<MetricPoint> {
     state.core.metrics.hub().series(source, &key)
+}
+
+/// MO-01: each running VM's share of this host's CPU and RAM, for the VM list. Read from the
+/// collector's latest round in memory: no extra polling.
+#[tauri::command]
+pub fn metrics_host_usage(state: State<'_, AppState>) -> Vec<VmHostUsage> {
+    state.core.metrics.hub().host_usage()
 }
 
 /// MO-04: assigned vs physical RAM and CPUs, and free space on each drive holding a VM folder.

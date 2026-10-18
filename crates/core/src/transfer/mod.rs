@@ -43,6 +43,7 @@ use crate::vault::{
     check_master_password, KdfParams, SecretId, SecretKind, SecretMeta, SecretString, VaultService, VaultStatus,
     MAX_LABEL_LEN,
 };
+use crate::vm_links::VmLink;
 
 pub use file::{FORMAT, FORMAT_VERSION, MAX_FILE_BYTES};
 
@@ -125,6 +126,9 @@ struct SessionEntry {
 struct VmHint {
     vmx_path: String,
     name: String,
+    /// QL-01: auto-linking made the link (and keeps it up to date); otherwise the user chose it.
+    #[serde(default)]
+    auto: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -858,6 +862,7 @@ impl Transfer {
                 Some(id) => self.store.vm_by_id(ctx, id).await?.map(|vm| VmHint {
                     vmx_path: vm.vmx_path,
                     name: vm.display_name,
+                    auto: s.vm_link == Some(VmLink::Auto),
                 }),
                 None => None,
             };
@@ -1229,6 +1234,10 @@ impl Transfer {
             let (mut input, missing) = self
                 .session_input(ctx, entry, &folder_map, &secret_map, &session_map, &local)
                 .await?;
+            let link = match &entry.vm {
+                Some(vm) if vm.auto => VmLink::Auto,
+                _ => VmLink::Manual,
+            };
             let result = match (action, here) {
                 (ItemAction::Replace, Some(here)) => {
                     // A credential that did not come along doesn't wipe a working one here.
@@ -1243,7 +1252,7 @@ impl Transfer {
                         input.name = free_name(&input.name, &taken_names, crate::sessions::MAX_SESSION_NAME);
                     }
                     library
-                        .restore(ctx, Uuid::new_v4(), input, imported_from(entry), SOURCE)
+                        .restore(ctx, Uuid::new_v4(), input, imported_from(entry), link, SOURCE)
                         .await
                 }
                 _ => {
@@ -1252,7 +1261,9 @@ impl Transfer {
                     } else {
                         entry.id
                     };
-                    library.restore(ctx, id, input, imported_from(entry), SOURCE).await
+                    library
+                        .restore(ctx, id, input, imported_from(entry), link, SOURCE)
+                        .await
                 }
             };
             match result {
@@ -1324,6 +1335,12 @@ impl Transfer {
         }
         self.audit(ctx, "data_imported", "Imported a Remotely export", &detail)
             .await?;
+        // QL-01: new sessions are linked to the VMs they reach here, in one pass for the whole import.
+        if report.sessions.added + report.sessions.kept_both > 0 {
+            if let Err(err) = library.auto_link(ctx).await {
+                tracing::warn!(error = %err, "could not link imported sessions to VMs automatically");
+            }
+        }
         Ok(report)
     }
 

@@ -1,9 +1,10 @@
 // MO-03, MO-04: a meter whose fill carries the threshold level, and the icon that goes with a level so
 // colour never carries it alone. shadcn's Progress has one fixed colour, hence this small component.
+// MetricCell puts both in a table cell (the dashboard grid, and the VM list's host shares, MO-01).
 
 import { OctagonAlertIcon, TriangleAlertIcon } from "lucide-react";
 import type { Level } from "@/lib/metrics";
-import { LEVEL_LABEL } from "@/lib/metrics";
+import { LEVEL_LABEL, level as levelOf } from "@/lib/metrics";
 import { cn } from "@/lib/utils";
 
 const FILL: Record<Level, string> = {
@@ -50,5 +51,36 @@ export function LevelIcon({ level, className }: { level: Level; className?: stri
       aria-label={LEVEL_LABEL[level]}
       className={cn("size-3.5 shrink-0", level === "critical" ? "text-tier-critical" : "text-tier-medium", className)}
     />
+  );
+}
+
+/** A reading with its level icon and meter; a dash when there is none. */
+export function MetricCell({
+  value,
+  text,
+  pct,
+  limits,
+  label,
+  title,
+}: {
+  value: number | null;
+  text: string;
+  /** Where the meter and the thresholds apply, 0 to 100. */
+  pct: number | null;
+  limits: [number, number];
+  /** What it measures, for screen readers. */
+  label: string;
+  title?: string;
+}) {
+  const lvl = levelOf(pct, limits);
+  if (value === null) return <span className="text-muted-foreground">—</span>;
+  return (
+    <div className="space-y-1" title={title}>
+      <div className="flex items-center gap-1 tabular-nums">
+        <LevelIcon level={lvl} />
+        <span>{text}</span>
+      </div>
+      <Meter pct={pct} level={lvl} label={label} />
+    </div>
   );
 }

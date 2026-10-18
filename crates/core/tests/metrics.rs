@@ -101,8 +101,24 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
     assert_eq!(host.cpu_pct, Some(50.0), "share of its own 2 vCPUs");
     assert_eq!(host.mem_bytes, Some(GB));
     assert_eq!(host.mem_total_bytes, Some(4 * GB));
+    assert_eq!(host.host_mem_pct, Some(3.125), "1 GB working set of the 32 GB host");
     assert_eq!(host.disk_read_bps, Some(1_000_000.0));
     assert_eq!(host.disk_write_bps, Some(2_000_000.0));
+    // MO-01 for the VM list: each running VM's share of the host, from the same round.
+    let usage = core.metrics.hub().host_usage();
+    let shares: Vec<(&str, Option<f64>, Option<f64>)> = usage
+        .iter()
+        .map(|u| (u.vmx_path.as_str(), u.host_cpu_pct, u.host_mem_pct))
+        .collect();
+    assert_eq!(
+        shares,
+        [
+            (vmx("db").as_str(), None, Some(3.125)),
+            (vmx("web").as_str(), Some(6.25), Some(3.125)),
+            (r"E:\Other\tmp\tmp.vmx", Some(1.0), Some(3.125)),
+        ],
+        "by path; a first reading has no CPU rate yet; 'off' is not running"
+    );
     let tmp = overview.rows.iter().find(|r| r.name == "tmp").unwrap();
     assert_eq!(tmp.power_state, Some(PowerState::Running));
     assert_eq!(tmp.host.as_ref().unwrap().cpu_pct, None, "vCPUs unknown");

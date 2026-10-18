@@ -9,8 +9,13 @@
 //!
 //! The environment label (SS-06) is what the policy engine reads for a session target: Prod raises
 //! the approval tier by one (see `inventory::StoreDirectory`).
+//!
+//! The VM a session reaches (BX-01) is chosen in the editor or linked automatically by IP address
+//! (QL-01, [`crate::vm_links`]): a new session, or one whose host changed, is linked right after it
+//! is saved.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,6 +25,7 @@ use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
+use crate::vm_links::{AutoLinkReport, VmLink, VmLinks};
 
 /// Colour of a session's tab and list entry (SS-01). Named, so each theme can draw it legibly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -180,8 +186,10 @@ pub struct SessionRecord {
     pub protected: bool,
     /// Tag names, sorted.
     pub tags: Vec<String>,
-    /// BX-01: the VM this session reaches, if one was chosen.
+    /// BX-01: the VM this session reaches, if one was chosen or linked.
     pub vm_id: Option<String>,
+    /// QL-01: how `vm_id` was set. `None`: no decision yet, so auto-linking may link it.
+    pub vm_link: Option<VmLink>,
     /// SS-02: where it was imported from, if it was.
     pub imported_from: Option<String>,
     pub created_at: String,
@@ -420,11 +428,25 @@ pub(crate) async fn credentials(
 
 pub struct SessionLibrary {
     store: Store,
+    links: Arc<VmLinks>,
 }
 
 impl SessionLibrary {
-    pub fn new(store: Store) -> Self {
-        Self { store }
+    pub fn new(store: Store, links: Arc<VmLinks>) -> Self {
+        Self { store, links }
+    }
+
+    /// QL-01: links every session it can to the VM whose guest IP it reaches. The importer calls it
+    /// once after saving a batch.
+    pub async fn auto_link(&self, ctx: &Context) -> Result<AutoLinkReport> {
+        self.links.auto_link(ctx).await
+    }
+
+    /// Auto-linking one session after a save. A failure is logged; the save itself stands.
+    async fn auto_link_quietly(&self, ctx: &Context, id: Uuid) {
+        if let Err(err) = self.links.auto_link_session(ctx, id).await {
+            tracing::warn!(error = %err, "could not link a session to a VM automatically");
+        }
     }
 
     /// The sessions that match `filter`, by name.
@@ -454,10 +476,15 @@ impl SessionLibrary {
         self.store.list_session_folders(ctx).await
     }
 
+    /// Saves a new session. Without a VM chosen, it is linked automatically when its host is a VM's
+    /// IP address (QL-01).
     pub async fn create(&self, ctx: &Context, input: SessionInput) -> Result<SessionRecord> {
         let input = self.check(ctx, None, input).await?;
         let id = Uuid::new_v4();
         self.store.insert_session(ctx, id, &input, None).await?;
+        if input.vm_id.is_some() {
+            self.store.set_vm_link_kind(ctx, id, Some(VmLink::Manual)).await?;
+        }
         let session = self.get(ctx, id).await?;
         let detail = self.describe(ctx, &session).await?;
         self.audit(
@@ -467,7 +494,10 @@ impl SessionLibrary {
             Some(&detail),
         )
         .await?;
-        Ok(session)
+        if input.vm_id.is_none() {
+            self.auto_link_quietly(ctx, id).await;
+        }
+        self.get(ctx, id).await
     }
 
     /// SS-02: saves an imported session, checked like an edit, with where it came from.
@@ -483,6 +513,9 @@ impl SessionLibrary {
         let input = self.check(ctx, None, input).await?;
         let id = Uuid::new_v4();
         self.store.insert_session(ctx, id, &input, Some(imported_from)).await?;
+        if input.vm_id.is_some() {
+            self.store.set_vm_link_kind(ctx, id, Some(VmLink::Manual)).await?;
+        }
         let session = self.get(ctx, id).await?;
         let detail = self.describe(ctx, &session).await?;
         self.audit(
@@ -497,17 +530,22 @@ impl SessionLibrary {
 
     /// FD-07: saves a session from a Remotely export under `id` (the one it had on the other laptop,
     /// when that is free here, so a later import finds it again), checked like an edit and audited
-    /// like an SS-02 import. `imported_from` keeps where it first came from, if anywhere.
+    /// like an SS-02 import. `imported_from` keeps where it first came from, if anywhere; `link` is how
+    /// its VM link was made there (QL-01), for a session that reaches a VM here too.
     pub(crate) async fn restore(
         &self,
         ctx: &Context,
         id: Uuid,
         input: SessionInput,
         imported_from: Option<&str>,
+        link: VmLink,
         source: &str,
     ) -> Result<SessionRecord> {
         let input = self.check(ctx, None, input).await?;
         self.store.insert_session(ctx, id, &input, imported_from).await?;
+        if input.vm_id.is_some() {
+            self.store.set_vm_link_kind(ctx, id, Some(link)).await?;
+        }
         let session = self.get(ctx, id).await?;
         let detail = self.describe(ctx, &session).await?;
         self.audit(
@@ -521,14 +559,31 @@ impl SessionLibrary {
     }
 
     /// Saves an edit. Audited with what changed; an edit that changes nothing writes nothing.
+    ///
+    /// QL-01: a VM chosen (or removed) in the editor is the user's choice, which auto-linking never
+    /// changes. A new host makes an automatic link, or the removal of one, out of date: the session
+    /// is linked again by its new address.
     pub async fn update(&self, ctx: &Context, id: Uuid, input: SessionInput) -> Result<SessionRecord> {
         let before = self.get(ctx, id).await?;
-        let input = self.check(ctx, Some(id), input).await?;
+        let mut input = self.check(ctx, Some(id), input).await?;
         if input == before.input() {
             return Ok(before);
         }
+        let host_changed = !input.host.eq_ignore_ascii_case(&before.host);
+        let decided_without_vm = before.vm_link == Some(VmLink::Manual) && before.vm_id.is_none();
+        let link = if input.vm_id != before.vm_id {
+            Some(VmLink::Manual)
+        } else if host_changed && (before.vm_link == Some(VmLink::Auto) || decided_without_vm) {
+            input.vm_id = None;
+            None
+        } else {
+            before.vm_link
+        };
         if !self.store.update_session(ctx, id, &input).await? {
             return Err(CoreError::UnknownTarget(format!("session {id}")));
+        }
+        if link != before.vm_link {
+            self.store.set_vm_link_kind(ctx, id, link).await?;
         }
         let after = self.get(ctx, id).await?;
         let changes = self.changes(ctx, &before, &after).await?;
@@ -539,6 +594,10 @@ impl SessionLibrary {
             Some(&changes.join("; ")),
         )
         .await?;
+        if host_changed && link != Some(VmLink::Manual) {
+            self.auto_link_quietly(ctx, id).await;
+            return self.get(ctx, id).await;
+        }
         Ok(after)
     }
 
@@ -546,6 +605,10 @@ impl SessionLibrary {
     pub async fn duplicate(&self, ctx: &Context, id: Uuid) -> Result<SessionRecord> {
         let original = self.get(ctx, id).await?;
         let mut input = original.input();
+        // An automatic link is made again for the copy, so it stays automatic.
+        if original.vm_link == Some(VmLink::Auto) {
+            input.vm_id = None;
+        }
         let suffix = " (copy)";
         let keep = MAX_SESSION_NAME - suffix.len();
         input.name = format!("{}{suffix}", original.name.chars().take(keep).collect::<String>());
@@ -1016,6 +1079,7 @@ mod tests {
             protected: false,
             tags: vec![],
             vm_id: None,
+            vm_link: None,
             imported_from: None,
             created_at: String::new(),
             updated_at: String::new(),

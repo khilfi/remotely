@@ -456,6 +456,7 @@ async fn read_once(
         ts: now_rfc3339(),
         cpu_pct: rates.cpu_pct,
         host_cpu_pct: None,
+        host_mem_pct: None,
         mem_bytes: reading.mem_used_bytes(),
         mem_total_bytes: reading.mem_total_bytes,
         disk_read_bps: rates.disk_read_bps,

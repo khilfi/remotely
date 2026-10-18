@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, SnapshotOp, StopMode, SubmitOutcome};
 use remotely_core::domain::TargetRef;
-use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
+use remotely_core::fakes::{
+    FakeHostCounters, FakeKeyProtector, FakeRemote, FakeResolver, FakeUpdater, FakeVault, FakeVmware,
+};
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::{PolicyRules, Tier};
 use remotely_core::store::Store;
@@ -59,6 +61,7 @@ async fn core_with(
         vault,
         host_counters: Arc::new(FakeHostCounters::default()),
         updater,
+        resolver: Arc::new(FakeResolver::default()),
     };
     Core::assemble(store, ctx, adapters, JobLimits::default())
         .await

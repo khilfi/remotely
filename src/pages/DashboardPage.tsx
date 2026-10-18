@@ -1,13 +1,12 @@
 // MO-03 dashboard: the host capacity panel (MO-04), then a grid of running VMs and watched hosts with
-// host-side metrics (MO-01, no login) and Linux guest metrics over SSH (MO-02), sorting, filters and
-// colour thresholds, and a drill-down with live charts. Everything here is a read: it goes straight
+// host-side metrics (MO-01, no login, including each VM's share of this host's CPU and RAM) and Linux
+// guest metrics over SSH (MO-02), sorting, filters and colour thresholds, and a drill-down with live
+// charts. Everything here is a read: it goes straight
 // to the core's metrics collector, never through the command bus. Actions open the command palette,
 // which submits to the bus like every other page.
 
 import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import {
-  ArrowDownIcon,
-  ArrowUpIcon,
   CheckIcon,
   EllipsisIcon,
   EyeIcon,
@@ -44,8 +43,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { EnvBadge, StateBadge } from "@/components/Badges";
 import { CapacityPanel } from "@/components/CapacityPanel";
 import { GuestStatusBadge } from "@/components/GuestStatusBadge";
-import { LevelIcon, Meter } from "@/components/MetricBits";
+import { MetricCell } from "@/components/MetricBits";
 import { MetricsDetail } from "@/components/MetricsDetail";
+import { SortableHead } from "@/components/SortableHead";
+import { AutoBadge } from "@/components/VmLinkControls";
 import {
   api,
   errorMessage,
@@ -58,14 +59,17 @@ import {
 } from "@/lib/api";
 import { plural } from "@/lib/format";
 import {
+  compareNullsLast as compare,
   DEFAULT_THRESHOLDS,
   formatBytes,
   formatPct,
   formatRate,
-  level,
+  HOST_SHARE_HINT,
   rowCpu,
   rowDiskIo,
   rowDiskUsed,
+  rowHostCpu,
+  rowHostMem,
   rowLevel,
   rowMemory,
   rowNetwork,
@@ -88,14 +92,17 @@ interface Props {
   onOpenSessions: () => void;
 }
 
-type SortKey = "name" | "state" | "cpu" | "memory" | "diskIo" | "network" | "load" | "diskUsed" | "guest";
+type SortKey =
+  "name" | "state" | "cpu" | "memory" | "hostCpu" | "hostMem" | "diskIo" | "network" | "load" | "diskUsed" | "guest";
 type Kind = "all" | "vm" | "session";
 
-const COLUMNS: { key: SortKey; label: string; className?: string }[] = [
+const COLUMNS: { key: SortKey; label: string; className?: string; hint?: string }[] = [
   { key: "name", label: "Name" },
   { key: "state", label: "State" },
   { key: "cpu", label: "CPU", className: "w-32" },
   { key: "memory", label: "Memory", className: "w-40" },
+  { key: "hostCpu", label: "% of host CPU", className: "w-28", hint: HOST_SHARE_HINT.cpu },
+  { key: "hostMem", label: "% of host RAM", className: "w-28", hint: HOST_SHARE_HINT.memory },
   { key: "diskIo", label: "Disk I/O" },
   { key: "network", label: "Network" },
   { key: "load", label: "Load" },
@@ -125,6 +132,10 @@ function sortValue(row: DashboardRow, key: SortKey): number | string | null {
       return rowCpu(row).value;
     case "memory":
       return rowMemory(row).pct;
+    case "hostCpu":
+      return rowHostCpu(row);
+    case "hostMem":
+      return rowHostMem(row);
     case "diskIo": {
       const io = rowDiskIo(row);
       return sum(io.a, io.b);
@@ -140,13 +151,6 @@ function sortValue(row: DashboardRow, key: SortKey): number | string | null {
     case "guest":
       return row.guestStatus?.state ?? "";
   }
-}
-
-/** Empty values last whatever the direction. */
-function compare(a: number | string | null, b: number | string | null, dir: 1 | -1) {
-  if (a === null || a === "") return b === null || b === "" ? 0 : 1;
-  if (b === null || b === "") return -1;
-  return (a < b ? -1 : a > b ? 1 : 0) * dir;
 }
 
 function CostLine({ cost }: { cost: CollectorCost | null }) {
@@ -271,34 +275,6 @@ function WatchPicker({ watched, onWatch }: { watched: Set<string>; onWatch: (id:
         </p>
       </PopoverContent>
     </Popover>
-  );
-}
-
-function MetricCell({
-  value,
-  text,
-  pct,
-  limits,
-  label,
-  title,
-}: {
-  value: number | null;
-  text: string;
-  pct: number | null;
-  limits: [number, number];
-  label: string;
-  title?: string;
-}) {
-  const lvl = level(pct, limits);
-  if (value === null) return <span className="text-muted-foreground">—</span>;
-  return (
-    <div className="space-y-1" title={title}>
-      <div className="flex items-center gap-1 tabular-nums">
-        <LevelIcon level={lvl} />
-        <span>{text}</span>
-      </div>
-      <Meter pct={pct} level={lvl} label={label} />
-    </div>
   );
 }
 
@@ -502,21 +478,15 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
             <TableHeader>
               <TableRow>
                 {COLUMNS.map((c) => (
-                  <TableHead
+                  <SortableHead
                     key={c.key}
+                    label={c.label}
+                    hint={c.hint}
                     className={c.className}
-                    aria-sort={sort.key === c.key ? (sort.dir === 1 ? "ascending" : "descending") : undefined}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => sortBy(c.key)}
-                      className="-mx-1 inline-flex items-center gap-1 rounded px-1 font-medium hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                    >
-                      {c.label}
-                      {sort.key === c.key &&
-                        (sort.dir === 1 ? <ArrowUpIcon className="size-3" /> : <ArrowDownIcon className="size-3" />)}
-                    </button>
-                  </TableHead>
+                    active={sort.key === c.key}
+                    dir={sort.dir}
+                    onSort={() => sortBy(c.key)}
+                  />
                 ))}
                 <TableHead className="w-10">
                   <span className="sr-only">Actions</span>
@@ -527,6 +497,8 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
               {shown.map((row) => {
                 const cpu = rowCpu(row);
                 const memory = rowMemory(row);
+                const hostCpu = rowHostCpu(row);
+                const hostMem = rowHostMem(row);
                 const io = rowDiskIo(row);
                 const net = rowNetwork(row);
                 const used = rowDiskUsed(row);
@@ -586,6 +558,24 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
                         limits={thresholds.memory}
                         label={`Memory of ${row.name}`}
                         title={memory.source ? SOURCE_LABEL[memory.source] : undefined}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <MetricCell
+                        value={hostCpu}
+                        text={formatPct(hostCpu)}
+                        pct={hostCpu}
+                        limits={thresholds.cpu}
+                        label={`${row.name}'s share of this host's CPU`}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <MetricCell
+                        value={hostMem}
+                        text={formatPct(hostMem)}
+                        pct={hostMem}
+                        limits={thresholds.memory}
+                        label={`${row.name}'s share of this host's RAM`}
                       />
                     </TableCell>
                     <TableCell title={io.source ? SOURCE_LABEL[io.source] : undefined}>
@@ -657,6 +647,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
                             row.sessions.map((s) => (
                               <DropdownMenuItem key={s.id} onSelect={() => void watch(s.id, true)}>
                                 <EyeIcon /> Watch guest via {s.name}
+                                {s.auto && <AutoBadge />}
                               </DropdownMenuItem>
                             ))
                           ) : (

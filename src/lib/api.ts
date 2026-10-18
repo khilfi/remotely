@@ -51,6 +51,32 @@ export interface InventoryWarning {
 export interface RefreshReport {
   vms: VmRecord[];
   warnings: InventoryWarning[];
+  /** QL-01: sessions linked to VMs (or unlinked) by IP address after this refresh. */
+  links: AutoLinkReport;
+}
+
+/** QL-01: how a session's VM link was made. auto: by IP address, not confirmed; manual: the user's choice. */
+export type VmLink = "auto" | "manual";
+
+/** QL-01: a link auto-linking made, moved or removed. */
+export interface LinkChange {
+  sessionId: string;
+  sessionName: string;
+  vmId: string;
+  vmName: string;
+}
+
+/** QL-01: a session whose address several VMs have; the user picks one. */
+export interface AmbiguousLink {
+  sessionId: string;
+  /** The matching VMs' ids, by name. */
+  vmIds: string[];
+}
+
+export interface AutoLinkReport {
+  linked: LinkChange[];
+  unlinked: LinkChange[];
+  ambiguous: AmbiguousLink[];
 }
 
 /**
@@ -478,6 +504,8 @@ export interface SessionRecord extends SessionInput {
   protocol: string;
   /** AP-04: bulk actions skip it. */
   protected: boolean;
+  /** QL-01: how vmId was set. null: no decision yet, so auto-linking may link it. */
+  vmLink: VmLink | null;
   importedFrom: string | null;
   createdAt: string;
   updatedAt: string;
@@ -879,6 +907,8 @@ export interface MetricSample {
   cpuPct: number | null;
   /** Host side: the VM process's share of this whole host's CPU, as Task Manager shows it. */
   hostCpuPct: number | null;
+  /** Host side: the VM process's working set as a share of this host's physical RAM. */
+  hostMemPct: number | null;
   /** Host side: the VM process's working set. Guest side: memory in use. */
   memBytes: number | null;
   /** Host side: RAM assigned to the VM. Guest side: the guest's total memory. */
@@ -892,6 +922,16 @@ export interface MetricSample {
   load15: number | null;
   uptimeSecs: number | null;
   mounts: MountUsage[];
+}
+
+/** MO-01: one running VM's share of this host, for the VM list. */
+export interface VmHostUsage {
+  vmxPath: string;
+  hostCpuPct: number | null;
+  hostMemPct: number | null;
+  /** The VM process's working set. */
+  memBytes: number | null;
+  ts: string;
 }
 
 /** MO-03 drill-down: one point of a chart. In memory only (history in SQLite is MO-06, v2). */
@@ -939,6 +979,8 @@ export interface CollectorCost {
 export interface LinkedSession {
   id: string;
   name: string;
+  /** QL-01: linked automatically by IP address and not confirmed yet. */
+  auto: boolean;
 }
 
 /** MO-03: a VM (host-side metrics, plus a watched linked session's guest metrics) or a watched host. */
@@ -1137,6 +1179,8 @@ export const api = {
   metricsOverview: () => invoke<DashboardOverview>("metrics_overview"),
   metricsSeries: (source: MetricSource, key: string) => invoke<MetricPoint[]>("metrics_series", { source, key }),
   metricsCapacity: () => invoke<HostCapacity>("metrics_capacity"),
+  /** MO-01: each running VM's share of this host's CPU and RAM, from the latest round (no extra polling). */
+  metricsHostUsage: () => invoke<VmHostUsage[]>("metrics_host_usage"),
   /** MO-02: watching a session logs in to it over SSH every round. Audited; returns the watched ids. */
   metricsWatch: (sessionId: string, watch: boolean) => invoke<string[]>("metrics_watch", { sessionId, watch }),
   onMetricsRound: (handler: (cost: CollectorCost) => void): Promise<UnlistenFn> =>
@@ -1172,6 +1216,13 @@ export const api = {
   updateSession: (id: string, input: SessionInput) => invoke<SessionRecord>("session_update", { id, input }),
   duplicateSession: (id: string) => invoke<SessionRecord>("session_duplicate", { id }),
   deleteSession: (id: string) => invoke<void>("session_delete", { id }),
+  /** QL-01: links a session to a VM by hand (vmId null removes the link); auto-linking leaves it alone. Audited. */
+  linkSessionVm: (sessionId: string, vmId: string | null) =>
+    invoke<SessionRecord>("session_link_vm", { sessionId, vmId }),
+  /** QL-01: keeps an automatic link, so auto-linking never changes it. Audited. */
+  confirmSessionVmLink: (sessionId: string) => invoke<SessionRecord>("session_confirm_vm_link", { sessionId }),
+  /** QL-01: sessions several VMs match, left for the user to pick. */
+  ambiguousVmLinks: () => invoke<AmbiguousLink[]>("vm_links_ambiguous"),
   /** folderId null: the top level. */
   moveSessions: (ids: string[], folderId: string | null) => invoke<void>("sessions_move", { ids, folderId }),
   createFolder: (name: string, parentId: string | null) => invoke<SessionFolder>("folder_create", { name, parentId }),

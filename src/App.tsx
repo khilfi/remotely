@@ -551,6 +551,7 @@ export default function App() {
             )}
             <section hidden={page !== "vms"}>
               <VmsPage
+                active={page === "vms"}
                 onSubmitted={submitted}
                 onOpenSettings={() => setPage("settings")}
                 onOpenSnapshots={openSnapshots}
