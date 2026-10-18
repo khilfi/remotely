@@ -5,9 +5,12 @@ mod ipc;
 mod terminal;
 mod updater;
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use remotely_core::{Core, CoreConfig};
+use tauri::utils::config::AppDirectoriesOverride;
 use tauri::{Emitter, Manager};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -25,17 +28,27 @@ pub fn run() {
         )
         .init();
 
+    let mut context = tauri::generate_context!();
+    match app_directories_override(
+        std::env::var_os("REMOTELY_DATA_DIR"),
+        &context.config().identifier,
+        cfg!(debug_assertions),
+    ) {
+        Ok(Some(dirs)) => context.config_mut().app.app_directories_override = Some(dirs),
+        Ok(None) => {}
+        Err(err) => {
+            tracing::error!(error = err, "the app can't choose its data folder");
+            std::process::exit(1);
+        }
+    }
+
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // %LOCALAPPDATA%\com.remotely.desktop: app data never lives in the working directory, so
-            // nothing private can land in the public repo (CLAUDE.md). REMOTELY_DATA_DIR points a
-            // development build at its own folder, so its migrations never reach the installed app's
-            // database; keep it outside the repository too.
-            let data_dir = match std::env::var_os("REMOTELY_DATA_DIR") {
-                Some(dir) => std::path::PathBuf::from(dir),
-                None => app.path().app_local_data_dir()?,
-            };
+            // %LOCALAPPDATA%\com.remotely.desktop, its `.dev` sibling for a debug build, or
+            // REMOTELY_DATA_DIR (see `app_directories_override`). Never the working directory, so nothing
+            // private can land in the public repo (CLAUDE.md).
+            let data_dir = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let config = CoreConfig {
                 db_path: data_dir.join("remotely.db"),
@@ -45,7 +58,7 @@ pub fn run() {
                 // FD-14: signed updates from the public repo's GitHub Releases.
                 updater: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
             };
-            tracing::info!("starting core");
+            tracing::info!(data_dir = %data_dir.display(), "starting core");
             let core = Arc::new(tauri::async_runtime::block_on(Core::init(config))?);
 
             // Job progress -> UI.
@@ -100,7 +113,7 @@ pub fn run() {
             terminal::terminal_resize,
             terminal::terminal_close,
         ])
-        .run(tauri::generate_context!());
+        .run(context);
 
     if let Err(err) = result {
         tracing::error!(error = %err, "the app stopped with an error");
@@ -114,5 +127,79 @@ fn windows_account() -> String {
     match std::env::var("USERDOMAIN") {
         Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
         _ => user,
+    }
+}
+
+/// Moves Tauri's app directories (the database and WebView2's profile) for this build.
+///
+/// A debug build (`npm run tauri dev`) uses `%LOCALAPPDATA%\com.remotely.desktop.dev`. Otherwise it would share the
+/// installed app's folder: a migration it adds would reach the installed app's database, which the older release then
+/// refuses to open, and its window would join the installed app's WebView2 browser process, which ignores
+/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`. A release build keeps Tauri's default, `%LOCALAPPDATA%\com.remotely.desktop`.
+/// `REMOTELY_DATA_DIR` overrides both. It must be absolute: Tauri resolves a relative override next to the executable,
+/// which for a dev build is inside the working directory.
+fn app_directories_override(
+    data_dir: Option<OsString>,
+    identifier: &str,
+    debug_build: bool,
+) -> Result<Option<AppDirectoriesOverride>, &'static str> {
+    match data_dir.filter(|dir| !dir.is_empty()).map(PathBuf::from) {
+        Some(dir) if dir.is_absolute() => Ok(Some(AppDirectoriesOverride::Root(dir))),
+        Some(_) => Err("REMOTELY_DATA_DIR must be an absolute path outside the repository"),
+        None if debug_build => Ok(Some(AppDirectoriesOverride::Root(
+            Path::new("$LOCALDATA").join(format!("{identifier}.dev")),
+        ))),
+        None => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IDENTIFIER: &str = "com.remotely.desktop";
+
+    #[test]
+    fn release_build_keeps_the_default_folder() {
+        assert_eq!(app_directories_override(None, IDENTIFIER, false), Ok(None));
+    }
+
+    #[test]
+    fn debug_build_uses_a_dev_folder_next_to_it() {
+        assert_eq!(
+            app_directories_override(None, IDENTIFIER, true),
+            Ok(Some(AppDirectoriesOverride::Root(
+                Path::new("$LOCALDATA").join("com.remotely.desktop.dev")
+            )))
+        );
+    }
+
+    #[test]
+    fn remotely_data_dir_overrides_both_builds() {
+        let dir = std::env::temp_dir().join("remotely-data");
+        for debug_build in [false, true] {
+            assert_eq!(
+                app_directories_override(Some(dir.clone().into()), IDENTIFIER, debug_build),
+                Ok(Some(AppDirectoriesOverride::Root(dir.clone())))
+            );
+        }
+    }
+
+    #[test]
+    fn empty_remotely_data_dir_counts_as_unset() {
+        assert_eq!(
+            app_directories_override(Some(OsString::new()), IDENTIFIER, false),
+            Ok(None)
+        );
+        assert_eq!(
+            app_directories_override(Some(OsString::new()), IDENTIFIER, true),
+            app_directories_override(None, IDENTIFIER, true)
+        );
+    }
+
+    #[test]
+    fn relative_remotely_data_dir_is_refused() {
+        assert!(app_directories_override(Some("data".into()), IDENTIFIER, true).is_err());
+        assert!(app_directories_override(Some("data".into()), IDENTIFIER, false).is_err());
     }
 }

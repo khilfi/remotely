@@ -30,9 +30,10 @@ git config core.hooksPath .githooks   # once per clone: gitleaks runs before eve
 npm run tauri dev                     # the app, with hot reload for the UI
 ```
 
-The app keeps its database under `%LOCALAPPDATA%\com.remotely.desktop\`, never in the working directory. A
-development build shares that folder with the installed app, so its database migrations would reach the installed app's
-database too; set `REMOTELY_DATA_DIR` to another folder outside the repository to keep them apart. It finds
+The installed app keeps its database and WebView2 profile under `%LOCALAPPDATA%\com.remotely.desktop\`, never in the
+working directory. A development build (`npm run tauri dev`) uses `%LOCALAPPDATA%\com.remotely.desktop.dev\` instead,
+so the migrations it applies never reach the installed app's database and the two never share a WebView2 browser
+process. To use another folder, set `REMOTELY_DATA_DIR` to an absolute path outside the repository. The app finds
 `vmrun.exe` from Settings, then the `REMOTELY_VMRUN` environment variable, then the registry, then the default install
 folders.
 
