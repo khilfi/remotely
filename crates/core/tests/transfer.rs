@@ -441,7 +441,7 @@ async fn the_update_token_stays_on_its_laptop() {
         .await
         .unwrap();
     a.store
-        .put_setting(&a.ctx, "updates.tokenId", &token.id.to_string())
+        .put_setting(&a.ctx, remotely_core::updates::UPDATE_TOKEN_KEY, &Some(token.id))
         .await
         .unwrap();
     let path = export(&a, &dir, true).await;

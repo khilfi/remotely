@@ -2,6 +2,7 @@
 //! Each sits behind a trait; [`crate::fakes`] has a fake of each for tests.
 
 pub mod exec_output;
+pub mod github;
 pub mod host_counters;
 pub mod remote;
 pub mod updater;

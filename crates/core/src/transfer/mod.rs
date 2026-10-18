@@ -62,9 +62,6 @@ const IMPORTED_FROM: [&str; 4] = ["putty", "mobaxterm", "openssh", "csv"];
 /// How the audit log and the session audit entries name the source.
 const SOURCE: &str = "a Remotely export";
 
-/// The setting that names FD-14's update token in the vault. That token is never exported.
-const UPDATE_TOKEN_SETTING: &str = "updates.tokenId";
-
 // ---- The payload (encrypted in the file) ---------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1529,15 +1526,11 @@ impl Transfer {
     /// FD-14's GitHub update token, if this laptop has one: it stays behind, since each laptop gets
     /// its own (they expire and are revoked one by one).
     async fn update_token(&self, ctx: &Context) -> Result<Option<SecretId>> {
-        let saved = self
+        Ok(self
             .store
-            .get_setting::<serde_json::Value>(ctx, UPDATE_TOKEN_SETTING)
-            .await?;
-        Ok(saved
-            .as_ref()
-            .and_then(serde_json::Value::as_str)
-            .and_then(|id| Uuid::parse_str(id).ok())
-            .map(SecretId))
+            .get_setting::<Option<SecretId>>(ctx, crate::updates::UPDATE_TOKEN_KEY)
+            .await?
+            .flatten())
     }
 
     async fn audit(&self, ctx: &Context, event: &str, action: &str, detail: &str) -> Result<()> {

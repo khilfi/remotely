@@ -5,7 +5,8 @@ performance dashboard, a PuTTY/MobaXterm-style SSH session manager and bulk comm
 multi-step approvals on every high-impact action.
 
 The requirements are in [docs/PRD.md](docs/PRD.md); project rules for contributors (and Claude Code) are in
-[CLAUDE.md](CLAUDE.md). This repository is public: read "Public repository rules" in CLAUDE.md before committing.
+[CLAUDE.md](CLAUDE.md). This repository is private while the app is field-tested, but it may go public later and git
+history is forever, so it follows the "Public repository rules" in CLAUDE.md: read them before committing.
 
 **Status:** MVP milestones 1 (VMs and power), 2 (snapshots and approvals) and 3 (vault and session library). The app
 lists every Workstation VM (the library, chosen folders and running VMs) with its OS, CPU, RAM, IP and VMware Tools
@@ -16,7 +17,8 @@ tree with creation times (read from its `.vmsd`), flags snapshots
 older than 30 days, and takes, reverts and deletes snapshots in bulk; high-risk VM actions take a named safety snapshot
 first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
 and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
-Auto-update checks this repo's GitHub Releases. The vault keeps passwords, private keys and passphrases encrypted
+Auto-update checks this repo's GitHub Releases, with a read-only GitHub token kept in the vault (see
+[GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
 (AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
 or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
@@ -78,8 +80,73 @@ that the `.vmsd` lists the same snapshots as `vmrun listSnapshots`).
 4. Smoke-test the installer from the draft, then publish it. Installed apps only see published releases; they check at
    start and every 24 hours (FD-14), and installing asks first.
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request: a gitleaks scan of the full history, UI
-lint and build, and Rust fmt, clippy and tests.
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request, except changes to documentation only
+(Markdown files anywhere, `docs/`): UI lint and build, and Rust fmt, clippy and tests. `.github/workflows/secrets.yml`
+runs a gitleaks scan of the full history on every push to `main` and every pull request, documentation included.
+
+### GitHub update token
+
+The repository is private, so an installed app can't see its releases without a token. Each machine keeps a read-only
+GitHub token in its vault, and update checks and installs use it. Copies on 0.2.0 or older don't know about the token:
+install 0.2.1 by hand once on each machine (download the installer from the release page while signed in to GitHub),
+then add the token.
+
+**Create the token** (on GitHub, signed in as the repository owner):
+
+1. Open [Settings → Developer settings → Personal access tokens → Fine-grained tokens](https://github.com/settings/personal-access-tokens)
+   and choose **Generate new token**.
+2. Name it after the machine, for example "Remotely updates, field laptop 2", so one lost laptop's token can be revoked
+   on its own.
+3. **Expiration:** pick a date (90 days is a good default). Remotely shows the date and warns two weeks before it.
+4. **Resource owner:** the account that owns the repository. **Repository access:** _Only select repositories_, then
+   this repository only.
+5. **Permissions → Repository permissions → Contents: Read-only.** Leave everything else at _No access_ (GitHub adds
+   Metadata: Read-only by itself).
+6. **Generate token** and copy it. It starts with `github_pat_`, and GitHub shows it only once.
+
+Contents: Read-only is the narrowest permission that can download release files, and it can also read the repository's
+code. Treat the token like a password: one per machine, with an expiry, never in a file, chat or ticket.
+
+**Enter it in Remotely:**
+
+1. Unlock the vault (the lock in the sidebar).
+2. Open **Settings → General → Updates → GitHub update token**, paste the token and choose **Save**.
+3. Remotely stores it in the vault and tests it at once: "The token works: it can read …, and the latest release is …".
+   **Test** repeats that check at any time.
+4. Clear the clipboard (`Win+V` keeps a history: delete the entry there).
+
+Without a token, update checks don't fail quietly: the banner and Settings say a token is needed. When the vault is
+locked, the check waits and runs once the vault is unlocked.
+
+**Replace it** before it expires, or at once if it may have leaked:
+
+1. On GitHub, open the token and choose **Regenerate token** (same settings, new value; the old value stops working
+   at once), or make a new one as above.
+2. In Remotely, **Settings → Updates → Replace**, paste the new token and **Save**.
+3. If you made a new token, delete the old one on GitHub.
+
+Once a token has expired or been revoked, the banner says so ("The GitHub update token expired on …") until it is
+replaced. **Remove** deletes the token from the vault; delete it on GitHub as well.
+
+What the app does with the token: it sends it only to `api.github.com`, to find the latest published release, then to
+fetch that release's `latest.json` and installer from their API download URLs. GitHub answers those with a redirect to
+its file storage, and the token is not sent there. Every update is still checked against the signing public key before
+it installs. The token never appears in logs, error messages, the audit log, exports or the UI.
+
+### CI minutes
+
+With the repository private, GitHub Actions minutes come out of the account's monthly allowance (2,000 minutes on GitHub
+Free; Settings → Billing and plans shows what is left). Jobs on Windows runners count double, and each job is rounded up
+to whole minutes:
+
+| Workflow      | Runs on                                           | Billed minutes per run                                           |
+| ------------- | ------------------------------------------------- | ---------------------------------------------------------------- |
+| `ci.yml`      | every pull request push and every merge to `main` | about 12 to 16 (the Windows Rust job is 5 to 7 minutes, doubled) |
+| `secrets.yml` | every pull request push and every merge to `main` | about 1 (Linux)                                                  |
+| `release.yml` | every `v*` tag                                    | about 28 (14 minutes on Windows, doubled)                        |
+
+To make them last: documentation-only changes skip `ci.yml`; a new push to a branch cancels the run it supersedes, so
+push when a change is ready rather than after every small commit; and group documentation edits.
 
 ### Update signing
 
@@ -125,7 +192,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04, AP-02                                                                        | Library, folder scan, `.vmx` and `.vmsd` reading, `vmware.log` start time, `vmrun` list, power and snapshots; vmrest later    |
 | Remote adapter    | `crates/core/src/adapters/remote.rs`                | SS-03, SS-05, BX-02, BX-07, MO-02                                                                        | Working: terminal shells, bulk exec with sudo, and connections kept open between guest-metric rounds                          |
 | Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                                                      | Working: host RAM, CPUs, CPU times, free disk, and each `vmware-vmx.exe` process's CPU, working set and I/O                   |
-| Updater           | `crates/core/src/adapters/updater.rs`               | FD-14                                                                                                    | Works: checks GitHub Releases; install is a Medium-tier job that runs alone; real adapter in `src-tauri/src/updater.rs`       |
+| Updater           | `crates/core/src/adapters/updater.rs`, `github.rs`  | FD-14                                                                                                    | Works: GitHub Releases of the private repo with the token from the vault; install is a Medium-tier job that runs alone        |
 | Inventory         | `crates/core/src/inventory.rs`                      | VM-01, VM-02, SS-06 (VM labels)                                                                          | Every VM from the library, chosen folders and `vmrun list`; filters; audited environment labels                               |
 | Capacity check    | `crates/core/src/capacity.rs`                       | VM-07, MO-04                                                                                             | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                     |
 | Metrics collector | `crates/core/src/metrics/`                          | MO-01, MO-02, MO-03, MO-04                                                                               | Working: host-side and SSH guest sources every 5 s, 30 minutes of history in memory, collector cost                           |

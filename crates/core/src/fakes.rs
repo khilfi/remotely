@@ -4,11 +4,12 @@
 //! Compiled for the crate's own unit tests and, through the `fakes` feature, for the integration
 //! tests in `tests/`. The app never enables that feature.
 
+pub mod github_server;
 pub mod ssh_server;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -24,7 +25,7 @@ use crate::adapters::remote::{
     ConnectRequest, Credentials, ExecRequest, ExecResult, ExecSession, Prompter, RemoteAdapter, ShellEnd, ShellHandle,
     ShellInput, ShellOutput, ShellRequest,
 };
-use crate::adapters::updater::{UpdateInfo, UpdaterAdapter};
+use crate::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
 use crate::domain::Context;
@@ -902,11 +903,18 @@ impl HostCounters for FakeHostCounters {
     }
 }
 
-/// An update server that offers at most one version. Records the versions installed.
+/// An update server that offers at most one version. Records the versions installed and the calls
+/// it got. With [`FakeUpdater::accepting`] it takes one token only and refuses any other the way
+/// GitHub refuses a revoked one; by default it takes any.
 #[derive(Default)]
 pub struct FakeUpdater {
     offered: Option<UpdateInfo>,
+    token: Option<String>,
+    expires_on: Option<String>,
+    /// Revoked (or expired) on GitHub: every token is refused.
+    revoked: AtomicBool,
     installed: Mutex<Vec<String>>,
+    calls: AtomicUsize,
 }
 
 impl FakeUpdater {
@@ -918,23 +926,64 @@ impl FakeUpdater {
                 notes: Some(format!("Release notes for {version}")),
                 pub_date: None,
             }),
-            installed: Mutex::default(),
+            ..Default::default()
         }
+    }
+
+    /// Takes only `token`, which GitHub says expires on `expires_on` (`YYYY-MM-DD`).
+    pub fn accepting(mut self, token: &str, expires_on: Option<&str>) -> Self {
+        self.token = Some(token.to_owned());
+        self.expires_on = expires_on.map(str::to_owned);
+        self
+    }
+
+    /// From now on GitHub answers 401, as it does for a revoked or expired token.
+    pub fn revoke(&self) {
+        self.revoked.store(true, Ordering::SeqCst);
     }
 
     pub fn installed(&self) -> Vec<String> {
         locks::lock(&self.installed).clone()
     }
+
+    /// Calls that reached it (checks, installs and tests), i.e. would have gone to GitHub.
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    fn authorize(&self, token: &SecretString) -> Result<()> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let refused = self.revoked.load(Ordering::SeqCst)
+            || self.token.as_ref().is_some_and(|accepted| accepted != token.expose());
+        match refused {
+            true => Err(CoreError::UpdateTokenRefused { expired_on: None }),
+            false => Ok(()),
+        }
+    }
 }
 
 #[async_trait]
 impl UpdaterAdapter for FakeUpdater {
-    async fn check(&self) -> Result<Option<UpdateInfo>> {
-        Ok(self.offered.clone())
+    async fn check(&self, token: &SecretString) -> Result<ReleaseCheck> {
+        self.authorize(token)?;
+        Ok(ReleaseCheck {
+            update: self.offered.clone(),
+            token_expires_on: self.expires_on.clone(),
+        })
     }
 
-    async fn install(&self, version: &str) -> Result<()> {
+    async fn install(&self, token: &SecretString, version: &str) -> Result<()> {
+        self.authorize(token)?;
         locks::lock(&self.installed).push(version.to_owned());
         Ok(())
+    }
+
+    async fn test_token(&self, token: &SecretString) -> Result<TokenReport> {
+        self.authorize(token)?;
+        Ok(TokenReport {
+            repository: "alice/remotely".into(),
+            latest_release: self.offered.as_ref().map(|u| format!("v{}", u.version)),
+            expires_on: self.expires_on.clone(),
+        })
     }
 }

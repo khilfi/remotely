@@ -11,6 +11,7 @@
 //!                                   jobs (runner) ──► adapters::vmware (vmrun)
 //!                                                 ├─► adapters::remote (russh)
 //!                                                 └─► adapters::updater (FD-14)
+//!                                                       └─► adapters::github (token from the vault)
 //!
 //!   sessions (SS-01), vault (SS-04), known_hosts (SS-05): the app's own data; changes are audited
 //!   transfer (FD-07): encrypted export and import of that data; ssh_keys (SS-09): keys in the vault
@@ -45,6 +46,7 @@ pub mod ssh_keys;
 pub mod store;
 pub mod terminal;
 pub mod transfer;
+pub mod updates;
 pub mod vault;
 
 use std::path::{Path, PathBuf};
@@ -53,7 +55,7 @@ use std::time::Duration;
 
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
-use adapters::updater::{UpdateInfo, UpdaterAdapter};
+use adapters::updater::UpdaterAdapter;
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
 use bulk::BulkRuns;
 use capacity::CapacityChecker;
@@ -397,15 +399,6 @@ impl Core {
             .await?;
         let detail = if enabled { "on" } else { "off" };
         self.audit_setting("Set update checks", detail).await
-    }
-
-    /// FD-14: a read, so it skips the bus. Installing is [`command_bus::Command::AppUpdate`]. With
-    /// update checks turned off this makes no network call and returns `None`.
-    pub async fn check_for_update(&self) -> Result<Option<UpdateInfo>> {
-        if !self.update_checks_enabled().await? {
-            return Ok(None);
-        }
-        self.updater.check().await
     }
 
     /// AP-05: writes the workspace's whole audit log to `path` as CSV (see [`export::audit_csv`]) and

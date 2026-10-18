@@ -108,6 +108,20 @@ pub enum CoreError {
 
     #[error("update failed: {0}")]
     Update(String),
+    /// FD-14: GitHub refused the update token (401): expired, revoked or mistyped. Never holds it.
+    #[error("{}", token_refused(.expired_on.as_deref()))]
+    UpdateTokenRefused {
+        /// When the token's remembered expiry date has passed, so the message can say so.
+        expired_on: Option<String>,
+    },
+    /// FD-14: the token works, but can't read the releases of `repo`.
+    #[error(
+        "the GitHub update token can't read the releases of {repo}. Make a fine-grained token for that repository with Contents: Read-only, and replace it in Settings, under Updates"
+    )]
+    UpdateTokenNoAccess { repo: String },
+    /// FD-14: checking and installing updates read the private repo's releases with a token.
+    #[error("there is no GitHub update token in the vault. Add one in Settings, under Updates")]
+    UpdateTokenMissing,
 
     /// SS-03: reaching or talking to an SSH server failed. Never holds a secret.
     #[error("{0}")]
@@ -192,6 +206,9 @@ impl CoreError {
             CoreError::Cancelled => "cancelled",
             CoreError::CancelledInFlight => "cancelled_in_flight",
             CoreError::Update(_) => "update_failed",
+            CoreError::UpdateTokenRefused { .. } => "update_token_refused",
+            CoreError::UpdateTokenNoAccess { .. } => "update_token_no_access",
+            CoreError::UpdateTokenMissing => "update_token_missing",
             CoreError::Ssh(_) => "ssh",
             CoreError::AuthFailed(_) => "auth_failed",
             CoreError::AgentUnavailable(_) => "agent_unavailable",
@@ -204,5 +221,16 @@ impl CoreError {
             CoreError::JumpHostUnsupported { .. } => "jump_host_unsupported",
             CoreError::NotImplemented(_) => "not_implemented",
         }
+    }
+}
+
+/// FD-14: GitHub answers 401 for an expired, revoked or mistyped token alike; the expiry date GitHub
+/// reported earlier tells the first apart.
+fn token_refused(expired_on: Option<&str>) -> String {
+    match expired_on {
+        Some(date) => format!(
+            "the GitHub update token expired on {date}. Make a new one and replace it in Settings, under Updates"
+        ),
+        None => "GitHub refused the update token: it was revoked, has expired or was mistyped. Make a new one and replace it in Settings, under Updates".into(),
     }
 }

@@ -3,12 +3,13 @@
 
 mod ipc;
 mod terminal;
-mod updater;
+pub mod updater;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use remotely_core::adapters::updater::{DisabledUpdater, UpdaterAdapter};
 use remotely_core::{Core, CoreConfig};
 use tauri::utils::config::AppDirectoriesOverride;
 use tauri::{Emitter, Manager};
@@ -52,13 +53,20 @@ pub fn run() {
             // private can land in the public repo (CLAUDE.md).
             let data_dir = app.path().app_local_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            // FD-14: signed updates from the private repo's GitHub Releases, with the token from the vault.
+            let updater: Arc<dyn UpdaterAdapter> = match updater::TauriUpdater::new(app.handle().clone()) {
+                Ok(updater) => Arc::new(updater),
+                Err(err) => {
+                    tracing::error!(error = %err, "update checks are unavailable");
+                    Arc::new(DisabledUpdater)
+                }
+            };
             let config = CoreConfig {
                 db_path: data_dir.join("remotely.db"),
                 vmrun_path: None,
                 account: windows_account(),
                 display_name: std::env::var("USERNAME").unwrap_or_else(|_| "user".into()),
-                // FD-14: signed updates from the public repo's GitHub Releases.
-                updater: Arc::new(updater::TauriUpdater::new(app.handle().clone())),
+                updater,
             };
             tracing::info!(data_dir = %data_dir.display(), "starting core");
             let core = Arc::new(tauri::async_runtime::block_on(Core::init(config))?);
@@ -143,6 +151,9 @@ pub fn run() {
             ipc::settings_set_update_checks,
             ipc::settings_set_bulk_parallel,
             ipc::update_check,
+            ipc::update_token_set,
+            ipc::update_token_test,
+            ipc::update_token_remove,
             ipc::vault_info,
             ipc::vault_setup,
             ipc::vault_unlock,

@@ -13,6 +13,7 @@ use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeRemote, FakeU
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::{PolicyRules, Tier};
 use remotely_core::store::Store;
+use remotely_core::updates::UpdateCheck;
 use remotely_core::vault::{LocalVault, SecretString, Vault, VaultOptions};
 use remotely_core::{Adapters, Core, CoreError};
 
@@ -339,10 +340,16 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
 async fn an_update_installs_only_once_no_other_job_is_open() {
     let fake = fake_vmware();
     let updater = Arc::new(FakeUpdater::offering("0.1.0", "0.1.1"));
-    let core = core_with(Arc::clone(&fake), None, None, Arc::clone(&updater)).await;
+    let vault = Arc::new(FakeVault::with_password("correct horse"));
+    let core = core_with(Arc::clone(&fake), None, Some(vault), Arc::clone(&updater)).await;
     let mut events = core.jobs.subscribe();
 
-    let offered = core.check_for_update().await.unwrap().unwrap();
+    core.set_update_token(SecretString::new("github_pat_test"))
+        .await
+        .unwrap();
+    let UpdateCheck::Available { update: offered } = core.check_for_update().await.unwrap() else {
+        panic!("0.1.1 is offered");
+    };
     assert_eq!(offered.version, "0.1.1");
 
     // A High job sits in its 10-second countdown, so a job is open.
@@ -417,14 +424,23 @@ async fn the_vmrun_path_must_be_a_real_vmrun_exe() {
 #[tokio::test]
 async fn update_checks_can_be_turned_off_for_air_gapped_sites() {
     let updater = Arc::new(FakeUpdater::offering("0.1.0", "0.1.1"));
-    let core = core_with(fake_vmware(), None, None, Arc::clone(&updater)).await;
+    let vault = Arc::new(FakeVault::with_password("correct horse"));
+    let core = core_with(fake_vmware(), None, Some(vault), Arc::clone(&updater)).await;
+    core.set_update_token(SecretString::new("github_pat_test"))
+        .await
+        .unwrap();
 
     assert!(core.update_checks_enabled().await.unwrap(), "checks are on by default");
-    assert!(core.check_for_update().await.unwrap().is_some());
+    assert!(matches!(
+        core.check_for_update().await.unwrap(),
+        UpdateCheck::Available { .. }
+    ));
 
     core.set_update_checks(false).await.unwrap();
     assert!(!core.update_checks_enabled().await.unwrap());
-    assert_eq!(core.check_for_update().await.unwrap(), None);
+    let calls = updater.calls();
+    assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::Off);
+    assert_eq!(updater.calls(), calls, "no network call with checks off");
 
     let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
     assert_eq!(audit[0].event, "setting_changed");
