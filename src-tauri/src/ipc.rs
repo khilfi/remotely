@@ -8,6 +8,7 @@ use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::bulk::{
     self, BulkExport, BulkResults, ExportFormat, GroupOptions, HostOutput, OutputDiff, ResolvedTargets, TargetPicks,
 };
+use remotely_core::capacity::HostCapacity;
 use remotely_core::command_bus::{
     ApprovalAnswers, Command, CommandPreview, SubmitOutcome, MAX_EXEC_TIMEOUT_SECS, MAX_SCRIPT_BYTES, MAX_SNAPSHOT_NAME,
 };
@@ -15,6 +16,7 @@ use remotely_core::domain::Environment;
 use remotely_core::import::{self, ImportPreview, ImportReport, ImportRequest, ImportSource};
 use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::jobs::JobLimits;
+use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
@@ -835,4 +837,40 @@ pub async fn bulk_export(
         .await?;
     tracing::info!(hosts = export.hosts, "bulk run exported");
     Ok(Some(export))
+}
+
+/// FD-01: the tier and approval steps a command would get, without submitting it (the command
+/// palette shows them before running an action).
+#[tauri::command]
+pub async fn command_preview(state: State<'_, AppState>, command: Command) -> IpcResult<CommandPreview> {
+    let core = &state.core;
+    Ok(core.bus.preview(&core.ctx, &command).await?)
+}
+
+/// MO-03: the overview grid: running VMs and watched hosts with their latest samples, guest states
+/// and what collecting costs. A read: no approval.
+#[tauri::command]
+pub async fn metrics_overview(state: State<'_, AppState>) -> IpcResult<DashboardOverview> {
+    let core = &state.core;
+    Ok(core.metrics.overview(&core.ctx).await?)
+}
+
+/// MO-03 drill-down: up to 30 minutes of one series (kept in memory only).
+#[tauri::command]
+pub fn metrics_series(state: State<'_, AppState>, source: MetricSource, key: String) -> Vec<MetricPoint> {
+    state.core.metrics.hub().series(source, &key)
+}
+
+/// MO-04: assigned vs physical RAM and CPUs, and free space on each drive holding a VM folder.
+#[tauri::command]
+pub async fn metrics_capacity(state: State<'_, AppState>) -> IpcResult<HostCapacity> {
+    let core = &state.core;
+    Ok(core.metrics.capacity(&core.ctx).await)
+}
+
+/// MO-02: starts or stops guest metrics for a session (logs in over SSH every round). Audited.
+#[tauri::command]
+pub async fn metrics_watch(state: State<'_, AppState>, session_id: Uuid, watch: bool) -> IpcResult<Vec<Uuid>> {
+    let core = &state.core;
+    Ok(core.metrics.set_watched(&core.ctx, session_id, watch).await?)
 }

@@ -19,10 +19,10 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::adapters::exec_output::OutputCollector;
-use crate::adapters::host_counters::{HostCounters, HostTotals, VmProcess};
+use crate::adapters::host_counters::{DiskSpace, HostCounters, HostTotals, SystemCpuTimes, VmProcess};
 use crate::adapters::remote::{
-    Credentials, ExecRequest, ExecResult, Prompter, RemoteAdapter, ShellEnd, ShellHandle, ShellInput, ShellOutput,
-    ShellRequest,
+    ConnectRequest, Credentials, ExecRequest, ExecResult, ExecSession, Prompter, RemoteAdapter, ShellEnd, ShellHandle,
+    ShellInput, ShellOutput, ShellRequest,
 };
 use crate::adapters::updater::{UpdateInfo, UpdaterAdapter};
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
@@ -446,7 +446,9 @@ pub struct FakeRemote {
     unreachable: HashSet<String>,
     /// BX-07: the sudo password every host takes; any other is refused.
     sudo_password: Option<String>,
-    calls: Mutex<Vec<String>>,
+    calls: std::sync::Arc<Mutex<Vec<String>>>,
+    /// MO-02: bumped by `drop_connections`; kept connections from before count as lost.
+    generation: std::sync::Arc<AtomicUsize>,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
 }
@@ -482,6 +484,11 @@ impl FakeRemote {
 
     pub fn calls(&self) -> Vec<String> {
         locks::lock(&self.calls).clone()
+    }
+
+    /// MO-02: every connection kept open so far counts as lost from now on.
+    pub fn drop_connections(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// The most commands that ran at the same time.
@@ -533,6 +540,68 @@ impl RemoteAdapter for FakeRemote {
     async fn open_shell(&self, request: ShellRequest<'_>, _: &mut dyn Prompter) -> Result<ShellHandle> {
         locks::lock(&self.calls).push(format!("{}: shell", request.session.host));
         Ok(loopback_shell())
+    }
+
+    async fn connect(&self, request: ConnectRequest<'_>) -> Result<Box<dyn ExecSession>> {
+        let host = request.session.host.clone();
+        locks::lock(&self.calls).push(format!("{host}: connect"));
+        if let Some(delay) = self.delays.get(&host) {
+            tokio::time::sleep(*delay).await;
+        }
+        if self.unreachable.contains(&host) {
+            return Err(CoreError::Ssh(format!(
+                "can't connect to {host}:{}: connection refused",
+                request.session.port
+            )));
+        }
+        Ok(Box::new(FakeSession {
+            stdout: self
+                .outputs
+                .get(&host)
+                .cloned()
+                .unwrap_or_else(|| format!("ok from {host}\n")),
+            exit_code: self.exit_codes.get(&host).copied().unwrap_or(0),
+            host,
+            calls: std::sync::Arc::clone(&self.calls),
+            generation: std::sync::Arc::clone(&self.generation),
+            opened_in: self.generation.load(Ordering::SeqCst),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        }))
+    }
+}
+
+/// A connection [`FakeRemote::connect`] kept open: answers every command like `exec` would.
+struct FakeSession {
+    host: String,
+    stdout: String,
+    exit_code: u32,
+    calls: std::sync::Arc<Mutex<Vec<String>>>,
+    generation: std::sync::Arc<AtomicUsize>,
+    opened_in: usize,
+    closed: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl ExecSession for FakeSession {
+    async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult> {
+        if self.is_closed() {
+            return Err(CoreError::Ssh("the connection was lost: the connection was cut".into()));
+        }
+        locks::lock(&self.calls).push(format!("{}: {script}", self.host));
+        Ok(ExecResult {
+            exit_code: Some(self.exit_code),
+            signal: None,
+            output: OutputCollector::collect(self.stdout.as_bytes(), b"", &[], max_output),
+            duration_ms: 1,
+        })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst) || self.generation.load(Ordering::SeqCst) != self.opened_in
+    }
+
+    async fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
     }
 }
 
@@ -745,30 +814,40 @@ impl KeyProtector for FakeKeyProtector {
     }
 }
 
-/// Fixed host counters: no VM processes, 32 GB RAM, 16 logical CPUs, 50% free disk by default.
-/// With `unavailable`, every read fails.
+/// Fixed host counters: no VM processes, 32 GB RAM (24 GB available), 16 logical CPUs, a 1 TB drive
+/// with 50% free by default. The host's CPU is 25% busy between any two readings, and this app has
+/// used 10 ms more CPU at each reading. With `unavailable`, every read fails. `processes` is shared, so
+/// a test can start and stop "VMs" between metric rounds.
 pub struct FakeHostCounters {
-    pub processes: Vec<VmProcess>,
+    pub processes: std::sync::Arc<Mutex<Vec<VmProcess>>>,
     pub totals: HostTotals,
     pub free_disk_pct: f64,
     pub unavailable: bool,
+    readings: AtomicUsize,
 }
 
 impl Default for FakeHostCounters {
     fn default() -> Self {
         Self {
-            processes: Vec::new(),
+            processes: std::sync::Arc::default(),
             totals: HostTotals {
                 physical_ram_mb: 32 * 1024,
+                available_ram_mb: 24 * 1024,
                 logical_cpus: 16,
             },
             free_disk_pct: 50.0,
             unavailable: false,
+            readings: AtomicUsize::new(0),
         }
     }
 }
 
 impl FakeHostCounters {
+    /// What the next round of `vm_processes` returns.
+    pub fn set_processes(&self, processes: Vec<VmProcess>) {
+        *locks::lock(&self.processes) = processes;
+    }
+
     fn available(&self) -> Result<()> {
         if self.unavailable {
             Err(CoreError::Io(std::io::Error::other("counters unavailable")))
@@ -776,17 +855,45 @@ impl FakeHostCounters {
             Ok(())
         }
     }
+
+    fn reading(&self) -> u32 {
+        u32::try_from(self.readings.fetch_add(1, Ordering::SeqCst) + 1).unwrap_or(u32::MAX)
+    }
 }
 
 #[async_trait]
 impl HostCounters for FakeHostCounters {
     async fn vm_processes(&self) -> Result<Vec<VmProcess>> {
-        Ok(self.processes.clone())
+        self.available()?;
+        Ok(locks::lock(&self.processes).clone())
     }
 
     async fn host_totals(&self) -> Result<HostTotals> {
         self.available()?;
         Ok(self.totals)
+    }
+
+    async fn system_cpu_times(&self) -> Result<SystemCpuTimes> {
+        self.available()?;
+        let n = self.reading();
+        Ok(SystemCpuTimes {
+            idle: Duration::from_secs(3) * n,
+            total: Duration::from_secs(4) * n,
+        })
+    }
+
+    async fn own_cpu_time(&self) -> Result<Duration> {
+        self.available()?;
+        Ok(Duration::from_millis(10) * self.reading())
+    }
+
+    async fn disk_space(&self, _path: &Path) -> Result<DiskSpace> {
+        self.available()?;
+        let total_bytes = 1u64 << 40;
+        Ok(DiskSpace {
+            free_bytes: (total_bytes as f64 * self.free_disk_pct / 100.0) as u64,
+            total_bytes,
+        })
     }
 
     async fn free_disk_pct(&self, _path: &Path) -> Result<f64> {

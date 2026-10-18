@@ -2,7 +2,8 @@
 //!
 //! Runs only with `REMOTELY_IT=1`, and only reads: Workstation's library, `vmrun list`, for running
 //! VMs `checkToolsState` and `getGuestIPAddress`, and each VM's snapshots (`vmrun listSnapshots`, the
-//! .vmsd file, the first line of vmware.log). It never starts, stops or changes a VM. It prints
+//! .vmsd file, the first line of vmware.log), and the counters of each running VM's `vmware-vmx.exe`
+//! process (MO-01). It never starts, stops or changes a VM. It prints
 //! counts, not VM names or paths.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -104,4 +105,49 @@ async fn lists_every_vm_through_the_core() {
 
     drop(core);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// MO-01: every VM `vmrun list` says is running has a `vmware-vmx.exe` process whose command line names
+/// its .vmx, and two rounds give it a CPU share and a working set. Reads only (process counters).
+#[tokio::test]
+async fn every_running_vm_has_host_side_metrics() {
+    if !enabled() {
+        return;
+    }
+    let (core, dir) = real_core().await;
+    let vmrun = vmware::connect(None);
+    let running: Vec<String> = vmrun
+        .list_running()
+        .await
+        .unwrap()
+        .iter()
+        .map(|p| vmware::path_key(p))
+        .collect();
+    core.metrics.collect_once().await;
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let cost = core.metrics.collect_once().await;
+    for key in &running {
+        let sample = core
+            .metrics
+            .hub()
+            .latest(remotely_core::metrics::MetricSource::Host, key)
+            .or_else(|| {
+                // The hub keys samples by the inventory's (or the command line's) spelling.
+                core.metrics.hub().running().unwrap_or_default().iter().find_map(|p| {
+                    (vmware::path_key(Path::new(p)) == *key)
+                        .then(|| core.metrics.hub().latest(remotely_core::metrics::MetricSource::Host, p))
+                        .flatten()
+                })
+            })
+            .expect("a running VM has host-side metrics");
+        assert!(sample.host_cpu_pct.is_some(), "a CPU share after two rounds");
+        assert!(sample.mem_bytes.unwrap_or(0) > 0, "a working set");
+    }
+    eprintln!(
+        "{} running VMs with host-side metrics; a round took {:.0} ms",
+        running.len(),
+        cost.round_ms
+    );
+    drop(core);
+    let _ = std::fs::remove_dir_all(dir);
 }

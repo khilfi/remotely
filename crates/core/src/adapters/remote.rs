@@ -2,9 +2,10 @@
 //!
 //! Covers SS-03 (interactive terminal), SS-05 (the host key check, decided by a [`HostKeyVerifier`]
 //! the core passes in), BX-02 (a command or script on an exec channel: stdout, stderr, exit code and
-//! duration, capped and hashed by [`exec_output`](super::exec_output)) and BX-07 (sudo with the password from the vault on
-//! stdin, never echoed or logged, and scrubbed from the output), and later MO-02 (guest metrics from
-//! /proc). Jump hosts (SS-07, v2) will chain through russh's direct-tcpip channels.
+//! duration, capped and hashed by [`exec_output`](super::exec_output)), BX-07 (sudo with the password from the vault on
+//! stdin, never echoed or logged, and scrubbed from the output) and MO-02 (guest metrics from /proc, over
+//! a connection kept open between rounds: [`RemoteAdapter::connect`]). Jump hosts (SS-07, v2) will
+//! chain through russh's direct-tcpip channels.
 //!
 //! The core reads secrets from the vault just before a connection and hands them over as
 //! [`Credentials`]; this adapter never sees the vault, the UI never sees the secrets, and no secret
@@ -176,6 +177,25 @@ pub struct ExecRequest<'a> {
     pub max_output: usize,
 }
 
+/// A connection that stays logged in for more read-only commands (MO-02 guest metrics): connecting
+/// and logging in once instead of every round. Nothing is typed and nothing runs under sudo.
+pub struct ConnectRequest<'a> {
+    pub session: &'a SessionSpec,
+    pub credentials: Credentials,
+    pub options: &'a ConnectOptions,
+    pub verifier: Arc<dyn HostKeyVerifier>,
+}
+
+/// An open, logged-in connection. Each command runs on a channel of its own.
+#[async_trait]
+pub trait ExecSession: Send + Sync {
+    /// Runs a command and collects its output, at most `max_output` bytes per stream.
+    async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult>;
+    /// The connection dropped (or was closed); connect again for the next command.
+    fn is_closed(&self) -> bool;
+    async fn close(&self);
+}
+
 /// How a command ended (BX-02). The output has had the run's secrets scrubbed.
 #[derive(Debug, Clone)]
 pub struct ExecResult {
@@ -226,6 +246,10 @@ pub trait RemoteAdapter: Send + Sync {
 
     /// Connects, checks the host key, logs in and opens a PTY shell (SS-03).
     async fn open_shell(&self, request: ShellRequest<'_>, prompter: &mut dyn Prompter) -> Result<ShellHandle>;
+
+    /// Connects, checks the host key and logs in without asking anything, then keeps the connection
+    /// open for more commands (MO-02).
+    async fn connect(&self, request: ConnectRequest<'_>) -> Result<Box<dyn ExecSession>>;
 }
 
 pub struct RusshAdapter;
@@ -267,7 +291,10 @@ impl RemoteAdapter for RusshAdapter {
             secrets.push(password.clone());
         }
         let (mut handle, shared) = connect(session, options, verifier).await?;
-        let mut prompter = NoPrompter { session: &session.name };
+        let mut prompter = NoPrompter {
+            session: &session.name,
+            who: "a bulk run",
+        };
         authenticate(
             &mut handle,
             &session.username,
@@ -286,6 +313,48 @@ impl RemoteAdapter for RusshAdapter {
             output,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         })
+    }
+
+    async fn connect(&self, request: ConnectRequest<'_>) -> Result<Box<dyn ExecSession>> {
+        let ConnectRequest {
+            session,
+            credentials,
+            options,
+            verifier,
+        } = request;
+        if session.username.is_empty() {
+            return Err(CoreError::AuthFailed(format!(
+                "'{}' has no user name, and the dashboard can't ask for one. Add it to the session",
+                session.name
+            )));
+        }
+        let mut secrets = Vec::new();
+        if let Credentials::Password(Some(password)) = &credentials {
+            secrets.push(password.clone());
+        }
+        let (mut handle, shared) = connect(session, options, verifier).await?;
+        let mut prompter = NoPrompter {
+            session: &session.name,
+            who: "the dashboard",
+        };
+        let logged_in = authenticate(
+            &mut handle,
+            &session.username,
+            credentials,
+            options,
+            &mut prompter,
+            &shared,
+        )
+        .await;
+        if let Err(err) = logged_in {
+            let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+            return Err(err);
+        }
+        Ok(Box::new(RusshSession {
+            handle,
+            shared,
+            secrets,
+        }))
     }
 
     async fn open_shell(&self, request: ShellRequest<'_>, prompter: &mut dyn Prompter) -> Result<ShellHandle> {
@@ -310,6 +379,41 @@ impl RemoteAdapter for RusshAdapter {
         }
         authenticate(&mut handle, &user, credentials, options, prompter, &shared).await?;
         open_pty(handle, shared, size, &options.term).await
+    }
+}
+
+/// MO-02: a logged-in russh connection kept for more commands.
+struct RusshSession {
+    handle: client::Handle<Handler>,
+    shared: Arc<Mutex<Shared>>,
+    /// The login password, scrubbed from what the host prints.
+    secrets: Vec<SecretString>,
+}
+
+#[async_trait]
+impl ExecSession for RusshSession {
+    async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult> {
+        if self.handle.is_closed() {
+            let reason = disconnect_reason(&self.shared).await;
+            return Err(CoreError::Ssh(format!("the connection was lost: {reason}")));
+        }
+        let started = std::time::Instant::now();
+        let (exit_code, signal, output) =
+            run_command(&self.handle, &self.shared, script, None, &self.secrets, max_output).await?;
+        Ok(ExecResult {
+            exit_code,
+            signal,
+            output,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+
+    fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
+    async fn close(&self) {
+        let _ = self.handle.disconnect(Disconnect::ByApplication, "", "en").await;
     }
 }
 
@@ -986,9 +1090,12 @@ async fn disconnect_reason(shared: &Arc<Mutex<Shared>>) -> String {
     "the connection was lost".into()
 }
 
-/// A bulk run can't ask anything: a login that needs something typed fails, saying what.
+/// A bulk run or the dashboard can't ask anything: a login that needs something typed fails, saying
+/// what.
 struct NoPrompter<'a> {
     session: &'a str,
+    /// Who could not ask, e.g. "a bulk run".
+    who: &'static str,
 }
 
 #[async_trait]
@@ -1001,8 +1108,8 @@ impl Prompter for NoPrompter<'_> {
             "Log in to it in a terminal instead"
         };
         Err(CoreError::AuthFailed(format!(
-            "'{}' asks for something typed ({asked}), and a bulk run can't ask. {advice}",
-            self.session
+            "'{}' asks for something typed ({asked}), and {} can't ask. {advice}",
+            self.session, self.who
         )))
     }
 

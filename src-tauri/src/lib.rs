@@ -13,6 +13,7 @@ use remotely_core::{Core, CoreConfig};
 use tauri::utils::config::AppDirectoriesOverride;
 use tauri::{Emitter, Manager};
 use tokio::sync::broadcast::error::RecvError;
+use tokio_util::sync::CancellationToken;
 
 pub struct AppState {
     pub core: Arc<Core>,
@@ -87,6 +88,24 @@ pub fn run() {
                 }
             });
 
+            // MO-01 to MO-04: host-side and guest metrics every 5 s; each round's cost -> UI, which then
+            // reads what it shows.
+            let metrics = Arc::clone(&core.metrics);
+            tauri::async_runtime::spawn(async move { metrics.run(CancellationToken::new()).await });
+            let mut rounds = core.metrics.subscribe();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match rounds.recv().await {
+                        Ok(cost) => {
+                            let _ = handle.emit("metrics://round", &cost);
+                        }
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
+
             app.manage(AppState { core });
             Ok(())
         })
@@ -158,6 +177,11 @@ pub fn run() {
             ipc::bulk_diff,
             ipc::bulk_retry_failed,
             ipc::bulk_export,
+            ipc::command_preview,
+            ipc::metrics_overview,
+            ipc::metrics_series,
+            ipc::metrics_capacity,
+            ipc::metrics_watch,
             terminal::terminal_open,
             terminal::terminal_write,
             terminal::terminal_resize,

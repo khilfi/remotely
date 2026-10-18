@@ -44,12 +44,15 @@ similar = "3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
-# Host RAM, CPUs and free disk (VM-07, MO-04), and DPAPI for the vault key (SS-04). 0.62 is the version
-# Tauri already pulls in.
+# Host RAM, CPUs and free disk (VM-07, MO-04), each VM process's counters and command line (MO-01), and
+# DPAPI for the vault key (SS-04). 0.62 is the version Tauri already pulls in.
 windows = { version = "0.62", features = [
+    "Wdk_System_Threading",
     "Win32_Foundation",
     "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
