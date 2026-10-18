@@ -350,3 +350,63 @@ async fn saved_filters_round_trip_and_replace_by_name() {
     assert_eq!(store.list_saved_filters(&ctx).await.unwrap().len(), 1);
     assert!(store.save_filter(&ctx, " ", &prod).await.is_err());
 }
+
+#[tokio::test]
+async fn auto_linking_never_overwrites_the_users_choice() {
+    use crate::sessions::{SessionAuth, SessionInput};
+    use crate::vm_links::VmLink;
+    let (store, ctx) = store_with_identity().await;
+    let vm = |name: &str| DiscoveredVm {
+        vmx_path: format!(r"C:\VMs\{name}\{name}.vmx"),
+        display_name: name.into(),
+        info: VmxInfo::default(),
+        power_state: PowerState::Running,
+        tools_state: None,
+        ip_address: None,
+    };
+    store.record_inventory(&ctx, &[vm("web"), vm("db")]).await.unwrap();
+    let id_of = |vms: &[VmRecord], name: &str| vms.iter().find(|v| v.display_name == name).unwrap().id.clone();
+    let vms = store.list_vms(&ctx).await.unwrap();
+    let (web, db) = (id_of(&vms, "web"), id_of(&vms, "db"));
+    let session = Uuid::new_v4();
+    let input = SessionInput {
+        name: "web01".into(),
+        folder_id: None,
+        host: "192.0.2.10".into(),
+        port: 22,
+        username: None,
+        auth: SessionAuth::Agent,
+        jump_session_id: None,
+        startup_command: None,
+        environment: Environment::None,
+        color: None,
+        tags: vec![],
+        vm_id: None,
+    };
+    store.insert_session(&ctx, session, &input, None).await.unwrap();
+    let link = |s: crate::sessions::SessionRecord| (s.vm_id, s.vm_link);
+
+    // No decision yet: auto-linking may link it, and move or remove its own link.
+    assert!(store.set_auto_vm_link(&ctx, session, None, Some(&web)).await.unwrap());
+    let read = store.get_session(&ctx, session).await.unwrap().unwrap();
+    assert_eq!(link(read), (Some(web.clone()), Some(VmLink::Auto)));
+    assert!(
+        !store.set_auto_vm_link(&ctx, session, None, Some(&db)).await.unwrap(),
+        "the link changed since it was read"
+    );
+    assert!(store.set_auto_vm_link(&ctx, session, Some(&web), None).await.unwrap());
+    let read = store.get_session(&ctx, session).await.unwrap().unwrap();
+    assert_eq!(link(read), (None, None));
+
+    // The user's choice, or removal, stays whatever auto-linking read before.
+    store.set_manual_vm_link(&ctx, session, Some(&db)).await.unwrap();
+    assert!(!store
+        .set_auto_vm_link(&ctx, session, Some(&db), Some(&web))
+        .await
+        .unwrap());
+    assert!(!store.set_auto_vm_link(&ctx, session, Some(&db), None).await.unwrap());
+    store.set_manual_vm_link(&ctx, session, None).await.unwrap();
+    assert!(!store.set_auto_vm_link(&ctx, session, None, Some(&web)).await.unwrap());
+    let read = store.get_session(&ctx, session).await.unwrap().unwrap();
+    assert_eq!(link(read), (None, Some(VmLink::Manual)));
+}

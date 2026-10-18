@@ -254,6 +254,7 @@ mod tests {
             protected: false,
             tags: tags.iter().map(|t| (*t).to_owned()).collect(),
             vm_id: None,
+            vm_link: None,
             imported_from: None,
             created_at: String::new(),
             updated_at: String::new(),

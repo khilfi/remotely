@@ -483,6 +483,12 @@ impl Importer {
 
         self.audit_summary(ctx, source, &report).await?;
         locks::lock(&self.previews).retain(|p| p.id != request.preview_id);
+        // QL-01: the new sessions are linked to the VMs they reach, in one pass for the whole batch.
+        if report.created > 0 {
+            if let Err(err) = sessions.auto_link(ctx).await {
+                tracing::warn!(error = %err, "could not link imported sessions to VMs automatically");
+            }
+        }
         Ok(report)
     }
 

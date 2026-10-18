@@ -67,7 +67,8 @@ crates/core/          remotely-core: all app logic
     jobs.rs
     adapters/         vmware.rs, remote.rs (SSH shell and exec), exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs, updater.rs, github.rs (FD-14 GitHub Releases API with the
-                      update token), network.rs (QL-03 DNS, QL-04 TCP probe)
+                      update token), dns.rs (QL-01 host names to IPs), network.rs (QL-03 DNS, QL-04
+                      TCP probe)
     updates.rs        FD-14 update checks and the GitHub update token in the vault
     inventory.rs
     capacity.rs       VM-07 capacity check before power-on
@@ -78,6 +79,7 @@ crates/core/          remotely-core: all app logic
                       polling, kept connections, backoff), procfs.rs (/proc and df parsers)
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); sessions/tree.rs the QL-04
                       tree (by folder, tag or label) for the Terminal page
+    vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
                       QL-03 host name and IP); quick.rs QL-02 quick connect; log.rs and output.rs SS-11 session logs
                       and saved, printed or copied output (secrets scrubbed)
