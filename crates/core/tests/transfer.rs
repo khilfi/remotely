@@ -809,6 +809,25 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
 }
 
 #[tokio::test]
+async fn keeping_both_renames_only_a_taken_name() {
+    let dir = temp_folder("transfer");
+    let a = laptop().await;
+    fill(&a).await;
+    let path = export(&a, &dir, false).await;
+    let b = laptop().await;
+    // B reaches bastion's user, host and port under another name.
+    let mut own = input("jump box", "bastion.example.org");
+    own.port = 2222;
+    b.sessions.create(&b.ctx, own).await.unwrap();
+    let preview = open(&b, &path).await;
+    assert_eq!(status_of(&preview, "bastion"), ItemStatus::Conflict);
+    commit(&b, &preview, &[(index_of(&preview, "bastion"), ItemAction::KeepBoth)]).await;
+    assert_eq!(by_name(&b, "bastion").await.port, 2222);
+    assert_eq!(by_name(&b, "jump box").await.port, 2222);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
 async fn an_unchanged_library_imports_as_already_there() {
     let dir = temp_folder("transfer");
     let a = laptop().await;

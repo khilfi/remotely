@@ -1242,7 +1242,9 @@ impl Transfer {
                     library.update(ctx, here.id, input).await
                 }
                 (ItemAction::KeepBoth, _) => {
-                    input.name = free_name(&input.name, &taken_names, crate::sessions::MAX_SESSION_NAME);
+                    if taken_names.contains(&input.name.to_lowercase()) {
+                        input.name = free_name(&input.name, &taken_names, crate::sessions::MAX_SESSION_NAME);
+                    }
                     library
                         .restore(ctx, Uuid::new_v4(), input, imported_from(entry), SOURCE)
                         .await
