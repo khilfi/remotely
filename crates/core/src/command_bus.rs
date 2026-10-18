@@ -21,6 +21,7 @@ use crate::jobs::{JobRunner, JobSpec, TargetStatus};
 use crate::locks;
 use crate::policy::{ActionKind, ApprovalStep, DangerousMatch, Decision, PolicyEngine, PolicyRules, Tier};
 use crate::snapshots::{is_safety_name, SAFETY_PREFIX};
+use crate::ssh_keys;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
 
@@ -54,6 +55,19 @@ pub enum Command {
     },
     /// FD-14 install a checked, signed update. Runs once no other job is open.
     AppUpdate { version: String },
+    /// SS-09 add a public key to `~/.ssh/authorized_keys` on many hosts, unless it is there already
+    /// (see [`ssh_keys::authorized_keys_script`]).
+    PushSshKey {
+        targets: Vec<TargetRef>,
+        /// The public key in OpenSSH's one-line form. Checked, and written to the hosts in Remotely's
+        /// own form, never as typed.
+        public_key: String,
+        /// As for [`Command::RemoteExec`]: a run can't ask about a host key it has not seen.
+        #[serde(default)]
+        trust_new_host_keys: bool,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+    },
 }
 
 /// The one target of commands that act on the app itself.
@@ -164,11 +178,16 @@ fn validate_script(script: &str, timeout_secs: Option<u64>) -> Result<()> {
     if script.contains('\0') {
         return invalid("A script can't hold NUL characters.".into());
     }
+    validate_timeout(timeout_secs)
+}
+
+/// BX-02: a per-host time limit within bounds.
+fn validate_timeout(timeout_secs: Option<u64>) -> Result<()> {
     if let Some(secs) = timeout_secs {
         if !(1..=MAX_EXEC_TIMEOUT_SECS).contains(&secs) {
-            return invalid(format!(
+            return Err(CoreError::InvalidInput(format!(
                 "The time limit must be 1 to {MAX_EXEC_TIMEOUT_SECS} seconds (a day)."
-            ));
+            )));
         }
     }
     Ok(())
@@ -182,6 +201,14 @@ impl Command {
             Command::RemoteExec {
                 script, timeout_secs, ..
             } => validate_script(script, *timeout_secs),
+            Command::PushSshKey {
+                public_key,
+                timeout_secs,
+                ..
+            } => {
+                ssh_keys::parse_public_key(public_key)?;
+                validate_timeout(*timeout_secs)
+            }
             _ => Ok(()),
         }
     }
@@ -193,7 +220,8 @@ impl Command {
             Command::VmPower { targets, .. }
             | Command::VmSnapshot { targets, .. }
             | Command::VmProtect { targets, .. }
-            | Command::RemoteExec { targets, .. } => *targets = new,
+            | Command::RemoteExec { targets, .. }
+            | Command::PushSshKey { targets, .. } => *targets = new,
             Command::AppUpdate { .. } => return None,
         }
         Some(command)
@@ -204,7 +232,8 @@ impl Command {
             Command::VmPower { targets, .. }
             | Command::VmSnapshot { targets, .. }
             | Command::VmProtect { targets, .. }
-            | Command::RemoteExec { targets, .. } => targets,
+            | Command::RemoteExec { targets, .. }
+            | Command::PushSshKey { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -246,6 +275,10 @@ impl Command {
                 format!("Run `{sudo}{first_line}` on {}", noun("host"))
             }
             Command::AppUpdate { version } => format!("Install update {version}"),
+            Command::PushSshKey { public_key, .. } => match ssh_keys::parse_public_key(public_key) {
+                Ok(key) => format!("Add the SSH key {} to {}", key.describe(), noun("host")),
+                Err(_) => format!("Add an SSH key to {}", noun("host")),
+            },
         }
     }
 }
@@ -495,6 +528,25 @@ impl CommandBus {
         command: &Command,
         retry_of: Option<Uuid>,
     ) -> Result<Option<Box<ExecDetails>>> {
+        if let Command::PushSshKey {
+            public_key,
+            trust_new_host_keys,
+            timeout_secs,
+            ..
+        } = command
+        {
+            // SS-09: the dialog shows the script each host runs.
+            let key = ssh_keys::parse_public_key(public_key)?;
+            return Ok(Some(Box::new(ExecDetails {
+                script: ssh_keys::authorized_keys_script(&key),
+                sudo: false,
+                sudo_password_label: None,
+                trust_new_host_keys: *trust_new_host_keys,
+                timeout_secs: *timeout_secs,
+                dangerous: Vec::new(),
+                retry_of,
+            })));
+        }
         let Command::RemoteExec {
             script,
             sudo,

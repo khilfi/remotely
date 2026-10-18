@@ -549,7 +549,13 @@ export default function App() {
               <KnownHostsPage active={page === "knownHosts"} />
             </section>
             <section hidden={page !== "vault"}>
-              <VaultPage vault={vault} onVaultChanged={setVault} active={page === "vault"} />
+              <VaultPage
+                vault={vault}
+                onVaultChanged={setVault}
+                active={page === "vault"}
+                onSubmitted={submitted}
+                onOpenSessions={() => setPage("sessions")}
+              />
             </section>
             <section hidden={page !== "activity"}>
               <ActivityPage version={jobsVersion} active={page === "activity"} />

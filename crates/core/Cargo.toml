@@ -26,17 +26,21 @@ uuid.workspace = true
 hex = "0.4"
 regex = "1"
 sha2 = "0.11"
-time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde"] }
+# local-offset: the local date in FD-07 export file names.
+time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde", "local-offset"] }
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
 # SS-04 vault: AES-256-GCM per item and Argon2id for the master password, with keys zeroized on drop.
 # The versions russh already pulls in.
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"] }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
-getrandom = "0.4"
+# SysRng: the random source for generating SSH keys (SS-09).
+getrandom = { version = "0.4", features = ["sys_rng"] }
 futures = { version = "0.3", optional = true }
 zeroize = "1"
 # SS-02: session lists imported from CSV.
 csv = "1"
+# FD-07: the encrypted export file's envelope. The version the dependencies already pull in.
+base64 = "0.22"
 # SSH (SS-03, BX-02, MO-02). `ring` instead of the default aws-lc-rs so Windows builds need no CMake/NASM.
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
 # BX-03: the line diff between two output groups.
