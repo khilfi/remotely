@@ -300,7 +300,7 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
 
   return (
     <Sheet open onOpenChange={(open) => !open && onClose()}>
-      <SheetContent className="w-full gap-0 sm:max-w-2xl">
+      <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-2xl">
         <SheetHeader>
           <div className="flex items-center gap-2">
             <TierBadge tier={job.tier} />

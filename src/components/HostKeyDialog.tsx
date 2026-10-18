@@ -71,7 +71,7 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
     const { key, otherKeyTypes } = question;
     return (
       <AlertDialog open onOpenChange={(open) => !open && !busy && void run(onReject)}>
-        <AlertDialogContent className="sm:max-w-md">
+        <AlertDialogContent className="data-[size=default]:sm:max-w-md">
           <AlertDialogHeader>
             <AlertDialogMedia>
               <ShieldQuestionIcon />
@@ -118,7 +118,7 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
   const { key, previous } = question;
   return (
     <AlertDialog open onOpenChange={(open) => !open && !busy && onDismiss()}>
-      <AlertDialogContent className="sm:max-w-lg">
+      <AlertDialogContent className="data-[size=default]:sm:max-w-lg">
         <AlertDialogHeader>
           <AlertDialogMedia className="bg-destructive/10 text-destructive">
             <ShieldAlertIcon />
