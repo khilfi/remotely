@@ -399,6 +399,11 @@ async fn a_quick_connection_saved_as_a_session_goes_to_its_folder_and_recent_ses
         .any(|e| e.event == "session_changed" && e.action == "Created session 'lab web'"));
     let opened = entries.iter().find(|e| e.event == "terminal_opened").unwrap();
     assert_eq!(opened.action, "Opened a terminal to 'lab web'");
+    assert!(opened
+        .detail
+        .as_deref()
+        .unwrap()
+        .ends_with("password typed in the quick-connect form"));
     assert!(opened.targets_json.contains(&session.id.to_string()));
     assert_audit_clean(&core, &[&password]).await;
 }

@@ -460,7 +460,7 @@ impl Terminals {
     /// Opens a pane to a saved session and starts connecting. Fails at once, opening nothing, for a
     /// session with a jump host (SS-07, v2) or a key login with no key chosen.
     pub async fn open(&self, ctx: &Context, session_id: Uuid, size: PtySize) -> Result<TerminalHandle> {
-        self.open_saved(ctx, session_id, None, size, "Opened a terminal to")
+        self.open_saved(ctx, session_id, None, size, "Opened a terminal to", "")
             .await
     }
 
@@ -471,6 +471,8 @@ impl Terminals {
         remembered: Option<SecretString>,
         size: PtySize,
         verb: &str,
+        // How the audit names a password typed before this terminal opened.
+        typed_how: &str,
     ) -> Result<TerminalHandle> {
         let spec = self
             .inner
@@ -495,7 +497,7 @@ impl Terminals {
             protected,
         };
         let auth = match (&spec.auth, &remembered) {
-            (AuthMethod::Password(None), Some(_)) => "password typed earlier",
+            (AuthMethod::Password(None), Some(_)) => typed_how,
             (auth, _) => describe_auth(auth),
         };
         let pane = NewPane {
@@ -525,7 +527,14 @@ impl Terminals {
         if request.save.is_some() {
             let session = library.create(ctx, input).await?;
             let handle = self
-                .open_saved(ctx, session.id, typed, size, "Opened a terminal to")
+                .open_saved(
+                    ctx,
+                    session.id,
+                    typed,
+                    size,
+                    "Opened a terminal to",
+                    "password typed in the quick-connect form",
+                )
                 .await?;
             return Ok(QuickOpened {
                 handle,
@@ -564,8 +573,15 @@ impl Terminals {
         let remembered = locks::lock(&control.remembered).clone();
         match &control.source {
             Source::Saved(session_id) => {
-                self.open_saved(ctx, *session_id, remembered, size, "Opened another terminal to")
-                    .await
+                self.open_saved(
+                    ctx,
+                    *session_id,
+                    remembered,
+                    size,
+                    "Opened another terminal to",
+                    "password typed earlier",
+                )
+                .await
             }
             Source::Unsaved(spec) => {
                 let address = spec.address();

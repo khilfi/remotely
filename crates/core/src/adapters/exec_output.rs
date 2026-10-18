@@ -22,11 +22,10 @@ pub const MAX_OUTPUT_PER_STREAM: usize = 64 * 1024;
 /// What a scrubbed secret reads as.
 pub const REDACTED: &str = "[redacted]";
 
-/// Replaces secrets in a byte stream. Holds back the last few bytes of each read until it knows they
-/// don't start a secret.
+/// Replaces secrets in a byte stream. Holds back the end of a read that starts a secret, until the
+/// next read shows whether the secret follows.
 pub struct Scrubber {
     secrets: Vec<Zeroizing<Vec<u8>>>,
-    longest: usize,
     pending: Zeroizing<Vec<u8>>,
     replacement: &'static [u8],
     found: usize,
@@ -52,10 +51,8 @@ impl Scrubber {
         // Longest first, so a secret that contains another is replaced whole.
         secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
         secrets.dedup_by(|a, b| a.as_slice() == b.as_slice());
-        let longest = secrets.first().map_or(0, |s| s.len());
         Self {
             secrets,
-            longest,
             pending: Zeroizing::new(Vec::new()),
             replacement,
             found: 0,
@@ -81,10 +78,27 @@ impl Scrubber {
             self.found += 1;
             at = pos + len;
         }
-        // The last `longest - 1` bytes may be the start of a secret that the next read completes.
-        let keep_from = at.max(self.pending.len().saturating_sub(self.longest - 1));
+        // Only a tail that is the start of a secret is held back: the next read may complete it.
+        // (SS-11: a session log then gets each line as soon as it ends.)
+        let keep_from = self.pending.len() - self.partial_tail(at);
         out.extend_from_slice(&self.pending[at..keep_from]);
         self.pending.drain(..keep_from);
+    }
+
+    /// The longest end of `pending[from..]` that a secret starts with (shorter than the secret).
+    fn partial_tail(&self, from: usize) -> usize {
+        let tail = &self.pending[from..];
+        self.secrets
+            .iter()
+            .map(|secret| {
+                let most = (secret.len() - 1).min(tail.len());
+                (1..=most)
+                    .rev()
+                    .find(|&k| tail[tail.len() - k..] == secret[..k])
+                    .unwrap_or(0)
+            })
+            .max()
+            .unwrap_or(0)
     }
 
     /// The bytes held back; they can't hold a whole secret.
@@ -364,6 +378,22 @@ mod tests {
             scrub_in_pieces("ends with s3cr3t-p", &["s3cr3t-pw"], 5),
             "ends with s3cr3t-p"
         );
+    }
+
+    #[test]
+    fn only_the_start_of_a_secret_is_held_back() {
+        let secret = SecretString::new("s3cr3t-pw");
+        let mut scrubber = Scrubber::new(&[&secret]);
+        let mut out = Vec::new();
+        // Nothing here starts the secret: all of it goes on at once (a session log line, say).
+        scrubber.push(b"uptime\r\n$ ", &mut out);
+        assert_eq!(out, b"uptime\r\n$ ");
+        out.clear();
+        scrubber.push(b"echo s3c", &mut out);
+        assert_eq!(out, b"echo ", "the start of the secret waits for the next read");
+        out.clear();
+        scrubber.push(b"r3t-pw\r\n", &mut out);
+        assert_eq!(out, b"[redacted]\r\n");
     }
 
     #[test]
