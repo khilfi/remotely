@@ -801,7 +801,11 @@ impl JobRunner {
             (Command::AppUpdate { version }, TargetRef::App) => {
                 // FD-14: never update under a running job.
                 self.wait_to_run_alone(job_id, token).await?;
-                self.updater.install(version).await?;
+                // The private repo's releases need the GitHub update token from the vault.
+                let github_token = crate::updates::stored_token(&self.store, self.vault.as_ref(), &spec.ctx)
+                    .await?
+                    .require()?;
+                self.updater.install(&github_token, version).await?;
                 Ok(TargetOutcome::done())
             }
             (command, other) => Err(CoreError::WrongTargetKind {

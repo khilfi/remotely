@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use remotely_core::adapters::updater::UpdateInfo;
+use remotely_core::adapters::updater::TokenReport;
 use remotely_core::bulk::{
     self, BulkExport, BulkResults, ExportFormat, GroupOptions, HostOutput, OutputDiff, ResolvedTargets, TargetPicks,
 };
@@ -21,6 +21,7 @@ use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COU
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
+use remotely_core::updates::{UpdateCheck, UpdateTokenInfo};
 use remotely_core::vault::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, VaultInfo, MAX_SECRET_BYTES};
 use remotely_core::{AuditExport, Core, CoreError};
 use serde::Serialize;
@@ -323,6 +324,8 @@ pub struct Settings {
     vmrun_path_in_use: Option<String>,
     /// FD-14: check GitHub Releases for updates (off at air-gapped sites).
     update_checks: bool,
+    /// FD-14: whether the GitHub update token is in the vault, and when it expires. Never the token.
+    update_token: UpdateTokenInfo,
     /// VM-01: folders scanned for .vmx files, besides Workstation's library.
     scan_folders: Vec<String>,
     /// VM-06: how many VMs may power on at once.
@@ -338,6 +341,7 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
         vmrun_path_saved: core.saved_vmrun_path().await?.map(|p| p.display().to_string()),
         vmrun_path_in_use: core.vmrun_path().map(|p| p.display().to_string()),
         update_checks: core.update_checks_enabled().await?,
+        update_token: core.update_token_info().await?,
         scan_folders: core
             .scan_folders()
             .await?
@@ -407,11 +411,31 @@ pub async fn settings_set_update_checks(state: State<'_, AppState>, enabled: boo
     settings(&state.core).await
 }
 
-/// FD-14: asks GitHub Releases for a newer signed version. `None` when up to date or when checks
-/// are off. Installing is the `appUpdate` command, through the command bus.
+/// FD-14: asks GitHub Releases for a newer signed version, or says why it did not ask (checks off,
+/// no token, vault locked). Installing is the `appUpdate` command, through the command bus.
 #[tauri::command]
-pub async fn update_check(state: State<'_, AppState>) -> IpcResult<Option<UpdateInfo>> {
+pub async fn update_check(state: State<'_, AppState>) -> IpcResult<UpdateCheck> {
     Ok(state.core.check_for_update().await?)
+}
+
+/// FD-14: stores the GitHub update token in the vault, replacing the one there. Write-only: nothing
+/// returns it. Needs the vault unlocked.
+#[tauri::command]
+pub async fn update_token_set(state: State<'_, AppState>, token: SecretString) -> IpcResult<Settings> {
+    state.core.set_update_token(token).await?;
+    settings(&state.core).await
+}
+
+/// FD-14: Settings' "Test": can the stored token read the releases?
+#[tauri::command]
+pub async fn update_token_test(state: State<'_, AppState>) -> IpcResult<TokenReport> {
+    Ok(state.core.test_update_token().await?)
+}
+
+#[tauri::command]
+pub async fn update_token_remove(state: State<'_, AppState>) -> IpcResult<Settings> {
+    state.core.remove_update_token().await?;
+    settings(&state.core).await
 }
 
 // ---- Vault (SS-04, AP-06) ----------------------------------------------------------------------
