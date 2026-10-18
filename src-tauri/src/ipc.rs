@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
+use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::policy::PolicyRules;
-use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, VmRecord};
+use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, SavedFilter, Tag, VmRecord};
 use remotely_core::{Core, CoreError};
 use serde::Serialize;
 use tauri::State;
@@ -52,20 +53,71 @@ pub fn app_info(state: State<'_, AppState>) -> AppInfo {
     }
 }
 
-/// VM-01: running VMs from `vmrun list`, saved to the inventory.
+/// VM-01: finds every VM (Workstation's library, the chosen folders, `vmrun list`), saves the result
+/// and returns it with any sources that could not be read.
 #[tauri::command]
-pub async fn vm_list_running(state: State<'_, AppState>) -> IpcResult<Vec<VmRecord>> {
+pub async fn vm_refresh(state: State<'_, AppState>) -> IpcResult<RefreshReport> {
     let core = &state.core;
-    let vms = core.inventory.refresh_running(&core.ctx).await?;
-    tracing::info!(running = vms.len(), "vmrun list");
-    Ok(vms)
+    let report = core.inventory.refresh(&core.ctx).await?;
+    tracing::info!(
+        vms = report.vms.len(),
+        warnings = report.warnings.len(),
+        "inventory refresh"
+    );
+    Ok(report)
 }
 
-/// VM-01: every VM the inventory knows, without asking Workstation.
+/// VM-01, VM-02: the VMs the last refresh found that match the filter (all of them without one),
+/// without asking Workstation.
 #[tauri::command]
-pub async fn vm_list(state: State<'_, AppState>) -> IpcResult<Vec<VmRecord>> {
+pub async fn vm_list(state: State<'_, AppState>, filter: Option<VmFilter>) -> IpcResult<Vec<VmRecord>> {
     let core = &state.core;
-    Ok(core.inventory.list(&core.ctx).await?)
+    Ok(core.inventory.list(&core.ctx, &filter.unwrap_or_default()).await?)
+}
+
+/// VM-02: tags are the app's own labels for picking VMs; they change no VM, so they skip the bus.
+#[tauri::command]
+pub async fn tags_list(state: State<'_, AppState>) -> IpcResult<Vec<Tag>> {
+    let core = &state.core;
+    Ok(core.store.list_tags(&core.ctx).await?)
+}
+
+#[tauri::command]
+pub async fn vm_tag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.tag_vms(&core.ctx, &vmx_paths, &tag).await?)
+}
+
+#[tauri::command]
+pub async fn vm_untag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.untag_vms(&core.ctx, &vmx_paths, &tag).await?)
+}
+
+#[tauri::command]
+pub async fn tag_delete(state: State<'_, AppState>, tag: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.delete_tag(&core.ctx, &tag).await?)
+}
+
+/// VM-02: saved filters, for selecting the same VMs again.
+#[tauri::command]
+pub async fn filters_list(state: State<'_, AppState>) -> IpcResult<Vec<SavedFilter>> {
+    let core = &state.core;
+    Ok(core.store.list_saved_filters(&core.ctx).await?)
+}
+
+/// Saving under an existing name replaces that filter.
+#[tauri::command]
+pub async fn filter_save(state: State<'_, AppState>, name: String, filter: VmFilter) -> IpcResult<SavedFilter> {
+    let core = &state.core;
+    Ok(core.store.save_filter(&core.ctx, &name, &filter).await?)
+}
+
+#[tauri::command]
+pub async fn filter_delete(state: State<'_, AppState>, id: String) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.store.delete_saved_filter(&core.ctx, &id).await?)
 }
 
 /// The one way in for changes: command bus -> policy engine -> (approval) -> job runner.
@@ -126,6 +178,12 @@ pub struct Settings {
     vmrun_path_in_use: Option<String>,
     /// FD-14: check GitHub Releases for updates (off at air-gapped sites).
     update_checks: bool,
+    /// VM-01: folders scanned for .vmx files, besides Workstation's library.
+    scan_folders: Vec<String>,
+    /// VM-06: how many VMs may power on at once.
+    power_on_limit: usize,
+    /// VM-03: seconds a soft stop may take before the VM counts as still running.
+    shutdown_wait_secs: u64,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -133,6 +191,14 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
         vmrun_path_saved: core.saved_vmrun_path().await?.map(|p| p.display().to_string()),
         vmrun_path_in_use: core.vmrun_path().map(|p| p.display().to_string()),
         update_checks: core.update_checks_enabled().await?,
+        scan_folders: core
+            .scan_folders()
+            .await?
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        power_on_limit: core.power_on_limit(),
+        shutdown_wait_secs: core.shutdown_wait_secs(),
     })
 }
 
@@ -149,6 +215,33 @@ pub async fn settings_set_vmrun_path(state: State<'_, AppState>, path: Option<St
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
     state.core.set_vmrun_path(path).await?;
+    settings(&state.core).await
+}
+
+/// VM-01: the folders to scan for .vmx files. Each must exist.
+#[tauri::command]
+pub async fn settings_set_scan_folders(state: State<'_, AppState>, folders: Vec<String>) -> IpcResult<Settings> {
+    let folders = folders
+        .iter()
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    state.core.set_scan_folders(folders).await?;
+    settings(&state.core).await
+}
+
+/// VM-06: how many VMs may power on at once.
+#[tauri::command]
+pub async fn settings_set_power_on_limit(state: State<'_, AppState>, limit: usize) -> IpcResult<Settings> {
+    state.core.set_power_on_limit(limit).await?;
+    settings(&state.core).await
+}
+
+/// VM-03: seconds a soft stop may take before the VM counts as still running.
+#[tauri::command]
+pub async fn settings_set_shutdown_wait(state: State<'_, AppState>, secs: u64) -> IpcResult<Settings> {
+    state.core.set_shutdown_wait_secs(secs).await?;
     settings(&state.core).await
 }
 

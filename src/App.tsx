@@ -78,6 +78,8 @@ export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [approval, setApproval] = useState<ApprovalRequest | null>(null);
   const [jobsVersion, setJobsVersion] = useState(0);
+  // Bumped when a job finishes, so the VM list shows the new power states.
+  const [jobsFinished, setJobsFinished] = useState(0);
   const [settingsVersion, setSettingsVersion] = useState(0);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [laterFor, setLaterFor] = useState<string | null>(null);
@@ -136,7 +138,27 @@ export default function App() {
         case "started":
           toast.loading("Running…", { id });
           break;
+        case "stillRunning": {
+          // VM-03: offer the hard power-off, which goes through the bus and its own Critical approval.
+          const names = event.targets.map((t) => t.name).join(", ");
+          const targets = event.targets.map((t) => t.target);
+          toast.warning(`Still running after the shutdown: ${names}`, {
+            id: `${id}-still-running`,
+            description: "The guest did not shut down in time. Forcing it off needs its own approval.",
+            duration: Infinity,
+            closeButton: true,
+            action: {
+              label: "Force off…",
+              onClick: () =>
+                void api
+                  .submit({ type: "vmPower", targets, op: { kind: "stop", mode: "hard" } })
+                  .then(submitted, (err) => toast.error(errorMessage(err))),
+            },
+          });
+          break;
+        }
         case "finished":
+          setJobsFinished((v) => v + 1);
           if (event.status === "succeeded") toast.success("Job succeeded", { id, duration: 5000 });
           else toast.error(`Job ${event.status.replace("_", " ")}`, { id, duration: 8000 });
           break;
@@ -147,6 +169,11 @@ export default function App() {
 
   function submitted(outcome: SubmitOutcome) {
     if (outcome.status === "needsApproval") setApproval(outcome.request);
+    else if (outcome.skipped.length > 0) {
+      // AP-04: a Low action has no dialog, so say which protected targets it left alone.
+      const names = outcome.skipped.map((t) => t.name).join(", ");
+      toast.info(`Skipped ${outcome.skipped.length} protected: ${names}`, { duration: 8000 });
+    }
   }
 
   const current = PAGES.find((p) => p.id === page) ?? PAGES[0];
@@ -251,7 +278,11 @@ export default function App() {
               />
             )}
             <section hidden={page !== "vms"}>
-              <VmsPage onSubmitted={submitted} onOpenSettings={() => setPage("settings")} />
+              <VmsPage
+                onSubmitted={submitted}
+                onOpenSettings={() => setPage("settings")}
+                refreshKey={jobsFinished + settingsVersion}
+              />
             </section>
             <section hidden={page !== "terminal"} className="h-full">
               <TerminalPage active={page === "terminal"} theme={resolved} />

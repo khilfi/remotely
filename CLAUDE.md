@@ -65,6 +65,7 @@ crates/core/          remotely-core: all app logic
     jobs.rs
     adapters/         vmware.rs, remote.rs, host_counters.rs, updater.rs
     inventory.rs
+    capacity.rs       VM-07 capacity check before power-on
     metrics.rs
     vault.rs
     store/
@@ -81,7 +82,8 @@ src/                  React + TypeScript UI
 ## VMware Workstation facts
 
 - `vmrun.exe` is under `C:\Program Files (x86)\VMware\VMware Workstation\` in older releases and under `C:\Program Files\VMware\VMware Workstation\` in newer ones (e.g. Workstation 26). Never hard-code it: the app uses the path saved in Settings, then `REMOTELY_VMRUN`, then the registry's `InstallPath`, then both default folders (`adapters::vmware::locate_vmrun`).
-- Always pass `-T ws`. `vmrun -T ws list` lists running VMs only. To find all VMs, read Workstation's library (`%APPDATA%\VMware\inventory.vmls`; check this on the machine) and scan user-chosen folders for `.vmx` files.
+- Always pass `-T ws`. `vmrun -T ws list` lists running VMs only. To find all VMs, read Workstation's library (`%APPDATA%\VMware\inventory.vmls`) and scan user-chosen folders for `.vmx` files (`adapters::vmware::parse_vmls`, `scan_for_vmx`). In the library each entry is `vmlistN.config = "<path to .vmx>"` with `vmlistN.DisplayName`; folders have `vmlistN.Type = "2"` and deleted slots an empty `config`.
+- A suspended VM's `.vmx` has a non-empty `checkpoint.vmState`. `guestInfo.detailed.data` holds the guest's `prettyName` once VMware Tools has reported it. Values may escape characters as `|XX` (hex).
 - Power: `start <vmx> [gui|nogui]`, `stop <vmx> [soft|hard]`, `reset <vmx> [soft|hard]`, `suspend <vmx> [soft|hard]`, `pause <vmx>`, `unpause <vmx>`.
 - Snapshots: `snapshot`, `listSnapshots`, `revertToSnapshot`, `deleteSnapshot`.
 - Guest operations (`runProgramInGuest`, file copy) need `-gu`/`-gp` guest credentials on the command line, so other processes on the host can see them. Use guest operations only on demand, and never log the command line.
@@ -99,7 +101,7 @@ src/                  React + TypeScript UI
 - Install: `npm install`
 - Run the app: `npm run tauri dev`. A debug build keeps its data (database, WebView2 profile) in `%LOCALAPPDATA%\com.remotely.desktop.dev`, apart from the installed app's `%LOCALAPPDATA%\com.remotely.desktop`, so its migrations never reach the installed app's database. `REMOTELY_DATA_DIR` (an absolute path outside the repo) overrides both.
 - Rust tests: `cargo test --workspace` (run at the repo root; `cargo test` inside `src-tauri/` only tests the shell crate)
-- Opt-in test against real Workstation (only runs `vmrun list`): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
+- Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - Format: `cargo fmt --all`, `npm run format`
 - Build the installer: `npm run tauri build`

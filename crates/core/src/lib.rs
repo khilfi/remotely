@@ -16,6 +16,7 @@
 //! runner (changes) or [`inventory::Inventory`] and [`metrics`] (reads).
 
 pub mod adapters;
+pub mod capacity;
 pub mod command_bus;
 pub mod domain;
 pub mod error;
@@ -31,11 +32,13 @@ pub mod vault;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::remote::{RemoteAdapter, RusshAdapter, ShellHandle};
 use adapters::updater::{UpdateInfo, UpdaterAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
+use capacity::CapacityChecker;
 use command_bus::CommandBus;
 use domain::Context;
 use inventory::{Inventory, StoreDirectory};
@@ -106,10 +109,11 @@ impl Core {
 
     /// Wires the modules together. Tests pass fake adapters here.
     pub async fn assemble(store: Store, ctx: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
-        let rules = store
+        let mut rules = store
             .get_setting::<PolicyRules>(&ctx, store::POLICY_RULES_KEY)
             .await?
             .unwrap_or_default();
+        rules.fill_missing_tiers();
         let policy = PolicyEngine::new(rules)?;
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
@@ -126,7 +130,18 @@ impl Core {
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
+            CapacityChecker::new(
+                store.clone(),
+                Arc::clone(&vmware_dyn),
+                Arc::clone(&adapters.host_counters),
+            ),
         );
+        if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
+            jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
+        }
+        if let Some(secs) = store.get_setting::<u64>(&ctx, store::SHUTDOWN_WAIT_KEY).await? {
+            jobs.set_shutdown_wait(Duration::from_secs(secs.clamp(1, JobLimits::MAX_SHUTDOWN_WAIT_SECS)));
+        }
         Ok(Self {
             ctx,
             inventory: Inventory::new(store.clone(), vmware_dyn),
@@ -171,6 +186,81 @@ impl Core {
         );
         self.audit_setting("Set the vmrun.exe path", &detail).await?;
         Ok(in_use)
+    }
+
+    /// VM-01: folders scanned for .vmx files, besides Workstation's library.
+    pub async fn scan_folders(&self) -> Result<Vec<PathBuf>> {
+        self.inventory.scan_folders(&self.ctx).await
+    }
+
+    /// VM-01: replaces the folders to scan. Each must be an existing folder; duplicates (any letter
+    /// case) are dropped. Audited.
+    pub async fn set_scan_folders(&self, folders: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        let mut seen = std::collections::HashSet::new();
+        let mut kept = Vec::new();
+        for folder in folders {
+            if !folder.is_dir() {
+                return Err(CoreError::InvalidSetting(format!(
+                    "{} is not an existing folder",
+                    folder.display()
+                )));
+            }
+            if seen.insert(adapters::vmware::path_key(&folder)) {
+                kept.push(folder);
+            }
+        }
+        let as_text: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
+        self.store
+            .put_setting(&self.ctx, store::SCAN_FOLDERS_KEY, &as_text)
+            .await?;
+        let detail = if as_text.is_empty() {
+            "none".to_owned()
+        } else {
+            as_text.join("; ")
+        };
+        self.audit_setting("Set the VM folders to scan", &detail).await?;
+        Ok(kept)
+    }
+
+    /// VM-06: how many VMs may power on at once (default 3).
+    pub fn power_on_limit(&self) -> usize {
+        self.jobs.limits().power_on
+    }
+
+    /// VM-06: 1 to [`JobLimits::MAX_POWER_ON`]. Applies from the next job on. Audited.
+    pub async fn set_power_on_limit(&self, limit: usize) -> Result<()> {
+        if !(1..=JobLimits::MAX_POWER_ON).contains(&limit) {
+            return Err(CoreError::InvalidSetting(format!(
+                "VMs powered on at once must be 1 to {}",
+                JobLimits::MAX_POWER_ON
+            )));
+        }
+        self.store
+            .put_setting(&self.ctx, store::POWER_ON_LIMIT_KEY, &limit)
+            .await?;
+        self.jobs.set_power_on_limit(limit);
+        self.audit_setting("Set the parallel power-on limit", &limit.to_string())
+            .await
+    }
+
+    /// VM-03: seconds a soft stop may take before the VM counts as still running (default 120).
+    pub fn shutdown_wait_secs(&self) -> u64 {
+        self.jobs.limits().shutdown_wait.as_secs()
+    }
+
+    /// VM-03: 1 to [`JobLimits::MAX_SHUTDOWN_WAIT_SECS`]. Applies from the next stop on. Audited.
+    pub async fn set_shutdown_wait_secs(&self, secs: u64) -> Result<()> {
+        if !(1..=JobLimits::MAX_SHUTDOWN_WAIT_SECS).contains(&secs) {
+            return Err(CoreError::InvalidSetting(format!(
+                "the shutdown wait must be 1 to {} seconds",
+                JobLimits::MAX_SHUTDOWN_WAIT_SECS
+            )));
+        }
+        self.store
+            .put_setting(&self.ctx, store::SHUTDOWN_WAIT_KEY, &secs)
+            .await?;
+        self.jobs.set_shutdown_wait(Duration::from_secs(secs));
+        self.audit_setting("Set the shutdown wait", &format!("{secs} s")).await
     }
 
     /// FD-14: whether update checks are on. Defaults to on.

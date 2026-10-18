@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::capacity::CapacityChecker;
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::jobs::{JobRunner, JobSpec};
@@ -28,6 +29,9 @@ pub enum Command {
     VmPower { targets: Vec<TargetRef>, op: PowerOp },
     /// VM-04 bulk snapshot take, revert and delete.
     VmSnapshot { targets: Vec<TargetRef>, op: SnapshotOp },
+    /// AP-04 mark VMs "do not touch" (`protected: true`) or unlock them. Other actions skip
+    /// protected targets; this one is the way to change that, so it never skips them.
+    VmProtect { targets: Vec<TargetRef>, protected: bool },
     /// BX-02 run a command or script on many hosts; BX-07 with sudo from the vault.
     RemoteExec {
         targets: Vec<TargetRef>,
@@ -83,6 +87,7 @@ impl Command {
         match self {
             Command::VmPower { targets, .. }
             | Command::VmSnapshot { targets, .. }
+            | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
@@ -116,6 +121,8 @@ impl Command {
                 SnapshotOp::Revert { name } => format!("Revert {} to '{name}'", noun("VM")),
                 SnapshotOp::Delete { name } => format!("Delete snapshot '{name}' on {}", noun("VM")),
             },
+            Command::VmProtect { protected: true, .. } => format!("Protect {}", noun("VM")),
+            Command::VmProtect { protected: false, .. } => format!("Unprotect {}", noun("VM")),
             Command::RemoteExec { script, sudo, .. } => {
                 let first_line = script.lines().next().unwrap_or_default();
                 let sudo = if *sudo { "sudo " } else { "" };
@@ -136,8 +143,13 @@ pub trait TargetDirectory: Send + Sync {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SubmitOutcome {
-    /// Low tier: logged and queued straight away.
-    Queued { job_id: Uuid, tier: Tier, summary: String },
+    /// Low tier: logged and queued straight away. `skipped` are protected targets left alone (AP-04).
+    Queued {
+        job_id: Uuid,
+        tier: Tier,
+        summary: String,
+        skipped: Vec<Target>,
+    },
     /// Medium and above: collect the answers for `steps`, then call [`CommandBus::approve`].
     NeedsApproval { request: ApprovalRequest },
 }
@@ -154,6 +166,8 @@ pub struct ApprovalRequest {
     pub targets: Vec<Target>,
     pub skipped: Vec<Target>,
     pub reasons: Vec<String>,
+    /// Problems to read before approving, e.g. the capacity check before a power-on (VM-07).
+    pub warnings: Vec<String>,
 }
 
 /// The user's answers to the approval steps (AP-03, AP-06).
@@ -196,6 +210,7 @@ pub struct CommandBus {
     jobs: Arc<JobRunner>,
     store: Store,
     vault: Arc<dyn Vault>,
+    capacity: CapacityChecker,
     pending: Mutex<HashMap<Uuid, Pending>>,
 }
 
@@ -206,6 +221,7 @@ impl CommandBus {
         jobs: Arc<JobRunner>,
         store: Store,
         vault: Arc<dyn Vault>,
+        capacity: CapacityChecker,
     ) -> Self {
         Self {
             policy: RwLock::new(policy),
@@ -213,6 +229,7 @@ impl CommandBus {
             jobs,
             store,
             vault,
+            capacity,
             pending: Mutex::new(HashMap::new()),
         }
     }
@@ -240,15 +257,25 @@ impl CommandBus {
             targets.push(self.directory.resolve(ctx, target).await?);
         }
 
-        let decision = locks::read(&self.policy).evaluate(&command, &targets);
+        let mut decision = locks::read(&self.policy).evaluate(&command, &targets);
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
+        }
+        if let Command::VmPower {
+            op: PowerOp::Start { .. },
+            ..
+        } = &command
+        {
+            // VM-07: capacity check before power-on.
+            let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
+            decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
         }
         let summary = command.summary(decision.targets.len());
 
         if decision.steps.is_empty() {
             // Low tier: no approval, logged only.
             let tier = decision.tier;
+            let skipped = decision.skipped.clone();
             let job_id = self
                 .jobs
                 .enqueue(JobSpec {
@@ -259,7 +286,12 @@ impl CommandBus {
                     safety_snapshot: false,
                 })
                 .await?;
-            return Ok(SubmitOutcome::Queued { job_id, tier, summary });
+            return Ok(SubmitOutcome::Queued {
+                job_id,
+                tier,
+                summary,
+                skipped,
+            });
         }
 
         let request = ApprovalRequest {
@@ -271,7 +303,15 @@ impl CommandBus {
             targets: decision.targets.clone(),
             skipped: decision.skipped.clone(),
             reasons: decision.reasons.clone(),
+            warnings: decision.warnings.clone(),
         };
+        let detail = decision
+            .reasons
+            .iter()
+            .chain(&decision.warnings)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
         self.store
             .append_audit(
                 ctx,
@@ -283,7 +323,7 @@ impl CommandBus {
                     targets: &decision.targets,
                     approval: None,
                     result: None,
-                    detail: Some(&decision.reasons.join("; ")),
+                    detail: Some(&detail),
                 },
             )
             .await?;

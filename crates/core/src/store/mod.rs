@@ -7,6 +7,7 @@ mod audit;
 mod inventory;
 mod jobs;
 mod metrics;
+mod tags;
 #[cfg(test)]
 mod tests;
 
@@ -27,12 +28,19 @@ pub use audit::{AuditEntry, ChainCheck, NewAuditEntry};
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, TargetResult};
+pub use tags::{SavedFilter, Tag};
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";
 /// Full path to vmrun.exe chosen in Settings; JSON null means "find it automatically".
 pub const VMRUN_PATH_KEY: &str = "vmware.vmrunPath";
 /// FD-14: whether the app checks GitHub Releases for updates; off for air-gapped sites. Default on.
 pub const UPDATE_CHECKS_KEY: &str = "updates.checkEnabled";
+/// VM-01: folders scanned for .vmx files, besides Workstation's library. A JSON list of paths.
+pub const SCAN_FOLDERS_KEY: &str = "vmware.scanFolders";
+/// VM-06: how many VMs may power on at once.
+pub const POWER_ON_LIMIT_KEY: &str = "jobs.powerOnLimit";
+/// VM-03: seconds a soft stop may take before the VM counts as still running.
+pub const SHUTDOWN_WAIT_KEY: &str = "vmware.shutdownWaitSecs";
 pub const DEFAULT_WORKSPACE: &str = "Default";
 
 #[derive(Clone)]

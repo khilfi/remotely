@@ -1,6 +1,9 @@
 //! Job runner: runs commands the bus has cleared, against each target, with bounded parallelism.
 //!
 //! * Parallel limits: power-ons default to 3 (VM-06), remote commands to 10 (BX-02).
+//! * Graceful shutdown (VM-03): a soft stop gets a set time; a VM still running after it is reported
+//!   ([`JobEvent::StillRunning`]) and left running. Forcing it off is a separate hard-stop command,
+//!   which the policy engine puts at Critical, so it gets its own approval.
 //! * Countdown with cancel after approval (AP-03); cancel stops targets that have not started (BX-04).
 //!   A vmrun call already in flight is left to finish rather than killed halfway.
 //! * Safety snapshot before each VM's action when the approval asked for one (VM-05).
@@ -9,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -20,9 +23,9 @@ use uuid::Uuid;
 
 use crate::adapters::remote::RemoteAdapter;
 use crate::adapters::updater::UpdaterAdapter;
-use crate::adapters::vmware::VmwareAdapter;
-use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp};
-use crate::domain::{Context, Target, TargetRef};
+use crate::adapters::vmware::{path_key, VmwareAdapter};
+use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp, StopMode};
+use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::policy::{ApprovalStep, Decision, Tier};
@@ -93,6 +96,15 @@ pub struct JobLimits {
     pub vm_ops: usize,
     /// BX-02: hosts at a time for remote commands.
     pub remote: usize,
+    /// VM-03: how long a soft stop may take before the VM counts as still running.
+    pub shutdown_wait: Duration,
+}
+
+impl JobLimits {
+    /// VM-06: the most power-ons the setting allows at once.
+    pub const MAX_POWER_ON: usize = 32;
+    /// VM-03: the longest shutdown wait the setting allows, in seconds.
+    pub const MAX_SHUTDOWN_WAIT_SECS: u64 = 3600;
 }
 
 impl Default for JobLimits {
@@ -101,6 +113,7 @@ impl Default for JobLimits {
             power_on: 3,
             vm_ops: 4,
             remote: 10,
+            shutdown_wait: Duration::from_secs(120),
         }
     }
 }
@@ -139,6 +152,12 @@ pub enum JobEvent {
         message: Option<String>,
         duration_ms: u64,
     },
+    /// VM-03: these VMs did not shut down. Sent before `Finished`, so the UI can offer to force
+    /// them off (a separate, Critical command).
+    StillRunning {
+        job_id: Uuid,
+        targets: Vec<Target>,
+    },
     Finished {
         job_id: Uuid,
         status: JobStatus,
@@ -166,7 +185,8 @@ pub struct JobRunner {
     vmware: Arc<dyn VmwareAdapter>,
     remote: Arc<dyn RemoteAdapter>,
     updater: Arc<dyn UpdaterAdapter>,
-    limits: JobLimits,
+    /// Read when a job starts, so a changed setting applies to the next job.
+    limits: RwLock<JobLimits>,
     events: broadcast::Sender<JobEvent>,
     /// Open jobs (queued, in countdown or running) and their cancel tokens.
     running: Mutex<HashMap<Uuid, CancellationToken>>,
@@ -188,11 +208,25 @@ impl JobRunner {
             vmware,
             remote,
             updater,
-            limits,
+            limits: RwLock::new(limits),
             events,
             running: Mutex::new(HashMap::new()),
             idle: Notify::new(),
         })
+    }
+
+    pub fn limits(&self) -> JobLimits {
+        *locks::read(&self.limits)
+    }
+
+    /// VM-06: how many VMs may power on at once, from the next job on. At least 1.
+    pub fn set_power_on_limit(&self, limit: usize) {
+        locks::write(&self.limits).power_on = limit.max(1);
+    }
+
+    /// VM-03: how long a soft stop may take, from the next stop on.
+    pub fn set_shutdown_wait(&self, wait: Duration) {
+        locks::write(&self.limits).shutdown_wait = wait;
     }
 
     /// Number of open jobs.
@@ -347,6 +381,7 @@ impl JobRunner {
         }
 
         let (mut succeeded, mut failed, mut cancelled) = (0usize, 0usize, 0usize);
+        let mut still_running = Vec::new();
         while let Some(joined) = tasks.join_next().await {
             let (target, outcome, duration_ms) = match joined {
                 Ok(v) => v,
@@ -365,6 +400,10 @@ impl JobRunner {
                     Some("non-zero exit code".to_owned()),
                 ),
                 Err(Some(CoreError::Cancelled)) | Err(None) => (TargetStatus::Cancelled, None, None, None),
+                Err(Some(err @ CoreError::StillRunning { .. })) => {
+                    still_running.push(target.clone());
+                    (TargetStatus::Failed, None, None, Some(err.to_string()))
+                }
                 Err(Some(err)) => (TargetStatus::Failed, None, None, Some(err.to_string())),
             };
             match status {
@@ -406,7 +445,18 @@ impl JobRunner {
             JobStatus::PartiallyFailed
         };
         self.store.set_job_status(id, status).await?;
-        let detail = format!("{succeeded} succeeded, {failed} failed, {cancelled} cancelled");
+        let mut detail = format!("{succeeded} succeeded, {failed} failed, {cancelled} cancelled");
+        if !still_running.is_empty() {
+            let names: Vec<&str> = still_running.iter().map(|t: &Target| t.name.as_str()).collect();
+            detail.push_str(&format!(
+                "; still running after the soft stop: {}; forcing them off needs its own approval",
+                names.join(", ")
+            ));
+            self.emit(JobEvent::StillRunning {
+                job_id: id,
+                targets: still_running,
+            });
+        }
         self.audit(
             &ctx,
             "job_finished",
@@ -434,7 +484,15 @@ impl JobRunner {
                 if spec.safety_snapshot && !matches!(op, PowerOp::Start { .. }) {
                     self.safety_snapshot(job_id, vmx).await?;
                 }
-                self.vmware.power(vmx, *op).await?;
+                if let PowerOp::Stop { mode: StopMode::Soft } = op {
+                    self.soft_stop(vmx).await?;
+                } else {
+                    self.vmware.power(vmx, *op).await?;
+                }
+                // The VM list shows the new state before the next refresh asks vmrun.
+                self.store
+                    .set_vm_power_state(&spec.ctx, vmx_path, state_after(*op))
+                    .await?;
                 Ok(TargetOutcome::done())
             }
             (Command::VmSnapshot { op, .. }, TargetRef::Vm { vmx_path }) => {
@@ -443,6 +501,13 @@ impl JobRunner {
                     self.safety_snapshot(job_id, vmx).await?;
                 }
                 self.vmware.snapshot(vmx, op).await?;
+                Ok(TargetOutcome::done())
+            }
+            (Command::VmProtect { protected, .. }, TargetRef::Vm { vmx_path }) => {
+                // AP-04: the app's own flag; the VM itself is not touched.
+                if !self.store.set_vm_protected(&spec.ctx, vmx_path, *protected).await? {
+                    return Err(CoreError::UnknownTarget(vmx_path.clone()));
+                }
                 Ok(TargetOutcome::done())
             }
             (Command::RemoteExec { script, sudo, .. }, TargetRef::Session { session_id }) => {
@@ -474,6 +539,38 @@ impl JobRunner {
         }
     }
 
+    /// VM-03: asks the guest to shut down and waits up to the shutdown wait. A VM that is still
+    /// running then (the guest ignored it, or has no VMware Tools) is reported as
+    /// [`CoreError::StillRunning`] and left running: forcing it off is a separate command.
+    async fn soft_stop(&self, vmx: &Path) -> Result<()> {
+        let wait = self.limits().shutdown_wait;
+        let op = PowerOp::Stop { mode: StopMode::Soft };
+        let failure = match tokio::time::timeout(wait, self.vmware.power(vmx, op)).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(err)) => err,
+            // The guest may still be shutting down; vmrun is stopped, the guest is not.
+            Err(_) => CoreError::Timeout {
+                command: "vmrun stop soft".into(),
+                seconds: wait.as_secs(),
+            },
+        };
+        let key = path_key(vmx);
+        match self.vmware.list_running().await {
+            Ok(running) if running.iter().any(|p| path_key(p) == key) => {
+                let reason = match failure {
+                    CoreError::Timeout { seconds, .. } => {
+                        format!("the guest did not shut down within {seconds} s")
+                    }
+                    other => format!("the soft stop failed ({other})"),
+                };
+                Err(CoreError::StillRunning { reason })
+            }
+            // It stopped after all, just as the wait ran out.
+            Ok(_) if matches!(failure, CoreError::Timeout { .. }) => Ok(()),
+            _ => Err(failure),
+        }
+    }
+
     /// VM-05: a named snapshot before the action, so it can be undone.
     async fn safety_snapshot(&self, job_id: Uuid, vmx: &Path) -> Result<()> {
         let name = format!(
@@ -485,13 +582,14 @@ impl JobRunner {
     }
 
     fn parallelism(&self, command: &Command) -> usize {
+        let limits = self.limits();
         let n = match command {
             Command::VmPower {
                 op: PowerOp::Start { .. },
                 ..
-            } => self.limits.power_on,
-            Command::VmPower { .. } | Command::VmSnapshot { .. } => self.limits.vm_ops,
-            Command::RemoteExec { .. } => self.limits.remote,
+            } => limits.power_on,
+            Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => limits.vm_ops,
+            Command::RemoteExec { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
         };
         n.max(1)
@@ -529,5 +627,15 @@ impl JobRunner {
     fn emit(&self, event: JobEvent) {
         // No subscribers is fine (e.g. in tests).
         let _ = self.events.send(event);
+    }
+}
+
+/// The power state a VM is in once `op` has succeeded.
+fn state_after(op: PowerOp) -> PowerState {
+    match op {
+        PowerOp::Start { .. } | PowerOp::Reset { .. } | PowerOp::Unpause => PowerState::Running,
+        PowerOp::Stop { .. } => PowerState::NotRunning,
+        PowerOp::Suspend => PowerState::Suspended,
+        PowerOp::Pause => PowerState::Paused,
     }
 }

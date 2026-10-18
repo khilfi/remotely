@@ -2,7 +2,7 @@
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { Environment, JobStatus, Tier, VmRecord } from "@/lib/api";
+import type { Environment, JobStatus, PowerState, Tier, ToolsState } from "@/lib/api";
 
 const TIER_CLASS: Record<Tier, string> = {
   low: "border-tier-low/40 text-tier-low",
@@ -35,7 +35,7 @@ export function EnvBadge({ env }: { env: Environment }) {
   );
 }
 
-const STATE: Record<VmRecord["powerState"], { label: string; className: string }> = {
+const STATE: Record<PowerState, { label: string; className: string }> = {
   running: { label: "Running", className: "border-success/40 text-success" },
   suspended: { label: "Suspended", className: "border-tier-medium/40 text-tier-medium" },
   paused: { label: "Paused", className: "border-tier-medium/40 text-tier-medium" },
@@ -43,7 +43,7 @@ const STATE: Record<VmRecord["powerState"], { label: string; className: string }
   unknown: { label: "Unknown", className: "text-muted-foreground" },
 };
 
-export function StateBadge({ state }: { state: VmRecord["powerState"] }) {
+export function StateBadge({ state }: { state: PowerState }) {
   const { label, className } = STATE[state];
   return (
     <Badge variant="outline" className={className}>
@@ -51,6 +51,20 @@ export function StateBadge({ state }: { state: VmRecord["powerState"] }) {
       {label}
     </Badge>
   );
+}
+
+const TOOLS: Record<ToolsState, { label: string; className: string }> = {
+  running: { label: "Running", className: "text-success" },
+  installed: { label: "Not running", className: "text-tier-medium" },
+  notInstalled: { label: "Not installed", className: "text-tier-medium" },
+  unknown: { label: "Unknown", className: "text-muted-foreground" },
+};
+
+/** VM-01 VMware Tools state. VMs that are off show a dash. */
+export function ToolsLabel({ state }: { state: ToolsState | null }) {
+  if (!state) return <span className="text-muted-foreground">—</span>;
+  const { label, className } = TOOLS[state];
+  return <span className={cn("text-sm", className)}>{label}</span>;
 }
 
 const STATUS_CLASS: Record<JobStatus, string> = {

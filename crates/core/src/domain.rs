@@ -68,6 +68,47 @@ impl Environment {
     }
 }
 
+/// A VM's power state as the inventory last saw it (VM-01).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PowerState {
+    /// vmrun could not be asked (Workstation not found).
+    #[default]
+    Unknown,
+    Running,
+    NotRunning,
+    Suspended,
+    /// Running but paused. vmrun cannot report it, so it comes from the app's own pause jobs.
+    Paused,
+}
+
+impl PowerState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PowerState::Unknown => "unknown",
+            PowerState::Running => "running",
+            PowerState::NotRunning => "not_running",
+            PowerState::Suspended => "suspended",
+            PowerState::Paused => "paused",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "running" => PowerState::Running,
+            "not_running" => PowerState::NotRunning,
+            "suspended" => PowerState::Suspended,
+            "paused" => PowerState::Paused,
+            _ => PowerState::Unknown,
+        }
+    }
+
+    /// Running or paused: the VM holds its assigned RAM (VM-07).
+    pub fn is_on(self) -> bool {
+        matches!(self, PowerState::Running | PowerState::Paused)
+    }
+}
+
 /// Something the app can act on, as a caller names it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
