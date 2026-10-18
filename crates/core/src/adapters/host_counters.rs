@@ -644,7 +644,20 @@ mod tests {
 
             let first = counters.system_cpu_times().await.unwrap();
             assert!(first.total >= first.idle);
-            assert!(counters.own_cpu_time().await.unwrap() > Duration::ZERO);
+
+            // Windows counts CPU time in scheduler ticks (about 15.6 ms), so a test process that has
+            // barely run can still read zero. Do some work until the counter moves.
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            let mut own = counters.own_cpu_time().await.unwrap();
+            while own == Duration::ZERO && std::time::Instant::now() < deadline {
+                let mut sum = 0u64;
+                for i in 0..2_000_000u64 {
+                    sum = sum.wrapping_add(std::hint::black_box(i));
+                }
+                std::hint::black_box(sum);
+                own = counters.own_cpu_time().await.unwrap();
+            }
+            assert!(own > Duration::ZERO, "own CPU time never moved: {own:?}");
         }
 
         // Lists whatever VMs run on this machine (none in CI); only reads.
