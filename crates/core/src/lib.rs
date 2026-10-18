@@ -14,6 +14,7 @@
 //!                                                       └─► adapters::github (token from the vault)
 //!
 //!   sessions (SS-01), vault (SS-04), known_hosts (SS-05): the app's own data; changes are audited
+//!   vm_links (QL-01): sessions linked to the VMs they reach, by IP (adapters::dns) or by hand
 //!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
 //!     quick connect (QL-02), host name and IP (QL-03 ──► adapters::network), output and logs (SS-11)
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
@@ -47,11 +48,13 @@ pub mod store;
 pub mod terminal;
 pub mod updates;
 pub mod vault;
+pub mod vm_links;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use adapters::dns::{Resolver, SystemResolver};
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::network::{NetworkAdapter, SystemNetwork};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
@@ -75,6 +78,7 @@ use snapshots::SnapshotReader;
 use store::{NewAuditEntry, Store};
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use vault::{Dpapi, LocalVault, Vault, VaultOptions, VaultService};
+use vm_links::VmLinks;
 
 pub use error::{CoreError, Result};
 
@@ -99,6 +103,8 @@ pub struct Adapters {
     pub updater: Arc<dyn UpdaterAdapter>,
     /// QL-03 DNS lookups and QL-04 reachability probes.
     pub network: Arc<dyn NetworkAdapter>,
+    /// QL-01: host names to IP addresses, for linking sessions to VMs.
+    pub resolver: Arc<dyn Resolver>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -123,6 +129,8 @@ pub struct Core {
     pub vault: VaultService,
     /// SS-01, SS-06: saved sessions and their folders.
     pub sessions: SessionLibrary,
+    /// QL-01: links between sessions and the VMs they reach, automatic (by IP) or chosen by hand.
+    pub links: Arc<VmLinks>,
     /// SS-02: session lists from PuTTY, MobaXterm, OpenSSH and CSV.
     pub import: Importer,
     /// SS-05: trusted SSH host keys.
@@ -164,6 +172,7 @@ impl Core {
                 host_counters: Arc::new(WindowsCounters::new()),
                 updater: config.updater,
                 network: Arc::new(SystemNetwork),
+                resolver: Arc::new(SystemResolver),
             },
             JobLimits::default(),
         )
@@ -176,12 +185,14 @@ impl Core {
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
+        let links = Arc::new(VmLinks::new(store.clone(), adapters.resolver));
         let terminals = Terminals::new(
             store.clone(),
             Arc::clone(&adapters.vault),
             Arc::clone(&adapters.remote),
             Arc::clone(&adapters.network),
             Arc::clone(&known_hosts),
+            Arc::clone(&links),
         );
         let reachability = Arc::new(ReachabilityChecker::new(
             store.clone(),
@@ -240,9 +251,10 @@ impl Core {
         Ok(Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
-            inventory: Inventory::new(store.clone(), vmware_dyn),
+            inventory: Inventory::new(store.clone(), vmware_dyn, Arc::clone(&links)),
             vault: VaultService::new(adapters.vault, store.clone()),
-            sessions: SessionLibrary::new(store.clone()),
+            sessions: SessionLibrary::new(store.clone(), Arc::clone(&links)),
+            links,
             import: Importer::new(store.clone()),
             known_hosts,
             terminals,

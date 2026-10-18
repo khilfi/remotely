@@ -60,6 +60,7 @@ use crate::locks;
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretString, Vault};
+use crate::vm_links::VmLinks;
 
 /// The terminal settings (JSON) in the settings table.
 pub const TERMINAL_SETTINGS_KEY: &str = "terminal.settings";
@@ -401,6 +402,8 @@ struct Inner {
     remote: Arc<dyn RemoteAdapter>,
     network: Arc<dyn NetworkAdapter>,
     known_hosts: Arc<KnownHosts>,
+    /// QL-01: a quick connection saved as a session is linked to its VM like any new session.
+    links: Arc<VmLinks>,
     open: Mutex<HashMap<Uuid, Arc<Control>>>,
     tasks: Mutex<HashMap<Uuid, JoinHandle<()>>>,
     tuning: Mutex<TerminalTuning>,
@@ -429,6 +432,7 @@ impl Terminals {
         remote: Arc<dyn RemoteAdapter>,
         network: Arc<dyn NetworkAdapter>,
         known_hosts: Arc<KnownHosts>,
+        links: Arc<VmLinks>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -437,6 +441,7 @@ impl Terminals {
                 remote,
                 network,
                 known_hosts,
+                links,
                 open: Mutex::default(),
                 tasks: Mutex::default(),
                 tuning: Mutex::new(TerminalTuning::default()),
@@ -523,7 +528,7 @@ impl Terminals {
     pub async fn quick_connect(&self, ctx: &Context, request: QuickConnect, size: PtySize) -> Result<QuickOpened> {
         let input = request.input()?;
         let typed = request.typed_password();
-        let library = SessionLibrary::new(self.inner.store.clone());
+        let library = SessionLibrary::new(self.inner.store.clone(), Arc::clone(&self.inner.links));
         if request.save.is_some() {
             let session = library.create(ctx, input).await?;
             let handle = self

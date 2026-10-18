@@ -144,6 +144,19 @@ export function SessionDialog({
     return { method: "agent" };
   }
 
+  /** QL-01: how the VM choice will be kept. */
+  function linkNote() {
+    if (session?.vmLink === "auto" && vm === session.vmId) {
+      return "Linked automatically because the host is this VM's IP address; choosing another makes the choice yours.";
+    }
+    if (vm !== NONE) return "";
+    const decided = session && (session.vmId !== null || session.vmLink === "manual");
+    if (decided && host.trim().toLowerCase() === session.host.toLowerCase()) {
+      return "Saved without a VM, it stays unlinked until its host changes.";
+    }
+    return "Left at None, it links on its own when the host is a running VM's IP address.";
+  }
+
   /** Throws, so the Prod confirm can show the error. */
   async function persist() {
     const input: SessionInput = {
@@ -401,8 +414,9 @@ export function SessionDialog({
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Lets a bulk run pick this VM and run commands on it through this session. A Prod or protected VM makes
-                the session count as Prod or protected too.
+                Lets a bulk run pick this VM and run commands on it through this session, and the dashboard show the
+                guest&apos;s own metrics. A Prod or protected VM makes the session count as Prod or protected too.{" "}
+                {linkNote()}
               </p>
             </div>
 

@@ -15,7 +15,7 @@ use common::{temp_folder, vm, vmx, wait_finished, Setup};
 use remotely_core::adapters::vmware::{ToolsState, VmxInfo};
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, StopMode, SubmitOutcome};
 use remotely_core::domain::{Environment, PowerState, Target};
-use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeUpdater, FakeVault, FakeVmware};
+use remotely_core::fakes::{FakeHostCounters, FakeRemote, FakeResolver, FakeUpdater, FakeVault, FakeVmware};
 use remotely_core::inventory::VmFilter;
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::{ApprovalStep, Tier};
@@ -550,6 +550,7 @@ async fn the_power_on_limit_is_a_saved_setting() {
             vault: Arc::new(FakeVault::with_password("x")),
             host_counters: Arc::new(FakeHostCounters::default()),
             updater: Arc::new(FakeUpdater::default()),
+            resolver: Arc::new(FakeResolver::default()),
             network: Arc::new(remotely_core::fakes::FakeNetwork::default()),
         },
         JobLimits::default(),

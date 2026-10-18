@@ -2,8 +2,9 @@
 // on the right. Each session shows its colour, environment label, address, how it logs in and its jump
 // host. Creating, editing and organising sessions is the app's own data (audited, no approval). Connect
 // (or a double-click) opens the session in a terminal tab (SS-03); Import reads PuTTY, MobaXterm,
-// OpenSSH and CSV session lists (SS-02). Under the address: the host name and IP the last connection saw
-// (QL-03).
+// OpenSSH and CSV session lists (SS-02). The VM column shows the VM each session reaches (QL-01),
+// linked automatically by IP address or by hand, and lets the user keep, change or remove the link.
+// Under the address: the host name and IP the last connection saw (QL-03).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -47,6 +48,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ImportDialog } from "@/components/ImportDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { SessionDialog } from "@/components/SessionDialog";
+import { SessionVmLink } from "@/components/VmLinkControls";
 import {
   api,
   errorMessage,
@@ -57,6 +59,7 @@ import {
   type SessionRecord,
   type Tag,
   type VaultInfo,
+  type VmRecord,
 } from "@/lib/api";
 import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
@@ -133,6 +136,23 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
     }, 120);
     return () => window.clearTimeout(timer);
   }, [active, version, text, environments, tagFilter, folderId]);
+
+  // QL-01: the VMs a session can be linked to, and the sessions several VMs match.
+  const [vms, setVms] = useState<VmRecord[]>([]);
+  const [ambiguous, setAmbiguous] = useState<Map<string, string[]>>(new Map());
+  useEffect(() => {
+    if (!active) return;
+    Promise.all([api.vmList(), api.ambiguousVmLinks()]).then(
+      ([v, a]) => {
+        setVms(v);
+        setAmbiguous(new Map(a.map((x) => [x.sessionId, x.vmIds])));
+      },
+      () => {
+        setVms([]);
+        setAmbiguous(new Map());
+      },
+    );
+  }, [active, version]);
 
   const secretLabel = useMemo(() => new Map(secrets.map((s) => [s.id, s.label])), [secrets]);
   const sessionName = useMemo(() => new Map(all.map((s) => [s.id, s.name])), [all]);
@@ -401,6 +421,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                   <TableHead>Address</TableHead>
                   <TableHead>Login</TableHead>
                   <TableHead>Via</TableHead>
+                  <TableHead>VM</TableHead>
                   <TableHead className="w-20">Label</TableHead>
                   <TableHead className="w-20">
                     <span className="sr-only">Actions</span>
@@ -456,6 +477,10 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
+                    </TableCell>
+                    {/* Its own menu: a double-click there doesn't connect. */}
+                    <TableCell onDoubleClick={(e) => e.stopPropagation()}>
+                      <SessionVmLink session={s} vms={vms} candidates={ambiguous.get(s.id) ?? []} onChanged={reload} />
                     </TableCell>
                     <TableCell>
                       <EnvBadge env={s.environment} />

@@ -3,8 +3,13 @@
 // opens in the snapshot manager (VM-04). Listing asks the core to read Workstation's library, the
 // chosen folders and `vmrun list`; every action is a command submitted to the command bus, never a
 // vmrun call. Tags and labels are the app's own data, so they skip the bus.
+//
+// Each running VM shows its share of this host's CPU and RAM (MO-01), read from the metrics
+// collector's latest 5-second round in memory: no extra polling. The sessions linked to each VM
+// (QL-01, made automatically by IP address) show in their own column, where they can be kept,
+// changed or removed. Columns sort by a click on their header.
 
-import { useEffect, useState, type MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type MouseEvent } from "react";
 import {
   CameraIcon,
   ChevronDownIcon,
@@ -45,25 +50,34 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EnvBadge, StateBadge, ToolsLabel } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { MetricCell } from "@/components/MetricBits";
 import { NameDialog } from "@/components/NameDialog";
+import { SortableHead } from "@/components/SortableHead";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
+import { VmSessionLinks } from "@/components/VmLinkControls";
 import {
   api,
   errorCode,
   errorMessage,
+  type AutoLinkReport,
   type Command,
   type Environment,
   type InventoryWarning,
   type PowerOp,
   type PowerState,
   type SavedFilter,
+  type SessionRecord,
   type SubmitOutcome,
   type Tag,
   type VmFilter,
+  type VmHostUsage,
   type VmRecord,
 } from "@/lib/api";
+import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
 
 interface Props {
+  /** True while the page is shown: the host shares (MO-01) follow the metrics rounds only then. */
+  active: boolean;
   /** Shows the approval dialog for commands the policy engine says need one. */
   onSubmitted: (outcome: SubmitOutcome) => void;
   onOpenSettings: () => void;
@@ -101,6 +115,45 @@ const LABELS: { value: Environment; label: string }[] = [
 ];
 
 type LoadError = { code?: string; message: string };
+type SortKey = "name" | "vcpus" | "ram" | "state" | "hostCpu" | "hostMem" | "label";
+
+/** Running first, then the states a VM passes through on its way down. */
+const STATE_ORDER: PowerState[] = ["running", "paused", "suspended", "not_running", "unknown"];
+const LABEL_ORDER: Environment[] = ["prod", "staging", "lab", "none"];
+
+function sortValue(vm: VmRecord, key: SortKey, usage: VmHostUsage | undefined): number | string | null {
+  switch (key) {
+    case "name":
+      return vm.displayName.toLowerCase();
+    case "vcpus":
+      return vm.numVcpus;
+    case "ram":
+      return vm.memsizeMb;
+    case "state":
+      return STATE_ORDER.indexOf(vm.powerState);
+    case "hostCpu":
+      return usage?.hostCpuPct ?? null;
+    case "hostMem":
+      return usage?.hostMemPct ?? null;
+    case "label":
+      return LABEL_ORDER.indexOf(vm.environment);
+  }
+}
+
+/** QL-01: what a refresh linked by IP address, in one line. */
+function linkNews(links: AutoLinkReport): string | null {
+  const parts: string[] = [];
+  if (links.linked.length > 0) {
+    const names = links.linked.map((l) => `${l.sessionName} → ${l.vmName}`).join(", ");
+    parts.push(`Linked ${plural(links.linked.length, "session")} to VMs by IP address: ${names}.`);
+  }
+  if (links.unlinked.length > 0) {
+    const names = links.unlinked.map((l) => `${l.sessionName} (${l.vmName})`).join(", ");
+    parts.push(`Unlinked ${plural(links.unlinked.length, "session")} whose VM has another address now: ${names}.`);
+  }
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
 type Dialog =
   | { kind: "addTag" }
   | { kind: "saveFilter" }
@@ -131,8 +184,13 @@ function lowerProdText(prodNames: string[], environment: Environment) {
   return `${who} ${change}. Actions on ${them} will no longer move up one approval tier, so they need fewer approval steps. The change is logged.`;
 }
 
-export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshKey }: Props) {
-  const [vms, setVms] = useState<VmRecord[]>([]);
+export function VmsPage({ active, onSubmitted, onOpenSettings, onOpenSnapshots, refreshKey }: Props) {
+  const [listed, setListed] = useState<VmRecord[]>([]);
+  const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
+  const [usage, setUsage] = useState<Map<string, VmHostUsage>>(new Map());
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
+  const [linksVersion, setLinksVersion] = useState(0);
+  const [thresholds] = useThresholds();
   const [total, setTotal] = useState({ vms: 0, running: 0 });
   const [warnings, setWarnings] = useState<InventoryWarning[]>([]);
   const [error, setError] = useState<LoadError | null>(null);
@@ -156,6 +214,8 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
     api.vmRefresh().then(
       (report) => {
         if (stale) return;
+        const news = linkNews(report.links);
+        if (news) toast.info(news, { id: "vm-links" });
         setWarnings(report.warnings);
         setTotal({
           vms: report.vms.length,
@@ -182,7 +242,7 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
     Promise.all([api.vmList(filter), api.tags(), api.savedFilters()]).then(
       ([list, allTags, filters]) => {
         if (stale) return;
-        setVms(list);
+        setListed(list);
         // Tags are shared with sessions (SS-01); this page offers the ones on VMs.
         setTags(allTags.filter((t) => t.vmCount > 0));
         setSavedFilters(filters);
@@ -197,6 +257,64 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
       stale = true;
     };
   }, [filter, listVersion]);
+
+  // QL-01: the sessions linked to each VM, read again when the page shows (they may have changed on
+  // the Sessions page), after a refresh (it may link some) and after a change here.
+  useEffect(() => {
+    if (!active) return;
+    let stale = false;
+    api.sessions().then(
+      (list) => {
+        if (!stale) setSessions(list);
+      },
+      () => {
+        if (!stale) setSessions([]);
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [active, listVersion, linksVersion]);
+  const linksChanged = useCallback(() => setLinksVersion((v) => v + 1), []);
+
+  // MO-01: each running VM's share of the host, after every metrics round while the page shows.
+  useEffect(() => {
+    if (!active) return;
+    let stale = false;
+    const read = () =>
+      api.metricsHostUsage().then(
+        (list) => {
+          if (!stale) setUsage(new Map(list.map((u) => [u.vmxPath.toLowerCase(), u])));
+        },
+        () => {
+          if (!stale) setUsage(new Map());
+        },
+      );
+    void read();
+    const unlisten = api.onMetricsRound(() => void read());
+    return () => {
+      stale = true;
+      void unlisten.then((stop) => stop());
+    };
+  }, [active]);
+
+  const usageOf = useCallback((vm: VmRecord) => usage.get(vm.vmxPath.toLowerCase()), [usage]);
+  // The shown order. Selection and shift-click ranges follow it.
+  const vms = useMemo(() => {
+    if (sort.key === "name" && sort.dir === 1) return listed;
+    return [...listed].sort(
+      (a, b) =>
+        compareNullsLast(sortValue(a, sort.key, usageOf(a)), sortValue(b, sort.key, usageOf(b)), sort.dir) ||
+        a.displayName.localeCompare(b.displayName),
+    );
+  }, [listed, sort, usageOf]);
+
+  function sortBy(key: SortKey) {
+    setSort((s) =>
+      s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: key === "name" || key === "state" ? 1 : -1 },
+    );
+    setAnchor(null);
+  }
 
   // Click toggles one VM; shift-click selects the range from the last click (VM-02).
   function toggle(index: number, e: MouseEvent) {
@@ -575,68 +693,140 @@ export function VmsPage({ onSubmitted, onOpenSettings, onOpenSnapshots, refreshK
                     onCheckedChange={() => setSelected(allSelected ? new Set() : new Set(vms.map((v) => v.vmxPath)))}
                   />
                 </TableHead>
-                <TableHead>Name</TableHead>
+                <SortableHead
+                  label="Name"
+                  className="min-w-48"
+                  active={sort.key === "name"}
+                  dir={sort.dir}
+                  onSort={() => sortBy("name")}
+                />
                 <TableHead>Guest OS</TableHead>
-                <TableHead className="text-right">vCPU</TableHead>
-                <TableHead className="text-right">RAM</TableHead>
+                <SortableHead
+                  label="vCPU"
+                  className="text-right"
+                  active={sort.key === "vcpus"}
+                  dir={sort.dir}
+                  onSort={() => sortBy("vcpus")}
+                />
+                <SortableHead
+                  label="RAM"
+                  className="text-right"
+                  active={sort.key === "ram"}
+                  dir={sort.dir}
+                  onSort={() => sortBy("ram")}
+                />
                 <TableHead>IP address</TableHead>
                 <TableHead>Tools</TableHead>
-                <TableHead>State</TableHead>
-                <TableHead>Label</TableHead>
+                <SortableHead
+                  label="State"
+                  active={sort.key === "state"}
+                  dir={sort.dir}
+                  onSort={() => sortBy("state")}
+                />
+                <SortableHead
+                  label="% of host CPU"
+                  hint={HOST_SHARE_HINT.cpu}
+                  className="w-24 whitespace-normal"
+                  active={sort.key === "hostCpu"}
+                  dir={sort.dir}
+                  onSort={() => sortBy("hostCpu")}
+                />
+                <SortableHead
+                  label="% of host RAM"
+                  hint={HOST_SHARE_HINT.memory}
+                  className="w-24 whitespace-normal"
+                  active={sort.key === "hostMem"}
+                  dir={sort.dir}
+                  onSort={() => sortBy("hostMem")}
+                />
+                <TableHead>Sessions</TableHead>
+                <SortableHead
+                  label="Label"
+                  active={sort.key === "label"}
+                  dir={sort.dir}
+                  onSort={() => sortBy("label")}
+                />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {vms.map((vm, i) => (
-                <TableRow
-                  key={vm.vmxPath}
-                  data-state={selected.has(vm.vmxPath) ? "selected" : undefined}
-                  onClick={(e) => toggle(i, e)}
-                  className="select-none"
-                >
-                  <TableCell>
-                    {/* The click (or Space) bubbles to the row, which does the selecting. */}
-                    <Checkbox aria-label={`Select ${vm.displayName}`} checked={selected.has(vm.vmxPath)} />
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-wrap items-center gap-1.5 font-medium">
-                      {vm.displayName}
-                      {vm.protected && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
-                          </TooltipTrigger>
-                          <TooltipContent>Protected: actions skip this VM until it is unprotected</TooltipContent>
-                        </Tooltip>
-                      )}
-                      {vm.tags.map((t) => (
-                        <Badge key={t} variant="secondary" className="font-normal">
-                          {t}
-                        </Badge>
-                      ))}
-                    </div>
-                    <div className="font-mono text-xs break-all whitespace-normal text-muted-foreground">
-                      {vm.vmxPath}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    {vm.guestOsName ?? vm.guestOs ?? <span className="text-muted-foreground">—</span>}
-                  </TableCell>
-                  <TableCell className="text-right tabular-nums">{vm.numVcpus ?? "—"}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatRam(vm.memsizeMb)}</TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {vm.ipAddress ?? <span className="font-sans text-muted-foreground">—</span>}
-                  </TableCell>
-                  <TableCell>
-                    <ToolsLabel state={vm.toolsState} />
-                  </TableCell>
-                  <TableCell>
-                    <StateBadge state={vm.powerState} />
-                  </TableCell>
-                  <TableCell>
-                    <EnvBadge env={vm.environment} />
-                  </TableCell>
-                </TableRow>
-              ))}
+              {vms.map((vm, i) => {
+                const share = usageOf(vm);
+                const hostCpu = share?.hostCpuPct ?? null;
+                const hostMem = share?.hostMemPct ?? null;
+                return (
+                  <TableRow
+                    key={vm.vmxPath}
+                    data-state={selected.has(vm.vmxPath) ? "selected" : undefined}
+                    onClick={(e) => toggle(i, e)}
+                    className="select-none"
+                  >
+                    <TableCell>
+                      {/* The click (or Space) bubbles to the row, which does the selecting. */}
+                      <Checkbox aria-label={`Select ${vm.displayName}`} checked={selected.has(vm.vmxPath)} />
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap items-center gap-1.5 font-medium">
+                        {vm.displayName}
+                        {vm.protected && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
+                            </TooltipTrigger>
+                            <TooltipContent>Protected: actions skip this VM until it is unprotected</TooltipContent>
+                          </Tooltip>
+                        )}
+                        {vm.tags.map((t) => (
+                          <Badge key={t} variant="secondary" className="font-normal">
+                            {t}
+                          </Badge>
+                        ))}
+                      </div>
+                      <div className="font-mono text-xs break-all whitespace-normal text-muted-foreground">
+                        {vm.vmxPath}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      {vm.guestOsName ?? vm.guestOs ?? <span className="text-muted-foreground">—</span>}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">{vm.numVcpus ?? "—"}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatRam(vm.memsizeMb)}</TableCell>
+                    <TableCell className="font-mono text-xs">
+                      {vm.ipAddress ?? <span className="font-sans text-muted-foreground">—</span>}
+                    </TableCell>
+                    <TableCell>
+                      <ToolsLabel state={vm.toolsState} />
+                    </TableCell>
+                    <TableCell>
+                      <StateBadge state={vm.powerState} />
+                    </TableCell>
+                    <TableCell>
+                      <MetricCell
+                        value={hostCpu}
+                        text={formatPct(hostCpu)}
+                        pct={hostCpu}
+                        limits={thresholds.cpu}
+                        label={`${vm.displayName}'s share of this host's CPU`}
+                      />
+                    </TableCell>
+                    <TableCell>
+                      <MetricCell
+                        value={hostMem}
+                        text={formatPct(hostMem)}
+                        pct={hostMem}
+                        limits={thresholds.memory}
+                        label={`${vm.displayName}'s share of this host's RAM`}
+                      />
+                    </TableCell>
+                    {/* The cell has its own controls: a click there doesn't select the row. */}
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <VmSessionLinks vm={vm} sessions={sessions} onChanged={linksChanged} />
+                    </TableCell>
+                    <TableCell>
+                      <EnvBadge env={vm.environment} />
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
