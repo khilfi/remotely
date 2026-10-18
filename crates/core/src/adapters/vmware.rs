@@ -716,9 +716,19 @@ fn scan_blocking(folder: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
-/// Windows paths are case-insensitive: the key to compare .vmx paths by.
+/// The key to compare .vmx paths by. Windows paths are case-insensitive and take `/` as well as `\`,
+/// so `C:/VMs/a/a.vmx` (from a folder saved with `/`) and vmrun's `C:\VMs\a\a.vmx` are one VM.
 pub fn path_key(path: &Path) -> String {
-    path.to_string_lossy().to_lowercase()
+    path.to_string_lossy().to_lowercase().replace('/', "\\")
+}
+
+/// `path` with `\` for each `/` (on Windows), so a VM is saved under the spelling vmrun and the
+/// library use however its scan folder was typed.
+pub fn with_backslashes(path: &Path) -> PathBuf {
+    match path.to_str() {
+        Some(text) if cfg!(windows) && text.contains('/') => PathBuf::from(text.replace('/', "\\")),
+        _ => path.to_path_buf(),
+    }
 }
 
 /// The adapter the rest of the core holds. Changing the vmrun path in Settings swaps what is inside
@@ -972,6 +982,26 @@ index.count = "1"
         let missing = scan_for_vmx(&root.join("nope")).await.unwrap_err();
         assert!(matches!(missing, CoreError::InvalidInput(_)));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn path_keys_ignore_letter_case_and_slash_direction() {
+        // VM-01: a scan of a folder saved as C:/VMs found C:/VMs\web01\web01.vmx, and vmrun list
+        // named the same VM C:\VMs\web01\web01.vmx.
+        let key = path_key(Path::new(r"C:\VMs\web01\web01.vmx"));
+        assert_eq!(path_key(Path::new("C:/VMs/web01/web01.vmx")), key);
+        assert_eq!(path_key(Path::new(r"c:/vms\WEB01\Web01.VMX")), key);
+        assert_ne!(path_key(Path::new(r"C:\VMs\web02\web02.vmx")), key);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn saved_paths_use_backslashes() {
+        // Compared as text: on Windows, Path equality already treats `/` and `\` alike.
+        let text = |p: &str| with_backslashes(Path::new(p)).to_string_lossy().into_owned();
+        assert_eq!(text("C:/VMs/web01/web01.vmx"), r"C:\VMs\web01\web01.vmx");
+        assert_eq!(text(r"C:/VMs\web01\web01.vmx"), r"C:\VMs\web01\web01.vmx");
+        assert_eq!(text(r"C:\VMs\web01"), r"C:\VMs\web01");
     }
 
     #[test]

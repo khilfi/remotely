@@ -276,12 +276,13 @@ impl Core {
         self.inventory.scan_folders(&self.ctx).await
     }
 
-    /// VM-01: replaces the folders to scan. Each must be an existing folder; duplicates (any letter
-    /// case) are dropped. Audited.
+    /// VM-01: replaces the folders to scan. Each must be an existing folder; it is saved with `\`, and
+    /// duplicates (any letter case, `/` or `\`) are dropped. Audited.
     pub async fn set_scan_folders(&self, folders: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
         let mut seen = std::collections::HashSet::new();
         let mut kept = Vec::new();
         for folder in folders {
+            let folder = adapters::vmware::with_backslashes(&folder);
             if !folder.is_dir() {
                 return Err(CoreError::InvalidSetting(format!(
                     "{} is not an existing folder",

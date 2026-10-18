@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -131,6 +132,29 @@ async fn vms_no_longer_found_drop_out_of_the_list() {
 }
 
 #[tokio::test]
+async fn a_folder_saved_with_forward_slashes_lists_a_running_vm_once() {
+    // The scan of C:/VMs found C:/VMs/web/web.vmx, then vmrun list named the running VM
+    // C:\VMs\web\web.vmx and the list showed it twice.
+    let fake = FakeVmware::with_running([vmx("web")]).in_folder("C:/VMs", "C:/VMs/web/web.vmx");
+    let core = Setup::new(fake).build().await;
+    // Saved as typed, as set_scan_folders did before it saved folders with `\`.
+    core.store
+        .put_setting(&core.ctx, remotely_core::store::SCAN_FOLDERS_KEY, &["C:/VMs"])
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let report = core.inventory.refresh(&core.ctx).await.unwrap();
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+        assert_eq!(report.vms.len(), 1, "{:?}", report.vms);
+        assert_eq!(report.vms[0].power_state, PowerState::Running);
+        if cfg!(windows) {
+            assert_eq!(report.vms[0].vmx_path, vmx("web"), "saved as vmrun names it");
+        }
+    }
+}
+
+#[tokio::test]
 async fn scan_folders_must_exist_are_deduplicated_and_audited() {
     let folder = temp_folder("lab");
     let core = Setup::new(FakeVmware::default()).build().await;
@@ -142,10 +166,20 @@ async fn scan_folders_must_exist_are_deduplicated_and_audited() {
     assert!(matches!(missing, CoreError::InvalidSetting(_)));
     assert!(core.scan_folders().await.unwrap().is_empty());
 
-    let upper = std::path::PathBuf::from(folder.display().to_string().to_uppercase());
-    let kept = core.set_scan_folders(vec![folder.clone(), upper]).await.unwrap();
-    assert_eq!(kept, std::slice::from_ref(&folder));
-    assert_eq!(core.scan_folders().await.unwrap(), std::slice::from_ref(&folder));
+    let upper = PathBuf::from(folder.display().to_string().to_uppercase());
+    let slashed = PathBuf::from(folder.display().to_string().replace('\\', "/"));
+    let kept = core
+        .set_scan_folders(vec![slashed, folder.clone(), upper])
+        .await
+        .unwrap();
+    // As text: on Windows, Path equality already treats `/` and `\` alike.
+    let text = |paths: &[PathBuf]| paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        text(&kept),
+        [folder.display().to_string()],
+        "saved with backslashes, duplicates dropped"
+    );
+    assert_eq!(text(&core.scan_folders().await.unwrap()), text(&kept));
 
     let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
     assert_eq!(audit[0].event, "setting_changed");
