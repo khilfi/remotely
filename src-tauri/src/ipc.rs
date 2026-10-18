@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use remotely_core::adapters::updater::UpdateInfo;
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome, MAX_SNAPSHOT_NAME};
 use remotely_core::domain::Environment;
+use remotely_core::import::{self, ImportPreview, ImportReport, ImportRequest, ImportSource};
 use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
@@ -622,4 +623,73 @@ pub async fn folder_move(state: State<'_, AppState>, id: Uuid, parent_id: Option
 pub async fn folder_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
     Ok(core.sessions.delete_folder(&core.ctx, id).await?)
+}
+
+// ---- Session import (SS-02) ---------------------------------------------------------------------
+// The source file is chosen in a dialog opened here, and the commit names preview rows only, so no
+// path ever comes from the UI.
+
+/// Reads a session list and compares it with the library. PuTTY reads the registry; the OpenSSH
+/// config is `~/.ssh/config` unless `choose_file`; the others ask for a file. `None` when the user
+/// closed the dialog.
+#[tauri::command]
+pub async fn import_preview(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    source: ImportSource,
+    choose_file: bool,
+) -> IpcResult<Option<ImportPreview>> {
+    let core = &state.core;
+    if source == ImportSource::Putty {
+        return Ok(Some(core.import.preview_putty(&core.ctx).await?));
+    }
+    let path = if source == ImportSource::Openssh && !choose_file {
+        let path = import::default_openssh_config();
+        if !path.is_file() {
+            return Err(CoreError::InvalidInput(format!(
+                "There is no OpenSSH config at {}. Choose a file instead.",
+                path.display()
+            ))
+            .into());
+        }
+        path
+    } else {
+        let (title, filter, extensions): (&str, &str, &[&str]) = match source {
+            ImportSource::PuttyFile => ("Choose a PuTTY registry export", "Registry export", &["reg"]),
+            ImportSource::Mobaxterm => (
+                "Choose a MobaXterm sessions file",
+                "MobaXterm sessions",
+                &["mxtsessions"],
+            ),
+            ImportSource::Csv => ("Choose a CSV file", "CSV", &["csv", "txt"]),
+            _ => ("Choose an OpenSSH config file", "All files", &["*"]),
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let mut dialog = window.dialog().file().set_parent(&window).set_title(title);
+        if source == ImportSource::Openssh {
+            dialog = dialog.set_directory(import::home_dir().join(".ssh"));
+        } else {
+            dialog = dialog.add_filter(filter, extensions);
+        }
+        dialog.pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+        let Some(chosen) = rx.await.ok().flatten() else {
+            return Ok(None);
+        };
+        chosen
+            .into_path()
+            .map_err(|err| CoreError::InvalidInput(format!("can't read that file: {err}")))?
+    };
+    Ok(Some(core.import.preview_file(&core.ctx, source, &path).await?))
+}
+
+/// Saves the rows picked in a preview, with their key files added to the vault when asked.
+#[tauri::command]
+pub async fn import_commit(state: State<'_, AppState>, request: ImportRequest) -> IpcResult<ImportReport> {
+    let core = &state.core;
+    Ok(core
+        .import
+        .commit(&core.ctx, &request, &core.sessions, &core.vault)
+        .await?)
 }

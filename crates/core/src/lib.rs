@@ -12,7 +12,8 @@
 //!                                                 ├─► adapters::remote (russh)
 //!                                                 └─► adapters::updater (FD-14)
 //!
-//!   sessions (SS-01), vault (SS-04): the app's own data; changes are audited like settings
+//!   sessions (SS-01), vault (SS-04), known_hosts (SS-05): the app's own data; changes are audited
+//!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -27,14 +28,17 @@ pub mod export;
 #[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
 pub mod impact;
+pub mod import;
 pub mod inventory;
 pub mod jobs;
+pub mod known_hosts;
 pub mod locks;
 pub mod metrics;
 pub mod policy;
 pub mod sessions;
 pub mod snapshots;
 pub mod store;
+pub mod terminal;
 pub mod vault;
 
 use std::path::{Path, PathBuf};
@@ -42,20 +46,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adapters::host_counters::{HostCounters, WindowsCounters};
-use adapters::remote::{RemoteAdapter, RusshAdapter, ShellHandle};
+use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::{UpdateInfo, UpdaterAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
 use capacity::CapacityChecker;
 use command_bus::CommandBus;
 use domain::Context;
 use impact::ImpactPreviewer;
+use import::Importer;
 use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
+use known_hosts::KnownHosts;
 use policy::{PolicyEngine, PolicyRules};
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
 use store::{NewAuditEntry, Store};
+use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use vault::{Dpapi, LocalVault, Vault, VaultOptions, VaultService};
 
 pub use error::{CoreError, Result};
@@ -103,6 +110,12 @@ pub struct Core {
     pub vault: VaultService,
     /// SS-01, SS-06: saved sessions and their folders.
     pub sessions: SessionLibrary,
+    /// SS-02: session lists from PuTTY, MobaXterm, OpenSSH and CSV.
+    pub import: Importer,
+    /// SS-05: trusted SSH host keys.
+    pub known_hosts: Arc<KnownHosts>,
+    /// SS-03: open terminal panes and their SSH connections.
+    pub terminals: Terminals,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -140,6 +153,13 @@ impl Core {
         let policy = load_policy(&store, &ctx).await?;
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
+        let known_hosts = Arc::new(KnownHosts::new(store.clone()));
+        let terminals = Terminals::new(
+            store.clone(),
+            Arc::clone(&adapters.vault),
+            Arc::clone(&adapters.remote),
+            Arc::clone(&known_hosts),
+        );
         let jobs = JobRunner::new(
             store.clone(),
             Arc::clone(&vmware_dyn),
@@ -172,6 +192,9 @@ impl Core {
             inventory: Inventory::new(store.clone(), vmware_dyn),
             vault: VaultService::new(adapters.vault, store.clone()),
             sessions: SessionLibrary::new(store.clone()),
+            import: Importer::new(store.clone()),
+            known_hosts,
+            terminals,
             store,
             bus,
             jobs,
@@ -366,9 +389,19 @@ impl Core {
             .map(drop)
     }
 
-    /// Opens a terminal. Until SS-03 this is a local loopback shell, not SSH.
-    pub fn open_terminal(&self) -> ShellHandle {
-        adapters::remote::loopback_shell()
+    /// SS-03: keep-alive, auto-reconnect and copy-on-select.
+    pub async fn terminal_settings(&self) -> Result<TerminalSettings> {
+        self.terminals.settings(&self.ctx).await
+    }
+
+    /// SS-03: applies to terminals opened from now on. Audited.
+    pub async fn set_terminal_settings(&self, settings: TerminalSettings) -> Result<()> {
+        settings.validate()?;
+        self.store
+            .put_setting(&self.ctx, TERMINAL_SETTINGS_KEY, &settings)
+            .await?;
+        self.audit_setting("Set the terminal settings", &settings.describe())
+            .await
     }
 }
 

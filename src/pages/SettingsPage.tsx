@@ -1,6 +1,7 @@
 // Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
-// power-on limit (VM-06), shutdown wait (VM-03) and update checks (FD-14) under General, and the
-// editable approval rules (AP-01) under Approval rules. The theme switch is in the top bar.
+// power-on limit (VM-06), shutdown wait (VM-03) and update checks (FD-14) under General, keep-alive,
+// auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
+// Approval rules. The theme switch is in the top bar.
 
 import { useEffect, useState } from "react";
 import { FolderIcon, XIcon } from "lucide-react";
@@ -11,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
+import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { api, errorMessage, type Settings } from "@/lib/api";
 
 interface Props {
@@ -123,8 +125,12 @@ export function SettingsPage({ onChanged }: Props) {
     <Tabs defaultValue="general" className="max-w-3xl gap-4">
       <TabsList>
         <TabsTrigger value="general">General</TabsTrigger>
+        <TabsTrigger value="terminal">Terminal</TabsTrigger>
         <TabsTrigger value="rules">Approval rules</TabsTrigger>
       </TabsList>
+      <TabsContent value="terminal">
+        <TerminalSettingsCard />
+      </TabsContent>
       <TabsContent value="rules">
         <PolicyRulesEditor />
       </TabsContent>

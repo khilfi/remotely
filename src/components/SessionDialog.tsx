@@ -227,8 +227,8 @@ export function SessionDialog({
             <DialogHeader>
               <DialogTitle>{session ? `Edit '${session.name}'` : "New session"}</DialogTitle>
               <DialogDescription>
-                Saved in Remotely only; nothing connects yet (the terminal comes with SS-03). Passwords and keys stay in
-                the vault: the session points to them.
+                Connect opens it in a terminal tab. Passwords and keys stay in the vault: the session points to them,
+                and a password left out is asked in the terminal.
               </DialogDescription>
             </DialogHeader>
 
@@ -344,6 +344,12 @@ export function SessionDialog({
                     ))}
                   </SelectContent>
                 </Select>
+                {jump !== NONE && (
+                  <p className="text-xs text-muted-foreground">
+                    Saved for later: connecting through a jump host arrives in a later version (SS-07). Until then
+                    Remotely won't connect this session.
+                  </p>
+                )}
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="session-folder">Folder</Label>

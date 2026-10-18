@@ -6,6 +6,7 @@
 mod audit;
 mod inventory;
 mod jobs;
+mod known_hosts;
 mod metrics;
 mod sessions;
 mod tags;

@@ -1,6 +1,6 @@
 // App shell (shadcn/ui): sidebar navigation with the vault status (SS-04), top bar with the theme switch
-// (FD-01), pages, the approval dialog and job toasts. Pages stay mounted while hidden so the terminal
-// session survives a page switch.
+// (FD-01), pages, the approval dialog and job toasts. Pages stay mounted while hidden so terminal
+// connections survive a page switch.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -16,6 +16,7 @@ import {
   MoonIcon,
   ServerIcon,
   SettingsIcon,
+  ShieldCheckIcon,
   SquareTerminalIcon,
   SunIcon,
   TerminalIcon,
@@ -57,6 +58,7 @@ import {
 import { useTheme, type ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { SnapshotsPage } from "@/pages/SnapshotsPage";
@@ -64,7 +66,7 @@ import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage } from "@/pages/VmsPage";
 
-type PageId = "vms" | "snapshots" | "sessions" | "terminal" | "vault" | "activity" | "settings";
+type PageId = "vms" | "snapshots" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
@@ -73,6 +75,7 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon }[] = 
   { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon },
   { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon },
+  { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon },
   { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon },
   { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon },
   { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon },
@@ -102,6 +105,8 @@ export default function App() {
   const [laterFor, setLaterFor] = useState<string | null>(null);
   // VMs picked on the VMs page to open in the snapshot manager (VM-04).
   const [snapshotPick, setSnapshotPick] = useState<{ paths: string[]; n: number } | null>(null);
+  // SS-03: a session to open in a new terminal tab.
+  const [terminalOpen, setTerminalOpen] = useState<{ sessionId: string; n: number } | null>(null);
   // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
   const [vault, setVault] = useState<VaultInfo | null>(null);
   const { preference, setPreference, resolved } = useTheme();
@@ -340,17 +345,29 @@ export default function App() {
                 vault={vault}
                 onVaultChanged={setVault}
                 onOpenVault={() => setPage("vault")}
+                onConnect={(sessionId) => {
+                  setTerminalOpen((prev) => ({ sessionId, n: (prev?.n ?? 0) + 1 }));
+                  setPage("terminal");
+                }}
                 active={page === "sessions"}
               />
             </section>
             <section hidden={page !== "terminal"} className="h-full">
-              <TerminalPage active={page === "terminal"} theme={resolved} />
+              <TerminalPage
+                active={page === "terminal"}
+                theme={resolved}
+                openRequest={terminalOpen}
+                onOpenVault={() => setPage("vault")}
+              />
+            </section>
+            <section hidden={page !== "knownHosts"}>
+              <KnownHostsPage active={page === "knownHosts"} />
             </section>
             <section hidden={page !== "vault"}>
               <VaultPage vault={vault} onVaultChanged={setVault} active={page === "vault"} />
             </section>
             <section hidden={page !== "activity"}>
-              <ActivityPage version={jobsVersion} />
+              <ActivityPage version={jobsVersion} active={page === "activity"} />
             </section>
             <section hidden={page !== "settings"}>
               <SettingsPage onChanged={() => setSettingsVersion((v) => v + 1)} />

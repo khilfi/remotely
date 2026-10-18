@@ -10,8 +10,9 @@ publish.workspace = true
 workspace = true
 
 [features]
-# Fake adapters (VMware, remote, vault, host counters, updater) for tests. Never enabled in the app.
-fakes = []
+# Fake adapters (VMware, remote, vault, host counters, updater) and a local SSH server for tests.
+# Never enabled in the app.
+fakes = ["getrandom/sys_rng", "dep:futures"]
 
 [dependencies]
 async-trait.workspace = true
@@ -32,7 +33,10 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc", "zeroize"] }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 getrandom = "0.4"
+futures = { version = "0.3", optional = true }
 zeroize = "1"
+# SS-02: session lists imported from CSV.
+csv = "1"
 # SSH (SS-03, BX-02, MO-02). `ring` instead of the default aws-lc-rs so Windows builds need no CMake/NASM.
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
 
@@ -47,6 +51,11 @@ windows = { version = "0.62", features = [
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
+
+# Try the terminal without a real host (see the file).
+[[example]]
+name = "dev_ssh_server"
+required-features = ["fakes"]
 
 [dev-dependencies]
 # Integration tests in tests/ use the fake adapters.

@@ -437,6 +437,114 @@ export interface SessionFilter {
   folderId?: string | null;
 }
 
+/** SS-05: a key a server presented. */
+export interface HostKey {
+  host: string;
+  port: number;
+  /** e.g. "ssh-ed25519". */
+  keyType: string;
+  /** "SHA256:" and the base64 digest, as OpenSSH prints it. */
+  fingerprint: string;
+}
+
+/** SS-05: a trusted host key. */
+export interface KnownHost {
+  id: string;
+  host: string;
+  port: number;
+  keyType: string;
+  fingerprint: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
+/** SS-03: what a terminal pane is doing. */
+export type TerminalStatus =
+  /** attempt 0: a first or manual connection; 1 and up: automatic reconnects. */
+  | { state: "connecting"; attempt: number }
+  | { state: "connected" }
+  | { state: "reconnecting"; attempt: number; maxAttempts: number; seconds: number; reason: string }
+  /** The remote shell ended; Enter or Reconnect starts a new one. */
+  | { state: "ended"; exitStatus: number | null }
+  /** Not connected and not trying. `code` says why (host_key_changed, auth_failed, vault_locked, ...). */
+  | { state: "disconnected"; code: string; message: string }
+  | { state: "closed" };
+
+export type TerminalEvent =
+  | { event: "status"; status: TerminalStatus }
+  /** SS-05: first connection to a host; answer with `terminalHostKeyAnswer`. */
+  | { event: "hostKeyUnknown"; key: HostKey; otherKeyTypes: string[] }
+  /** SS-05: the key changed and the connection was blocked. */
+  | { event: "hostKeyChanged"; key: HostKey; previous: KnownHost };
+
+/** SS-03 settings. */
+export interface TerminalSettings {
+  /** Seconds without traffic before a keep-alive; 0: off. */
+  keepaliveSecs: number;
+  autoReconnect: boolean;
+  copyOnSelect: boolean;
+}
+
+/** SS-02 import sources. */
+export type ImportSource = "putty" | "puttyFile" | "mobaxterm" | "openssh" | "csv";
+
+export type CandidateAuth = { method: "password" } | { method: "keyFile"; path: string } | { method: "agent" };
+
+/** One session an import source has. */
+export interface ImportCandidate {
+  name: string;
+  host: string;
+  port: number;
+  username: string | null;
+  /** Folder path in the source, outermost first. */
+  folder: string[];
+  auth: CandidateAuth;
+  startupCommand: string | null;
+  /** Jump host as the source names it (SS-07 is v2). */
+  jump: string | null;
+  environment: Environment;
+  color: SessionColor | null;
+  tags: string[];
+  /** What the import left out or changed. */
+  notes: string[];
+}
+
+export type ImportRowStatus =
+  | { kind: "new" }
+  | { kind: "duplicate"; sessionId: string; sessionName: string }
+  | { kind: "duplicateInImport"; row: number }
+  | { kind: "nameConflict"; sessionId: string; renameTo: string };
+
+export interface ImportRow {
+  index: number;
+  candidate: ImportCandidate;
+  status: ImportRowStatus;
+  /** Ticked by default. */
+  selected: boolean;
+  keyFile: { path: string; label: string; exists: boolean } | null;
+}
+
+export interface ImportSkipped {
+  name: string;
+  reason: string;
+}
+
+export interface ImportPreview {
+  id: string;
+  source: ImportSource;
+  file: string | null;
+  rows: ImportRow[];
+  skipped: ImportSkipped[];
+  warnings: string[];
+}
+
+export interface ImportReport {
+  created: number;
+  keysAdded: number;
+  foldersCreated: number;
+  problems: ImportSkipped[];
+}
+
 /** FD-14: a newer signed release on GitHub. */
 export interface UpdateInfo {
   currentVersion: string;
@@ -570,12 +678,48 @@ export const api = {
   /** Its sessions and subfolders move up to its parent. */
   deleteFolder: (id: string) => invoke<void>("folder_delete", { id }),
 
-  terminalOpen: (onOutput: (data: string) => void) => {
-    const channel = new Channel<string>();
-    channel.onmessage = onOutput;
-    return invoke<string>("terminal_open", { onOutput: channel });
+  /**
+   * SS-02: reads a session list (PuTTY's registry, or a file chosen in a dialog the core opens; the
+   * OpenSSH config is ~/.ssh/config unless chooseFile) and compares it with the library. null when the
+   * dialog was closed.
+   */
+  importPreview: (source: ImportSource, chooseFile = false) =>
+    invoke<ImportPreview | null>("import_preview", { source, chooseFile }),
+  /** Saves the picked rows of a preview; key files go into the vault when addKeys. */
+  importCommit: (request: { previewId: string; rows: number[]; folderId: string | null; addKeys: boolean }) =>
+    invoke<ImportReport>("import_commit", { request }),
+
+  /**
+   * SS-03: opens a pane to a saved session. Output arrives as raw bytes (xterm.js decodes them, so a
+   * character split across reads stays whole); status and host key questions arrive as events.
+   */
+  terminalOpen: (
+    sessionId: string,
+    cols: number,
+    rows: number,
+    onOutput: (data: Uint8Array) => void,
+    onEvent: (event: TerminalEvent) => void,
+  ) => {
+    const output = new Channel<ArrayBuffer>();
+    output.onmessage = (data) => onOutput(new Uint8Array(data));
+    const events = new Channel<TerminalEvent>();
+    events.onmessage = onEvent;
+    return invoke<string>("terminal_open", { sessionId, cols, rows, onOutput: output, onEvent: events });
   },
-  terminalWrite: (id: string, data: string) => invoke<void>("terminal_write", { id, data }),
+  /** Keystrokes and pastes as raw bytes. */
+  terminalWrite: (id: string, data: Uint8Array) =>
+    invoke<void>("terminal_write", data, { headers: { "x-terminal-id": id } }),
   terminalResize: (id: string, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
+  /** Connects again now (drops a live connection first). */
+  terminalReconnect: (id: string) => invoke<void>("terminal_reconnect", { id }),
   terminalClose: (id: string) => invoke<void>("terminal_close", { id }),
+  /** SS-05: the answer to a first-connection host key question. Trusting saves the key (audited). */
+  terminalHostKeyAnswer: (id: string, trust: boolean) => invoke<void>("terminal_host_key_answer", { id, trust }),
+  /** SS-05: trusts the changed key that blocked this pane (audited) and reconnects. */
+  terminalHostKeyReplace: (id: string) => invoke<void>("terminal_host_key_replace", { id }),
+  terminalSettings: () => invoke<TerminalSettings>("terminal_settings"),
+  setTerminalSettings: (settings: TerminalSettings) => invoke<TerminalSettings>("terminal_set_settings", { settings }),
+  /** SS-05: trusted host keys; removing one is audited and the next connection asks again. */
+  knownHosts: () => invoke<KnownHost[]>("known_hosts_list"),
+  removeKnownHost: (id: string) => invoke<void>("known_host_remove", { id }),
 };
