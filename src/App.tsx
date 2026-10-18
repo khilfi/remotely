@@ -131,6 +131,8 @@ export default function App() {
   const [snapshotPick, setSnapshotPick] = useState<{ paths: string[]; n: number } | null>(null);
   // SS-03: a session to open in a new terminal tab.
   const [terminalOpen, setTerminalOpen] = useState<{ sessionId: string; n: number } | null>(null);
+  // QL-02: the New terminal form, opened from the palette.
+  const [terminalNew, setTerminalNew] = useState(0);
   // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
   const [vault, setVault] = useState<VaultInfo | null>(null);
   // FD-01: the command palette, opened on everything or on one VM's actions.
@@ -325,6 +327,16 @@ export default function App() {
       icon: GaugeIcon,
       keywords: "metrics monitoring guest",
       run: () => setPage("dashboard"),
+    },
+    {
+      id: "new-terminal",
+      label: "New terminal (quick connect)…",
+      icon: TerminalIcon,
+      keywords: "ssh connect host open quick",
+      run: () => {
+        setTerminalNew((n) => n + 1);
+        setPage("terminal");
+      },
     },
     {
       id: "bulk",
@@ -533,6 +545,7 @@ export default function App() {
                 active={page === "terminal"}
                 theme={resolved}
                 openRequest={terminalOpen}
+                newRequest={terminalNew}
                 onOpenVault={() => setPage("vault")}
               />
             </section>

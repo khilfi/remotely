@@ -64,7 +64,7 @@ crates/core/          remotely-core: all app logic
     policy/
     jobs.rs
     adapters/         vmware.rs, remote.rs (SSH shell and exec), exec_output.rs (BX-02/BX-07 output cap, hashes,
-                      secret scrubbing), host_counters.rs, updater.rs
+                      secret scrubbing), host_counters.rs, updater.rs, network.rs (QL-03 DNS, QL-04 TCP probe)
     inventory.rs
     capacity.rs       VM-07 capacity check before power-on
     snapshots.rs      VM-04 snapshot trees (from .vmsd), VM-05 safety snapshot names
@@ -72,8 +72,12 @@ crates/core/          remotely-core: all app logic
     export.rs         AP-05 audit log CSV export and secret redaction
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows), guest.rs (MO-02 SSH
                       polling, kept connections, backoff), procfs.rs (/proc and df parsers)
-    sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier)
-    terminal.rs       SS-03 terminal panes: one supervised SSH connection each (keep-alive, auto-reconnect)
+    sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); sessions/tree.rs the QL-04
+                      tree (by folder, tag or label) for the Terminal page
+    terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
+                      QL-03 host name and IP); quick.rs QL-02 quick connect; log.rs and output.rs SS-11 session logs
+                      and saved, printed or copied output (secrets scrubbed)
+    reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only)
     bulk.rs           BX-01 targets, BX-03 grouped results and diff, BX-05 exports (running is RemoteExec on the bus)
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit

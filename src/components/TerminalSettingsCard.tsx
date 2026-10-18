@@ -1,24 +1,49 @@
-// SS-03 terminal settings: keep-alive, auto-reconnect and copy-on-select. Saved in the core and audited;
-// they apply to terminals opened from then on.
+// SS-03, QL-04 and QL-05 terminal settings: keep-alive, auto-reconnect, copy-on-select, font size,
+// scrollback and the session tree's reachability checks. Saved in the core and audited. Connection
+// settings apply to terminals opened from then on; font size and scrollback to open ones too.
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { api, errorMessage, type TerminalSettings } from "@/lib/api";
+import { api, errorMessage, type ReachabilityMode, type TerminalSettings } from "@/lib/api";
+
+const REACHABILITY: { value: ReachabilityMode; label: string }[] = [
+  { value: "auto", label: "On, unless there are more than 200 sessions" },
+  { value: "on", label: "On" },
+  { value: "off", label: "Off" },
+];
+
+/** The number fields, as typed. */
+interface Draft {
+  keepalive: string;
+  fontSize: string;
+  scrollback: string;
+  reachabilitySecs: string;
+}
+
+function draftOf(s: TerminalSettings): Draft {
+  return {
+    keepalive: String(s.keepaliveSecs),
+    fontSize: String(s.fontSize),
+    scrollback: String(s.scrollback),
+    reachabilitySecs: String(s.reachabilitySecs),
+  };
+}
 
 export function TerminalSettingsCard() {
   const [settings, setSettings] = useState<TerminalSettings | null>(null);
-  const [keepalive, setKeepalive] = useState("");
+  const [draft, setDraft] = useState<Draft | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     api.terminalSettings().then(
       (s) => {
         setSettings(s);
-        setKeepalive(String(s.keepaliveSecs));
+        setDraft(draftOf(s));
       },
       (err) => setMessage({ ok: false, text: errorMessage(err) }),
     );
@@ -28,14 +53,29 @@ export function TerminalSettingsCard() {
     try {
       const saved = await api.setTerminalSettings(next);
       setSettings(saved);
-      setKeepalive(String(saved.keepaliveSecs));
-      setMessage({ ok: true, text: "Saved. Applies to terminals opened from now on." });
+      setDraft(draftOf(saved));
+      setMessage({ ok: true, text: "Saved." });
     } catch (err) {
       setMessage({ ok: false, text: errorMessage(err) });
     }
   }
 
-  if (!settings) return null;
+  if (!settings || !draft) return null;
+  const changed = JSON.stringify(draft) !== JSON.stringify(draftOf(settings));
+  const field = (key: keyof Draft, id: string, label: string, hint?: string) => (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>{label}</Label>
+      <Input
+        id={id}
+        className="max-w-32"
+        inputMode="numeric"
+        value={draft[key]}
+        onChange={(e) => setDraft({ ...draft, [key]: e.currentTarget.value })}
+      />
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    </div>
+  );
+
   return (
     <Card>
       <CardHeader>
@@ -46,15 +86,15 @@ export function TerminalSettingsCard() {
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        <div className="grid gap-2">
-          <Label htmlFor="keepalive">Keep-alive every (seconds, 0 for off)</Label>
-          <Input
-            id="keepalive"
-            className="max-w-32"
-            inputMode="numeric"
-            value={keepalive}
-            onChange={(e) => setKeepalive(e.currentTarget.value)}
-          />
+        <div className="grid gap-4 sm:grid-cols-2">
+          {field("keepalive", "keepalive", "Keep-alive every (seconds, 0 for off)")}
+          {field("fontSize", "font-size", "Font size (8 to 32)")}
+          {field(
+            "scrollback",
+            "scrollback",
+            "Scrollback lines (1000 to 100000)",
+            "Lines each terminal keeps to scroll back through, copy, search and save.",
+          )}
         </div>
         <div className="flex items-center gap-3">
           <Switch
@@ -76,6 +116,31 @@ export function TerminalSettingsCard() {
             Copy text as soon as it is selected (like PuTTY)
           </Label>
         </div>
+        <div className="grid gap-4 border-t pt-4 sm:grid-cols-2">
+          <div className="grid gap-2">
+            <Label htmlFor="reachability">Reachability dots in the session tree</Label>
+            <Select
+              value={settings.reachability}
+              onValueChange={(v) => void save({ ...settings, reachability: v as ReachabilityMode })}
+            >
+              <SelectTrigger id="reachability" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {REACHABILITY.map((r) => (
+                  <SelectItem key={r.value} value={r.value}>
+                    {r.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              A TCP connection to each shown session's port, opened and closed at once: no login. Sessions in closed
+              groups are not checked.
+            </p>
+          </div>
+          {field("reachabilitySecs", "reachability-secs", "Check every (seconds, 15 to 3600)")}
+        </div>
         {message && (
           <p className={message.ok ? "text-sm text-muted-foreground" : "text-sm text-destructive"} role="status">
             {message.text}
@@ -85,10 +150,18 @@ export function TerminalSettingsCard() {
       <CardFooter>
         <Button
           variant="outline"
-          disabled={keepalive === String(settings.keepaliveSecs)}
-          onClick={() => void save({ ...settings, keepaliveSecs: Number(keepalive) })}
+          disabled={!changed}
+          onClick={() =>
+            void save({
+              ...settings,
+              keepaliveSecs: Number(draft.keepalive),
+              fontSize: Number(draft.fontSize),
+              scrollback: Number(draft.scrollback),
+              reachabilitySecs: Number(draft.reachabilitySecs),
+            })
+          }
         >
-          Save keep-alive
+          Save
         </Button>
       </CardFooter>
     </Card>
