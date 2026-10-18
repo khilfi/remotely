@@ -7,11 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use remotely_core::adapters::network::NetworkAdapter;
 use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
 use remotely_core::adapters::updater::UpdaterAdapter;
 use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{
-    FakeHostCounters, FakeKeyProtector, FakeRemote, FakeResolver, FakeUpdater, FakeVault, FakeVmware,
+    FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeResolver, FakeUpdater, FakeVault, FakeVmware,
 };
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::PolicyRules;
@@ -36,6 +37,8 @@ pub struct Setup {
     pub updater: Arc<dyn UpdaterAdapter>,
     /// QL-01: host names to addresses. Resolves nothing unless a test adds names.
     pub resolver: Arc<FakeResolver>,
+    /// QL-03 DNS and QL-04 probes: no real lookups unless a test asks for them.
+    pub network: Arc<dyn NetworkAdapter>,
 }
 
 impl Setup {
@@ -52,11 +55,17 @@ impl Setup {
             remote: Arc::new(FakeRemote::default()),
             updater: Arc::new(FakeUpdater::default()),
             resolver: Arc::new(FakeResolver::default()),
+            network: Arc::new(FakeNetwork::default()),
         }
     }
 
     pub fn with_updater(mut self, updater: Arc<dyn UpdaterAdapter>) -> Self {
         self.updater = updater;
+        self
+    }
+
+    pub fn with_network(mut self, network: Arc<dyn NetworkAdapter>) -> Self {
+        self.network = network;
         self
     }
 
@@ -102,6 +111,7 @@ impl Setup {
             host_counters: Arc::new(self.host),
             updater: self.updater,
             resolver: self.resolver,
+            network: self.network,
         };
         Core::assemble(store, ctx, adapters, JobLimits::default())
             .await

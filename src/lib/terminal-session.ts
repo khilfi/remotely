@@ -4,10 +4,27 @@
 //
 // Bytes stay bytes: keystrokes go to the core as raw UTF-8, output comes back as raw bytes that xterm.js
 // decodes itself. Writes are sent one at a time, in order, with whatever was typed meanwhile batched.
+//
+// A pane opens a saved session, a quick connection from the New terminal form (QL-02) or another
+// connection like an open pane (a split). QL-05: search (Ctrl+Shift+F), Ctrl+Shift+C / Ctrl+Shift+V,
+// right-click paste, and the font size, scrollback and copy-on-select settings, applied live. SS-11:
+// the whole buffer as text, and logging to a file.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { api, errorCode, errorMessage, type HostKey, type KnownHost, type TerminalStatus } from "@/lib/api";
+import { SearchAddon } from "@xterm/addon-search";
+import {
+  api,
+  errorCode,
+  errorMessage,
+  type HostFacts,
+  type HostKey,
+  type KnownHost,
+  type QuickConnectRequest,
+  type SessionRecord,
+  type TerminalEvent,
+  type TerminalStatus,
+} from "@/lib/api";
 import type { ResolvedTheme } from "@/lib/theme";
 
 const MONO = "'Cascadia Mono', 'Cascadia Code', Consolas, monospace";
@@ -19,12 +36,28 @@ export const TERMINAL_PALETTE = {
   dark: { background: "#0c0c0d", foreground: "#e4e4e7", cursor: "#e4e4e7", selectionBackground: "#ffffff38" },
 } as const;
 
+/** Search matches; the search addon wants #RRGGBB. */
+const SEARCH_DECORATIONS = {
+  matchBackground: "#ffd33d",
+  matchOverviewRuler: "#ffd33d",
+  activeMatchBackground: "#ff9632",
+  activeMatchColorOverviewRuler: "#ff9632",
+};
+
 /** SS-05: a host key decision the pane is waiting for. */
 export type HostKeyQuestion =
   { kind: "unknown"; key: HostKey; otherKeyTypes: string[] } | { kind: "changed"; key: HostKey; previous: KnownHost };
 
 /** Before the core has a status for the pane. */
 export type PaneStatus = TerminalStatus | { state: "opening" };
+
+/** What a pane connects to. */
+export type PaneOpener =
+  | { kind: "session"; sessionId: string }
+  /** QL-02. The typed password, if any, is dropped as soon as the core has it. */
+  | { kind: "quick"; request: QuickConnectRequest }
+  /** Another connection like an open pane, with a password typed for it (a split). */
+  | { kind: "like"; terminalId: string };
 
 export interface PaneSnapshot {
   status: PaneStatus;
@@ -33,7 +66,26 @@ export interface PaneSnapshot {
   question: HostKeyQuestion | null;
   /** The last changed-key notice, kept so the user can review it after closing the dialog. */
   changedKey: Extract<HostKeyQuestion, { kind: "changed" }> | null;
+  /** QL-03: the host's name and address as far as they are known. */
+  facts: HostFacts | null;
+  /** The saved session, once known (a quick connection saved as one learns it when it opens). */
+  sessionId: string | null;
+  /** SS-11: the file this pane logs to. */
+  logPath: string | null;
+  /** QL-05: the search bar is open. */
+  searching: boolean;
+  /** QL-05: the last search's matches; index -1 when there are too many to number. */
+  searchResults: { index: number; count: number } | null;
 }
+
+/** QL-05 settings a pane applies live. */
+export interface PaneOptions {
+  fontSize: number;
+  scrollback: number;
+  copyOnSelect: boolean;
+}
+
+export const DEFAULT_PANE_OPTIONS: PaneOptions = { fontSize: 13, scrollback: 10000, copyOnSelect: true };
 
 const encoder = new TextEncoder();
 
@@ -48,40 +100,71 @@ function keepQuestion(question: HostKeyQuestion | null, status: TerminalStatus):
   return null;
 }
 
+/** QL-03: `web01 · 192.0.2.10`, or whichever of the two is known. */
+export function factsTitle(facts: HostFacts | null): string | null {
+  if (!facts) return null;
+  const { hostname, ip } = facts;
+  if (hostname && ip && hostname !== ip) return `${hostname} · ${ip}`;
+  return hostname ?? ip;
+}
+
+/** `alice@web01.example.com:2222`; the port only when it is not 22. */
+export function sessionAddress(s: Pick<SessionRecord, "username" | "host" | "port">) {
+  return `${s.username ? `${s.username}@` : ""}${s.host}${s.port === 22 ? "" : `:${s.port}`}`;
+}
+
 export class PaneSession {
   readonly key: string;
-  readonly sessionId: string;
   readonly element: HTMLDivElement;
   readonly term: Terminal;
+  /** How the pane is named before the core says more: the session's or the typed address. */
+  readonly label: string;
   private readonly fitAddon: FitAddon;
+  private readonly searchAddon: SearchAddon;
+  private opener: PaneOpener | null;
   private coreId: string | null = null;
   private started = false;
   private closed = false;
-  private snapshot: PaneSnapshot = {
-    status: { state: "opening" },
-    statusAt: Date.now(),
-    question: null,
-    changedKey: null,
-  };
+  private snapshot: PaneSnapshot;
   private readonly listeners = new Set<() => void>();
   private pending: Uint8Array[] = [];
   private writing = false;
   copyOnSelect = true;
 
-  constructor(key: string, sessionId: string, theme: ResolvedTheme) {
+  constructor(key: string, opener: PaneOpener, label: string, theme: ResolvedTheme, options: PaneOptions) {
     this.key = key;
-    this.sessionId = sessionId;
+    this.opener = opener;
+    this.label = label;
+    this.snapshot = {
+      status: { state: "opening" },
+      statusAt: Date.now(),
+      question: null,
+      changedKey: null,
+      facts: null,
+      sessionId: opener.kind === "session" ? opener.sessionId : null,
+      logPath: null,
+      searching: false,
+      searchResults: null,
+    };
     this.element = document.createElement("div");
     this.element.className = "h-full w-full";
+    this.copyOnSelect = options.copyOnSelect;
     this.term = new Terminal({
       fontFamily: MONO,
-      fontSize: 13,
+      fontSize: options.fontSize,
       cursorBlink: true,
-      scrollback: 10000,
+      scrollback: options.scrollback,
       theme: TERMINAL_PALETTE[theme],
+      // The search addon's match highlights use the decorations API.
+      allowProposedApi: true,
     });
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
+    this.searchAddon = new SearchAddon({ highlightLimit: 2000 });
+    this.term.loadAddon(this.searchAddon);
+    this.searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
+      this.update({ searchResults: { index: resultIndex, count: resultCount } });
+    });
     this.term.open(this.element);
 
     this.term.onData((data) => this.send(encoder.encode(data)));
@@ -95,7 +178,7 @@ export class PaneSession {
       if (this.copyOnSelect && this.term.hasSelection()) void navigator.clipboard?.writeText(this.term.getSelection());
     });
     this.term.attachCustomKeyEventHandler((ev) => this.handleKey(ev));
-    // Right-click pastes, like PuTTY.
+    // QL-05: right-click pastes, like PuTTY.
     this.element.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
       void this.pasteFromClipboard();
@@ -116,64 +199,93 @@ export class PaneSession {
     this.listeners.forEach((l) => l());
   }
 
+  /** The core's id for this pane, once it has opened. */
+  get terminalId() {
+    return this.coreId;
+  }
+
+  get sessionId() {
+    return this.snapshot.sessionId;
+  }
+
   // ---- connection ----
 
-  /** Opens the connection, sized to the pane. Called once the element is on screen. */
-  start() {
-    if (this.started || this.closed) return;
+  private onEvent = (event: TerminalEvent) => {
+    switch (event.event) {
+      case "status":
+        this.update({
+          status: event.status,
+          statusAt: Date.now(),
+          question: keepQuestion(this.snapshot.question, event.status),
+          ...(event.status.state === "closed" ? { logPath: null } : {}),
+        });
+        break;
+      case "hostKeyUnknown":
+        this.update({ question: { kind: "unknown", key: event.key, otherKeyTypes: event.otherKeyTypes } });
+        break;
+      case "hostKeyChanged": {
+        const changed = { kind: "changed" as const, key: event.key, previous: event.previous };
+        this.update({ question: changed, changedKey: changed });
+        break;
+      }
+      case "host":
+        this.update({ facts: event.facts });
+        break;
+    }
+  };
+
+  private onOutput = (data: Uint8Array) => this.term.write(data);
+
+  /**
+   * Opens the connection, sized to the pane (80×24 until it is on screen; the core gets the real size
+   * as soon as the pane is laid out). Resolves once the core has opened the pane, and rejects when it
+   * opened nothing (a bad quick connection, a jump host, a deleted session).
+   */
+  async start(): Promise<void> {
+    if (this.started || this.closed || !this.opener) return;
     this.started = true;
     this.fit();
     this.update({ status: { state: "opening" }, statusAt: Date.now() });
-    api
-      .terminalOpen(
-        this.sessionId,
-        this.term.cols,
-        this.term.rows,
-        (data) => this.term.write(data),
-        (event) => {
-          switch (event.event) {
-            case "status":
-              this.update({
-                status: event.status,
-                statusAt: Date.now(),
-                question: keepQuestion(this.snapshot.question, event.status),
-              });
-              break;
-            case "hostKeyUnknown":
-              this.update({ question: { kind: "unknown", key: event.key, otherKeyTypes: event.otherKeyTypes } });
-              break;
-            case "hostKeyChanged": {
-              const changed = { kind: "changed" as const, key: event.key, previous: event.previous };
-              this.update({ question: changed, changedKey: changed });
-              break;
-            }
-          }
-        },
-      )
-      .then((id) => {
-        if (this.closed) {
-          void api.terminalClose(id);
-          return;
-        }
-        this.coreId = id;
-        this.flush();
-      })
-      .catch((err) => {
-        // Nothing was opened (a jump host, a key login with no key chosen, a deleted session).
-        this.started = false;
-        const message = errorMessage(err);
-        this.update({
-          status: { state: "disconnected", code: errorCode(err) ?? "error", message },
-          statusAt: Date.now(),
-        });
-        this.term.write(`\r\n\x1b[31m[Not connected: ${message}]\x1b[0m\r\n`);
+    const opener = this.opener;
+    const { cols, rows } = this.term;
+    try {
+      let id: string;
+      if (opener.kind === "session") {
+        id = await api.terminalOpen(opener.sessionId, cols, rows, this.onOutput, this.onEvent);
+      } else if (opener.kind === "quick") {
+        const opened = await api.terminalQuickConnect(opener.request, cols, rows, this.onOutput, this.onEvent);
+        id = opened.id;
+        // A saved quick connection is a session from now on: reconnects and splits follow it.
+        this.opener = opened.session ? { kind: "session", sessionId: opened.session.id } : null;
+        if (opened.session) this.update({ sessionId: opened.session.id });
+      } else {
+        id = await api.terminalOpenLike(opener.terminalId, cols, rows, this.onOutput, this.onEvent);
+        this.opener = null;
+      }
+      if (this.closed) {
+        void api.terminalClose(id);
+        return;
+      }
+      this.coreId = id;
+      this.flush();
+    } catch (err) {
+      this.started = false;
+      // A typed password goes to the core once; trying again asks in the terminal.
+      if (opener.kind === "quick") this.opener = { kind: "quick", request: { ...opener.request, password: null } };
+      const message = errorMessage(err);
+      this.update({
+        status: { state: "disconnected", code: errorCode(err) ?? "error", message },
+        statusAt: Date.now(),
       });
+      this.term.write(`\r\n\x1b[31m[Not connected: ${message}]\x1b[0m\r\n`);
+      throw err;
+    }
   }
 
   /** Connects again now: a fresh open when nothing was opened, otherwise the core reconnects. */
   reconnect() {
     if (this.coreId) void api.terminalReconnect(this.coreId);
-    else this.start();
+    else this.start().catch(() => undefined);
   }
 
   answerHostKey(trust: boolean) {
@@ -199,6 +311,7 @@ export class PaneSession {
   close() {
     if (this.closed) return;
     this.closed = true;
+    this.opener = null;
     if (this.coreId) void api.terminalClose(this.coreId);
     this.term.dispose();
     this.listeners.clear();
@@ -237,6 +350,7 @@ export class PaneSession {
     if (ev.type !== "keydown") return true;
     const key = ev.key.toLowerCase();
     // Ctrl+C with a selection copies (as in Windows Terminal); without one it is ^C for the shell.
+    // Ctrl+Shift+C always copies.
     if (ev.ctrlKey && !ev.altKey && key === "c" && (ev.shiftKey || this.term.hasSelection())) {
       if (this.term.hasSelection()) void navigator.clipboard?.writeText(this.term.getSelection());
       this.term.clearSelection();
@@ -245,6 +359,12 @@ export class PaneSession {
     }
     // Ctrl+V and Ctrl+Shift+V: let the browser paste; xterm.js picks up the paste event.
     if (ev.ctrlKey && !ev.altKey && key === "v") return false;
+    // QL-05: Ctrl+Shift+F searches the scrollback.
+    if (ev.ctrlKey && ev.shiftKey && !ev.altKey && key === "f") {
+      ev.preventDefault();
+      this.openSearch();
+      return false;
+    }
     return true;
   }
 
@@ -257,10 +377,77 @@ export class PaneSession {
     }
   }
 
+  // ---- QL-05 search ----
+
+  openSearch() {
+    this.update({ searching: true });
+  }
+
+  closeSearch() {
+    this.searchAddon.clearDecorations();
+    this.update({ searching: false, searchResults: null });
+    this.focus();
+  }
+
+  /** Finds the next (or previous) match; false when there is none. */
+  find(text: string, backwards: boolean, options: { caseSensitive: boolean; regex: boolean }) {
+    if (!text) {
+      this.searchAddon.clearDecorations();
+      this.update({ searchResults: null });
+      return false;
+    }
+    const search = { ...options, decorations: SEARCH_DECORATIONS };
+    return backwards ? this.searchAddon.findPrevious(text, search) : this.searchAddon.findNext(text, search);
+  }
+
+  // ---- SS-11 output ----
+
+  /** The whole buffer (scrollback and screen) as text: wrapped lines joined, trailing blank lines dropped. */
+  bufferText(): string {
+    const buffer = this.term.buffer.active;
+    const lines: string[] = [];
+    let current: string | null = null;
+    for (let i = 0; i < buffer.length; i++) {
+      const line = buffer.getLine(i);
+      if (!line) continue;
+      const text = line.translateToString(false);
+      if (line.isWrapped && current !== null) current += text;
+      else {
+        if (current !== null) lines.push(current.trimEnd());
+        current = text;
+      }
+    }
+    if (current !== null) lines.push(current.trimEnd());
+    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+    return lines.join("\n");
+  }
+
+  /** SS-11: asks the core for a log file and starts logging; null when the user cancelled. */
+  async startLog(title: string) {
+    if (!this.coreId) throw new Error("This terminal has not connected yet.");
+    const path = await api.terminalLogStart(this.coreId, title);
+    if (path) this.update({ logPath: path });
+    return path;
+  }
+
+  async stopLog() {
+    if (!this.coreId) return;
+    await api.terminalLogStop(this.coreId);
+    this.update({ logPath: null });
+  }
+
   // ---- view ----
 
   setTheme(theme: ResolvedTheme) {
     this.term.options.theme = TERMINAL_PALETTE[theme];
+  }
+
+  /** QL-05: font size, scrollback and copy-on-select, applied to an open pane. */
+  setOptions(options: PaneOptions) {
+    this.copyOnSelect = options.copyOnSelect;
+    if (this.term.options.fontSize !== options.fontSize) this.term.options.fontSize = options.fontSize;
+    if (this.term.options.scrollback !== options.scrollback) this.term.options.scrollback = options.scrollback;
+    this.fit();
   }
 
   fit() {

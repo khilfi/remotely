@@ -21,7 +21,7 @@ macro_rules! session_columns {
     () => {
         "id, folder_id, name, protocol, host, port, username, auth_method, credential_id, key_passphrase_id,
          jump_session_id, startup_command, environment, color, protected, vm_id, vm_link, imported_from, created_at,
-         updated_at,
+         updated_at, last_ip, last_hostname, last_seen_at, last_opened_at,
          (SELECT group_concat(t.name, char(31)) FROM target_tags tt JOIN tags t ON t.id = tt.tag_id
           WHERE tt.target_kind = 'session' AND tt.target_id = sessions.id) AS tags"
     };
@@ -80,6 +80,10 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         imported_from: row.try_get("imported_from")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        last_ip: row.try_get("last_ip")?,
+        last_hostname: row.try_get("last_hostname")?,
+        last_seen_at: row.try_get("last_seen_at")?,
+        last_opened_at: row.try_get("last_opened_at")?,
     })
 }
 
@@ -427,6 +431,57 @@ impl Store {
         .transpose()
     }
 
+    /// QL-02: a terminal to the session was opened now (Recent sessions). Not an edit: `updated_at`
+    /// stays.
+    pub(crate) async fn record_session_opened(&self, ctx: &Context, id: Uuid) -> Result<()> {
+        sqlx::query("UPDATE sessions SET last_opened_at = ? WHERE workspace_id = ? AND id = ?")
+            .bind(now_rfc3339())
+            .bind(ctx.workspace_id.to_string())
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// QL-03: what a connection to the session saw. A `None` keeps the value seen before. Not an
+    /// edit: `updated_at` stays.
+    pub(crate) async fn record_host_facts(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        ip: Option<&str>,
+        hostname: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET last_ip = COALESCE(?, last_ip), last_hostname = COALESCE(?, last_hostname),
+                 last_seen_at = ?
+             WHERE workspace_id = ? AND id = ?",
+        )
+        .bind(ip)
+        .bind(hostname)
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// QL-02: the sessions opened most recently, newest first.
+    pub async fn recent_sessions(&self, ctx: &Context, limit: u32) -> Result<Vec<SessionRecord>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            session_columns!(),
+            " FROM sessions WHERE workspace_id = ? AND last_opened_at IS NOT NULL
+              ORDER BY last_opened_at DESC LIMIT ?"
+        ))
+        .bind(ctx.workspace_id.to_string())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_session).collect()
+    }
+
     /// QL-01: how the session's VM link was made, after a create or an edit set `vm_id`.
     pub(crate) async fn set_vm_link_kind(&self, ctx: &Context, id: Uuid, link: Option<VmLink>) -> Result<()> {
         sqlx::query("UPDATE sessions SET vm_link = ? WHERE workspace_id = ? AND id = ?")
@@ -522,6 +577,25 @@ impl Store {
         };
         Ok(Some(spec_of(session, auth, jump)))
     }
+}
+
+/// QL-02: connection details for a quick connection that is not saved. `input` must already be
+/// checked. A key login with no key chosen can't connect.
+pub(crate) fn unsaved_spec(input: &SessionInput) -> Result<SessionSpec> {
+    if let SessionAuth::Key { key_id: None, .. } = input.auth {
+        return Err(CoreError::InvalidInput("Choose the key to log in with.".into()));
+    }
+    Ok(SessionSpec {
+        id: Uuid::new_v4(),
+        name: input.name.clone(),
+        host: input.host.clone(),
+        port: input.port,
+        username: input.username.clone().unwrap_or_default(),
+        auth: auth_method(&input.auth),
+        jump: None,
+        environment: input.environment,
+        startup_command: None,
+    })
 }
 
 fn auth_method(auth: &SessionAuth) -> AuthMethod {

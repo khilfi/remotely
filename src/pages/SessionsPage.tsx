@@ -6,6 +6,7 @@
 // linked automatically by IP address or by hand, and lets the user keep, change or remove the link.
 // Export and "Import from another laptop" move the library between the owner's laptops in one encrypted
 // file (FD-07).
+// Under the address: the host name and IP the last connection saw (QL-03).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -67,7 +68,7 @@ import {
   type VmRecord,
 } from "@/lib/api";
 import { flattenFolders, folderPath, subtree } from "@/lib/folders";
-import { plural } from "@/lib/format";
+import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -488,7 +489,17 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                         <div className="text-xs text-muted-foreground">{folderPath(folders, s.folderId)}</div>
                       )}
                     </TableCell>
-                    <TableCell className="font-mono text-xs">{address(s)}</TableCell>
+                    <TableCell className="font-mono text-xs">
+                      {address(s)}
+                      {(s.lastHostname || s.lastIp) && (
+                        <div
+                          className="font-sans text-muted-foreground"
+                          title={`What the last connection saw, ${formatWhen(s.lastSeenAt)}`}
+                        >
+                          {[s.lastHostname, s.lastIp].filter(Boolean).join(" · ")}
+                        </div>
+                      )}
+                    </TableCell>
                     <TableCell className="text-sm">{login(s.auth)}</TableCell>
                     <TableCell className="text-sm">
                       {s.jumpSessionId ? (

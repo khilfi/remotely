@@ -114,6 +114,23 @@ pub fn run() {
                 }
             });
 
+            // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
+            let reachability = Arc::clone(&core.reachability);
+            tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
+            let mut reach = core.reachability.subscribe();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match reach.recv().await {
+                        Ok(update) => {
+                            let _ = handle.emit("reachability://update", &update);
+                        }
+                        Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
+
             app.manage(AppState { core });
             Ok(())
         })
@@ -209,6 +226,8 @@ pub fn run() {
             ipc::metrics_capacity,
             ipc::metrics_watch,
             terminal::terminal_open,
+            terminal::terminal_quick_connect,
+            terminal::terminal_open_like,
             terminal::terminal_write,
             terminal::terminal_resize,
             terminal::terminal_reconnect,
@@ -219,6 +238,16 @@ pub fn run() {
             terminal::terminal_set_settings,
             terminal::known_hosts_list,
             terminal::known_host_remove,
+            terminal::quick_connect_history,
+            terminal::quick_connect_forget,
+            terminal::sessions_recent,
+            terminal::session_tree,
+            terminal::reachability_watch,
+            terminal::terminal_output_text,
+            terminal::terminal_output_print,
+            terminal::terminal_output_save,
+            terminal::terminal_log_start,
+            terminal::terminal_log_stop,
         ])
         .build(context);
 

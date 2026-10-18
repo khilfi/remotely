@@ -509,6 +509,13 @@ export interface SessionRecord extends SessionInput {
   importedFrom: string | null;
   createdAt: string;
   updatedAt: string;
+  /** QL-03: the IP address the last connection reached. */
+  lastIp: string | null;
+  /** QL-03: the server's own name at the last connection (or its DNS name when it didn't say). */
+  lastHostname: string | null;
+  lastSeenAt: string | null;
+  /** QL-02: when a terminal to it was last opened (Recent sessions). */
+  lastOpenedAt: string | null;
 }
 
 export interface SessionFolder {
@@ -562,19 +569,115 @@ export type TerminalStatus =
   | { state: "disconnected"; code: string; message: string }
   | { state: "closed" };
 
+/** QL-03: "dns" is what the session says, filled in by DNS; "host" is the host itself. */
+export type FactSource = "dns" | "host";
+
+/** QL-03: a terminal's host name and address, e.g. web01 · 192.0.2.10. */
+export interface HostFacts {
+  hostname: string | null;
+  hostnameFrom: FactSource | null;
+  ip: string | null;
+  ipFrom: FactSource | null;
+}
+
 export type TerminalEvent =
   | { event: "status"; status: TerminalStatus }
   /** SS-05: first connection to a host; answer with `terminalHostKeyAnswer`. */
   | { event: "hostKeyUnknown"; key: HostKey; otherKeyTypes: string[] }
   /** SS-05: the key changed and the connection was blocked. */
-  | { event: "hostKeyChanged"; key: HostKey; previous: KnownHost };
+  | { event: "hostKeyChanged"; key: HostKey; previous: KnownHost }
+  /** QL-03: what is known about the host so far. */
+  | { event: "host"; facts: HostFacts };
 
-/** SS-03 settings. */
+/** QL-04: "auto" checks libraries of up to 200 sessions. */
+export type ReachabilityMode = "auto" | "on" | "off";
+
+/** SS-03, QL-04, QL-05 settings. */
 export interface TerminalSettings {
   /** Seconds without traffic before a keep-alive; 0: off. */
   keepaliveSecs: number;
   autoReconnect: boolean;
   copyOnSelect: boolean;
+  /** QL-05: points, 8 to 32. */
+  fontSize: number;
+  /** QL-05: lines, 1000 to 100000. */
+  scrollback: number;
+  reachability: ReachabilityMode;
+  /** QL-04: seconds between two checks of a session, 15 to 3600. */
+  reachabilitySecs: number;
+}
+
+/** QL-02: what the New terminal form sends. A typed password goes to the core only. */
+export interface QuickConnectRequest {
+  /** A host name or address; user@host:port is taken apart. */
+  host: string;
+  port: number | null;
+  username: string | null;
+  auth: SessionAuth;
+  password: string | null;
+  save: { name: string; folderId: string | null; environment: Environment; color: SessionColor | null } | null;
+}
+
+/** QL-02: a quick connection that was not saved. Never holds a password. */
+export interface QuickConnectEntry {
+  id: string;
+  host: string;
+  port: number;
+  username: string | null;
+  auth: SessionAuth;
+  usedAt: string;
+}
+
+/** QL-04 session tree. */
+export type TreeGrouping = "folder" | "tag" | "label";
+
+export interface TreeNode {
+  /** Stable across reloads: folder:<id>, tag:<name>, label:prod, ... */
+  key: string;
+  kind: "folder" | "tag" | "label" | "other";
+  name: string;
+  environment: Environment | null;
+  children: TreeNode[];
+  /** Sessions directly in this group. */
+  sessions: string[];
+  /** Sessions in this group and below. */
+  count: number;
+}
+
+export interface SessionTree {
+  grouping: TreeGrouping;
+  nodes: TreeNode[];
+  /** Sessions outside any group (folder grouping). */
+  sessions: string[];
+  records: SessionRecord[];
+}
+
+/** QL-04 reachability (MO-08 lite). */
+export interface Reachability {
+  sessionId: string;
+  state: "up" | "down";
+  latencyMs: number | null;
+  reason: string | null;
+  checkedAt: string;
+}
+
+export interface ReachabilityUpdate {
+  enabled: boolean;
+  states: Reachability[];
+}
+
+/** SS-11: one terminal's text, as read from its buffer. */
+export interface TerminalText {
+  terminalId: string | null;
+  title: string;
+  text: string;
+}
+
+export type SaveLayout = "oneFile" | "filePerTerminal";
+
+export interface SavedOutput {
+  files: string[];
+  terminals: number;
 }
 
 /** SS-02 import sources. */
@@ -1311,6 +1414,40 @@ export const api = {
     return invoke<string>("terminal_open", { sessionId, cols, rows, onOutput: output, onEvent: events });
   },
   /** Keystrokes and pastes as raw bytes. */
+  /** QL-02: a pane to a host typed in the New terminal form, saved as a session or not. */
+  terminalQuickConnect: (
+    request: QuickConnectRequest,
+    cols: number,
+    rows: number,
+    onOutput: (data: Uint8Array) => void,
+    onEvent: (event: TerminalEvent) => void,
+  ) => {
+    const output = new Channel<ArrayBuffer>();
+    output.onmessage = (data) => onOutput(new Uint8Array(data));
+    const events = new Channel<TerminalEvent>();
+    events.onmessage = onEvent;
+    return invoke<{ id: string; session: SessionRecord | null }>("terminal_quick_connect", {
+      request,
+      cols,
+      rows,
+      onOutput: output,
+      onEvent: events,
+    });
+  },
+  /** A second pane like an open one (split): same target, and a password typed for it. */
+  terminalOpenLike: (
+    id: string,
+    cols: number,
+    rows: number,
+    onOutput: (data: Uint8Array) => void,
+    onEvent: (event: TerminalEvent) => void,
+  ) => {
+    const output = new Channel<ArrayBuffer>();
+    output.onmessage = (data) => onOutput(new Uint8Array(data));
+    const events = new Channel<TerminalEvent>();
+    events.onmessage = onEvent;
+    return invoke<string>("terminal_open_like", { id, cols, rows, onOutput: output, onEvent: events });
+  },
   terminalWrite: (id: string, data: Uint8Array) =>
     invoke<void>("terminal_write", data, { headers: { "x-terminal-id": id } }),
   terminalResize: (id: string, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
@@ -1325,5 +1462,27 @@ export const api = {
   setTerminalSettings: (settings: TerminalSettings) => invoke<TerminalSettings>("terminal_set_settings", { settings }),
   /** SS-05: trusted host keys; removing one is audited and the next connection asks again. */
   knownHosts: () => invoke<KnownHost[]>("known_hosts_list"),
+  /** QL-02 history of quick connections that were not saved, and Recent sessions. */
+  quickConnectHistory: () => invoke<QuickConnectEntry[]>("quick_connect_history"),
+  /** Without an id, clears the whole history. Audited. */
+  quickConnectForget: (id: string | null) => invoke<void>("quick_connect_forget", { id }),
+  recentSessions: (limit?: number) => invoke<SessionRecord[]>("sessions_recent", { limit: limit ?? null }),
+  /** QL-04: the Terminal page's session tree. */
+  sessionTree: (grouping: TreeGrouping, filter?: SessionFilter) =>
+    invoke<SessionTree>("session_tree", { grouping, filter: filter ?? null }),
+  /** QL-04: only these sessions are checked; returns what is known so far. */
+  reachabilityWatch: (sessionIds: string[]) => invoke<ReachabilityUpdate>("reachability_watch", { sessionIds }),
+  onReachability: (handler: (update: ReachabilityUpdate) => void): Promise<UnlistenFn> =>
+    listen<ReachabilityUpdate>("reachability://update", (e) => handler(e.payload)),
+  /** SS-11: the terminals' text with their login secrets scrubbed, for the clipboard. */
+  terminalOutputText: (items: TerminalText[]) => invoke<TerminalText[]>("terminal_output_text", { items }),
+  /** SS-11: the same for printing; audited as printed. */
+  terminalOutputPrint: (items: TerminalText[]) => invoke<TerminalText[]>("terminal_output_print", { items }),
+  /** SS-11: asks where (a file, or a folder for one file each), then saves. Audited. null: cancelled. */
+  terminalOutputSave: (items: TerminalText[], layout: SaveLayout) =>
+    invoke<SavedOutput | null>("terminal_output_save", { items, layout }),
+  /** SS-11: asks for a log file, then logs the pane's output to it. null: cancelled. Audited. */
+  terminalLogStart: (id: string, title: string) => invoke<string | null>("terminal_log_start", { id, title }),
+  terminalLogStop: (id: string) => invoke<boolean>("terminal_log_stop", { id }),
   removeKnownHost: (id: string) => invoke<void>("known_host_remove", { id }),
 };

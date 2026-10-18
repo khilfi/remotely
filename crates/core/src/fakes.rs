@@ -646,9 +646,13 @@ pub fn loopback_shell() -> ShellHandle {
             .send(ShellOutput::Closed(ShellEnd::Exited { status: None }))
             .await;
     });
+    let (hostname_tx, hostname_rx) = tokio::sync::oneshot::channel();
+    let _ = hostname_tx.send(None);
     ShellHandle {
         input: input_tx,
         output: output_rx,
+        peer_ip: None,
+        hostname: hostname_rx,
     }
 }
 
@@ -1037,5 +1041,100 @@ impl UpdaterAdapter for FakeUpdater {
             latest_release: self.offered.as_ref().map(|u| format!("v{}", u.version)),
             expires_on: self.expires_on.clone(),
         })
+    }
+}
+
+/// DNS and reachability without the network (QL-03, QL-04): names and addresses the test sets, and
+/// ports that answer or not. Records every lookup and probe.
+#[derive(Default)]
+pub struct FakeNetwork {
+    forward: Mutex<HashMap<String, Vec<std::net::IpAddr>>>,
+    reverse: Mutex<HashMap<std::net::IpAddr, String>>,
+    open_ports: Mutex<HashSet<(String, u16)>>,
+    probe_delay: Mutex<Option<Duration>>,
+    calls: Mutex<Vec<String>>,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+}
+
+impl FakeNetwork {
+    /// `host` resolves to `ip`, and `ip` back to `host`.
+    pub fn with_name(self, host: &str, ip: &str) -> Self {
+        let ip: std::net::IpAddr = ip
+            .parse()
+            .unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        locks::lock(&self.forward)
+            .entry(host.to_lowercase())
+            .or_default()
+            .push(ip);
+        locks::lock(&self.reverse).insert(ip, host.to_owned());
+        self
+    }
+
+    /// A probe of `host:port` succeeds (or, with `false`, fails again).
+    pub fn set_open(&self, host: &str, port: u16, open: bool) {
+        let key = (host.to_lowercase(), port);
+        let mut ports = locks::lock(&self.open_ports);
+        if open {
+            ports.insert(key);
+        } else {
+            ports.remove(&key);
+        }
+    }
+
+    pub fn with_open_port(self, host: &str, port: u16) -> Self {
+        self.set_open(host, port, true);
+        self
+    }
+
+    /// Every probe takes this long.
+    pub fn with_probe_delay(self, delay: Duration) -> Self {
+        *locks::lock(&self.probe_delay) = Some(delay);
+        self
+    }
+
+    /// `resolve <host>`, `reverse <ip>` and `probe <host>:<port>`, in order.
+    pub fn calls(&self) -> Vec<String> {
+        locks::lock(&self.calls).clone()
+    }
+
+    /// The most probes that ran at the same time.
+    pub fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl crate::adapters::network::NetworkAdapter for FakeNetwork {
+    async fn resolve(&self, host: &str) -> Result<Vec<std::net::IpAddr>> {
+        locks::lock(&self.calls).push(format!("resolve {host}"));
+        if let Some(ip) = crate::adapters::network::ip_literal(host) {
+            return Ok(vec![ip]);
+        }
+        locks::lock(&self.forward)
+            .get(&host.to_lowercase())
+            .cloned()
+            .ok_or_else(|| CoreError::Network(format!("{host} could not be found")))
+    }
+
+    async fn reverse(&self, ip: std::net::IpAddr) -> Option<String> {
+        locks::lock(&self.calls).push(format!("reverse {ip}"));
+        locks::lock(&self.reverse).get(&ip).cloned()
+    }
+
+    async fn probe(&self, host: &str, port: u16, _timeout: Duration) -> Result<Duration> {
+        locks::lock(&self.calls).push(format!("probe {host}:{port}"));
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        let _done = InFlight(&self.in_flight);
+        let delay = *locks::lock(&self.probe_delay);
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+        if locks::lock(&self.open_ports).contains(&(host.to_lowercase(), port)) {
+            Ok(Duration::from_millis(1))
+        } else {
+            Err(CoreError::Network("the port is closed (connection refused)".into()))
+        }
     }
 }

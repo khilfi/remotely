@@ -42,6 +42,7 @@ async fn core_on(store: Store, vmware: Arc<FakeVmware>) -> Core {
         host_counters: Arc::new(FakeHostCounters::default()),
         updater: Arc::new(FakeUpdater::default()),
         resolver: Arc::new(FakeResolver::default()),
+        network: Arc::new(remotely_core::fakes::FakeNetwork::default()),
     };
     Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
