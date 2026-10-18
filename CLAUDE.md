@@ -97,7 +97,7 @@ src/                  React + TypeScript UI
 ## Commands
 
 - Install: `npm install`
-- Run the app: `npm run tauri dev`
+- Run the app: `npm run tauri dev`. A debug build keeps its data (database, WebView2 profile) in `%LOCALAPPDATA%\com.remotely.desktop.dev`, apart from the installed app's `%LOCALAPPDATA%\com.remotely.desktop`, so its migrations never reach the installed app's database. `REMOTELY_DATA_DIR` (an absolute path outside the repo) overrides both.
 - Rust tests: `cargo test --workspace` (run at the repo root; `cargo test` inside `src-tauri/` only tests the shell crate)
 - Opt-in test against real Workstation (only runs `vmrun list`): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
