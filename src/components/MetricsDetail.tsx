@@ -126,7 +126,13 @@ export function MetricsDetail({ row, round, thresholds, theme, onClose, onWatch,
                 </Button>
               ) : (
                 linked.map((s) => (
-                  <Button key={s.id} size="sm" variant="outline" onClick={() => onWatch(s.id, true)}>
+                  <Button
+                    key={s.id}
+                    size="sm"
+                    variant="outline"
+                    title={s.auto ? "Linked automatically: the session's host is this VM's IP address" : undefined}
+                    onClick={() => onWatch(s.id, true)}
+                  >
                     <EyeIcon /> Watch guest via {s.name}
                   </Button>
                 ))
@@ -150,7 +156,14 @@ export function MetricsDetail({ row, round, thresholds, theme, onClose, onWatch,
               <Stat
                 label="Memory"
                 value={formatBytes(memory?.used ?? null)}
-                hint={memory?.total ? `of ${formatBytes(memory.total)}` : undefined}
+                hint={
+                  [
+                    memory?.total ? `of ${formatBytes(memory.total)}` : null,
+                    row.host?.hostMemPct != null ? `${formatPct(row.host.hostMemPct)} of this host's RAM` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ") || undefined
+                }
               />
               <Stat
                 label="Load (1, 5, 15 min)"

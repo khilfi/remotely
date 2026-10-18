@@ -1,8 +1,9 @@
 // MO-03: what the dashboard shows for a row, the colour thresholds, and number formats. A VM row has
 // host-side samples (MO-01, no login) and, when a linked session is watched, guest samples (MO-02);
-// where both measure the same thing, the guest's own view wins because it is what the OS sees.
+// where both measure the same thing, the guest's own view wins because it is what the OS sees. The
+// shares of the host (MO-01) come from the host side only: they say what the VM costs this machine.
 
-import { useEffect, useState } from "react";
+import { useSyncExternalStore } from "react";
 import type { DashboardRow, MetricSource } from "@/lib/api";
 
 export type Level = "ok" | "warning" | "critical";
@@ -39,16 +40,35 @@ function readThresholds(): Thresholds {
   return DEFAULT_THRESHOLDS;
 }
 
-/** The dashboard's colour thresholds: a view preference, remembered per machine like the theme. */
+let currentThresholds: Thresholds | null = null;
+const thresholdListeners = new Set<() => void>();
+
+function thresholdsSnapshot(): Thresholds {
+  currentThresholds ??= readThresholds();
+  return currentThresholds;
+}
+
+function subscribeThresholds(listener: () => void) {
+  thresholdListeners.add(listener);
+  return () => void thresholdListeners.delete(listener);
+}
+
+function setThresholds(next: Thresholds) {
+  currentThresholds = next;
+  try {
+    localStorage.setItem(THRESHOLDS_KEY, JSON.stringify(next));
+  } catch {
+    // Not persisted; still applied for this session.
+  }
+  thresholdListeners.forEach((listener) => listener());
+}
+
+/**
+ * The colour thresholds: a view preference, remembered per machine like the theme. Shared by the
+ * dashboard and the VM list (MO-01), so a change shows on both at once.
+ */
 export function useThresholds() {
-  const [thresholds, setThresholds] = useState<Thresholds>(readThresholds);
-  useEffect(() => {
-    try {
-      localStorage.setItem(THRESHOLDS_KEY, JSON.stringify(thresholds));
-    } catch {
-      // Not persisted; still applied for this session.
-    }
-  }, [thresholds]);
+  const thresholds = useSyncExternalStore(subscribeThresholds, thresholdsSnapshot);
   return [thresholds, setThresholds] as const;
 }
 
@@ -127,11 +147,30 @@ export function rowDiskUsed(row: DashboardRow): { pct: number | null; mount: str
   return best;
 }
 
+/** MO-01: the VM process's share of this whole host's CPU (every logical processor). */
+export function rowHostCpu(row: DashboardRow): number | null {
+  return row.host?.hostCpuPct ?? null;
+}
+
+/** MO-01: the VM process's working set as a share of this host's physical RAM. */
+export function rowHostMem(row: DashboardRow): number | null {
+  return row.host?.hostMemPct ?? null;
+}
+
+/** What the host-share columns mean, for their header tooltips. */
+export const HOST_SHARE_HINT = {
+  cpu: "The VM's process as a share of every CPU on this host, as Task Manager shows it. From the samples taken every 5 seconds; no extra polling.",
+  memory:
+    "The VM's process working set as a share of this host's physical RAM. From the samples taken every 5 seconds; no extra polling.",
+};
+
 /** The worst level a row reaches on any threshold. */
 export function rowLevel(row: DashboardRow, t: Thresholds): Level {
   const levels = [
     level(rowCpu(row).value, t.cpu),
     level(rowMemory(row).pct, t.memory),
+    level(rowHostCpu(row), t.cpu),
+    level(rowHostMem(row), t.memory),
     level(rowDiskUsed(row).pct, t.disk),
   ];
   if (levels.includes("critical")) return "critical";
@@ -160,6 +199,13 @@ export function formatBytes(bytes: number | null) {
 
 export function formatRate(bps: number | null) {
   return bps === null ? "—" : `${formatBytes(bps)}/s`;
+}
+
+/** Sorts empty values last whatever the direction; ties are 0. */
+export function compareNullsLast(a: number | string | null, b: number | string | null, dir: 1 | -1) {
+  if (a === null || a === "") return b === null || b === "" ? 0 : 1;
+  if (b === null || b === "") return -1;
+  return (a < b ? -1 : a > b ? 1 : 0) * dir;
 }
 
 export function formatPct(pct: number | null) {

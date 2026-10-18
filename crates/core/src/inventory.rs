@@ -6,6 +6,9 @@
 //!
 //! A VM's environment label (SS-06, as for sessions) is the app's own data: setting it changes no VM,
 //! so it skips the bus too, and it is audited like a setting.
+//!
+//! After each refresh, saved sessions are linked to the VMs whose new guest IPs they reach (QL-01,
+//! [`crate::vm_links`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -21,6 +24,7 @@ use crate::command_bus::TargetDirectory;
 use crate::domain::{Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::store::{self, DiscoveredVm, NewAuditEntry, Store, VmRecord};
+use crate::vm_links::{AutoLinkReport, VmLinks};
 
 /// How the app names itself in dialogs, jobs and the audit log.
 pub const APP_NAME: &str = "Remotely";
@@ -51,6 +55,8 @@ impl InventoryWarning {
 pub struct RefreshReport {
     pub vms: Vec<VmRecord>,
     pub warnings: Vec<InventoryWarning>,
+    /// QL-01: sessions linked to VMs (or unlinked) by IP address after this refresh.
+    pub links: AutoLinkReport,
 }
 
 /// Which VMs to show or select (VM-02). Empty fields match everything; a VM must match every field
@@ -108,6 +114,7 @@ impl VmFilter {
 pub struct Inventory {
     store: Store,
     vmware: Arc<dyn VmwareAdapter>,
+    links: Arc<VmLinks>,
 }
 
 /// A .vmx path found by one of the sources, before its file is read.
@@ -117,8 +124,8 @@ struct Candidate {
 }
 
 impl Inventory {
-    pub fn new(store: Store, vmware: Arc<dyn VmwareAdapter>) -> Self {
-        Self { store, vmware }
+    pub fn new(store: Store, vmware: Arc<dyn VmwareAdapter>, links: Arc<VmLinks>) -> Self {
+        Self { store, vmware, links }
     }
 
     /// VM-01: folders scanned for .vmx files, as saved in Settings.
@@ -220,9 +227,20 @@ impl Inventory {
 
         self.query_guests(&mut found, &to_query).await;
         self.store.record_inventory(ctx, &found).await?;
+        let links = match self.links.auto_link(ctx).await {
+            Ok(links) => links,
+            Err(err) => {
+                warnings.push(InventoryWarning::new(
+                    "Could not link sessions to VMs by IP address",
+                    &err,
+                ));
+                AutoLinkReport::default()
+            }
+        };
         Ok(RefreshReport {
             vms: self.store.list_vms(ctx).await?,
             warnings,
+            links,
         })
     }
 
