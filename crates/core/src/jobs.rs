@@ -11,7 +11,13 @@
 //!   and stops waiting for a power call in flight, e.g. on a VM that waits for an answer in
 //!   Workstation. vmrun is killed, but Workstation may still finish the action, so that target is
 //!   reported as cancelled with its outcome unknown. A snapshot call in flight is left to finish: its
-//!   outcome must be known (VM-05).
+//!   outcome must be known (VM-05). A remote command in flight has its connection closed; the host
+//!   may still finish it, and the target says so.
+//! * Remote commands (BX-02): each host's secrets come from the vault just before it connects, and
+//!   only the adapter gets them. A bulk run can't ask about an unknown host key, so it fails that host
+//!   unless the run says to trust new keys; a changed key always blocks (SS-05). Each host has the
+//!   run's time limit. Output, exit code, duration and the output's hashes are journaled per host;
+//!   the adapter has already scrubbed the run's secrets from the output (BX-07).
 //! * Safety snapshot before each VM's action when the approval asked for one (VM-05). One name per
 //!   job, so a single bulk revert undoes it; a VM whose safety snapshot fails is left untouched.
 //! * Every job and target is journaled in the store, and the audit log gets an entry when the job
@@ -22,22 +28,28 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use serde::Serialize;
 use tokio::sync::{broadcast, Notify, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::adapters::remote::RemoteAdapter;
+use crate::adapters::exec_output::{CollectedOutput, MAX_OUTPUT_PER_STREAM};
+use crate::adapters::remote::{
+    AgentSource, AuthMethod, ConnectOptions, ExecRequest, HostKeyVerifier, RemoteAdapter, SessionSpec,
+};
 use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::{path_key, ToolsState, VmwareAdapter};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
 use crate::locks;
 use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
 use crate::snapshots::safety_snapshot_name;
 use crate::store::{NewAuditEntry, NewJob, Store, TargetResult};
+use crate::vault::{SecretId, SecretString, Vault};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -111,6 +123,8 @@ pub struct JobLimits {
 impl JobLimits {
     /// VM-06: the most power-ons the setting allows at once.
     pub const MAX_POWER_ON: usize = 32;
+    /// BX-02: the most hosts the setting lets a bulk run reach at once (NFR Scale: 10 to 50).
+    pub const MAX_REMOTE: usize = 50;
     /// VM-03: the longest shutdown wait the setting allows, in seconds.
     pub const MAX_SHUTDOWN_WAIT_SECS: u64 = 3600;
 }
@@ -133,6 +147,27 @@ pub struct JobSpec {
     pub decision: Decision,
     pub approval: Option<ApprovalRecord>,
     pub safety_snapshot: bool,
+    /// BX-04: the job whose failed targets this one retries.
+    pub retry_of: Option<Uuid>,
+}
+
+/// How bulk runs connect (BX-02). The defaults suit real networks; tests shorten them.
+#[derive(Debug, Clone)]
+pub struct ExecTuning {
+    pub connect_timeout: Duration,
+    pub agent: AgentSource,
+    /// Bytes kept per stream and host.
+    pub max_output: usize,
+}
+
+impl Default for ExecTuning {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(15),
+            agent: AgentSource::System,
+            max_output: MAX_OUTPUT_PER_STREAM,
+        }
+    }
 }
 
 /// Progress events, forwarded to the UI.
@@ -154,12 +189,20 @@ pub enum JobEvent {
     Started {
         job_id: Uuid,
     },
+    /// BX-02: work on this target began (after the parallel limit let it).
+    TargetStarted {
+        job_id: Uuid,
+        target: String,
+        name: String,
+    },
     TargetFinished {
         job_id: Uuid,
         target: String,
         name: String,
         status: TargetStatus,
         message: Option<String>,
+        /// BX-02: a remote command's exit code.
+        exit_code: Option<i64>,
         duration_ms: u64,
         /// VM-05: the safety snapshot taken on this target first, if one was.
         safety_snapshot: Option<String>,
@@ -179,7 +222,9 @@ pub enum JobEvent {
 struct TargetOutcome {
     ok: bool,
     exit_code: Option<i64>,
-    output: Option<String>,
+    output: Option<CollectedOutput>,
+    /// Why it counts as failed although it ran, e.g. "exit code 2".
+    failure: Option<String>,
 }
 
 impl TargetOutcome {
@@ -188,6 +233,66 @@ impl TargetOutcome {
             ok: true,
             exit_code: None,
             output: None,
+            failure: None,
+        }
+    }
+}
+
+/// What gets journaled for one finished target.
+struct Finished {
+    status: TargetStatus,
+    exit_code: Option<i64>,
+    output: Option<CollectedOutput>,
+    error: Option<String>,
+    error_code: Option<&'static str>,
+}
+
+impl Finished {
+    fn failed(err: &CoreError) -> Self {
+        Self {
+            status: TargetStatus::Failed,
+            exit_code: None,
+            output: None,
+            error: Some(err.to_string()),
+            error_code: Some(err.code()),
+        }
+    }
+
+    fn cancelled(err: Option<&CoreError>) -> Self {
+        Self {
+            status: TargetStatus::Cancelled,
+            exit_code: None,
+            output: None,
+            error: err.map(ToString::to_string),
+            error_code: err.map(CoreError::code),
+        }
+    }
+}
+
+/// SS-05 for bulk runs: a trusted key passes; a changed key blocks, and that is audited; a key never
+/// seen before is trusted (and audited) only when the run says so, since nobody can be asked.
+struct BulkVerifier {
+    known_hosts: Arc<KnownHosts>,
+    ctx: Context,
+    target: Target,
+    trust_new: bool,
+}
+
+#[async_trait]
+impl HostKeyVerifier for BulkVerifier {
+    async fn verify(&self, key: &HostKey) -> Result<()> {
+        match self.known_hosts.check(&self.ctx, key).await? {
+            HostKeyCheck::Trusted => Ok(()),
+            HostKeyCheck::Changed { previous } => {
+                self.known_hosts
+                    .record_blocked(&self.ctx, key, &previous, Some(&self.target))
+                    .await?;
+                Err(CoreError::HostKeyChanged { address: key.address() })
+            }
+            HostKeyCheck::Unknown { .. } if self.trust_new => {
+                self.known_hosts.trust(&self.ctx, key, Some(&self.target)).await
+            }
+            HostKeyCheck::Unknown { .. } => Err(CoreError::HostKeyUnknown { address: key.address() }),
         }
     }
 }
@@ -197,6 +302,11 @@ pub struct JobRunner {
     vmware: Arc<dyn VmwareAdapter>,
     remote: Arc<dyn RemoteAdapter>,
     updater: Arc<dyn UpdaterAdapter>,
+    /// BX-02, BX-07: login and sudo secrets, read per host just before it connects.
+    vault: Arc<dyn Vault>,
+    /// SS-05: the host keys bulk runs check against.
+    known_hosts: Arc<KnownHosts>,
+    exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
     events: broadcast::Sender<JobEvent>,
@@ -207,19 +317,26 @@ pub struct JobRunner {
 }
 
 impl JobRunner {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
         vmware: Arc<dyn VmwareAdapter>,
         remote: Arc<dyn RemoteAdapter>,
         updater: Arc<dyn UpdaterAdapter>,
+        vault: Arc<dyn Vault>,
+        known_hosts: Arc<KnownHosts>,
         limits: JobLimits,
     ) -> Arc<Self> {
-        let (events, _) = broadcast::channel(256);
+        // Room for a 200-host bulk run's events (NFR Scale) without the UI lagging behind.
+        let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
             store,
             vmware,
             remote,
             updater,
+            vault,
+            known_hosts,
+            exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
             running: Mutex::new(HashMap::new()),
@@ -239,6 +356,16 @@ impl JobRunner {
     /// VM-03: how long a soft stop may take, from the next stop on.
     pub fn set_shutdown_wait(&self, wait: Duration) {
         locks::write(&self.limits).shutdown_wait = wait;
+    }
+
+    /// BX-02: how many hosts a bulk run reaches at once, from the next job on. At least 1.
+    pub fn set_remote_limit(&self, limit: usize) {
+        locks::write(&self.limits).remote = limit.max(1);
+    }
+
+    /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
+    pub fn set_exec_tuning(&self, tuning: ExecTuning) {
+        *locks::write(&self.exec_tuning) = tuning;
     }
 
     /// Number of open jobs.
@@ -278,11 +405,6 @@ impl JobRunner {
         }
     }
 
-    /// BX-04: rerun only the targets that failed, as a new job through the bus.
-    pub async fn retry_failed(&self, _job_id: Uuid) -> Result<Uuid> {
-        Err(CoreError::NotImplemented("BX-04 retry failed hosts"))
-    }
-
     /// Only the command bus calls this, after policy and approval.
     pub(crate) async fn enqueue(self: &Arc<Self>, spec: JobSpec) -> Result<Uuid> {
         let id = Uuid::new_v4();
@@ -316,6 +438,7 @@ impl JobRunner {
                     targets: &spec.decision.targets,
                     status,
                     countdown_until: countdown_until.as_deref(),
+                    retry_of: spec.retry_of,
                 },
             )
             .await?;
@@ -375,7 +498,11 @@ impl JobRunner {
         }
 
         self.store.set_job_status(id, JobStatus::Running).await?;
-        self.audit(&ctx, "job_started", &summary, &spec, id, None, None).await?;
+        let retry = spec
+            .retry_of
+            .map(|of| format!("retries the failed targets of job {of}"));
+        self.audit(&ctx, "job_started", &summary, &spec, id, None, retry.as_deref())
+            .await?;
         self.emit(JobEvent::Started { job_id: id });
 
         let semaphore = Arc::new(Semaphore::new(self.parallelism(&spec.command)));
@@ -402,6 +529,11 @@ impl JobRunner {
                 if let Err(err) = this.store.set_target_running(id, &key).await {
                     tracing::warn!(%id, error = %err, "could not journal target start");
                 }
+                this.emit(JobEvent::TargetStarted {
+                    job_id: id,
+                    target: key,
+                    name: target.name.clone(),
+                });
                 let started = Instant::now();
                 let mut safety_taken = None;
                 if let (Some(name), TargetRef::Vm { vmx_path }) = (&safety_name, &target.target) {
@@ -433,40 +565,56 @@ impl JobRunner {
                     continue;
                 }
             };
-            let (status, exit_code, output, error) = match outcome {
-                Ok(o) if o.ok => (TargetStatus::Succeeded, o.exit_code, o.output, None),
-                Ok(o) => (
-                    TargetStatus::Failed,
-                    o.exit_code,
-                    o.output,
-                    Some("non-zero exit code".to_owned()),
-                ),
-                Err(Some(CoreError::Cancelled)) | Err(None) => (TargetStatus::Cancelled, None, None, None),
-                Err(Some(err @ CoreError::CancelledInFlight)) => {
+            let done = match outcome {
+                Ok(o) => Finished {
+                    status: if o.ok {
+                        TargetStatus::Succeeded
+                    } else {
+                        TargetStatus::Failed
+                    },
+                    exit_code: o.exit_code,
+                    output: o.output,
+                    error: if o.ok {
+                        None
+                    } else {
+                        Some(o.failure.unwrap_or_else(|| "non-zero exit code".to_owned()))
+                    },
+                    error_code: None,
+                },
+                Err(Some(CoreError::Cancelled)) | Err(None) => Finished::cancelled(None),
+                Err(Some(err @ (CoreError::CancelledInFlight | CoreError::CancelledRemote))) => {
                     cancelled_in_flight.push(target.name.clone());
-                    (TargetStatus::Cancelled, None, None, Some(err.to_string()))
+                    Finished::cancelled(Some(&err))
                 }
                 Err(Some(err @ CoreError::StillRunning { .. })) => {
                     still_running.push(target.clone());
-                    (TargetStatus::Failed, None, None, Some(err.to_string()))
+                    Finished::failed(&err)
                 }
-                Err(Some(err)) => (TargetStatus::Failed, None, None, Some(err.to_string())),
+                Err(Some(err)) => Finished::failed(&err),
             };
-            match status {
+            match done.status {
                 TargetStatus::Succeeded => succeeded += 1,
                 TargetStatus::Cancelled => cancelled += 1,
                 _ => failed += 1,
             }
             let key = target.target.key();
+            let out = done.output.as_ref();
             self.store
                 .set_target_result(
                     id,
                     &key,
                     TargetResult {
-                        status,
-                        exit_code,
-                        output: output.as_deref(),
-                        error: error.as_deref(),
+                        status: Some(done.status),
+                        exit_code: done.exit_code,
+                        output: out.map(|o| o.stdout.as_str()),
+                        stderr: out.map(|o| o.stderr.as_str()),
+                        stdout_bytes: out.and_then(|o| i64::try_from(o.stdout_bytes).ok()),
+                        stderr_bytes: out.and_then(|o| i64::try_from(o.stderr_bytes).ok()),
+                        truncated: out.is_some_and(|o| o.truncated),
+                        output_hash: out.map(|o| o.hash.as_str()),
+                        output_hash_loose: out.map(|o| o.hash_loose.as_str()),
+                        error: done.error.as_deref(),
+                        error_code: done.error_code,
                         duration_ms: i64::try_from(duration_ms).ok(),
                         safety_snapshot: safety_snapshot.as_deref(),
                     },
@@ -477,8 +625,9 @@ impl JobRunner {
                 job_id: id,
                 target: key,
                 name: target.name.clone(),
-                status,
-                message: error,
+                status: done.status,
+                message: done.error,
+                exit_code: done.exit_code,
                 duration_ms,
                 safety_snapshot,
             });
@@ -499,10 +648,12 @@ impl JobRunner {
             detail.push_str(&format!("; safety snapshot '{name}' taken on {safety_snapshots} VM(s)"));
         }
         if !cancelled_in_flight.is_empty() {
-            detail.push_str(&format!(
-                "; cancelled while vmrun was running, so Workstation may still finish it: {}",
-                cancelled_in_flight.join(", ")
-            ));
+            let what = if matches!(spec.command, Command::RemoteExec { .. }) {
+                "cancelled while the command was running, so the host may still finish it"
+            } else {
+                "cancelled while vmrun was running, so Workstation may still finish it"
+            };
+            detail.push_str(&format!("; {what}: {}", cancelled_in_flight.join(", ")));
         }
         if !still_running.is_empty() {
             let names: Vec<&str> = still_running.iter().map(|t: &Target| t.name.as_str()).collect();
@@ -565,20 +716,86 @@ impl JobRunner {
                 }
                 Ok(TargetOutcome::done())
             }
-            (Command::RemoteExec { script, sudo, .. }, TargetRef::Session { session_id }) => {
+            (
+                Command::RemoteExec {
+                    script,
+                    sudo,
+                    sudo_password_id,
+                    trust_new_host_keys,
+                    timeout_secs,
+                    ..
+                },
+                TargetRef::Session { session_id },
+            ) => {
                 let session = self
                     .store
                     .session_spec(&spec.ctx, *session_id)
                     .await?
-                    .ok_or_else(|| CoreError::UnknownTarget(session_id.to_string()))?;
-                if *sudo {
-                    return Err(CoreError::NotImplemented("BX-07 sudo with the vault password"));
+                    .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
+                if let Some(jump) = &session.jump {
+                    return Err(CoreError::JumpHostUnsupported {
+                        jump: jump.name.clone(),
+                    });
                 }
-                let r = self.remote.exec(&session, script, None).await?;
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let credentials = crate::sessions::credentials(&*self.vault, &spec.ctx, &session, None).await?;
+                let sudo_password = match sudo {
+                    true => Some(self.sudo_password(&spec.ctx, &session, *sudo_password_id).await?),
+                    false => None,
+                };
+                let tuning = locks::read(&self.exec_tuning).clone();
+                let options = ConnectOptions {
+                    connect_timeout: tuning.connect_timeout,
+                    keepalive_interval: Some(Duration::from_secs(30)),
+                    agent: tuning.agent,
+                    ..ConnectOptions::default()
+                };
+                let verifier = Arc::new(BulkVerifier {
+                    known_hosts: Arc::clone(&self.known_hosts),
+                    ctx: spec.ctx,
+                    target: target.clone(),
+                    trust_new: *trust_new_host_keys,
+                });
+                let run = self.remote.exec(ExecRequest {
+                    session: &session,
+                    credentials,
+                    script,
+                    sudo_password,
+                    options: &options,
+                    verifier,
+                    max_output: tuning.max_output,
+                });
+                let limited = async {
+                    match timeout_secs {
+                        Some(secs) => tokio::time::timeout(Duration::from_secs(*secs), run)
+                            .await
+                            .map_err(|_| CoreError::Timeout {
+                                command: "the command".into(),
+                                seconds: *secs,
+                            })?,
+                        None => run.await,
+                    }
+                };
+                // BX-04: cancel closes the connection; the host may still finish the command.
+                let result = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(CoreError::CancelledRemote),
+                    result = limited => result?,
+                };
+                let ok = result.exit_code == Some(0) && result.signal.is_none();
+                let failure = match (&result.signal, result.exit_code) {
+                    (Some(signal), _) => Some(format!("ended by signal {signal}")),
+                    (None, Some(0)) => None,
+                    (None, Some(code)) => Some(format!("exit code {code}")),
+                    (None, None) => Some("the host sent no exit code".to_owned()),
+                };
                 Ok(TargetOutcome {
-                    ok: r.exit_code == Some(0),
-                    exit_code: r.exit_code.map(i64::from),
-                    output: Some(r.stdout),
+                    ok,
+                    exit_code: result.exit_code.map(i64::from),
+                    output: Some(result.output),
+                    failure,
                 })
             }
             (Command::AppUpdate { version }, TargetRef::App) => {
@@ -592,6 +809,27 @@ impl JobRunner {
                 target: format!("a {} target", other.kind()),
             }),
         }
+    }
+
+    /// BX-07: the password sudo gets on this host: the one chosen for the run, or the session's own
+    /// login password.
+    async fn sudo_password(
+        &self,
+        ctx: &Context,
+        session: &SessionSpec,
+        chosen: Option<SecretId>,
+    ) -> Result<SecretString> {
+        let id = match (chosen, &session.auth) {
+            (Some(id), _) => id,
+            (None, AuthMethod::Password(Some(id))) => *id,
+            (None, _) => {
+                return Err(CoreError::NoSudoPassword(format!(
+                    "'{}' has no saved login password for sudo. Choose a sudo password from the vault for the run",
+                    session.name
+                )))
+            }
+        };
+        self.vault.get(ctx, id).await
     }
 
     /// VM-02, VM-03: one power operation on one VM. A graceful one that needs VMware Tools fails at

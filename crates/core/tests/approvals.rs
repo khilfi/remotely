@@ -534,6 +534,9 @@ async fn a_secret_typed_into_a_command_never_reaches_the_audit_log() {
         targets: vec![],
         script: "deploy --token s3cr3t\nsecond line".into(),
         sudo: false,
+        sudo_password_id: None,
+        trust_new_host_keys: false,
+        timeout_secs: None,
     }
     .summary(2);
     assert_eq!(summary, "Run `deploy --token [redacted]` on 2 hosts");

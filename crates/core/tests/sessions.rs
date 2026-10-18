@@ -33,6 +33,7 @@ fn session(name: &str, host: &str) -> SessionInput {
         environment: Environment::None,
         color: None,
         tags: vec![],
+        vm_id: None,
     }
 }
 
@@ -464,6 +465,9 @@ fn exec(script: &str, sessions: &[Uuid]) -> Command {
             .collect(),
         script: script.into(),
         sudo: false,
+        sudo_password_id: None,
+        trust_new_host_keys: false,
+        timeout_secs: None,
     }
 }
 

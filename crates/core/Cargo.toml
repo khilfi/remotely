@@ -39,6 +39,8 @@ zeroize = "1"
 csv = "1"
 # SSH (SS-03, BX-02, MO-02). `ring` instead of the default aws-lc-rs so Windows builds need no CMake/NASM.
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
+# BX-03: the line diff between two output groups.
+similar = "3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
@@ -61,3 +63,5 @@ required-features = ["fakes"]
 # Integration tests in tests/ use the fake adapters.
 remotely-core = { path = ".", features = ["fakes"] }
 tokio = { workspace = true, features = ["test-util"] }
+# BX-07: the secret-leak test reads every log line the core and russh write.
+tracing-subscriber.workspace = true

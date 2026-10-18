@@ -127,6 +127,26 @@ pub enum CoreError {
     #[error("the host key of {address} was not trusted, so Remotely did not connect")]
     HostKeyRejected { address: String },
 
+    /// BX-02: a bulk run can't ask about a host key it has not seen, and the run did not say to trust
+    /// new ones.
+    #[error(
+        "the host key of {address} is not trusted yet. Connect to it once in a terminal to check and trust it, or tick 'Trust new host keys' for the run"
+    )]
+    HostKeyUnknown { address: String },
+
+    /// BX-07: sudo did not take the password from the vault. Never holds the password.
+    #[error("sudo refused the password from the vault")]
+    SudoPasswordRefused,
+
+    /// BX-07: a sudo run, but no password to give sudo for this session.
+    #[error("{0}")]
+    NoSudoPassword(String),
+
+    /// BX-04: cancelled while the command was running on the host. The connection is closed, but the
+    /// host may still finish the command.
+    #[error("cancelled while the command was running; it may still finish on the host")]
+    CancelledRemote,
+
     /// SS-07 is v2: a session with a jump host is not connected directly.
     #[error(
         "this session connects through the jump host '{jump}'. Jump hosts arrive in a later version (SS-07), so Remotely doesn't connect to it directly"
@@ -172,6 +192,10 @@ impl CoreError {
             CoreError::AgentUnavailable(_) => "agent_unavailable",
             CoreError::HostKeyChanged { .. } => "host_key_changed",
             CoreError::HostKeyRejected { .. } => "host_key_rejected",
+            CoreError::HostKeyUnknown { .. } => "host_key_unknown",
+            CoreError::SudoPasswordRefused => "sudo_password_refused",
+            CoreError::NoSudoPassword(_) => "no_sudo_password",
+            CoreError::CancelledRemote => "cancelled_remote",
             CoreError::JumpHostUnsupported { .. } => "jump_host_unsupported",
             CoreError::NotImplemented(_) => "not_implemented",
         }

@@ -19,7 +19,7 @@ const TAG_SEPARATOR: char = '\u{1f}';
 macro_rules! session_columns {
     () => {
         "id, folder_id, name, protocol, host, port, username, auth_method, credential_id, key_passphrase_id,
-         jump_session_id, startup_command, environment, color, protected, imported_from, created_at, updated_at,
+         jump_session_id, startup_command, environment, color, protected, vm_id, imported_from, created_at, updated_at,
          (SELECT group_concat(t.name, char(31)) FROM target_tags tt JOIN tags t ON t.id = tt.tag_id
           WHERE tt.target_kind = 'session' AND tt.target_id = sessions.id) AS tags"
     };
@@ -72,6 +72,7 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         color: color.as_deref().and_then(SessionColor::parse),
         protected: protected != 0,
         tags,
+        vm_id: row.try_get("vm_id")?,
         imported_from: row.try_get("imported_from")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -182,8 +183,8 @@ impl Store {
         sqlx::query(
             "INSERT INTO sessions (id, workspace_id, user_id, folder_id, name, protocol, host, port, username,
                                    auth_method, credential_id, key_passphrase_id, jump_session_id, startup_command,
-                                   environment, color, imported_from, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   environment, color, vm_id, imported_from, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(ctx.workspace_id.to_string())
@@ -200,6 +201,7 @@ impl Store {
         .bind(&input.startup_command)
         .bind(input.environment.as_str())
         .bind(input.color.map(SessionColor::as_str))
+        .bind(&input.vm_id)
         .bind(imported_from)
         .bind(&now)
         .bind(&now)
@@ -216,7 +218,7 @@ impl Store {
         let done = sqlx::query(
             "UPDATE sessions SET folder_id = ?, name = ?, host = ?, port = ?, username = ?, auth_method = ?,
                  credential_id = ?, key_passphrase_id = ?, jump_session_id = ?, startup_command = ?, environment = ?,
-                 color = ?, user_id = ?, updated_at = ?
+                 color = ?, vm_id = ?, user_id = ?, updated_at = ?
              WHERE workspace_id = ? AND id = ?",
         )
         .bind(input.folder_id.map(|f| f.to_string()))
@@ -231,6 +233,7 @@ impl Store {
         .bind(&input.startup_command)
         .bind(input.environment.as_str())
         .bind(input.color.map(SessionColor::as_str))
+        .bind(&input.vm_id)
         .bind(ctx.user_id.to_string())
         .bind(now_rfc3339())
         .bind(ctx.workspace_id.to_string())
@@ -386,19 +389,55 @@ impl Store {
         Ok(done.rows_affected() > 0)
     }
 
-    /// Name, label and protection of a saved session (SS-06: what the policy engine needs).
+    /// Name, label and protection of a saved session (SS-06: what the policy engine needs). A session
+    /// that reaches a VM (BX-01) counts as Prod when the VM is labelled Prod, and as protected when
+    /// either is (AP-04): a command over SSH changes the VM as much as a VM action would.
     pub async fn find_session_target(&self, ctx: &Context, id: Uuid) -> Result<Option<(String, Environment, bool)>> {
-        let row = sqlx::query("SELECT name, environment, protected FROM sessions WHERE workspace_id = ? AND id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(id.to_string())
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = sqlx::query(
+            "SELECT s.name, s.environment, s.protected, v.environment AS vm_environment, v.protected AS vm_protected
+             FROM sessions s LEFT JOIN vms v ON v.id = s.vm_id AND v.workspace_id = s.workspace_id
+             WHERE s.workspace_id = ? AND s.id = ?",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
         row.map(|r| -> Result<_> {
-            let env: String = r.try_get("environment")?;
+            let env = Environment::parse(&r.try_get::<String, _>("environment")?);
+            let vm_env = r
+                .try_get::<Option<String>, _>("vm_environment")?
+                .map(|e| Environment::parse(&e));
             let protected: i64 = r.try_get("protected")?;
-            Ok((r.try_get("name")?, Environment::parse(&env), protected != 0))
+            let vm_protected: Option<i64> = r.try_get("vm_protected")?;
+            let env = if vm_env == Some(Environment::Prod) {
+                Environment::Prod
+            } else {
+                env
+            };
+            Ok((
+                r.try_get("name")?,
+                env,
+                protected != 0 || vm_protected.unwrap_or(0) != 0,
+            ))
         })
         .transpose()
+    }
+
+    /// BX-01: sessions that reach each VM, by VM id, in name order.
+    pub async fn sessions_by_vm(&self, ctx: &Context) -> Result<HashMap<String, Vec<Uuid>>> {
+        let rows = sqlx::query(
+            "SELECT id, vm_id FROM sessions WHERE workspace_id = ? AND vm_id IS NOT NULL
+             ORDER BY name COLLATE NOCASE, host",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        let mut by_vm: HashMap<String, Vec<Uuid>> = HashMap::new();
+        for r in &rows {
+            let id: String = r.try_get("id")?;
+            by_vm.entry(r.try_get("vm_id")?).or_default().push(parse_uuid(&id)?);
+        }
+        Ok(by_vm)
     }
 
     /// Connection details for the remote adapter. The jump host (SS-07, v2) is resolved one level, so

@@ -605,6 +605,7 @@ impl Importer {
             environment: c.environment,
             color: c.color,
             tags: c.tags.clone(),
+            vm_id: None,
         };
         match sessions
             .import(ctx, input, source.imported_from(), source.label())

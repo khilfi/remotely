@@ -31,6 +31,7 @@ fn existing(name: &str, host: &str, user: &str) -> SessionInput {
         environment: Environment::None,
         color: None,
         tags: vec![],
+        vm_id: None,
     }
 }
 

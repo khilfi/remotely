@@ -15,10 +15,11 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::adapters::remote::{AuthMethod, Credentials, SessionSpec};
 use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
-use crate::vault::{SecretId, SecretKind};
+use crate::vault::{SecretId, SecretKind, SecretString, Vault};
 
 /// Colour of a session's tab and list entry (SS-01). Named, so each theme can draw it legibly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -149,6 +150,10 @@ pub struct SessionInput {
     pub color: Option<SessionColor>,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// BX-01: the VM this session reaches (its `vms.id`), so a bulk run can pick the VM. A Prod or
+    /// protected VM makes the session count as Prod or protected too.
+    #[serde(default)]
+    pub vm_id: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -175,6 +180,8 @@ pub struct SessionRecord {
     pub protected: bool,
     /// Tag names, sorted.
     pub tags: Vec<String>,
+    /// BX-01: the VM this session reaches, if one was chosen.
+    pub vm_id: Option<String>,
     /// SS-02: where it was imported from, if it was.
     pub imported_from: Option<String>,
     pub created_at: String,
@@ -211,6 +218,7 @@ impl SessionRecord {
             environment: self.environment,
             color: self.color,
             tags: self.tags.clone(),
+            vm_id: self.vm_id.clone(),
         }
     }
 }
@@ -350,6 +358,8 @@ fn tidy(mut input: SessionInput) -> Result<SessionInput> {
         return invalid("Choose the private key the passphrase is for.");
     }
 
+    input.vm_id = input.vm_id.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+
     let mut seen = HashSet::new();
     let mut tags = Vec::new();
     for tag in &input.tags {
@@ -373,6 +383,39 @@ fn clean_folder_name(name: &str) -> Result<String> {
 /// "web01" with quotes, for audit actions.
 fn quoted(name: &str) -> String {
     format!("'{name}'")
+}
+
+/// What `spec` logs in with, read from the vault just before a connection (SS-03, BX-02). Only the
+/// remote adapter gets it. `typed`: a password typed in the terminal earlier, for a session with no
+/// saved one (a bulk run has none, so such a login fails there with what to do).
+pub(crate) async fn credentials(
+    vault: &dyn Vault,
+    ctx: &Context,
+    spec: &SessionSpec,
+    typed: Option<SecretString>,
+) -> Result<Credentials> {
+    Ok(match &spec.auth {
+        AuthMethod::Password(Some(id)) => Credentials::Password(Some(vault.get(ctx, *id).await?)),
+        AuthMethod::Password(None) => Credentials::Password(typed),
+        AuthMethod::PrivateKey { key, passphrase } => {
+            let label = vault
+                .list(ctx)
+                .await?
+                .into_iter()
+                .find(|m| m.id == *key)
+                .map_or_else(|| "key".to_owned(), |m| m.label);
+            let passphrase = match passphrase {
+                Some(id) => Some(vault.get(ctx, *id).await?),
+                None => None,
+            };
+            Credentials::PrivateKey {
+                key: vault.get(ctx, *key).await?,
+                passphrase,
+                label,
+            }
+        }
+        AuthMethod::Agent => Credentials::Agent,
+    })
 }
 
 pub struct SessionLibrary {
@@ -721,6 +764,11 @@ impl SessionLibrary {
                 None => return invalid(format!("The chosen {} is not in the vault.", kind.label())),
             }
         }
+        if let Some(vm) = &input.vm_id {
+            if self.store.vm_by_id(ctx, vm).await?.is_none() {
+                return invalid("The chosen VM is not in the VM list. Refresh the VMs and choose it again.");
+            }
+        }
         if let Some(jump) = input.jump_session_id {
             if Some(jump) == id {
                 return invalid("A session can't be its own jump host.");
@@ -758,6 +806,13 @@ impl SessionLibrary {
         Ok((folders, sessions))
     }
 
+    async fn vm_name(&self, ctx: &Context, id: Option<&str>) -> Result<Option<String>> {
+        match id {
+            Some(id) => Ok(self.store.vm_by_id(ctx, id).await?.map(|vm| vm.display_name)),
+            None => Ok(None),
+        }
+    }
+
     /// One line for the audit log: where it connects and how, without any secret.
     async fn describe(&self, ctx: &Context, s: &SessionRecord) -> Result<String> {
         let (folders, sessions) = self.names(ctx).await?;
@@ -770,6 +825,9 @@ impl SessionLibrary {
         }
         if let Some(jump) = s.jump_session_id.and_then(|j| sessions.get(&j)) {
             parts.push(format!("via {}", quoted(jump)));
+        }
+        if let Some(vm) = self.vm_name(ctx, s.vm_id.as_deref()).await? {
+            parts.push(format!("reaches VM {}", quoted(&vm)));
         }
         if s.startup_command.is_some() {
             parts.push("with a startup command".into());
@@ -818,6 +876,12 @@ impl SessionLibrary {
         );
         let tags = |t: &[String]| if t.is_empty() { "none".to_owned() } else { t.join(", ") };
         field("tags", tags(&a.tags), tags(&b.tags));
+        if a.vm_id != b.vm_id {
+            let vm = |name: Option<String>| name.map_or_else(|| "none".to_owned(), |n| quoted(&n));
+            let before = vm(self.vm_name(ctx, a.vm_id.as_deref()).await?);
+            let after = vm(self.vm_name(ctx, b.vm_id.as_deref()).await?);
+            out.push(format!("VM: {before} -> {after}"));
+        }
         if a.auth.method() == b.auth.method() && a.auth != b.auth && a.auth.describe() == b.auth.describe() {
             out.push("login: another vault item".into());
         }
@@ -906,6 +970,7 @@ mod tests {
             environment: Environment::None,
             color: None,
             tags: vec![],
+            vm_id: None,
         }
     }
 
@@ -925,6 +990,7 @@ mod tests {
             color: None,
             protected: false,
             tags: vec![],
+            vm_id: None,
             imported_from: None,
             created_at: String::new(),
             updated_at: String::new(),

@@ -689,29 +689,7 @@ impl Pane {
     }
 
     async fn credentials(&self, spec: &SessionSpec) -> Result<Credentials> {
-        let vault = &self.inner.vault;
-        Ok(match &spec.auth {
-            AuthMethod::Password(Some(id)) => Credentials::Password(Some(vault.get(&self.ctx, *id).await?)),
-            AuthMethod::Password(None) => Credentials::Password(self.remembered.clone()),
-            AuthMethod::PrivateKey { key, passphrase } => {
-                let label = vault
-                    .list(&self.ctx)
-                    .await?
-                    .into_iter()
-                    .find(|m| m.id == *key)
-                    .map_or_else(|| "key".to_owned(), |m| m.label);
-                let passphrase = match passphrase {
-                    Some(id) => Some(vault.get(&self.ctx, *id).await?),
-                    None => None,
-                };
-                Credentials::PrivateKey {
-                    key: vault.get(&self.ctx, *key).await?,
-                    passphrase,
-                    label,
-                }
-            }
-            AuthMethod::Agent => Credentials::Agent,
-        })
+        crate::sessions::credentials(&*self.inner.vault, &self.ctx, spec, self.remembered.clone()).await
     }
 
     /// Moves bytes between the pane and the shell until one side ends.

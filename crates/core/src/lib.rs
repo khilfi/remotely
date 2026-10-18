@@ -14,12 +14,14 @@
 //!
 //!   sessions (SS-01), vault (SS-04), known_hosts (SS-05): the app's own data; changes are audited
 //!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
+//!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
 //! runner (changes) or [`inventory::Inventory`] and [`metrics`] (reads).
 
 pub mod adapters;
+pub mod bulk;
 pub mod capacity;
 pub mod command_bus;
 pub mod domain;
@@ -49,6 +51,7 @@ use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::{UpdateInfo, UpdaterAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
+use bulk::BulkRuns;
 use capacity::CapacityChecker;
 use command_bus::CommandBus;
 use domain::Context;
@@ -116,6 +119,8 @@ pub struct Core {
     pub known_hosts: Arc<KnownHosts>,
     /// SS-03: open terminal panes and their SSH connections.
     pub terminals: Terminals,
+    /// BX-01, BX-03, BX-05: bulk run targets, results, diffs and exports. Running is the bus.
+    pub bulk: BulkRuns,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -165,6 +170,8 @@ impl Core {
             Arc::clone(&vmware_dyn),
             adapters.remote,
             Arc::clone(&adapters.updater),
+            Arc::clone(&adapters.vault),
+            Arc::clone(&known_hosts),
             limits,
         );
         let bus = CommandBus::new(
@@ -186,6 +193,9 @@ impl Core {
         if let Some(secs) = store.get_setting::<u64>(&ctx, store::SHUTDOWN_WAIT_KEY).await? {
             jobs.set_shutdown_wait(Duration::from_secs(secs.clamp(1, JobLimits::MAX_SHUTDOWN_WAIT_SECS)));
         }
+        if let Some(limit) = store.get_setting::<usize>(&ctx, store::REMOTE_LIMIT_KEY).await? {
+            jobs.set_remote_limit(limit.clamp(1, JobLimits::MAX_REMOTE));
+        }
         Ok(Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
@@ -195,6 +205,7 @@ impl Core {
             import: Importer::new(store.clone()),
             known_hosts,
             terminals,
+            bulk: BulkRuns::new(store.clone()),
             store,
             bus,
             jobs,
@@ -310,6 +321,27 @@ impl Core {
             .await?;
         self.jobs.set_shutdown_wait(Duration::from_secs(secs));
         self.audit_setting("Set the shutdown wait", &format!("{secs} s")).await
+    }
+
+    /// BX-02: how many hosts a bulk run reaches at once (default 10).
+    pub fn bulk_parallel_limit(&self) -> usize {
+        self.jobs.limits().remote
+    }
+
+    /// BX-02: 1 to [`JobLimits::MAX_REMOTE`]. Applies from the next run on. Audited.
+    pub async fn set_bulk_parallel_limit(&self, limit: usize) -> Result<()> {
+        if !(1..=JobLimits::MAX_REMOTE).contains(&limit) {
+            return Err(CoreError::InvalidSetting(format!(
+                "hosts at once must be 1 to {}",
+                JobLimits::MAX_REMOTE
+            )));
+        }
+        self.store
+            .put_setting(&self.ctx, store::REMOTE_LIMIT_KEY, &limit)
+            .await?;
+        self.jobs.set_remote_limit(limit);
+        self.audit_setting("Set the hosts a bulk run reaches at once", &limit.to_string())
+            .await
     }
 
     /// FD-14: whether update checks are on. Defaults to on.

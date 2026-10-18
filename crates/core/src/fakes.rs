@@ -18,9 +18,11 @@ use tokio::sync::watch;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::adapters::exec_output::OutputCollector;
 use crate::adapters::host_counters::{HostCounters, HostTotals, VmProcess};
 use crate::adapters::remote::{
-    ExecResult, Prompter, RemoteAdapter, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
+    Credentials, ExecRequest, ExecResult, Prompter, RemoteAdapter, ShellEnd, ShellHandle, ShellInput, ShellOutput,
+    ShellRequest,
 };
 use crate::adapters::updater::{UpdateInfo, UpdaterAdapter};
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
@@ -434,11 +436,19 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
 }
 
 /// Remote hosts that answer every command with `ok from <host>` and exit code 0, unless a host is
-/// given another exit code. Records `<host>: <script>`; never records a sudo password.
+/// given another output, exit code, delay or failure. Records `<host>: <script>` (with ` [sudo]` for
+/// sudo runs); never records a password.
 #[derive(Default)]
 pub struct FakeRemote {
     exit_codes: HashMap<String, u32>,
+    outputs: HashMap<String, String>,
+    delays: HashMap<String, Duration>,
+    unreachable: HashSet<String>,
+    /// BX-07: the sudo password every host takes; any other is refused.
+    sudo_password: Option<String>,
     calls: Mutex<Vec<String>>,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
 }
 
 impl FakeRemote {
@@ -447,24 +457,75 @@ impl FakeRemote {
         self
     }
 
+    /// What `host` prints on stdout, instead of `ok from <host>`.
+    pub fn with_output(mut self, host: &str, stdout: &str) -> Self {
+        self.outputs.insert(host.to_owned(), stdout.to_owned());
+        self
+    }
+
+    /// Every command on `host` takes this long.
+    pub fn with_delay(mut self, host: &str, delay: Duration) -> Self {
+        self.delays.insert(host.to_owned(), delay);
+        self
+    }
+
+    /// Connecting to `host` fails.
+    pub fn unreachable(mut self, host: &str) -> Self {
+        self.unreachable.insert(host.to_owned());
+        self
+    }
+
+    pub fn with_sudo_password(mut self, password: &str) -> Self {
+        self.sudo_password = Some(password.to_owned());
+        self
+    }
+
     pub fn calls(&self) -> Vec<String> {
         locks::lock(&self.calls).clone()
+    }
+
+    /// The most commands that ran at the same time.
+    pub fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
     }
 }
 
 #[async_trait]
 impl RemoteAdapter for FakeRemote {
-    async fn exec(
-        &self,
-        session: &SessionSpec,
-        script: &str,
-        _sudo_password: Option<&SecretString>,
-    ) -> Result<ExecResult> {
-        locks::lock(&self.calls).push(format!("{}: {script}", session.host));
+    async fn exec(&self, request: ExecRequest<'_>) -> Result<ExecResult> {
+        let host = request.session.host.clone();
+        let sudo = if request.sudo_password.is_some() { " [sudo]" } else { "" };
+        locks::lock(&self.calls).push(format!("{host}: {}{sudo}", request.script));
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        let _done = InFlight(&self.in_flight);
+        if let Some(delay) = self.delays.get(&host) {
+            tokio::time::sleep(*delay).await;
+        }
+        if self.unreachable.contains(&host) {
+            return Err(CoreError::Ssh(format!(
+                "can't connect to {host}:{}: connection refused",
+                request.session.port
+            )));
+        }
+        if let (Some(given), Some(wanted)) = (&request.sudo_password, &self.sudo_password) {
+            if given.expose() != wanted {
+                return Err(CoreError::SudoPasswordRefused);
+            }
+        }
+        let mut secrets: Vec<&SecretString> = request.sudo_password.iter().collect();
+        if let Credentials::Password(Some(password)) = &request.credentials {
+            secrets.push(password);
+        }
+        let stdout = self
+            .outputs
+            .get(&host)
+            .cloned()
+            .unwrap_or_else(|| format!("ok from {host}\n"));
         Ok(ExecResult {
-            exit_code: Some(self.exit_codes.get(&session.host).copied().unwrap_or(0)),
-            stdout: format!("ok from {}\n", session.host),
-            stderr: String::new(),
+            exit_code: Some(self.exit_codes.get(&host).copied().unwrap_or(0)),
+            signal: None,
+            output: OutputCollector::collect(stdout.as_bytes(), b"", &secrets, request.max_output),
             duration_ms: 1,
         })
     }

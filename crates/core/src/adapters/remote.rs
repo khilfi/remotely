@@ -1,9 +1,10 @@
 //! Remote adapter: SSH to any reachable machine, via russh.
 //!
 //! Covers SS-03 (interactive terminal), SS-05 (the host key check, decided by a [`HostKeyVerifier`]
-//! the core passes in), and later BX-02 (bulk exec), BX-07 (sudo from the vault, never echoed or
-//! logged) and MO-02 (guest metrics from /proc). Jump hosts (SS-07, v2) will chain through russh's
-//! direct-tcpip channels.
+//! the core passes in), BX-02 (a command or script on an exec channel: stdout, stderr, exit code and
+//! duration, capped and hashed by [`exec_output`](super::exec_output)) and BX-07 (sudo with the password from the vault on
+//! stdin, never echoed or logged, and scrubbed from the output), and later MO-02 (guest metrics from
+//! /proc). Jump hosts (SS-07, v2) will chain through russh's direct-tcpip channels.
 //!
 //! The core reads secrets from the vault just before a connection and hands them over as
 //! [`Credentials`]; this adapter never sees the vault, the UI never sees the secrets, and no secret
@@ -20,11 +21,11 @@ use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect, MethodKind, MethodSet};
-use serde::Serialize;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::adapters::exec_output::{CollectedOutput, OutputCollector, Scrubber};
 use crate::domain::Environment;
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{address, HostKey};
@@ -160,12 +161,29 @@ pub struct ShellRequest<'a> {
     pub verifier: Arc<dyn HostKeyVerifier>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// A command or script to run on one host (BX-02), with no terminal and nothing typed.
+pub struct ExecRequest<'a> {
+    pub session: &'a SessionSpec,
+    pub credentials: Credentials,
+    /// One command or a multi-line script, run by the login shell.
+    pub script: &'a str,
+    /// BX-07: run the script under `sudo`, which reads this password from stdin. Never echoed,
+    /// logged or returned; scrubbed from the output if it ever shows up there.
+    pub sudo_password: Option<SecretString>,
+    pub options: &'a ConnectOptions,
+    pub verifier: Arc<dyn HostKeyVerifier>,
+    /// Bytes kept per stream (stdout, stderr); see [`exec_output`](super::exec_output).
+    pub max_output: usize,
+}
+
+/// How a command ended (BX-02). The output has had the run's secrets scrubbed.
+#[derive(Debug, Clone)]
 pub struct ExecResult {
+    /// `None` when a signal ended it or the server sent no status.
     pub exit_code: Option<u32>,
-    pub stdout: String,
-    pub stderr: String,
+    /// The signal that ended the command, e.g. "TERM".
+    pub signal: Option<String>,
+    pub output: CollectedOutput,
     pub duration_ms: u64,
 }
 
@@ -201,13 +219,10 @@ pub struct ShellHandle {
 
 #[async_trait]
 pub trait RemoteAdapter: Send + Sync {
-    /// Runs a command or script and collects its output (BX-02). `sudo_password` comes from the vault.
-    async fn exec(
-        &self,
-        session: &SessionSpec,
-        script: &str,
-        sudo_password: Option<&SecretString>,
-    ) -> Result<ExecResult>;
+    /// Connects, checks the host key, logs in without asking anything, runs a command or script and
+    /// collects its output (BX-02), with `sudo` and the password from the vault when asked (BX-07).
+    /// [`CoreError::SudoPasswordRefused`] when sudo did not take the password.
+    async fn exec(&self, request: ExecRequest<'_>) -> Result<ExecResult>;
 
     /// Connects, checks the host key, logs in and opens a PTY shell (SS-03).
     async fn open_shell(&self, request: ShellRequest<'_>, prompter: &mut dyn Prompter) -> Result<ShellHandle>;
@@ -229,8 +244,48 @@ impl Default for RusshAdapter {
 
 #[async_trait]
 impl RemoteAdapter for RusshAdapter {
-    async fn exec(&self, _: &SessionSpec, _: &str, _: Option<&SecretString>) -> Result<ExecResult> {
-        Err(CoreError::NotImplemented("BX-02 remote exec over SSH"))
+    async fn exec(&self, request: ExecRequest<'_>) -> Result<ExecResult> {
+        let ExecRequest {
+            session,
+            credentials,
+            script,
+            sudo_password,
+            options,
+            verifier,
+            max_output,
+        } = request;
+        let started = std::time::Instant::now();
+        if session.username.is_empty() {
+            return Err(CoreError::AuthFailed(format!(
+                "'{}' has no user name, and a bulk run can't ask for one. Add it to the session",
+                session.name
+            )));
+        }
+        // BX-07: every secret of this run is scrubbed from what the host prints.
+        let mut secrets: Vec<SecretString> = sudo_password.iter().cloned().collect();
+        if let Credentials::Password(Some(password)) = &credentials {
+            secrets.push(password.clone());
+        }
+        let (mut handle, shared) = connect(session, options, verifier).await?;
+        let mut prompter = NoPrompter { session: &session.name };
+        authenticate(
+            &mut handle,
+            &session.username,
+            credentials,
+            options,
+            &mut prompter,
+            &shared,
+        )
+        .await?;
+        let result = run_command(&handle, &shared, script, sudo_password.as_ref(), &secrets, max_output).await;
+        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        let (exit_code, signal, output) = result?;
+        Ok(ExecResult {
+            exit_code,
+            signal,
+            output,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
     }
 
     async fn open_shell(&self, request: ShellRequest<'_>, prompter: &mut dyn Prompter) -> Result<ShellHandle> {
@@ -931,6 +986,160 @@ async fn disconnect_reason(shared: &Arc<Mutex<Shared>>) -> String {
     "the connection was lost".into()
 }
 
+/// A bulk run can't ask anything: a login that needs something typed fails, saying what.
+struct NoPrompter<'a> {
+    session: &'a str,
+}
+
+#[async_trait]
+impl Prompter for NoPrompter<'_> {
+    async fn ask(&mut self, prompt: &str, _echo: bool) -> Result<SecretString> {
+        let asked = prompt.trim().trim_end_matches(':').trim();
+        let advice = if asked.to_lowercase().contains("password") {
+            "Save the password in the vault and choose it in the session"
+        } else {
+            "Log in to it in a terminal instead"
+        };
+        Err(CoreError::AuthFailed(format!(
+            "'{}' asks for something typed ({asked}), and a bulk run can't ask. {advice}",
+            self.session
+        )))
+    }
+
+    async fn show(&mut self, _text: &str) {}
+}
+
+/// `text` as one word for a POSIX shell: in single quotes, with each `'` written as `'\''`.
+pub(crate) fn sh_quote(text: &str) -> String {
+    format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// BX-07: the script under sudo. `sudo -S` reads the password from stdin, and `-p` makes its prompt
+/// a random marker: a second prompt means sudo asked again because the password was refused, and the
+/// markers are removed from the output. The script runs in `sh -c` with its stdin on /dev/null, so
+/// when sudo does not ask (NOPASSWD, cached credentials) the script still can't read the password.
+pub(crate) fn sudo_command(script: &str, marker: &str) -> String {
+    format!(
+        "sudo -S -p {} sh -c {}",
+        sh_quote(marker),
+        sh_quote(&format!("exec </dev/null\n{script}"))
+    )
+}
+
+/// BX-07: sudo did not take the password. Two prompts mean it asked again. The English messages
+/// cover a sudo that kept a PAM prompt instead of the marker, or tries only once.
+fn sudo_refused(prompts: usize, exit_code: Option<u32>, stderr: &str) -> bool {
+    if prompts >= 2 {
+        return true;
+    }
+    exit_code == Some(1)
+        && ["incorrect password attempt", "Sorry, try again."]
+            .iter()
+            .any(|m| stderr.contains(m))
+}
+
+fn signal_name(signal: &russh::Sig) -> String {
+    use russh::Sig;
+    match signal {
+        Sig::ABRT => "ABRT",
+        Sig::ALRM => "ALRM",
+        Sig::FPE => "FPE",
+        Sig::HUP => "HUP",
+        Sig::ILL => "ILL",
+        Sig::INT => "INT",
+        Sig::KILL => "KILL",
+        Sig::PIPE => "PIPE",
+        Sig::QUIT => "QUIT",
+        Sig::SEGV => "SEGV",
+        Sig::TERM => "TERM",
+        Sig::USR1 => "USR1",
+        Sig::Custom(name) => name,
+    }
+    .to_owned()
+}
+
+/// Runs the command on an exec channel (no PTY, so nothing is echoed) and collects what it prints.
+/// Stdin carries the sudo password and nothing else, then ends.
+async fn run_command(
+    handle: &client::Handle<Handler>,
+    shared: &Arc<Mutex<Shared>>,
+    script: &str,
+    sudo_password: Option<&SecretString>,
+    secrets: &[SecretString],
+    max_output: usize,
+) -> Result<(Option<u32>, Option<String>, CollectedOutput)> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|err| CoreError::Ssh(format!("the server did not open a session: {err}")))?;
+    let marker = sudo_password.map(|_| format!("remotely-sudo-{}", Uuid::new_v4().simple()));
+    let command = match &marker {
+        Some(marker) => sudo_command(script, marker),
+        None => script.to_owned(),
+    };
+    channel
+        .exec(true, command.into_bytes())
+        .await
+        .map_err(|err| CoreError::Ssh(format!("sending the command failed: {err}")))?;
+    if let Some(password) = sudo_password {
+        let mut line = zeroize::Zeroizing::new(password.expose().as_bytes().to_vec());
+        line.push(b'\n');
+        // A failed write shows up as the channel closing below.
+        let _ = channel.data(&line[..]).await;
+    }
+    let _ = channel.eof().await;
+
+    let refs: Vec<&SecretString> = secrets.iter().collect();
+    let mut collected = OutputCollector::new(&refs, max_output);
+    let mut prompts = marker.as_deref().map(Scrubber::remover);
+    let mut cleaned = Vec::new();
+    let mut exit_code = None;
+    let mut signal = None;
+    loop {
+        match channel.wait().await {
+            Some(ChannelMsg::Data { data }) => collected.stdout(&data),
+            Some(ChannelMsg::ExtendedData { data, .. }) => match prompts.as_mut() {
+                Some(remover) => {
+                    cleaned.clear();
+                    remover.push(&data, &mut cleaned);
+                    collected.stderr(&cleaned);
+                }
+                None => collected.stderr(&data),
+            },
+            Some(ChannelMsg::ExitStatus { exit_status }) => exit_code = Some(exit_status),
+            Some(ChannelMsg::ExitSignal { signal_name: sig, .. }) => signal = Some(signal_name(&sig)),
+            Some(ChannelMsg::Failure) => {
+                return Err(CoreError::Ssh("the server refused to run the command".into()));
+            }
+            Some(ChannelMsg::Close) => break,
+            Some(_) => {}
+            None => {
+                if exit_code.is_some() || signal.is_some() {
+                    break;
+                }
+                let reason = disconnect_reason(shared).await;
+                return Err(CoreError::Ssh(format!(
+                    "the connection was lost while the command ran: {reason}"
+                )));
+            }
+        }
+    }
+    let prompts = match prompts.as_mut() {
+        Some(remover) => {
+            cleaned.clear();
+            remover.finish(&mut cleaned);
+            collected.stderr(&cleaned);
+            remover.found()
+        }
+        None => 0,
+    };
+    let output = collected.finish();
+    if sudo_password.is_some() && sudo_refused(prompts, exit_code, &output.stderr) {
+        return Err(CoreError::SudoPasswordRefused);
+    }
+    Ok((exit_code, signal, output))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -959,6 +1168,35 @@ mod tests {
         spec.username.clear();
         spec.port = 2222;
         assert_eq!(spec.address(), "web01.example.com:2222");
+    }
+
+    #[test]
+    fn shell_quoting_survives_single_quotes() {
+        assert_eq!(sh_quote("plain"), "'plain'");
+        assert_eq!(sh_quote("it's"), r"'it'\''s'");
+        assert_eq!(sh_quote(""), "''");
+    }
+
+    #[test]
+    fn sudo_runs_the_script_in_sh_with_stdin_closed() {
+        let command = sudo_command("whoami\necho 'done'", "remotely-sudo-abc");
+        assert_eq!(
+            command,
+            "sudo -S -p 'remotely-sudo-abc' sh -c 'exec </dev/null\nwhoami\necho '\\''done'\\'''"
+        );
+    }
+
+    #[test]
+    fn a_second_sudo_prompt_or_its_message_means_the_password_was_refused() {
+        assert!(sudo_refused(2, Some(1), ""));
+        assert!(sudo_refused(1, Some(1), "sudo: 1 incorrect password attempt\n"));
+        assert!(sudo_refused(0, Some(1), "Sorry, try again.\n"));
+        assert!(!sudo_refused(1, Some(0), ""), "asked once, then ran");
+        assert!(!sudo_refused(0, Some(0), ""), "NOPASSWD");
+        assert!(
+            !sudo_refused(1, Some(1), "grep: no match\n"),
+            "the script failed, not sudo"
+        );
     }
 
     #[test]
