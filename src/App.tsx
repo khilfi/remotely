@@ -53,15 +53,17 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
-import { UpdateBanner } from "@/components/UpdateBanner";
+import { UpdateBanner, UpdateNotice } from "@/components/UpdateBanner";
 import {
   api,
+  errorCode,
   errorMessage,
+  UPDATE_TOKEN_ERRORS,
   type AppInfo,
   type ApprovalRequest,
   type Command,
   type SubmitOutcome,
-  type UpdateInfo,
+  type UpdateCheck,
   type VaultInfo,
 } from "@/lib/api";
 import { useTheme, type ThemePreference } from "@/lib/theme";
@@ -125,8 +127,14 @@ export default function App() {
   // Bumped when a job finishes, so the VM list shows the new power states.
   const [jobsFinished, setJobsFinished] = useState(0);
   const [settingsVersion, setSettingsVersion] = useState(0);
-  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  // FD-14: the last update check, a problem with the GitHub update token it ran into, and the banner
+  // put off with "Later" (an update's version, or "noToken" / the problem's code).
+  const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
+  const [updateProblem, setUpdateProblem] = useState<{ code: string; message: string } | null>(null);
   const [laterFor, setLaterFor] = useState<string | null>(null);
+  const [updateRun, setUpdateRun] = useState(0);
+  const lastUpdateStatus = useRef<UpdateCheck["status"] | null>(null);
+  const offered = updateCheck?.status === "available" ? updateCheck.update : null;
   // VMs picked on the VMs page to open in the snapshot manager (VM-04).
   const [snapshotPick, setSnapshotPick] = useState<{ paths: string[]; n: number } | null>(null);
   // SS-03: a session to open in a new terminal tab.
@@ -181,7 +189,14 @@ export default function App() {
   }, []);
 
   const loadVault = useCallback(() => {
-    api.vaultInfo().then(setVault, () => setVault(null));
+    api.vaultInfo().then(
+      (info) => {
+        setVault(info);
+        // FD-14: a check that found the vault locked runs again once the update token can be read.
+        if (info.status === "unlocked" && lastUpdateStatus.current === "vaultLocked") setUpdateRun((n) => n + 1);
+      },
+      () => setVault(null),
+    );
   }, []);
 
   useEffect(() => {
@@ -197,17 +212,38 @@ export default function App() {
 
   useEffect(loadInfo, [loadInfo, settingsVersion]);
 
-  // FD-14: check for a newer release at start and every 24 hours, and again when settings change.
-  // The core skips the network call when update checks are turned off.
+  const applyUpdateCheck = useCallback((result: UpdateCheck) => {
+    lastUpdateStatus.current = result.status;
+    setUpdateProblem(null);
+    // A locked vault says nothing new: keep showing an update found earlier.
+    setUpdateCheck((prev) => (result.status === "vaultLocked" && prev?.status === "available" ? prev : result));
+  }, []);
+
+  const applyUpdateError = useCallback((err: unknown) => {
+    const code = errorCode(err);
+    if (code && UPDATE_TOKEN_ERRORS.includes(code)) {
+      lastUpdateStatus.current = null;
+      setUpdateProblem({ code, message: errorMessage(err) });
+    } else {
+      // Offline or GitHub having a moment: not worth interrupting anyone for. "Check now" in Settings
+      // shows the error.
+      console.warn("update check failed", err);
+    }
+  }, []);
+
+  // FD-14: check for a newer release at start and every 24 hours, again when settings change, and
+  // once the vault is unlocked if it was locked. The core makes no network call when update checks
+  // are off, there is no GitHub update token or the vault is locked.
   useEffect(() => {
     let stopped = false;
     const check = () =>
       api.checkForUpdate().then(
-        (found) => {
-          if (!stopped) setUpdate(found);
+        (result) => {
+          if (!stopped) applyUpdateCheck(result);
         },
-        // No release yet, offline or blocked: not worth interrupting anyone for.
-        (err) => console.warn("update check failed", err),
+        (err) => {
+          if (!stopped) applyUpdateError(err);
+        },
       );
     void check();
     const timer = window.setInterval(() => void check(), UPDATE_CHECK_INTERVAL_MS);
@@ -215,7 +251,7 @@ export default function App() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [settingsVersion]);
+  }, [settingsVersion, updateRun, applyUpdateCheck, applyUpdateError]);
 
   async function installUpdate(version: string) {
     try {
@@ -360,12 +396,16 @@ export default function App() {
       icon: DownloadIcon,
       keywords: "version release",
       run: async () => {
+        setLaterFor(null);
         try {
-          const found = await api.checkForUpdate();
-          setUpdate(found);
-          setLaterFor(null);
-          if (!found) toast.info("Remotely is up to date (or update checks are off)");
+          const result = await api.checkForUpdate();
+          applyUpdateCheck(result);
+          if (result.status === "upToDate") toast.info("Remotely is up to date");
+          if (result.status === "off") toast.info("Update checks are off in Settings");
+          if (result.status === "vaultLocked")
+            toast.info("Unlock the vault first: the GitHub update token is kept there");
         } catch (err) {
+          applyUpdateError(err);
           toast.error(errorMessage(err));
         }
       },
@@ -485,11 +525,28 @@ export default function App() {
             </ToggleGroup>
           </header>
           <div className="min-h-0 flex-1 overflow-auto p-6">
-            {update && laterFor !== update.version && (
+            {offered && laterFor !== offered.version && (
               <UpdateBanner
-                update={update}
-                onInstall={() => void installUpdate(update.version)}
-                onLater={() => setLaterFor(update.version)}
+                update={offered}
+                onInstall={() => void installUpdate(offered.version)}
+                onLater={() => setLaterFor(offered.version)}
+              />
+            )}
+            {!offered && updateProblem && laterFor !== updateProblem.code && (
+              <UpdateNotice
+                destructive
+                title="Remotely can't check for updates"
+                description={sentence(updateProblem.message)}
+                onOpenSettings={() => setPage("settings")}
+                onLater={() => setLaterFor(updateProblem.code)}
+              />
+            )}
+            {!offered && !updateProblem && updateCheck?.status === "noToken" && laterFor !== "noToken" && (
+              <UpdateNotice
+                title="Updates need a GitHub update token"
+                description="Remotely's releases are in a private GitHub repository. Add a read-only token in Settings, under Updates, to get new versions, or turn update checks off there."
+                onOpenSettings={() => setPage("settings")}
+                onLater={() => setLaterFor("noToken")}
               />
             )}
             <section hidden={page !== "vms"}>
@@ -555,7 +612,12 @@ export default function App() {
               <ActivityPage version={jobsVersion} active={page === "activity"} />
             </section>
             <section hidden={page !== "settings"}>
-              <SettingsPage onChanged={() => setSettingsVersion((v) => v + 1)} />
+              <SettingsPage
+                onChanged={() => setSettingsVersion((v) => v + 1)}
+                vault={vault}
+                onVaultChanged={setVault}
+                onOpenVault={() => setPage("vault")}
+              />
             </section>
           </div>
         </SidebarInset>
@@ -595,6 +657,12 @@ export default function App() {
       <Toaster theme={resolved} position="bottom-right" />
     </TooltipProvider>
   );
+}
+
+/** Core messages start in lower case and end without a full stop, so they read well after a prefix. */
+function sentence(text: string) {
+  const capital = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
 function vaultLabel(vault: VaultInfo | null) {
