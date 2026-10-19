@@ -6,12 +6,20 @@
 // (QL-05). The Output menu copies, saves or prints a pane's whole scrollback or that of several tabs
 // picked with Ctrl+click or Shift+click, and logs a pane to a file (SS-11). Host key questions (SS-05)
 // come up as dialogs. Interactive shells skip the approval flow; remote commands get it with bulk runs.
+//
+// P5: the command panel on the right (BX-08) pastes favourite and built-in commands into the current pane; the key
+// button types a vault password at a sudo or su prompt (QL-06); a long command that finishes in a tab in the
+// background (another tab, another page, or the window not in front) shows a Windows notification, unless turned off
+// for that tab or in Settings (QL-07).
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
+  BellIcon,
+  BellOffIcon,
+  BellRingIcon,
   CaseSensitiveIcon,
   Columns2Icon,
   FileTextIcon,
@@ -24,6 +32,7 @@ import {
   Rows2Icon,
   SearchIcon,
   ShieldAlertIcon,
+  SquareChevronRightIcon,
   SquareTerminalIcon,
   XIcon,
 } from "lucide-react";
@@ -42,9 +51,11 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ColorDot } from "@/components/Badges";
+import { CommandPanel } from "@/components/CommandPanel";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { SessionTree } from "@/components/SessionTree";
+import { TypeSecretMenu } from "@/components/TypeSecretMenu";
 import {
   api,
   errorMessage,
@@ -53,7 +64,8 @@ import {
   type SessionColor,
   type SessionRecord,
 } from "@/lib/api";
-import { plural } from "@/lib/format";
+import { sendCommand } from "@/lib/command-send";
+import { formatDuration, plural } from "@/lib/format";
 import { clickTab, isMulti, NO_SELECTION, pruneSelection, type TabSelection } from "@/lib/tab-selection";
 import { copyOutput, paneTitle, printOutput, saveOutput, type NamedPane } from "@/lib/terminal-output";
 import {
@@ -62,6 +74,7 @@ import {
   PaneSession,
   sessionAddress,
   TERMINAL_PALETTE,
+  type CommandFinished,
   type PaneOpener,
   type PaneOptions,
   type PaneSnapshot,
@@ -79,11 +92,16 @@ interface Tab {
   layout: Layout;
   /** The pane the toolbar acts on. */
   activePane: string;
+  /** QL-07: notify when a long command finishes here while the tab is in the background. */
+  notify: boolean;
 }
 
 /** More would make each pane too small to read. */
 const MAX_PANES = 6;
 const TREE_KEY = "remotely.terminal.treeShown";
+const COMMANDS_KEY = "remotely.terminal.commandsShown";
+/** BX-08: below this width the command panel starts hidden, so the tabs keep their room (the toolbar shows it). */
+const COMMANDS_SHOWN_FROM = 1440;
 
 interface Props {
   /** The page stays mounted while hidden so its connections survive. */
@@ -165,12 +183,29 @@ const ENV_TEXT: Record<Environment, string> = {
   prod: "text-env-prod",
 };
 
-function readTreeShown() {
+function readShown(key: string, byDefault: boolean) {
   try {
-    return localStorage.getItem(TREE_KEY) !== "false";
+    const value = localStorage.getItem(key);
+    return value === null ? byDefault : value !== "false";
   } catch {
-    return true;
+    return byDefault;
   }
+}
+
+/** QL-07: the window is not in front, or the tab or page is not the one on screen. */
+function inBackground(tabKey: string, activeTab: string | null, pageActive: boolean) {
+  return tabKey !== activeTab || !pageActive || !document.hasFocus() || document.visibilityState !== "visible";
+}
+
+function finishedText(name: string, finished: CommandFinished) {
+  const ran = formatDuration(finished.afterSecs);
+  return {
+    title: `Command finished in ${name}`,
+    body:
+      finished.how === "prompt"
+        ? `It ran ${ran} and the prompt is back.`
+        : `It ran ${ran}, then the output stopped: it finished, or it waits for an answer.`,
+  };
 }
 
 export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVault }: Props) {
@@ -179,7 +214,14 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
   const [selection, setSelection] = useState<TabSelection>(NO_SELECTION);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [options, setOptions] = useState<PaneOptions>(DEFAULT_PANE_OPTIONS);
-  const [treeShown, setTreeShown] = useState(readTreeShown);
+  const [treeShown, setTreeShown] = useState(() => readShown(TREE_KEY, true));
+  const [commandsShown, setCommandsShown] = useState(() =>
+    readShown(COMMANDS_KEY, window.innerWidth >= COMMANDS_SHOWN_FROM),
+  );
+  /** QL-07: notifications are on in Settings. */
+  const [notifyOn, setNotifyOn] = useState(true);
+  /** QL-07: tabs where a long command finished while they were in the background. */
+  const [attention, setAttention] = useState<string[]>([]);
   const [newOpen, setNewOpen] = useState(false);
   const [version, setVersion] = useState(0);
   const handled = useRef(0);
@@ -189,7 +231,10 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
   const loadSessions = useCallback(() => {
     api.sessions().then(setSessions, (err) => toast.error(errorMessage(err)));
     api.terminalSettings().then(
-      (s) => setOptions({ fontSize: s.fontSize, scrollback: s.scrollback, copyOnSelect: s.copyOnSelect }),
+      (s) => {
+        setOptions({ fontSize: s.fontSize, scrollback: s.scrollback, copyOnSelect: s.copyOnSelect });
+        setNotifyOn(s.notifyFinished);
+      },
       () => undefined,
     );
   }, []);
@@ -214,18 +259,39 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
     }
   }, [treeShown]);
 
+  /** BX-08: only the user's own choice is kept; until then the window's width decides. */
+  function showCommands(shown: boolean) {
+    setCommandsShown(shown);
+    try {
+      localStorage.setItem(COMMANDS_KEY, String(shown));
+    } catch {
+      // Not kept.
+    }
+  }
+
   // Closing the app closes every connection; the core audits each close.
   useEffect(() => () => tabsRef.current.forEach((t) => allPanes(t.layout).forEach((p) => p.close())), []);
 
   const sessionById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
 
+  // QL-07: a pane's finished command is handled with the page's latest state.
+  const finishedRef = useRef<(pane: PaneSession, finished: CommandFinished) => void>(() => undefined);
   const createPane = useCallback(
-    (opener: PaneOpener, label: string) => new PaneSession(newKey(), opener, label, theme, options),
+    (opener: PaneOpener, label: string) => {
+      const pane = new PaneSession(newKey(), opener, label, theme, options);
+      pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
+      return pane;
+    },
     [theme, options],
   );
 
   const addTab = useCallback((pane: PaneSession) => {
-    const tab: Tab = { key: newKey(), layout: { kind: "pane", key: pane.key, pane }, activePane: pane.key };
+    const tab: Tab = {
+      key: newKey(),
+      layout: { kind: "pane", key: pane.key, pane },
+      activePane: pane.key,
+      notify: true,
+    };
     setTabs((prev) => [...prev, tab]);
     setActiveTab(tab.key);
     setSelection({ keys: [], anchor: tab.key });
@@ -312,6 +378,14 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
   const current = tabs.find((t) => t.key === activeTab) ?? null;
   const currentPane = current ? findPane(current.layout, current.activePane) : undefined;
 
+  // QL-07: looking at a tab clears its "finished in the background" mark.
+  const viewing = active ? activeTab : null;
+  const [viewed, setViewed] = useState<string | null>(null);
+  if (viewing !== viewed) {
+    setViewed(viewing);
+    if (viewing && attention.includes(viewing)) setAttention(attention.filter((k) => k !== viewing));
+  }
+
   function split(orientation: "horizontal" | "vertical") {
     if (!current || !currentPane) return;
     if (allPanes(current.layout).length >= MAX_PANES) {
@@ -344,6 +418,34 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
     },
     [sessionById],
   );
+
+  useEffect(() => {
+    finishedRef.current = (pane, finished) => {
+      const tab = tabs.find((t) => allPanes(t.layout).includes(pane));
+      if (!tab || !notifyOn || !tab.notify || !inBackground(tab.key, activeTab, active)) return;
+      const { title, body } = finishedText(nameOf(pane), finished);
+      api.notifyCommandFinished(title, body).catch((err) => console.warn("notification failed", err));
+      if (tab.key !== activeTab || !active)
+        setAttention((prev) => (prev.includes(tab.key) ? prev : [...prev, tab.key]));
+    };
+  });
+
+  function setTabNotify(tabKey: string, notify: boolean) {
+    setTabs((prev) => prev.map((t) => (t.key === tabKey ? { ...t, notify } : t)));
+  }
+
+  /** BX-08: the command panel pastes into the current pane (P6's MultiExec will pass the picked panes). */
+  function sendToCurrent(command: string, enter: boolean) {
+    return currentPane ? sendCommand([currentPane], command, { enter }) > 0 : false;
+  }
+
+  const currentSession = currentPane?.sessionId ? sessionById.get(currentPane.sessionId) : undefined;
+  const loginSecretId =
+    currentSession?.auth.method === "password"
+      ? currentSession.auth.passwordId
+      : currentSession?.auth.method === "key"
+        ? currentSession.auth.passphraseId
+        : null;
 
   const multi = isMulti(selection);
   const selectedTabs = tabs.filter((t) => selection.keys.includes(t.key));
@@ -391,6 +493,7 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
               pane={findPane(tab.layout, tab.activePane)}
               current={tab.key === activeTab}
               picked={multi && selection.keys.includes(tab.key)}
+              attention={attention.includes(tab.key)}
               onSelect={(modifiers) => pickTab(tab.key, modifiers)}
               onClose={() => closeTab(tab)}
             />
@@ -413,6 +516,24 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
             <IconButton label="Reconnect this pane" onClick={() => currentPane?.reconnect()}>
               <RefreshCwIcon />
             </IconButton>
+            <TypeSecretMenu
+              pane={currentPane}
+              loginSecretId={loginSecretId}
+              terminalName={currentPane ? nameOf(currentPane) : "the terminal"}
+              onOpenVault={onOpenVault}
+            />
+            <IconButton
+              label={
+                !notifyOn
+                  ? "Notifications are off in Settings (Terminal)"
+                  : current.notify
+                    ? "Notify when a long command finishes in this tab (on; click to turn off)"
+                    : "No notifications from this tab (click to turn on)"
+              }
+              onClick={() => setTabNotify(current.key, !current.notify)}
+            >
+              {current.notify && notifyOn ? <BellIcon /> : <BellOffIcon />}
+            </IconButton>
             <OutputMenu
               panes={outputPanes}
               multi={multi}
@@ -429,6 +550,13 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
             </IconButton>
           </div>
         )}
+        <IconButton
+          label={commandsShown ? "Hide the commands" : "Show the commands (favourites and library)"}
+          onClick={() => showCommands(!commandsShown)}
+          className={cn("mb-1", commandsShown && "bg-accent")}
+        >
+          <SquareChevronRightIcon />
+        </IconButton>
       </div>
       {multi && (
         <div
@@ -516,24 +644,47 @@ export function TerminalPage({ active, theme, openRequest, newRequest, onOpenVau
       <p className="text-xs text-muted-foreground">
         {options.copyOnSelect ? "Selecting text copies it. " : "Ctrl+Shift+C copies a selection. "}
         Ctrl+Shift+V or right-click pastes, Ctrl+Shift+F searches. Ctrl+click tabs to pick several for Output. Typing
-        into a terminal is not audited; opening and closing it, and saving its output, are.
+        into a terminal is not audited; opening and closing it, saving its output and typing a vault password are.
       </p>
     </div>
   );
 
+  const mainSize = 100 - (treeShown ? 20 : 0) - (commandsShown ? 22 : 0);
   return (
     <>
-      {treeShown ? (
-        <ResizablePanelGroup orientation="horizontal" id="terminal-workspace">
-          <ResizablePanel id="terminal-tree" defaultSize="20%" minSize="12%" maxSize="40%">
-            <div className="h-full pr-3">
-              <SessionTree active={active} version={version} openSessions={openSessions} onOpen={openSession} />
-            </div>
+      {treeShown || commandsShown ? (
+        <ResizablePanelGroup
+          orientation="horizontal"
+          id={`terminal-workspace-${treeShown ? "tree" : "no-tree"}-${commandsShown ? "commands" : "no-commands"}`}
+        >
+          {treeShown && (
+            <>
+              <ResizablePanel id="terminal-tree" defaultSize="20%" minSize="12%" maxSize="40%">
+                <div className="h-full pr-3">
+                  <SessionTree active={active} version={version} openSessions={openSessions} onOpen={openSession} />
+                </div>
+              </ResizablePanel>
+              <ResizableHandle />
+            </>
+          )}
+          <ResizablePanel id="terminal-main" defaultSize={`${mainSize}%`}>
+            <div className={cn("h-full", treeShown && "pl-3", commandsShown && "pr-3")}>{workspace}</div>
           </ResizablePanel>
-          <ResizableHandle />
-          <ResizablePanel id="terminal-main" defaultSize="80%">
-            <div className="h-full pl-3">{workspace}</div>
-          </ResizablePanel>
+          {commandsShown && (
+            <>
+              <ResizableHandle />
+              <ResizablePanel id="terminal-commands" defaultSize="22%" minSize="14%" maxSize="45%">
+                <div className="h-full pl-3">
+                  <CommandPanel
+                    active={active}
+                    targetName={currentPane ? nameOf(currentPane) : null}
+                    onSend={sendToCurrent}
+                    onClose={() => showCommands(false)}
+                  />
+                </div>
+              </ResizablePanel>
+            </>
+          )}
         </ResizablePanelGroup>
       ) : (
         workspace
@@ -611,6 +762,7 @@ function TabButton({
   pane,
   current,
   picked,
+  attention,
   onSelect,
   onClose,
 }: {
@@ -619,6 +771,8 @@ function TabButton({
   pane: PaneSession | undefined;
   current: boolean;
   picked: boolean;
+  /** QL-07: a long command finished here while the tab was in the background. */
+  attention: boolean;
   onSelect: (modifiers: { ctrl: boolean; shift: boolean }) => void;
   onClose: () => void;
 }) {
@@ -633,6 +787,8 @@ function TabButton({
     seen && `Host: ${seen}`,
     session ? null : "Not saved as a session",
     snapshot.logPath && `Logging to ${snapshot.logPath}`,
+    attention && "A long command finished here",
+    !tab.notify && "No notifications from this tab",
     "Ctrl+click or Shift+click to pick several tabs",
   ]
     .filter(Boolean)
@@ -666,6 +822,8 @@ function TabButton({
         )}
       </span>
       {snapshot.logPath && <FileTextIcon className="size-3.5 shrink-0 text-tier-medium" aria-label="Logging" />}
+      {attention && <BellRingIcon className="size-3.5 shrink-0 text-primary" aria-label="A long command finished" />}
+      {!tab.notify && <BellOffIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label="No notifications" />}
       {count > 1 && <span className="text-xs text-muted-foreground">{count}</span>}
       <button
         type="button"

@@ -1,6 +1,7 @@
-// SS-03, QL-04 and QL-05 terminal settings: keep-alive, auto-reconnect, copy-on-select, font size,
-// scrollback and the session tree's reachability checks. Saved in the core and audited. Connection
-// settings apply to terminals opened from then on; font size and scrollback to open ones too.
+// SS-03, QL-04, QL-05 and QL-07 terminal settings: keep-alive, auto-reconnect, copy-on-select, font size,
+// scrollback, the session tree's reachability checks, and notifications when a long command finishes in a background
+// tab. Saved in the core and audited. Connection settings apply to terminals opened from then on; font size,
+// scrollback and notifications to open ones too.
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -23,6 +24,8 @@ interface Draft {
   fontSize: string;
   scrollback: string;
   reachabilitySecs: string;
+  notifyAfter: string;
+  notifyQuiet: string;
 }
 
 function draftOf(s: TerminalSettings): Draft {
@@ -31,6 +34,8 @@ function draftOf(s: TerminalSettings): Draft {
     fontSize: String(s.fontSize),
     scrollback: String(s.scrollback),
     reachabilitySecs: String(s.reachabilitySecs),
+    notifyAfter: String(s.notifyAfterSecs),
+    notifyQuiet: String(s.notifyQuietSecs),
   };
 }
 
@@ -141,6 +146,36 @@ export function TerminalSettingsCard() {
           </div>
           {field("reachabilitySecs", "reachability-secs", "Check every (seconds, 15 to 3600)")}
         </div>
+        <div className="grid gap-4 border-t pt-4">
+          <div className="flex items-center gap-3">
+            <Switch
+              id="notify-finished"
+              checked={settings.notifyFinished}
+              onCheckedChange={(notifyFinished) => void save({ ...settings, notifyFinished })}
+            />
+            <Label htmlFor="notify-finished" className="font-normal">
+              Notify when a long command finishes in a tab in the background
+            </Label>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            {field(
+              "notifyAfter",
+              "notify-after",
+              "A command is long after (seconds, 5 to 3600)",
+              "Measured from Enter until its shell prompt comes back.",
+            )}
+            {field(
+              "notifyQuiet",
+              "notify-quiet",
+              "Or when it goes quiet for (seconds, 0 for never)",
+              "For prompts Remotely doesn't recognise, or a command waiting for an answer: no output for this long ends it.",
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground">
+            In the background means another tab, another page, or Remotely not in front. The bell in the terminal
+            toolbar turns it off for one tab.
+          </p>
+        </div>
         {message && (
           <p className={message.ok ? "text-sm text-muted-foreground" : "text-sm text-destructive"} role="status">
             {message.text}
@@ -158,6 +193,8 @@ export function TerminalSettingsCard() {
               fontSize: Number(draft.fontSize),
               scrollback: Number(draft.scrollback),
               reachabilitySecs: Number(draft.reachabilitySecs),
+              notifyAfterSecs: Number(draft.notifyAfter),
+              notifyQuietSecs: Number(draft.notifyQuiet),
             })
           }
         >

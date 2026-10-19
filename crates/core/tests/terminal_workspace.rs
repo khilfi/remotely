@@ -52,6 +52,7 @@ fn tuning() -> TerminalTuning {
         keepalive_max: 2,
         agent: AgentSource::NamedPipe(format!(r"\\.\pipe\remotely-test-none-{}", Uuid::new_v4())),
         host_key_wait: Duration::from_secs(10),
+        notify_timing: None,
     }
 }
 

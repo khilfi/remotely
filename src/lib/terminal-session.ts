@@ -8,7 +8,9 @@
 // A pane opens a saved session, a quick connection from the New terminal form (QL-02) or another
 // connection like an open pane (a split). QL-05: search (Ctrl+Shift+F), Ctrl+Shift+C / Ctrl+Shift+V,
 // right-click paste, and the font size, scrollback and copy-on-select settings, applied live. SS-11:
-// the whole buffer as text, and logging to a file.
+// the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if typed;
+// QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
+// command that finished, and the page decides whether to notify.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -17,6 +19,7 @@ import {
   api,
   errorCode,
   errorMessage,
+  type FinishedHow,
   type HostFacts,
   type HostKey,
   type KnownHost,
@@ -87,6 +90,12 @@ export interface PaneOptions {
 
 export const DEFAULT_PANE_OPTIONS: PaneOptions = { fontSize: 13, scrollback: 10000, copyOnSelect: true };
 
+/** QL-07: a command that ran long has ended in this pane. */
+export interface CommandFinished {
+  afterSecs: number;
+  how: FinishedHow;
+}
+
 const encoder = new TextEncoder();
 
 /**
@@ -130,6 +139,8 @@ export class PaneSession {
   private pending: Uint8Array[] = [];
   private writing = false;
   copyOnSelect = true;
+  /** QL-07: called when the core reports a long command that finished here. */
+  onCommandFinished: ((finished: CommandFinished) => void) | null = null;
 
   constructor(key: string, opener: PaneOpener, label: string, theme: ResolvedTheme, options: PaneOptions) {
     this.key = key;
@@ -208,6 +219,11 @@ export class PaneSession {
     return this.snapshot.sessionId;
   }
 
+  /** The shell is up, so typed or pasted text reaches it. */
+  get connected() {
+    return this.coreId !== null && this.snapshot.status.state === "connected";
+  }
+
   // ---- connection ----
 
   private onEvent = (event: TerminalEvent) => {
@@ -230,6 +246,9 @@ export class PaneSession {
       }
       case "host":
         this.update({ facts: event.facts });
+        break;
+      case "commandFinished":
+        this.onCommandFinished?.({ afterSecs: event.afterSecs, how: event.how });
         break;
     }
   };
@@ -315,6 +334,7 @@ export class PaneSession {
     if (this.coreId) void api.terminalClose(this.coreId);
     this.term.dispose();
     this.listeners.clear();
+    this.onCommandFinished = null;
   }
 
   // ---- input ----
@@ -366,6 +386,29 @@ export class PaneSession {
       return false;
     }
     return true;
+  }
+
+  /**
+   * BX-08: a command pasted as if typed, through xterm.js (bracketed when the shell asked for it, so the shell waits
+   * for Enter even when the command has several lines). See `sendCommand` in command-send.ts.
+   */
+  pasteCommand(command: string) {
+    this.term.paste(command);
+  }
+
+  /** BX-08 Shift+click: runs what was pasted. */
+  pressEnter() {
+    this.send(encoder.encode("\r"));
+  }
+
+  /**
+   * QL-06: the core types a vault password or passphrase into this terminal, then Enter, if it shows a password
+   * prompt (or `force`). The value never comes here.
+   */
+  async typeSecret(secretId: string, force: boolean) {
+    if (!this.coreId) throw new Error("This terminal has not connected yet.");
+    await api.terminalTypeSecret(this.coreId, secretId, force);
+    this.focus();
   }
 
   /**

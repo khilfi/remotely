@@ -59,6 +59,16 @@ impl Scrubber {
         }
     }
 
+    /// One more secret to replace from now on (QL-06: a vault password typed into a terminal).
+    pub fn add(&mut self, secret: &SecretString) {
+        let bytes = secret.expose().as_bytes();
+        if bytes.is_empty() || self.secrets.iter().any(|s| s.as_slice() == bytes) {
+            return;
+        }
+        self.secrets.push(Zeroizing::new(bytes.to_vec()));
+        self.secrets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    }
+
     /// How many times a secret was found so far.
     pub fn found(&self) -> usize {
         self.found

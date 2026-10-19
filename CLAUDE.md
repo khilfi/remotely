@@ -81,8 +81,11 @@ crates/core/          remotely-core: all app logic
                       tree (by folder, tag or label) for the Terminal page
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
-                      QL-03 host name and IP); quick.rs QL-02 quick connect; log.rs and output.rs SS-11 session logs
-                      and saved, printed or copied output (secrets scrubbed)
+                      QL-03 host name and IP, QL-06 a vault password typed at a prompt); quick.rs QL-02 quick connect;
+                      log.rs and output.rs SS-11 session logs and saved, printed or copied output (secrets scrubbed);
+                      activity.rs the cursor's line and QL-07 long-run detection (prompt back, or quiet)
+    snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
+                      library (library.rs), {{variables}} (variables.rs); classified by the bus's policy engine
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only)
     bulk.rs           BX-01 targets, BX-03 grouped results and diff, BX-05 exports (running is RemoteExec on the bus)
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
@@ -98,7 +101,8 @@ crates/core/          remotely-core: all app logic
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
-src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, clipboard read for right-click paste
+src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, command panel and notifications
+                      (command_panel.rs), clipboard read for right-click paste
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges)

@@ -171,6 +171,13 @@ pub enum CoreError {
     )]
     JumpHostUnsupported { jump: String },
 
+    /// QL-06: the terminal's last line is no password prompt, so a vault password was not typed: at a
+    /// shell prompt it would run as a command and land in the shell's history.
+    #[error(
+        "the terminal is not showing a password prompt, so the password was not typed: at a shell prompt it would land on the command line"
+    )]
+    NoPasswordPrompt,
+
     /// QL-03, QL-04: a DNS lookup or a reachability probe failed. Never holds a secret.
     #[error("{0}")]
     Network(String),
@@ -223,6 +230,7 @@ impl CoreError {
             CoreError::NoSudoPassword(_) => "no_sudo_password",
             CoreError::CancelledRemote => "cancelled_remote",
             CoreError::JumpHostUnsupported { .. } => "jump_host_unsupported",
+            CoreError::NoPasswordPrompt => "no_password_prompt",
             CoreError::Network(_) => "network",
             CoreError::NotImplemented(_) => "not_implemented",
         }

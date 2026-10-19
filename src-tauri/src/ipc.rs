@@ -872,7 +872,14 @@ pub async fn transfer_commit(state: State<'_, AppState>, request: TransferCommit
     let core = &state.core;
     Ok(core
         .transfer
-        .commit(&core.ctx, request, &core.sessions, &core.vault, &core.known_hosts)
+        .commit(
+            &core.ctx,
+            request,
+            &core.sessions,
+            &core.vault,
+            &core.known_hosts,
+            &core.snippets,
+        )
         .await?)
 }
 

@@ -1,7 +1,9 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`], [`terminal`] and [`clipboard`], never vmrun or SSH directly.
+//! reaches it only through the commands in [`ipc`], [`terminal`], [`command_panel`] and [`clipboard`], never vmrun or
+//! SSH directly.
 
 mod clipboard;
+mod command_panel;
 mod ipc;
 mod terminal;
 pub mod updater;
@@ -48,6 +50,8 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // AP-05: the audit export's save dialog, opened from Rust (no dialog permission for the UI).
         .plugin(tauri_plugin_dialog::init())
+        // QL-07: notifications, shown from Rust (no notification permission for the UI).
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // %LOCALAPPDATA%\com.remotely.desktop, its `.dev` sibling for a debug build, or
             // REMOTELY_DATA_DIR (see `app_directories_override`). Never the working directory, so nothing
@@ -249,6 +253,16 @@ pub fn run() {
             terminal::terminal_output_save,
             terminal::terminal_log_start,
             terminal::terminal_log_stop,
+            command_panel::favourites_list,
+            command_panel::favourite_add,
+            command_panel::favourite_update,
+            command_panel::favourite_delete,
+            command_panel::favourites_reorder,
+            command_panel::command_library,
+            command_panel::command_inspect,
+            command_panel::command_fill,
+            command_panel::terminal_type_secret,
+            command_panel::notify_command_finished,
             clipboard::clipboard_read_text,
         ])
         .build(context);

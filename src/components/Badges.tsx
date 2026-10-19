@@ -2,7 +2,16 @@
 
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import type { Environment, JobStatus, PowerState, SecretKind, SessionColor, Tier, ToolsState } from "@/lib/api";
+import type {
+  CommandRisk,
+  Environment,
+  JobStatus,
+  PowerState,
+  SecretKind,
+  SessionColor,
+  Tier,
+  ToolsState,
+} from "@/lib/api";
 
 const TIER_CLASS: Record<Tier, string> = {
   low: "border-tier-low/40 text-tier-low",
@@ -124,3 +133,32 @@ export const SECRET_KIND_LABEL: Record<SecretKind, string> = {
   privateKey: "Private key",
   passphrase: "Passphrase",
 };
+
+const RISK: Record<CommandRisk["action"], { label: string; className: string; hint: string }> = {
+  execReadOnly: {
+    label: "Read-only",
+    className: "text-muted-foreground",
+    hint: "Every part only reads, by the read-only list in Settings. A bulk run sends it without asking.",
+  },
+  execOther: {
+    label: "Changes",
+    className: "border-tier-medium/40 text-tier-medium",
+    hint: "Not on the read-only list, so it may change the host. A bulk run asks for a confirm first.",
+  },
+  execDangerous: {
+    label: "Dangerous",
+    className: "border-tier-high/50 bg-tier-high/10 text-tier-high",
+    hint: "Matches a dangerous-command rule. A bulk run needs the full approval.",
+  },
+};
+
+/** BX-08: what the policy engine makes of a command (BX-06), with the rules it matches in the tooltip. */
+export function RiskBadge({ risk, className }: { risk: CommandRisk; className?: string }) {
+  const { label, className: tone, hint } = RISK[risk.action];
+  const rules = risk.dangerous.length > 0 ? ` Rule: ${risk.dangerous.join(", ")}.` : "";
+  return (
+    <Badge variant="outline" className={cn(tone, className)} title={`${hint}${rules}`}>
+      {label}
+    </Badge>
+  );
+}

@@ -2,8 +2,8 @@
 //! laptops (and, later, to a teammate).
 //!
 //! * Export writes one file (see [`file`]) with the session folders, the sessions (with their tags,
-//!   environment labels and colours), the trusted host keys and, only when the user ticks it, the
-//!   vault's secrets with their values. The user chooses the passphrase; Argon2id turns it into the
+//!   environment labels and colours), the trusted host keys, the favourite commands (BX-08) and, only
+//!   when the user ticks it, the vault's secrets with their values. The user chooses the passphrase; Argon2id turns it into the
 //!   AES-256-GCM key. The vault's labels always go along (they are not secret), so on the other laptop
 //!   sessions find secrets with the same label even when the values stayed behind. Exporting secret
 //!   values asks for the vault password again, as Critical actions do (AP-06): otherwise anyone at an
@@ -11,10 +11,12 @@
 //! * Import opens the file with its passphrase, compares it with this laptop's library and shows a
 //!   preview: each session, known host and secret is new, already here, or in conflict with something
 //!   here (the same session changed, the same user, host and port, the same name; another key trusted
-//!   for the host; another value under the label). The user chooses per item: skip, replace, or keep
+//!   for the host; another value under the label; another command under the favourite's folder and
+//!   name). The user chooses per item: skip, replace, or keep
 //!   both. The opened file stays in the core under an id until it is imported or closed, so the commit
 //!   names rows only, and no path or secret comes back from the UI.
-//! * Every change goes through the module that owns the data (session library, vault, known hosts),
+//! * Every change goes through the module that owns the data (session library, vault, known hosts,
+//!   the command panel's favourites),
 //!   so it is checked and audited as if the user had made it there. Export and import themselves are
 //!   audited with counts and the file path, never the contents.
 //! * An export is never written into a Git working tree (the default folder is Documents), so it can't
@@ -37,8 +39,9 @@ use crate::error::{CoreError, Result};
 use crate::known_hosts::{address, HostKey, KnownHost, KnownHosts};
 use crate::locks;
 use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord};
+use crate::snippets::{FavouriteInput, Snippets};
 use crate::ssh_keys::PublicKeyInfo;
-use crate::store::{NewAuditEntry, Store};
+use crate::store::{FavouriteRow, NewAuditEntry, Store};
 use crate::vault::{
     check_master_password, KdfParams, SecretId, SecretKind, SecretMeta, SecretString, VaultService, VaultStatus,
     MAX_LABEL_LEN,
@@ -81,6 +84,21 @@ struct Payload {
     /// Every vault item's label and kind; values only when the user ticked "include secrets".
     #[serde(default)]
     secrets: Vec<SecretEntry>,
+    /// BX-08, in the order the panel shows them.
+    #[serde(default)]
+    favourites: Vec<FavouriteEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FavouriteEntry {
+    /// `""`: the top level.
+    #[serde(default)]
+    folder: String,
+    name: String,
+    command: String,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -198,6 +216,8 @@ pub struct ExportReport {
     pub secrets: usize,
     /// Their values are in the file too.
     pub secret_values: bool,
+    /// BX-08 favourite commands.
+    pub favourites: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +287,8 @@ pub struct TransferPreview {
     /// Secrets whose values are in the file.
     pub secrets: Vec<PreviewItem>,
     pub secret_values: bool,
+    /// BX-08 favourite commands.
+    pub favourites: Vec<PreviewItem>,
     pub warnings: Vec<String>,
 }
 
@@ -289,6 +311,8 @@ pub struct TransferCommit {
     pub known_hosts: Vec<ItemChoice>,
     #[serde(default)]
     pub secrets: Vec<ItemChoice>,
+    #[serde(default)]
+    pub favourites: Vec<ItemChoice>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -336,6 +360,7 @@ pub struct TransferReport {
     pub sessions: Counts,
     pub known_hosts: Counts,
     pub secrets: Counts,
+    pub favourites: Counts,
     pub folders_added: usize,
     /// Sessions imported without the password or key they used (not in the file, not here).
     pub without_credentials: usize,
@@ -352,6 +377,7 @@ struct Local {
     known_hosts: Vec<KnownHost>,
     secrets: Vec<SecretMeta>,
     vault: VaultStatus,
+    favourites: Vec<FavouriteRow>,
 }
 
 impl Local {
@@ -365,6 +391,7 @@ impl Local {
             known_hosts: store.list_known_hosts(ctx).await?,
             secrets: vault.list(ctx).await?,
             vault: vault.info().status,
+            favourites: store.list_favourites(ctx).await?,
         })
     }
 
@@ -574,6 +601,61 @@ fn plan_known_hosts(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
         .collect()
 }
 
+/// BX-08: a favourite matches the one here with the same folder and name (any letter case).
+fn plan_favourites(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
+    payload
+        .favourites
+        .iter()
+        .enumerate()
+        .map(|(index, f)| {
+            let here = local
+                .favourites
+                .iter()
+                .find(|l| l.folder.eq_ignore_ascii_case(f.folder.trim()) && l.name.eq_ignore_ascii_case(f.name.trim()));
+            match here {
+                None => RowPlan::new(index),
+                Some(l) if l.command == f.command && l.description == f.description => {
+                    RowPlan::same(index, l.id, "Already a favourite here.".to_owned())
+                }
+                Some(l) => {
+                    let what = if l.command == f.command {
+                        "another description"
+                    } else {
+                        "another command"
+                    };
+                    RowPlan::conflict(
+                        index,
+                        l.id,
+                        format!(
+                            "A favourite with this name in {} has {what}.",
+                            favourite_place(&l.folder)
+                        ),
+                        CONFLICT_CHOICES.to_vec(),
+                    )
+                }
+            }
+        })
+        .collect()
+}
+
+fn favourite_place(folder: &str) -> String {
+    if folder.is_empty() {
+        "the top level".to_owned()
+    } else {
+        format!("'{folder}'")
+    }
+}
+
+/// The command's first line, cut short, for the preview.
+fn command_preview(command: &str) -> String {
+    let first = command.lines().next().unwrap_or("");
+    let mut shown: String = first.chars().take(80).collect();
+    if shown.len() < first.len() || command.lines().count() > 1 {
+        shown.push('…');
+    }
+    shown
+}
+
 /// Secrets whose values are in the file. With the vault unlocked, a value under a label that is here
 /// already is compared with the one here; locked, it can't be.
 async fn plan_secrets(
@@ -728,6 +810,8 @@ struct Decided {
     session_actions: Vec<ItemAction>,
     host_rows: Vec<RowPlan<Uuid>>,
     host_actions: Vec<ItemAction>,
+    favourite_rows: Vec<RowPlan<Uuid>>,
+    favourite_actions: Vec<ItemAction>,
 }
 
 /// An opened export, kept until it is imported or closed. Its secrets are zeroized when it is dropped.
@@ -836,6 +920,7 @@ impl Transfer {
             Vec::new()
         };
         let keys = self.store.ssh_key_rows(ctx).await?;
+        let favourites = self.store.list_favourites(ctx).await?;
         let update_token = self.update_token(ctx).await?;
         let mut secrets = Vec::new();
         for meta in vault.list(ctx).await? {
@@ -906,6 +991,15 @@ impl Transfer {
                 })
                 .collect(),
             secrets,
+            favourites: favourites
+                .into_iter()
+                .map(|f| FavouriteEntry {
+                    folder: f.folder,
+                    name: f.name,
+                    command: f.command,
+                    description: f.description,
+                })
+                .collect(),
         };
         let report = ExportReport {
             path: path.display().to_string(),
@@ -914,6 +1008,7 @@ impl Transfer {
             known_hosts: payload.known_hosts.len(),
             secrets: payload.secrets.len(),
             secret_values: include_secrets,
+            favourites: payload.favourites.len(),
         };
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
         drop(payload);
@@ -927,10 +1022,11 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, to {}",
+            "{}, {}, {}, {secrets}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
+            plural(report.favourites, "favourite command"),
             report.path
         );
         self.audit(
@@ -1081,6 +1177,14 @@ impl Transfer {
                 item(row, e.label.clone(), detail, Vec::new())
             })
             .collect();
+        let favourites = plan_favourites(payload, &local)
+            .into_iter()
+            .map(|row| {
+                let f = &payload.favourites[row.index];
+                let detail = format!("in {}: {}", favourite_place(&f.folder), command_preview(&f.command));
+                item(row, f.name.clone(), detail, Vec::new())
+            })
+            .collect();
 
         let secret_values = payload.secrets.iter().any(|s| s.value.is_some());
         let mut warnings = Vec::new();
@@ -1115,6 +1219,7 @@ impl Transfer {
             known_hosts,
             secrets,
             secret_values,
+            favourites,
             warnings,
         })
     }
@@ -1129,6 +1234,7 @@ impl Transfer {
         library: &SessionLibrary,
         vault: &VaultService,
         known_hosts: &KnownHosts,
+        snippets: &Snippets,
     ) -> Result<TransferReport> {
         let opened = {
             let mut slot = locks::lock(&self.opened);
@@ -1162,6 +1268,8 @@ impl Transfer {
             session_actions,
             host_rows,
             host_actions,
+            favourite_rows,
+            favourite_actions,
         } = decided;
         let mut report = TransferReport::default();
 
@@ -1316,13 +1424,56 @@ impl Transfer {
             }
         }
 
+        // 5. Favourite commands (BX-08), each saved and audited by the command panel's module.
+        for (row, action) in favourite_rows.iter().zip(&favourite_actions) {
+            let f = &payload.favourites[row.index];
+            let mut input = FavouriteInput {
+                folder: Some(f.folder.clone()).filter(|folder| !folder.trim().is_empty()),
+                name: f.name.clone(),
+                command: f.command.clone(),
+                description: f.description.clone(),
+            };
+            let result = match (action, row.local) {
+                (ItemAction::Skip, _) => {
+                    report.favourites.count(*action);
+                    continue;
+                }
+                (ItemAction::Replace, Some(id)) => snippets.update(ctx, id, input).await,
+                (ItemAction::KeepBoth, _) => {
+                    let names: HashSet<String> = snippets
+                        .favourites(ctx)
+                        .await?
+                        .iter()
+                        .filter(|here| {
+                            here.folder
+                                .as_deref()
+                                .unwrap_or("")
+                                .eq_ignore_ascii_case(f.folder.trim())
+                        })
+                        .map(|here| here.name.to_lowercase())
+                        .collect();
+                    input.name = free_name(&f.name, &names, crate::snippets::MAX_NAME);
+                    snippets.add(ctx, input).await
+                }
+                _ => snippets.add(ctx, input).await,
+            };
+            match result {
+                Ok(_) => report.favourites.count(*action),
+                Err(err) => report.problems.push(ItemProblem {
+                    name: f.name.clone(),
+                    reason: err.to_string(),
+                }),
+            }
+        }
+
         let mut detail = format!(
-            "from {}: sessions {}; folders {} added; known host keys {}; vault secrets {}",
+            "from {}: sessions {}; folders {} added; known host keys {}; vault secrets {}; favourite commands {}",
             path.display(),
             report.sessions.describe(),
             report.folders_added,
             report.known_hosts.describe(),
-            report.secrets.describe()
+            report.secrets.describe(),
+            report.favourites.describe()
         );
         if report.without_credentials > 0 {
             detail.push_str(&format!(
@@ -1374,6 +1525,12 @@ impl Transfer {
             let k = &payload.known_hosts[row.index];
             host_actions.push(row.action(&host_choices, &address(&k.host, k.port))?);
         }
+        let favourite_rows = plan_favourites(payload, &local);
+        let favourite_choices = chosen(&request.favourites);
+        let mut favourite_actions = Vec::with_capacity(favourite_rows.len());
+        for row in &favourite_rows {
+            favourite_actions.push(row.action(&favourite_choices, &payload.favourites[row.index].name)?);
+        }
         if secret_actions.iter().any(|a| *a != ItemAction::Skip) {
             match local.vault {
                 VaultStatus::Unlocked => {}
@@ -1389,6 +1546,8 @@ impl Transfer {
             session_actions,
             host_rows,
             host_actions,
+            favourite_rows,
+            favourite_actions,
         })
     }
 

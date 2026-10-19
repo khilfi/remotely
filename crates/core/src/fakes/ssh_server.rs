@@ -5,8 +5,10 @@
 //! cuts the TCP connections the way a network failure would (no SSH goodbye), and
 //! [`TestSshServer::freeze_connections`] silently swallows their traffic, so only keep-alives can tell
 //! the connection is dead. The shell is a toy that echoes what is typed and understands a few
-//! commands (`exit [code]`, `whoami`, `split-utf8`, `echo <text>`, and for trying the app by hand,
-//! `drop-connection` and `change-host-key`). The server logs what clients ask for
+//! commands (`exit [code]`, `whoami`, `split-utf8`, `echo <text>`, `sudo <command>` (asks for the
+//! password without echoing it, as set by [`TestSshServer::with_sudo`]), `sleep <seconds>` (the prompt
+//! comes back after that long), `work <seconds>` (prints a line every 100 ms that long, then stops
+//! without a prompt), and for trying the app by hand, `drop-connection` and `change-host-key`). The server logs what clients ask for
 //! (`pty xterm-256color 80x24`, `resize 120x40`, `shell`, `line whoami`, `exec uptime`) for tests to
 //! check; it never logs what arrives on stdin.
 //!
@@ -323,6 +325,7 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             state: Arc::clone(&state),
             user: String::new(),
             first_factor: false,
+            asking: HashMap::new(),
             lines: HashMap::new(),
             execs: HashMap::new(),
         };
@@ -369,6 +372,9 @@ struct ServerHandler {
     lines: HashMap<ChannelId, Vec<u8>>,
     /// Exec channels: the command, and stdin until the client ends it.
     execs: HashMap<ChannelId, (String, Vec<u8>)>,
+    /// Shell channels where `sudo` waits for its password: what was typed so far (not echoed), and
+    /// the tries left.
+    asking: HashMap<ChannelId, (Vec<u8>, u8)>,
 }
 
 impl ServerHandler {
@@ -410,6 +416,44 @@ impl ServerHandler {
             Some("echo") => {
                 let rest: Vec<&str> = words.collect();
                 session.data(channel, format!("{}\r\n", rest.join(" ")).into_bytes())?;
+            }
+            // QL-06: like sudo at a terminal, the password is not echoed.
+            Some("sudo") => {
+                let mode = locks::lock(&self.state.sudo).clone();
+                match mode {
+                    SudoMode::Missing => session.data(channel, b"sudo: command not found\r\n".to_vec())?,
+                    SudoMode::NoPassword => session.data(channel, b"ok\r\n".to_vec())?,
+                    SudoMode::Password(_) | SudoMode::EchoesPassword(_) => {
+                        self.asking.insert(channel, (Vec::new(), 3));
+                        return session.data(channel, format!("[sudo] password for {}: ", self.user).into_bytes());
+                    }
+                }
+            }
+            // QL-07: a long command; the prompt comes back when it is done.
+            Some("sleep") => {
+                let secs: f64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(1.0);
+                let handle = session.handle();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs_f64(secs.max(0.0))).await;
+                    let _ = handle.data(channel, b"$ ".to_vec()).await;
+                });
+                return Ok(());
+            }
+            // QL-07: output for a while, then silence and no prompt.
+            Some("work") => {
+                let secs: f64 = words.next().and_then(|w| w.parse().ok()).unwrap_or(1.0);
+                let handle = session.handle();
+                tokio::spawn(async move {
+                    let until = std::time::Instant::now() + Duration::from_secs_f64(secs.max(0.0));
+                    let mut step = 1;
+                    while std::time::Instant::now() < until {
+                        let _ = handle.data(channel, format!("step {step}\r\n").into_bytes()).await;
+                        step += 1;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    let _ = handle.data(channel, b"done, waiting\r\n".to_vec()).await;
+                });
+                return Ok(());
             }
             // For trying the app by hand: a network failure, a moment later so this reply goes out.
             Some("drop-connection") => {
@@ -615,7 +659,9 @@ impl server::Handler for ServerHandler {
             return Ok(());
         }
         for &byte in data {
-            if byte == b'\r' || byte == b'\n' {
+            if self.asking.contains_key(&channel) {
+                self.sudo_byte(channel, byte, session)?;
+            } else if byte == b'\r' || byte == b'\n' {
                 session.data(channel, b"\r\n".to_vec())?;
                 let line = self.lines.get_mut(&channel).map(std::mem::take).unwrap_or_default();
                 self.run_line(channel, &String::from_utf8_lossy(&line), session)?;
@@ -625,6 +671,49 @@ impl server::Handler for ServerHandler {
             }
         }
         Ok(())
+    }
+}
+
+impl ServerHandler {
+    /// A byte typed at the interactive `sudo` password prompt: kept, not echoed, until Enter. The log
+    /// says whether it was right, never what it was.
+    fn sudo_byte(&mut self, channel: ChannelId, byte: u8, session: &mut Session) -> Result<(), russh::Error> {
+        let Some((typed, tries)) = self.asking.get_mut(&channel) else {
+            return Ok(());
+        };
+        if byte != b'\r' && byte != b'\n' {
+            typed.push(byte);
+            return Ok(());
+        }
+        let answer = String::from_utf8_lossy(&std::mem::take(typed)).into_owned();
+        *tries -= 1;
+        let tries_left = *tries;
+        let mode = locks::lock(&self.state.sudo).clone();
+        let (right, echo) = match &mode {
+            SudoMode::Password(p) => (*p == answer, false),
+            SudoMode::EchoesPassword(p) => (*p == answer, true),
+            _ => (false, false),
+        };
+        session.data(channel, b"\r\n".to_vec())?;
+        self.state
+            .note(format!("sudo {} {}", self.user, if right { "ok" } else { "refused" }));
+        if right {
+            self.asking.remove(&channel);
+            let reply = if echo {
+                format!("ok {answer}\r\n$ ")
+            } else {
+                "ok\r\n$ ".to_owned()
+            };
+            return session.data(channel, reply.into_bytes());
+        }
+        if tries_left == 0 {
+            self.asking.remove(&channel);
+            return session.data(channel, b"sudo: 3 incorrect password attempts\r\n$ ".to_vec());
+        }
+        session.data(
+            channel,
+            format!("Sorry, try again.\r\n[sudo] password for {}: ", self.user).into_bytes(),
+        )
     }
 }
 

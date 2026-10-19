@@ -1,7 +1,7 @@
 // FD-07: import a Remotely export from another laptop. The core opens the file (chosen in a dialog it
 // opens) with the passphrase typed here and compares it with this library; this shows each session,
-// trusted host key and vault secret as new, already here or in conflict, and lets the user choose per
-// item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
+// trusted host key, vault secret and favourite command (BX-08) as new, already here or in conflict, and lets the
+// user choose per item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
 
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -50,7 +50,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Section = "sessions" | "knownHosts" | "secrets";
+type Section = "sessions" | "knownHosts" | "secrets" | "favourites";
 type Choices = Record<Section, Record<number, TransferAction>>;
 
 const ACTION_LABEL: Record<TransferAction, string> = {
@@ -70,11 +70,18 @@ const SECTIONS: { key: Section; title: string; empty: string }[] = [
   { key: "sessions", title: "Sessions", empty: "No sessions in the file." },
   { key: "knownHosts", title: "Trusted host keys", empty: "No host keys in the file." },
   { key: "secrets", title: "Vault secrets", empty: "" },
+  { key: "favourites", title: "Favourite commands", empty: "No favourite commands in the file." },
 ];
 
 function defaults(preview: TransferPreview): Choices {
   const of = (items: TransferItem[]) => Object.fromEntries(items.map((i) => [i.index, i.defaultAction]));
-  return { sessions: of(preview.sessions), knownHosts: of(preview.knownHosts), secrets: of(preview.secrets) };
+  return {
+    sessions: of(preview.sessions),
+    knownHosts: of(preview.knownHosts),
+    secrets: of(preview.secrets),
+    // Files from before BX-08 have none.
+    favourites: of(preview.favourites ?? []),
+  };
 }
 
 function counts(report: TransferReport) {
@@ -90,6 +97,7 @@ function counts(report: TransferReport) {
     part("Sessions", report.sessions),
     part("Host keys", report.knownHosts),
     part("Secrets", report.secrets),
+    part("Favourite commands", report.favourites),
     report.foldersAdded ? `Folders: ${report.foldersAdded} added` : null,
   ].filter(Boolean) as string[];
 }
@@ -98,7 +106,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
   const [file, setFile] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [preview, setPreview] = useState<TransferPreview | null>(null);
-  const [choices, setChoices] = useState<Choices>({ sessions: {}, knownHosts: {}, secrets: {} });
+  const [choices, setChoices] = useState<Choices>({ sessions: {}, knownHosts: {}, secrets: {}, favourites: {} });
   const [report, setReport] = useState<TransferReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -166,6 +174,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         sessions: list("sessions"),
         knownHosts: list("knownHosts"),
         secrets: list("secrets"),
+        favourites: list("favourites"),
       });
       setReport(done);
       onImported();
