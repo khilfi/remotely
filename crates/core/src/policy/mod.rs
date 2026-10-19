@@ -85,11 +85,15 @@ pub enum ActionKind {
     AppUpdate,
     /// Add a public key to hosts' `~/.ssh/authorized_keys` (SS-09): it grants a login.
     SshKeyPush,
+    /// Upload files into a folder on a terminal's host (SS-08), adding new files only.
+    FileUpload,
+    /// Upload files that replace files on the host (SS-08). Never below Medium: replacing asks.
+    FileReplace,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 18] = [
+    pub const ALL: [ActionKind; 20] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -107,6 +111,8 @@ impl ActionKind {
         ActionKind::ExecOther,
         ActionKind::ExecDangerous,
         ActionKind::SshKeyPush,
+        ActionKind::FileUpload,
+        ActionKind::FileReplace,
         ActionKind::AppUpdate,
     ];
 
@@ -131,6 +137,8 @@ impl ActionKind {
             ActionKind::ExecDangerous => "Run a dangerous command",
             ActionKind::AppUpdate => "Install an app update",
             ActionKind::SshKeyPush => "Add an SSH key to hosts",
+            ActionKind::FileUpload => "Upload files",
+            ActionKind::FileReplace => "Upload files that replace files on the host",
         }
     }
 }
@@ -188,6 +196,9 @@ pub struct PolicyRules {
     pub safety_snapshot_default: bool,
 }
 
+/// SS-08: replacing a file on a host always asks at least for a confirm.
+pub const MIN_REPLACE_TIER: Tier = Tier::Medium;
+
 /// AP-01: the editable numbers stay within these bounds.
 pub const MAX_BULK_THRESHOLD: usize = 1000;
 pub const MAX_COUNTDOWN_SECONDS: u32 = 300;
@@ -223,6 +234,15 @@ impl PolicyRules {
             let Some(rule) = self.tiers.get(&kind) else {
                 return invalid(kind.label(), "no tier set for this action".into());
             };
+            if kind == ActionKind::FileReplace && rule.single < MIN_REPLACE_TIER {
+                return invalid(
+                    kind.label(),
+                    format!(
+                        "replacing a file always asks first, so this can't be lower than {}",
+                        MIN_REPLACE_TIER.as_str()
+                    ),
+                );
+            }
             if rule.bulk < rule.single {
                 return invalid(
                     kind.label(),
@@ -414,6 +434,9 @@ impl Default for PolicyRules {
             (AppUpdate, TierRule::same(Medium)),
             // A key in authorized_keys lets its holder log in: a change like any other command.
             (SshKeyPush, TierRule::same(Medium)),
+            // SS-08: a new file in a folder the user can write to anyway; replacing one asks first.
+            (FileUpload, TierRule::same(Low)),
+            (FileReplace, TierRule::same(Medium)),
         ]);
         Self {
             tiers,
@@ -558,6 +581,9 @@ impl PolicyEngine {
                 ActionKind::ExecReadOnly if *unreliable => ActionKind::ExecOther,
                 kind => kind,
             },
+            // SS-08: replacing a file loses what was there; adding one does not.
+            Command::FileUpload { files, .. } if files.iter().any(|f| f.replace) => ActionKind::FileReplace,
+            Command::FileUpload { .. } => ActionKind::FileUpload,
         }
     }
 
@@ -679,7 +705,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::RemoteExec { .. }
         | Command::AppUpdate { .. }
         | Command::PushSshKey { .. }
-        | Command::TerminalLine { .. } => false,
+        | Command::TerminalLine { .. }
+        | Command::FileUpload { .. } => false,
     };
     on_vms && can_lose_state
 }

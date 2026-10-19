@@ -21,7 +21,9 @@
 //! * Safety snapshot before each VM's action when the approval asked for one (VM-05). One name per
 //!   job, so a single bulk revert undoes it; a VM whose safety snapshot fails is left untouched.
 //! * SS-10 MultiExec lines: the line's keys are already in each terminal; the job sends the Enter the
-//!   policy engine held back ([`TerminalKeys`]), to terminals that are still connected.
+//!   policy engine held back ([`TerminalActions`]), to terminals that are still connected.
+//! * SS-08 uploads: through the one open terminal, over its SFTP channel ([`TerminalActions::upload`]);
+//!   each file is audited as it lands, and the end of the job says what landed and what did not.
 //! * Every job and target is journaled in the store, and the audit log gets an entry when the job
 //!   starts and when it ends (NFR Audit, NFR Reliability).
 
@@ -52,7 +54,8 @@ use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
 use crate::snapshots::safety_snapshot_name;
 use crate::ssh_keys;
 use crate::store::{NewAuditEntry, NewJob, Store, TargetResult};
-use crate::terminal::TerminalKeys;
+use crate::terminal::files::UploadRun;
+use crate::terminal::TerminalActions;
 use crate::vault::{SecretId, SecretString, Vault};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -246,6 +249,8 @@ struct TargetOutcome {
     output: Option<CollectedOutput>,
     /// Why it counts as failed although it ran, e.g. "exit code 2".
     failure: Option<String>,
+    /// What the end of the job's audit entry says about this target (SS-08: the files uploaded).
+    note: Option<String>,
 }
 
 impl TargetOutcome {
@@ -255,6 +260,7 @@ impl TargetOutcome {
             exit_code: None,
             output: None,
             failure: None,
+            note: None,
         }
     }
 }
@@ -336,8 +342,8 @@ pub struct JobRunner {
     vault: Arc<dyn Vault>,
     /// SS-05: the host keys bulk runs check against.
     known_hosts: Arc<KnownHosts>,
-    /// SS-10: the open terminals a MultiExec line's Enter goes to.
-    terminal_keys: Arc<dyn TerminalKeys>,
+    /// SS-10, SS-08: the open terminals a MultiExec line's Enter and an upload go to.
+    terminals: Arc<dyn TerminalActions>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -357,7 +363,7 @@ impl JobRunner {
         updater: Arc<dyn UpdaterAdapter>,
         vault: Arc<dyn Vault>,
         known_hosts: Arc<KnownHosts>,
-        terminal_keys: Arc<dyn TerminalKeys>,
+        terminals: Arc<dyn TerminalActions>,
         limits: JobLimits,
     ) -> Arc<Self> {
         // Room for a 200-host bulk run's events (NFR Scale) without the UI lagging behind.
@@ -369,7 +375,7 @@ impl JobRunner {
             updater,
             vault,
             known_hosts,
-            terminal_keys,
+            terminals,
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -581,7 +587,7 @@ impl JobRunner {
                     _ = token.cancelled() => None,
                 };
                 if permit.is_none() || token.is_cancelled() {
-                    return (target, Err(None), 0, None);
+                    return (target, Err(None), 0, None, None);
                 }
                 let key = target.target.key();
                 if let Err(err) = this.store.set_target_running(id, &key).await {
@@ -596,16 +602,18 @@ impl JobRunner {
                 let mut safety_taken = None;
                 if let (Some(name), TargetRef::Vm { vmx_path }) = (&safety_name, &target.target) {
                     if let Err(err) = this.take_safety_snapshot(Path::new(vmx_path), name).await {
-                        return (target, Err(Some(err)), started.elapsed().as_millis() as u64, None);
+                        return (target, Err(Some(err)), started.elapsed().as_millis() as u64, None, None);
                     }
                     safety_taken = Some(name.to_string());
                 }
-                let outcome = this.execute(id, &spec, &target, &token).await;
+                let mut outcome = this.execute(id, &spec, &target, &token).await;
+                let note = outcome.as_mut().ok().and_then(|o| o.note.take());
                 (
                     target,
                     outcome.map_err(Some),
                     started.elapsed().as_millis() as u64,
                     safety_taken,
+                    note,
                 )
             });
         }
@@ -614,8 +622,9 @@ impl JobRunner {
         let mut still_running = Vec::new();
         let mut cancelled_in_flight = Vec::new();
         let mut safety_snapshots = 0usize;
+        let mut notes = Vec::new();
         while let Some(joined) = tasks.join_next().await {
-            let (target, outcome, duration_ms, safety_snapshot) = match joined {
+            let (target, outcome, duration_ms, safety_snapshot, note) = match joined {
                 Ok(v) => v,
                 Err(err) => {
                     tracing::error!(%id, error = %err, "target task panicked");
@@ -650,6 +659,9 @@ impl JobRunner {
                 }
                 Err(Some(err)) => Finished::failed(&err),
             };
+            if let Some(note) = note {
+                notes.push(note);
+            }
             match done.status {
                 TargetStatus::Succeeded => succeeded += 1,
                 TargetStatus::Cancelled => cancelled += 1,
@@ -704,6 +716,9 @@ impl JobRunner {
         let mut detail = format!("{succeeded} succeeded, {failed} failed, {cancelled} cancelled");
         if let (Some(name), true) = (&safety_name, safety_snapshots > 0) {
             detail.push_str(&format!("; safety snapshot '{name}' taken on {safety_snapshots} VM(s)"));
+        }
+        for note in &notes {
+            detail.push_str(&format!("; {note}"));
         }
         if !cancelled_in_flight.is_empty() {
             let what = if matches!(spec.command, Command::RemoteExec { .. } | Command::PushSshKey { .. }) {
@@ -830,8 +845,30 @@ impl JobRunner {
                     return Err(CoreError::Cancelled);
                 }
                 // SS-10: the held Enter (and the rest of a paste of several lines).
-                self.terminal_keys.send(*terminal_id, keys.as_bytes()).await?;
+                self.terminals.send(*terminal_id, keys.as_bytes()).await?;
                 Ok(TargetOutcome::done())
+            }
+            (Command::FileUpload { folder, files, .. }, TargetRef::Terminal { terminal_id, .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let run = UploadRun {
+                    ctx: spec.ctx,
+                    job_id,
+                    tier: spec.decision.tier,
+                    target,
+                    terminal_id: *terminal_id,
+                    folder,
+                    files,
+                };
+                let report = self.terminals.upload(run, token).await?;
+                Ok(TargetOutcome {
+                    ok: report.failed.is_empty(),
+                    exit_code: None,
+                    output: None,
+                    failure: report.failure(),
+                    note: Some(report.summary(folder)),
+                })
             }
             (command, other) => Err(CoreError::WrongTargetKind {
                 action: command.summary(1),
@@ -918,6 +955,7 @@ impl JobRunner {
             exit_code: result.exit_code.map(i64::from),
             output: Some(result.output),
             failure,
+            note: None,
         })
     }
 
@@ -1042,6 +1080,8 @@ impl JobRunner {
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
+            // SS-08: one terminal, its files one after another.
+            Command::FileUpload { .. } => 1,
         };
         n.max(1)
     }
@@ -1101,6 +1141,7 @@ fn safety_verb(command: &Command) -> &'static str {
         },
         Command::VmProtect { .. } => "protect",
         Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::TerminalLine { .. } => "command",
+        Command::FileUpload { .. } => "upload",
         Command::AppUpdate { .. } => "update",
     }
 }

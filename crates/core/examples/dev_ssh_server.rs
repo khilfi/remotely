@@ -17,7 +17,11 @@
 //! last of 3 or more servers has another release, so the results show two groups), `seq <n>`,
 //! `sleep <s>`, `exit <code>`, and any of them with sudo. Each server also serves an Ubuntu guest's
 //! /proc files and `df`, with counters that move every 5 seconds, so watching it on the dashboard shows
-//! moving charts. Nothing it prints is a real credential; it all goes away when it stops.
+//! moving charts. For file transfer (SS-08): SFTP serves a temp folder (printed at start, deleted when it
+//! stops), with a few files in /home/alice and /srv/www; /etc, /root and /usr refuse uploads like folders
+//! alice may not write to. The login shell counts as bash, so the terminal sets up its folder hook: `cd <dir>`
+//! and `pwd` move the shell, and the "Files here" drawer follows. Nothing it prints is a real credential;
+//! it all goes away when it stops.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -26,6 +30,21 @@ use std::time::Duration;
 
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::metrics::procfs::samples;
+
+/// SS-08: a log file of a few hundred KB, so a download shows its progress.
+fn dev_log() -> Vec<u8> {
+    (0..8000)
+        .map(|i| {
+            format!(
+                "2026-10-19T10:{:02}:{:02}Z info request {i} served in {} ms\n",
+                i / 60 % 60,
+                i % 60,
+                i % 97
+            )
+        })
+        .collect::<String>()
+        .into_bytes()
+}
 
 /// MO-02: the guest's /proc files as of `round`.
 fn serve_proc(server: &TestSshServer, round: u64) {
@@ -57,12 +76,18 @@ async fn main() {
                 &format!("NAME=\"Ubuntu\"\nVERSION_ID=\"{release}\"\n"),
             )
             .with_program("df", &samples::ubuntu(0).df)
-            .with_banner("Remotely dev SSH server: a toy shell, not a real host.\n");
+            .with_banner("Remotely dev SSH server: a toy shell, not a real host.\n")
+            // SS-08: a bash login (the folder hook), and files to download.
+            .with_login_shell("bash")
+            .with_sftp_file("/home/alice/notes.txt", b"Remotely dev server: a file to download.\n")
+            .with_sftp_file("/home/alice/logs/app.log", &dev_log())
+            .with_sftp_file("/srv/www/index.html", b"<h1>It works</h1>\n");
         serve_proc(&server, 0);
         println!(
-            "Listening on 127.0.0.1:{}  host key ssh-ed25519 {}",
+            "Listening on 127.0.0.1:{}  host key ssh-ed25519 {}  SFTP folder {}",
             server.port(),
-            server.host_key_fingerprint()
+            server.host_key_fingerprint(),
+            server.sftp_root().display()
         );
         servers.push(server);
     }
@@ -72,6 +97,7 @@ async fn main() {
     println!("  and for P5: sudo <command> (no echo), sleep <s> (prompt back after), work <s> (output, then quiet)");
     println!("  and for MultiExec: top (full screen, q quits), Ctrl+C drops the line");
     println!("Compare output commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>, exit <code>");
+    println!("Files: cd <dir> and pwd move the shell (the drawer follows); /etc refuses uploads");
     println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");
     println!("Stop with Ctrl+C.");
     // Runs until the process is stopped; the servers go with it.

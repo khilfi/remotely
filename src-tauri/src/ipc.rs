@@ -168,6 +168,14 @@ pub async fn filter_delete(state: State<'_, AppState>, id: String) -> IpcResult<
 /// The one way in for changes: command bus -> policy engine -> (approval) -> job runner.
 #[tauri::command]
 pub async fn command_submit(state: State<'_, AppState>, command: Command) -> IpcResult<SubmitOutcome> {
+    // SS-08: an upload names files on this PC, so only `files_upload` builds one, from files picked in a
+    // dialog or dropped on the window; never from paths the UI sends.
+    if matches!(command, Command::FileUpload { .. }) {
+        return Err(IpcError::new(
+            "invalid_input",
+            "Uploads start from a terminal: its upload button, or files dropped on it.",
+        ));
+    }
     let core = &state.core;
     Ok(core.bus.submit(&core.ctx, command).await?)
 }

@@ -23,8 +23,8 @@ use crate::adapters::exec_output::OutputCollector;
 use crate::adapters::host_counters::{DiskSpace, HostCounters, HostTotals, SystemCpuTimes, VmProcess};
 use crate::adapters::network::{ip_literal, NetworkAdapter};
 use crate::adapters::remote::{
-    ConnectRequest, Credentials, ExecRequest, ExecResult, ExecSession, Prompter, RemoteAdapter, ShellEnd, ShellHandle,
-    ShellInput, ShellOutput, ShellRequest,
+    ConnectRequest, Credentials, EntryKind, ExecRequest, ExecResult, ExecSession, PromptShell, Prompter, RemoteAdapter,
+    RemoteEntry, RemoteFiles, RemoteRead, RemoteWrite, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
 };
 use crate::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
@@ -453,9 +453,21 @@ pub struct FakeRemote {
     generation: std::sync::Arc<AtomicUsize>,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
+    /// SS-08: the files every terminal on this fake reaches.
+    files: FakeFiles,
 }
 
 impl FakeRemote {
+    /// SS-08: the files its terminals transfer to and from (shared: changes show in `files()`).
+    pub fn with_files(mut self, files: FakeFiles) -> Self {
+        self.files = files;
+        self
+    }
+
+    pub fn files(&self) -> FakeFiles {
+        self.files.clone()
+    }
+
     pub fn with_exit_code(mut self, host: &str, code: u32) -> Self {
         self.exit_codes.insert(host.to_owned(), code);
         self
@@ -541,7 +553,7 @@ impl RemoteAdapter for FakeRemote {
 
     async fn open_shell(&self, request: ShellRequest<'_>, _: &mut dyn Prompter) -> Result<ShellHandle> {
         locks::lock(&self.calls).push(format!("{}: shell", request.session.host));
-        Ok(loopback_shell())
+        Ok(loopback_shell_with(self.files.clone(), None))
     }
 
     async fn connect(&self, request: ConnectRequest<'_>) -> Result<Box<dyn ExecSession>> {
@@ -610,6 +622,11 @@ impl ExecSession for FakeSession {
 /// A shell that echoes what is typed and answers each line with `not connected: <line>`; `exit`
 /// ends it.
 pub fn loopback_shell() -> ShellHandle {
+    loopback_shell_with(FakeFiles::default(), None)
+}
+
+/// [`loopback_shell`] with these files (SS-08) and what the shell probe says it is.
+pub fn loopback_shell_with(files: FakeFiles, shell: Option<PromptShell>) -> ShellHandle {
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<ShellInput>(64);
     let (output_tx, output_rx) = tokio::sync::mpsc::channel::<ShellOutput>(64);
     tokio::spawn(async move {
@@ -648,11 +665,259 @@ pub fn loopback_shell() -> ShellHandle {
     });
     let (hostname_tx, hostname_rx) = tokio::sync::oneshot::channel();
     let _ = hostname_tx.send(None);
+    let (shell_tx, shell_rx) = tokio::sync::oneshot::channel();
+    let _ = shell_tx.send(shell);
     ShellHandle {
         input: input_tx,
         output: output_rx,
         peer_ip: None,
         hostname: hostname_rx,
+        shell: shell_rx,
+        files: std::sync::Arc::new(files),
+    }
+}
+
+/// SS-08: a host's files in memory, for terminals on [`FakeRemote`]: folders and files by absolute
+/// path, folders the user can't write to (`/etc`, `/root` and `/usr` unless more are added), and a
+/// pause per chunk or a failure part way through, so tests can watch progress, cancel and retry.
+/// Clones share the same files.
+#[derive(Clone)]
+pub struct FakeFiles {
+    inner: std::sync::Arc<Mutex<FakeFs>>,
+}
+
+struct FakeFs {
+    user: String,
+    home: String,
+    dirs: HashSet<String>,
+    files: HashMap<String, Vec<u8>>,
+    protected: Vec<String>,
+    /// Each read and write waits this long.
+    delay: Duration,
+    /// The next write fails once this many bytes of it went through.
+    fail_after: Option<u64>,
+}
+
+impl Default for FakeFiles {
+    fn default() -> Self {
+        let dirs = ["/", "/home", "/home/alice", "/tmp", "/etc", "/root", "/usr", "/srv"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        Self {
+            inner: std::sync::Arc::new(Mutex::new(FakeFs {
+                user: "alice".into(),
+                home: "/home/alice".into(),
+                dirs,
+                files: HashMap::new(),
+                protected: vec!["/etc".into(), "/root".into(), "/usr".into()],
+                delay: Duration::ZERO,
+                fail_after: None,
+            })),
+        }
+    }
+}
+
+/// `/a/b` for `/a/b/c`; `/` for `/a`.
+fn fake_parent(path: &str) -> String {
+    match path.trim_end_matches('/').rsplit_once('/') {
+        Some(("", _)) | None => "/".to_owned(),
+        Some((parent, _)) => parent.to_owned(),
+    }
+}
+
+impl FakeFiles {
+    pub fn with_dir(self, path: &str) -> Self {
+        locks::lock(&self.inner).dirs.insert(path.to_owned());
+        self
+    }
+
+    pub fn with_file(self, path: &str, content: &[u8]) -> Self {
+        self.set_file(path, content);
+        self
+    }
+
+    pub fn set_file(&self, path: &str, content: &[u8]) {
+        locks::lock(&self.inner).files.insert(path.to_owned(), content.to_vec());
+    }
+
+    /// Writes into this folder (and below) are refused, like a folder the user may not write to.
+    pub fn protect(self, folder: &str) -> Self {
+        locks::lock(&self.inner).protected.push(folder.to_owned());
+        self
+    }
+
+    /// Each read and write of a chunk waits this long, so a transfer takes a while.
+    pub fn with_delay(self, delay: Duration) -> Self {
+        locks::lock(&self.inner).delay = delay;
+        self
+    }
+
+    /// The next write fails after this many bytes, as if the connection dropped; later ones work.
+    pub fn fail_next_write_after(&self, bytes: u64) {
+        locks::lock(&self.inner).fail_after = Some(bytes);
+    }
+
+    pub fn file(&self, path: &str) -> Option<Vec<u8>> {
+        locks::lock(&self.inner).files.get(path).cloned()
+    }
+
+    fn entry(fs: &FakeFs, path: &str) -> Option<RemoteEntry> {
+        let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path).to_owned();
+        if fs.dirs.contains(path) {
+            return Some(RemoteEntry {
+                name,
+                kind: EntryKind::Folder,
+                link: false,
+                size: 4096,
+                modified: Some(1_700_000_000),
+                mode: Some(0o755),
+            });
+        }
+        fs.files.get(path).map(|content| RemoteEntry {
+            name,
+            kind: EntryKind::File,
+            link: false,
+            size: content.len() as u64,
+            modified: Some(1_700_000_000),
+            mode: Some(0o644),
+        })
+    }
+}
+
+#[async_trait]
+impl RemoteFiles for FakeFiles {
+    async fn home(&self) -> Result<String> {
+        Ok(locks::lock(&self.inner).home.clone())
+    }
+
+    async fn list(&self, folder: &str) -> Result<Vec<RemoteEntry>> {
+        let fs = locks::lock(&self.inner);
+        if !fs.dirs.contains(folder) {
+            return Err(CoreError::RemoteNotFound {
+                path: folder.to_owned(),
+            });
+        }
+        let inside = |path: &&String| fake_parent(path) == folder && path.as_str() != folder;
+        let mut paths: Vec<&String> = fs
+            .dirs
+            .iter()
+            .filter(inside)
+            .chain(fs.files.keys().filter(inside))
+            .collect();
+        paths.sort();
+        Ok(paths.into_iter().filter_map(|path| Self::entry(&fs, path)).collect())
+    }
+
+    async fn stat(&self, path: &str) -> Result<Option<RemoteEntry>> {
+        Ok(Self::entry(&locks::lock(&self.inner), path))
+    }
+
+    async fn read(&self, path: &str) -> Result<Box<dyn RemoteRead>> {
+        let (content, delay) = {
+            let fs = locks::lock(&self.inner);
+            let content = fs
+                .files
+                .get(path)
+                .cloned()
+                .ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })?;
+            (content, fs.delay)
+        };
+        Ok(Box::new(FakeRead { content, at: 0, delay }))
+    }
+
+    async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
+        let fail_after = {
+            let mut fs = locks::lock(&self.inner);
+            let folder = fake_parent(path);
+            if fs
+                .protected
+                .iter()
+                .any(|p| folder == *p || folder.starts_with(&format!("{p}/")))
+            {
+                return Err(CoreError::RemotePermissionDenied {
+                    user: fs.user.clone(),
+                    what: "write to",
+                    path: path.to_owned(),
+                    advice: "",
+                });
+            }
+            if !fs.dirs.contains(&folder) {
+                return Err(CoreError::RemoteNotFound { path: folder });
+            }
+            if fs.files.contains_key(path) && !replace {
+                return Err(CoreError::RemoteFileExists { path: path.to_owned() });
+            }
+            fs.files.insert(path.to_owned(), Vec::new());
+            fs.fail_after.take()
+        };
+        Ok(Box::new(FakeWrite {
+            files: self.clone(),
+            path: path.to_owned(),
+            written: 0,
+            fail_after,
+        }))
+    }
+
+    async fn remove(&self, path: &str) -> Result<()> {
+        locks::lock(&self.inner)
+            .files
+            .remove(path)
+            .map(drop)
+            .ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })
+    }
+}
+
+struct FakeRead {
+    content: Vec<u8>,
+    at: usize,
+    delay: Duration,
+}
+
+#[async_trait]
+impl RemoteRead for FakeRead {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        let n = buf.len().min(self.content.len() - self.at);
+        buf[..n].copy_from_slice(&self.content[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+struct FakeWrite {
+    files: FakeFiles,
+    path: String,
+    written: u64,
+    fail_after: Option<u64>,
+}
+
+#[async_trait]
+impl RemoteWrite for FakeWrite {
+    async fn write_all(&mut self, data: &[u8]) -> Result<()> {
+        let delay = locks::lock(&self.files.inner).delay;
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if self
+            .fail_after
+            .is_some_and(|limit| self.written + data.len() as u64 > limit)
+        {
+            return Err(CoreError::Ssh("the connection was lost: the connection was cut".into()));
+        }
+        self.written += data.len() as u64;
+        locks::lock(&self.files.inner)
+            .files
+            .entry(self.path.clone())
+            .or_default()
+            .extend_from_slice(data);
+        Ok(())
+    }
+
+    async fn finish(self: Box<Self>) -> Result<()> {
+        Ok(())
     }
 }
 

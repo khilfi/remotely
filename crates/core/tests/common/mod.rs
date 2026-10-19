@@ -67,6 +67,12 @@ impl Setup {
         self
     }
 
+    /// Another fake remote adapter, e.g. a [`FakeRemote`] with files (SS-08).
+    pub fn with_remote(mut self, remote: Arc<dyn RemoteAdapter>) -> Self {
+        self.remote = remote;
+        self
+    }
+
     /// The real russh adapter, for tests against `fakes::ssh_server::TestSshServer` on 127.0.0.1.
     pub fn with_ssh(mut self) -> Self {
         self.remote = Arc::new(RusshAdapter::new());

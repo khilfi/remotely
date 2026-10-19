@@ -8,9 +8,11 @@ import {
   compareRunReason,
   connectedReason,
   diffReason,
+  downloadReason,
   multiExecIdleReason,
   multiExecReason,
   splitReason,
+  uploadReason,
 } from "./disabled-reasons.ts";
 
 const ready = {
@@ -108,4 +110,19 @@ test("comparing groups and connection actions say why they wait", () => {
   assert.equal(connectedReason({ open: false, connected: false }), "No terminal is open");
   assert.equal(connectedReason({ open: true, connected: false }), "This terminal has not connected yet");
   assert.equal(connectedReason({ open: true, connected: true }), null);
+});
+
+test("SS-08: uploads need a connected terminal", () => {
+  assert.match(uploadReason({ open: false, connected: false }) ?? "", /Open a terminal/);
+  assert.match(uploadReason({ open: true, connected: false }) ?? "", /not connected/);
+  assert.equal(uploadReason({ open: true, connected: true }), null);
+});
+
+test("SS-08: downloads take files, not folders", () => {
+  const file = { kind: "file" as const };
+  assert.match(downloadReason({ connected: false, picked: [file] }) ?? "", /not connected/);
+  assert.match(downloadReason({ connected: true, picked: [] }) ?? "", /Tick the files/);
+  assert.match(downloadReason({ connected: true, picked: [file, { kind: "folder" }] }) ?? "", /Folders aren't/);
+  assert.match(downloadReason({ connected: true, picked: [{ kind: "other" }] }) ?? "", /regular files/);
+  assert.equal(downloadReason({ connected: true, picked: [file, file] }), null);
 });

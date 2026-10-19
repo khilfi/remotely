@@ -182,6 +182,32 @@ pub enum CoreError {
     #[error("{0}")]
     Network(String),
 
+    /// SS-08: the host refused a file operation for the logged-in user. Transfers never use sudo.
+    #[error("{user} can't {what} {path} on the host (permission denied).{advice}")]
+    RemotePermissionDenied {
+        user: String,
+        /// "write to", "read", "open the folder".
+        what: &'static str,
+        path: String,
+        /// What to do instead, starting with a space; may be empty.
+        advice: &'static str,
+    },
+
+    /// SS-08: an upload that was not asked to replace found a file there.
+    #[error(
+        "{path} already exists on the host, so it was not replaced. Upload it again to choose whether to replace it"
+    )]
+    RemoteFileExists { path: String },
+
+    /// SS-08: nothing at that path on the host.
+    #[error("{path} doesn't exist on the host")]
+    RemoteNotFound { path: String },
+
+    /// SS-08: SFTP failed: the host has no SFTP server, the channel closed, or the host reported an
+    /// error. Never holds a secret or file content.
+    #[error("{0}")]
+    Sftp(String),
+
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
 }
@@ -232,6 +258,10 @@ impl CoreError {
             CoreError::JumpHostUnsupported { .. } => "jump_host_unsupported",
             CoreError::NoPasswordPrompt => "no_password_prompt",
             CoreError::Network(_) => "network",
+            CoreError::RemotePermissionDenied { .. } => "permission_denied",
+            CoreError::RemoteFileExists { .. } => "file_exists",
+            CoreError::RemoteNotFound { .. } => "not_found",
+            CoreError::Sftp(_) => "sftp",
             CoreError::NotImplemented(_) => "not_implemented",
         }
     }

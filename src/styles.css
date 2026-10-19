@@ -753,3 +753,23 @@ input[type="password"]::-ms-reveal {
   color: var(--foreground);
   font-variant-numeric: tabular-nums;
 }
+
+/* SS-08: files dragged over a terminal: the pane under them says where they would go (set from TerminalPage). */
+.pane-drop[data-drop]::after {
+  content: attr(data-drop);
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  text-align: center;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--foreground);
+  background: color-mix(in oklab, var(--primary) 14%, transparent);
+  border: 2px dashed var(--primary);
+  border-radius: var(--radius-md);
+  pointer-events: none;
+}
