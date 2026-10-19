@@ -18,6 +18,7 @@ use super::{split_address, text, Candidate, CandidateAuth, Parsed, Skipped};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::locks;
+use crate::presentation::Change;
 use crate::sessions::{SessionAuth, SessionInput, SessionLibrary, SessionRecord, MAX_SESSION_NAME};
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, VaultService, VaultStatus, MAX_SECRET_BYTES};
@@ -347,6 +348,7 @@ impl Importer {
         sessions: &SessionLibrary,
         vault: &VaultService,
     ) -> Result<ImportReport> {
+        self.store.read_only().check(Change::Import)?;
         let (source, rows) = {
             let kept = locks::lock(&self.previews);
             let stored = kept.iter().find(|p| p.id == request.preview_id).ok_or_else(|| {

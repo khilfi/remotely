@@ -3,8 +3,34 @@
 // The UI talks to the Rust core only through these; it never runs vmrun or SSH itself.
 // Types mirror the serde shapes in crates/core.
 
-import { Channel, invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Channel, invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
+import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tauri-apps/api/event";
+import { learnFields, masker } from "@/lib/presentation";
+
+// FD-03: every answer and event passes the host, IP and user fields it holds to the presentation masker, so those
+// values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored.
+async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+  const answer = await tauriInvoke<T>(cmd, args, options);
+  learnFields(masker, answer);
+  return answer;
+}
+
+function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+  return tauriListen<T>(event, (e) => {
+    learnFields(masker, e.payload);
+    handler(e);
+  });
+}
+
+/** A terminal's events, learnt like the answers above (QL-03's host name and IP arrive this way). */
+function eventChannel(onEvent: (event: TerminalEvent) => void): Channel<TerminalEvent> {
+  const events = new Channel<TerminalEvent>();
+  events.onmessage = (event) => {
+    learnFields(masker, event);
+    onEvent(event);
+  };
+  return events;
+}
 
 export type Environment = "none" | "lab" | "staging" | "prod";
 export type Tier = "low" | "medium" | "high" | "critical";
@@ -520,6 +546,12 @@ export interface AuditExport {
   entries: number;
   /** Rows where something that looked like a secret was replaced by [redacted]. */
   redacted: number;
+}
+
+/** FD-03: presentation mode and its read-only lock, as saved. The lock applies while presenting. */
+export interface Presentation {
+  enabled: boolean;
+  readOnly: boolean;
 }
 
 export interface Settings {
@@ -1603,6 +1635,11 @@ export const api = {
     listen<JobEvent>("job://event", (e) => handler(e.payload)),
 
   settings: () => invoke<Settings>("settings_get"),
+  /** FD-03: read before anything shows, so the app starts presenting if it was. */
+  presentation: () => invoke<Presentation>("presentation_get"),
+  /** FD-03: audited per change; never refused by the lock. */
+  setPresentation: (p: Presentation) =>
+    invoke<Presentation>("presentation_set", { enabled: p.enabled, readOnly: p.readOnly }),
   /** null or "" goes back to finding vmrun.exe automatically. */
   setVmrunPath: (path: string | null) => invoke<Settings>("settings_set_vmrun_path", { path }),
   setUpdateChecks: (enabled: boolean) => invoke<Settings>("settings_set_update_checks", { enabled }),
@@ -1770,8 +1807,7 @@ export const api = {
   ) => {
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (data) => onOutput(new Uint8Array(data));
-    const events = new Channel<TerminalEvent>();
-    events.onmessage = onEvent;
+    const events = eventChannel(onEvent);
     return invoke<string>("terminal_open", { sessionId, cols, rows, onOutput: output, onEvent: events });
   },
   /** Keystrokes and pastes as raw bytes. */
@@ -1785,8 +1821,7 @@ export const api = {
   ) => {
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (data) => onOutput(new Uint8Array(data));
-    const events = new Channel<TerminalEvent>();
-    events.onmessage = onEvent;
+    const events = eventChannel(onEvent);
     return invoke<{ id: string; session: SessionRecord | null }>("terminal_quick_connect", {
       request,
       cols,
@@ -1805,8 +1840,7 @@ export const api = {
   ) => {
     const output = new Channel<ArrayBuffer>();
     output.onmessage = (data) => onOutput(new Uint8Array(data));
-    const events = new Channel<TerminalEvent>();
-    events.onmessage = onEvent;
+    const events = eventChannel(onEvent);
     return invoke<string>("terminal_open_like", { id, cols, rows, onOutput: output, onEvent: events });
   },
   terminalWrite: (id: string, data: Uint8Array) =>

@@ -30,6 +30,7 @@ use crate::adapters::network::{ip_literal, NetworkAdapter};
 use crate::domain::{Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::locks;
+use crate::presentation::Change;
 use crate::sessions::SessionRecord;
 use crate::store::{NewAuditEntry, Store, VmRecord};
 
@@ -436,6 +437,7 @@ impl VmLinks {
     /// The user's choice: links the session to `vm_id`, or removes its link with `None`. Auto-linking
     /// never changes it afterwards (until the session's host changes). Audited.
     pub async fn link(&self, ctx: &Context, session_id: Uuid, vm_id: Option<String>) -> Result<SessionRecord> {
+        self.store.read_only().check(Change::VmLinks)?;
         let _pass = self.pass.lock().await;
         let session = self.session(ctx, session_id).await?;
         let vm = match vm_id.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
@@ -509,6 +511,7 @@ impl VmLinks {
 
     /// The user keeps an automatic link: it becomes manual, so auto-linking never changes it.
     pub async fn confirm(&self, ctx: &Context, session_id: Uuid) -> Result<SessionRecord> {
+        self.store.read_only().check(Change::VmLinks)?;
         let session = self.session(ctx, session_id).await?;
         match (&session.vm_id, session.vm_link) {
             (Some(id), Some(VmLink::Auto)) => self.link(ctx, session_id, Some(id.clone())).await,

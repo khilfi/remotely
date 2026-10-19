@@ -9,6 +9,7 @@ use super::Store;
 use crate::domain::{now_rfc3339, Context};
 use crate::error::{CoreError, Result};
 use crate::inventory::VmFilter;
+use crate::presentation::Change;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +83,7 @@ impl Store {
 
     /// Adds the tag (created on first use, matched without regard to letter case) to each VM.
     pub async fn tag_vms(&self, ctx: &Context, vmx_paths: &[String], name: &str) -> Result<()> {
+        self.read_only().check(Change::VmLabels)?;
         let name = clean_name("tag", name, MAX_TAG_LEN)?;
         if vmx_paths.is_empty() {
             return Err(CoreError::NoTargets);
@@ -133,6 +135,7 @@ impl Store {
 
     /// Removes the tag from each VM. A tag left on nothing is deleted.
     pub async fn untag_vms(&self, ctx: &Context, vmx_paths: &[String], name: &str) -> Result<()> {
+        self.read_only().check(Change::VmLabels)?;
         let ws = ctx.workspace_id.to_string();
         let mut tx = self.pool.begin().await?;
         let tag_id: Option<String> = sqlx::query_scalar("SELECT id FROM tags WHERE workspace_id = ? AND name = ?")
@@ -165,6 +168,7 @@ impl Store {
 
     /// Deletes a tag from every VM.
     pub async fn delete_tag(&self, ctx: &Context, name: &str) -> Result<()> {
+        self.read_only().check(Change::VmLabels)?;
         sqlx::query("DELETE FROM tags WHERE workspace_id = ? AND name = ?")
             .bind(ctx.workspace_id.to_string())
             .bind(name.trim())
@@ -196,6 +200,7 @@ impl Store {
 
     /// Saves a VM filter under a name; saving under an existing name replaces it.
     pub async fn save_filter(&self, ctx: &Context, name: &str, filter: &VmFilter) -> Result<SavedFilter> {
+        self.read_only().check(Change::VmLabels)?;
         let name = clean_name("filter", name, MAX_FILTER_NAME_LEN)?;
         let now = now_rfc3339();
         sqlx::query(
@@ -222,6 +227,7 @@ impl Store {
     }
 
     pub async fn delete_saved_filter(&self, ctx: &Context, id: &str) -> Result<()> {
+        self.read_only().check(Change::VmLabels)?;
         sqlx::query("DELETE FROM saved_filters WHERE workspace_id = ? AND id = ?")
             .bind(ctx.workspace_id.to_string())
             .bind(id)

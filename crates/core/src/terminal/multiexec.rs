@@ -43,6 +43,7 @@ use crate::domain::{Context, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::jobs::{JobRunner, JobStatus};
 use crate::policy::Tier;
+use crate::presentation::Change;
 
 /// Keys that wait for a held line's Enter, at most. More are dropped (and the UI is told).
 pub const MAX_QUEUED_BYTES: usize = 64 * 1024;
@@ -378,6 +379,7 @@ impl MultiExec {
     /// Turns MultiExec on for these terminals, or changes them. A line being typed keeps going to the
     /// targets it started with that are still picked; ones picked meanwhile join at the next line.
     pub async fn set_targets(&self, targets: Vec<Uuid>) -> Result<MultiExecStatus> {
+        self.shared.bus.read_only().check(Change::MultiExec)?;
         let mut seen = HashSet::new();
         let targets: Vec<Uuid> = targets.into_iter().filter(|id| seen.insert(*id)).collect();
         let mut state = self.shared.state.lock().await;

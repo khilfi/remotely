@@ -110,6 +110,7 @@ export function ForwardsEditor({
                 className="h-8 w-32 font-mono text-xs"
                 spellCheck={false}
                 placeholder={defaultBind(f.kind)}
+                data-mask="host"
                 aria-label={`Port forward ${i + 1}: listen address`}
                 value={f.bindAddress}
                 disabled={disabled}
@@ -133,6 +134,7 @@ export function ForwardsEditor({
                     className="h-8 min-w-28 flex-1 font-mono text-xs"
                     spellCheck={false}
                     placeholder={f.kind === "remote" ? "127.0.0.1 (from this PC)" : "db01.example.com (from the host)"}
+                    data-mask="host"
                     aria-label={`Port forward ${i + 1}: where it leads`}
                     value={f.destHost}
                     disabled={disabled}

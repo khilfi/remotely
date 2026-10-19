@@ -18,6 +18,7 @@ use remotely_core::inventory::{RefreshReport, VmFilter};
 use remotely_core::jobs::JobLimits;
 use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHostUsage};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
+use remotely_core::presentation::Presentation;
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
@@ -437,6 +438,19 @@ pub async fn settings_set_bulk_parallel(state: State<'_, AppState>, limit: usize
 pub async fn settings_set_update_checks(state: State<'_, AppState>, enabled: bool) -> IpcResult<Settings> {
     state.core.set_update_checks(enabled).await?;
     settings(&state.core).await
+}
+
+/// FD-03: presentation mode and its read-only lock, as saved (the UI reads it before it shows anything).
+#[tauri::command]
+pub fn presentation_get(state: State<'_, AppState>) -> Presentation {
+    state.core.presentation.get()
+}
+
+/// FD-03: starts or stops presenting, or turns the read-only lock on or off. Audited per change. The UI asks for one
+/// confirm before turning either off; the lock never refuses this.
+#[tauri::command]
+pub async fn presentation_set(state: State<'_, AppState>, enabled: bool, read_only: bool) -> IpcResult<Presentation> {
+    Ok(state.core.presentation.set(Presentation { enabled, read_only }).await?)
 }
 
 /// FD-14: asks GitHub Releases for a newer signed version, or says why it did not ask (checks off,

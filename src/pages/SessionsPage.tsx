@@ -490,7 +490,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                       )}
                     </TableCell>
                     <TableCell className="font-mono text-xs">
-                      {address(s)}
+                      <span data-mask="address">{address(s)}</span>
                       {(s.lastHostname || s.lastIp) && (
                         <div
                           className="font-sans text-muted-foreground"

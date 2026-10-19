@@ -1935,3 +1935,112 @@ fn tunnels_open_on_one_terminal_and_are_never_retried_elsewhere() {
     let hosts = vec![host(Environment::Lab)];
     assert!(tunnel(ForwardKind::Local, "127.0.0.1", &hosts).validate().is_err());
 }
+
+// ---- FD-03: the read-only lock while presenting ---------------------------------------------------
+
+/// One command of every kind the bus takes.
+fn every_command() -> Vec<(Command, Vec<Target>)> {
+    use crate::adapters::remote::forward::ForwardKind;
+    let lab = vms(1);
+    let two = vms(2);
+    let hosts = vec![host(Environment::Lab)];
+    let t = vec![terminal(Environment::Lab)];
+    let app = vec![Target {
+        target: TargetRef::App,
+        name: "Remotely".into(),
+        environment: Environment::None,
+        protected: false,
+    }];
+    vec![
+        (power(PowerOp::Start { gui: false }, &lab), lab.clone()),
+        (power(PowerOp::Unpause, &lab), lab.clone()),
+        (power(PowerOp::Pause, &lab), lab.clone()),
+        (power(PowerOp::Suspend, &two), two.clone()),
+        (power(PowerOp::Reset { mode: SOFT }, &lab), lab.clone()),
+        (power(PowerOp::Reset { mode: HARD }, &lab), lab.clone()),
+        (power(PowerOp::Stop { mode: SOFT }, &lab), lab.clone()),
+        (power(PowerOp::Stop { mode: HARD }, &lab), lab.clone()),
+        (snapshot(SnapshotOp::Take { name: "before".into() }, &lab), lab.clone()),
+        (
+            snapshot(SnapshotOp::Revert { name: "before".into() }, &lab),
+            lab.clone(),
+        ),
+        (
+            snapshot(SnapshotOp::Delete { name: "before".into() }, &lab),
+            lab.clone(),
+        ),
+        (protect(true, &lab), lab.clone()),
+        (protect(false, &lab), lab.clone()),
+        (exec("uptime", &hosts), hosts.clone()),
+        (exec("systemctl restart nginx", &hosts), hosts.clone()),
+        (exec("rm -rf /var/lib/app", &hosts), hosts.clone()),
+        (push_key(&hosts), hosts.clone()),
+        (line("uptime", false, &t), t.clone()),
+        (upload(&[("a.txt", false)], &t), t.clone()),
+        (upload(&[("a.txt", true)], &t), t.clone()),
+        (tunnel(ForwardKind::Local, "127.0.0.1", &t), t.clone()),
+        (tunnel(ForwardKind::Remote, "localhost", &t), t.clone()),
+        (tunnel(ForwardKind::Dynamic, "0.0.0.0", &t), t.clone()),
+        (
+            Command::AppUpdate {
+                version: "0.3.0".into(),
+            },
+            app,
+        ),
+    ]
+}
+
+#[test]
+fn the_read_only_lock_refuses_every_kind_of_command_and_names_it() {
+    let engine = engine();
+    let commands = every_command();
+    let kinds: std::collections::BTreeSet<ActionKind> = commands.iter().map(|(c, _)| engine.classify(c)).collect();
+    // Every action the policy engine knows is covered.
+    assert_eq!(kinds.len(), ActionKind::ALL.len());
+    for (command, targets) in &commands {
+        let action = engine.classify(command);
+        let err = engine.check_read_only(true, command).expect_err("locked: refused");
+        assert_eq!(err.code(), "read_only_lock");
+        assert!(err.to_string().contains(action.label()), "names the action: {err}");
+        assert!(err.to_string().contains("read-only lock"), "{err}");
+        // Whatever the tier would have been: a Low one (start, read-only exec) is refused too.
+        let _ = engine.evaluate(command, targets);
+        assert!(
+            engine.check_read_only(false, command).is_ok(),
+            "unlocked: {action:?} goes on"
+        );
+    }
+}
+
+#[test]
+fn the_read_only_lock_ignores_tiers_labels_and_protection() {
+    let engine = engine();
+    let mut prod = host(Environment::Prod);
+    prod.protected = true;
+    let low = exec("uptime", std::slice::from_ref(&prod));
+    assert!(engine.check_read_only(true, &low).is_err());
+    // Rules that make everything Low change nothing about the lock.
+    let mut rules = PolicyRules::default();
+    for kind in ActionKind::ALL {
+        if kind != ActionKind::FileReplace && kind != ActionKind::TunnelShared {
+            rules.tiers.insert(kind, TierRule::same(Tier::Low));
+        }
+    }
+    let lenient = PolicyEngine::new(rules).expect("valid");
+    assert!(lenient
+        .check_read_only(true, &power(PowerOp::Start { gui: false }, &vms(1)))
+        .is_err());
+}
+
+#[test]
+fn the_read_only_lock_refuses_every_edit_of_the_apps_data() {
+    use crate::presentation::Change;
+    let mut labels = std::collections::HashSet::new();
+    for change in Change::ALL {
+        assert!(labels.insert(change.label()), "labels differ: {}", change.label());
+        let err = read_only_edit_refusal(true, change).expect_err("locked: refused");
+        assert_eq!(err.code(), "read_only_lock");
+        assert!(err.to_string().contains(change.label()), "{err}");
+        assert!(read_only_edit_refusal(false, change).is_ok());
+    }
+}

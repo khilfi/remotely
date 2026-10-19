@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use super::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultStatus};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
 
 pub struct VaultService {
@@ -35,6 +36,7 @@ impl VaultService {
     }
 
     pub async fn setup(&self, ctx: &Context, password: SecretString, windows_login: bool) -> Result<VaultInfo> {
+        self.store.read_only().check(Change::Vault)?;
         self.vault.setup(ctx, password, windows_login).await?;
         let detail = if windows_login {
             "unlocks with the Windows login or the vault password"
@@ -73,6 +75,7 @@ impl VaultService {
     }
 
     pub async fn change_password(&self, ctx: &Context, current: &SecretString, new: SecretString) -> Result<VaultInfo> {
+        self.store.read_only().check(Change::Vault)?;
         match self.vault.change_password(current, new).await {
             Ok(()) => {
                 self.audit(ctx, "vault_changed", "Changed the vault password", None)
@@ -84,6 +87,7 @@ impl VaultService {
     }
 
     pub async fn set_windows_login(&self, ctx: &Context, password: &SecretString, enabled: bool) -> Result<VaultInfo> {
+        self.store.read_only().check(Change::Vault)?;
         let action = if enabled {
             "Let the Windows login unlock the vault"
         } else {
@@ -103,6 +107,7 @@ impl VaultService {
     }
 
     pub async fn add(&self, ctx: &Context, kind: SecretKind, label: &str, secret: SecretString) -> Result<SecretMeta> {
+        self.store.read_only().check(Change::Vault)?;
         let id = self.vault.put(ctx, kind, label, secret).await?;
         let meta = self.meta(ctx, id).await?;
         let action = format!("Added the {} '{}' to the vault", kind.label(), meta.label);
@@ -111,6 +116,7 @@ impl VaultService {
     }
 
     pub async fn replace(&self, ctx: &Context, id: SecretId, secret: SecretString) -> Result<SecretMeta> {
+        self.store.read_only().check(Change::Vault)?;
         self.vault.replace(ctx, id, secret).await?;
         let meta = self.meta(ctx, id).await?;
         let action = format!("Replaced the {} '{}'", meta.kind.label(), meta.label);
@@ -120,6 +126,7 @@ impl VaultService {
     }
 
     pub async fn rename(&self, ctx: &Context, id: SecretId, label: &str) -> Result<SecretMeta> {
+        self.store.read_only().check(Change::Vault)?;
         let before = self.meta(ctx, id).await?;
         self.vault.rename(ctx, id, label).await?;
         let meta = self.meta(ctx, id).await?;
@@ -137,6 +144,7 @@ impl VaultService {
 
     /// Sessions that used it keep their other settings and lose this credential.
     pub async fn delete(&self, ctx: &Context, id: SecretId) -> Result<()> {
+        self.store.read_only().check(Change::Vault)?;
         let meta = self.meta(ctx, id).await?;
         self.vault.delete(ctx, id).await?;
         let action = format!("Deleted the {} '{}' from the vault", meta.kind.label(), meta.label);

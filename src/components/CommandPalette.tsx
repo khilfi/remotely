@@ -419,7 +419,9 @@ export function CommandPalette({
                     >
                       <ServerIcon />
                       <span className="truncate">{s.name}</span>
-                      <CommandShortcut className="truncate tracking-normal">{s.host}</CommandShortcut>
+                      <CommandShortcut className="truncate tracking-normal" data-mask="host">
+                        {s.host}
+                      </CommandShortcut>
                     </CommandItem>
                   ))}
                 </CommandGroup>

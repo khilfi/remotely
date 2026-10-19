@@ -55,6 +55,8 @@ import { NameDialog } from "@/components/NameDialog";
 import { SortableHead } from "@/components/SortableHead";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
 import { VmSessionLinks } from "@/components/VmLinkControls";
+import { useReadOnlyReason } from "@/components/Presentation";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
   errorCode,
@@ -185,6 +187,9 @@ function lowerProdText(prodNames: string[], environment: Environment) {
 }
 
 export function VmsPage({ active, onSubmitted, onOpenSettings, onOpenSnapshots, refreshKey }: Props) {
+  // FD-03: power actions, protection, tags and labels are off while the read-only lock applies (the core refuses them
+  // too); the page's notice says so.
+  const readOnly = useReadOnlyReason();
   const [listed, setListed] = useState<VmRecord[]>([]);
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
   const [usage, setUsage] = useState<Map<string, VmHostUsage>>(new Map());
@@ -493,55 +498,75 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onOpenSnapshots, 
         </DropdownMenu>
         <span className="mr-2 text-sm text-muted-foreground">{selected.size} selected</span>
 
-        <ButtonGroup>
+        <WhyDisabled reason={readOnly}>
+          <ButtonGroup>
+            <Button
+              variant="outline"
+              disabled={start.length === 0 || submitting || readOnly !== null}
+              onClick={() => void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: false } })}
+            >
+              <PlayIcon data-icon="inline-start" />
+              Start
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  aria-label="More ways to start"
+                  disabled={start.length === 0 || submitting || readOnly !== null}
+                >
+                  <ChevronDownIcon />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: false } })
+                  }
+                >
+                  Start in the background
+                  <DropdownMenuShortcut>{start.length}</DropdownMenuShortcut>
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: true } })
+                  }
+                >
+                  Start with a console window
+                  <DropdownMenuShortcut>{start.length}</DropdownMenuShortcut>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </ButtonGroup>
+        </WhyDisabled>
+        <WhyDisabled reason={readOnly}>
           <Button
             variant="outline"
-            disabled={start.length === 0 || submitting}
-            onClick={() => void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: false } })}
+            disabled={shutDown.count === 0 || submitting || readOnly !== null}
+            onClick={shutDown.run}
           >
-            <PlayIcon data-icon="inline-start" />
-            Start
+            {SHUT_DOWN.label}
           </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button
-                variant="outline"
-                size="icon"
-                aria-label="More ways to start"
-                disabled={start.length === 0 || submitting}
-              >
-                <ChevronDownIcon />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-64">
-              <DropdownMenuItem
-                onSelect={() =>
-                  void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: false } })
-                }
-              >
-                Start in the background
-                <DropdownMenuShortcut>{start.length}</DropdownMenuShortcut>
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={() =>
-                  void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: true } })
-                }
-              >
-                Start with a console window
-                <DropdownMenuShortcut>{start.length}</DropdownMenuShortcut>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </ButtonGroup>
-        <Button variant="outline" disabled={shutDown.count === 0 || submitting} onClick={shutDown.run}>
-          {SHUT_DOWN.label}
-        </Button>
-        <Button variant="outline" disabled={suspend.count === 0 || submitting} onClick={suspend.run}>
-          {SUSPEND.label}
-        </Button>
-        <Button variant="destructive" disabled={powerOff.count === 0 || submitting} onClick={powerOff.run}>
-          {POWER_OFF.label}
-        </Button>
+        </WhyDisabled>
+        <WhyDisabled reason={readOnly}>
+          <Button
+            variant="outline"
+            disabled={suspend.count === 0 || submitting || readOnly !== null}
+            onClick={suspend.run}
+          >
+            {SUSPEND.label}
+          </Button>
+        </WhyDisabled>
+        <WhyDisabled reason={readOnly}>
+          <Button
+            variant="destructive"
+            disabled={powerOff.count === 0 || submitting || readOnly !== null}
+            onClick={powerOff.run}
+          >
+            {POWER_OFF.label}
+          </Button>
+        </WhyDisabled>
 
         <Button
           variant="outline"
@@ -554,7 +579,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onOpenSnapshots, 
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button variant="outline" disabled={selected.size === 0 || submitting}>
+            <Button variant="outline" disabled={selected.size === 0 || submitting || readOnly !== null}>
               <EllipsisIcon data-icon="inline-start" />
               More
             </Button>
@@ -791,7 +816,11 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onOpenSnapshots, 
                     <TableCell className="text-right tabular-nums">{vm.numVcpus ?? "—"}</TableCell>
                     <TableCell className="text-right tabular-nums">{formatRam(vm.memsizeMb)}</TableCell>
                     <TableCell className="font-mono text-xs">
-                      {vm.ipAddress ?? <span className="font-sans text-muted-foreground">—</span>}
+                      {vm.ipAddress ? (
+                        <span data-mask="ip">{vm.ipAddress}</span>
+                      ) : (
+                        <span className="font-sans text-muted-foreground">—</span>
+                      )}
                     </TableCell>
                     <TableCell>
                       <ToolsLabel state={vm.toolsState} />

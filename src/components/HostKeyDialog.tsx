@@ -19,6 +19,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type HostKey } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
@@ -54,6 +55,8 @@ function Fingerprint({ label, keyType, fingerprint }: { label: string; keyType: 
 }
 
 export function HostKeyDialog({ question, sessionName, onTrust, onReject, onReplace, onDismiss }: Props) {
+  // FD-03: replacing a trusted key is blocked by the read-only lock (trusting a new host's key is not).
+  const readOnly = useReadOnlyReason();
   const [busy, setBusy] = useState(false);
   const [checked, setChecked] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -166,16 +169,17 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
           <AlertDialogCancel disabled={busy}>Close, don't connect</AlertDialogCancel>
           <WhyDisabled
             reason={
-              !checked
+              readOnly ??
+              (!checked
                 ? "Tick the box first: the host's owner confirmed the new fingerprint"
                 : busy
                   ? "Connecting…"
-                  : null
+                  : null)
             }
           >
             <AlertDialogAction
               variant="destructive"
-              disabled={busy || !checked}
+              disabled={busy || !checked || readOnly !== null}
               onClick={(e) => {
                 e.preventDefault();
                 void run(onReplace);

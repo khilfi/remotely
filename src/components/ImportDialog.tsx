@@ -348,7 +348,9 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                               )}
                             </div>
                           </TableCell>
-                          <TableCell className="font-mono text-xs">{address(row)}</TableCell>
+                          <TableCell className="font-mono text-xs" data-mask="address">
+                            {address(row)}
+                          </TableCell>
                           <TableCell className="text-sm">{c.folder.length > 0 ? c.folder.join(" / ") : "—"}</TableCell>
                           <TableCell className="text-sm">
                             {c.auth.method === "keyFile" ? (

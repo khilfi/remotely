@@ -54,6 +54,7 @@ pub mod known_hosts;
 pub mod locks;
 pub mod metrics;
 pub mod policy;
+pub mod presentation;
 pub mod reachability;
 pub mod sessions;
 pub mod snapshots;
@@ -87,6 +88,7 @@ use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
+use presentation::{Change, PresentationMode};
 use reachability::ReachabilityChecker;
 use serde::Serialize;
 use sessions::SessionLibrary;
@@ -178,6 +180,8 @@ pub struct Core {
     /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
     /// The shell starts its polling with [`Metrics::run`].
     pub metrics: Arc<Metrics>,
+    /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
+    pub presentation: PresentationMode,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -214,6 +218,8 @@ impl Core {
     /// Wires the modules together. Tests pass fake adapters here.
     pub async fn assemble(store: Store, ctx: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
         let policy = load_policy(&store, &ctx).await?;
+        // FD-03: the lock applies before anything else can run.
+        let presentation = PresentationMode::load(store.clone(), ctx).await;
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
@@ -306,6 +312,7 @@ impl Core {
             snippets,
             reachability,
             metrics,
+            presentation,
             store,
             bus,
             jobs,
@@ -328,6 +335,7 @@ impl Core {
     /// Saves the vmrun path (`None` = find it automatically) and switches to it right away. The path
     /// must be an existing vmrun.exe. Audited, since it decides which program runs every VM action.
     pub async fn set_vmrun_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
         if let Some(path) = &path {
             adapters::vmware::validate_vmrun_path(path)?;
         }
@@ -356,6 +364,7 @@ impl Core {
     /// VM-01: replaces the folders to scan. Each must be an existing folder; it is saved with `\`, and
     /// duplicates (any letter case, `/` or `\`) are dropped. Audited.
     pub async fn set_scan_folders(&self, folders: Vec<PathBuf>) -> Result<Vec<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
         let mut seen = std::collections::HashSet::new();
         let mut kept = Vec::new();
         for folder in folders {
@@ -390,6 +399,7 @@ impl Core {
 
     /// VM-06: 1 to [`JobLimits::MAX_POWER_ON`]. Applies from the next job on. Audited.
     pub async fn set_power_on_limit(&self, limit: usize) -> Result<()> {
+        self.store.read_only().check(Change::Settings)?;
         if !(1..=JobLimits::MAX_POWER_ON).contains(&limit) {
             return Err(CoreError::InvalidSetting(format!(
                 "VMs powered on at once must be 1 to {}",
@@ -411,6 +421,7 @@ impl Core {
 
     /// VM-03: 1 to [`JobLimits::MAX_SHUTDOWN_WAIT_SECS`]. Applies from the next stop on. Audited.
     pub async fn set_shutdown_wait_secs(&self, secs: u64) -> Result<()> {
+        self.store.read_only().check(Change::Settings)?;
         if !(1..=JobLimits::MAX_SHUTDOWN_WAIT_SECS).contains(&secs) {
             return Err(CoreError::InvalidSetting(format!(
                 "the shutdown wait must be 1 to {} seconds",
@@ -431,6 +442,7 @@ impl Core {
 
     /// BX-02: 1 to [`JobLimits::MAX_REMOTE`]. Applies from the next run on. Audited.
     pub async fn set_bulk_parallel_limit(&self, limit: usize) -> Result<()> {
+        self.store.read_only().check(Change::Settings)?;
         if !(1..=JobLimits::MAX_REMOTE).contains(&limit) {
             return Err(CoreError::InvalidSetting(format!(
                 "hosts at once must be 1 to {}",
@@ -456,6 +468,7 @@ impl Core {
 
     /// FD-14: turns update checks off (air-gapped sites) or back on. Audited.
     pub async fn set_update_checks(&self, enabled: bool) -> Result<()> {
+        self.store.read_only().check(Change::Settings)?;
         self.store
             .put_setting(&self.ctx, store::UPDATE_CHECKS_KEY, &enabled)
             .await?;
@@ -522,6 +535,7 @@ impl Core {
     /// SS-03: connection settings apply to terminals opened from now on; QL-05's font size and
     /// scrollback to open ones too (the UI applies them); QL-04's checks at once. Audited.
     pub async fn set_terminal_settings(&self, settings: TerminalSettings) -> Result<()> {
+        self.store.read_only().check(Change::Settings)?;
         settings.validate()?;
         self.store
             .put_setting(&self.ctx, TERMINAL_SETTINGS_KEY, &settings)

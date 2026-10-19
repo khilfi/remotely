@@ -10,6 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type ApprovalRequest, type TunnelInfo } from "@/lib/api";
 import type { PaneSession, PaneSnapshot } from "@/lib/terminal-session";
@@ -109,7 +110,9 @@ function TunnelsList({
   useEffect(() => {
     if (ready) pane.loadTunnels().catch((err) => setError(errorMessage(err)));
   }, [pane, ready]);
-  const reason = startReason(snapshot);
+  // FD-03: the read-only lock blocks opening tunnels (stopping one stays possible).
+  const readOnly = useReadOnlyReason();
+  const reason = readOnly ?? startReason(snapshot);
   const tunnels = snapshot.tunnels;
 
   async function act(forwardId: string, what: () => Promise<void>) {

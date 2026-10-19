@@ -773,3 +773,29 @@ input[type="password"]::-ms-reveal {
   border-radius: var(--radius-md);
   pointer-events: none;
 }
+
+/* ---- FD-03 presentation mode ---- */
+
+@theme inline {
+  --color-presenting: var(--presenting);
+}
+
+:root {
+  --presenting: oklch(0.55 0.22 305);
+}
+
+.dark {
+  --presenting: oklch(0.6 0.22 305);
+}
+
+/* Inputs keep their real value (it is the user's data): those holding a host, user or path show dots instead. */
+html[data-presenting] input[data-mask]:not([type="password"]),
+html[data-presenting] textarea[data-mask],
+html[data-presenting] [data-presentation-hidden] {
+  -webkit-text-security: disc;
+}
+
+/* "Hide terminal output": the terminals are blurred past reading; typing still reaches the shell. */
+html[data-hide-terminals] .terminal-host .xterm-screen {
+  filter: blur(7px);
+}

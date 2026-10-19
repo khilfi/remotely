@@ -28,6 +28,7 @@ use uuid::Uuid;
 use crate::adapters::remote::{AuthMethod, Credentials, SessionSpec};
 use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
 use crate::vm_links::{AutoLinkReport, VmLink, VmLinks};
@@ -524,6 +525,7 @@ impl SessionLibrary {
     /// Saves a new session. Without a VM chosen, it is linked automatically when its host is a VM's
     /// IP address (QL-01).
     pub async fn create(&self, ctx: &Context, input: SessionInput) -> Result<SessionRecord> {
+        self.store.read_only().check(Change::Sessions)?;
         let input = self.check(ctx, None, input).await?;
         let id = Uuid::new_v4();
         self.store.insert_session(ctx, id, &input, None).await?;
@@ -609,6 +611,7 @@ impl SessionLibrary {
     /// changes. A new host makes an automatic link, or the removal of one, out of date: the session
     /// is linked again by its new address.
     pub async fn update(&self, ctx: &Context, id: Uuid, input: SessionInput) -> Result<SessionRecord> {
+        self.store.read_only().check(Change::Sessions)?;
         let before = self.get(ctx, id).await?;
         let mut input = self.check(ctx, Some(id), input).await?;
         if input == before.input() {
@@ -648,6 +651,7 @@ impl SessionLibrary {
 
     /// A copy named "<name> (copy)" in the same folder, with the same credentials and tags.
     pub async fn duplicate(&self, ctx: &Context, id: Uuid) -> Result<SessionRecord> {
+        self.store.read_only().check(Change::Sessions)?;
         let original = self.get(ctx, id).await?;
         let mut input = original.input();
         // An automatic link is made again for the copy, so it stays automatic.
@@ -662,6 +666,7 @@ impl SessionLibrary {
 
     /// Sessions that jumped through it lose their jump host; the vault keeps its credentials.
     pub async fn delete(&self, ctx: &Context, id: Uuid) -> Result<()> {
+        self.store.read_only().check(Change::Sessions)?;
         let session = self.get(ctx, id).await?;
         let jumpers = self
             .store
@@ -690,6 +695,7 @@ impl SessionLibrary {
 
     /// Moves sessions into a folder, or to the top level with `None`.
     pub async fn move_to(&self, ctx: &Context, ids: &[Uuid], folder: Option<Uuid>) -> Result<()> {
+        self.store.read_only().check(Change::Sessions)?;
         if ids.is_empty() {
             return Err(CoreError::NoTargets);
         }
@@ -723,6 +729,7 @@ impl SessionLibrary {
     }
 
     pub async fn create_folder(&self, ctx: &Context, name: &str, parent: Option<Uuid>) -> Result<SessionFolder> {
+        self.store.read_only().check(Change::Sessions)?;
         let name = clean_folder_name(name)?;
         let folders = self.folders(ctx).await?;
         let place = self.folder_place(&folders, parent)?;
@@ -740,6 +747,7 @@ impl SessionLibrary {
     }
 
     pub async fn rename_folder(&self, ctx: &Context, id: Uuid, name: &str) -> Result<SessionFolder> {
+        self.store.read_only().check(Change::Sessions)?;
         let name = clean_folder_name(name)?;
         let folders = self.folders(ctx).await?;
         let folder = Self::find_folder(&folders, id)?;
@@ -761,6 +769,7 @@ impl SessionLibrary {
 
     /// Moves a folder, with everything in it, under another folder or to the top level.
     pub async fn move_folder(&self, ctx: &Context, id: Uuid, parent: Option<Uuid>) -> Result<SessionFolder> {
+        self.store.read_only().check(Change::Sessions)?;
         let folders = self.folders(ctx).await?;
         let folder = Self::find_folder(&folders, id)?.clone();
         if folder.parent_id == parent {
@@ -781,6 +790,7 @@ impl SessionLibrary {
 
     /// Deletes a folder only: its sessions and subfolders move up to its parent.
     pub async fn delete_folder(&self, ctx: &Context, id: Uuid) -> Result<()> {
+        self.store.read_only().check(Change::Sessions)?;
         let folders = self.folders(ctx).await?;
         let folder = Self::find_folder(&folders, id)?.clone();
         let place = self.folder_place(&folders, folder.parent_id)?;

@@ -4,6 +4,9 @@
 
 import type { ApprovalStep } from "./api.ts";
 
+/** FD-03: an action that changes something, while presenting with the read-only lock on (the core refuses it too). */
+export const READ_ONLY_REASON = "Read-only while presenting: turn the read-only lock off first (Presenting menu)";
+
 /** BX-03 Compare: the Run button. */
 export function compareRunReason(input: {
   /** Saved sessions on this computer. */
@@ -17,7 +20,10 @@ export function compareRunReason(input: {
   script: string;
   timeoutOk: boolean;
   submitting: boolean;
+  /** FD-03: the read-only lock applies. */
+  readOnly?: boolean;
 }): string | null {
+  if (input.readOnly) return READ_ONLY_REASON;
   if (input.savedSessions === 0) return "No saved sessions on this computer: add or import sessions first";
   if (input.picked === 0) return "Pick tabs, or sessions in the tree, to run on";
   if (input.hosts.length === 0) {
@@ -33,8 +39,9 @@ export function compareRunReason(input: {
 }
 
 /** SS-10: the MultiExec switch. */
-export function multiExecReason(input: { tabs: number; on: boolean }): string | null {
+export function multiExecReason(input: { tabs: number; on: boolean; readOnly?: boolean }): string | null {
   if (input.on) return null;
+  if (input.readOnly) return READ_ONLY_REASON;
   if (input.tabs === 0) return "Open a terminal first: MultiExec types into open tabs";
   return null;
 }
@@ -90,7 +97,8 @@ export function connectedReason(input: { open: boolean; connected: boolean }): s
 }
 
 /** SS-08: uploading into a terminal (the toolbar's button, the drawer's, a drop). */
-export function uploadReason(input: { open: boolean; connected: boolean }): string | null {
+export function uploadReason(input: { open: boolean; connected: boolean; readOnly?: boolean }): string | null {
+  if (input.readOnly) return READ_ONLY_REASON;
   if (!input.open) return "Open a terminal first: files are uploaded through it";
   if (!input.connected) return "This terminal is not connected, so nothing can be uploaded through it";
   return null;

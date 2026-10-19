@@ -88,6 +88,7 @@ use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
 use crate::locks;
 use crate::policy::Tier;
+use crate::presentation::Change;
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
@@ -1056,6 +1057,7 @@ impl Terminals {
     /// SS-05: trusts the changed key that blocked this pane's last connection (audited as a
     /// re-trust, with both fingerprints) and connects again.
     pub async fn replace_host_key(&self, ctx: &Context, id: Uuid) -> Result<()> {
+        self.inner.store.read_only().check(Change::KnownHosts)?;
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;

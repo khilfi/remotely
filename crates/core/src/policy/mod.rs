@@ -25,6 +25,7 @@ use crate::adapters::remote::forward::ForwardKind;
 use crate::command_bus::{Command, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 
 pub use commands::{default_dangerous_patterns, default_read_only_commands, DangerousPattern};
 
@@ -623,6 +624,11 @@ impl PolicyEngine {
         }
     }
 
+    /// FD-03: refuses the command while presenting with the read-only lock on (see [`read_only_refusal`]).
+    pub fn check_read_only(&self, locked: bool, command: &Command) -> Result<()> {
+        read_only_refusal(locked, self.classify(command))
+    }
+
     /// A shell command on its own: dangerous (BX-06), read-only, or other. Bulk runs use it, and the
     /// command panel (BX-08) shows it for each saved and built-in command.
     pub fn classify_script(&self, script: &str) -> ActionKind {
@@ -739,6 +745,29 @@ impl PolicyEngine {
             }
         }
     }
+}
+
+/// FD-03: while presenting with the read-only lock on, the bus refuses every command, whatever its tier, targets or
+/// labels: each one changes a VM, a host or the app (reads never reach the bus). That includes read-only remote
+/// commands, which run programs on customer hosts, and MultiExec lines. The refusal names the action as Settings
+/// does. With the lock off, nothing changes here and the tiers apply as usual.
+pub fn read_only_refusal(locked: bool, action: ActionKind) -> Result<()> {
+    if locked {
+        return Err(CoreError::ReadOnlyLock {
+            what: action.label().to_owned(),
+        });
+    }
+    Ok(())
+}
+
+/// FD-03: the same for edits of the app's own data, which skip the bus (sessions, settings, the vault, imports...).
+pub fn read_only_edit_refusal(locked: bool, change: Change) -> Result<()> {
+    if locked {
+        return Err(CoreError::ReadOnlyLock {
+            what: change.label().to_owned(),
+        });
+    }
+    Ok(())
 }
 
 /// VM-05: a safety snapshot is offered (when the tier is High or Critical) for the VM actions that

@@ -30,6 +30,7 @@ use uuid::Uuid;
 
 use crate::domain::{now_rfc3339, Context, UserId, WorkspaceId};
 use crate::error::Result;
+use crate::presentation::ReadOnlyLock;
 
 pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
 pub(crate) use favourites::{FavouriteFields, FavouriteRow};
@@ -62,6 +63,9 @@ pub struct Store {
     pool: SqlitePool,
     /// Serializes audit appends so the hash chain stays linear.
     audit_lock: Arc<tokio::sync::Mutex<()>>,
+    /// FD-03: presentation mode's read-only lock, shared by every service that edits the app's data and by the
+    /// command bus. Set by [`crate::presentation::PresentationMode`].
+    read_only: ReadOnlyLock,
 }
 
 impl Store {
@@ -98,7 +102,13 @@ impl Store {
         Ok(Self {
             pool,
             audit_lock: Arc::new(tokio::sync::Mutex::new(())),
+            read_only: ReadOnlyLock::default(),
         })
+    }
+
+    /// FD-03: whether presentation mode's read-only lock applies now.
+    pub fn read_only(&self) -> &ReadOnlyLock {
+        &self.read_only
     }
 
     pub fn pool(&self) -> &SqlitePool {

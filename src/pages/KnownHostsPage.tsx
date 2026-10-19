@@ -10,6 +10,8 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { useReadOnlyReason } from "@/components/Presentation";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type KnownHost } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 
@@ -24,6 +26,8 @@ function address(k: KnownHost) {
 }
 
 export function KnownHostsPage({ active }: Props) {
+  // FD-03: removing a trusted key is blocked by the read-only lock.
+  const readOnly = useReadOnlyReason();
   const [hosts, setHosts] = useState<KnownHost[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [text, setText] = useState("");
@@ -96,7 +100,9 @@ export function KnownHostsPage({ active }: Props) {
             <TableBody>
               {shown.map((k) => (
                 <TableRow key={k.id}>
-                  <TableCell className="font-medium">{address(k)}</TableCell>
+                  <TableCell className="font-medium" data-mask="address">
+                    {address(k)}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">{k.keyType}</TableCell>
                   <TableCell>
                     <code className="font-mono text-xs break-all select-all">{k.fingerprint}</code>
@@ -104,15 +110,18 @@ export function KnownHostsPage({ active }: Props) {
                   <TableCell className="whitespace-nowrap text-muted-foreground">{formatWhen(k.firstSeenAt)}</TableCell>
                   <TableCell className="whitespace-nowrap text-muted-foreground">{formatWhen(k.lastSeenAt)}</TableCell>
                   <TableCell>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Remove the key of ${address(k)}`}
-                      title="Remove"
-                      onClick={() => setRemoving(k)}
-                    >
-                      <Trash2Icon />
-                    </Button>
+                    <WhyDisabled reason={readOnly}>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={`Remove the key of ${address(k)}`}
+                        title="Remove"
+                        disabled={readOnly !== null}
+                        onClick={() => setRemoving(k)}
+                      >
+                        <Trash2Icon />
+                      </Button>
+                    </WhyDisabled>
                   </TableCell>
                 </TableRow>
               ))}

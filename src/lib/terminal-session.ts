@@ -16,10 +16,21 @@
 // SS-07: the core reports the session's tunnels (`tunnels`); one that waits for approval (e.g. one that starts with
 // a Prod session's terminal) goes to `onTunnelAsking`, so the page can show the dialog. Host key questions name the
 // jump host that asks.
+//
+// FD-03: while presenting, the pane shows a second, masked terminal in front of the real one. Output goes to both:
+// as it is to the real one, through presentation.ts's TerminalMasker to the masked one, whose stand-ins keep the
+// width of what they replace, so both hold the same cells in the same places. Keys, pastes and the host's queries
+// are answered by the one on screen; copies (selection, Ctrl+Shift+C, copy-on-select), the whole-buffer text that
+// SS-11 saves and prints, and the file name under a right-click are read from the real one at the same place. The
+// masked one starts from the real one's screen and scrollback (serialized, then masked) and is dropped when
+// presenting stops. Nothing changes in what is sent to the host.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
+import { SerializeAddon } from "@xterm/addon-serialize";
+import { masker, TerminalMasker } from "@/lib/presentation";
+import { presentationView, subscribePresentation } from "@/lib/presentation-state";
 import {
   api,
   errorCode,
@@ -113,6 +124,23 @@ export interface CommandFinished {
 
 const encoder = new TextEncoder();
 
+/** FD-03: how long the masked terminal waits for the rest of a value split across reads. */
+const MASK_HOLD_MS = 25;
+
+/** FD-03: the masked terminal on screen while presenting. */
+interface MaskedView {
+  term: Terminal;
+  host: HTMLDivElement;
+  fit: FitAddon;
+  search: SearchAddon;
+  mask: TerminalMasker;
+  decoder: TextDecoder;
+  timer: number | null;
+  /** The real terminal's screen has been copied in; output before that waits in `queue`. */
+  ready: boolean;
+  queue: string[];
+}
+
 /**
  * A first-connection question ends with its connection attempt; a changed-key notice stays up after
  * the pane reports the blocked connection, until the user closes it.
@@ -140,11 +168,17 @@ export function sessionAddress(s: Pick<SessionRecord, "username" | "host" | "por
 export class PaneSession {
   readonly key: string;
   readonly element: HTMLDivElement;
-  readonly term: Terminal;
+  /** The real terminal: everything the host sent, as it sent it. While presenting, a masked one is on screen. */
+  private readonly term: Terminal;
+  private readonly realHost: HTMLDivElement;
   /** How the pane is named before the core says more: the session's or the typed address. */
   readonly label: string;
   private readonly fitAddon: FitAddon;
   private readonly searchAddon: SearchAddon;
+  private readonly serializer: SerializeAddon;
+  private masked: MaskedView | null = null;
+  private readonly stopFollowing: () => void;
+  private theme: ResolvedTheme;
   private opener: PaneOpener | null;
   private coreId: string | null = null;
   private started = false;
@@ -172,6 +206,7 @@ export class PaneSession {
   constructor(key: string, opener: PaneOpener, label: string, theme: ResolvedTheme, options: PaneOptions) {
     this.key = key;
     this.opener = opener;
+    this.theme = theme;
     this.label = label;
     this.snapshot = {
       status: { state: "opening" },
@@ -187,9 +222,35 @@ export class PaneSession {
       tunnels: null,
     };
     this.element = document.createElement("div");
-    this.element.className = "h-full w-full";
+    this.element.className = "relative h-full w-full";
+    // FD-03: the page's masker leaves terminals alone; this pane masks its own output.
+    this.element.setAttribute("data-presentation-skip", "");
+    this.realHost = document.createElement("div");
+    this.realHost.className = "absolute inset-0";
+    this.element.appendChild(this.realHost);
     this.copyOnSelect = options.copyOnSelect;
-    this.term = new Terminal({
+    this.term = this.newTerminal(theme, options);
+    this.fitAddon = new FitAddon();
+    this.term.loadAddon(this.fitAddon);
+    this.searchAddon = this.newSearch(this.term);
+    this.serializer = new SerializeAddon();
+    this.term.loadAddon(this.serializer);
+    this.term.open(this.realHost);
+    this.wire(this.term);
+    // QL-05: right-click pastes, like PuTTY; SS-08: on a file name, the page may offer to download it first.
+    this.element.addEventListener("contextmenu", (ev) => {
+      ev.preventDefault();
+      const word = this.onFileWord && this.connected ? this.wordAt(ev.clientX, ev.clientY) : null;
+      if (word && this.onFileWord) this.onFileWord(word, ev.clientX, ev.clientY);
+      else void this.pasteFromClipboard();
+    });
+    // FD-03: masked from its first output when the app is presenting, and from the moment it starts.
+    this.stopFollowing = subscribePresentation(() => this.present(presentationView().presenting));
+    this.present(presentationView().presenting);
+  }
+
+  private newTerminal(theme: ResolvedTheme, options: PaneOptions) {
+    return new Terminal({
       fontFamily: MONO,
       fontSize: options.fontSize,
       cursorBlink: true,
@@ -198,33 +259,153 @@ export class PaneSession {
       // The search addon's match highlights use the decorations API.
       allowProposedApi: true,
     });
-    this.fitAddon = new FitAddon();
-    this.term.loadAddon(this.fitAddon);
-    this.searchAddon = new SearchAddon({ highlightLimit: 2000 });
-    this.term.loadAddon(this.searchAddon);
-    this.searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
-      this.update({ searchResults: { index: resultIndex, count: resultCount } });
-    });
-    this.term.open(this.element);
+  }
 
-    this.term.onData((data) => this.send(encoder.encode(data)));
+  private newSearch(term: Terminal) {
+    const search = new SearchAddon({ highlightLimit: 2000 });
+    term.loadAddon(search);
+    search.onDidChangeResults(({ resultIndex, resultCount }) => {
+      if (term === this.screen) this.update({ searchResults: { index: resultIndex, count: resultCount } });
+    });
+    return search;
+  }
+
+  /** Keys, pastes, the host's queries and size changes come from the terminal on screen only. */
+  private wire(term: Terminal) {
+    term.onData((data) => {
+      if (term === this.screen) this.send(encoder.encode(data));
+    });
     // Binary data (some mouse reports) is one byte per character.
-    this.term.onBinary((data) => this.send(Uint8Array.from(data, (c) => c.charCodeAt(0) & 0xff)));
-    this.term.onResize(({ cols, rows }) => {
+    term.onBinary((data) => {
+      if (term === this.screen) this.send(Uint8Array.from(data, (c) => c.charCodeAt(0) & 0xff));
+    });
+    term.onResize(({ cols, rows }) => {
+      if (term !== this.screen) return;
+      // The real terminal keeps the same size, so both hold the same cells.
+      if (term !== this.term) this.term.resize(cols, rows);
       if (this.coreId) void api.terminalResize(this.coreId, cols, rows);
     });
-    // SS-03 copy-on-select, like PuTTY.
-    this.term.onSelectionChange(() => {
-      if (this.copyOnSelect && this.term.hasSelection()) void navigator.clipboard?.writeText(this.term.getSelection());
+    // SS-03 copy-on-select, like PuTTY (FD-03: the real text, even while presenting).
+    term.onSelectionChange(() => {
+      if (term === this.screen && this.copyOnSelect && term.hasSelection())
+        void navigator.clipboard?.writeText(this.selectionText());
     });
-    this.term.attachCustomKeyEventHandler((ev) => this.handleKey(ev));
-    // QL-05: right-click pastes, like PuTTY; SS-08: on a file name, the page may offer to download it first.
-    this.element.addEventListener("contextmenu", (ev) => {
-      ev.preventDefault();
-      const word = this.onFileWord && this.connected ? this.wordAt(ev.clientX, ev.clientY) : null;
-      if (word && this.onFileWord) this.onFileWord(word, ev.clientX, ev.clientY);
-      else void this.pasteFromClipboard();
+    term.attachCustomKeyEventHandler((ev) => this.handleKey(ev));
+  }
+
+  /** The terminal on screen: the masked one while presenting, otherwise the real one. */
+  private get screen(): Terminal {
+    return this.masked?.term ?? this.term;
+  }
+
+  // ---- FD-03 presentation mode ----
+
+  private present(on: boolean) {
+    if (on && !this.masked && !this.closed) this.showMasked();
+    else if (!on && this.masked) this.showReal();
+  }
+
+  private showMasked() {
+    const hadFocus = this.realHost.contains(document.activeElement);
+    // Hidden at once, before the next paint; the masked copy shows once it holds the real one's screen.
+    this.realHost.style.visibility = "hidden";
+    const host = document.createElement("div");
+    host.className = "absolute inset-0";
+    this.element.appendChild(host);
+    const term = this.newTerminal(this.theme, {
+      fontSize: this.term.options.fontSize ?? DEFAULT_PANE_OPTIONS.fontSize,
+      scrollback: this.term.options.scrollback ?? DEFAULT_PANE_OPTIONS.scrollback,
+      copyOnSelect: this.copyOnSelect,
     });
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    const view: MaskedView = {
+      term,
+      host,
+      fit,
+      search: this.newSearch(term),
+      mask: new TerminalMasker(masker),
+      decoder: new TextDecoder(),
+      timer: null,
+      ready: false,
+      queue: [],
+    };
+    this.masked = view;
+    term.open(host);
+    term.resize(this.term.cols, this.term.rows);
+    this.wire(term);
+    this.searchAddon.clearDecorations();
+    // Once the real terminal has parsed what it was given so far, its screen and scrollback, masked, start the copy;
+    // output that arrived since follows in order.
+    this.term.write("", () => {
+      if (this.masked !== view) return;
+      const screen = this.serializer.serialize({ scrollback: this.term.options.scrollback });
+      term.write(view.mask.mask(screen));
+      view.ready = true;
+      for (const chunk of view.queue) term.write(chunk);
+      view.queue = [];
+      if (hadFocus) term.focus();
+    });
+  }
+
+  private showReal() {
+    const view = this.masked;
+    if (!view) return;
+    this.masked = null;
+    if (view.timer !== null) window.clearTimeout(view.timer);
+    const hadFocus = view.host.contains(document.activeElement);
+    view.term.dispose();
+    view.host.remove();
+    this.realHost.style.visibility = "";
+    this.fit();
+    this.term.refresh(0, this.term.rows - 1);
+    if (this.snapshot.searching) this.update({ searchResults: null });
+    if (hadFocus) this.term.focus();
+  }
+
+  /** Output for the masked terminal: decoded, masked, and the last word held a moment for the rest of a value. */
+  private showMaskedOutput(data: Uint8Array | string) {
+    const view = this.masked;
+    if (!view) return;
+    const text = typeof data === "string" ? data : view.decoder.decode(data, { stream: true });
+    this.writeMasked(view, view.mask.push(text));
+    if (view.timer !== null) window.clearTimeout(view.timer);
+    view.timer = view.mask.holding
+      ? window.setTimeout(() => {
+          view.timer = null;
+          if (this.masked === view) this.writeMasked(view, view.mask.flush());
+        }, MASK_HOLD_MS)
+      : null;
+  }
+
+  private writeMasked(view: MaskedView, text: string) {
+    if (!text) return;
+    if (view.ready) view.term.write(text);
+    else view.queue.push(text);
+  }
+
+  /** A line of the app's own (a connection error, a paste hint), shown in both terminals. */
+  private say(text: string) {
+    this.term.write(text);
+    this.showMaskedOutput(text);
+  }
+
+  /**
+   * The real text of what is selected on screen. Both terminals hold the same cells, counted from the bottom (the
+   * masked one may have less scrollback when it started late).
+   */
+  private selectionText(): string {
+    const view = this.masked;
+    if (!view) return this.term.getSelection();
+    const at = view.term.getSelectionPosition();
+    if (!at) return "";
+    const offset = this.term.buffer.active.length - view.term.buffer.active.length;
+    const length = (at.end.y - at.start.y) * this.term.cols + (at.end.x - at.start.x);
+    if (length <= 0) return "";
+    this.term.select(at.start.x, at.start.y + offset, length);
+    const text = this.term.getSelection();
+    this.term.clearSelection();
+    return text;
   }
 
   // ---- state for React (useSyncExternalStore) ----
@@ -304,7 +485,10 @@ export class PaneSession {
     }
   };
 
-  private onOutput = (data: Uint8Array) => this.term.write(data);
+  private onOutput = (data: Uint8Array) => {
+    this.term.write(data);
+    this.showMaskedOutput(data);
+  };
 
   /**
    * Opens the connection, sized to the pane (80×24 until it is on screen; the core gets the real size
@@ -347,7 +531,7 @@ export class PaneSession {
         status: { state: "disconnected", code: errorCode(err) ?? "error", message },
         statusAt: Date.now(),
       });
-      this.term.write(`\r\n\x1b[31m[Not connected: ${message}]\x1b[0m\r\n`);
+      this.say(`\r\n\x1b[31m[Not connected: ${message}]\x1b[0m\r\n`);
       throw err;
     }
   }
@@ -383,6 +567,8 @@ export class PaneSession {
     this.closed = true;
     this.opener = null;
     if (this.coreId) void api.terminalClose(this.coreId);
+    this.stopFollowing();
+    this.showReal();
     this.term.dispose();
     this.listeners.clear();
     this.onCommandFinished = null;
@@ -427,15 +613,18 @@ export class PaneSession {
 
   /** SS-08: the file name under a point of the screen (client pixels), if the output shows one there. */
   wordAt(clientX: number, clientY: number): string | null {
-    const screen = this.element.querySelector(".xterm-screen");
+    const screen = (this.masked?.host ?? this.realHost).querySelector(".xterm-screen");
     if (!screen) return null;
     const rect = screen.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
-    const col = Math.floor(((clientX - rect.left) / rect.width) * this.term.cols);
-    const row = Math.floor(((clientY - rect.top) / rect.height) * this.term.rows);
-    if (col < 0 || row < 0 || col >= this.term.cols || row >= this.term.rows) return null;
+    const shown = this.screen;
+    const col = Math.floor(((clientX - rect.left) / rect.width) * shown.cols);
+    const row = Math.floor(((clientY - rect.top) / rect.height) * shown.rows);
+    if (col < 0 || row < 0 || col >= shown.cols || row >= shown.rows) return null;
+    // FD-03: the real file name, under the masked one while presenting.
     const buffer = this.term.buffer.active;
-    const line = buffer.getLine(buffer.viewportY + row);
+    const offset = buffer.length - shown.buffer.active.length;
+    const line = buffer.getLine(shown.buffer.active.viewportY + row + offset);
     return line ? fileWordAt(line.translateToString(false), col) : null;
   }
 
@@ -479,9 +668,10 @@ export class PaneSession {
     const key = ev.key.toLowerCase();
     // Ctrl+C with a selection copies (as in Windows Terminal); without one it is ^C for the shell.
     // Ctrl+Shift+C always copies.
-    if (ev.ctrlKey && !ev.altKey && key === "c" && (ev.shiftKey || this.term.hasSelection())) {
-      if (this.term.hasSelection()) void navigator.clipboard?.writeText(this.term.getSelection());
-      this.term.clearSelection();
+    const shown = this.screen;
+    if (ev.ctrlKey && !ev.altKey && key === "c" && (ev.shiftKey || shown.hasSelection())) {
+      if (shown.hasSelection()) void navigator.clipboard?.writeText(this.selectionText());
+      shown.clearSelection();
       ev.preventDefault();
       return false;
     }
@@ -501,7 +691,7 @@ export class PaneSession {
    * for Enter even when the command has several lines). See `sendCommand` in command-send.ts.
    */
   pasteCommand(command: string) {
-    this.term.paste(command);
+    this.screen.paste(command);
   }
 
   /** BX-08 Shift+click: runs what was pasted. */
@@ -526,9 +716,9 @@ export class PaneSession {
   async pasteFromClipboard() {
     try {
       const text = await api.clipboardReadText();
-      if (text) this.term.paste(text);
+      if (text) this.screen.paste(text);
     } catch {
-      this.term.write("\r\n\x1b[2m[Paste with Ctrl+V]\x1b[0m\r\n");
+      this.say("\r\n\x1b[2m[Paste with Ctrl+V]\x1b[0m\r\n");
     }
   }
 
@@ -540,19 +730,21 @@ export class PaneSession {
 
   closeSearch() {
     this.searchAddon.clearDecorations();
+    this.masked?.search.clearDecorations();
     this.update({ searching: false, searchResults: null });
     this.focus();
   }
 
   /** Finds the next (or previous) match; false when there is none. */
   find(text: string, backwards: boolean, options: { caseSensitive: boolean; regex: boolean }) {
+    const searchAddon = this.masked?.search ?? this.searchAddon;
     if (!text) {
-      this.searchAddon.clearDecorations();
+      searchAddon.clearDecorations();
       this.update({ searchResults: null });
       return false;
     }
     const search = { ...options, decorations: SEARCH_DECORATIONS };
-    return backwards ? this.searchAddon.findPrevious(text, search) : this.searchAddon.findNext(text, search);
+    return backwards ? searchAddon.findPrevious(text, search) : searchAddon.findNext(text, search);
   }
 
   // ---- SS-11 output ----
@@ -594,21 +786,27 @@ export class PaneSession {
   // ---- view ----
 
   setTheme(theme: ResolvedTheme) {
+    this.theme = theme;
     this.term.options.theme = TERMINAL_PALETTE[theme];
+    if (this.masked) this.masked.term.options.theme = TERMINAL_PALETTE[theme];
   }
 
   /** QL-05: font size, scrollback and copy-on-select, applied to an open pane. */
   setOptions(options: PaneOptions) {
     this.copyOnSelect = options.copyOnSelect;
-    if (this.term.options.fontSize !== options.fontSize) this.term.options.fontSize = options.fontSize;
-    if (this.term.options.scrollback !== options.scrollback) this.term.options.scrollback = options.scrollback;
+    for (const term of [this.term, this.masked?.term]) {
+      if (!term) continue;
+      if (term.options.fontSize !== options.fontSize) term.options.fontSize = options.fontSize;
+      if (term.options.scrollback !== options.scrollback) term.options.scrollback = options.scrollback;
+    }
     this.fit();
   }
 
   fit() {
     if (this.element.offsetWidth > 0 && this.element.offsetHeight > 0) {
       try {
-        this.fitAddon.fit();
+        // FD-03: the terminal on screen fits the pane; the real one follows its size (see `wire`).
+        (this.masked?.fit ?? this.fitAddon).fit();
       } catch {
         // Not laid out yet.
       }
@@ -616,6 +814,11 @@ export class PaneSession {
   }
 
   focus() {
-    this.term.focus();
+    this.screen.focus();
+  }
+
+  /** Redraws the terminal on screen (after the page moved its element). */
+  refresh() {
+    this.screen.refresh(0, this.screen.rows - 1);
   }
 }
