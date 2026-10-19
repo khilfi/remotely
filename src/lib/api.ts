@@ -934,9 +934,26 @@ export interface FavouriteInput {
   description: string | null;
 }
 
+/** BX-08: the two sections of the library: symptom runbooks first, then groups by area. */
+export type LibrarySection = "troubleshoot" | "area";
+
 export type LibraryGroup =
+  // Troubleshoot section (symptoms).
+  | "slowHost"
+  | "outOfMemory"
+  | "diskFull"
+  | "cantReachService"
+  | "dnsFails"
+  | "serviceWontStart"
+  | "cantLoginSsh"
+  | "clockWrong"
+  | "certExpired"
+  | "packageBroken"
+  // Area section.
   | "systemInfo"
   | "disk"
+  | "storageLvm"
+  | "storageSan"
   | "memory"
   | "processes"
   | "network"
@@ -945,13 +962,25 @@ export type LibraryGroup =
   | "packagesApt"
   | "packagesDnf"
   | "users"
+  | "security"
+  | "certificates"
   | "firewall"
+  | "webServers"
+  | "databases"
+  | "scheduling"
+  | "timeSync"
+  | "identity"
+  | "vmwareGuest"
   | "docker"
-  | "kubernetes";
+  | "podman"
+  | "kubernetes"
+  | "helm";
 
-/** BX-08: a built-in command. */
+/** BX-08: a built-in command, as one group shows it (a command can appear in a symptom group too). */
 export interface LibraryEntry {
   id: string;
+  section: LibrarySection;
+  sectionLabel: string;
   group: LibraryGroup;
   groupLabel: string;
   name: string;

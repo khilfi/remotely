@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use self::library::{LibraryGroup, LIBRARY};
+use self::library::{BuiltIn, LibraryGroup, LibrarySection, LIBRARY, TROUBLESHOOT};
 use self::variables::Variable;
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
@@ -86,11 +86,15 @@ pub struct CommandInfo {
     pub risk: CommandRisk,
 }
 
-/// A built-in command.
+/// A built-in command, as one group shows it. The same command (same `id`) can appear once in its area
+/// group and again in one or more symptom (Troubleshoot) groups, so `group`/`section` say where this
+/// copy sits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryEntry {
     pub id: &'static str,
+    pub section: LibrarySection,
+    pub section_label: &'static str,
     pub group: LibraryGroup,
     pub group_label: &'static str,
     pub name: &'static str,
@@ -370,21 +374,37 @@ impl Snippets {
         self.favourites(ctx).await
     }
 
-    /// The built-in commands, each with what the policy engine makes of it now.
+    /// The built-in commands, each with what the policy engine makes of it now. The Troubleshoot
+    /// section (symptom runbooks) comes first, then the area groups; a command listed in a symptom
+    /// runbook appears once there (in the symptom group) and once in its own area group.
     pub fn library(&self) -> Vec<LibraryEntry> {
-        LIBRARY
-            .iter()
-            .map(|entry| LibraryEntry {
-                id: entry.id,
-                group: entry.group,
-                group_label: entry.group.label(),
-                name: entry.name,
-                command: entry.command,
-                description: entry.description,
-                variables: variables::variables(entry.command),
-                risk: self.classify(entry.command),
-            })
-            .collect()
+        let shown = |b: &BuiltIn, group: LibraryGroup| LibraryEntry {
+            id: b.id,
+            section: group.section(),
+            section_label: group.section().label(),
+            group,
+            group_label: group.label(),
+            name: b.name,
+            command: b.command,
+            description: b.description,
+            variables: variables::variables(b.command),
+            risk: self.classify(b.command),
+        };
+        let find = |id: &str| LIBRARY.iter().find(|b| b.id == id);
+        let mut out = Vec::new();
+        // Troubleshoot section first, in symptom order, each runbook in its listed order.
+        for symptom in TROUBLESHOOT {
+            for id in symptom.steps {
+                if let Some(b) = find(id) {
+                    out.push(shown(b, symptom.group));
+                }
+            }
+        }
+        // Area section, in the order the entries are written (grouped by area).
+        for b in LIBRARY {
+            out.push(shown(b, b.group));
+        }
+        out
     }
 
     /// What the favourite dialog shows while a command is typed.

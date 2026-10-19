@@ -1540,6 +1540,408 @@ fn a_saved_list_from_before_these_checks_gets_them_too() {
     );
 }
 
+#[test]
+fn the_extended_library_commands_read_or_write() {
+    // BX-08 (extended library): the reading forms of the commands added for the bigger library are
+    // read-only, and their writing cousins are "other" (a bulk run or MultiExec asks first).
+    reads_and_writes(
+        None,
+        &[
+            // Storage: LVM and RAID, filesystems, SAN.
+            "sudo pvs",
+            "sudo vgs",
+            "sudo lvs -a -o +devices",
+            "sudo pvdisplay",
+            "sudo vgdisplay",
+            "sudo lvdisplay",
+            "sudo xfs_info /",
+            "sudo dumpe2fs -h /dev/sda1",
+            "showmount -e nfs01.test",
+            "nfsstat -c",
+            "sudo multipath -ll",
+            "sudo multipath -l",
+            // Memory and processes.
+            "sudo slabtop -o -s c",
+            "smem -rs pss",
+            "pidstat -dru 1 3",
+            "sudo iotop -b -n 2 -o -k",
+            "swapon --show",
+            // Network.
+            "traceroute -n host.test",
+            "mtr -rwznc 10 host.test",
+            "resolvectl status",
+            "resolvectl query host.test",
+            // System, services, logs.
+            "localectl status",
+            "systemd-analyze time",
+            "systemd-analyze critical-chain --no-pager",
+            // Packages.
+            "apt-cache search nginx",
+            "sudo apt-get check",
+            "dpkg -C",
+            "dpkg -V bash",
+            "dpkg --get-selections",
+            "apt-mark showhold",
+            "apt-mark showmanual",
+            "dnf repoquery nginx",
+            "dnf search nginx",
+            "dnf provides /usr/bin/ssh",
+            "dnf grouplist",
+            "dnf group list",
+            "dnf updateinfo list security",
+            "needs-restarting -r",
+            "rpm -V bash",
+            "rpm -K /tmp/pkg.rpm",
+            // Users and security.
+            "lslogins",
+            "loginctl list-sessions",
+            "loginctl session-status 1",
+            "sestatus",
+            "getsebool -a",
+            "sudo aa-status",
+            "sudo ausearch -m avc -ts recent",
+            "sudo aureport",
+            "sudo auditctl -l",
+            "sudo auditctl -s",
+            "sudo sshd -T",
+            "sudo sshd -t",
+            "sudo visudo -c",
+            "sudo fail2ban-client status",
+            "sudo fail2ban-client status sshd",
+            "klist",
+            // Firewall.
+            "sudo nft list tables",
+            // Web servers.
+            "sudo nginx -t",
+            "sudo nginx -T",
+            "nginx -V",
+            "sudo apachectl configtest",
+            "sudo apache2ctl -S",
+            "sudo httpd -t",
+            // Databases.
+            "sudo mysqladmin status",
+            "sudo mysqladmin ping",
+            "mysql --version",
+            "psql --version",
+            "pg_isready",
+            "pg_lsclusters",
+            // Scheduling and time.
+            "crontab -l",
+            "sudo crontab -l -u bob",
+            "atq",
+            "chronyc tracking",
+            "chronyc sources -v",
+            "ntpq -p -n",
+            "sudo hwclock --show",
+            // Identity.
+            "realm list",
+            "sudo sssctl domain-list",
+            "adcli info example.test",
+            // VMware Tools in the guest.
+            "vmware-toolbox-cmd -v",
+            "vmware-toolbox-cmd stat hosttime",
+            "vmware-toolbox-cmd timesync status",
+            "vmware-toolbox-cmd device list",
+            // Containers and Kubernetes.
+            "podman ps -a",
+            "podman images",
+            "podman pod ps",
+            "podman system df",
+            "docker version",
+            "docker info",
+            "docker volume ls",
+            "docker compose logs",
+            "kubectl api-resources",
+            "kubectl rollout status deploy/web -n shop",
+            "kubectl auth can-i --list",
+            "kubectl config view",
+            "helm list -A",
+            "helm status web -n shop",
+            "helm get values web",
+            "helm repo list",
+            "helm search repo nginx",
+        ],
+        &[
+            // The writing cousins of the same commands.
+            "sudo multipath -f mpatha",
+            "swapon /dev/sdb2",
+            "resolvectl flush-caches",
+            "apt-mark hold nginx",
+            "sudo dnf group install 'Development Tools'",
+            "loginctl terminate-session 3",
+            "sudo auditctl -w /etc/passwd -p wa",
+            "sudo setsebool httpd_can_network_connect on",
+            "sudo fail2ban-client set sshd unbanip 192.0.2.5",
+            "sudo nginx -s reload",
+            "sudo apachectl graceful",
+            "sudo mysqladmin flush-logs",
+            "crontab -r",
+            "sudo chronyc makestep",
+            "sudo hwclock --systohc",
+            "sudo realm join example.test -U bob",
+            "sudo sssctl cache-expire",
+            "vmware-toolbox-cmd timesync enable",
+            "vmware-toolbox-cmd device disconnect net0",
+            "podman rm web",
+            "docker volume rm data",
+            "kubectl rollout restart deploy/web -n shop",
+            "kubectl delete pod web-1 -n shop",
+            "helm uninstall web -n shop",
+            "helm repo add charts https://charts.test",
+            "sudo nft add rule inet filter input tcp dport 22 accept",
+            "sudo pvcreate /dev/sdb",
+            "sudo lvextend -L +1G /dev/vg0/root",
+        ],
+    );
+}
+
+#[test]
+fn smartctl_reads_health_and_writes_when_it_tests_or_sets() {
+    // BX-08: `smartctl` reads SMART data; it writes to the device when it starts or aborts a
+    // self-test (-t, -X) or turns a feature on or off (-s, -o, -S).
+    reads_and_writes(
+        None,
+        &[
+            "sudo smartctl -H /dev/sda",
+            "sudo smartctl -a /dev/sda",
+            "sudo smartctl -A /dev/sda",
+            "sudo smartctl -x /dev/sda",
+            "sudo smartctl -i /dev/sda",
+            "sudo smartctl -l error /dev/sda",
+            "sudo smartctl --scan",
+            "sudo smartctl --all /dev/nvme0",
+        ],
+        &[
+            "sudo smartctl -t short /dev/sda",
+            "sudo smartctl -t long /dev/sda",
+            "sudo smartctl -X /dev/sda",
+            "sudo smartctl -s on /dev/sda",
+            "sudo smartctl -o on /dev/sda",
+            "sudo smartctl -S on /dev/sda",
+            "sudo smartctl --test=short /dev/sda",
+            "sudo smartctl --abort /dev/sda",
+            "sudo smartctl --smart=on /dev/sda",
+            "sudo smartctl -a -s on /dev/sda",
+            "sudo smartctl -t $KIND /dev/sda",
+        ],
+    );
+}
+
+#[test]
+fn sysctl_reads_a_parameter_and_writes_when_it_sets_one() {
+    // BX-08: `sysctl` reads values (`-a`, a bare key); it writes with `-w`, a `name=value` operand or
+    // by loading a file (`-p`, --load, --system).
+    reads_and_writes(
+        None,
+        &[
+            "sudo sysctl -a",
+            "sysctl --all",
+            "sysctl net.ipv4.ip_forward",
+            "sysctl -n kernel.hostname",
+            "sysctl vm.swappiness",
+        ],
+        &[
+            "sudo sysctl -w net.ipv4.ip_forward=1",
+            "sudo sysctl net.ipv4.ip_forward=1",
+            "sudo sysctl kernel.hostname=web02",
+            "sudo sysctl -p",
+            "sudo sysctl -p /etc/sysctl.conf",
+            "sudo sysctl --system",
+            "sudo sysctl --load=/etc/sysctl.conf",
+            "sudo sysctl -f /etc/sysctl.conf",
+            "sysctl -w $PARAM",
+        ],
+    );
+}
+
+#[test]
+fn openssl_inspects_certs_and_writes_when_it_creates_files_or_keys() {
+    // BX-08: `openssl` reads certificates and keys and connects to TLS servers; it writes a file with
+    // -out/-keyout, and the ca and rehash subcommands and the key generators write by design.
+    reads_and_writes(
+        None,
+        &[
+            "openssl x509 -in /tmp/c.pem -noout -dates",
+            "openssl x509 -noout -text -in /tmp/c.pem",
+            "openssl x509 -in /tmp/c.pem -noout -fingerprint -sha256",
+            "openssl verify -CAfile /tmp/ca.pem /tmp/c.pem",
+            "openssl req -in /tmp/r.csr -noout -text -verify",
+            "openssl rsa -in /tmp/k.pem -noout -check",
+            "openssl pkey -in /tmp/k.pem -noout -text",
+            "openssl s_client -connect host.test:443 -servername host.test",
+            "echo | openssl s_client -connect host.test:443",
+            "openssl crl -in /tmp/c.crl -noout -text",
+            "openssl ciphers -v",
+            "openssl list -digest-algorithms",
+            "openssl version",
+        ],
+        &[
+            "openssl req -new -newkey rsa:2048 -keyout /tmp/k.pem -out /tmp/r.csr",
+            "openssl x509 -in /tmp/c.pem -out /tmp/c.der -outform DER",
+            "openssl x509 -in /tmp/c.pem -signkey /tmp/k.pem -out /tmp/s.pem",
+            "openssl genrsa -out /tmp/k.pem 2048",
+            "openssl genrsa 2048",
+            "openssl genpkey -algorithm RSA",
+            "sudo openssl ca -config /etc/pki/tls/openssl.cnf",
+            "openssl rehash /etc/ssl/certs",
+            "openssl x509 -in /tmp/c.pem -out $DEST",
+            // Review #3: more write forms an allow-list has to cover.
+            "openssl s_client -connect host.test:443 -sess_out /tmp/sess",
+            "openssl s_client -connect host.test:443 -keylogfile /tmp/keys",
+            "openssl req -new -x509 -keyout /tmp/k.pem -days 365",
+            "openssl req -newkey rsa:2048 -nodes",
+            "openssl dhparam -out /tmp/dh.pem 2048",
+            "openssl ecparam -name prime256v1 -genkey",
+            "openssl s_server -accept 4433 -cert /tmp/c.pem",
+            "openssl rand -writerand /tmp/rnd",
+        ],
+    );
+}
+
+#[test]
+fn library_prefixes_catch_multiple_commands_and_last_option_wins() {
+    // Review of PR #25: several new read-only prefixes could be turned into host changes by packing a
+    // second command into one call, or by a later option overriding an earlier read one. Each writing
+    // form must stay "other" so MultiExec and Compare ask first.
+    reads_and_writes(
+        None,
+        &[
+            // Still plain reads.
+            "sudo mysqladmin status",
+            "sudo mysqladmin ping",
+            "sudo mysqladmin -u alice -h db.example.com -P 3306 status",
+            "sudo mysqladmin status extended-status processlist",
+            "sudo nft list ruleset",
+            "sudo nft list tables",
+            "sudo nft list ruleset -a",
+            "sudo auditctl -l",
+            "sudo auditctl -s",
+            "sudo multipath -ll",
+            "sudo multipath -l -v 2",
+            "swapon --show",
+            "chronyc tracking",
+            "chronyc sources -v",
+            "ntpq -p -n",
+            "crontab -l",
+            "sudo crontab -l -u bob",
+            "sudo hwclock --show",
+            "sudo nginx -t",
+            "sudo nginx -T",
+            "sudo apachectl configtest",
+            "sudo httpd -t",
+            "mysql --version",
+            "psql --version",
+            "kubectl config view",
+        ],
+        &[
+            // mysqladmin: a second command word runs too (`status shutdown` is caught even harder, as
+            // Dangerous by the shutdown rule; these stay "other").
+            "sudo mysqladmin status reload",
+            "sudo mysqladmin ping flush-hosts",
+            "sudo mysqladmin flush-logs",
+            "sudo mysqladmin -u alice status create appdb",
+            // nft: extra statements in one argument, or -f/-I, clustered or attached.
+            "sudo nft -f /tmp/rules.nft",
+            "sudo nft list ruleset -f /tmp/x",
+            "sudo nft -I /tmp/inc list ruleset",
+            "nft $'list ruleset\\nflush ruleset'",
+            // auditctl / multipath: the last option wins, clustered too.
+            "sudo auditctl -l -D",
+            "sudo auditctl -lD",
+            "sudo auditctl -D",
+            "sudo auditctl -l -w /etc/passwd -p wa",
+            "sudo multipath -ll -F",
+            "sudo multipath -llF",
+            "sudo multipath -l -r",
+            "swapon --show -a",
+            // chronyc -m (clustered -nm), ntpq -c (attached/clustered), crontab -r (clustered -lr).
+            "chronyc tracking -m makestep",
+            "chronyc -nm tracking makestep",
+            "ntpq -p -c writevar",
+            "ntpq -p -cwritevar",
+            "ntpq -pc writevar",
+            "ntpq -p -c ':config server x'",
+            "crontab -l -r",
+            "crontab -lr",
+            // hwclock / nginx / apache control actions reached via a read flag, attached/clustered.
+            "sudo hwclock --show --systohc",
+            "sudo hwclock --show --sys",
+            "sudo nginx -t -s reload",
+            "sudo nginx -ts stop",
+            "sudo apachectl -t -k graceful",
+            "sudo apachectl -tk stop",
+            "sudo httpd -t -kstop",
+            // SQL clients: --version plus a query, attached or with =.
+            "mysql --version -e 'SELECT 1'",
+            "mysql --version -e'SELECT 1'",
+            "mysql --version --execute='SELECT 1'",
+            "psql --version -c 'SELECT 1'",
+            "psql --version --command='SELECT 1'",
+            "psql --version -o /tmp/out",
+            // kubectl config view --raw leaks credentials (plain and =true).
+            "kubectl config view --raw",
+            "kubectl config view --raw=true",
+        ],
+    );
+}
+
+#[test]
+fn library_prefixes_catch_commands_that_write_files() {
+    // Review of PR #25, like `sort -o`: a read command that can be pointed at an output file.
+    reads_and_writes(
+        None,
+        &[
+            "sudo ausearch -m avc -ts recent",
+            "sudo lshw -short",
+            "sudo sshd -T",
+            "sudo sshd -t",
+            "nfsstat -c",
+            "apt-cache search nginx",
+            "apt-cache policy nginx",
+        ],
+        &[
+            "sudo ausearch -m avc --checkpoint /tmp/cp",
+            "sudo ausearch --checkpoint=/tmp/cp",
+            "sudo ausearch --check /tmp/cp",
+            "sudo lshw -dump /tmp/hw.db",
+            "sudo lshw --dump=/tmp/hw.db",
+            "sudo sshd -t -E /tmp/sshd.log",
+            "sudo sshd -T -E /tmp/sshd.log",
+            "sudo sshd -E/tmp/sshd.log -T",
+            "sudo sshd -tE /tmp/sshd.log",
+            "nfsstat -z",
+            "nfsstat -sz",
+            "nfsstat --zero",
+            "apt-cache gencaches",
+        ],
+    );
+}
+
+#[test]
+fn openssl_option_spellings_are_normalised() {
+    // Review of PR #25: openssl takes -opt, --opt and -opt=value, so equivalent spellings must not
+    // slip past the allow-list as read-only.
+    reads_and_writes(
+        None,
+        &[
+            "openssl x509 -in /tmp/c.pem -noout -text",
+            "openssl s_client -connect host.test:443",
+            "openssl req -in /tmp/r.csr -noout -text",
+        ],
+        &[
+            "openssl s_client -connect host.test:443 --keylogfile=/tmp/k",
+            "openssl s_client -connect host.test:443 -sess_out=/tmp/s",
+            "openssl x509 -in /tmp/c.pem --out=/tmp/c.der",
+            "openssl req --newkey rsa:2048 -nodes",
+            "openssl req --new --x509 --keyout=/tmp/k.pem",
+            "openssl x509 -in /tmp/c.pem -CAcreateserial -CA /tmp/ca.pem",
+            "openssl x509 -in /tmp/c.pem -CAserial=/tmp/ca.srl",
+            "openssl ca -config /etc/pki/tls/openssl.cnf",
+            "openssl dhparam -out /tmp/dh.pem 2048",
+        ],
+    );
+}
+
 // ---- SS-10: MultiExec lines ----------------------------------------------------------------------
 
 fn terminal(env: Environment) -> Target {

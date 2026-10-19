@@ -93,6 +93,19 @@ Release 0.2.1 as soon as P1 is merged (one manual install per machine), and 0.3.
     Kubernetes. Each entry has a short description. Entries a dangerous-command rule matches are marked.
   - Click pastes into the current terminal; Shift+click also presses Enter; with MultiExec on (P6), the line goes
     to every selected terminal through MultiExec's checks. Any library entry can be copied into Favourites.
+- **Library extended (owner asked 20 Oct 2026).** After 0.3.0 the owner asked for a much bigger built-in library for
+  day-to-day admin and troubleshooting, and chose: Linux only; four more areas (troubleshooting, storage in depth,
+  security and access, apps and platforms) and the existing groups grown; checks plus the usual fixes (no data-wiping
+  ones); and two sections in the panel — **By area** (25 topic groups: system info, disk, storage/LVM/RAID/SMART/SAN,
+  memory, CPU and processes, network, services, logs, apt and dnf packages, users, security and access, TLS
+  certificates, firewall, web servers, databases, cron and timers, time sync, identity, VMware Tools, Docker, Podman,
+  Kubernetes, Helm) and **Troubleshoot** (10 symptom runbooks that list area commands in order). Done in 0.3.1:
+  `library.rs` now holds ~425 area commands plus `TROUBLESHOOT`; the panel shows both sections, collapsible and
+  searchable together. Commands target RHEL/Rocky/Alma 8–9, Ubuntu 22.04/24.04 and Debian 12, give apt and dnf (and
+  ufw and firewalld) where they differ, and never open a pager or hang. Classification is unchanged in spirit: the new
+  read-only commands were added to `policy/commands.rs` and their writing forms (`smartctl -t`, `sysctl -w`, `openssl
+  -out`, ...) to `policy/commands/writes.rs`, each with a unit test; a test in `tests/command_panel.rs` pins every
+  entry's classification so a later rule change shows as a diff.
 - QL-06 "Type vault password": sends a chosen vault password into the current terminal (for sudo or su prompts)
   without the clipboard and without showing it. Audited as used (secret label, session), never the value.
 - QL-07 notifications: when a command in a background tab finishes after a long run (shell prompt returns, or the

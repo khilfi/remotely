@@ -46,6 +46,7 @@ import {
   type Favourite,
   type FavouriteInput,
   type LibraryEntry,
+  type LibrarySection,
 } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -74,6 +75,9 @@ interface Group {
   label: string;
   /** Favourites: the folder name, or null for the top level. */
   folder?: string | null;
+  /** Library: which section the group sits in. */
+  section?: LibrarySection;
+  sectionLabel?: string;
   items: Item[];
 }
 
@@ -160,7 +164,9 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
     const groups = new Map<string, Group>();
     for (const e of library) {
       const key = `lib:${e.group}`;
-      const group = groups.get(key) ?? { key, label: e.groupLabel, items: [] };
+      const group =
+        groups.get(key) ??
+        ({ key, label: e.groupLabel, section: e.section, sectionLabel: e.sectionLabel, items: [] } satisfies Group);
       group.items.push({
         key: e.id,
         name: e.name,
@@ -277,8 +283,24 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
     );
   };
 
+  /** A library section (Troubleshoot or By area) with its own small header; nothing when it is empty. */
+  const librarySection = (label: string, hint: string, groups: Group[]) => {
+    if (groups.length === 0) return null;
+    return (
+      <div key={label} role="group" aria-label={label} className="grid gap-1">
+        <div className="flex items-baseline gap-2 px-1 pt-1">
+          <span className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{label}</span>
+          <span className="truncate text-[11px] text-muted-foreground/70">{hint}</span>
+        </div>
+        {groups.map((g) => groupView(g, false))}
+      </div>
+    );
+  };
+
   const shownFavourites = filter(favouriteGroups);
   const shownLibrary = filter(libraryGroups);
+  const troubleshootGroups = shownLibrary.filter((g) => g.section === "troubleshoot");
+  const areaGroups = shownLibrary.filter((g) => g.section === "area");
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
@@ -350,7 +372,10 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
             {shownLibrary.length === 0 ? (
               <p className="px-1 py-2 text-sm text-muted-foreground">No command in the library matches.</p>
             ) : (
-              <div className="grid gap-1">{shownLibrary.map((g) => groupView(g, false))}</div>
+              <div className="grid gap-2">
+                {librarySection("Troubleshoot", "Runbooks by symptom", troubleshootGroups)}
+                {librarySection("By area", "Commands by topic", areaGroups)}
+              </div>
             )}
           </ScrollArea>
         </TabsContent>
