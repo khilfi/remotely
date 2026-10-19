@@ -1,4 +1,5 @@
-// BX-01 target picker for the Bulk run page: saved sessions, VMs (reached through the session linked to
+// BX-01 target picker (the SS-09 key push; Compare output picks tabs and tree sessions instead): saved sessions, VMs
+// (reached through the session linked to
 // each), tags and saved VM filters. The core turns the picks into hosts, each session once, and lists
 // the picked VMs no session reaches: commands reach a VM over SSH, and running them through VMware
 // Tools without SSH (VM-09) comes in a later version.

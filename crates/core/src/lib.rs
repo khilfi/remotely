@@ -20,9 +20,12 @@
 //!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
 //!     quick connect (QL-02), host name and IP (QL-03 ──► adapters::network), output and logs (SS-11),
 //!     vault passwords typed at a prompt (QL-06), long runs finishing (QL-07)
+//!     MultiExec (SS-10): typed into several at once; each line's Enter is a command on the bus, and the
+//!     job runner sends it to the terminals
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
+//!     (the Terminal page's Compare output)
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -84,6 +87,7 @@ use snapshots::SnapshotReader;
 use snippets::Snippets;
 use ssh_keys::KeyManager;
 use store::{NewAuditEntry, Store};
+use terminal::multiexec::MultiExec;
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use transfer::Transfer;
 use vault::{Dpapi, LocalVault, Vault, VaultOptions, VaultService};
@@ -131,7 +135,7 @@ pub struct Core {
     pub inventory: Inventory,
     /// VM-04: snapshot trees, read from each VM's .vmsd. Changes go through [`Core::bus`].
     pub snapshots: SnapshotReader,
-    pub bus: CommandBus,
+    pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
     /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
     pub vault: VaultService,
@@ -149,13 +153,15 @@ pub struct Core {
     pub transfer: Transfer,
     /// SS-03: open terminal panes and their SSH connections.
     pub terminals: Terminals,
+    /// SS-10: what is typed into one terminal goes to several; each line's Enter goes through the bus.
+    pub multiexec: MultiExec,
     /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
     /// classified by the bus's policy engine.
     pub snippets: Snippets,
     /// QL-04: background checks of the sessions the Terminal page's tree shows. Reads only. The shell
     /// starts it with [`ReachabilityChecker::run`].
     pub reachability: Arc<ReachabilityChecker>,
-    /// BX-01, BX-03, BX-05: bulk run targets, results, diffs and exports. Running is the bus.
+    /// BX-01, BX-03, BX-05: Compare targets, results, diffs and exports. Running is the bus.
     pub bulk: BulkRuns,
     /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
     /// The shell starts its polling with [`Metrics::run`].
@@ -238,11 +244,12 @@ impl Core {
             Arc::clone(&adapters.updater),
             Arc::clone(&adapters.vault),
             Arc::clone(&known_hosts),
+            Arc::new(terminals.clone()),
             limits,
         );
-        let bus = CommandBus::new(
+        let bus = Arc::new(CommandBus::new(
             policy,
-            Arc::new(StoreDirectory::new(store.clone())),
+            Arc::new(StoreDirectory::new(store.clone()).with_terminals(terminals.clone())),
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
@@ -252,7 +259,7 @@ impl Core {
                 Arc::clone(&adapters.host_counters),
             ),
             ImpactPreviewer::new(store.clone(), Arc::clone(&vmware_dyn)),
-        );
+        ));
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
         }
@@ -264,6 +271,7 @@ impl Core {
         }
         let keys = KeyManager::new(store.clone(), Arc::clone(&adapters.vault));
         let snippets = Snippets::new(store.clone(), bus.policy());
+        let multiexec = MultiExec::new(ctx, terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
         Ok(Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
@@ -275,10 +283,11 @@ impl Core {
             known_hosts,
             keys,
             transfer: Transfer::new(store.clone()),
+            bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
             terminals,
+            multiexec,
             snippets,
             reachability,
-            bulk: BulkRuns::new(store.clone()),
             metrics,
             store,
             bus,

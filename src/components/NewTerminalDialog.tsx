@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ColorDot, EnvBadge } from "@/components/Badges";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
   errorMessage,
@@ -469,10 +470,12 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="submit" form="quick-connect" disabled={busy}>
-            {busy ? <LoaderCircleIcon className="animate-spin" /> : <TerminalIcon />}
-            Connect
-          </Button>
+          <WhyDisabled reason={busy ? "Connecting…" : null}>
+            <Button type="submit" form="quick-connect" disabled={busy}>
+              {busy ? <LoaderCircleIcon className="animate-spin" /> : <TerminalIcon />}
+              Connect
+            </Button>
+          </WhyDisabled>
         </DialogFooter>
       </DialogContent>
     </Dialog>

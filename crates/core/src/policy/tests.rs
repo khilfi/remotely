@@ -1539,3 +1539,140 @@ fn a_saved_list_from_before_these_checks_gets_them_too() {
         ],
     );
 }
+
+// ---- SS-10: MultiExec lines ----------------------------------------------------------------------
+
+fn terminal(env: Environment) -> Target {
+    Target {
+        target: TargetRef::Terminal {
+            terminal_id: Uuid::new_v4(),
+            session_id: Some(Uuid::new_v4()),
+        },
+        name: "web01".into(),
+        environment: env,
+        protected: false,
+    }
+}
+
+fn terminals(n: usize) -> Vec<Target> {
+    (0..n).map(|_| terminal(Environment::Lab)).collect()
+}
+
+fn line(text: &str, unreliable: bool, targets: &[Target]) -> Command {
+    Command::TerminalLine {
+        targets: refs(targets),
+        line: text.into(),
+        unreliable,
+        keys: "\r".into(),
+    }
+}
+
+#[test]
+fn a_read_only_multiexec_line_is_low_and_sent_without_asking() {
+    let t = terminals(3);
+    let d = engine().evaluate(&line("uptime", false, &t), &t);
+    assert_eq!(d.action, ActionKind::ExecReadOnly);
+    assert_eq!(d.tier, Tier::Low);
+    assert!(d.steps.is_empty());
+}
+
+#[test]
+fn a_multiexec_line_that_may_change_the_hosts_needs_a_confirm() {
+    let t = terminals(2);
+    let d = engine().evaluate(&line("systemctl restart nginx", false, &t), &t);
+    assert_eq!(d.action, ActionKind::ExecOther);
+    assert_eq!(d.tier, Tier::Medium);
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+}
+
+#[test]
+fn a_dangerous_multiexec_line_needs_the_full_approval() {
+    let t = terminals(2);
+    let d = engine().evaluate(&line("rm -rf /var/lib/app", false, &t), &t);
+    assert_eq!(d.action, ActionKind::ExecDangerous);
+    assert_eq!(d.tier, Tier::High);
+    assert!(
+        d.reasons.iter().any(|r| r.starts_with("flagged dangerous")),
+        "{:?}",
+        d.reasons
+    );
+    assert!(d.steps.contains(&ApprovalStep::TypeTargetCount { expected: 2 }));
+    assert!(d.steps.contains(&ApprovalStep::Reason));
+    assert!(!d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })));
+}
+
+#[test]
+fn a_prod_terminal_raises_a_multiexec_line() {
+    let t = vec![terminal(Environment::Lab), terminal(Environment::Prod)];
+    let d = engine().evaluate(&line("uptime", false, &t), &t);
+    assert_eq!(d.tier, Tier::Medium, "read-only on Prod: one confirm");
+    assert!(d.reasons.iter().any(|r| r.contains("Prod")), "{:?}", d.reasons);
+}
+
+#[test]
+fn a_multiexec_line_remotely_could_not_follow_is_never_read_only() {
+    let t = terminals(2);
+    let d = engine().evaluate(&line("uptime", true, &t), &t);
+    assert_eq!(d.action, ActionKind::ExecOther);
+    assert_eq!(d.tier, Tier::Medium);
+    assert!(d.reasons.iter().any(|r| r.contains("can't follow")), "{:?}", d.reasons);
+    // Nothing known at all (a line recalled from the history) is the same.
+    let d = engine().evaluate(&line("", true, &t), &t);
+    assert_eq!(d.tier, Tier::Medium);
+    // A dangerous line stays dangerous.
+    let d = engine().evaluate(&line("reboot", true, &t), &t);
+    assert_eq!(d.action, ActionKind::ExecDangerous);
+}
+
+#[test]
+fn a_multiexec_line_remotely_could_not_follow_gets_a_confirm_even_when_other_commands_are_low() {
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(ActionKind::ExecOther, TierRule::same(Tier::Low));
+    let e = PolicyEngine::new(rules).unwrap();
+    let t = terminals(2);
+    assert_eq!(e.evaluate(&line("touch /tmp/x", false, &t), &t).tier, Tier::Low);
+    let d = e.evaluate(&line("touch /tmp/x", true, &t), &t);
+    assert_eq!(d.tier, Tier::Medium);
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+    // ...and Prod still raises it from there.
+    let p = vec![terminal(Environment::Prod)];
+    assert_eq!(e.evaluate(&line("touch /tmp/x", true, &p), &p).tier, Tier::High);
+}
+
+#[test]
+fn multiexec_lines_go_to_terminals_only_and_are_never_retried() {
+    let t = terminals(1);
+    let ok = line("uptime", false, &t);
+    assert!(ok.validate().is_ok());
+    assert!(ok.with_targets(refs(&t)).is_none(), "a line is not sent again later");
+    let hosts = vec![host(Environment::Lab)];
+    assert!(line("uptime", false, &hosts).validate().is_err());
+    assert!(
+        line("   ", false, &t).validate().is_err(),
+        "an empty line has nothing to rate"
+    );
+    assert!(line("", true, &t).validate().is_ok(), "but a recalled one does");
+    let no_enter = Command::TerminalLine {
+        targets: refs(&t),
+        line: "uptime".into(),
+        unreliable: false,
+        keys: "x".into(),
+    };
+    assert!(no_enter.validate().is_err());
+}
+
+#[test]
+fn multiexec_summaries_name_the_line_without_secrets() {
+    let t = terminals(3);
+    assert_eq!(
+        line("df -h /", false, &t).summary(3),
+        "MultiExec: run `df -h /` in 3 terminals"
+    );
+    assert_eq!(
+        line("cd /srv\nmake\n", false, &t).summary(1),
+        "MultiExec: run `cd /srv` (and 1 more line) in 1 terminal"
+    );
+    assert_eq!(line("", true, &t).summary(2), "MultiExec: press Enter in 2 terminals");
+    let summary = line("mysql --password=hunter2-secret", false, &t).summary(3);
+    assert!(!summary.contains("hunter2-secret"), "{summary}");
+}

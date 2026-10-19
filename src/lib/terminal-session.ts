@@ -10,7 +10,8 @@
 // right-click paste, and the font size, scrollback and copy-on-select settings, applied live. SS-11:
 // the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if typed;
 // QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
-// command that finished, and the page decides whether to notify.
+// command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's keys go
+// to `inputRouter` instead (see multiexec.ts).
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -141,6 +142,11 @@ export class PaneSession {
   copyOnSelect = true;
   /** QL-07: called when the core reports a long command that finished here. */
   onCommandFinished: ((finished: CommandFinished) => void) | null = null;
+  /**
+   * SS-10: set while MultiExec is on and this pane is picked. Its keys (typed, pasted, or from the command panel) go
+   * there instead of to this terminal alone; MultiExec sends them to every picked terminal and holds Enter.
+   */
+  inputRouter: ((pane: PaneSession, bytes: Uint8Array) => void) | null = null;
 
   constructor(key: string, opener: PaneOpener, label: string, theme: ResolvedTheme, options: PaneOptions) {
     this.key = key;
@@ -208,6 +214,11 @@ export class PaneSession {
   private update(change: Partial<PaneSnapshot>) {
     this.snapshot = { ...this.snapshot, ...change };
     this.listeners.forEach((l) => l());
+  }
+
+  /** SS-10: MultiExec takes this pane's keys (a function), or gives them back (null). */
+  setInputRouter(router: ((pane: PaneSession, bytes: Uint8Array) => void) | null) {
+    this.inputRouter = router;
   }
 
   /** The core's id for this pane, once it has opened. */
@@ -340,6 +351,12 @@ export class PaneSession {
   // ---- input ----
 
   private send(bytes: Uint8Array) {
+    // Always, so no key typed with MultiExec on skips its checks (one typed just before may still be writing; the
+    // core then knows that terminal's line holds text it did not see).
+    if (this.inputRouter && this.coreId) {
+      this.inputRouter(this, bytes);
+      return;
+    }
     this.pending.push(bytes);
     this.flush();
   }

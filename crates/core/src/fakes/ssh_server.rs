@@ -326,6 +326,7 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             user: String::new(),
             first_factor: false,
             asking: HashMap::new(),
+            full_screen: HashMap::new(),
             lines: HashMap::new(),
             execs: HashMap::new(),
         };
@@ -375,6 +376,8 @@ struct ServerHandler {
     /// Shell channels where `sudo` waits for its password: what was typed so far (not echoed), and
     /// the tries left.
     asking: HashMap<ChannelId, (Vec<u8>, u8)>,
+    /// SS-10: shell channels where the full-screen `top` runs, and the keys it got so far.
+    full_screen: HashMap<ChannelId, Vec<u8>>,
 }
 
 impl ServerHandler {
@@ -454,6 +457,14 @@ impl ServerHandler {
                     let _ = handle.data(channel, b"done, waiting\r\n".to_vec()).await;
                 });
                 return Ok(());
+            }
+            // SS-10: a full-screen program on the alternate screen; `q` quits it (see `data`).
+            Some("top") => {
+                self.full_screen.insert(channel, Vec::new());
+                return session.data(
+                    channel,
+                    b"\x1b[?1049h\x1b[H\x1b[2Jtop - 10:00:00 up 3 days, 1 user\r\nTasks: 99 total\r\n".to_vec(),
+                );
             }
             // For trying the app by hand: a network failure, a moment later so this reply goes out.
             Some("drop-connection") => {
@@ -661,10 +672,30 @@ impl server::Handler for ServerHandler {
         for &byte in data {
             if self.asking.contains_key(&channel) {
                 self.sudo_byte(channel, byte, session)?;
+            } else if let Some(keys) = self.full_screen.get_mut(&channel) {
+                // `top` reads keys, not lines; `q` quits and leaves the alternate screen.
+                if byte == b'q' {
+                    let keys = String::from_utf8_lossy(&std::mem::take(keys)).into_owned();
+                    self.full_screen.remove(&channel);
+                    self.state.note(format!("top keys {keys:?}"));
+                    session.data(channel, b"\x1b[?1049l$ ".to_vec())?;
+                } else {
+                    keys.push(byte);
+                }
             } else if byte == b'\r' || byte == b'\n' {
                 session.data(channel, b"\r\n".to_vec())?;
                 let line = self.lines.get_mut(&channel).map(std::mem::take).unwrap_or_default();
                 self.run_line(channel, &String::from_utf8_lossy(&line), session)?;
+            } else if byte == 0x03 {
+                // Ctrl+C drops the line, like a shell.
+                let dropped = self.lines.get_mut(&channel).map(std::mem::take).unwrap_or_default();
+                self.state
+                    .note(format!("interrupt {}", String::from_utf8_lossy(&dropped)));
+                session.data(channel, b"^C\r\n$ ".to_vec())?;
+            } else if byte == 0x7f || byte == 0x08 {
+                if self.lines.entry(channel).or_default().pop().is_some() {
+                    session.data(channel, b"\x08 \x08".to_vec())?;
+                }
             } else {
                 session.data(channel, vec![byte])?;
                 self.lines.entry(channel).or_default().push(byte);
@@ -681,6 +712,12 @@ impl ServerHandler {
         let Some((typed, tries)) = self.asking.get_mut(&channel) else {
             return Ok(());
         };
+        if byte == 0x03 {
+            // Ctrl+C at the prompt: sudo gives up.
+            typed.clear();
+            self.asking.remove(&channel);
+            return session.data(channel, b"^C\r\n$ ".to_vec());
+        }
         if byte != b'\r' && byte != b'\n' {
             typed.push(byte);
             return Ok(());

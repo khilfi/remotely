@@ -20,6 +20,8 @@
 //!   the adapter has already scrubbed the run's secrets from the output (BX-07).
 //! * Safety snapshot before each VM's action when the approval asked for one (VM-05). One name per
 //!   job, so a single bulk revert undoes it; a VM whose safety snapshot fails is left untouched.
+//! * SS-10 MultiExec lines: the line's keys are already in each terminal; the job sends the Enter the
+//!   policy engine held back ([`TerminalKeys`]), to terminals that are still connected.
 //! * Every job and target is journaled in the store, and the audit log gets an entry when the job
 //!   starts and when it ends (NFR Audit, NFR Reliability).
 
@@ -50,6 +52,7 @@ use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
 use crate::snapshots::safety_snapshot_name;
 use crate::ssh_keys;
 use crate::store::{NewAuditEntry, NewJob, Store, TargetResult};
+use crate::terminal::TerminalKeys;
 use crate::vault::{SecretId, SecretString, Vault};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -82,6 +85,21 @@ impl JobStatus {
 
     pub fn is_terminal(self) -> bool {
         !matches!(self, JobStatus::Queued | JobStatus::Countdown | JobStatus::Running)
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            JobStatus::Queued,
+            JobStatus::Countdown,
+            JobStatus::Running,
+            JobStatus::Succeeded,
+            JobStatus::Failed,
+            JobStatus::PartiallyFailed,
+            JobStatus::Cancelled,
+            JobStatus::Interrupted,
+        ]
+        .into_iter()
+        .find(|status| status.as_str() == s)
     }
 }
 
@@ -180,6 +198,8 @@ pub enum JobEvent {
         summary: String,
         tier: Tier,
         targets: usize,
+        /// SS-10: a MultiExec line, whose terminals show what happened: the UI shows no toasts for it.
+        quiet: bool,
     },
     /// AP-03: the job waits until `until` (RFC 3339) and can be cancelled until then.
     Countdown {
@@ -316,6 +336,8 @@ pub struct JobRunner {
     vault: Arc<dyn Vault>,
     /// SS-05: the host keys bulk runs check against.
     known_hosts: Arc<KnownHosts>,
+    /// SS-10: the open terminals a MultiExec line's Enter goes to.
+    terminal_keys: Arc<dyn TerminalKeys>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -335,6 +357,7 @@ impl JobRunner {
         updater: Arc<dyn UpdaterAdapter>,
         vault: Arc<dyn Vault>,
         known_hosts: Arc<KnownHosts>,
+        terminal_keys: Arc<dyn TerminalKeys>,
         limits: JobLimits,
     ) -> Arc<Self> {
         // Room for a 200-host bulk run's events (NFR Scale) without the UI lagging behind.
@@ -346,6 +369,7 @@ impl JobRunner {
             updater,
             vault,
             known_hosts,
+            terminal_keys,
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -401,6 +425,29 @@ impl JobRunner {
 
     pub fn subscribe(&self) -> broadcast::Receiver<JobEvent> {
         self.events.subscribe()
+    }
+
+    /// Waits until the job has ended and returns how (SS-10: MultiExec waits for a line's Enter to be
+    /// sent before the next keys go out). A job that ended already answers from the journal.
+    pub async fn wait(&self, job_id: Uuid) -> Result<JobStatus> {
+        let mut events = self.subscribe();
+        if locks::lock(&self.running).contains_key(&job_id) {
+            loop {
+                match events.recv().await {
+                    Ok(JobEvent::Finished { job_id: id, status }) if id == job_id => return Ok(status),
+                    Ok(_) => {}
+                    // Missed events: the journal says how it ended once it has.
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        if !locks::lock(&self.running).contains_key(&job_id) {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+        let status = self.store.job_status(job_id).await?;
+        Ok(status.unwrap_or(JobStatus::Interrupted))
     }
 
     /// Cancels a job in its countdown, or the targets of a running job that have not started yet.
@@ -460,6 +507,7 @@ impl JobRunner {
             summary: summary.clone(),
             tier: spec.decision.tier,
             targets: spec.decision.targets.len(),
+            quiet: matches!(spec.command, Command::TerminalLine { .. }),
         });
 
         let this = Arc::clone(self);
@@ -777,6 +825,14 @@ impl JobRunner {
                 self.updater.install(&github_token, version).await?;
                 Ok(TargetOutcome::done())
             }
+            (Command::TerminalLine { keys, .. }, TargetRef::Terminal { terminal_id, .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                // SS-10: the held Enter (and the rest of a paste of several lines).
+                self.terminal_keys.send(*terminal_id, keys.as_bytes()).await?;
+                Ok(TargetOutcome::done())
+            }
             (command, other) => Err(CoreError::WrongTargetKind {
                 action: command.summary(1),
                 target: format!("a {} target", other.kind()),
@@ -984,6 +1040,8 @@ impl JobRunner {
             Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => limits.vm_ops,
             Command::RemoteExec { .. } | Command::PushSshKey { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
+            // SS-10: pressing Enter is instant; every terminal at once, so they start together.
+            Command::TerminalLine { targets, .. } => targets.len(),
         };
         n.max(1)
     }
@@ -1042,7 +1100,7 @@ fn safety_verb(command: &Command) -> &'static str {
             SnapshotOp::Take { .. } => "snapshot",
         },
         Command::VmProtect { .. } => "protect",
-        Command::RemoteExec { .. } | Command::PushSshKey { .. } => "command",
+        Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::TerminalLine { .. } => "command",
         Command::AppUpdate { .. } => "update",
     }
 }

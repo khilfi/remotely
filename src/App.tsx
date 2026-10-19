@@ -1,6 +1,7 @@
 // App shell (shadcn/ui): sidebar navigation with the vault status (SS-04), top bar with the command
 // palette and the theme switch (FD-01), pages, the approval dialog and job toasts. Pages stay mounted
-// while hidden so terminal connections survive a page switch.
+// while hidden so terminal connections survive a page switch. Bulk execution lives in the Terminal page (post-MVP P6):
+// MultiExec (SS-10) and Compare output (BX-03) replace the MVP's Bulk run page.
 //
 // FD-01 keyboard: Ctrl+K opens the command palette (Ctrl+Shift+K inside a terminal, where Ctrl+K belongs
 // to the shell), Ctrl+1 to Ctrl+9 open the pages in sidebar order and Ctrl+, opens Settings.
@@ -11,6 +12,7 @@ import {
   CameraIcon,
   DownloadIcon,
   GaugeIcon,
+  GitCompareArrowsIcon,
   HistoryIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
@@ -19,12 +21,12 @@ import {
   LockOpenIcon,
   MonitorIcon,
   MoonIcon,
+  RadioTowerIcon,
   RefreshCwIcon,
   SearchIcon,
   ServerIcon,
   SettingsIcon,
   ShieldCheckIcon,
-  SquareTerminalIcon,
   SunIcon,
   TerminalIcon,
   type LucideIcon,
@@ -69,7 +71,6 @@ import {
 import { useTheme, type ThemePreference } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
-import { BulkRunPage } from "@/pages/BulkRunPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
@@ -80,30 +81,20 @@ import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage } from "@/pages/VmsPage";
 
 type PageId =
-  | "vms"
-  | "dashboard"
-  | "snapshots"
-  | "sessions"
-  | "terminal"
-  | "bulk"
-  | "knownHosts"
-  | "vault"
-  | "activity"
-  | "settings";
+  "vms" | "dashboard" | "snapshots" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-/** In sidebar order; the first nine open with Ctrl+1 to Ctrl+9, Settings with Ctrl+,. */
+/** In sidebar order; they open with Ctrl+1 to Ctrl+8, Settings with Ctrl+,. */
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
   { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon, shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
   { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon, shortcut: "Ctrl+5" },
-  { id: "bulk", label: "Bulk run", title: "Bulk run", icon: SquareTerminalIcon, shortcut: "Ctrl+6" },
-  { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon, shortcut: "Ctrl+7" },
-  { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon, shortcut: "Ctrl+8" },
-  { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon, shortcut: "Ctrl+9" },
+  { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon, shortcut: "Ctrl+6" },
+  { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon, shortcut: "Ctrl+7" },
+  { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon, shortcut: "Ctrl+8" },
   { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon, shortcut: "Ctrl+," },
 ];
 
@@ -121,7 +112,7 @@ const THEMES: { value: ThemePreference; label: string; icon: LucideIcon }[] = [
 export default function App() {
   const [page, setPage] = useState<PageId>("vms");
   const [info, setInfo] = useState<AppInfo | null>(null);
-  // The open approval, and who wants the job id once it is approved (the Bulk run page follows its run).
+  // The open approval, and who wants the job id once it is approved (Compare output follows its run).
   const [approval, setApproval] = useState<{ request: ApprovalRequest; onJob?: (jobId: string) => void } | null>(null);
   const [jobsVersion, setJobsVersion] = useState(0);
   // Bumped when a job finishes, so the VM list shows the new power states.
@@ -141,6 +132,11 @@ export default function App() {
   const [terminalOpen, setTerminalOpen] = useState<{ sessionId: string; n: number } | null>(null);
   // QL-02: the New terminal form, opened from the palette.
   const [terminalNew, setTerminalNew] = useState(0);
+  // BX-03, SS-10: Compare output and MultiExec, opened from the palette.
+  const [terminalCompare, setTerminalCompare] = useState(0);
+  const [terminalMultiExec, setTerminalMultiExec] = useState(0);
+  // SS-10: MultiExec lines are jobs too; their terminals show what happened, so they get no toasts.
+  const quietJobs = useRef(new Set<string>());
   // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
   const [vault, setVault] = useState<VaultInfo | null>(null);
   // FD-01: the command palette, opened on everything or on one VM's actions.
@@ -268,6 +264,12 @@ export default function App() {
     const unlisten = api.onJobEvent((event) => {
       setJobsVersion((v) => v + 1);
       const id = event.jobId;
+      if (event.event === "queued" && event.quiet) quietJobs.current.add(id);
+      if (quietJobs.current.has(id)) {
+        if (event.event === "finished") quietJobs.current.delete(id);
+        // A countdown still shows: it can be cancelled from the toast.
+        if (event.event !== "countdown") return;
+      }
       switch (event.event) {
         case "queued":
           toast.info(event.summary, { id, description: "Queued" });
@@ -375,11 +377,24 @@ export default function App() {
       },
     },
     {
-      id: "bulk",
-      label: "New bulk run",
-      icon: SquareTerminalIcon,
-      keywords: "command script many hosts",
-      run: () => setPage("bulk"),
+      id: "compare",
+      label: "Compare output on several hosts…",
+      icon: GitCompareArrowsIcon,
+      keywords: "bulk run command script many hosts group diff",
+      run: () => {
+        setTerminalCompare((n) => n + 1);
+        setPage("terminal");
+      },
+    },
+    {
+      id: "multiexec",
+      label: "MultiExec: type into several terminals",
+      icon: RadioTowerIcon,
+      keywords: "broadcast bulk many tabs at once",
+      run: () => {
+        setTerminalMultiExec((n) => n + 1);
+        setPage("terminal");
+      },
     },
     vault?.status === "unlocked"
       ? {
@@ -604,16 +619,11 @@ export default function App() {
                 theme={resolved}
                 openRequest={terminalOpen}
                 newRequest={terminalNew}
-                onOpenVault={() => setPage("vault")}
-              />
-            </section>
-            <section hidden={page !== "bulk"}>
-              <BulkRunPage
-                active={page === "bulk"}
+                compareRequest={terminalCompare}
+                multiExecRequest={terminalMultiExec}
                 vault={vault}
-                onSubmit={submitted}
+                onSubmitted={submitted}
                 onOpenVault={() => setPage("vault")}
-                onOpenSessions={() => setPage("sessions")}
               />
             </section>
             <section hidden={page !== "knownHosts"}>

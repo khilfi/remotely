@@ -1,10 +1,11 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`], [`terminal`], [`command_panel`] and [`clipboard`], never vmrun or
-//! SSH directly.
+//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`] and
+//! [`clipboard`], never vmrun or SSH directly.
 
 mod clipboard;
 mod command_panel;
 mod ipc;
+mod multiexec;
 mod terminal;
 pub mod updater;
 
@@ -114,6 +115,21 @@ pub fn run() {
                             let _ = handle.emit("metrics://round", &cost);
                         }
                         Err(RecvError::Lagged(_)) => {}
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
+
+            // SS-10: MultiExec lines that finished, and lines held while waiting keys were sent -> UI.
+            let mut lines = core.multiexec.subscribe();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match lines.recv().await {
+                        Ok(event) => {
+                            let _ = handle.emit("multiexec://event", &event);
+                        }
+                        Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed MultiExec events"),
                         Err(RecvError::Closed) => break,
                     }
                 }
@@ -253,6 +269,12 @@ pub fn run() {
             terminal::terminal_output_save,
             terminal::terminal_log_start,
             terminal::terminal_log_stop,
+            multiexec::multiexec_set_targets,
+            multiexec::multiexec_stop,
+            multiexec::multiexec_status,
+            multiexec::multiexec_input,
+            multiexec::multiexec_approve,
+            multiexec::multiexec_cancel,
             command_panel::favourites_list,
             command_panel::favourite_add,
             command_panel::favourite_update,

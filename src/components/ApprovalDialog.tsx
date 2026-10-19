@@ -5,6 +5,10 @@
 // the vault password again; without a vault it points to the Vault page. After approval it shows
 // the countdown, which can be cancelled until it ends. The core checks every answer again; these
 // fields only help the user get them right first time.
+//
+// SS-10: a MultiExec line comes here too, held at Enter: it shows the line and the terminals it is typed into, and
+// the caller answers it through MultiExec (`approve`, `cancel`), which sends Enter, or Ctrl+C to clear the line.
+// QL-08: a disabled button says why.
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { InfoIcon, KeyRoundIcon, OctagonAlertIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
@@ -28,13 +32,16 @@ import {
   api,
   errorCode,
   errorMessage,
+  type ApprovalAnswers,
   type ApprovalRequest,
   type ApprovalStep,
   type TargetImpact,
   type VaultInfo,
 } from "@/lib/api";
+import { approveReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { EnvBadge, StateBadge, TierBadge } from "./Badges";
+import { WhyDisabled } from "./WhyDisabled";
 
 interface Props {
   request: ApprovalRequest;
@@ -46,6 +53,10 @@ interface Props {
   onClose: (jobId: string | null) => void;
   /** Called as soon as the job is queued, before any countdown ends. */
   onApproved?: (jobId: string) => void;
+  /** SS-10: answers a held MultiExec line instead of the bus directly; returns the job. */
+  approve?: (answers: ApprovalAnswers) => Promise<string>;
+  /** SS-10: cancels it (the terminals get Ctrl+C). */
+  cancel?: () => Promise<void>;
 }
 
 function find<S extends ApprovalStep["step"]>(steps: ApprovalStep[], step: S) {
@@ -55,13 +66,22 @@ function find<S extends ApprovalStep["step"]>(steps: ApprovalStep[], step: S) {
 function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
   if (target.kind === "vm") return target.vmxPath;
   if (target.kind === "session") return target.sessionId;
+  if (target.kind === "terminal") return target.terminalId;
   return "app";
 }
 
 /** After approval: the job waits until `until` and can be cancelled meanwhile (AP-03). */
 type Countdown = { jobId: string; until: number; seconds: number };
 
-export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApproved }: Props) {
+export function ApprovalDialog({
+  request,
+  vault,
+  onOpenVault,
+  onClose,
+  onApproved,
+  approve: approveWith,
+  cancel: cancelWith,
+}: Props) {
   const { steps, tier } = request;
   const snapshot = find(steps, "safetySnapshot");
   const typeCount = find(steps, "typeTargetCount");
@@ -86,6 +106,7 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
     (!typeCount || Number(typed) === typeCount.expected) &&
     (!needsReason || reason.trim() !== "") &&
     (!reauth || password !== "");
+  const notReady = approveReason({ steps, typedCount: typed, reason, password, busy });
   // FD-01: the first answer to type gets the focus, and Enter in any of them approves once all are
   // right (the same as pressing Approve).
   const firstField = typeCount ? "count" : needsReason ? "reason" : reauth ? "password" : null;
@@ -100,14 +121,15 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
     setBusy(true);
     setError(null);
     try {
-      const jobId = await api.approve(request.id, {
+      const answers: ApprovalAnswers = {
         // Pressing the approve button is the confirmation (AP-03).
         confirmed: true,
         typedTargetCount: typeCount ? Number(typed) : undefined,
         reason: needsReason ? reason : undefined,
         safetySnapshot: snapshot ? safetySnapshot : undefined,
         vaultPassword: reauth ? password : undefined,
-      });
+      };
+      const jobId = approveWith ? await approveWith(answers) : await api.approve(request.id, answers);
       setPassword("");
       onApproved?.(jobId);
       if (countdownStep && countdownStep.seconds > 0) {
@@ -128,7 +150,7 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
 
   async function cancel() {
     try {
-      await api.cancelApproval(request.id);
+      await (cancelWith ? cancelWith() : api.cancelApproval(request.id));
     } finally {
       onClose(null);
     }
@@ -136,7 +158,7 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
 
   async function openVault() {
     try {
-      await api.cancelApproval(request.id);
+      await (cancelWith ? cancelWith() : api.cancelApproval(request.id));
     } finally {
       onOpenVault();
     }
@@ -163,7 +185,7 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
           </DialogDescription>
         </DialogHeader>
 
-        {request.exec && <ExecSummary exec={request.exec} />}
+        {request.exec && <ExecSummary exec={request.exec} targets={request.targets.length} />}
 
         <div className="grid gap-1.5">
           <div className="max-h-64 overflow-auto rounded-md border">
@@ -367,25 +389,35 @@ export function ApprovalDialog({ request, vault, onOpenVault, onClose, onApprove
         </div>
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => void cancel()} disabled={busy}>
-            Cancel
-          </Button>
-          <Button
-            variant={risky ? "destructive" : "default"}
-            onClick={() => void approve()}
-            disabled={!ready || busy}
-            autoFocus={tier === "medium"}
-          >
-            {risky ? "Approve" : "Confirm"}
-          </Button>
+          <WhyDisabled reason={busy ? "Checking the answers…" : null}>
+            <Button variant="outline" onClick={() => void cancel()} disabled={busy}>
+              {request.exec?.multiExec ? "Cancel (Ctrl+C)" : "Cancel"}
+            </Button>
+          </WhyDisabled>
+          <WhyDisabled reason={notReady}>
+            <Button
+              variant={risky ? "destructive" : "default"}
+              onClick={() => void approve()}
+              disabled={!ready || busy}
+              autoFocus={tier === "medium"}
+            >
+              {request.exec?.multiExec
+                ? risky
+                  ? "Approve and press Enter"
+                  : "Press Enter"
+                : risky
+                  ? "Approve"
+                  : "Confirm"}
+            </Button>
+          </WhyDisabled>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
 
-/** BX-02, BX-06, BX-07: what a remote command will run, and how. */
-function ExecSummary({ exec }: { exec: NonNullable<ApprovalRequest["exec"]> }) {
+/** BX-02, BX-06, BX-07: what a remote command will run, and how. SS-10: a MultiExec line, held at Enter. */
+function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exec"]>; targets: number }) {
   const how = [
     exec.sudo &&
       (exec.sudoPasswordLabel
@@ -397,9 +429,25 @@ function ExecSummary({ exec }: { exec: NonNullable<ApprovalRequest["exec"]> }) {
   ].filter((x): x is string => Boolean(x));
   return (
     <div className="grid gap-2">
+      {exec.multiExec && (
+        <p className="text-sm text-muted-foreground">
+          MultiExec: this line is typed into {plural(targets, "terminal")} and waits there. Approving presses Enter in
+          each; cancelling sends Ctrl+C, which clears it.
+        </p>
+      )}
       <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
-        {exec.script}
+        {exec.script || <span className="text-muted-foreground italic">(nothing Remotely could follow)</span>}
       </pre>
+      {exec.unreliable && (
+        <Alert className="border-tier-medium/40">
+          <TriangleAlertIcon className="text-tier-medium" />
+          <AlertTitle>The terminals may run something else</AlertTitle>
+          <AlertDescription>
+            The line was edited with keys Remotely can&apos;t follow (Tab completion, arrow keys, history search), or a
+            terminal already had text on its line. Look at the terminals before you press Enter.
+          </AlertDescription>
+        </Alert>
+      )}
       {how.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {how.map((h) => (
@@ -505,9 +553,11 @@ function CountdownView({
           <Button variant="outline" onClick={onClose}>
             Close
           </Button>
-          <Button variant="destructive" onClick={() => void cancelJob()} disabled={cancelling} autoFocus>
-            {cancelling ? "Cancelling…" : "Cancel the action"}
-          </Button>
+          <WhyDisabled reason={cancelling ? "Cancelling…" : null}>
+            <Button variant="destructive" onClick={() => void cancelJob()} disabled={cancelling} autoFocus>
+              {cancelling ? "Cancelling…" : "Cancel the action"}
+            </Button>
+          </WhyDisabled>
         </DialogFooter>
       </DialogContent>
     </Dialog>

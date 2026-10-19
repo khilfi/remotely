@@ -31,7 +31,7 @@ Everything committed here may become public, and git history is forever, so trea
 ## Releases and auto-update
 
 - The version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` must match. Release by pushing a tag `vX.Y.Z`.
-- `.github/workflows/ci.yml` runs on every push to main and every pull request, except documentation-only changes (`paths-ignore`: `**/*.md`, `docs/**`): `cargo fmt --all --check`, clippy, `cargo test --workspace`, `npm run lint`. `.github/workflows/secrets.yml` runs gitleaks over the full history on every push to main and every pull request, documentation included. Both cancel a run a newer push supersedes.
+- `.github/workflows/ci.yml` runs on every push to main and every pull request, except documentation-only changes (`paths-ignore`: `**/*.md`, `docs/**`): `cargo fmt --all --check`, clippy, `cargo test --workspace`, `npm run lint`, `npm test`. `.github/workflows/secrets.yml` runs gitleaks over the full history on every push to main and every pull request, documentation included. Both cancel a run a newer push supersedes.
 - CI minutes: the repo is private, so Actions minutes come out of the owner's monthly allowance (2,000 on GitHub Free), and Windows minutes count double. A `ci.yml` run bills about 12 to 16 minutes, a release about 28. Don't push for every small commit, and keep `paths-ignore` working (README "CI minutes").
 - `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`. It uses `tauri-apps/tauri-action` to build, sign the update artifacts and create a **draft** GitHub Release with the installer, its `.sig` file and `latest.json`, then checks the signatures against `plugins.updater.pubkey` with `scripts/verify-update-signature.mjs` (a failure means the signing secret and the public key don't pair: don't publish). The user publishes the draft after a smoke test; installed apps only see published releases.
 - `tauri.conf.json`: `bundle.createUpdaterArtifacts: true`; `plugins.updater.pubkey` holds the public key; `plugins.updater.endpoints` is `["https://github.com/khilfi/remotely/releases/latest/download/latest.json"]`, which names the repository the app updates from (the app doesn't fetch that URL, see the next point); `plugins.updater.windows.installMode: "passive"`.
@@ -83,11 +83,15 @@ crates/core/          remotely-core: all app logic
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
                       QL-03 host name and IP, QL-06 a vault password typed at a prompt); quick.rs QL-02 quick connect;
                       log.rs and output.rs SS-11 session logs and saved, printed or copied output (secrets scrubbed);
-                      activity.rs the cursor's line and QL-07 long-run detection (prompt back, or quiet)
+                      activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
+                      detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
+                      a line buffer, Enter held and the line rated on the bus (Command::TerminalLine), password prompts
+                      and full-screen programs passed straight through
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
                       library (library.rs), {{variables}} (variables.rs); classified by the bus's policy engine
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only)
-    bulk.rs           BX-01 targets, BX-03 grouped results and diff, BX-05 exports (running is RemoteExec on the bus)
+    bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
+                      BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus)
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
                       authorized_keys push script (the push itself is Command::PushSshKey on the bus)
@@ -99,15 +103,16 @@ crates/core/          remotely-core: all app logic
     fakes.rs          one fake per adapter (feature `fakes`; tests only)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
-  examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal by hand
+  examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec and Compare by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
-src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, command panel and notifications
-                      (command_panel.rs), clipboard read for right-click paste
+src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
+                      panel and notifications (command_panel.rs), clipboard read for right-click paste
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
-  components/         app components (approval dialog, badges)
-  pages/              one file per page
-  lib/                api.ts (typed IPC wrappers), theme.ts, utils.ts
+  components/         app components (approval dialog, badges, Compare panel, MultiExec bar, WhyDisabled for QL-08)
+  pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output)
+  lib/                api.ts (typed IPC wrappers), theme.ts, utils.ts, multiexec.ts; pure helpers with *.test.ts
+                      next to them (Node's test runner: `npm test`)
 ```
 
 ## VMware Workstation facts
@@ -134,20 +139,22 @@ src/                  React + TypeScript UI
 - Tests against real Workstation are opt-in: they run only when `REMOTELY_IT=1` is set, and only touch VMs whose display name starts with `it-`.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, and runs exec requests in a toy
-  shell with sudo modes, /proc files and fake programs such as `df`), with `common::Setup::with_ssh()` for the real russh
-  adapter.
+  shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C and a
+  full-screen `top`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
+  them (`tests/multiexec.rs`).
 
 ## Commands
 
 - Install: `npm install`
 - Run the app: `npm run tauri dev`. A debug build keeps its data (database, WebView2 profile) in `%LOCALAPPDATA%\com.remotely.desktop.dev`, apart from the installed app's `%LOCALAPPDATA%\com.remotely.desktop`, so its migrations never reach the installed app's database. `REMOTELY_DATA_DIR` (an absolute path outside the repo) overrides both.
 - Rust tests: `cargo test --workspace` (run at the repo root; `cargo test` inside `src-tauri/` only tests the shell crate)
-- Try the terminal or a bulk run without a real host:
+- Try the terminal, MultiExec or Compare output without a real host:
   `cargo run -p remotely-core --example dev_ssh_server --features fakes [port] [count]` (default 2222 and 1 server;
   prints the user, one fresh password for all of them, which sudo takes too, and each host key fingerprint). Each also
   serves moving /proc counters, so watching it on the dashboard shows live guest metrics.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
+- UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM)
 - Format: `cargo fmt --all`, `npm run format`
 - Build the installer: `npm run tauri build`
 - Release: bump the version in all three files, commit, then `git tag -a vX.Y.Z -m "<release notes>"` and `git push origin vX.Y.Z`; publish the draft release on GitHub after a smoke test. The tag message is the release notes users see in the update banner, so write it for them.

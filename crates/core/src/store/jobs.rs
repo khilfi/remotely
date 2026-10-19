@@ -118,6 +118,13 @@ impl JobTargetRecord {
                 .ok()
                 .map(|session_id| TargetRef::Session { session_id }),
             "app" => Some(TargetRef::App),
+            // SS-10: a MultiExec line's terminal; it is gone once closed, and lines are never retried.
+            "terminal" => Uuid::parse_str(&self.target_key)
+                .ok()
+                .map(|terminal_id| TargetRef::Terminal {
+                    terminal_id,
+                    session_id: None,
+                }),
             _ => None,
         }
     }
@@ -259,16 +266,32 @@ impl Store {
 
     /// Newest first, with per-status target counts.
     pub async fn recent_jobs(&self, ctx: &Context, limit: u32) -> Result<Vec<JobSummary>> {
-        self.recent_jobs_like(ctx, "%", limit).await
+        self.recent_jobs_like(ctx, "%", "", limit).await
     }
 
-    /// BX-02: the newest remote command jobs (bulk runs), newest first.
+    /// BX-02, BX-03: the newest remote command jobs (Compare runs), newest first. MultiExec lines are
+    /// rated like them but typed into terminals, so they are left out.
     pub async fn recent_exec_jobs(&self, ctx: &Context, limit: u32) -> Result<Vec<JobSummary>> {
-        self.recent_jobs_like(ctx, "exec%", limit).await
+        self.recent_jobs_like(ctx, "exec%", "terminalLine", limit).await
     }
 
-    /// Jobs whose action matches the SQL LIKE pattern.
-    async fn recent_jobs_like(&self, ctx: &Context, action: &str, limit: u32) -> Result<Vec<JobSummary>> {
+    /// When the job ended, how; `None` for a job that is not in the journal.
+    pub async fn job_status(&self, id: Uuid) -> Result<Option<JobStatus>> {
+        let status: Option<String> = sqlx::query_scalar("SELECT status FROM jobs WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(status.as_deref().and_then(JobStatus::parse))
+    }
+
+    /// Jobs whose action matches the SQL LIKE pattern, except commands of type `not_type`.
+    async fn recent_jobs_like(
+        &self,
+        ctx: &Context,
+        action: &str,
+        not_type: &str,
+        limit: u32,
+    ) -> Result<Vec<JobSummary>> {
         let rows = sqlx::query(
             "SELECT j.id, j.summary, j.action, j.tier, j.status, j.created_at, j.started_at, j.finished_at,
                     j.countdown_until, j.retry_of,
@@ -277,12 +300,14 @@ impl Store {
                     COALESCE(SUM(t.status = 'failed'), 0) AS failed
              FROM jobs j LEFT JOIN job_targets t ON t.job_id = j.id
              WHERE j.workspace_id = ? AND j.action LIKE ?
+               AND IFNULL(json_extract(j.command_json, '$.type'), '') <> ?
              GROUP BY j.id
              ORDER BY j.created_at DESC
              LIMIT ?",
         )
         .bind(ctx.workspace_id.to_string())
         .bind(action)
+        .bind(not_type)
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?;

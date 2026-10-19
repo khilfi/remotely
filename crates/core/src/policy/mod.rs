@@ -552,6 +552,12 @@ impl PolicyEngine {
             Command::RemoteExec { script, .. } => self.classify_script(script),
             Command::AppUpdate { .. } => ActionKind::AppUpdate,
             Command::PushSshKey { .. } => ActionKind::SshKeyPush,
+            // SS-10: a MultiExec line is rated like a bulk run's command. When Remotely could not follow
+            // what was typed, the shells may run something else, so it is never read-only.
+            Command::TerminalLine { line, unreliable, .. } => match self.classify_script(line) {
+                ActionKind::ExecReadOnly if *unreliable => ActionKind::ExecOther,
+                kind => kind,
+            },
         }
     }
 
@@ -585,10 +591,24 @@ impl PolicyEngine {
         };
         reasons.push(format!("{} on {count}: {}", action.label(), tier.as_str()));
 
-        if let Command::RemoteExec { script, .. } = command {
+        if let Command::RemoteExec { script, .. } | Command::TerminalLine { line: script, .. } = command {
             let hits = self.dangerous_matches(script);
             if !hits.is_empty() {
                 reasons.push(format!("flagged dangerous: {}", hits.join(", ")));
+            }
+        }
+
+        // SS-10: a line Remotely could not follow gets at least a confirm, whatever the rules say for
+        // "other" commands: the approval shows what is known of it.
+        if let Command::TerminalLine { unreliable: true, .. } = command {
+            reasons.push(
+                "the line was edited with keys Remotely can't follow (Tab, arrow keys, history) or had text on it \
+                 already, so the terminals may run something else"
+                    .into(),
+            );
+            if tier < Tier::Medium {
+                reasons.push(format!("{} -> {}", tier.as_str(), Tier::Medium.as_str()));
+                tier = Tier::Medium;
             }
         }
 
@@ -658,7 +678,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         Command::VmProtect { .. }
         | Command::RemoteExec { .. }
         | Command::AppUpdate { .. }
-        | Command::PushSshKey { .. } => false,
+        | Command::PushSshKey { .. }
+        | Command::TerminalLine { .. } => false,
     };
     on_vms && can_lose_state
 }

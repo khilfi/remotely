@@ -24,6 +24,7 @@ use crate::command_bus::TargetDirectory;
 use crate::domain::{Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::store::{self, DiscoveredVm, NewAuditEntry, Store, VmRecord};
+use crate::terminal::Terminals;
 use crate::vm_links::{AutoLinkReport, VmLinks};
 
 /// How the app names itself in dialogs, jobs and the audit log.
@@ -388,14 +389,22 @@ fn label_change(before: &[VmRecord], to: Environment) -> String {
     format!("label: {}", parts.join("; "))
 }
 
-/// Resolves targets from the store so the policy engine sees their labels and protection.
+/// Resolves targets from the store so the policy engine sees their labels and protection; open
+/// terminals (SS-10 MultiExec) by the session behind each.
 pub struct StoreDirectory {
     store: Store,
+    terminals: Option<Terminals>,
 }
 
 impl StoreDirectory {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self { store, terminals: None }
+    }
+
+    /// SS-10: terminal targets are the open panes.
+    pub fn with_terminals(mut self, terminals: Terminals) -> Self {
+        self.terminals = Some(terminals);
+        self
     }
 }
 
@@ -440,6 +449,10 @@ impl TargetDirectory for StoreDirectory {
                 environment: Environment::None,
                 protected: false,
             }),
+            TargetRef::Terminal { terminal_id, .. } => match &self.terminals {
+                Some(terminals) => terminals.target(ctx, *terminal_id).await,
+                None => Err(CoreError::UnknownTarget(format!("terminal {terminal_id}"))),
+            },
         }
     }
 }

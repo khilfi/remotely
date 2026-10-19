@@ -37,6 +37,7 @@ import { RiskBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FavouriteDialog } from "@/components/FavouriteDialog";
 import { FillCommandDialog } from "@/components/FillCommandDialog";
+import { ReasonLine } from "@/components/WhyDisabled";
 import {
   api,
   errorMessage,
@@ -52,6 +53,9 @@ const SECTION_KEY = "remotely.terminal.commandsSection";
 const OPEN_KEY = "remotely.terminal.commandsOpen";
 
 type Section = "favourites" | "library";
+
+/** QL-08: why a favourite can't move while the list is searched. */
+const MOVE_SEARCHING = "Clear the search to reorder";
 
 /** One command as the panel lists it. */
 interface Item {
@@ -465,11 +469,17 @@ function CommandRow({
               </DropdownMenuItem>
               <DropdownMenuItem disabled={!canMove || first} onSelect={() => onMove(-1)}>
                 <ArrowUpIcon />
-                Move up
+                <span>
+                  Move up
+                  <ReasonLine reason={!canMove ? MOVE_SEARCHING : first ? "Already the first in its folder" : null} />
+                </span>
               </DropdownMenuItem>
               <DropdownMenuItem disabled={!canMove || last} onSelect={() => onMove(1)}>
                 <ArrowDownIcon />
-                Move down
+                <span>
+                  Move down
+                  <ReasonLine reason={!canMove ? MOVE_SEARCHING : last ? "Already the last in its folder" : null} />
+                </span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem variant="destructive" onSelect={onDelete}>
