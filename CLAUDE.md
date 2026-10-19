@@ -65,8 +65,11 @@ crates/core/          remotely-core: all app logic
     command_bus.rs
     policy/
     jobs.rs
-    adapters/         vmware.rs, remote.rs (SSH shell and exec; remote/sftp.rs SS-08 SFTP on a terminal's own
-                      connection, behind the RemoteFiles trait), exec_output.rs (BX-02/BX-07 output cap, hashes,
+    adapters/         vmware.rs, remote.rs (SSH shell and exec, every path through the SS-07 jump host chain over
+                      direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
+                      terminal's own connection, behind the RemoteFiles trait; remote/forward.rs SS-07 port forwards on
+                      it, local, remote and SOCKS, behind RemoteForwards; remote/socks.rs SOCKS 4/4a/5),
+                      exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs, updater.rs, github.rs (FD-14 GitHub Releases API with the
                       update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe)
@@ -80,6 +83,8 @@ crates/core/          remotely-core: all app logic
                       polling, kept connections, backoff), procfs.rs (/proc and df parsers)
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); sessions/tree.rs the QL-04
                       tree (by folder, tag or label) for the Terminal page
+    forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
+                      Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
                       QL-03 host name and IP, QL-06 a vault password typed at a prompt); quick.rs QL-02 quick connect;
@@ -91,10 +96,14 @@ crates/core/          remotely-core: all app logic
                       the invisible prompt hook typed into bash and zsh on connect (hidden from the terminal, logs,
                       MultiExec and QL-07; the startup command waits for it); files.rs SS-08 the "Files here" listing,
                       downloads (audited reads), the upload job's work (Command::FileUpload on the bus), the transfers
-                      list with cancel and retry, and FileTransfers (Core.files: staged files, uploads, retries)
+                      list with cancel and retry, and FileTransfers (Core.files: staged files, uploads, retries);
+                      tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
+                      that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
+                      closed with the terminal, audited tunnel_opened and tunnel_closed
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
                       library (library.rs), {{variables}} (variables.rs); classified by the bus's policy engine
-    reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only)
+    reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only); SS-07 the first jump
+                      host's for a session behind one, never the session itself
     bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus)
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
@@ -107,19 +116,23 @@ crates/core/          remotely-core: all app logic
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
-                      subsystem on a temp folder (SS-08)
+                      subsystem on a temp folder (SS-08); SS-07 direct-tcpip (with_route names reach another port on
+                      127.0.0.1, so a server is reachable only through another) and tcpip-forward
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
-  examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec and Compare by hand
+  examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
+                      chains and tunnels by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
                       panel and notifications (command_panel.rs), clipboard read for right-click paste, SS-08 file
-                      transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder")
+                      transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
+                      SS-07 port forwards and tunnels (tunnels.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel, MultiExec bar, WhyDisabled for QL-08,
-                      FilesDrawer and TransfersList for SS-08)
+                      FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output)
-  lib/                api.ts (typed IPC wrappers), theme.ts, utils.ts, multiexec.ts, transfers.ts; pure helpers with
+  lib/                api.ts (typed IPC wrappers), theme.ts, utils.ts, multiexec.ts, transfers.ts, tunnels.ts (SS-07
+                      chains and forwards); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```
@@ -153,7 +166,10 @@ src/                  React + TypeScript UI
   them (`tests/multiexec.rs`). SS-08: it serves SFTP from a temp folder deleted with it (`with_sftp_file`,
   `with_protected`, `without_sftp`), and with `with_login_shell("bash")` its shell answers the folder hook and knows
   `cd` and `pwd`; `fakes::FakeFiles` is the in-memory version for the fake remote adapter (`tests/files.rs`). Uploads
-  and downloads in tests use files made at run time in the system temp folder, never in the repo.
+  and downloads in tests use files made at run time in the system temp folder, never in the repo. SS-07: it forwards
+  like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
+  resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on
+  127.0.0.1. Tunnel tests bind loopback with port 0; never a network address.
 
 ## Commands
 
@@ -164,7 +180,9 @@ src/                  React + TypeScript UI
   `cargo run -p remotely-core --example dev_ssh_server --features fakes [port] [count]` (default 2222 and 1 server;
   prints the user, one fresh password for all of them, which sudo takes too, and each host key fingerprint). Each also
   serves moving /proc counters, so watching it on the dashboard shows live guest metrics, and SFTP from a temp folder
-  (SS-08) with a bash login, so the "Files here" drawer follows `cd`.
+  (SS-08) with a bash login, so the "Files here" drawer follows `cd`. SS-07: the servers reach each other as
+  `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
+  `web.test:80`, for trying chains and tunnels.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM)
