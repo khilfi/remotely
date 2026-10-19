@@ -122,6 +122,37 @@ pub(super) fn writes(words: &[String]) -> bool {
             let p = parse("ID", "", &[]);
             expands || p.has_short("f") || p.has_long(&["file"])
         }
+        "smartctl" => {
+            // Reads health, attributes and logs (-H, -a, -A, -x, -i, -l, ...). Writes to the device
+            // when it starts or aborts a self-test (-t, -X), or sets a feature (-s, -o, -S on/off).
+            let p = parse("", "", &[]);
+            expands || p.has_short("stXoS") || p.has_long(&["test", "abort", "set", "smart", "offlineauto", "saveauto"])
+        }
+        "sysctl" => {
+            // Reads a parameter (`sysctl -a`, `sysctl net.ipv4.ip_forward`); writes one with `-w`, a
+            // `name=value` operand, or by loading a file (`-p`, --load, --system).
+            let p = parse("", "", &[]);
+            expands
+                || p.has_short("wp")
+                || p.has_long(&["write", "load", "system"])
+                || p.operands.iter().any(|o| o.contains('='))
+        }
+        "openssl" => {
+            // Inspects certificates and keys and connects to TLS servers (x509, s_client, verify, req
+            // with -noout). Writes a file with -out/-keyout/-CAout, and the ca and rehash subcommands,
+            // and the key generators, write by design.
+            let writes_file = args.iter().any(|a| {
+                matches!(
+                    a.as_str(),
+                    "-out" | "-keyout" | "-CAout" | "-CAkeyout" | "-signkey" | "-outfile"
+                )
+            });
+            let generates = matches!(
+                args.first().map(String::as_str),
+                Some("ca" | "rehash" | "c_rehash" | "genrsa" | "genpkey" | "gendsa")
+            );
+            expands || writes_file || generates
+        }
         "firewall-cmd" => firewall_cmd_writes(args),
         "kubectl" => {
             // `kubectl cluster-info dump --output-directory DIR` writes files.

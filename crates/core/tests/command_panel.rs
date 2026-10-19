@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use common::Setup;
 use remotely_core::fakes::FakeVmware;
 use remotely_core::policy::{ActionKind, DangerousPattern};
-use remotely_core::snippets::library::LibraryGroup;
+use remotely_core::snippets::library::{LibraryGroup, LibrarySection, LIBRARY, TROUBLESHOOT};
 use remotely_core::snippets::{Favourite, FavouriteInput};
 use remotely_core::store::AuditEntry;
 use remotely_core::transfer::{ExportRequest, ItemAction, ItemChoice, ItemStatus, TransferCommit};
@@ -310,41 +310,195 @@ async fn variables_are_filled_in_before_pasting() {
 async fn the_library_covers_every_group_with_described_entries() {
     let core = core().await;
     let library = core.snippets.library();
-    let mut ids = HashSet::new();
+
+    // Every area entry is defined once in LIBRARY, with a unique id and a clean, described command.
+    let mut area_ids = HashSet::new();
+    for b in LIBRARY {
+        assert_eq!(b.group.section(), LibrarySection::Area, "{} is in an area group", b.id);
+        assert!(area_ids.insert(b.id), "{} defined twice", b.id);
+        assert!(b.description.ends_with('.') && b.description.len() > 10, "{}", b.id);
+        assert_eq!(b.command.trim(), b.command, "{}", b.id);
+        assert!(!b.command.contains(['\n', '\t', '\r']), "{}", b.id);
+        // Test data uses only reserved example hosts (.test / 192.0.2.0/24), never example.com.
+        assert!(!b.command.contains("example.com"), "no made-up hosts: {}", b.id);
+    }
+
+    // Each area group is shown, with a handful of entries, names unique within it.
     for group in LibraryGroup::ALL {
+        if group.section() != LibrarySection::Area {
+            continue;
+        }
         let entries: Vec<_> = library.iter().filter(|e| e.group == group).collect();
         assert!(entries.len() >= 4, "{} has {} entries", group.label(), entries.len());
         let mut names = HashSet::new();
-        for e in entries {
-            assert!(ids.insert(e.id), "{} twice", e.id);
-            assert!(names.insert(e.name), "{} twice in {}", e.name, group.label());
+        for e in &entries {
+            assert_eq!(e.section, LibrarySection::Area);
+            assert_eq!(e.section_label, "By area");
             assert_eq!(e.group_label, group.label());
-            assert!(e.description.ends_with('.') && e.description.len() > 10, "{}", e.id);
-            assert_eq!(e.command.trim(), e.command, "{}", e.id);
-            assert!(!e.command.contains(['\n', '\t', '\r']), "{}", e.id);
-            assert!(
-                !e.command.contains("example.com"),
-                "no made-up hosts in commands: {}",
-                e.id
-            );
+            assert!(names.insert(e.name), "{} twice in {}", e.name, group.label());
         }
     }
-    assert_eq!(ids.len(), library.len(), "every entry is in a group");
-    // Go templates are not variables; real ones are.
+
+    // Every Troubleshoot runbook has an order of real area-entry ids, and each symptom entry reuses
+    // the area entry's text and classification.
+    let mut symptom_groups = HashSet::new();
+    for symptom in TROUBLESHOOT {
+        assert_eq!(symptom.group.section(), LibrarySection::Troubleshoot);
+        assert!(symptom_groups.insert(symptom.group), "{} twice", symptom.group.label());
+        assert!(symptom.steps.len() >= 3, "{} is too short", symptom.group.label());
+        for id in symptom.steps {
+            let b = LIBRARY
+                .iter()
+                .find(|b| b.id == *id)
+                .unwrap_or_else(|| panic!("unknown id {id}"));
+            let shown = library
+                .iter()
+                .find(|e| e.id == *id && e.group == symptom.group)
+                .unwrap_or_else(|| panic!("{id} not shown under {}", symptom.group.label()));
+            assert_eq!(shown.section, LibrarySection::Troubleshoot);
+            assert_eq!(shown.command, b.command);
+            assert_eq!(shown.risk, core.snippets.classify(b.command));
+        }
+    }
+    assert_eq!(symptom_groups.len(), TROUBLESHOOT.len());
+
+    // The Troubleshoot section is listed before the area section, so the panel shows it first.
+    let first_area = library.iter().position(|e| e.section == LibrarySection::Area).unwrap();
+    let last_troubleshoot = library
+        .iter()
+        .rposition(|e| e.section == LibrarySection::Troubleshoot)
+        .unwrap();
+    assert!(last_troubleshoot < first_area, "Troubleshoot comes before By area");
+
+    // Go templates are not variables; real ones are. (Picked from the area copies.)
     let names = library.iter().find(|e| e.id == "docker.names").unwrap();
     assert!(names.variables.is_empty());
-    let logs = library.iter().find(|e| e.id == "k8s.logs").unwrap();
+    let logs = library
+        .iter()
+        .find(|e| e.id == "k8s.logs" && e.section == LibrarySection::Area)
+        .unwrap();
     let vars: Vec<&str> = logs.variables.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(vars, ["pod", "namespace", "lines"]);
 }
+
+/// Every area entry that the default rules do NOT classify read-only, pinned so a later rule change,
+/// or a careless new command, shows up as a diff in this test. Read-only is the default; this is the
+/// exception list of checks that change something (or that Remotely cannot prove only read, like curl
+/// or an interactive tool) and so ask before a bulk run or MultiExec sends them.
+const EXPECTED_NON_READ_ONLY: &[&str] = &[
+    // Dangerous (a default dangerous-command rule matches).
+    "system.reboot",
+    // Changes, or not provably read-only (ExecOther).
+    "disk.ncdu",
+    "lvm.scan",
+    "lvm.lvextend",
+    "lvm.resize",
+    "lvm.fsgrow-xfs",
+    "lvm.fsgrow-ext",
+    "lvm.mddetail",
+    "lvm.mdexamine",
+    "san.smart-test",
+    "san.iscsi-sessions",
+    "san.iscsi-nodes",
+    "san.smb-shares",
+    "san.fsck-check",
+    "memory.dropcaches",
+    "cpu.strace",
+    "cpu.renice",
+    "cpu.kill",
+    "cpu.killname",
+    "network.tcpprobe",
+    "network.curl-time",
+    "network.curl-head",
+    "network.curl-resolve",
+    "network.iface-detail",
+    "network.nmcli",
+    "network.tcpdump",
+    "network.conntrack",
+    "services.start",
+    "services.stop",
+    "services.restart",
+    "services.reload",
+    "services.enable",
+    "services.disable",
+    "services.mask",
+    "services.reset-failed",
+    "services.daemon-reload",
+    "logs.vacuum",
+    "logs.vacuum-time",
+    "apt.update",
+    "apt.upgrade",
+    "apt.full-upgrade",
+    "apt.install",
+    "apt.remove",
+    "apt.autoremove",
+    "apt.fix-broken",
+    "apt.clean",
+    "dnf.upgrade",
+    "dnf.install",
+    "dnf.remove",
+    "dnf.autoremove",
+    "dnf.downgrade",
+    "dnf.distrosync",
+    "dnf.makecache",
+    "dnf.clean",
+    "users.add",
+    "users.add-to-group",
+    "users.lock",
+    "users.deluser",
+    "sec.setenforce",
+    "sec.restorecon",
+    "sec.sudo-rights",
+    "sec.fail2ban-unban",
+    "cert.update-trust",
+    "firewall.ufw-allow",
+    "firewall.ufw-reload",
+    "firewall.firewalld-allow",
+    "firewall.firewalld-reload",
+    "web.nginx-reload",
+    "web.apache-reload",
+    "web.local-check",
+    "db.pg-activity",
+    "db.pg-conns",
+    "time.set-ntp",
+    "time.makestep",
+    "id.sss-cache",
+    "id.realm-join",
+    "docker.restart",
+    "docker.shell",
+    "docker.prune",
+    "podman.restart",
+    "podman.prune",
+    "k8s.restart",
+    "k8s.scale",
+    "k8s.delete-pod",
+    "helm.rollback",
+];
 
 #[tokio::test]
 async fn library_entries_are_classified_by_the_policy_engine() {
     let core = core().await;
     let library = core.snippets.library();
-    let by_id = |id: &str| library.iter().find(|e| e.id == id).unwrap().clone();
+    let by_id = |id: &str| {
+        library
+            .iter()
+            .find(|e| e.id == id && e.section == LibrarySection::Area)
+            .unwrap()
+            .clone()
+    };
 
-    // Mostly read-only.
+    // Each area entry's classification is pinned: everything is read-only except EXPECTED_NON_READ_ONLY.
+    let mut actual: Vec<&str> = library
+        .iter()
+        .filter(|e| e.section == LibrarySection::Area && e.risk.action != ActionKind::ExecReadOnly)
+        .map(|e| e.id)
+        .collect();
+    actual.sort_unstable();
+    let mut expected: Vec<&str> = EXPECTED_NON_READ_ONLY.to_vec();
+    expected.sort_unstable();
+    assert_eq!(actual, expected, "the set of non-read-only library entries changed");
+
+    // The vast majority are read-only.
     let read_only = library
         .iter()
         .filter(|e| e.risk.action == ActionKind::ExecReadOnly)
@@ -355,21 +509,19 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         library.len()
     );
     // Exactly the entries a default dangerous-command rule matches are marked dangerous.
-    let dangerous: Vec<(&str, Vec<String>)> = library
+    let mut dangerous: Vec<(&str, Vec<String>)> = library
         .iter()
-        .filter(|e| e.risk.action == ActionKind::ExecDangerous)
+        .filter(|e| e.section == LibrarySection::Area && e.risk.action == ActionKind::ExecDangerous)
         .map(|e| (e.id, e.risk.dangerous.clone()))
         .collect();
+    dangerous.dedup();
     assert_eq!(dangerous, [("system.reboot", vec!["shutdown / reboot".to_owned()])]);
-    // What changes things is marked as such.
+    // Spot checks on both sides of the line.
     for id in [
         "services.restart",
         "apt.upgrade",
         "dnf.install",
         "users.add",
-        "firewall.ufw-allow",
-        "docker.prune",
-        "k8s.delete-pod",
         "cpu.kill",
     ] {
         assert_eq!(by_id(id).risk.action, ActionKind::ExecOther, "{id}");
@@ -381,6 +533,10 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         "docker.logs",
         "k8s.logs",
         "dnf.installed",
+        "san.smart-health",
+        "sec.sshd-config",
+        "cert.expiry",
+        "lvm.pvs",
     ] {
         assert_eq!(by_id(id).risk.action, ActionKind::ExecReadOnly, "{id}");
     }
@@ -413,7 +569,7 @@ async fn a_library_entry_can_be_copied_into_the_favourites() {
         .snippets
         .library()
         .into_iter()
-        .find(|e| e.id == "logs.service")
+        .find(|e| e.id == "logs.service" && e.section == LibrarySection::Area)
         .unwrap();
     let fav = core
         .snippets
