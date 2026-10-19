@@ -98,6 +98,7 @@ function counts(report: TransferReport) {
     part("Host keys", report.knownHosts),
     part("Secrets", report.secrets),
     part("Favourite commands", report.favourites),
+    report.forwards ? `Port forwards: ${report.forwards} saved with their sessions` : null,
     report.foldersAdded ? `Folders: ${report.foldersAdded} added` : null,
   ].filter(Boolean) as string[];
 }

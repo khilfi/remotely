@@ -1,11 +1,12 @@
 // Session editor (SS-01, SS-06): where to connect, how to log in (a password or key from the vault, or
-// the SSH agent), a jump host, the VM it reaches (BX-01), a startup command, folder, tags, colour and
-// environment label. Saving
+// the SSH agent), a jump host (SS-07: its own jump host in turn makes a chain, shown here), the VM it reaches
+// (BX-01), a startup command, saved port forwards (SS-07), folder, tags, colour and environment label. Saving
 // changes only the app's own data: the core checks it and audits it, with no approval step. Taking the
 // Prod label off asks first, since it lowers the tier of later actions on the session.
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { PlusIcon } from "lucide-react";
+import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -25,6 +26,7 @@ import {
   api,
   errorMessage,
   type Environment,
+  type ForwardInput,
   type SecretKind,
   type SecretMeta,
   type SessionAuth,
@@ -36,10 +38,13 @@ import {
   type VmRecord,
 } from "@/lib/api";
 import { flattenFolders, folderPath } from "@/lib/folders";
+import { forwardsProblem, jumpChain, routeText, toInput } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 import { ColorDot, SESSION_COLORS } from "./Badges";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { ForwardsEditor } from "./ForwardsEditor";
 import { SecretDialog } from "./SecretDialog";
+import { WhyDisabled } from "./WhyDisabled";
 
 /** Radix Select can't hold an empty value, so "none" stands for no choice. */
 const NONE = "none";
@@ -115,6 +120,9 @@ export function SessionDialog({
   const [tags, setTags] = useState((session?.tags ?? []).join(", "));
   const [vm, setVm] = useState(session ? (session.vmId ?? NONE) : (presetVm ?? NONE));
   const [vms, setVms] = useState<VmRecord[]>([]);
+  /** SS-07: the saved port forwards; null while an edited session's are loading. */
+  const [forwards, setForwards] = useState<ForwardInput[] | null>(session ? null : []);
+  const [forwardsError, setForwardsError] = useState<string | null>(null);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [adding, setAdding] = useState<SecretKind | null>(null);
   /** Taking the Prod label off lowers the tier of later actions on the session, so saving asks first. */
@@ -127,6 +135,16 @@ export function SessionDialog({
     api.vmList().then(setVms, () => setVms([]));
   }, []);
 
+  // Loaded once per session edited, so a refreshed session list never resets what is being typed.
+  const editedId = session?.id ?? null;
+  useEffect(() => {
+    if (!editedId) return;
+    api.forwards(editedId).then(
+      (saved) => setForwards(saved.map(toInput)),
+      (err) => setForwardsError(errorMessage(err)),
+    );
+  }, [editedId]);
+
   const of = (kind: SecretKind) => secrets.filter((s) => s.kind === kind);
   const portNumber = Number(port);
   const portOk = Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535;
@@ -136,6 +154,18 @@ export function SessionDialog({
     .filter(Boolean);
   const jumpChoices = sessions.filter((s) => s.id !== session?.id);
   const vaultReady = vault !== null && vault.status !== "notSetUp";
+  /** SS-07: the chosen jump host and the ones before it, in the order they are connected. */
+  const chain = useMemo(() => {
+    if (jump === NONE) return null;
+    const byId = new Map(sessions.map((s) => [s.id, s]));
+    const chosen = byId.get(jump);
+    if (!chosen) return null;
+    // As if saved: this session goes through the chosen one.
+    if (session) byId.set(session.id, { ...session, jumpSessionId: jump });
+    const before = jumpChain(jump, byId);
+    return { names: [...before.names, chosen.name], loops: before.loop };
+  }, [jump, sessions, session]);
+  const forwardsIssue = forwards ? forwardsProblem(forwards) : null;
 
   function auth(): SessionAuth {
     const pick = (v: string) => (v === NONE ? null : v);
@@ -173,7 +203,18 @@ export function SessionDialog({
       tags: tagList,
       vmId: vm === NONE ? null : vm,
     };
-    onSaved(session ? await api.updateSession(session.id, input) : await api.createSession(input));
+    const saved = session ? await api.updateSession(session.id, input) : await api.createSession(input);
+    // SS-07: the forwards are saved after the session (a new one needs its id); the core skips an unchanged list.
+    if (forwards) {
+      try {
+        await api.saveForwards(saved.id, forwards);
+      } catch (err) {
+        toast.error(`'${saved.name}' was saved, but its port forwards were not`, {
+          description: `${errorMessage(err)} Edit the session to fix them.`,
+        });
+      }
+    }
+    onSaved(saved);
     onClose();
   }
 
@@ -243,7 +284,7 @@ export function SessionDialog({
             className="grid gap-4"
             onSubmit={(e) => {
               e.preventDefault();
-              if (host.trim() && portOk) submit();
+              if (host.trim() && portOk && forwards && !forwardsIssue) submit();
             }}
           >
             <DialogHeader>
@@ -366,10 +407,11 @@ export function SessionDialog({
                     ))}
                   </SelectContent>
                 </Select>
-                {jump !== NONE && (
-                  <p className="text-xs text-muted-foreground">
-                    Saved for later: connecting through a jump host arrives in a later version (SS-07). Until then
-                    Remotely won't connect this session.
+                {chain && (
+                  <p className={cn("text-xs", chain.loops ? "text-destructive" : "text-muted-foreground")}>
+                    {chain.loops
+                      ? "That jump host leads back to this session through its own jump hosts, so it can't be saved."
+                      : `Connects through ${routeText(chain.names)}. Each hop checks its host key and logs in with its own session's login; tunnels start from this host.`}
                   </p>
                 )}
               </div>
@@ -433,6 +475,19 @@ export function SessionDialog({
               />
               <p className="text-xs text-muted-foreground">
                 Kept in the session, not the vault: don&apos;t put passwords here.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label>Port forwards</Label>
+              {forwards ? (
+                <ForwardsEditor forwards={forwards} onChange={setForwards} disabled={busy} />
+              ) : (
+                <p className="text-sm text-muted-foreground">{forwardsError ?? "Loading…"}</p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                They open on this session&apos;s terminal connection, through the approval flow (a Prod host asks
+                first), and are stopped or started from the terminal&apos;s Tunnels button.
               </p>
             </div>
 
@@ -514,9 +569,11 @@ export function SessionDialog({
               <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={!host.trim() || !portOk || busy}>
-                {session ? "Save" : "Create session"}
-              </Button>
+              <WhyDisabled reason={forwards ? forwardsIssue : "The port forwards are still loading."}>
+                <Button type="submit" disabled={!host.trim() || !portOk || busy || !forwards || forwardsIssue !== null}>
+                  {session ? "Save" : "Create session"}
+                </Button>
+              </WhyDisabled>
             </DialogFooter>
           </form>
         </DialogContent>

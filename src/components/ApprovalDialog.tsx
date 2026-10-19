@@ -9,6 +9,7 @@
 // SS-10: a MultiExec line comes here too, held at Enter: it shows the line and the terminals it is typed into, and
 // the caller answers it through MultiExec (`approve`, `cancel`), which sends Enter, or Ctrl+C to clear the line.
 // SS-08: an upload shows the host folder and its files, marking the ones that replace a file there.
+// SS-07: a tunnel shows where it listens, where it leads and who can use it (a network address is called out).
 // QL-08: a disabled button says why.
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
@@ -39,6 +40,7 @@ import {
   type TargetImpact,
   type VaultInfo,
 } from "@/lib/api";
+import { isLoopback } from "@/lib/tunnels";
 import { approveReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { formatSize } from "@/lib/transfers";
@@ -189,6 +191,7 @@ export function ApprovalDialog({
 
         {request.exec && <ExecSummary exec={request.exec} targets={request.targets.length} />}
         {request.upload && <UploadSummary upload={request.upload} />}
+        {request.tunnel && <TunnelSummary tunnel={request.tunnel} />}
 
         <div className="grid gap-1.5">
           <div className="max-h-64 overflow-auto rounded-md border">
@@ -502,6 +505,27 @@ function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** SS-07: what a tunnel opens, and who can use it. */
+function TunnelSummary({ tunnel }: { tunnel: NonNullable<ApprovalRequest["tunnel"]> }) {
+  const shared = !isLoopback(tunnel.forward.bindAddress);
+  return (
+    <div className="grid gap-1.5 rounded-md border p-3 text-sm">
+      {tunnel.forward.label && <p className="font-medium">{tunnel.forward.label}</p>}
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+        <dt className="text-muted-foreground">Listens on</dt>
+        <dd className="font-mono text-xs">{tunnel.listens}</dd>
+        <dt className="text-muted-foreground">Leads to</dt>
+        <dd className="font-mono text-xs">{tunnel.leads}</dd>
+      </dl>
+      <p className={shared ? "text-tier-medium" : "text-muted-foreground"}>{tunnel.exposes}</p>
+      <p className="text-xs text-muted-foreground">
+        It stays open until you stop it or close the terminal, and opens again by itself after a reconnect. Opening and
+        closing are audited, never what goes through.
+      </p>
     </div>
   );
 }

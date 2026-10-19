@@ -88,7 +88,10 @@ pub async fn terminal_tunnel_approve(
 #[tauri::command]
 pub async fn terminal_tunnel_decline(state: State<'_, AppState>, terminal_id: Uuid, forward_id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.terminals.decline_tunnel(&core.ctx, terminal_id, forward_id).await?)
+    Ok(core
+        .terminals
+        .decline_tunnel(&core.ctx, terminal_id, forward_id)
+        .await?)
 }
 
 /// Stops a tunnel (audited when it was open). It stays stopped after reconnects.

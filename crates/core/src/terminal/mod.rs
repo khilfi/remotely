@@ -2005,7 +2005,7 @@ impl Pane {
             Pump::Closed => None,
             Pump::Reconnect => Some("the terminal reconnected".to_owned()),
             Pump::Ended(ShellEnd::Exited { .. }) => Some("the shell ended".to_owned()),
-            Pump::Ended(ShellEnd::Lost { reason }) => Some(format!("the connection was lost ({reason})")),
+            Pump::Ended(ShellEnd::Lost { reason }) => Some(reason.clone()),
         };
         if let Some(reason) = reason {
             tunnels::disconnected(&self.inner.store, &self.ctx, &self.control, &reason).await;

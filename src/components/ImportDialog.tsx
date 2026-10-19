@@ -337,7 +337,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                                       ...c.notes,
                                       ...(c.jump
                                         ? [
-                                            `Connects through ${c.jump}. Jump hosts arrive in a later version (SS-07); the link is kept if that session is imported too.`,
+                                            `Connects through ${c.jump}. The link is kept if that session is imported too (or is here already); otherwise it connects directly until you choose a jump host.`,
                                           ]
                                         : []),
                                     ].map((n) => (

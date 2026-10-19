@@ -80,6 +80,7 @@ import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { SessionTree } from "@/components/SessionTree";
+import { TunnelsButton } from "@/components/TunnelsPanel";
 import { TypeSecretMenu } from "@/components/TypeSecretMenu";
 import { UploadConflictDialog } from "@/components/UploadConflictDialog";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
@@ -122,6 +123,7 @@ import {
 } from "@/lib/terminal-session";
 import type { ResolvedTheme } from "@/lib/theme";
 import { formatSize, isActive, mergeTransfer } from "@/lib/transfers";
+import { routeText, viaText } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 
 /** A tab's panes: one pane, or a split of several side by side or stacked. */
@@ -295,6 +297,10 @@ export function TerminalPage({
   const [mxNote, setMxNote] = useState<MultiExecNote | null>(null);
   /** SS-10: a held line that needs the approval dialog. */
   const [mxApproval, setMxApproval] = useState<{ lineId: string; request: ApprovalRequest } | null>(null);
+  /** SS-07: tunnels waiting for the approval dialog, one at a time (several may start with a Prod terminal). */
+  const [tunnelApprovals, setTunnelApprovals] = useState<
+    { pane: PaneSession; forwardId: string; request: ApprovalRequest }[]
+  >([]);
   /** SS-10: the picked tabs side by side while MultiExec is on. */
   const [tile, setTile] = useState(true);
   /** BX-03: the Compare output panel, and the sessions Ctrl+clicked in the tree for it. */
@@ -374,6 +380,13 @@ export function TerminalPage({
 
   const sessionById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
 
+  /** SS-07: a tunnel needs the approval dialog (started here, or one that starts with the terminal). */
+  const askTunnel = useCallback((pane: PaneSession, forwardId: string, request: ApprovalRequest) => {
+    setTunnelApprovals((queue) =>
+      queue.some((a) => a.request.id === request.id) ? queue : [...queue, { pane, forwardId, request }],
+    );
+  }, []);
+
   // QL-07: a pane's finished command is handled with the page's latest state.
   const finishedRef = useRef<(pane: PaneSession, finished: CommandFinished) => void>(() => undefined);
   // SS-08: a file name right-clicked in a pane, too.
@@ -383,9 +396,16 @@ export function TerminalPage({
       const pane = new PaneSession(newKey(), opener, label, theme, options);
       pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
       pane.onFileWord = (word, x, y) => fileWordRef.current(pane, word, x, y);
+      // SS-07: a tunnel that starts with the terminal may ask first (a Prod host): show its approval.
+      pane.onTunnelAsking = (p, forwardId) => {
+        p.tunnelRequest(forwardId).then(
+          (request) => request && askTunnel(p, forwardId, request),
+          (err) => toast.error(errorMessage(err)),
+        );
+      };
       return pane;
     },
-    [theme, options],
+    [theme, options, askTunnel],
   );
 
   // SS-10: a new tab does not join MultiExec by itself (Ctrl+click adds it), and keeps the picked tabs picked.
@@ -1221,6 +1241,12 @@ export function TerminalPage({
         >
           <GitCompareArrowsIcon />
         </IconButton>
+        <TunnelsButton
+          pane={currentPane}
+          snapshot={currentSnapshot}
+          name={currentPane ? nameOf(currentPane) : ""}
+          onApproval={askTunnel}
+        />
         <IconButton
           label={filesShown ? "Hide the files" : "Files here: the terminal's folder, downloads and uploads"}
           onClick={() => setFilesShown((v) => !v)}
@@ -1429,6 +1455,20 @@ export function TerminalPage({
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+      {tunnelApprovals.length > 0 && !mxApproval && (
+        <ApprovalDialog
+          key={tunnelApprovals[0].request.id}
+          request={tunnelApprovals[0].request}
+          vault={vault}
+          approve={(answers) => tunnelApprovals[0].pane.approveTunnel(tunnelApprovals[0].forwardId, answers)}
+          cancel={() => tunnelApprovals[0].pane.declineTunnel(tunnelApprovals[0].forwardId)}
+          onOpenVault={() => {
+            setTunnelApprovals((queue) => queue.slice(1));
+            onOpenVault();
+          }}
+          onClose={() => setTunnelApprovals((queue) => queue.slice(1))}
+        />
+      )}
       {mxApproval && (
         <ApprovalDialog
           key={mxApproval.lineId}
@@ -1508,6 +1548,7 @@ const NO_SNAPSHOT: PaneSnapshot = {
   searching: false,
   searchResults: null,
   folder: null,
+  tunnels: null,
 };
 const noSubscribe = () => () => undefined;
 
@@ -1566,10 +1607,13 @@ function TabButton({
   const env = session?.environment ?? "none";
   const name = session?.name ?? pane?.label ?? "Terminal";
   const seen = factsTitle(snapshot.facts);
+  // SS-07: the jump hosts on the way, as the core connected through them.
+  const via = snapshot.facts?.via ?? [];
   const count = allPanes(tab.layout).length;
   const tooltip = [
     session ? `${session.name} (${sessionAddress(session)})` : name,
     seen && `Host: ${seen}`,
+    via.length > 0 && `Through ${routeText(via)}`,
     session ? null : "Not saved as a session",
     snapshot.logPath && `Logging to ${snapshot.logPath}`,
     attention && "A long command finished here",
@@ -1613,10 +1657,11 @@ function TabButton({
       {session?.color && <ColorDot color={session.color} />}
       <span className="grid min-w-0 flex-1 leading-tight">
         <span className="truncate">{name}</span>
-        {(env !== "none" || (seen && seen !== name)) && (
+        {(env !== "none" || (seen && seen !== name) || via.length > 0) && (
           <span className="truncate text-[11px] font-normal text-muted-foreground">
             {env !== "none" && <span className={cn("font-semibold uppercase", ENV_TEXT[env])}>{env} </span>}
             {seen !== name && seen}
+            {via.length > 0 && <span className="text-muted-foreground/80"> {viaText(via)}</span>}
           </span>
         )}
       </span>
@@ -2131,13 +2176,11 @@ function PaneStatusBar({
           </Button>,
         );
       }
-      if (status.code !== "jump_host_unsupported") {
-        actions.push(
-          <Button key="again" size="xs" variant="outline" onClick={onReconnect}>
-            Try again
-          </Button>,
-        );
-      }
+      actions.push(
+        <Button key="again" size="xs" variant="outline" onClick={onReconnect}>
+          Try again
+        </Button>,
+      );
       actions.push(
         <Button key="close" size="xs" variant="ghost" onClick={onClose}>
           Close

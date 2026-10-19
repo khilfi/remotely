@@ -1,6 +1,6 @@
 // Session library (SS-01, SS-06): folders on the left; search, label and tag filters and the session list
 // on the right. Each session shows its colour, environment label, address, how it logs in and its jump
-// host. Creating, editing and organising sessions is the app's own data (audited, no approval). Connect
+// host (SS-07: the whole chain on hover). Creating, editing and organising sessions is the app's own data (audited, no approval). Connect
 // (or a double-click) opens the session in a terminal tab (SS-03); Import reads PuTTY, MobaXterm,
 // OpenSSH and CSV session lists (SS-02). The VM column shows the VM each session reaches (QL-01),
 // linked automatically by IP address or by hand, and lets the user keep, change or remove the link.
@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { jumpChain, routeText } from "@/lib/tunnels";
 import {
   EllipsisIcon,
   FileLockIcon,
@@ -117,6 +118,12 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
   const [dialog, setDialog] = useState<DialogState>(null);
 
   const reload = useCallback(() => setVersion((v) => v + 1), []);
+  /** SS-07: the whole way in, for the Via column's tooltip. */
+  const chainTitle = (id: string) => {
+    const chain = jumpChain(id, new Map(all.map((x) => [x.id, x])));
+    if (chain.loop) return "Its jump hosts go round in a loop, so it can't connect. Edit one of them.";
+    return chain.names.length > 0 ? `Connects through ${routeText(chain.names)}` : undefined;
+  };
 
   // Everything but the filtered list: folders, every session (jump hosts, counts), tags, vault labels.
   useEffect(() => {
@@ -206,15 +213,8 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
     }
   }
 
-  /** SS-07 is v2: a session with a jump host says so instead of connecting directly. */
+  /** SS-07: a session behind jump hosts connects through them; the terminal says how. */
   function connect(session: SessionRecord) {
-    if (session.jumpSessionId) {
-      const jump = sessionName.get(session.jumpSessionId) ?? "a jump host";
-      toast.warning(`${session.name} connects through ${jump}`, {
-        description: "Jump hosts arrive in a later version (SS-07), so Remotely doesn't connect to it directly.",
-      });
-      return;
-    }
     onConnect(session.id);
   }
 
@@ -501,7 +501,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                       )}
                     </TableCell>
                     <TableCell className="text-sm">{login(s.auth)}</TableCell>
-                    <TableCell className="text-sm">
+                    <TableCell className="text-sm" title={chainTitle(s.id)}>
                       {s.jumpSessionId ? (
                         (sessionName.get(s.jumpSessionId) ?? "—")
                       ) : (

@@ -13,6 +13,9 @@
 // command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's keys go
 // to `inputRouter` instead (see multiexec.ts). SS-08: the core says which folder the shell is in (`folder`), and a
 // right-click on a file name in the output goes to `onFileWord` (the page offers to download it) instead of pasting.
+// SS-07: the core reports the session's tunnels (`tunnels`); one that waits for approval (e.g. one that starts with
+// a Prod session's terminal) goes to `onTunnelAsking`, so the page can show the dialog. Host key questions name the
+// jump host that asks.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -21,6 +24,7 @@ import {
   api,
   errorCode,
   errorMessage,
+  type ApprovalAnswers,
   type FinishedHow,
   type FolderInfo,
   type HostFacts,
@@ -30,6 +34,8 @@ import {
   type SessionRecord,
   type TerminalEvent,
   type TerminalStatus,
+  type TunnelInfo,
+  type TunnelStart,
 } from "@/lib/api";
 import type { ResolvedTheme } from "@/lib/theme";
 import { fileWordAt } from "@/lib/transfers";
@@ -51,9 +57,10 @@ const SEARCH_DECORATIONS = {
   activeMatchColorOverviewRuler: "#ff9632",
 };
 
-/** SS-05: a host key decision the pane is waiting for. */
+/** SS-05: a host key decision the pane is waiting for. `jump`: SS-07, the jump host on the way that asks, if any. */
 export type HostKeyQuestion =
-  { kind: "unknown"; key: HostKey; otherKeyTypes: string[] } | { kind: "changed"; key: HostKey; previous: KnownHost };
+  | { kind: "unknown"; key: HostKey; otherKeyTypes: string[]; jump: string | null }
+  | { kind: "changed"; key: HostKey; previous: KnownHost; jump: string | null };
 
 /** Before the core has a status for the pane. */
 export type PaneStatus = TerminalStatus | { state: "opening" };
@@ -85,6 +92,8 @@ export interface PaneSnapshot {
   searchResults: { index: number; count: number } | null;
   /** SS-08: the shell's folder, as far as the core knows it. */
   folder: FolderInfo | null;
+  /** SS-07: the session's tunnels and their state, once the core has said. */
+  tunnels: TunnelInfo[] | null;
 }
 
 /** QL-05 settings a pane applies live. */
@@ -157,6 +166,8 @@ export class PaneSession {
    * it, or pastes. Without it, right-click pastes (QL-05).
    */
   onFileWord: ((word: string, x: number, y: number) => void) | null = null;
+  /** SS-07: a tunnel started waiting for the user's approval (the page fetches the request and shows it). */
+  onTunnelAsking: ((pane: PaneSession, forwardId: string) => void) | null = null;
 
   constructor(key: string, opener: PaneOpener, label: string, theme: ResolvedTheme, options: PaneOptions) {
     this.key = key;
@@ -173,6 +184,7 @@ export class PaneSession {
       searching: false,
       searchResults: null,
       folder: null,
+      tunnels: null,
     };
     this.element = document.createElement("div");
     this.element.className = "h-full w-full";
@@ -261,11 +273,23 @@ export class PaneSession {
         });
         break;
       case "hostKeyUnknown":
-        this.update({ question: { kind: "unknown", key: event.key, otherKeyTypes: event.otherKeyTypes } });
+        this.update({
+          question: { kind: "unknown", key: event.key, otherKeyTypes: event.otherKeyTypes, jump: event.jump },
+        });
         break;
       case "hostKeyChanged": {
-        const changed = { kind: "changed" as const, key: event.key, previous: event.previous };
+        const changed = { kind: "changed" as const, key: event.key, previous: event.previous, jump: event.jump };
         this.update({ question: changed, changedKey: changed });
+        break;
+      }
+      case "tunnels": {
+        const before = new Set(
+          (this.snapshot.tunnels ?? []).filter((t) => t.state.state === "asking").map((t) => t.forward.id),
+        );
+        this.update({ tunnels: event.tunnels });
+        for (const t of event.tunnels) {
+          if (t.state.state === "asking" && !before.has(t.forward.id)) this.onTunnelAsking?.(this, t.forward.id);
+        }
         break;
       }
       case "host":
@@ -285,7 +309,7 @@ export class PaneSession {
   /**
    * Opens the connection, sized to the pane (80×24 until it is on screen; the core gets the real size
    * as soon as the pane is laid out). Resolves once the core has opened the pane, and rejects when it
-   * opened nothing (a bad quick connection, a jump host, a deleted session).
+   * opened nothing (a bad quick connection, jump hosts that go round in a loop, a deleted session).
    */
   async start(): Promise<void> {
     if (this.started || this.closed || !this.opener) return;
@@ -363,6 +387,42 @@ export class PaneSession {
     this.listeners.clear();
     this.onCommandFinished = null;
     this.onFileWord = null;
+    this.onTunnelAsking = null;
+  }
+
+  // ---- SS-07 tunnels ----
+
+  private requireId() {
+    if (!this.coreId) throw new Error("This terminal has not opened yet.");
+    return this.coreId;
+  }
+
+  /** The tunnels as the core has them now (also kept up to date by its events). */
+  async loadTunnels() {
+    const tunnels = await api.terminalTunnels(this.requireId());
+    this.update({ tunnels });
+    return tunnels;
+  }
+
+  /** Opens a saved forward through the approval flow: opening at once, or the approval to show. */
+  startTunnel(forwardId: string): Promise<TunnelStart> {
+    return api.terminalTunnelStart(this.requireId(), forwardId);
+  }
+
+  stopTunnel(forwardId: string) {
+    return api.terminalTunnelStop(this.requireId(), forwardId);
+  }
+
+  tunnelRequest(forwardId: string) {
+    return api.terminalTunnelRequest(this.requireId(), forwardId);
+  }
+
+  approveTunnel(forwardId: string, answers: ApprovalAnswers) {
+    return api.terminalTunnelApprove(this.requireId(), forwardId, answers);
+  }
+
+  declineTunnel(forwardId: string) {
+    return api.terminalTunnelDecline(this.requireId(), forwardId);
   }
 
   /** SS-08: the file name under a point of the screen (client pixels), if the output shows one there. */
