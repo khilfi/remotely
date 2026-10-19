@@ -103,7 +103,9 @@ crates/core/          remotely-core: all app logic
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
                       closed with the terminal, audited tunnel_opened and tunnel_closed
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
-                      library (library.rs), {{variables}} (variables.rs); classified by the bus's policy engine
+                      library (library.rs: ~425 Linux commands in 25 area groups plus TROUBLESHOOT symptom runbooks
+                      that reference them; two LibrarySections), {{variables}} (variables.rs); classified by the bus's
+                      policy engine (read-only additions in policy/commands.rs, writing forms in commands/writes.rs)
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only); SS-07 the first jump
                       host's for a session behind one, never the session itself
     bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
