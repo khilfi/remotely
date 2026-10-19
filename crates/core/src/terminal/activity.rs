@@ -1,9 +1,12 @@
 //! What a terminal is doing, read from its own traffic: the line the cursor is on (QL-06 checks it
-//! shows a password prompt before typing a vault password), and whether a command is running and has
-//! finished (QL-07 notifies when one in a background tab ends after a long run).
+//! shows a password prompt before typing a vault password), whether a full-screen program is open
+//! (SS-10 MultiExec passes keys straight to it), and whether a command is running and has finished
+//! (QL-07 notifies when one in a background tab ends after a long run).
 //!
 //! * [`ScreenLine`] follows the output well enough to know the line the cursor is on: escapes are
-//!   dropped, a carriage return starts the line over, backspace takes a character back.
+//!   dropped, a carriage return starts the line over, backspace takes a character back. A full-screen
+//!   program switches to xterm's alternate screen buffer (`CSI ? 1049 h`, or the older 47 and 1047)
+//!   and back (`l`), which it notes.
 //! * [`RunWatch`]: Enter starts a run (remembering the line it was pressed on, which starts with the
 //!   prompt). The run ends when a prompt comes back: the same prompt as before (that line starts with
 //!   it), or a line that looks like a shell prompt. Or it ends when the output stops for a while after
@@ -55,13 +58,20 @@ enum Escape {
     StringEsc,
 }
 
+/// The longest control sequence parameters kept: enough for any private mode.
+const MAX_CSI_CHARS: usize = 32;
+
 /// The line the cursor is on, as far as plain output shows it.
 pub struct ScreenLine {
     line: String,
     escape: Escape,
+    /// The parameters of the control sequence being read.
+    csi: String,
     carriage_return: bool,
     /// Bytes of a character split across two reads.
     partial: Vec<u8>,
+    /// SS-10: the alternate screen buffer is in use (a full-screen program).
+    alternate: bool,
 }
 
 impl Default for ScreenLine {
@@ -75,13 +85,29 @@ impl ScreenLine {
         Self {
             line: String::new(),
             escape: Escape::None,
+            csi: String::new(),
             carriage_return: false,
             partial: Vec::new(),
+            alternate: false,
         }
     }
 
     pub fn line(&self) -> &str {
         &self.line
+    }
+
+    /// SS-10: a full-screen program is open.
+    pub fn alternate(&self) -> bool {
+        self.alternate
+    }
+
+    /// `CSI ? Pm h` / `CSI ? Pm l`: the private modes that switch to the alternate screen and back.
+    fn private_mode(&mut self, set: bool) {
+        if let Some(params) = self.csi.strip_prefix('?') {
+            if params.split(';').any(|p| matches!(p, "47" | "1047" | "1049")) {
+                self.alternate = set;
+            }
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -109,8 +135,16 @@ impl ScreenLine {
         match self.escape {
             Escape::Started => {
                 self.escape = match ch {
-                    '[' => Escape::Csi,
+                    '[' => {
+                        self.csi.clear();
+                        Escape::Csi
+                    }
                     ']' | 'P' | 'X' | '^' | '_' => Escape::String,
+                    // RIS, a full reset, leaves the alternate screen.
+                    'c' => {
+                        self.alternate = false;
+                        Escape::None
+                    }
                     _ => Escape::None,
                 };
                 return;
@@ -118,6 +152,11 @@ impl ScreenLine {
             Escape::Csi => {
                 if ('@'..='~').contains(&ch) {
                     self.escape = Escape::None;
+                    if matches!(ch, 'h' | 'l') {
+                        self.private_mode(ch == 'h');
+                    }
+                } else if self.csi.len() < MAX_CSI_CHARS {
+                    self.csi.push(ch);
                 }
                 return;
             }
@@ -229,6 +268,11 @@ impl RunWatch {
     /// The line the cursor is on.
     pub fn line(&self) -> &str {
         self.screen.line()
+    }
+
+    /// SS-10: a full-screen program is open.
+    pub fn alternate(&self) -> bool {
+        self.screen.alternate()
     }
 
     pub fn is_running(&self) -> bool {
@@ -350,6 +394,32 @@ mod tests {
         assert_eq!(line_after(&[&[b'c', b'a', b'f', 0xC3], &[0xA9]]), "café");
         let long = "x".repeat(MAX_LINE_CHARS * 2);
         assert_eq!(line_after(&[long.as_bytes()]).len(), MAX_LINE_CHARS);
+    }
+
+    #[test]
+    fn full_screen_programs_are_noticed_and_their_end_too() {
+        let mut screen = ScreenLine::new();
+        screen.feed(b"$ vim notes.txt\r\n");
+        assert!(!screen.alternate());
+        screen.feed(b"\x1b[?1049h\x1b[22;0;0t\x1b[1;24r\x1b[?12h");
+        assert!(screen.alternate(), "vim switched to the alternate screen");
+        screen.feed(b"\x1b[?25l\x1b[?12l");
+        assert!(screen.alternate(), "other private modes change nothing");
+        // Split across two reads, and switched back.
+        screen.feed(b"\x1b[?10");
+        screen.feed(b"49l\r\n$ ");
+        assert!(!screen.alternate());
+        assert_eq!(screen.line(), "$ ");
+        // The older forms, several modes in one sequence, and a full reset.
+        screen.feed(b"\x1b[?47h");
+        assert!(screen.alternate());
+        screen.feed(b"\x1b[?1;1047l");
+        assert!(!screen.alternate());
+        screen.feed(b"\x1b[?1049h\x1bc");
+        assert!(!screen.alternate());
+        // Not private: `CSI 4 h` is insert mode.
+        screen.feed(b"\x1b[4h\x1b[1049h");
+        assert!(!screen.alternate());
     }
 
     #[test]

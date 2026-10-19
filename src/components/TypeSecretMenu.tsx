@@ -26,7 +26,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorCode, errorMessage, type SecretMeta } from "@/lib/api";
+import { connectedReason } from "@/lib/disabled-reasons";
 import type { PaneSession } from "@/lib/terminal-session";
 
 interface Props {
@@ -73,14 +75,24 @@ export function TypeSecretMenu({ pane, loginSecretId, terminalName, onOpenVault 
     }
   }
 
-  const disabled = !pane?.terminalId;
+  // QL-08: a disabled button says why.
+  const disabled = connectedReason({ open: Boolean(pane), connected: Boolean(pane?.terminalId) });
+  if (disabled) {
+    return (
+      <WhyDisabled reason={`Type a vault password: ${disabled}`}>
+        <Button variant="ghost" size="icon-sm" aria-label="Type a vault password" disabled>
+          <KeyRoundIcon />
+        </Button>
+      </WhyDisabled>
+    );
+  }
   return (
     <>
       <DropdownMenu onOpenChange={load}>
         <Tooltip>
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon-sm" aria-label="Type a vault password" disabled={disabled}>
+              <Button variant="ghost" size="icon-sm" aria-label="Type a vault password">
                 <KeyRoundIcon />
               </Button>
             </DropdownMenuTrigger>

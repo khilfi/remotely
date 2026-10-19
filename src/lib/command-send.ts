@@ -1,10 +1,10 @@
 // BX-08: how a command from the command panel reaches terminals. It goes in as if the user typed it, through
 // each pane's own input (xterm.js's paste, bracketed when the shell asked for it, so a multi-line command waits for
-// Enter), and Enter only when asked. An interactive shell skips the approval flow, as typing does.
+// Enter), and Enter only when asked. One interactive shell skips the approval flow, as typing does.
 //
-// P5 sends to the current pane only. P6's MultiExec will call this with the panes picked for it and must hold the
-// Enter until its policy check (read-only goes at once, anything higher shows the approval dialog): `enter` is the
-// one place that runs a command, so that check goes here, before `pane.pressEnter()`.
+// SS-10: with MultiExec on, the Terminal page passes one picked pane, whose input goes to MultiExec (its
+// `inputRouter`): the paste reaches every picked terminal, and the Enter is held there and rated by the policy engine
+// like a typed one (read-only goes at once, anything higher shows the approval dialog).
 
 import type { PaneSession } from "@/lib/terminal-session";
 

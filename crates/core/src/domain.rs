@@ -119,6 +119,14 @@ pub enum TargetRef {
     Session { session_id: Uuid },
     /// This app itself, e.g. installing an update (FD-14).
     App,
+    /// SS-10: an open terminal pane, for a MultiExec line typed into several at once. The command bus
+    /// fills in `session_id` (the saved session behind it, `None` for a quick connection that was not
+    /// saved), so the audit log names the sessions; the key is the terminal.
+    Terminal {
+        terminal_id: Uuid,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+    },
 }
 
 impl TargetRef {
@@ -127,6 +135,7 @@ impl TargetRef {
             TargetRef::Vm { .. } => "vm",
             TargetRef::Session { .. } => "session",
             TargetRef::App => "app",
+            TargetRef::Terminal { .. } => "terminal",
         }
     }
 
@@ -136,6 +145,7 @@ impl TargetRef {
             TargetRef::Vm { vmx_path } => vmx_path.clone(),
             TargetRef::Session { session_id } => session_id.to_string(),
             TargetRef::App => "app".to_owned(),
+            TargetRef::Terminal { terminal_id, .. } => terminal_id.to_string(),
         }
     }
 }

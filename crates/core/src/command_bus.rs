@@ -68,6 +68,23 @@ pub enum Command {
         #[serde(default)]
         timeout_secs: Option<u64>,
     },
+    /// SS-10 MultiExec: Enter on a line typed into several open terminals at once
+    /// ([`crate::terminal::multiexec`]). The line's keys went to each terminal as they were typed; Enter
+    /// was held so the policy engine could rate the line first, and this command sends it.
+    TerminalLine {
+        /// [`TargetRef::Terminal`]s.
+        targets: Vec<TargetRef>,
+        /// What was typed, as far as Remotely could follow it; several lines for a paste of several.
+        line: String,
+        /// Keys were typed that Remotely can't follow (Tab completion, arrow keys, history, Ctrl+R) or
+        /// text was on the line before MultiExec, so the shell may run something else: the line counts
+        /// as at least "other", never Low.
+        #[serde(default)]
+        unreliable: bool,
+        /// What each terminal gets: Enter, and for a paste of several lines the lines after the first,
+        /// each with its Enter.
+        keys: String,
+    },
 }
 
 /// The one target of commands that act on the app itself.
@@ -166,6 +183,22 @@ impl SnapshotOp {
     }
 }
 
+/// SS-10: a MultiExec line: something to run (an empty line only when the shell may hold more than
+/// Remotely saw, e.g. a command recalled from its history), and Enter first in what is sent.
+fn validate_line(line: &str, keys: &str, unreliable: bool) -> Result<()> {
+    let invalid = |message: String| Err(CoreError::InvalidInput(message));
+    if !unreliable && line.trim().is_empty() {
+        return invalid("The line is empty.".into());
+    }
+    if line.len() > MAX_SCRIPT_BYTES || keys.len() > MAX_SCRIPT_BYTES {
+        return invalid(format!("A line can be at most {} KB.", MAX_SCRIPT_BYTES / 1024));
+    }
+    if !keys.starts_with(['\r', '\n']) {
+        return invalid("A MultiExec line is sent with Enter.".into());
+    }
+    Ok(())
+}
+
 /// BX-02: a script the hosts' shells can take.
 fn validate_script(script: &str, timeout_secs: Option<u64>) -> Result<()> {
     let invalid = |message: String| Err(CoreError::InvalidInput(message));
@@ -209,6 +242,19 @@ impl Command {
                 ssh_keys::parse_public_key(public_key)?;
                 validate_timeout(*timeout_secs)
             }
+            Command::TerminalLine {
+                targets,
+                line,
+                keys,
+                unreliable,
+            } => {
+                if targets.iter().any(|t| !matches!(t, TargetRef::Terminal { .. })) {
+                    return Err(CoreError::InvalidInput(
+                        "A MultiExec line goes to open terminals only.".into(),
+                    ));
+                }
+                validate_line(line, keys, *unreliable)
+            }
             _ => Ok(()),
         }
     }
@@ -222,7 +268,9 @@ impl Command {
             | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. }
             | Command::PushSshKey { targets, .. } => *targets = new,
-            Command::AppUpdate { .. } => return None,
+            // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
+            // after something else.
+            Command::AppUpdate { .. } | Command::TerminalLine { .. } => return None,
         }
         Some(command)
     }
@@ -233,7 +281,8 @@ impl Command {
             | Command::VmSnapshot { targets, .. }
             | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. }
-            | Command::PushSshKey { targets, .. } => targets,
+            | Command::PushSshKey { targets, .. }
+            | Command::TerminalLine { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -279,6 +328,22 @@ impl Command {
                 Ok(key) => format!("Add the SSH key {} to {}", key.describe(), noun("host")),
                 Err(_) => format!("Add an SSH key to {}", noun("host")),
             },
+            Command::TerminalLine { line, .. } => {
+                // Kept in the audit log for good, like a bulk run's summary: no secret typed into it.
+                let mut lines = line.lines().filter(|l| !l.trim().is_empty());
+                let (first, _) = redact_secrets(lines.next().unwrap_or_default().trim());
+                let more = match lines.count() {
+                    0 => String::new(),
+                    1 => " (and 1 more line)".to_owned(),
+                    n => format!(" (and {n} more lines)"),
+                };
+                if first.is_empty() {
+                    // A line recalled from the shell's history: Remotely saw only Enter.
+                    format!("MultiExec: press Enter in {}", noun("terminal"))
+                } else {
+                    format!("MultiExec: run `{first}`{more} in {}", noun("terminal"))
+                }
+            }
         }
     }
 }
@@ -339,6 +404,11 @@ pub struct ExecDetails {
     pub dangerous: Vec<DangerousMatch>,
     /// BX-04: the job whose failed hosts this one retries.
     pub retry_of: Option<Uuid>,
+    /// SS-10: a line typed into open terminals (MultiExec): Enter is sent once approved.
+    pub multi_exec: bool,
+    /// SS-10: the line was edited with keys Remotely can't follow, so the terminals may run something
+    /// other than `script`.
+    pub unreliable: bool,
 }
 
 /// What a command would need, without submitting it (BX-06: the bulk run editor shows the tier and
@@ -513,7 +583,9 @@ impl CommandBus {
         let policy = locks::read(&self.policy);
         let decision = policy.evaluate(command, &targets);
         let dangerous = match command {
-            Command::RemoteExec { script, .. } => policy.dangerous_details(script),
+            Command::RemoteExec { script, .. } | Command::TerminalLine { line: script, .. } => {
+                policy.dangerous_details(script)
+            }
             _ => Vec::new(),
         };
         Ok(CommandPreview {
@@ -551,6 +623,21 @@ impl CommandBus {
                 timeout_secs: *timeout_secs,
                 dangerous: Vec::new(),
                 retry_of,
+                multi_exec: false,
+                unreliable: false,
+            })));
+        }
+        if let Command::TerminalLine { line, unreliable, .. } = command {
+            return Ok(Some(Box::new(ExecDetails {
+                script: line.clone(),
+                sudo: false,
+                sudo_password_label: None,
+                trust_new_host_keys: false,
+                timeout_secs: None,
+                dangerous: locks::read(&self.policy).dangerous_details(line),
+                retry_of: None,
+                multi_exec: true,
+                unreliable: *unreliable,
             })));
         }
         let Command::RemoteExec {
@@ -582,6 +669,8 @@ impl CommandBus {
             timeout_secs: *timeout_secs,
             dangerous: locks::read(&self.policy).dangerous_details(script),
             retry_of,
+            multi_exec: false,
+            unreliable: false,
         })))
     }
 

@@ -42,8 +42,10 @@ import {
 } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { diffReason } from "@/lib/disabled-reasons";
 import { StatusBadge, TierBadge } from "./Badges";
 import { OutputDiffDialog } from "./OutputDiffDialog";
+import { WhyDisabled } from "./WhyDisabled";
 
 interface Props {
   jobId: string;
@@ -190,20 +192,24 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
             </Button>
           )}
           {canRetry && (
-            <Button variant="outline" size="sm" onClick={() => void retry()} disabled={busy}>
-              <RotateCcwIcon data-icon="inline-start" />
-              Retry {plural(counts.failed, "failed host")}
-            </Button>
+            <WhyDisabled reason={busy ? "Submitting the retry…" : null}>
+              <Button variant="outline" size="sm" onClick={() => void retry()} disabled={busy}>
+                <RotateCcwIcon data-icon="inline-start" />
+                Retry {plural(counts.failed, "failed host")}
+              </Button>
+            </WhyDisabled>
           )}
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={groups.length < 2}
-            onClick={() => setComparing({ left: groups[0].label, right: groups[1].label })}
-          >
-            <GitCompareArrowsIcon data-icon="inline-start" />
-            Compare
-          </Button>
+          <WhyDisabled reason={diffReason(groups.length)}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={groups.length < 2}
+              onClick={() => setComparing({ left: groups[0].label, right: groups[1].label })}
+            >
+              <GitCompareArrowsIcon data-icon="inline-start" />
+              Compare groups
+            </Button>
+          </WhyDisabled>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="outline" size="sm">

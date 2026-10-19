@@ -15,6 +15,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RiskBadge } from "@/components/Badges";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type CommandRisk, type CommandVariable } from "@/lib/api";
 
 interface Props {
@@ -59,6 +60,8 @@ export function FillCommandDialog({ name, command, variables, risk, target, run,
   }
 
   const ready = !(filled && "error" in filled);
+  // QL-08: the fill's own problem says why the buttons wait.
+  const notReady = filled && "error" in filled ? filled.error : null;
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
@@ -107,22 +110,26 @@ export function FillCommandDialog({ name, command, variables, risk, target, run,
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button
-              type={run ? "button" : "submit"}
-              variant={run ? "outline" : "default"}
-              disabled={!ready}
-              onClick={run ? () => void send(false) : undefined}
-            >
-              Paste
-            </Button>
-            <Button
-              type={run ? "submit" : "button"}
-              variant={run ? "default" : "outline"}
-              disabled={!ready}
-              onClick={run ? undefined : () => void send(true)}
-            >
-              Paste and run
-            </Button>
+            <WhyDisabled reason={notReady}>
+              <Button
+                type={run ? "button" : "submit"}
+                variant={run ? "outline" : "default"}
+                disabled={!ready}
+                onClick={run ? () => void send(false) : undefined}
+              >
+                Paste
+              </Button>
+            </WhyDisabled>
+            <WhyDisabled reason={notReady}>
+              <Button
+                type={run ? "submit" : "button"}
+                variant={run ? "default" : "outline"}
+                disabled={!ready}
+                onClick={run ? undefined : () => void send(true)}
+              >
+                Paste and run
+              </Button>
+            </WhyDisabled>
           </DialogFooter>
         </form>
       </DialogContent>

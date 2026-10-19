@@ -18,6 +18,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type HostKey } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import type { HostKeyQuestion } from "@/lib/terminal-session";
@@ -156,16 +157,26 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
         )}
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>Close, don't connect</AlertDialogCancel>
-          <AlertDialogAction
-            variant="destructive"
-            disabled={busy || !checked}
-            onClick={(e) => {
-              e.preventDefault();
-              void run(onReplace);
-            }}
+          <WhyDisabled
+            reason={
+              !checked
+                ? "Tick the box first: the host's owner confirmed the new fingerprint"
+                : busy
+                  ? "Connecting…"
+                  : null
+            }
           >
-            Replace key and connect
-          </AlertDialogAction>
+            <AlertDialogAction
+              variant="destructive"
+              disabled={busy || !checked}
+              onClick={(e) => {
+                e.preventDefault();
+                void run(onReplace);
+              }}
+            >
+              Replace key and connect
+            </AlertDialogAction>
+          </WhyDisabled>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

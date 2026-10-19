@@ -1,24 +1,27 @@
-// Bulk run (BX-01 to BX-07): pick hosts, type a command or script, see its approval tier and any
-// dangerous-command rule it matches before it runs, run it (through the command bus, so the policy
-// engine and the approval dialog decide), then follow the results live, grouped by output. Earlier runs
-// can be opened again from the list.
+// BX-03 Compare output, in the Terminal page (post-MVP P6; it replaces the Bulk run page). One command runs once on
+// each host of the picked tabs and of the sessions picked in the tree, as a one-shot job through the bulk engine
+// (exec channels, not the terminals; BX-02 to BX-07): the parallel limit, sudo with a password from the vault, the
+// approval tier shown while typing and the dangerous-command rules (BX-06), then the results grouped by output ("48
+// same, 2 differ"), the diff between two groups, retry of the failed hosts and CSV, JSON or HTML export. Hosts are
+// saved sessions: a tab of a quick connection that was not saved can't be reached. QL-08: Run says why it is
+// disabled.
 
-import { useEffect, useState } from "react";
-import { KeyRoundIcon, OctagonAlertIcon, PlayIcon, SquareTerminalIcon } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { KeyRoundIcon, OctagonAlertIcon, PlayIcon, SquareTerminalIcon, XIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { StatusBadge, TierBadge } from "@/components/Badges";
+import { TierBadge } from "@/components/Badges";
 import { BulkResultsView } from "@/components/BulkResultsView";
-import { BulkTargetPicker } from "@/components/BulkTargetPicker";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
   errorMessage,
@@ -29,23 +32,34 @@ import {
   type ResolvedTargets,
   type SecretMeta,
   type SubmitOutcome,
-  type TargetPicks,
   type VaultInfo,
 } from "@/lib/api";
+import { compareRunReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
 
 interface Props {
   active: boolean;
   vault: VaultInfo | null;
+  /** The picked tabs' terminals (each reaches its saved session). */
+  terminalIds: string[];
+  /** Sessions picked in the tree, with no tab needed. */
+  sessionIds: string[];
+  /** How many of the picked tabs are quick connections that were not saved. */
+  unsavedTabs: number;
+  /** Saved sessions on this computer. */
+  savedSessions: number;
+  onClearTree: () => void;
   /** Goes through the app, which opens the approval dialog; `onJob` gets the job id once queued. */
   onSubmit: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenVault: () => void;
-  onOpenSessions: () => void;
+  onClose: () => void;
 }
 
 /** sudo gets each session's own login password. */
 const LOGIN = "login";
 const DEFAULT_TIMEOUT = "600";
+/** Hosts named in the summary before "and N more". */
+const NAMES_SHOWN = 6;
 
 function stepsText(steps: ApprovalStep[]) {
   if (steps.length === 0) return "Runs at once; logged.";
@@ -54,8 +68,18 @@ function stepsText(steps: ApprovalStep[]) {
   return "Needs one confirm.";
 }
 
-export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessions }: Props) {
-  const [picks, setPicks] = useState<TargetPicks>({});
+export function ComparePanel({
+  active,
+  vault,
+  terminalIds,
+  sessionIds,
+  unsavedTabs,
+  savedSessions,
+  onClearTree,
+  onSubmit,
+  onOpenVault,
+  onClose,
+}: Props) {
   const [resolved, setResolved] = useState<ResolvedTargets | null>(null);
   const [script, setScript] = useState("");
   const [sudo, setSudo] = useState(false);
@@ -71,7 +95,8 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const hosts = resolved?.hosts ?? [];
+  const picksKey = JSON.stringify([terminalIds, sessionIds]);
+  const hosts = useMemo(() => resolved?.hosts ?? [], [resolved]);
   const timeoutSecs = timeout.trim() === "" ? null : Number(timeout);
   const timeoutOk =
     timeoutSecs === null || (Number.isInteger(timeoutSecs) && timeoutSecs >= 1 && timeoutSecs <= 86_400);
@@ -86,7 +111,15 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
   };
   const commandKey = JSON.stringify(command);
   const shownPreview = script.trim() && preview?.key === commandKey ? preview.preview : null;
-  const runnable = hosts.some((h) => !h.protected) && script.trim() !== "" && timeoutOk && !submitting;
+  const notReady = compareRunReason({
+    savedSessions,
+    picked: terminalIds.length + sessionIds.length,
+    hosts,
+    unsavedTabs,
+    script,
+    timeoutOk,
+    submitting,
+  });
 
   useEffect(() => {
     if (!active) return;
@@ -104,10 +137,11 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
     };
   }, [active]);
 
-  // BX-01: the hosts the picks reach.
+  // BX-01: the hosts the picked tabs and tree sessions reach.
   useEffect(() => {
     let stale = false;
-    api.bulkTargets(picks).then(
+    const [terminals, sessions] = JSON.parse(picksKey) as [string[], string[]];
+    api.bulkTargets({ terminalIds: terminals, sessionIds: sessions }).then(
       (r) => {
         if (!stale) setResolved(r);
       },
@@ -118,7 +152,7 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
     return () => {
       stale = true;
     };
-  }, [picks, active]);
+  }, [picksKey, active]);
 
   // BX-06: the tier and any dangerous-command rule, shown while typing.
   useEffect(() => {
@@ -162,7 +196,7 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
   }, []);
 
   async function run() {
-    if (!runnable) return;
+    if (notReady) return;
     setSubmitting(true);
     setError(null);
     try {
@@ -176,53 +210,78 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
 
   const vaultLocked = vault?.status !== "unlocked";
   const runCount = hosts.filter((h) => !h.protected).length;
+  const protectedCount = hosts.length - runCount;
+  const names = hosts.map((h) => h.name);
+  const shownNames =
+    names.length > NAMES_SHOWN
+      ? `${names.slice(0, NAMES_SHOWN).join(", ")} and ${names.length - NAMES_SHOWN} more`
+      : names.join(", ");
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[minmax(0,30rem)_minmax(0,1fr)]">
-      <div className="grid content-start gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Hosts</CardTitle>
-            <CardDescription>
-              Pick saved sessions, VMs (through the session linked to each), tags or saved filters. Each host runs the
-              command once.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <BulkTargetPicker
-              active={active}
-              picks={picks}
-              onPicksChange={setPicks}
-              resolved={resolved}
-              onOpenSessions={onOpenSessions}
-            />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Command</CardTitle>
-            <CardDescription>
-              One command or a script of several lines, run by each host&apos;s login shell
-              {parallel ? `, on up to ${parallel} hosts at once` : ""}. Ctrl+Enter runs it.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-4">
-            <Textarea
-              aria-label="Command or script"
-              rows={6}
-              spellCheck={false}
-              className="font-mono text-xs"
-              placeholder={"uptime\ndf -h /"}
-              value={script}
-              onChange={(e) => setScript(e.currentTarget.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                  e.preventDefault();
-                  void run();
-                }
-              }}
-            />
+    <div className="flex h-full min-h-0 flex-col rounded-lg border bg-background">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
+        <h2 className="text-sm font-semibold">Compare output</h2>
+        <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground" title={names.join(", ")}>
+          {hosts.length === 0
+            ? "Pick tabs (Ctrl+click), or sessions in the tree (Ctrl+click), to run on."
+            : `Runs once on ${plural(runCount, "host")}: ${shownNames}`}
+          {protectedCount > 0 && ` (${protectedCount} protected, skipped)`}
+        </span>
+        <Badge variant="outline" className="font-normal">
+          {plural(terminalIds.length, "tab")}
+        </Badge>
+        <Badge variant="outline" className="font-normal">
+          {plural(sessionIds.length, "tree session")}
+        </Badge>
+        {sessionIds.length > 0 && (
+          <Button size="xs" variant="ghost" onClick={onClearTree}>
+            Clear the tree picks
+          </Button>
+        )}
+        <Button variant="ghost" size="icon-sm" aria-label="Close Compare output" onClick={onClose}>
+          <XIcon />
+        </Button>
+      </div>
+      <ScrollArea className="@container min-h-0 flex-1">
+        <div className="grid gap-4 p-3 @5xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
+          <div className="grid content-start gap-3">
+            {resolved && resolved.notes.length > 0 && (
+              <Alert>
+                <SquareTerminalIcon />
+                <AlertTitle>Not every pick can run the command</AlertTitle>
+                <AlertDescription>
+                  <ul className="list-disc pl-4">
+                    {resolved.notes.map((n) => (
+                      <li key={n}>{n}</li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
+            <div className="grid gap-1.5">
+              <Label htmlFor="compare-script">
+                Command or script{parallel ? `, on up to ${parallel} hosts at once` : ""} (Ctrl+Enter runs it)
+              </Label>
+              <Textarea
+                id="compare-script"
+                rows={4}
+                spellCheck={false}
+                className="font-mono text-xs"
+                placeholder={"uptime\ndf -h /"}
+                value={script}
+                onChange={(e) => setScript(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                    e.preventDefault();
+                    void run();
+                  }
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                Each host runs it once in its own login shell (not in the terminals), and the results are grouped by
+                output.
+              </p>
+            </div>
 
             {shownPreview && (
               <div className="grid gap-2">
@@ -251,18 +310,18 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
 
             <div className="grid gap-3 rounded-md border p-3">
               <div className="flex items-center gap-3">
-                <Switch id="bulk-sudo" checked={sudo} onCheckedChange={setSudo} />
-                <Label htmlFor="bulk-sudo" className="font-normal">
+                <Switch id="compare-sudo" checked={sudo} onCheckedChange={setSudo} />
+                <Label htmlFor="compare-sudo" className="font-normal">
                   Run with sudo
                 </Label>
               </div>
               {sudo && (
                 <div className="grid gap-1.5 pl-12">
-                  <Label htmlFor="bulk-sudo-password" className="font-normal text-muted-foreground">
+                  <Label htmlFor="compare-sudo-password" className="font-normal text-muted-foreground">
                     Password for sudo, from the vault
                   </Label>
                   <Select value={sudoPassword} onValueChange={setSudoPassword}>
-                    <SelectTrigger id="bulk-sudo-password" className="w-full">
+                    <SelectTrigger id="compare-sudo-password" className="w-full">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -282,13 +341,13 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
               )}
               <div className="flex items-start gap-3">
                 <Checkbox
-                  id="bulk-trust"
+                  id="compare-trust"
                   className="mt-0.5"
                   checked={trustNew}
                   onCheckedChange={(v) => setTrustNew(v === true)}
                 />
                 <div className="grid gap-0.5">
-                  <Label htmlFor="bulk-trust" className="font-normal">
+                  <Label htmlFor="compare-trust" className="font-normal">
                     Trust new host keys
                   </Label>
                   <p className="text-xs text-muted-foreground">
@@ -298,11 +357,11 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
                 </div>
               </div>
               <div className="flex items-center gap-3">
-                <Label htmlFor="bulk-timeout" className="font-normal">
+                <Label htmlFor="compare-timeout" className="font-normal">
                   Time limit per host
                 </Label>
                 <Input
-                  id="bulk-timeout"
+                  id="compare-timeout"
                   className="w-24"
                   inputMode="numeric"
                   value={timeout}
@@ -334,89 +393,56 @@ export function BulkRunPage({ active, vault, onSubmit, onOpenVault, onOpenSessio
                 {error}
               </p>
             )}
-          </CardContent>
-          <CardFooter>
-            <Button onClick={() => void run()} disabled={!runnable}>
-              <PlayIcon data-icon="inline-start" />
-              {runCount > 0 ? `Run on ${plural(runCount, "host")}` : "Run"}
-            </Button>
-          </CardFooter>
-        </Card>
-      </div>
+            <div className="flex items-center gap-2">
+              <WhyDisabled reason={notReady}>
+                <Button onClick={() => void run()} disabled={notReady !== null}>
+                  <PlayIcon data-icon="inline-start" />
+                  {runCount > 0 ? `Run on ${plural(runCount, "host")}` : "Run"}
+                </Button>
+              </WhyDisabled>
+              {runs.length > 0 && (
+                <Select value={jobId ?? ""} onValueChange={(id) => setJobId(id || null)}>
+                  <SelectTrigger className="min-w-0 flex-1" aria-label="Open an earlier run">
+                    <SelectValue placeholder="Earlier runs…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {runs.map((r) => (
+                      <SelectItem key={r.id} value={r.id}>
+                        <span className="truncate font-mono text-xs">
+                          {r.retryOf && "Retry: "}
+                          {r.summary}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {r.targetsSucceeded}/{r.targetsTotal} · {formatWhen(r.createdAt)}
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          </div>
 
-      <div className="grid content-start gap-6">
-        <Card>
-          <CardHeader>
-            <CardTitle>Results</CardTitle>
-            <CardDescription>
-              Hosts with the same exit code and output are grouped, so 50 hosts read like a few answers.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
+          <div className="min-w-0">
             {jobId ? (
               <BulkResultsView key={jobId} jobId={jobId} onRetry={(outcome) => onSubmit(outcome, setJobId)} />
             ) : (
-              <Empty>
+              <Empty className="border">
                 <EmptyHeader>
                   <EmptyMedia variant="icon">
                     <SquareTerminalIcon />
                   </EmptyMedia>
                   <EmptyTitle>No run open</EmptyTitle>
                   <EmptyDescription>
-                    Pick hosts, type a command and run it, or open an earlier run below.
+                    Type a command and run it: hosts with the same exit code and output are grouped, so 50 hosts read
+                    like a few answers. Or open an earlier run.
                   </EmptyDescription>
                 </EmptyHeader>
               </Empty>
             )}
-          </CardContent>
-        </Card>
-
-        {runs.length > 0 && (
-          <Card>
-            <CardHeader>
-              <CardTitle>Earlier runs</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <Table className="table-fixed">
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Command</TableHead>
-                    <TableHead className="w-28">Hosts</TableHead>
-                    <TableHead className="w-32">Status</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {runs.map((r) => (
-                    <TableRow
-                      key={r.id}
-                      className="cursor-pointer"
-                      data-state={r.id === jobId ? "selected" : undefined}
-                      onClick={() => setJobId(r.id)}
-                    >
-                      <TableCell title={r.summary}>
-                        <div className="truncate font-mono text-xs">
-                          {r.retryOf && <span className="mr-1 font-sans text-muted-foreground">Retry:</span>}
-                          {r.summary}
-                        </div>
-                        <div className="text-xs text-muted-foreground">{formatWhen(r.createdAt)}</div>
-                      </TableCell>
-                      <TableCell className="tabular-nums">
-                        {r.targetsSucceeded}/{r.targetsTotal}
-                        {r.targetsFailed > 0 && (
-                          <div className="text-xs text-destructive">{r.targetsFailed} failed</div>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        <StatusBadge status={r.status} />
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        )}
-      </div>
+          </div>
+        </div>
+      </ScrollArea>
     </div>
   );
 }

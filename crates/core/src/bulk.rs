@@ -1,11 +1,13 @@
 //! Bulk execution (BX-01, BX-03, BX-05): which hosts a run reaches, its results grouped by output, the
 //! diff between two groups, and exports. Running a command is `Command::RemoteExec` through the
 //! command bus; everything here reads, except an export, which writes the file the user chose and is
-//! audited.
+//! audited. The Terminal page's Compare output (BX-03, post-MVP P6) runs one command this way on the
+//! hosts of the picked tabs and of sessions picked in its tree.
 //!
 //! * BX-01: hosts are saved sessions. A VM is reached through a session linked to it
 //!   (`sessions.vm_id`); a VM with none can't run commands yet (guest operations, VM-09, are v2).
-//!   Tags pick sessions and VMs; saved filters pick VMs.
+//!   Tags pick sessions and VMs; saved filters pick VMs; an open terminal picks its saved session (a
+//!   quick connection that was not saved has none to run on).
 //! * BX-03: finished hosts group by exit code and output (stdout and stderr, hashed whole as they
 //!   arrived, so a cut output still groups right), optionally ignoring trailing whitespace. Hosts that
 //!   failed before their command ran group by cause.
@@ -29,14 +31,18 @@ use crate::export::{push_row, redact_secrets};
 use crate::jobs::TargetStatus;
 use crate::sessions::SessionRecord;
 use crate::store::{JobSummary, JobTargetRecord, NewAuditEntry, Store, VmRecord};
+use crate::terminal::Terminals;
 
 // ---- BX-01: targets ----------------------------------------------------------------------------
 
-/// What the user picked on the Bulk run page. Every list may be empty.
+/// What the user picked: tabs and sessions in the Terminal page's tree (Compare), or sessions, VMs,
+/// tags and filters (the SS-09 key push). Every list may be empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TargetPicks {
     pub session_ids: Vec<Uuid>,
+    /// Open terminals (picked tabs), each reached through its saved session.
+    pub terminal_ids: Vec<Uuid>,
     /// VMs by .vmx path; each is reached through its linked session.
     pub vm_paths: Vec<String>,
     /// Sessions and VMs with any of these tags.
@@ -796,11 +802,18 @@ fn to_html(data: &ExportData) -> String {
 
 pub struct BulkRuns {
     store: Store,
+    terminals: Option<Terminals>,
 }
 
 impl BulkRuns {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self { store, terminals: None }
+    }
+
+    /// Open terminals pick their sessions (Compare in the Terminal page).
+    pub fn with_terminals(mut self, terminals: Terminals) -> Self {
+        self.terminals = Some(terminals);
+        self
     }
 
     /// BX-01: the hosts a run on these picks reaches, and the picked VMs it can't reach.
@@ -813,6 +826,27 @@ impl BulkRuns {
         let linked = self.store.sessions_by_vm(ctx).await?;
         let mut picked = Picked::default();
 
+        for id in &picks.terminal_ids {
+            let info = self.terminals.as_ref().and_then(|t| t.pane_info(*id));
+            match info {
+                Some(info) => match info.session_id {
+                    Some(session) if by_id.contains_key(&session) => picked.session(session, "open tab".into()),
+                    Some(_) => picked
+                        .notes
+                        .push(format!("The session of '{}' no longer exists.", info.name)),
+                    None => {
+                        let note = format!(
+                            "{} is a quick connection, not a saved session, so Compare can't run on it. Save it as a session first.",
+                            info.name
+                        );
+                        if !picked.notes.contains(&note) {
+                            picked.notes.push(note);
+                        }
+                    }
+                },
+                None => picked.notes.push("A picked tab has closed.".into()),
+            }
+        }
         for id in &picks.session_ids {
             if by_id.contains_key(id) {
                 picked.session(*id, "session".into());

@@ -59,7 +59,7 @@ interface Props {
   session?: SessionRecord;
   /** Where a new session goes. */
   folderId: string | null;
-  /** BX-01: the VM a new session reaches, e.g. when linking one from the Bulk run page. */
+  /** BX-01: the VM a new session reaches, e.g. when linking one from a target picker. */
   vmId?: string | null;
   folders: SessionFolder[];
   /** Candidates for the jump host. */

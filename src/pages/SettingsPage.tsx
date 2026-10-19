@@ -1,5 +1,5 @@
 // Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
-// power-on limit (VM-06), shutdown wait (VM-03), hosts a bulk run reaches at once (BX-02), and update
+// power-on limit (VM-06), shutdown wait (VM-03), hosts Compare output reaches at once (BX-02), and update
 // checks with the GitHub update token (FD-14) under General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
 // Approval rules. The theme switch is in the top bar.
@@ -302,10 +302,10 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
 
         <Card>
           <CardHeader>
-            <CardTitle>Bulk runs</CardTitle>
+            <CardTitle>Compare output</CardTitle>
             <CardDescription>
-              A command run on many hosts reaches this many at a time; the rest wait their turn. More at once finishes
-              sooner but opens more SSH connections from this PC.
+              Compare output (and a key push) runs a command on this many hosts at a time; the rest wait their turn.
+              More at once finishes sooner but opens more SSH connections from this PC.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4">

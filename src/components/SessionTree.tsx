@@ -4,12 +4,17 @@
 //
 // Reachability dots (MO-08 lite): the core checks the port of each session the tree shows, in the
 // background; collapsed groups are not checked, which keeps large libraries light. A setting turns it off.
+//
+// BX-03 Compare (post-MVP P6): Ctrl+click picks sessions to run a command on without opening tabs (Ctrl+click a
+// group picks every session in it, for large runs); the footer opens Compare output with them.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
+  CheckIcon,
   ChevronRightIcon,
   ClockIcon,
+  GitCompareArrowsIcon,
   EllipsisIcon,
   FolderIcon,
   FolderOpenIcon,
@@ -77,9 +82,19 @@ interface Props {
   /** Sessions with a tab open, marked in the tree. */
   openSessions: Set<string>;
   onOpen: (session: SessionRecord) => void;
+  /** BX-03: sessions picked for Compare output (Ctrl+click). */
+  picks: string[];
+  onPicksChange: (ids: string[]) => void;
+  /** Opens Compare output with the picks. */
+  onCompare: () => void;
 }
 
-export function SessionTree({ active, version, openSessions, onOpen }: Props) {
+/** Every session in a group and the groups under it. */
+function sessionsUnder(node: TreeNode): string[] {
+  return [...node.sessions, ...node.children.flatMap(sessionsUnder)];
+}
+
+export function SessionTree({ active, version, openSessions, onOpen, picks, onPicksChange, onCompare }: Props) {
   const [grouping, setGrouping] = useState<TreeGrouping>(() => readJson(GROUPING_KEY, "folder"));
   const [text, setText] = useState("");
   const [tree, setTree] = useState<Tree | null>(null);
@@ -166,6 +181,15 @@ export function SessionTree({ active, version, openSessions, onOpen }: Props) {
     setOpen((prev) => ({ ...prev, [key]: !isOpen(key) }));
   }
 
+  const pickSet = useMemo(() => new Set(picks), [picks]);
+
+  /** BX-03: Ctrl+click adds or removes; for a group, all of its sessions (removed when all were picked). */
+  function togglePicks(ids: string[]) {
+    const all = ids.every((id) => pickSet.has(id));
+    const next = all ? picks.filter((id) => !ids.includes(id)) : [...picks, ...ids.filter((id) => !pickSet.has(id))];
+    onPicksChange(next);
+  }
+
   const row = (id: string, depth: number, from: string) => {
     const s = byId.get(id);
     if (!s) return null;
@@ -175,9 +199,11 @@ export function SessionTree({ active, version, openSessions, onOpen }: Props) {
         session={s}
         depth={depth}
         picked={picked === `${from}:${id}`}
+        checked={pickSet.has(id)}
         open={openSessions.has(id)}
         reach={reach.enabled ? (reach.states.get(id) ?? null) : undefined}
         onPick={() => setPicked(`${from}:${id}`)}
+        onToggleCheck={() => togglePicks([id])}
         onOpen={() => onOpen(s)}
       />
     );
@@ -193,7 +219,8 @@ export function SessionTree({ active, version, openSessions, onOpen }: Props) {
           className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pr-2 text-left text-sm hover:bg-accent [&_svg]:size-3.5 [&_svg]:shrink-0"
           style={{ paddingLeft: `${0.25 + depth * 0.75}rem` }}
           aria-expanded={expanded}
-          onClick={() => toggle(node.key)}
+          title="Ctrl+click picks all its sessions for Compare output"
+          onClick={(e) => (e.ctrlKey || e.metaKey ? togglePicks(sessionsUnder(node)) : toggle(node.key))}
         >
           <ChevronRightIcon className={cn("text-muted-foreground transition-transform", expanded && "rotate-90")} />
           {node.kind === "label" || (node.kind === "other" && node.environment) ? (
@@ -274,9 +301,11 @@ export function SessionTree({ active, version, openSessions, onOpen }: Props) {
                     session={s}
                     depth={1}
                     picked={picked === `recent:${s.id}`}
+                    checked={pickSet.has(s.id)}
                     open={openSessions.has(s.id)}
                     reach={reach.enabled ? (reach.states.get(s.id) ?? null) : undefined}
                     onPick={() => setPicked(`recent:${s.id}`)}
+                    onToggleCheck={() => togglePicks([s.id])}
                     onOpen={() => onOpen(s)}
                   />
                 ))}
@@ -293,6 +322,25 @@ export function SessionTree({ active, version, openSessions, onOpen }: Props) {
       </ScrollArea>
       {!reach.enabled && tree && tree.records.length > 0 && (
         <p className="text-xs text-muted-foreground">Reachability checks are off (Settings, Terminal).</p>
+      )}
+      {picks.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-1 rounded-md border bg-muted/50 p-1.5 text-xs" role="status">
+          <span className="px-1 font-medium">
+            {picks.length === 1 ? "1 session" : `${picks.length} sessions`} picked
+          </span>
+          <Button size="xs" variant="outline" className="ml-auto" onClick={onCompare}>
+            <GitCompareArrowsIcon data-icon="inline-start" />
+            Compare output…
+          </Button>
+          <Button size="xs" variant="ghost" onClick={() => onPicksChange([])}>
+            Clear
+          </Button>
+        </div>
+      ) : (
+        tree &&
+        tree.records.length > 1 && (
+          <p className="text-xs text-muted-foreground">Ctrl+click sessions or a group to run one command on them.</p>
+        )
       )}
     </div>
   );
@@ -321,18 +369,23 @@ function SessionRow({
   session,
   depth,
   picked,
+  checked,
   open,
   reach,
   onPick,
+  onToggleCheck,
   onOpen,
 }: {
   session: SessionRecord;
   depth: number;
   picked: boolean;
+  /** BX-03: picked for Compare output. */
+  checked: boolean;
   open: boolean;
   /** `undefined`: checks are off; `null`: not checked yet. */
   reach: Reachability | null | undefined;
   onPick: () => void;
+  onToggleCheck: () => void;
   onOpen: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -342,7 +395,8 @@ function SessionRow({
     `${session.name} (${sessionAddress(session)})`,
     seen && `Last seen as ${seen}, ${formatWhen(session.lastSeenAt)}`,
     reachText(reach),
-    "Double-click to open",
+    checked && "Picked for Compare output",
+    "Double-click to open; Ctrl+click to pick for Compare output",
   ]
     .filter(Boolean)
     .join("\n");
@@ -356,15 +410,20 @@ function SessionRow({
       className={cn(
         "group/row flex h-7 min-w-0 cursor-default items-center gap-1.5 rounded-md pr-1 text-sm select-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
         picked && "bg-accent",
+        checked && "bg-primary/10",
       )}
       style={{ paddingLeft: `${0.5 + depth * 0.75}rem` }}
-      onClick={onPick}
+      onClick={(e) => (e.ctrlKey || e.metaKey ? onToggleCheck() : onPick())}
       onDoubleClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === "Enter") onOpen();
       }}
     >
-      <ReachDot reach={reach} />
+      {checked ? (
+        <CheckIcon className="size-3 shrink-0 text-primary" aria-label="Picked for Compare output" />
+      ) : (
+        <ReachDot reach={reach} />
+      )}
       {session.color ? <ColorDot color={session.color} className="size-2" /> : <span className="size-2 shrink-0" />}
       <span className={cn("truncate", open && "font-medium")}>{session.name}</span>
       {session.environment !== "none" && (
@@ -386,6 +445,9 @@ function SessionRow({
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start">
           <DropdownMenuItem onSelect={onOpen}>Open in a new tab</DropdownMenuItem>
+          <DropdownMenuItem onSelect={onToggleCheck}>
+            {checked ? "Unpick for Compare output" : "Pick for Compare output"}
+          </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() => void navigator.clipboard?.writeText(sessionAddress(session)).catch(() => undefined)}
           >

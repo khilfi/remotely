@@ -32,15 +32,20 @@
 //! * QL-07: each pane watches its shell ([`activity::RunWatch`]) and reports a command that ran long
 //!   when its prompt comes back or its output stops ([`TerminalEvent::CommandFinished`]); the UI shows a
 //!   Windows notification when that tab is in the background.
+//! * SS-10 ([`multiexec`]): what is typed into one terminal goes to several at once. Each pane shares
+//!   what its screen shows ([`PaneScreen`]: connected, the cursor's line, a full-screen program), and
+//!   whether text was typed on its line outside MultiExec, so MultiExec knows what each shell holds.
 
 pub mod activity;
 pub mod log;
+pub mod multiexec;
 pub mod output;
 pub mod quick;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -283,6 +288,9 @@ pub enum TerminalInput {
     /// Connect again now (also drops a live connection first).
     Reconnect,
     Close,
+    /// SS-10: keys for the live shell only (MultiExec). Dropped while the pane is not connected, so
+    /// Enter never means "reconnect", and never given to a login prompt.
+    Keys(Vec<u8>),
     /// QL-06: a vault secret to type, followed by Enter, if the terminal shows a password prompt (or
     /// `force`). The answer says whether a prompt was showing.
     TypeSecret {
@@ -407,6 +415,42 @@ pub enum TerminalEvent {
     },
 }
 
+/// SS-10: what a pane's screen shows now, as far as its output tells.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PaneScreen {
+    /// A shell is up (not connecting, logging in, or waiting to reconnect).
+    pub connected: bool,
+    /// The line the cursor is on. Never logged and never sent to the UI.
+    pub line: String,
+    /// A full-screen program (xterm's alternate screen buffer: vim, less, top) is open.
+    pub alternate: bool,
+}
+
+impl PaneScreen {
+    pub fn at_password_prompt(&self) -> bool {
+        is_password_prompt(&self.line)
+    }
+}
+
+/// SS-10: what MultiExec and the command bus need to know about an open pane.
+#[derive(Debug, Clone)]
+pub struct PaneInfo {
+    /// The saved session; `None` for a quick connection that was not saved.
+    pub session_id: Option<Uuid>,
+    /// The session's name, or `user@host:port (not saved)`.
+    pub name: String,
+    pub screen: PaneScreen,
+    /// Text was typed on the shell's line outside MultiExec since its last Enter.
+    pub dirty: bool,
+}
+
+/// SS-10: what the job runner needs from the open terminals to finish a MultiExec line.
+#[async_trait]
+pub trait TerminalKeys: Send + Sync {
+    /// Sends keys to the terminal's live shell. Fails when it has closed or is not connected.
+    async fn send(&self, terminal_id: Uuid, keys: &[u8]) -> Result<()>;
+}
+
 /// A pane's connection, from [`Terminals::open`]. Input goes through [`Terminals`] by id.
 pub struct TerminalHandle {
     pub id: Uuid,
@@ -450,6 +494,10 @@ struct Control {
     log: Mutex<Option<SessionLog>>,
     /// QL-06: vault secrets typed into this terminal, scrubbed from saved output and logs too.
     typed: Mutex<Vec<SecretString>>,
+    /// SS-10: what the screen shows now.
+    screen: Mutex<PaneScreen>,
+    /// SS-10: text typed on the line outside MultiExec since the last Enter or Ctrl+C.
+    dirty: AtomicBool,
 }
 
 impl Control {
@@ -468,6 +516,23 @@ impl Control {
     fn facts(&self) -> HostFacts {
         locks::lock(&self.facts).clone()
     }
+
+    fn screen(&self) -> PaneScreen {
+        locks::lock(&self.screen).clone()
+    }
+
+    fn session_id(&self) -> Option<Uuid> {
+        match &self.source {
+            Source::Saved(id) => Some(*id),
+            Source::Unsaved(_) => None,
+        }
+    }
+}
+
+/// SS-10: whether keys typed straight into a terminal leave text on its line. Enter and Ctrl+C end the
+/// line; anything else (a character, an arrow key, Tab) leaves something MultiExec did not see.
+fn leaves_text(was_dirty: bool, bytes: &[u8]) -> bool {
+    bytes.iter().fold(was_dirty, |_, b| !matches!(*b, b'\r' | b'\n' | 0x03))
 }
 
 struct Inner {
@@ -496,7 +561,8 @@ struct NewPane {
     detail: String,
 }
 
-/// The open terminal panes.
+/// The open terminal panes. Cloning gives another handle to the same panes.
+#[derive(Clone)]
 pub struct Terminals {
     inner: Arc<Inner>,
 }
@@ -736,6 +802,8 @@ impl Terminals {
             hostname_answered: std::sync::atomic::AtomicBool::new(false),
             log: Mutex::default(),
             typed: Mutex::default(),
+            screen: Mutex::default(),
+            dirty: AtomicBool::new(false),
         });
         audit(
             &self.inner.store,
@@ -780,7 +848,83 @@ impl Terminals {
 
     /// Keystrokes and pastes, as raw bytes.
     pub async fn write(&self, id: Uuid, data: Vec<u8>) {
-        self.send(id, TerminalInput::Data(data)).await;
+        if let Some(control) = self.control(id) {
+            // SS-10: MultiExec can't know what this put on the line.
+            let dirty = leaves_text(control.dirty.load(Ordering::SeqCst), &data);
+            control.dirty.store(dirty, Ordering::SeqCst);
+            let _ = control.input.send(TerminalInput::Data(data)).await;
+        }
+    }
+
+    // ---- SS-10: MultiExec -------------------------------------------------------------------------------
+
+    /// What MultiExec and the command bus need to know about an open pane; `None` once it has closed.
+    pub fn pane_info(&self, id: Uuid) -> Option<PaneInfo> {
+        let control = self.control(id)?;
+        Some(PaneInfo {
+            session_id: control.session_id(),
+            name: match control.target {
+                Some(_) => control.name.clone(),
+                None => format!("{} (not saved)", control.name),
+            },
+            screen: control.screen(),
+            dirty: control.dirty.load(Ordering::SeqCst),
+        })
+    }
+
+    /// SS-10: MultiExec left text on this terminal's line (or cleared it).
+    pub(crate) fn set_dirty(&self, id: Uuid, dirty: bool) {
+        if let Some(control) = self.control(id) {
+            control.dirty.store(dirty, Ordering::SeqCst);
+        }
+    }
+
+    /// SS-10: keys typed into several terminals at once go to each live shell here. Fails when the
+    /// terminal has closed or is not connected.
+    pub async fn send_keys(&self, id: Uuid, keys: &[u8]) -> Result<()> {
+        let control = self
+            .control(id)
+            .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id} has closed")))?;
+        if !control.screen().connected {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is not connected, so nothing was typed into it.",
+                quoted_name(&control)
+            )));
+        }
+        control
+            .input
+            .send(TerminalInput::Keys(keys.to_vec()))
+            .await
+            .map_err(|_| CoreError::UnknownTarget(format!("terminal {id} has closed")))
+    }
+
+    /// SS-10: a terminal as a command target, for the policy engine: its saved session's name, label
+    /// and protection as they are now, or no label for a quick connection that was not saved.
+    pub async fn target(&self, ctx: &Context, id: Uuid) -> Result<Target> {
+        let control = self
+            .control(id)
+            .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id} has closed")))?;
+        let session_id = control.session_id();
+        let found = match session_id {
+            Some(session) => self.inner.store.find_session_target(ctx, session).await?,
+            None => None,
+        };
+        let (name, environment, protected) = match found {
+            Some(found) => found,
+            None => match &control.target {
+                Some(target) => (target.name.clone(), target.environment, target.protected),
+                None => (format!("{} (not saved)", control.name), Default::default(), false),
+            },
+        };
+        Ok(Target {
+            target: TargetRef::Terminal {
+                terminal_id: id,
+                session_id,
+            },
+            name,
+            environment,
+            protected,
+        })
     }
 
     pub async fn resize(&self, id: Uuid, cols: u16, rows: u16) {
@@ -1120,6 +1264,13 @@ async fn remember_typed(control: &Control, secret: &SecretString) -> bool {
         let _ = log.send(LogMessage::Secret(secret.clone())).await;
     }
     added
+}
+
+#[async_trait]
+impl TerminalKeys for Terminals {
+    async fn send(&self, terminal_id: Uuid, keys: &[u8]) -> Result<()> {
+        self.send_keys(terminal_id, keys).await
+    }
 }
 
 /// Where a `select!` timer waits when there is nothing to wait for.
@@ -1595,6 +1746,14 @@ impl Pane {
         config
     }
 
+    /// SS-10: shares what the live shell's screen shows now.
+    fn show_screen(&self, watch: &RunWatch) {
+        let mut screen = locks::lock(&self.control.screen);
+        screen.connected = true;
+        watch.line().clone_into(&mut screen.line);
+        screen.alternate = watch.alternate();
+    }
+
     /// QL-07: tells the UI a long command ended.
     async fn finished(&self, done: activity::Finished) {
         let _ = self
@@ -1614,10 +1773,28 @@ impl Pane {
             peer_ip: _,
             hostname: mut hostname_answer,
         } = shell;
+        // QL-06, QL-07: a new shell, watched from its first output.
+        let watch = RunWatch::new(self.watch_config());
+        // SS-10: a new shell has nothing typed on its line yet.
+        self.control.dirty.store(false, Ordering::SeqCst);
+        self.show_screen(&watch);
+        let end = self
+            .pump_shell(shell_input, &mut shell_output, &mut hostname_answer, watch)
+            .await;
+        *locks::lock(&self.control.screen) = PaneScreen::default();
+        end
+    }
+
+    /// The loop of [`Pane::pump`].
+    async fn pump_shell(
+        &mut self,
+        shell_input: mpsc::Sender<ShellInput>,
+        shell_output: &mut mpsc::Receiver<ShellOutput>,
+        hostname_answer: &mut oneshot::Receiver<Option<String>>,
+        mut watch: RunWatch,
+    ) -> Pump {
         let mut hostname_pending = true;
         let cancel = self.control.cancel.clone();
-        // QL-06, QL-07: a new shell, watched from its first output.
-        let mut watch = RunWatch::new(self.watch_config());
         loop {
             watch.set_config(self.watch_config());
             let deadline = watch.deadline();
@@ -1631,7 +1808,7 @@ impl Pane {
                         self.finished(done).await;
                     }
                 }
-                answer = &mut hostname_answer, if hostname_pending => {
+                answer = &mut *hostname_answer, if hostname_pending => {
                     hostname_pending = false;
                     if let Ok(Some(name)) = answer {
                         self.learn(|facts| facts.learn_hostname(&name, FactSource::Host)).await;
@@ -1645,7 +1822,7 @@ impl Pane {
                         let _ = shell_input.send(ShellInput::Close).await;
                         return Pump::Closed;
                     }
-                    Some(TerminalInput::Data(bytes)) => {
+                    Some(TerminalInput::Data(bytes) | TerminalInput::Keys(bytes)) => {
                         // A settings change while waiting applies to this Enter already.
                         watch.set_config(self.watch_config());
                         watch.input(&bytes, Instant::now());
@@ -1681,6 +1858,7 @@ impl Pane {
                     Some(ShellOutput::Data(bytes)) => {
                         self.tee(&bytes).await;
                         let done = watch.output(&bytes, Instant::now());
+                        self.show_screen(&watch);
                         if self.output.send(bytes).await.is_err() {
                             let _ = shell_input.send(ShellInput::Close).await;
                             return Pump::Closed;
@@ -1755,7 +1933,7 @@ impl Pane {
                 self.size = PtySize { cols, rows };
                 None
             }
-            Some(TerminalInput::Data(_)) => None,
+            Some(TerminalInput::Data(_) | TerminalInput::Keys(_)) => None,
             Some(TerminalInput::TypeSecret { reply, .. }) => {
                 let _ = reply.send(Err(CoreError::InvalidInput(
                     "This terminal is not connected, so nothing was typed. Reconnect it first.".into(),
@@ -1850,7 +2028,8 @@ impl Prompter for PanePrompter<'_> {
                     *self.size = PtySize { cols, rows };
                     continue;
                 }
-                Some(TerminalInput::Reconnect) => continue,
+                // SS-10: keys typed into several terminals are not answers to this login.
+                Some(TerminalInput::Reconnect | TerminalInput::Keys(_)) => continue,
                 Some(TerminalInput::Data(bytes)) => Zeroizing::new(bytes),
                 // QL-06 at a login prompt: the vault's password answers it.
                 Some(TerminalInput::TypeSecret {

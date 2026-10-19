@@ -17,6 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { RiskBadge } from "@/components/Badges";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type CommandInfo, type Favourite, type FavouriteInput } from "@/lib/api";
 
 interface Props {
@@ -154,9 +155,21 @@ export function FavouriteDialog({ existing, initial, folders, onSaved, onClose }
             <Button type="button" variant="outline" disabled={busy} onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit" disabled={busy || !name.trim() || !command.trim()}>
-              {existing ? "Save" : "Add to favourites"}
-            </Button>
+            <WhyDisabled
+              reason={
+                !name.trim()
+                  ? "Give it a name first"
+                  : !command.trim()
+                    ? "Type the command first"
+                    : busy
+                      ? "Saving…"
+                      : null
+              }
+            >
+              <Button type="submit" disabled={busy || !name.trim() || !command.trim()}>
+                {existing ? "Save" : "Add to favourites"}
+              </Button>
+            </WhyDisabled>
           </DialogFooter>
         </form>
       </DialogContent>

@@ -255,10 +255,37 @@ async fn fifty_hosts_show_grouped_results_within_five_seconds_of_the_slowest() {
     }
     let mut events = core.jobs.subscribe();
 
+    // BX-03 Compare in the Terminal page: three hosts are open tabs, the rest picked in the tree (one
+    // of them twice, as a tab and in the tree); the run reaches each host once.
+    let mut tabs = Vec::new();
+    for id in &ids[..3] {
+        let pane = core
+            .terminals
+            .open(
+                &core.ctx,
+                *id,
+                remotely_core::adapters::remote::PtySize { cols: 80, rows: 24 },
+            )
+            .await
+            .unwrap();
+        tabs.push(pane);
+    }
+    let picks = TargetPicks {
+        terminal_ids: tabs.iter().map(|t| t.id).collect(),
+        session_ids: ids[2..].to_vec(),
+        ..TargetPicks::default()
+    };
+    let resolved = core.bulk.resolve(&core.ctx, &picks).await.unwrap();
+    assert_eq!(resolved.hosts.len(), 50);
+    assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
+    let web02 = resolved.hosts.iter().find(|h| h.name == "web02").unwrap();
+    assert_eq!(web02.via, ["open tab", "session"]);
+    let targets: Vec<Uuid> = resolved.hosts.iter().map(|h| h.session_id).collect();
+
     let started = Instant::now();
     let SubmitOutcome::Queued { job_id, .. } = core
         .bus
-        .submit(&core.ctx, exec("cat /etc/os-release", &ids))
+        .submit(&core.ctx, exec("cat /etc/os-release", &targets))
         .await
         .unwrap()
     else {
@@ -882,6 +909,7 @@ async fn targets_come_from_sessions_vms_with_a_linked_session_tags_and_saved_fil
         vm_paths: vec![vmx("web")],
         tags: vec!["frontend".into(), "backend".into()],
         filter_ids: vec![filter.id.clone()],
+        ..Default::default()
     };
     let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
     let names: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
@@ -899,6 +927,62 @@ async fn targets_come_from_sessions_vms_with_a_linked_session_tags_and_saved_fil
     let empty = core.bulk.resolve(ctx, &TargetPicks::default()).await.unwrap();
     assert!(empty.hosts.is_empty() && empty.vms_without_session.is_empty());
     assert_eq!(web.vm_id.as_deref(), Some(web_vm.as_str()));
+}
+
+#[tokio::test]
+async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cannot_reach() {
+    let core = ssh_core().await;
+    let password = new_password();
+    let pw = add_password(&core, "lab", &password).await;
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let saved = host(&core, &server, "web01", pw).await;
+    let size = remotely_core::adapters::remote::PtySize { cols: 80, rows: 24 };
+    let tab = core.terminals.open(&core.ctx, saved, size).await.unwrap();
+    let split = core.terminals.open(&core.ctx, saved, size).await.unwrap();
+    let quick = core
+        .terminals
+        .quick_connect(
+            &core.ctx,
+            remotely_core::terminal::quick::QuickConnect {
+                host: format!("alice@127.0.0.1:{}", server.port()),
+                port: None,
+                username: None,
+                auth: SessionAuth::Password { password_id: None },
+                password: Some(SecretString::new(password.as_str())),
+                save: None,
+            },
+            size,
+        )
+        .await
+        .unwrap();
+    let closed = core.terminals.open(&core.ctx, saved, size).await.unwrap();
+    core.terminals.close(closed.id).await;
+    tokio::time::timeout(WAIT, async {
+        while core.terminals.pane_info(closed.id).is_some() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let resolved = core
+        .bulk
+        .resolve(
+            &core.ctx,
+            &TargetPicks {
+                terminal_ids: vec![tab.id, split.id, quick.handle.id, closed.id],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let names: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(names, ["web01"], "two tabs of one session: one host");
+    assert_eq!(resolved.hosts[0].via, ["open tab"]);
+    assert_eq!(resolved.notes.len(), 2, "{:?}", resolved.notes);
+    assert!(resolved.notes[0].contains("is a quick connection, not a saved session"));
+    assert!(resolved.notes[0].starts_with(&format!("alice@127.0.0.1:{}", server.port())));
+    assert_eq!(resolved.notes[1], "A picked tab has closed.");
 }
 
 #[tokio::test]

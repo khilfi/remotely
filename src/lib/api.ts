@@ -1,4 +1,4 @@
-// Typed wrappers over the Tauri IPC commands in src-tauri/src/ipc.rs and terminal.rs.
+// Typed wrappers over the Tauri IPC commands in src-tauri/src/ipc.rs, terminal.rs, multiexec.rs and command_panel.rs.
 // The UI talks to the Rust core only through these; it never runs vmrun or SSH itself.
 // Types mirror the serde shapes in crates/core.
 
@@ -8,7 +8,12 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export type Environment = "none" | "lab" | "staging" | "prod";
 export type Tier = "low" | "medium" | "high" | "critical";
 
-export type TargetRef = { kind: "vm"; vmxPath: string } | { kind: "session"; sessionId: string } | { kind: "app" };
+export type TargetRef =
+  | { kind: "vm"; vmxPath: string }
+  | { kind: "session"; sessionId: string }
+  | { kind: "app" }
+  /** SS-10: an open terminal (MultiExec); the core fills in the session behind it. */
+  | { kind: "terminal"; terminalId: string; sessionId?: string | null };
 
 export interface Target {
   target: TargetRef;
@@ -191,7 +196,9 @@ export type Command =
       publicKey: string;
       trustNewHostKeys?: boolean;
       timeoutSecs?: number | null;
-    };
+    }
+  /** SS-10: the held Enter of a MultiExec line. The UI never submits it itself: MultiExec does. */
+  | { type: "terminalLine"; targets: TargetRef[]; line: string; unreliable: boolean; keys: string };
 
 /** AP-02: a VM target as it is now, read without a guest login. */
 export interface TargetImpact {
@@ -234,6 +241,10 @@ export interface ExecDetails {
   dangerous: DangerousMatch[];
   /** BX-04: the job whose failed hosts this retries. */
   retryOf: string | null;
+  /** SS-10: a line typed into open terminals (MultiExec); Enter is sent once approved. */
+  multiExec: boolean;
+  /** SS-10: edited with keys Remotely can't follow, so the terminals may run something else. */
+  unreliable: boolean;
 }
 
 export interface ApprovalRequest {
@@ -272,7 +283,8 @@ export type JobStatus =
 export type TargetStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
 
 export type JobEvent =
-  | { event: "queued"; jobId: string; summary: string; tier: Tier; targets: number }
+  /** `quiet`: a MultiExec line, whose terminals show what happened (no toasts). */
+  | { event: "queued"; jobId: string; summary: string; tier: Tier; targets: number; quiet: boolean }
   /** AP-03: the job waits until `until` and can be cancelled until then. */
   | { event: "countdown"; jobId: string; seconds: number; until: string }
   | { event: "started"; jobId: string }
@@ -294,6 +306,54 @@ export type JobEvent =
   /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
   | { event: "stillRunning"; jobId: string; targets: Target[] }
   | { event: "finished"; jobId: string; status: JobStatus };
+
+/** SS-10: how MultiExec handled a line's keys. */
+export type LineMode = "command" | "password" | "fullScreen";
+
+/** SS-10: a picked terminal that did not get a line's keys, and why. */
+export interface LeftOut {
+  terminalId: string;
+  reason: string;
+}
+
+/** SS-10: what happened to keys typed with MultiExec on. */
+export type MultiExecOutcome =
+  | { status: "typed"; mode: LineMode; reached: string[]; leftOut: LeftOut[] }
+  /** Not a MultiExec target: the keys went to that terminal alone. */
+  | { status: "alone"; reason: string }
+  /** Enter is held: Low has `jobId`; anything higher has `request` for the approval dialog. */
+  | {
+      status: "held";
+      lineId: string;
+      tier: Tier;
+      reached: string[];
+      leftOut: LeftOut[];
+      jobId: string | null;
+      request: ApprovalRequest | null;
+    }
+  /** A line waits for its Enter; these keys follow it. */
+  | { status: "queued"; lineId: string; dropped: boolean };
+
+export type MultiExecEvent =
+  | { event: "lineDone"; lineId: string; sent: boolean; terminals: number; status: JobStatus | null }
+  | { event: "outcome"; outcome: MultiExecOutcome };
+
+export interface MultiExecTarget {
+  terminalId: string;
+  name: string;
+  /** Gets what is typed now. */
+  receives: boolean;
+  /** Why not, when it does not. */
+  reason: string | null;
+  /** Keys pass straight through: at a password prompt, or to a full-screen program. */
+  note: string | null;
+}
+
+export interface MultiExecStatus {
+  on: boolean;
+  targets: MultiExecTarget[];
+  held: string | null;
+}
 
 export interface JobSummary {
   id: string;
@@ -917,9 +977,11 @@ export interface TransferReport {
   problems: { name: string; reason: string }[];
 }
 
-/** BX-01: what is picked on the Bulk run page. */
+/** BX-01: what is picked: tabs and tree sessions for Compare, sessions, VMs, tags and filters for a key push. */
 export interface TargetPicks {
   sessionIds?: string[];
+  /** Open terminals (picked tabs), each reached through its saved session. */
+  terminalIds?: string[];
   vmPaths?: string[];
   tags?: string[];
   /** Saved VM filters, by id. */
@@ -1536,6 +1598,21 @@ export const api = {
   },
   terminalWrite: (id: string, data: Uint8Array) =>
     invoke<void>("terminal_write", data, { headers: { "x-terminal-id": id } }),
+  /** SS-10: turns MultiExec on for these terminals, or changes them. */
+  multiExecSetTargets: (terminalIds: string[]) => invoke<MultiExecStatus>("multiexec_set_targets", { terminalIds }),
+  /** SS-10: off; a line waiting for approval gets Ctrl+C. */
+  multiExecStop: () => invoke<MultiExecStatus>("multiexec_stop"),
+  multiExecStatus: () => invoke<MultiExecStatus>("multiexec_status"),
+  /** SS-10: keys typed into terminal `id` while MultiExec is on (raw bytes, like terminalWrite). */
+  multiExecInput: (id: string, data: Uint8Array) =>
+    invoke<MultiExecOutcome>("multiexec_input", data, { headers: { "x-terminal-id": id } }),
+  /** SS-10: the approval dialog's answers for a held line; returns the job that sends its Enter. */
+  multiExecApprove: (lineId: string, answers: ApprovalAnswers) =>
+    invoke<string>("multiexec_approve", { lineId, answers }),
+  /** SS-10: cancels a held line: Ctrl+C instead of Enter on every terminal. */
+  multiExecCancel: (lineId: string) => invoke<void>("multiexec_cancel", { lineId }),
+  onMultiExecEvent: (handler: (event: MultiExecEvent) => void): Promise<UnlistenFn> =>
+    listen<MultiExecEvent>("multiexec://event", (e) => handler(e.payload)),
   terminalResize: (id: string, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),
   /** Connects again now (drops a live connection first). */
   terminalReconnect: (id: string) => invoke<void>("terminal_reconnect", { id }),
