@@ -368,9 +368,13 @@ export class PaneSession {
     return true;
   }
 
+  /**
+   * QL-05 right-click paste. The shell reads the clipboard: the browser's clipboard API would make WebView2 ask
+   * for permission, and fail while the window is not focused.
+   */
   async pasteFromClipboard() {
     try {
-      const text = await navigator.clipboard.readText();
+      const text = await api.clipboardReadText();
       if (text) this.term.paste(text);
     } catch {
       this.term.write("\r\n\x1b[2m[Paste with Ctrl+V]\x1b[0m\r\n");

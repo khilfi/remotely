@@ -98,7 +98,7 @@ crates/core/          remotely-core: all app logic
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
-src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge
+src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, clipboard read for right-click paste
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges)
