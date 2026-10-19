@@ -931,3 +931,519 @@ fn dangerous_details_name_each_rule_with_the_line_it_matched() {
     );
     assert!(e.dangerous_details("uptime\ndf -h").is_empty());
 }
+
+// ---- BX-06: forms of read-only commands that write ----------------------------------------------
+
+/// With `read_only` as the read-only list (the defaults when `None`), each of `reads` is read-only
+/// and each of `writes` is "other": a bulk run or MultiExec asks before it sends one.
+fn reads_and_writes(read_only: Option<&[&str]>, reads: &[&str], writes: &[&str]) {
+    let mut rules = PolicyRules::default();
+    if let Some(list) = read_only {
+        rules.read_only_commands = list.iter().map(|s| s.to_string()).collect();
+    }
+    let e = PolicyEngine::new(rules).expect("valid rules");
+    for script in reads {
+        assert_eq!(e.classify_script(script), ActionKind::ExecReadOnly, "reads: {script}");
+    }
+    for script in writes {
+        assert_eq!(e.classify_script(script), ActionKind::ExecOther, "writes: {script}");
+    }
+}
+
+#[test]
+fn ip_reads_only_when_it_shows_lists_or_gets() {
+    reads_and_writes(
+        None,
+        &[
+            "ip a",
+            "ip addr",
+            "ip addr show dev eth0",
+            "ip a s",
+            "ip a list",
+            "ip -br a",
+            "ip -br a show eth0",
+            "ip route",
+            "ip r",
+            "ip route show table all",
+            "ip route get 192.0.2.1",
+            "ip r g 192.0.2.1",
+            "ip link",
+            "sudo ip link show eth0",
+            "ip link ls",
+            "ip neigh show",
+        ],
+        &[
+            "ip link set eth0 down",
+            "sudo ip link set dev eth0 mtu 9000",
+            "ip link s eth0 down",
+            "ip link add br0 type bridge",
+            "ip link delete br0",
+            "ip route add 198.51.100.0/24 via 192.0.2.1",
+            "ip r del default",
+            "ip r a 198.51.100.0/24 via 192.0.2.1",
+            "ip route replace default via 192.0.2.1",
+            "ip route flush cache",
+            "ip route restore",
+            "ip a add 192.0.2.5/24 dev eth0",
+            "ip a a 192.0.2.5/24 dev eth0",
+            "ip addr del 192.0.2.5/24 dev eth0",
+            "ip a flush dev eth0",
+            "ip -br a add 192.0.2.5/24 dev eth0",
+            "ip link $ACTION eth0",
+        ],
+    );
+    // A saved list with `ip` alone: options before the object are read, and only show/list/get read.
+    reads_and_writes(
+        Some(&["ip"]),
+        &[
+            "ip",
+            "ip -4 -o addr show",
+            "ip -s -s link",
+            "ip -n blue route",
+            "ip -j -p a",
+            "ip netns",
+            "ip rule show",
+        ],
+        &[
+            "ip -batch /tmp/commands",
+            "ip -b /tmp/commands",
+            "ip -force -batch /tmp/commands",
+            "ip -n blue link set eth0 up",
+            "ip netns exec blue ip link set lo up",
+            "ip netns add blue",
+            "ip netns s blue 1",
+            "ip rule add from 192.0.2.0/24 table 100",
+            "ip $OBJECT show",
+            "ip -n $NS link",
+        ],
+    );
+}
+
+#[test]
+fn systemctl_reads_only_with_a_verb_that_shows_something() {
+    reads_and_writes(
+        None,
+        &[
+            "systemctl status nginx",
+            "systemctl --failed",
+            "systemctl --failed --no-legend",
+            "systemctl list-units --type=service --state=running",
+            "systemctl list-units --type service",
+            "systemctl is-active nginx",
+            "systemctl cat nginx",
+        ],
+        &[
+            "systemctl --failed restart nginx",
+            "systemctl --failed stop nginx",
+            "sudo systemctl --failed --type service stop nginx",
+            "systemctl --failed $VERB nginx",
+        ],
+    );
+    reads_and_writes(
+        Some(&["systemctl"]),
+        &[
+            "systemctl",
+            "systemctl -t service --state failed",
+            "systemctl -H web01.example.com status nginx",
+            "systemctl --no-pager show nginx -p MainPID",
+            "systemctl list-dependencies sshd",
+            "systemctl get-default",
+        ],
+        &[
+            "systemctl enable --now nginx",
+            "systemctl -q stop nginx",
+            "systemctl --type service start nginx",
+            "systemctl daemon-reload",
+            "systemctl set-default multi-user.target",
+            "systemctl -H $HOST status",
+        ],
+    );
+}
+
+#[test]
+fn timedatectl_and_hostnamectl_read_only_when_they_show() {
+    reads_and_writes(
+        None,
+        &[
+            "timedatectl",
+            "timedatectl status",
+            "timedatectl show --property=NTP --value",
+            "timedatectl list-timezones",
+            "timedatectl timesync-status",
+            "timedatectl -H web01.example.com status",
+            "hostnamectl status",
+            "hostnamectl status --static",
+        ],
+        &[
+            "timedatectl set-time '2026-10-19 12:00:00'",
+            "sudo timedatectl set-timezone UTC",
+            "timedatectl set-ntp true",
+            "timedatectl --adjust-system-clock set-local-rtc 1",
+            "timedatectl ntp-servers eth0 192.0.2.123",
+            "timedatectl revert eth0",
+        ],
+    );
+    reads_and_writes(
+        Some(&["hostnamectl"]),
+        &[
+            "hostnamectl",
+            "hostnamectl hostname",
+            "hostnamectl hostname --static",
+            "hostnamectl chassis",
+        ],
+        &[
+            "hostnamectl hostname web02",
+            "hostnamectl set-hostname web02",
+            "sudo hostnamectl chassis vm",
+            "hostnamectl set-location rack-1",
+        ],
+    );
+}
+
+#[test]
+fn env_reads_only_when_it_runs_no_command() {
+    reads_and_writes(
+        None,
+        &["env", "env | sort", "env -0", "env -u HOME", "env -i", "env --null"],
+        &[
+            "env systemctl stop nginx",
+            "env LANG=C apt-get -y upgrade",
+            "sudo env -i PATH=/usr/bin systemctl restart nginx",
+            "env -S 'systemctl stop nginx'",
+            "env -u HOME journalctl --vacuum-time=1d",
+            "env $COMMAND",
+        ],
+    );
+}
+
+#[test]
+fn journalctl_reads_unless_it_vacuums_rotates_flushes_or_writes_a_file() {
+    reads_and_writes(
+        None,
+        &[
+            "journalctl -u nginx --since today",
+            "journalctl -b -p err --no-pager",
+            "journalctl -k -n 100",
+            "journalctl --since '1 hour ago' --no-pager",
+            "journalctl -f",
+            "journalctl --list-boots",
+            "journalctl --disk-usage",
+            "journalctl --verify",
+            "journalctl --cursor=s=0123 -n 5",
+            "journalctl --after-cursor s=0123",
+        ],
+        &[
+            "sudo journalctl --vacuum-size=100M",
+            "journalctl --vacuum-time 2weeks",
+            "journalctl --vacuum-files=5",
+            "journalctl --vacuum-s=1G",
+            "journalctl --rotate",
+            "journalctl --rot",
+            "journalctl --flush",
+            "journalctl --sync",
+            "journalctl --relinquish-var",
+            "journalctl --smart-relinquish-var",
+            "journalctl --setup-keys",
+            "journalctl --update-catalog",
+            "journalctl -u nginx --cursor-file=/tmp/cursor",
+            "journalctl -u $UNIT",
+            "journalctl $OPTIONS",
+        ],
+    );
+}
+
+#[test]
+fn dmesg_reads_unless_it_clears_the_buffer_or_sets_the_console() {
+    reads_and_writes(
+        None,
+        &[
+            "dmesg",
+            "dmesg -T",
+            "dmesg -T | tail -50",
+            "dmesg --level=err,warn",
+            "dmesg -l err",
+            "dmesg -lcrit",
+            "dmesg -Lnever",
+            "dmesg -w",
+        ],
+        &[
+            "dmesg -C",
+            "sudo dmesg -c",
+            "dmesg -Tc",
+            "dmesg --clear",
+            "dmesg --read-clear",
+            "dmesg -n 1",
+            "dmesg --console-level 1",
+            "dmesg -D",
+            "dmesg -E",
+            "dmesg --console-off",
+        ],
+    );
+}
+
+#[test]
+fn date_and_hostname_read_unless_they_set_the_clock_or_the_name() {
+    reads_and_writes(
+        None,
+        &[
+            "date",
+            "date +%F",
+            "date -u '+%F %T'",
+            "date -R",
+            "date -Iseconds",
+            "date --iso-8601=seconds",
+            "date -d '2 days ago' +%F",
+            "date -d @1700000000",
+            "date --date 'next friday'",
+            "date -r /etc/hosts",
+            "date --rfc-3339 seconds",
+            "hostname",
+            "hostname -f",
+            "hostname -I",
+            "hostname --fqdn",
+            "hostname -s",
+            "hostname -A",
+        ],
+        &[
+            "date -s '2026-10-19 12:00'",
+            "sudo date --set='2026-10-19 12:00'",
+            "date --set 12:00",
+            "date -us 12:00",
+            "date 101912002026",
+            "date -u 101912002026",
+            "date -- 1019120026",
+            "date $NOW",
+            "hostname web02",
+            "sudo hostname web02.example.com",
+            "hostname -F /etc/hostname",
+            "hostname --file /etc/hostname",
+            "hostname -b web02",
+            "hostname --boot",
+            "hostname $NAME",
+        ],
+    );
+}
+
+#[test]
+fn ss_reads_unless_it_kills_sockets_or_dumps_them_to_a_file() {
+    reads_and_writes(
+        None,
+        &[
+            "ss -tulpn",
+            "sudo ss -tulpn",
+            "ss -tan state established",
+            "ss -s",
+            "ss -f inet -n",
+            "ss -tnp dst 192.0.2.1",
+        ],
+        &[
+            "ss -K dst 192.0.2.1",
+            "sudo ss -tK dport = 22",
+            "ss --kill dst 192.0.2.1",
+            "ss -D /tmp/sockets",
+            "ss --diag=/tmp/sockets",
+        ],
+    );
+}
+
+#[test]
+fn sort_and_uniq_read_unless_they_write_an_output_file() {
+    reads_and_writes(
+        None,
+        &[
+            "sort -h",
+            "sudo du -xh --max-depth=1 /var 2>/dev/null | sort -h | tail -20",
+            "sort -rn /tmp/counts",
+            "sort -t: -k3 -n /etc/passwd",
+            "sort -nk2 /tmp/counts",
+            "cut -d: -f1 /etc/passwd | sort | uniq -c",
+            "uniq -c",
+            "uniq -f 1 /var/log/app.log",
+            "uniq --skip-fields 1 /var/log/app.log",
+        ],
+        &[
+            "sort -o /etc/hosts /etc/hosts",
+            "sort --output=/tmp/sorted /tmp/counts",
+            "sort -uo /tmp/sorted /tmp/counts",
+            "sort --compress-program=gzip /tmp/counts",
+            "sort -k2 $FILE",
+            "uniq /tmp/in /tmp/out",
+            "sort /tmp/in | uniq - /tmp/out",
+        ],
+    );
+}
+
+#[test]
+fn less_and_file_read_unless_they_write_a_log_or_a_magic_file() {
+    reads_and_writes(
+        Some(&["less", "file"]),
+        &[
+            "less /var/log/syslog",
+            "less -R /var/log/syslog",
+            "less -N +G /var/log/syslog",
+            "less -pfoo /var/log/syslog",
+            "file /bin/ls",
+            "file -L /etc/localtime",
+            "file -m /usr/share/misc/magic /bin/ls",
+        ],
+        &[
+            "less -o /tmp/log /var/log/syslog",
+            "less -O/tmp/log /var/log/syslog",
+            "less -No /tmp/log /var/log/syslog",
+            "less --log-file=/tmp/log /var/log/syslog",
+            "file -C -m /tmp/magic",
+            "file --compile -m /tmp/magic",
+        ],
+    );
+}
+
+#[test]
+fn rpm_reads_unless_it_pipes_to_a_command_or_expands_macros() {
+    reads_and_writes(
+        None,
+        &[
+            "rpm -q bash",
+            "rpm -qa | sort",
+            "rpm -qf /usr/bin/ssh",
+            "rpm -qa --last",
+            "rpm -q -i bash",
+        ],
+        &[
+            "rpm -qa --pipe 'tee /tmp/packages'",
+            "rpm -q --eval '%(id)'",
+            "rpm -q -D '_dbpath /tmp' bash",
+            "rpm -q --define '_dbpath /tmp' bash",
+            "rpm -q --specfile /tmp/app.spec",
+            "rpm -q $PACKAGE",
+        ],
+    );
+}
+
+#[test]
+fn firewall_and_cluster_listings_read_unless_they_change_or_save_something() {
+    reads_and_writes(
+        None,
+        &[
+            "sudo iptables -L -n -v --line-numbers",
+            "iptables -L INPUT -n",
+            "sudo iptables -S",
+            "sudo nft list ruleset",
+            "nft list ruleset -a",
+            "sudo firewall-cmd --list-all",
+            "firewall-cmd --state",
+            "firewall-cmd --list-all --zone=public",
+            "firewall-cmd --list-all --permanent --zone public",
+            "kubectl cluster-info",
+            "kubectl cluster-info dump",
+        ],
+        &[
+            "iptables -L -Z",
+            "sudo iptables -L INPUT -n -Z",
+            "iptables -L --zero",
+            "iptables -S -Z",
+            "sudo nft list ruleset -f /tmp/rules.nft",
+            "firewall-cmd --list-all --add-port=80/tcp",
+            "firewall-cmd --state --reload",
+            "sudo firewall-cmd --list-all --zone=public --add-service=http",
+            "firewall-cmd --list-all --remove-port=22/tcp",
+            "firewall-cmd --list-all $MORE",
+            "kubectl cluster-info dump --output-directory=/tmp/dump",
+            "kubectl cluster-info dump --output-directory /tmp/dump",
+        ],
+    );
+}
+
+#[test]
+fn redirects_into_files_and_process_substitution_are_not_read_only() {
+    reads_and_writes(
+        None,
+        &[
+            "systemctl status sshd 2>&1",
+            "ls /var/log > /dev/null",
+            "uptime >&2",
+            "uptime 1>&2",
+            "cat /etc/hosts 2>/dev/null",
+            "df -h &>/dev/null",
+            "uptime >/dev/null 2>&1",
+            "uptime >&-",
+        ],
+        &[
+            "echo hi >| w",
+            "echo hi >|/tmp/x",
+            "echo hi >&/tmp/x",
+            "echo hi >& file",
+            "uptime &>/tmp/x",
+            "uptime &>> /tmp/x",
+            "cat <(systemctl restart nginx)",
+            "wc -l >(tee /tmp/x)",
+        ],
+    );
+}
+
+#[test]
+fn quotes_and_comments_are_read_as_the_shell_reads_them() {
+    reads_and_writes(
+        None,
+        &[
+            "grep 'a b' /etc/hosts",
+            "cat \"/etc/my file\"",
+            "\"cat\" /etc/hosts",
+            "uptime # how busy is it",
+            "date # -s would set it",
+            "sort -t$'\\t' -k2 /tmp/table",
+            "LC_ALL=C sort /tmp/table",
+            "TZ='America/New_York' date",
+        ],
+        &[
+            "journalctl \"--vacuum-size=100M\"",
+            "journalctl '--rotate'",
+            "journalctl --vacuum\\-size=1M",
+            "date -s\"12:00\"",
+            "ip link 'set' eth0 down",
+            "hostname 'web 02'",
+        ],
+    );
+}
+
+#[test]
+fn a_saved_list_from_before_these_checks_gets_them_too() {
+    // Rules saved by an older version keep their own list, entries the user added included; the
+    // writing forms are caught in code, so there is nothing to migrate.
+    let saved = [
+        "ip link",
+        "ip route",
+        "journalctl",
+        "date",
+        "hostname",
+        "timedatectl",
+        "dmesg",
+        "env",
+        "systemctl --failed",
+        "ip link set",
+    ];
+    reads_and_writes(
+        Some(&saved),
+        &[
+            "ip link show",
+            "ip route",
+            "journalctl -u nginx",
+            "date +%F",
+            "hostname -f",
+            "timedatectl",
+            "dmesg -T",
+            "env",
+            "systemctl --failed",
+        ],
+        &[
+            "ip link set eth0 down",
+            "ip route add default via 192.0.2.1",
+            "journalctl --vacuum-size=100M",
+            "date -s 12:00",
+            "hostname web02",
+            "timedatectl set-time 12:00",
+            "dmesg -C",
+            "env systemctl stop nginx",
+            "systemctl --failed stop nginx",
+        ],
+    );
+}
