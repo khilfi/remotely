@@ -204,7 +204,9 @@ pub(crate) fn is_read_only(script: &str, read_only: &[String]) -> bool {
 
     let mut segments = 0;
     for segment in SEPARATOR.split(&without_redirects) {
-        let words = command_words(segment);
+        let Some(words) = command_words(segment) else {
+            return false;
+        };
         if words.is_empty() {
             continue;
         }
@@ -222,19 +224,28 @@ pub(crate) fn is_read_only(script: &str, read_only: &[String]) -> bool {
     segments > 0
 }
 
-/// Words of one command with leading `VAR=value` assignments and `sudo [flags]` removed.
-fn command_words(segment: &str) -> Vec<String> {
-    let mut words = shell_words(segment);
-    while words.first().is_some_and(|w| is_assignment(w)) {
-        words.remove(0);
-    }
-    if words.first().is_some_and(|w| w == "sudo") {
-        words.remove(0);
-        while words.first().is_some_and(|w| w.starts_with('-')) {
-            words.remove(0);
+/// Words of the command one segment runs, without what only sets up how it runs: `VAR=value`
+/// assignments, `sudo [flags]` and `env` with the options and settings it stays read-only with
+/// (`writes::env_command`). None when an assignment can make the command do more than read, such as
+/// `LD_PRELOAD=…` or `PAGER=…` (`writes::harmless_assignment`).
+fn command_words(segment: &str) -> Option<Vec<String>> {
+    let words = shell_words(segment);
+    let mut rest = words.as_slice();
+    while let Some((first, tail)) = rest.split_first() {
+        if is_assignment(first) {
+            if !writes::harmless_assignment(first) {
+                return None;
+            }
+            rest = tail;
+        } else if first == "sudo" {
+            rest = &tail[tail.iter().take_while(|w| w.starts_with('-')).count()..];
+        } else if let Some(command) = (first == "env").then(|| writes::env_command(tail)).flatten() {
+            rest = command;
+        } else {
+            break;
         }
     }
-    words
+    Some(rest.to_vec())
 }
 
 fn is_assignment(word: &str) -> bool {
