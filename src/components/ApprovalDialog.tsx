@@ -8,6 +8,7 @@
 //
 // SS-10: a MultiExec line comes here too, held at Enter: it shows the line and the terminals it is typed into, and
 // the caller answers it through MultiExec (`approve`, `cancel`), which sends Enter, or Ctrl+C to clear the line.
+// SS-08: an upload shows the host folder and its files, marking the ones that replace a file there.
 // QL-08: a disabled button says why.
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
@@ -40,6 +41,7 @@ import {
 } from "@/lib/api";
 import { approveReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
+import { formatSize } from "@/lib/transfers";
 import { EnvBadge, StateBadge, TierBadge } from "./Badges";
 import { WhyDisabled } from "./WhyDisabled";
 
@@ -186,6 +188,7 @@ export function ApprovalDialog({
         </DialogHeader>
 
         {request.exec && <ExecSummary exec={request.exec} targets={request.targets.length} />}
+        {request.upload && <UploadSummary upload={request.upload} />}
 
         <div className="grid gap-1.5">
           <div className="max-h-64 overflow-auto rounded-md border">
@@ -473,6 +476,32 @@ function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exe
           </AlertDescription>
         </Alert>
       )}
+    </div>
+  );
+}
+
+/** SS-08: what an upload writes, and where. */
+function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload"]> }) {
+  const replacing = upload.files.filter((f) => f.replace).length;
+  return (
+    <div className="grid gap-2">
+      <p className="text-sm text-muted-foreground">
+        Into <code className="font-mono text-xs">{upload.folder}</code> on the host, as the logged-in user.
+        {replacing > 0 && ` ${plural(replacing, "file")} there ${replacing === 1 ? "is" : "are"} replaced.`}
+      </p>
+      <ul className="max-h-40 divide-y overflow-auto rounded-md border text-sm">
+        {upload.files.map((f) => (
+          <li key={f.name} className="flex items-center gap-2 px-3 py-1">
+            <span className="truncate font-mono text-xs">{f.name}</span>
+            {f.replace && (
+              <Badge variant="outline" className="border-tier-medium/50 font-normal text-tier-medium">
+                replaces the file there
+              </Badge>
+            )}
+            <span className="ml-auto shrink-0 text-xs text-muted-foreground tabular-nums">{formatSize(f.size)}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

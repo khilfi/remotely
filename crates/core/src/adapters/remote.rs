@@ -5,14 +5,18 @@
 //! duration, capped and hashed by [`exec_output`](super::exec_output)), BX-07 (sudo with the password from the vault on
 //! stdin, never echoed or logged, and scrubbed from the output) and MO-02 (guest metrics from /proc, over
 //! a connection kept open between rounds: [`RemoteAdapter::connect`]). A shell also reports the address
-//! it reached and what `hostname` prints on the same connection (QL-03). Jump hosts (SS-07, v2) will
-//! chain through russh's direct-tcpip channels.
+//! it reached and what `hostname` prints on the same connection (QL-03), which shell it runs (SS-08,
+//! [`SHELL_PROBE`]), and gives SFTP on channels of that same connection ([`RemoteFiles`], SS-08), so file
+//! transfers need no second login. Jump hosts (SS-07, v2) will chain through russh's direct-tcpip
+//! channels.
 //!
 //! The core reads secrets from the vault just before a connection and hands them over as
 //! [`Credentials`]; this adapter never sees the vault, the UI never sees the secrets, and no secret
 //! reaches a log or an error message. A login that needs something typed (a password that is not
 //! saved, a key's passphrase, a one-time code) asks through the [`Prompter`], which the terminal
 //! shows like PuTTY does.
+
+mod sftp;
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -24,6 +28,7 @@ use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect, MethodKind, MethodSet};
+use serde::Serialize;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -243,10 +248,99 @@ pub struct ShellHandle {
     /// shell so a server that won't run it never holds the shell up. `None` when it failed, took
     /// longer than [`HOSTNAME_WAIT`] or printed something that is not a host name.
     pub hostname: oneshot::Receiver<Option<String>>,
+    /// SS-08: the login shell, from [`SHELL_PROBE`] on the same connection, beside the shell like
+    /// `hostname`. `None` when it is neither bash nor zsh, or the probe failed or took too long.
+    pub shell: oneshot::Receiver<Option<PromptShell>>,
+    /// SS-08: files on the host, over SFTP channels of this same connection.
+    pub files: Arc<dyn RemoteFiles>,
 }
 
 /// How long the `hostname` beside a new shell may take.
 pub const HOSTNAME_WAIT: Duration = Duration::from_secs(5);
+
+/// SS-08: the shells whose prompt Remotely can hook to report the current folder (OSC 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PromptShell {
+    Bash,
+    Zsh,
+}
+
+/// SS-08: run by the login shell on an exec channel beside a new shell. bash and zsh print their
+/// name; sh prints an empty line; fish and tcsh fail on the syntax. No terminal, nothing typed.
+pub const SHELL_PROBE: &str = r#"printf '%s\n' "${BASH_VERSION:+bash}${ZSH_VERSION:+zsh}""#;
+
+/// SS-08: the shell [`SHELL_PROBE`] found, if it is one Remotely can hook.
+pub fn parse_shell_probe(stdout: &str, exit_code: Option<u32>) -> Option<PromptShell> {
+    if exit_code != Some(0) {
+        return None;
+    }
+    match stdout.trim() {
+        "bash" => Some(PromptShell::Bash),
+        "zsh" => Some(PromptShell::Zsh),
+        _ => None,
+    }
+}
+
+/// SS-08: what a remote folder entry is. A link counts as what it points to, with `link` set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EntryKind {
+    File,
+    Folder,
+    /// A device, socket, pipe, or a link that points nowhere.
+    Other,
+}
+
+/// SS-08: one file or folder on the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteEntry {
+    pub name: String,
+    pub kind: EntryKind,
+    /// A symbolic link (to `kind`).
+    pub link: bool,
+    pub size: u64,
+    /// Seconds since 1970, as the host says.
+    pub modified: Option<u64>,
+    /// The permission bits, e.g. 0o644.
+    pub mode: Option<u32>,
+}
+
+/// SS-08: files on the host, on an SFTP channel of a terminal's connection. Paths are the host's:
+/// absolute and `/`-separated. Everything runs as the logged-in user; nothing uses sudo, so a folder
+/// the user can't write to fails with [`CoreError::RemotePermissionDenied`].
+#[async_trait]
+pub trait RemoteFiles: Send + Sync {
+    /// The folder SFTP starts in: the login's home folder.
+    async fn home(&self) -> Result<String>;
+    /// A folder's entries, without `.` and `..`.
+    async fn list(&self, folder: &str) -> Result<Vec<RemoteEntry>>;
+    /// What is at `path` (a link followed), or `None` when nothing is.
+    async fn stat(&self, path: &str) -> Result<Option<RemoteEntry>>;
+    /// Opens a file to read.
+    async fn read(&self, path: &str) -> Result<Box<dyn RemoteRead>>;
+    /// Creates a file to write. Without `replace` it fails with [`CoreError::RemoteFileExists`] when
+    /// one is there; with it, an existing file is emptied and keeps its owner and permissions.
+    async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>>;
+    /// Deletes a file (a transfer's own leftover).
+    async fn remove(&self, path: &str) -> Result<()>;
+}
+
+/// SS-08: a remote file being read.
+#[async_trait]
+pub trait RemoteRead: Send {
+    /// Up to `buf.len()` bytes; 0 at the end of the file.
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+}
+
+/// SS-08: a remote file being written.
+#[async_trait]
+pub trait RemoteWrite: Send {
+    async fn write_all(&mut self, data: &[u8]) -> Result<()>;
+    /// Waits for every write to be confirmed and closes the file.
+    async fn finish(self: Box<Self>) -> Result<()>;
+}
 
 /// QL-03: the host name in what `hostname` printed: its first line, if that looks like one.
 /// Network gear answers with an error or a menu instead, which is no name.
@@ -405,7 +499,7 @@ impl RemoteAdapter for RusshAdapter {
             return Err(CoreError::AuthFailed("no user name was given".into()));
         }
         authenticate(&mut handle, &user, credentials, options, prompter, &shared).await?;
-        open_pty(handle, shared, size, &options.term, peer_ip).await
+        open_pty(handle, shared, size, &options.term, peer_ip, user).await
     }
 }
 
@@ -1011,14 +1105,17 @@ async fn agent_login(
 }
 
 /// Opens a session channel with a PTY and a shell, then pumps it from a task of its own. Beside it,
-/// the same task asks the server for its `hostname` once (QL-03).
+/// the same task asks the server for its `hostname` once (QL-03) and which shell it runs (SS-08).
+/// SFTP (SS-08) opens channels on the same connection when it is first used.
 async fn open_pty(
     handle: client::Handle<Handler>,
     shared: Arc<Mutex<Shared>>,
     size: PtySize,
     term: &str,
     peer_ip: Option<IpAddr>,
+    user: String,
 ) -> Result<ShellHandle> {
+    let handle = Arc::new(handle);
     let mut channel = handle
         .channel_open_session()
         .await
@@ -1058,6 +1155,8 @@ async fn open_pty(
     let (input_tx, mut input_rx) = mpsc::channel::<ShellInput>(256);
     let (output_tx, output_rx) = mpsc::channel::<ShellOutput>(256);
     let (hostname_tx, hostname_rx) = oneshot::channel();
+    let (shell_tx, shell_rx) = oneshot::channel();
+    let files: Arc<dyn RemoteFiles> = Arc::new(sftp::SftpFiles::new(Arc::clone(&handle), Arc::clone(&shared), user));
     tokio::spawn(async move {
         for data in early {
             if output_tx.send(ShellOutput::Data(data)).await.is_err() {
@@ -1070,6 +1169,12 @@ async fn open_pty(
             run_command(&handle, &shared, "hostname", None, &[], 1024),
         );
         tokio::pin!(hostname);
+        let mut shell_tx = Some(shell_tx);
+        let probe = tokio::time::timeout(
+            HOSTNAME_WAIT,
+            run_command(&handle, &shared, SHELL_PROBE, None, &[], 256),
+        );
+        tokio::pin!(probe);
         let mut exit_status: Option<u32> = None;
         let end = loop {
             tokio::select! {
@@ -1080,6 +1185,15 @@ async fn open_pty(
                     };
                     if let Some(tx) = hostname_tx.take() {
                         let _ = tx.send(name);
+                    }
+                }
+                answer = &mut probe, if shell_tx.is_some() => {
+                    let shell = match answer {
+                        Ok(Ok((code, _, output))) => parse_shell_probe(&output.stdout, code),
+                        _ => None,
+                    };
+                    if let Some(tx) = shell_tx.take() {
+                        let _ = tx.send(shell);
                     }
                 }
                 msg = input_rx.recv() => match msg {
@@ -1125,6 +1239,8 @@ async fn open_pty(
         output: output_rx,
         peer_ip,
         hostname: hostname_rx,
+        shell: shell_rx,
+        files,
     })
 }
 
@@ -1368,6 +1484,20 @@ mod tests {
         assert_eq!(parse_hostname("% Invalid input detected\n", Some(0)), None);
         assert_eq!(parse_hostname("---\n", Some(0)), None);
         assert_eq!(parse_hostname(&"a".repeat(254), Some(0)), None);
+    }
+
+    #[test]
+    fn the_shell_probe_names_bash_and_zsh_only() {
+        assert_eq!(parse_shell_probe("bash\n", Some(0)), Some(PromptShell::Bash));
+        assert_eq!(parse_shell_probe("zsh\n", Some(0)), Some(PromptShell::Zsh));
+        assert_eq!(parse_shell_probe("\n", Some(0)), None, "sh");
+        assert_eq!(parse_shell_probe("bash\n", Some(1)), None, "failed");
+        assert_eq!(parse_shell_probe("", Some(127)), None, "fish or tcsh: a syntax error");
+        assert_eq!(
+            parse_shell_probe("${BASH_VERSION:+bash}\n", Some(0)),
+            None,
+            "a shell that printed it as is"
+        );
     }
 
     #[test]

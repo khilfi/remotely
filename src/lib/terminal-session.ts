@@ -11,7 +11,8 @@
 // the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if typed;
 // QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
 // command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's keys go
-// to `inputRouter` instead (see multiexec.ts).
+// to `inputRouter` instead (see multiexec.ts). SS-08: the core says which folder the shell is in (`folder`), and a
+// right-click on a file name in the output goes to `onFileWord` (the page offers to download it) instead of pasting.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -21,6 +22,7 @@ import {
   errorCode,
   errorMessage,
   type FinishedHow,
+  type FolderInfo,
   type HostFacts,
   type HostKey,
   type KnownHost,
@@ -30,6 +32,7 @@ import {
   type TerminalStatus,
 } from "@/lib/api";
 import type { ResolvedTheme } from "@/lib/theme";
+import { fileWordAt } from "@/lib/transfers";
 
 const MONO = "'Cascadia Mono', 'Cascadia Code', Consolas, monospace";
 
@@ -80,6 +83,8 @@ export interface PaneSnapshot {
   searching: boolean;
   /** QL-05: the last search's matches; index -1 when there are too many to number. */
   searchResults: { index: number; count: number } | null;
+  /** SS-08: the shell's folder, as far as the core knows it. */
+  folder: FolderInfo | null;
 }
 
 /** QL-05 settings a pane applies live. */
@@ -147,6 +152,11 @@ export class PaneSession {
    * there instead of to this terminal alone; MultiExec sends them to every picked terminal and holds Enter.
    */
   inputRouter: ((pane: PaneSession, bytes: Uint8Array) => void) | null = null;
+  /**
+   * SS-08: a right-click on what looks like a file name in the output: the page looks it up and offers to download
+   * it, or pastes. Without it, right-click pastes (QL-05).
+   */
+  onFileWord: ((word: string, x: number, y: number) => void) | null = null;
 
   constructor(key: string, opener: PaneOpener, label: string, theme: ResolvedTheme, options: PaneOptions) {
     this.key = key;
@@ -162,6 +172,7 @@ export class PaneSession {
       logPath: null,
       searching: false,
       searchResults: null,
+      folder: null,
     };
     this.element = document.createElement("div");
     this.element.className = "h-full w-full";
@@ -195,10 +206,12 @@ export class PaneSession {
       if (this.copyOnSelect && this.term.hasSelection()) void navigator.clipboard?.writeText(this.term.getSelection());
     });
     this.term.attachCustomKeyEventHandler((ev) => this.handleKey(ev));
-    // QL-05: right-click pastes, like PuTTY.
+    // QL-05: right-click pastes, like PuTTY; SS-08: on a file name, the page may offer to download it first.
     this.element.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
-      void this.pasteFromClipboard();
+      const word = this.onFileWord && this.connected ? this.wordAt(ev.clientX, ev.clientY) : null;
+      if (word && this.onFileWord) this.onFileWord(word, ev.clientX, ev.clientY);
+      else void this.pasteFromClipboard();
     });
   }
 
@@ -260,6 +273,9 @@ export class PaneSession {
         break;
       case "commandFinished":
         this.onCommandFinished?.({ afterSecs: event.afterSecs, how: event.how });
+        break;
+      case "folder":
+        this.update({ folder: event.folder });
         break;
     }
   };
@@ -346,6 +362,21 @@ export class PaneSession {
     this.term.dispose();
     this.listeners.clear();
     this.onCommandFinished = null;
+    this.onFileWord = null;
+  }
+
+  /** SS-08: the file name under a point of the screen (client pixels), if the output shows one there. */
+  wordAt(clientX: number, clientY: number): string | null {
+    const screen = this.element.querySelector(".xterm-screen");
+    if (!screen) return null;
+    const rect = screen.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) return null;
+    const col = Math.floor(((clientX - rect.left) / rect.width) * this.term.cols);
+    const row = Math.floor(((clientY - rect.top) / rect.height) * this.term.rows);
+    if (col < 0 || row < 0 || col >= this.term.cols || row >= this.term.rows) return null;
+    const buffer = this.term.buffer.active;
+    const line = buffer.getLine(buffer.viewportY + row);
+    return line ? fileWordAt(line.translateToString(false), col) : null;
   }
 
   // ---- input ----

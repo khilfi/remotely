@@ -1,4 +1,5 @@
-// Typed wrappers over the Tauri IPC commands in src-tauri/src/ipc.rs, terminal.rs, multiexec.rs and command_panel.rs.
+// Typed wrappers over the Tauri IPC commands in src-tauri/src/ipc.rs, terminal.rs, multiexec.rs, command_panel.rs and
+// files.rs.
 // The UI talks to the Rust core only through these; it never runs vmrun or SSH itself.
 // Types mirror the serde shapes in crates/core.
 
@@ -198,7 +199,23 @@ export type Command =
       timeoutSecs?: number | null;
     }
   /** SS-10: the held Enter of a MultiExec line. The UI never submits it itself: MultiExec does. */
-  | { type: "terminalLine"; targets: TargetRef[]; line: string; unreliable: boolean; keys: string };
+  | { type: "terminalLine"; targets: TargetRef[]; line: string; unreliable: boolean; keys: string }
+  /** SS-08: an upload. Never submitted by the UI: `filesUpload` builds it in Rust from picked or dropped files. */
+  | { type: "fileUpload"; targets: TargetRef[]; folder: string; files: UploadFile[] };
+
+/** SS-08: one file of an upload. */
+export interface UploadFile {
+  localPath: string;
+  name: string;
+  size: number;
+  replace: boolean;
+}
+
+/** SS-08: an upload as the approval dialog shows it. */
+export interface UploadDetails {
+  folder: string;
+  files: { name: string; size: number; replace: boolean }[];
+}
 
 /** AP-02: a VM target as it is now, read without a guest login. */
 export interface TargetImpact {
@@ -262,6 +279,8 @@ export interface ApprovalRequest {
   impact: TargetImpact[];
   /** BX-02: for a remote command, what will run and how. */
   exec: ExecDetails | null;
+  /** SS-08: for an upload, the folder and the files (which ones replace a file there). */
+  upload: UploadDetails | null;
 }
 
 export type SubmitOutcome =
@@ -438,6 +457,8 @@ export type ActionKind =
   | "execOther"
   | "execDangerous"
   | "sshKeyPush"
+  | "fileUpload"
+  | "fileReplace"
   | "appUpdate";
 
 export interface TierRule {
@@ -649,7 +670,88 @@ export type TerminalEvent =
   /** QL-03: what is known about the host so far. */
   | { event: "host"; facts: HostFacts }
   /** QL-07: a command that ran at least the threshold ended (its prompt came back, or its output stopped). */
-  | { event: "commandFinished"; afterSecs: number; how: FinishedHow };
+  | { event: "commandFinished"; afterSecs: number; how: FinishedHow }
+  /** SS-08: the shell's folder, or how far it is known (each connection starts over). */
+  | { event: "folder"; folder: FolderInfo };
+
+// ---- SS-08 file transfer ----
+
+/**
+ * SS-08: how the terminal knows its shell's folder. "following": the shell reports it (bash and zsh, through Remotely's
+ * hook); "unsupported": another shell; "missed": bash or zsh, but something was typed before the hook could be set up
+ * (a reconnect tries again).
+ */
+export type FolderTracking = "waiting" | "following" | "unsupported" | "missed";
+
+export interface FolderInfo {
+  path: string | null;
+  tracking: FolderTracking;
+}
+
+/** SS-08: a link counts as what it points to, with `link` set; "other": a device, socket or broken link. */
+export type EntryKind = "file" | "folder" | "other";
+
+export interface RemoteEntry {
+  name: string;
+  kind: EntryKind;
+  link: boolean;
+  size: number;
+  /** Seconds since 1970. */
+  modified: number | null;
+  /** Permission bits, e.g. 0o644. */
+  mode: number | null;
+}
+
+export interface FolderListing {
+  path: string;
+  parent: string | null;
+  entries: RemoteEntry[];
+}
+
+export interface StagedFiles {
+  id: string;
+  files: { name: string; size: number }[];
+  total: number;
+}
+
+/** SS-08: what to do with files already in the folder. */
+export type Existing = "ask" | "replace" | "skip";
+
+export type UploadStart =
+  | { status: "conflicts"; existing: string[]; folder: string }
+  | { status: "submitted"; outcome: SubmitOutcome }
+  /** Every file was there already and skipped. */
+  | { status: "nothing" };
+
+export type TransferState = "queued" | "running" | "done" | "failed" | "cancelled";
+
+export interface TransferInfo {
+  id: string;
+  jobId: string | null;
+  terminalId: string;
+  terminal: string;
+  direction: "upload" | "download";
+  name: string;
+  remotePath: string;
+  localPath: string | null;
+  size: number;
+  done: number;
+  bytesPerSec: number;
+  state: TransferState;
+  message: string | null;
+  sha256: string | null;
+  replace: boolean;
+}
+
+export type Retried = { kind: "upload"; start: UploadStart } | { kind: "download"; transfers: TransferInfo[] };
+
+/** SS-08: files dropped on the window, staged by the shell; x and y in CSS pixels. */
+export interface DroppedFiles {
+  staged: StagedFiles | null;
+  error: string | null;
+  x: number;
+  y: number;
+}
 
 /** QL-07: how a long command was seen to end. */
 export type FinishedHow = "prompt" | "quiet";
@@ -1676,4 +1778,30 @@ export const api = {
     invoke<void>("terminal_type_secret", { id, secretId, force }),
   /** QL-07: a Windows notification that a long command finished in a background tab. */
   notifyCommandFinished: (title: string, body: string) => invoke<void>("notify_command_finished", { title, body }),
+
+  /** SS-08: the shell's folder as far as it is known. */
+  filesFolder: (id: string) => invoke<FolderInfo | null>("files_folder", { id }),
+  /** SS-08: a folder on the terminal's host; without a path, the shell's folder (or home). */
+  filesList: (id: string, path: string | null) => invoke<FolderListing>("files_list", { id, path }),
+  /** SS-08: what a name right-clicked in the output is, from the shell's folder. null: nothing there. */
+  filesLookUp: (id: string, path: string) =>
+    invoke<{ path: string; entry: RemoteEntry } | null>("files_look_up", { id, path }),
+  /** SS-08: a file dialog opened by the shell; the files wait (staged) for `filesUpload`. null: cancelled. */
+  filesPickUpload: () => invoke<StagedFiles | null>("files_pick_upload"),
+  /** SS-08: uploads staged files through the command bus (Low; Prod and replacing ask). */
+  filesUpload: (id: string, stagedId: string, folder: string, existing: Existing) =>
+    invoke<UploadStart>("files_upload", { id, stagedId, folder, existing }),
+  filesUnstage: (stagedId: string) => invoke<void>("files_unstage", { stagedId }),
+  /** SS-08: to Downloads, or a folder the shell asks for. Audited per file. null: the dialog was closed. */
+  filesDownload: (id: string, paths: string[], to: "downloads" | "choose") =>
+    invoke<TransferInfo[] | null>("files_download", { id, paths, to }),
+  filesTransfers: () => invoke<TransferInfo[]>("files_transfers"),
+  filesCancel: (transferId: string) => invoke<boolean>("files_cancel", { transferId }),
+  filesRetry: (transferId: string) => invoke<Retried>("files_retry", { transferId }),
+  /** SS-08: Explorer at a finished download. */
+  filesOpenFolder: (transferId: string) => invoke<void>("files_open_folder", { transferId }),
+  onTransfer: (handler: (transfer: TransferInfo) => void): Promise<UnlistenFn> =>
+    listen<TransferInfo>("files://transfer", (e) => handler(e.payload)),
+  onFilesDropped: (handler: (dropped: DroppedFiles) => void): Promise<UnlistenFn> =>
+    listen<DroppedFiles>("files://dropped", (e) => handler(e.payload)),
 };

@@ -85,7 +85,35 @@ pub enum Command {
         /// each with its Enter.
         keys: String,
     },
+    /// SS-08 upload files into a folder on the host of one open terminal, over SFTP on that terminal's
+    /// own connection ([`crate::terminal::files`]). A file already there is replaced only when its
+    /// `replace` says so, and the policy engine rates that higher. Never built by the UI: the shell
+    /// builds it from files chosen in a dialog or dropped on the terminal.
+    FileUpload {
+        /// One [`TargetRef::Terminal`].
+        targets: Vec<TargetRef>,
+        /// The host folder, absolute.
+        folder: String,
+        files: Vec<UploadFile>,
+    },
 }
+
+/// SS-08: one file of a [`Command::FileUpload`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadFile {
+    /// The file on this PC.
+    pub local_path: String,
+    /// Its name in the host folder.
+    pub name: String,
+    pub size: u64,
+    /// A file of that name is there, and this upload replaces it.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+/// SS-08: the most files one upload takes.
+pub const MAX_UPLOAD_FILES: usize = 1000;
 
 /// The one target of commands that act on the app itself.
 const APP_TARGET: &[TargetRef] = &[TargetRef::App];
@@ -199,6 +227,58 @@ fn validate_line(line: &str, keys: &str, unreliable: bool) -> Result<()> {
     Ok(())
 }
 
+/// SS-08: an upload Remotely can carry out: one open terminal, an absolute host folder, plain file
+/// names (no folder parts) once each, and files on this PC given by their full path.
+fn validate_upload(targets: &[TargetRef], folder: &str, files: &[UploadFile]) -> Result<()> {
+    let invalid = |message: String| Err(CoreError::InvalidInput(message));
+    match targets {
+        [TargetRef::Terminal { .. }] => {}
+        [_] => return invalid("Files are uploaded through an open terminal.".into()),
+        _ => return invalid("Files are uploaded to one terminal at a time.".into()),
+    }
+    if !folder.starts_with('/') || folder.contains(['\0', '\n', '\r']) {
+        return invalid(format!(
+            "'{folder}' is not a folder on the host (it must start with /)."
+        ));
+    }
+    if files.is_empty() {
+        return invalid("Choose at least one file to upload.".into());
+    }
+    if files.len() > MAX_UPLOAD_FILES {
+        return invalid(format!("One upload takes at most {MAX_UPLOAD_FILES} files."));
+    }
+    let mut names = std::collections::HashSet::new();
+    for file in files {
+        let name = file.name.as_str();
+        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0', '\n', '\r']) {
+            return invalid(format!("'{name}' can't be a file name on the host."));
+        }
+        if !names.insert(name) {
+            return invalid(format!("Two files are named '{name}'; upload them one at a time."));
+        }
+        if !std::path::Path::new(&file.local_path).is_absolute() {
+            return invalid(format!("'{}' is not a full path on this PC.", file.local_path));
+        }
+    }
+    Ok(())
+}
+
+/// "1.2 MB", for summaries and messages.
+pub fn human_size(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1000.0 && unit + 1 < UNITS.len() {
+        value /= 1000.0;
+        unit += 1;
+    }
+    match unit {
+        0 => format!("{bytes} B"),
+        _ if value < 10.0 => format!("{value:.1} {}", UNITS[unit]),
+        _ => format!("{value:.0} {}", UNITS[unit]),
+    }
+}
+
 /// BX-02: a script the hosts' shells can take.
 fn validate_script(script: &str, timeout_secs: Option<u64>) -> Result<()> {
     let invalid = |message: String| Err(CoreError::InvalidInput(message));
@@ -255,6 +335,7 @@ impl Command {
                 }
                 validate_line(line, keys, *unreliable)
             }
+            Command::FileUpload { targets, folder, files } => validate_upload(targets, folder, files),
             _ => Ok(()),
         }
     }
@@ -267,7 +348,8 @@ impl Command {
             | Command::VmSnapshot { targets, .. }
             | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. }
-            | Command::PushSshKey { targets, .. } => *targets = new,
+            | Command::PushSshKey { targets, .. }
+            | Command::FileUpload { targets, .. } => *targets = new,
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else.
             Command::AppUpdate { .. } | Command::TerminalLine { .. } => return None,
@@ -282,7 +364,8 @@ impl Command {
             | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. }
             | Command::PushSshKey { targets, .. }
-            | Command::TerminalLine { targets, .. } => targets,
+            | Command::TerminalLine { targets, .. }
+            | Command::FileUpload { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -344,6 +427,21 @@ impl Command {
                     format!("MultiExec: run `{first}`{more} in {}", noun("terminal"))
                 }
             }
+            Command::FileUpload { folder, files, .. } => {
+                let size = human_size(files.iter().map(|f| f.size).sum());
+                let what = match files.as_slice() {
+                    [one] => format!("'{}' ({size})", one.name),
+                    several => format!("{} files ({size})", several.len()),
+                };
+                let replaced = files.iter().filter(|f| f.replace).count();
+                let replacing = match (replaced, files.len()) {
+                    (0, _) => String::new(),
+                    (1, 1) => ", replacing the file there".to_owned(),
+                    (1, _) => ", replacing 1 file there".to_owned(),
+                    (n, _) => format!(", replacing {n} files there"),
+                };
+                format!("Upload {what} to {folder}{replacing}")
+            }
         }
     }
 }
@@ -387,6 +485,43 @@ pub struct ApprovalRequest {
     pub impact: Vec<TargetImpact>,
     /// BX-02, BX-06, BX-07: for a remote command, what will run and how.
     pub exec: Option<Box<ExecDetails>>,
+    /// SS-08: for an upload, the folder and the files (which ones replace a file there).
+    pub upload: Option<Box<UploadDetails>>,
+}
+
+/// SS-08: an upload as the approval dialog shows it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadDetails {
+    pub folder: String,
+    pub files: Vec<UploadFileDetails>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadFileDetails {
+    pub name: String,
+    pub size: u64,
+    pub replace: bool,
+}
+
+impl UploadDetails {
+    fn of(command: &Command) -> Option<Box<Self>> {
+        let Command::FileUpload { folder, files, .. } = command else {
+            return None;
+        };
+        Some(Box::new(Self {
+            folder: folder.clone(),
+            files: files
+                .iter()
+                .map(|f| UploadFileDetails {
+                    name: f.name.clone(),
+                    size: f.size,
+                    replace: f.replace,
+                })
+                .collect(),
+        }))
+    }
 }
 
 /// A remote command as the approval dialog and the bulk run editor show it (BX-02, BX-06, BX-07).
@@ -757,6 +892,7 @@ impl CommandBus {
             warnings: decision.warnings.clone(),
             impact: self.impact.preview(ctx, &decision.targets).await,
             exec: self.exec_details(ctx, &command, retry_of).await?,
+            upload: UploadDetails::of(&command),
         };
         let detail = decision
             .reasons

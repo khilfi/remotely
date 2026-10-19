@@ -19,6 +19,14 @@
 // here, with the line and the terminals. The command panel's paste and Shift+click go through it too. Compare output
 // (BX-03) runs one command on the picked tabs' hosts and on sessions Ctrl+clicked in the tree, as a one-shot job, and
 // shows the grouped results in a panel under the terminals. QL-08: disabled buttons say why.
+//
+// P7: file transfer (SS-08) over each terminal's own SSH connection (SFTP, no second login). The "Files here" drawer
+// follows the current terminal's folder (bash and zsh report it through an invisible prompt hook; other shells start
+// in the home folder), downloads ticked files and uploads into the folder it shows. Files dropped on a terminal, or
+// picked with the upload button, go into that terminal's folder; files already there are replaced only after asking.
+// Right-clicking a file name in a terminal offers to download it. Uploads are commands on the bus (Low; Prod and
+// replacing ask); the transfers panel shows progress, speed and time left, with cancel and retry. No path on this PC
+// comes from here: the shell opens the dialogs and catches drops.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
@@ -31,6 +39,7 @@ import {
   CaseSensitiveIcon,
   Columns2Icon,
   FileTextIcon,
+  FolderOpenIcon,
   GitCompareArrowsIcon,
   LoaderCircleIcon,
   PanelLeftCloseIcon,
@@ -44,8 +53,10 @@ import {
   ShieldAlertIcon,
   SquareChevronRightIcon,
   SquareTerminalIcon,
+  UploadIcon,
   XIcon,
 } from "lucide-react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -64,11 +75,13 @@ import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { ColorDot } from "@/components/Badges";
 import { CommandPanel } from "@/components/CommandPanel";
 import { ComparePanel } from "@/components/ComparePanel";
+import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { SessionTree } from "@/components/SessionTree";
 import { TypeSecretMenu } from "@/components/TypeSecretMenu";
+import { UploadConflictDialog } from "@/components/UploadConflictDialog";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
@@ -81,12 +94,16 @@ import {
   type QuickConnectRequest,
   type SessionColor,
   type SessionFolder,
+  type DroppedFiles,
   type SessionRecord,
+  type StagedFiles,
   type SubmitOutcome,
+  type TransferInfo,
+  type UploadStart,
   type VaultInfo,
 } from "@/lib/api";
 import { sendCommand } from "@/lib/command-send";
-import { connectedReason, multiExecReason, splitReason } from "@/lib/disabled-reasons";
+import { connectedReason, multiExecReason, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { MultiExecSender } from "@/lib/multiexec";
 import type { PickableTab } from "@/lib/multiexec-picks";
@@ -104,6 +121,7 @@ import {
   type PaneSnapshot,
 } from "@/lib/terminal-session";
 import type { ResolvedTheme } from "@/lib/theme";
+import { formatSize, isActive, mergeTransfer } from "@/lib/transfers";
 import { cn } from "@/lib/utils";
 
 /** A tab's panes: one pane, or a split of several side by side or stacked. */
@@ -124,6 +142,7 @@ interface Tab {
 const MAX_PANES = 6;
 const TREE_KEY = "remotely.terminal.treeShown";
 const COMMANDS_KEY = "remotely.terminal.commandsShown";
+const FILES_KEY = "remotely.terminal.filesShown";
 /** BX-08: below this width the command panel starts hidden, so the tabs keep their room (the toolbar shows it). */
 const COMMANDS_SHOWN_FROM = 1440;
 
@@ -284,6 +303,26 @@ export function TerminalPage({
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   /** Bumped when a pane's state changes, so what depends on terminal ids and statuses is recomputed. */
   const [paneTick, setPaneTick] = useState(0);
+  /** SS-08: the "Files here" drawer, and every transfer (newest last) less the ones cleared from the panel. */
+  const [filesShown, setFilesShown] = useState(() => readShown(FILES_KEY, false));
+  const [transfers, setTransfers] = useState<TransferInfo[]>([]);
+  const [clearedTransfers, setClearedTransfers] = useState<string[]>([]);
+  /** SS-08: files picked or dropped for upload that are in the folder already. */
+  const [conflict, setConflict] = useState<{
+    pane: PaneSession;
+    staged: StagedFiles;
+    folder: string;
+    existing: string[];
+  } | null>(null);
+  /** SS-08: a file name right-clicked in a terminal, offered for download. */
+  const [fileMenu, setFileMenu] = useState<{
+    pane: PaneSession;
+    path: string;
+    name: string;
+    size: number;
+    x: number;
+    y: number;
+  } | null>(null);
   const handled = useRef(0);
   // For closing every pane when the page goes away (the app closing).
   const tabsRef = useRef(tabs);
@@ -337,10 +376,13 @@ export function TerminalPage({
 
   // QL-07: a pane's finished command is handled with the page's latest state.
   const finishedRef = useRef<(pane: PaneSession, finished: CommandFinished) => void>(() => undefined);
+  // SS-08: a file name right-clicked in a pane, too.
+  const fileWordRef = useRef<(pane: PaneSession, word: string, x: number, y: number) => void>(() => undefined);
   const createPane = useCallback(
     (opener: PaneOpener, label: string) => {
       const pane = new PaneSession(newKey(), opener, label, theme, options);
       pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
+      pane.onFileWord = (word, x, y) => fileWordRef.current(pane, word, x, y);
       return pane;
     },
     [theme, options],
@@ -445,6 +487,8 @@ export function TerminalPage({
 
   const current = tabs.find((t) => t.key === activeTab) ?? null;
   const currentPane = current ? findPane(current.layout, current.activePane) : undefined;
+  const currentSnapshot = usePane(currentPane);
+  const currentConnected = Boolean(currentPane?.terminalId) && currentSnapshot.status.state === "connected";
 
   // QL-07: looking at a tab clears its "finished in the background" mark.
   const viewing = active ? activeTab : null;
@@ -700,6 +744,232 @@ export function TerminalPage({
     return currentPane ? sendCommand([currentPane], command, { enter }) > 0 : false;
   }
 
+  // ---- SS-08 file transfer --------------------------------------------------------------------------
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FILES_KEY, String(filesShown));
+    } catch {
+      // Not kept.
+    }
+  }, [filesShown]);
+
+  // Every transfer, then each change as it comes. A transfer that ends while the drawer is hidden says so.
+  const transferStates = useRef(new Map<string, TransferInfo["state"]>());
+  const endedRef = useRef<(transfer: TransferInfo) => void>(() => undefined);
+  useEffect(() => {
+    let gone = false;
+    api.filesTransfers().then(
+      (list) => {
+        if (gone) return;
+        list.forEach((t) => transferStates.current.set(t.id, t.state));
+        setTransfers(list);
+      },
+      () => undefined,
+    );
+    const unlisten = api.onTransfer((changed) => {
+      const before = transferStates.current.get(changed.id);
+      transferStates.current.set(changed.id, changed.state);
+      if (before && before !== changed.state && !isActive(changed)) endedRef.current(changed);
+      setTransfers((prev) => mergeTransfer(prev, changed));
+    });
+    return () => {
+      gone = true;
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+  useEffect(() => {
+    endedRef.current = (t) => {
+      if (filesShown && active) return;
+      const show = { label: "Show", onClick: () => setFilesShown(true) };
+      if (t.state === "failed") {
+        const what = t.direction === "upload" ? "Upload" : "Download";
+        toast.error(`${what} of ${t.name} failed: ${t.message ?? ""}`, { action: show });
+      } else if (t.state === "done" && t.direction === "download") {
+        toast.success(`Downloaded ${t.name}`, {
+          action: { label: "Open folder", onClick: () => void api.filesOpenFolder(t.id).catch(() => undefined) },
+        });
+      } else if (t.state === "done") {
+        toast.success(`Uploaded ${t.name} to ${t.remotePath}`);
+      }
+    };
+  });
+
+  /** The pane under a point of the window (CSS pixels), if any. */
+  function paneAt(x: number, y: number) {
+    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-pane-key]");
+    return el ? everyPane.find((p) => p.key === el.dataset.paneKey) : undefined;
+  }
+
+  /** The folder a terminal's uploads go to: its shell's, or the home folder when the shell does not say. */
+  async function folderOf(pane: PaneSession, terminalId: string) {
+    return pane.getSnapshot().folder?.path ?? (await api.filesList(terminalId, null)).path;
+  }
+
+  function handleStart(pane: PaneSession, staged: StagedFiles, start: UploadStart) {
+    if (start.status === "conflicts") setConflict({ pane, staged, folder: start.folder, existing: start.existing });
+    else if (start.status === "submitted") onSubmitted(start.outcome, () => undefined);
+    else toast.info("Every file is in the folder already, so nothing was uploaded.");
+  }
+
+  /** Uploads staged files through a pane: into `folder`, or the terminal's own folder. */
+  async function uploadStaged(pane: PaneSession, staged: StagedFiles, folder: string | null) {
+    const id = pane.terminalId;
+    const why = uploadReason({ open: true, connected: pane.connected });
+    if (!id || why) {
+      void api.filesUnstage(staged.id).catch(() => undefined);
+      toast.info(`Not uploaded: ${why ?? "this terminal has not connected yet"}`);
+      return;
+    }
+    try {
+      const into = folder ?? (await folderOf(pane, id));
+      handleStart(pane, staged, await api.filesUpload(id, staged.id, into, "ask"));
+    } catch (err) {
+      void api.filesUnstage(staged.id).catch(() => undefined);
+      toast.error(`Upload failed: ${errorMessage(err)}`);
+    }
+  }
+
+  /** The upload buttons: files from a dialog the shell opens. */
+  async function pickAndUpload(pane: PaneSession | undefined, folder: string | null) {
+    if (!pane) return;
+    try {
+      const staged = await api.filesPickUpload();
+      if (staged) await uploadStaged(pane, staged, folder);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
+  async function download(pane: PaneSession, paths: string[], to: "downloads" | "choose") {
+    const id = pane.terminalId;
+    if (!id) return;
+    try {
+      const queued = await api.filesDownload(id, paths, to);
+      if (queued && !filesShown) {
+        const what = queued.length === 1 ? queued[0].name : plural(queued.length, "file");
+        toast.info(`Downloading ${what}…`, { action: { label: "Show", onClick: () => setFilesShown(true) } });
+      }
+    } catch (err) {
+      toast.error(`Download failed: ${errorMessage(err)}`);
+    }
+  }
+
+  async function retryTransfer(t: TransferInfo) {
+    try {
+      const retried = await api.filesRetry(t.id);
+      if (retried.kind === "upload" && retried.start.status === "submitted") {
+        onSubmitted(retried.start.outcome, () => undefined);
+      }
+    } catch (err) {
+      toast.error(`Retry failed: ${errorMessage(err)}`);
+    }
+  }
+
+  // Files dropped on the window: the shell staged them and says where they fell.
+  const dropRef = useRef<(dropped: DroppedFiles) => void>(() => undefined);
+  useEffect(() => {
+    const unlisten = api.onFilesDropped((dropped) => dropRef.current(dropped));
+    return () => void unlisten.then((stop) => stop());
+  }, []);
+  useEffect(() => {
+    dropRef.current = (dropped) => {
+      if (dropped.error) {
+        toast.error(`Not uploaded: ${dropped.error}`);
+        return;
+      }
+      if (!dropped.staged) return;
+      const pane = active ? paneAt(dropped.x, dropped.y) : undefined;
+      if (!pane) {
+        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
+        if (active) toast.info("Drop files on a terminal to upload them into its folder.");
+        return;
+      }
+      void uploadStaged(pane, dropped.staged, null);
+    };
+  });
+
+  // While files are dragged over the window, the pane under them says where they would go.
+  const dropLabelRef = useRef<(key: string | undefined) => string>(() => "");
+  useEffect(() => {
+    dropLabelRef.current = (key) => {
+      const pane = everyPane.find((p) => p.key === key);
+      if (!pane?.connected) return "Not connected: nothing can be uploaded here";
+      return `Drop to upload into ${pane.getSnapshot().folder?.path ?? "the home folder"}`;
+    };
+  });
+  useEffect(() => {
+    let marked: HTMLElement | null = null;
+    const clear = () => {
+      marked?.removeAttribute("data-drop");
+      marked = null;
+    };
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      const p = event.payload;
+      if (p.type !== "enter" && p.type !== "over") {
+        clear();
+        return;
+      }
+      const scale = window.devicePixelRatio || 1;
+      const under = document.elementFromPoint(p.position.x / scale, p.position.y / scale);
+      const el = under?.closest<HTMLElement>("[data-pane-key]") ?? null;
+      if (el === marked) return;
+      clear();
+      if (el) {
+        el.setAttribute("data-drop", dropLabelRef.current(el.dataset.paneKey));
+        marked = el;
+      }
+    });
+    return () => {
+      clear();
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  // Right-click on a file name: offered for download when it is a file there; otherwise the usual paste.
+  useEffect(() => {
+    fileWordRef.current = (pane, word, x, y) => {
+      const id = pane.terminalId;
+      if (!id) {
+        void pane.pasteFromClipboard();
+        return;
+      }
+      api.filesLookUp(id, word).then(
+        (found) => {
+          if (found?.entry.kind === "file") {
+            setFileMenu({ pane, path: found.path, name: found.entry.name, size: found.entry.size, x, y });
+          } else void pane.pasteFromClipboard();
+        },
+        () => void pane.pasteFromClipboard(),
+      );
+    };
+  });
+
+  const shownTransfers = transfers.filter((t) => !clearedTransfers.includes(t.id));
+  const uploadsHere = transfers.filter(
+    (t) => t.terminalId === currentPane?.terminalId && t.direction === "upload" && t.state === "done",
+  ).length;
+  const uploadBlocked = uploadReason({ open: Boolean(currentPane), connected: currentConnected });
+  const drawer = (
+    <FilesDrawer
+      terminalId={currentPane?.terminalId ?? null}
+      snapshot={currentSnapshot}
+      name={currentPane ? nameOf(currentPane) : "No terminal"}
+      multiExecTerminals={multiExec ? pickedPanes.length : 0}
+      transfers={shownTransfers}
+      refresh={uploadsHere}
+      onUpload={(folder) => void pickAndUpload(currentPane, folder)}
+      onDownload={(paths, to) => {
+        if (currentPane) void download(currentPane, paths, to);
+      }}
+      onRetry={(t) => void retryTransfer(t)}
+      onClearTransfers={() =>
+        setClearedTransfers((prev) => [...prev, ...transfers.filter((t) => !isActive(t)).map((t) => t.id)])
+      }
+      onClose={() => setFilesShown(false)}
+    />
+  );
+
   const currentSession = currentPane?.sessionId ? sessionById.get(currentPane.sessionId) : undefined;
   const loginSecretId =
     currentSession?.auth.method === "password"
@@ -730,6 +1000,102 @@ export function TerminalPage({
     }
     return ids;
   }, [tabs]);
+
+  /** The terminals (and Compare output under them), or the empty state. */
+  const stack = current ? (
+    <ResizablePanelGroup
+      orientation="vertical"
+      className="min-h-0 flex-1"
+      id={`terminal-stack-${compareOpen ? "compare" : "plain"}`}
+    >
+      <ResizablePanel id="terminal-panes" defaultSize={compareOpen ? "55%" : "100%"} minSize="20%">
+        {multiExec && tile && pickedTabs.length > 1 ? (
+          <TileView
+            tabs={pickedTabs}
+            activeTab={activeTab}
+            theme={theme}
+            pageActive={active}
+            nameOf={nameOf}
+            status={mxStatus}
+            onActivate={setActiveTab}
+            onFocusPane={(tabKey, key) =>
+              setTabs((prev) => prev.map((t) => (t.key === tabKey ? { ...t, activePane: key } : t)))
+            }
+            onClosePane={closePane}
+            onOpenVault={onOpenVault}
+          />
+        ) : (
+          <div className="h-full min-h-0 overflow-hidden rounded-lg border" key={current.key}>
+            <LayoutView
+              layout={current.layout}
+              tab={current}
+              theme={theme}
+              pageActive={active}
+              nameOf={nameOf}
+              onFocusPane={(key) =>
+                setTabs((prev) => prev.map((t) => (t.key === current.key ? { ...t, activePane: key } : t)))
+              }
+              onClosePane={(key) => closePane(current.key, key)}
+              onOpenVault={onOpenVault}
+            />
+          </div>
+        )}
+      </ResizablePanel>
+      {compareOpen && (
+        <>
+          <ResizableHandle withHandle className="my-1" />
+          <ResizablePanel id="terminal-compare" defaultSize="45%" minSize="20%">
+            <ComparePanel
+              active={active}
+              vault={vault}
+              terminalIds={compareTerminals}
+              sessionIds={treePicks}
+              unsavedTabs={unsavedTabs}
+              savedSessions={sessions.length}
+              onClearTree={() => setTreePicks([])}
+              onSubmit={onSubmitted}
+              onOpenVault={onOpenVault}
+              onClose={() => setCompareOpen(false)}
+            />
+          </ResizablePanel>
+        </>
+      )}
+    </ResizablePanelGroup>
+  ) : compareOpen ? (
+    <div className="min-h-0 flex-1">
+      <ComparePanel
+        active={active}
+        vault={vault}
+        terminalIds={[]}
+        sessionIds={treePicks}
+        unsavedTabs={0}
+        savedSessions={sessions.length}
+        onClearTree={() => setTreePicks([])}
+        onSubmit={onSubmitted}
+        onOpenVault={onOpenVault}
+        onClose={() => setCompareOpen(false)}
+      />
+    </div>
+  ) : (
+    <Empty className="min-h-0 flex-1 border">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <SquareTerminalIcon />
+        </EmptyMedia>
+        <EmptyTitle>No terminal open</EmptyTitle>
+        <EmptyDescription>
+          Double-click a session in the tree, or connect to any host with New terminal. Each tab can be split into
+          panes, and a dropped connection reconnects by itself.
+        </EmptyDescription>
+      </EmptyHeader>
+      <EmptyContent>
+        <Button onClick={() => setNewOpen(true)}>
+          <PlusIcon />
+          New terminal
+        </Button>
+      </EmptyContent>
+    </Empty>
+  );
 
   const workspace = (
     <div className="flex h-full min-h-0 flex-col gap-2">
@@ -789,6 +1155,17 @@ export function TerminalPage({
             <IconButton label="Reconnect this pane" onClick={() => currentPane?.reconnect()}>
               <RefreshCwIcon />
             </IconButton>
+            <IconButton
+              label={
+                multiExec && pickedPanes.length > 1
+                  ? "Upload files into this terminal's folder (this terminal only, not every MultiExec terminal)"
+                  : "Upload files into this terminal's folder"
+              }
+              onClick={() => void pickAndUpload(currentPane, null)}
+              disabledReason={uploadBlocked}
+            >
+              <UploadIcon />
+            </IconButton>
             <TypeSecretMenu
               pane={currentPane}
               loginSecretId={loginSecretId}
@@ -843,6 +1220,14 @@ export function TerminalPage({
           pressed={compareOpen}
         >
           <GitCompareArrowsIcon />
+        </IconButton>
+        <IconButton
+          label={filesShown ? "Hide the files" : "Files here: the terminal's folder, downloads and uploads"}
+          onClick={() => setFilesShown((v) => !v)}
+          className={cn("mb-1", filesShown && "bg-accent")}
+          pressed={filesShown}
+        >
+          <FolderOpenIcon />
         </IconButton>
         <IconButton
           label={commandsShown ? "Hide the commands" : "Show the commands (favourites and library)"}
@@ -917,105 +1302,25 @@ export function TerminalPage({
           </Button>
         </div>
       )}
-      {current ? (
-        <ResizablePanelGroup
-          orientation="vertical"
-          className="min-h-0 flex-1"
-          id={`terminal-stack-${compareOpen ? "compare" : "plain"}`}
-        >
-          <ResizablePanel id="terminal-panes" defaultSize={compareOpen ? "55%" : "100%"} minSize="20%">
-            {multiExec && tile && pickedTabs.length > 1 ? (
-              <TileView
-                tabs={pickedTabs}
-                activeTab={activeTab}
-                theme={theme}
-                pageActive={active}
-                nameOf={nameOf}
-                status={mxStatus}
-                onActivate={setActiveTab}
-                onFocusPane={(tabKey, key) =>
-                  setTabs((prev) => prev.map((t) => (t.key === tabKey ? { ...t, activePane: key } : t)))
-                }
-                onClosePane={closePane}
-                onOpenVault={onOpenVault}
-              />
-            ) : (
-              <div className="h-full min-h-0 overflow-hidden rounded-lg border" key={current.key}>
-                <LayoutView
-                  layout={current.layout}
-                  tab={current}
-                  theme={theme}
-                  pageActive={active}
-                  nameOf={nameOf}
-                  onFocusPane={(key) =>
-                    setTabs((prev) => prev.map((t) => (t.key === current.key ? { ...t, activePane: key } : t)))
-                  }
-                  onClosePane={(key) => closePane(current.key, key)}
-                  onOpenVault={onOpenVault}
-                />
-              </div>
-            )}
+      {filesShown ? (
+        <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1" id="terminal-files">
+          <ResizablePanel id="terminal-files-main" defaultSize="62%" minSize="30%">
+            <div className="flex h-full min-h-0 flex-col">{stack}</div>
           </ResizablePanel>
-          {compareOpen && (
-            <>
-              <ResizableHandle withHandle className="my-1" />
-              <ResizablePanel id="terminal-compare" defaultSize="45%" minSize="20%">
-                <ComparePanel
-                  active={active}
-                  vault={vault}
-                  terminalIds={compareTerminals}
-                  sessionIds={treePicks}
-                  unsavedTabs={unsavedTabs}
-                  savedSessions={sessions.length}
-                  onClearTree={() => setTreePicks([])}
-                  onSubmit={onSubmitted}
-                  onOpenVault={onOpenVault}
-                  onClose={() => setCompareOpen(false)}
-                />
-              </ResizablePanel>
-            </>
-          )}
+          <ResizableHandle className="mx-1" />
+          <ResizablePanel id="terminal-files-drawer" defaultSize="38%" minSize="20%" maxSize="60%">
+            {drawer}
+          </ResizablePanel>
         </ResizablePanelGroup>
-      ) : compareOpen ? (
-        <div className="min-h-0 flex-1">
-          <ComparePanel
-            active={active}
-            vault={vault}
-            terminalIds={[]}
-            sessionIds={treePicks}
-            unsavedTabs={0}
-            savedSessions={sessions.length}
-            onClearTree={() => setTreePicks([])}
-            onSubmit={onSubmitted}
-            onOpenVault={onOpenVault}
-            onClose={() => setCompareOpen(false)}
-          />
-        </div>
       ) : (
-        <Empty className="min-h-0 flex-1 border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <SquareTerminalIcon />
-            </EmptyMedia>
-            <EmptyTitle>No terminal open</EmptyTitle>
-            <EmptyDescription>
-              Double-click a session in the tree, or connect to any host with New terminal. Each tab can be split into
-              panes, and a dropped connection reconnects by itself.
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
-            <Button onClick={() => setNewOpen(true)}>
-              <PlusIcon />
-              New terminal
-            </Button>
-          </EmptyContent>
-        </Empty>
+        stack
       )}
       <p className="text-xs text-muted-foreground">
         {options.copyOnSelect ? "Selecting text copies it. " : "Ctrl+Shift+C copies a selection. "}
         Ctrl+Shift+V or right-click pastes, Ctrl+Shift+F searches. Ctrl+click tabs to pick several for Output, MultiExec
         and Compare. Typing into one terminal is not audited; each line MultiExec sends is (the command, the sessions,
-        the tier), and so are opening and closing a terminal, saving its output and typing a vault password.
+        the tier), and so are opening and closing a terminal, saving its output, typing a vault password and every file
+        uploaded or downloaded (its name, size and SHA-256).
       </p>
     </div>
   );
@@ -1080,6 +1385,50 @@ export function TerminalPage({
         onConnect={openQuick}
         onOpenSession={(s) => openSession(s)}
       />
+      {conflict && (
+        <UploadConflictDialog
+          folder={conflict.folder}
+          existing={conflict.existing}
+          total={conflict.staged.files.length}
+          terminal={nameOf(conflict.pane)}
+          onAnswer={async (answer) => {
+            const { pane, staged, folder } = conflict;
+            const id = pane.terminalId;
+            if (!id) throw new Error("The terminal has closed.");
+            const start = await api.filesUpload(id, staged.id, folder, answer);
+            setConflict(null);
+            handleStart(pane, staged, start);
+          }}
+          onCancel={() => {
+            void api.filesUnstage(conflict.staged.id).catch(() => undefined);
+            setConflict(null);
+          }}
+        />
+      )}
+      {fileMenu && (
+        <DropdownMenu open onOpenChange={(open) => !open && setFileMenu(null)}>
+          <DropdownMenuTrigger asChild>
+            <span
+              aria-hidden
+              className="pointer-events-none fixed size-0"
+              style={{ left: fileMenu.x, top: fileMenu.y }}
+            />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-64">
+            <DropdownMenuLabel className="truncate" title={fileMenu.path}>
+              {fileMenu.name} · {formatSize(fileMenu.size)}
+            </DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => void download(fileMenu.pane, [fileMenu.path], "downloads")}>
+              Download to Downloads
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => void download(fileMenu.pane, [fileMenu.path], "choose")}>
+              Download to…
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => void fileMenu.pane.pasteFromClipboard()}>Paste</DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
       {mxApproval && (
         <ApprovalDialog
           key={mxApproval.lineId}
@@ -1158,6 +1507,7 @@ const NO_SNAPSHOT: PaneSnapshot = {
   logPath: null,
   searching: false,
   searchResults: null,
+  folder: null,
 };
 const noSubscribe = () => () => undefined;
 
@@ -1574,7 +1924,12 @@ function PaneView({
 
   return (
     <div
-      className={cn("relative flex h-full min-h-0 flex-col", split && focused && "ring-2 ring-primary/40 ring-inset")}
+      className={cn(
+        "pane-drop relative flex h-full min-h-0 flex-col",
+        split && focused && "ring-2 ring-primary/40 ring-inset",
+      )}
+      // SS-08: files dragged over the window find their pane by this, and it shows where they would go.
+      data-pane-key={pane.key}
       onMouseDownCapture={() => onFocusPane(pane.key)}
     >
       <PaneStatusBar

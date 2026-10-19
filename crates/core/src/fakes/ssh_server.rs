@@ -20,8 +20,16 @@
 //! stdin, `-p` sets the prompt, asked up to three times like the real one; see [`SudoMode`]). For
 //! SS-09's key push it keeps a tiny file system: `umask`, `mkdir [-p]`, `touch` and `chmod` (octal),
 //! with each file's and folder's mode ([`TestSshServer::file`], [`TestSshServer::mode`]).
+//!
+//! SS-08: an SFTP subsystem on a real temp folder ([`TestSshServer::sftp_root`], see [`sftp`]), and,
+//! with [`TestSshServer::with_login_shell`], a login shell the shell probe calls bash or zsh: its
+//! interactive shell then answers Remotely's prompt hook (prints the hook's marker, then OSC 7 before
+//! each prompt) and knows `cd` and `pwd`.
+
+mod sftp;
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -107,6 +115,16 @@ struct State {
     links: Mutex<Vec<Link>>,
     connections: AtomicUsize,
     log: Mutex<Vec<String>>,
+    /// SS-08: the folder SFTP serves, made when the server starts.
+    sftp_root: Mutex<Option<PathBuf>>,
+    /// SS-08: host folders SFTP refuses to write into.
+    sftp_protected: Mutex<Vec<String>>,
+    /// SS-08: each SFTP read and write waits this long.
+    sftp_delay: Mutex<Option<Duration>>,
+    /// SS-08: no SFTP subsystem, like a host without sftp-server.
+    sftp_off: AtomicBool,
+    /// SS-08: what the shell probe says the login shell is.
+    login_shell: Mutex<Option<String>>,
 }
 
 struct Link {
@@ -150,8 +168,70 @@ impl TestSshServer {
             .port();
         let state = Arc::new(State::default());
         *locks::lock(&state.host_key) = Some(generate_key());
+        let root = std::env::temp_dir().join(format!("remotely-sftp-{}", uuid::Uuid::new_v4().simple()));
+        for dir in sftp::SFTP_DIRS {
+            let _ = std::fs::create_dir_all(sftp::local(&root, dir));
+        }
+        *locks::lock(&state.sftp_root) = Some(root);
+        *locks::lock(&state.sftp_protected) = vec!["/etc".into(), "/root".into(), "/usr".into()];
         let accept = tokio::spawn(accept_loop(listener, Arc::clone(&state)));
         Self { port, state, accept }
+    }
+
+    /// SS-08: the folder on this PC that SFTP serves as `/`.
+    pub fn sftp_root(&self) -> PathBuf {
+        locks::lock(&self.state.sftp_root).clone().unwrap_or_default()
+    }
+
+    /// SS-08: where a host path is on this PC.
+    pub fn sftp_path(&self, path: &str) -> PathBuf {
+        sftp::local(&self.sftp_root(), path)
+    }
+
+    /// SS-08: a file SFTP serves (its folders are made too).
+    pub fn with_sftp_file(self, path: &str, content: &[u8]) -> Self {
+        let local = self.sftp_path(path);
+        if let Some(folder) = local.parent() {
+            let _ = std::fs::create_dir_all(folder);
+        }
+        std::fs::write(&local, content).unwrap_or_else(|err| panic!("can't write {}: {err}", local.display()));
+        self
+    }
+
+    /// SS-08: an empty folder SFTP serves.
+    pub fn with_sftp_dir(self, path: &str) -> Self {
+        let _ = std::fs::create_dir_all(self.sftp_path(path));
+        self
+    }
+
+    /// SS-08: a file as SFTP left it.
+    pub fn sftp_file(&self, path: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.sftp_path(path)).ok()
+    }
+
+    /// SS-08: SFTP refuses to write into this folder (and below), like one the user may not write to.
+    pub fn with_protected(self, folder: &str) -> Self {
+        locks::lock(&self.state.sftp_protected).push(folder.into());
+        self
+    }
+
+    /// SS-08: each SFTP read and write waits this long, so a transfer takes a while.
+    pub fn with_sftp_delay(self, delay: Duration) -> Self {
+        *locks::lock(&self.state.sftp_delay) = Some(delay);
+        self
+    }
+
+    /// SS-08: a host without an SFTP server.
+    pub fn without_sftp(self) -> Self {
+        self.state.sftp_off.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// SS-08: the shell probe calls the login shell this (`bash`, `zsh`); its interactive shell answers
+    /// Remotely's prompt hook and reports its folder with OSC 7 from then on.
+    pub fn with_login_shell(self, shell: &str) -> Self {
+        *locks::lock(&self.state.login_shell) = Some(shell.into());
+        self
     }
 
     pub fn port(&self) -> u16 {
@@ -293,6 +373,9 @@ impl Drop for TestSshServer {
     fn drop(&mut self) {
         self.accept.abort();
         self.drop_connections();
+        if let Some(root) = locks::lock(&self.state.sftp_root).take() {
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 }
 
@@ -329,6 +412,10 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             full_screen: HashMap::new(),
             lines: HashMap::new(),
             execs: HashMap::new(),
+            unclaimed: HashMap::new(),
+            sftp: HashSet::new(),
+            folders: HashMap::new(),
+            hooked: HashSet::new(),
         };
         let session = tokio::spawn(async move {
             if let Ok(running) = server::run_stream(config, server_end, handler).await {
@@ -378,6 +465,15 @@ struct ServerHandler {
     asking: HashMap<ChannelId, (Vec<u8>, u8)>,
     /// SS-10: shell channels where the full-screen `top` runs, and the keys it got so far.
     full_screen: HashMap<ChannelId, Vec<u8>>,
+    /// SS-08: channels opened but not asked for anything yet; the one asking for SFTP takes its own.
+    /// Dropped at the first other request, so their data is never queued unread.
+    unclaimed: HashMap<ChannelId, Channel<Msg>>,
+    /// SS-08: channels running SFTP: their data is not shell input.
+    sftp: HashSet<ChannelId>,
+    /// SS-08: each interactive shell's folder (`cd`).
+    folders: HashMap<ChannelId, String>,
+    /// SS-08: shells that ran Remotely's prompt hook, and so print OSC 7 before each prompt.
+    hooked: HashSet<ChannelId>,
 }
 
 impl ServerHandler {
@@ -398,10 +494,59 @@ impl ServerHandler {
         }
     }
 
+    fn home(&self) -> String {
+        if self.user == "root" {
+            "/root".to_owned()
+        } else {
+            format!("/home/{}", self.user)
+        }
+    }
+
+    /// SS-08: the interactive shell's folder.
+    fn folder(&self, channel: ChannelId) -> String {
+        self.folders.get(&channel).cloned().unwrap_or_else(|| self.home())
+    }
+
+    /// The prompt: `$ `, after OSC 7 with the folder once the prompt hook ran (SS-08).
+    fn prompt(&self, channel: ChannelId) -> Vec<u8> {
+        if !self.hooked.contains(&channel) {
+            return b"$ ".to_vec();
+        }
+        let host = locks::lock(&self.state.hostname)
+            .clone()
+            .unwrap_or_else(|| "test-host".into());
+        let path = self.folder(channel).replace('%', "%25");
+        format!("\x1b]7;file://{host}{path}\x1b\\$ ").into_bytes()
+    }
+
     fn run_line(&mut self, channel: ChannelId, line: &str, session: &mut Session) -> Result<(), russh::Error> {
-        self.state.note(format!("line {line}"));
+        let hook = line.trim_start().starts_with("__remotely_cwd()");
+        // The hook is logged by name only: a test checks it never shows, not what it says.
+        self.state.note(if hook {
+            "line [prompt hook]".to_owned()
+        } else {
+            format!("line {line}")
+        });
         let mut words = line.split_whitespace();
         match words.next() {
+            // SS-08: Remotely's prompt hook, in a shell the probe called bash or zsh: it prints its
+            // marker, and OSC 7 comes before each prompt from now on.
+            Some(_) if hook && locks::lock(&self.state.login_shell).is_some() => {
+                let token = line.split_whitespace().last().unwrap_or_default();
+                session.data(channel, format!("\x1b]7777;remotely-{token}\x07").into_bytes())?;
+                self.hooked.insert(channel);
+            }
+            Some("cd") => {
+                let home = self.home();
+                let to = crate::terminal::files::resolve(&self.folder(channel), &home, words.next().unwrap_or("~"));
+                let root = locks::lock(&self.state.sftp_root).clone().unwrap_or_default();
+                if sftp::local(&root, &to).is_dir() {
+                    self.folders.insert(channel, to);
+                } else {
+                    session.data(channel, format!("cd: no such file or directory: {to}\r\n").into_bytes())?;
+                }
+            }
+            Some("pwd") => session.data(channel, format!("{}\r\n", self.folder(channel)).into_bytes())?,
             Some("exit") => {
                 let code = words.next().and_then(|c| c.parse().ok()).unwrap_or(0);
                 session.data(channel, b"logout\r\n".to_vec())?;
@@ -483,7 +628,7 @@ impl ServerHandler {
             Some(other) => session.data(channel, format!("{other}: command not found\r\n").into_bytes())?,
             None => {}
         }
-        session.data(channel, b"$ ".to_vec())?;
+        session.data(channel, self.prompt(channel))?;
         Ok(())
     }
 }
@@ -582,8 +727,31 @@ impl server::Handler for ServerHandler {
         _session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.lines.insert(channel.id(), Vec::new());
+        self.unclaimed.insert(channel.id(), channel);
         reply.accept().await;
         Ok(())
+    }
+
+    /// SS-08: SFTP on its own channel, served from the temp folder.
+    async fn subsystem_request(
+        &mut self,
+        channel: ChannelId,
+        name: &str,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.state.note(format!("subsystem {name}"));
+        let stream = self.unclaimed.remove(&channel);
+        let root = locks::lock(&self.state.sftp_root).clone();
+        match (name, stream, root) {
+            ("sftp", Some(stream), Some(root)) if !self.state.sftp_off.load(Ordering::SeqCst) => {
+                self.sftp.insert(channel);
+                session.channel_success(channel)?;
+                let server = sftp::SftpServer::new(Arc::clone(&self.state), root, &self.user);
+                russh_sftp::server::run(stream.into_stream(), server).await;
+                Ok(())
+            }
+            _ => session.channel_failure(channel),
+        }
     }
 
     async fn pty_request(
@@ -597,11 +765,13 @@ impl server::Handler for ServerHandler {
         _: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.unclaimed.remove(&channel);
         self.state.note(format!("pty {term} {cols}x{rows}"));
         session.channel_success(channel)
     }
 
     async fn shell_request(&mut self, channel: ChannelId, session: &mut Session) -> Result<(), Self::Error> {
+        self.unclaimed.remove(&channel);
         self.state.note("shell");
         session.channel_success(channel)?;
         session.data(channel, format!("Welcome, {}\r\n$ ", self.user).into_bytes())
@@ -626,6 +796,7 @@ impl server::Handler for ServerHandler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        self.unclaimed.remove(&channel);
         let command = String::from_utf8_lossy(data).into_owned();
         self.state.note(format!("exec {command}"));
         self.execs.insert(channel, (command, Vec::new()));
@@ -641,7 +812,15 @@ impl server::Handler for ServerHandler {
             tokio::spawn(async move {
                 let delay = *locks::lock(&state.exec_delay);
                 let mut shell = ToyShell::new(&state, &user, stdin);
-                let status = shell.run(&command);
+                // SS-08: the shell probe beside each new terminal names the login shell, if one is set.
+                let login = locks::lock(&state.login_shell).clone();
+                let status = match login {
+                    Some(name) if command == crate::adapters::remote::SHELL_PROBE => {
+                        shell.print(&format!("{name}\n"));
+                        0
+                    }
+                    _ => shell.run(&command),
+                };
                 if let Some(delay) = delay {
                     tokio::time::sleep(delay).await;
                 }
@@ -664,7 +843,19 @@ impl server::Handler for ServerHandler {
         Ok(())
     }
 
+    async fn channel_close(&mut self, channel: ChannelId, _: &mut Session) -> Result<(), Self::Error> {
+        self.unclaimed.remove(&channel);
+        self.sftp.remove(&channel);
+        self.folders.remove(&channel);
+        self.hooked.remove(&channel);
+        Ok(())
+    }
+
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
+        // SS-08: SFTP reads its own channel.
+        if self.sftp.contains(&channel) {
+            return Ok(());
+        }
         if let Some((_, stdin)) = self.execs.get_mut(&channel) {
             stdin.extend_from_slice(data);
             return Ok(());

@@ -35,8 +35,13 @@
 //! * SS-10 ([`multiexec`]): what is typed into one terminal goes to several at once. Each pane shares
 //!   what its screen shows ([`PaneScreen`]: connected, the cursor's line, a full-screen program), and
 //!   whether text was typed on its line outside MultiExec, so MultiExec knows what each shell holds.
+//! * SS-08 ([`files`]): SFTP on each pane's own connection: the "Files here" drawer, downloads and
+//!   uploads (a command on the bus). bash and zsh report their folder through a prompt hook typed
+//!   invisibly on connect ([`folder`]), so the drawer and uploads follow the shell's folder.
 
 pub mod activity;
+pub mod files;
+pub mod folder;
 pub mod log;
 pub mod multiexec;
 pub mod output;
@@ -58,14 +63,16 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use self::activity::{is_password_prompt, FinishedHow, RunWatch, WatchConfig};
+use self::files::{Transfers, UploadReport, UploadRun};
+use self::folder::{FolderInfo, FolderTracking, FolderWatch, PromptHook};
 use self::log::{LogMessage, SessionLog};
 use self::output::{SaveLayout, SavedOutput, TerminalText};
 use self::quick::{QuickConnect, QuickOpened};
 use crate::adapters::exec_output::Scrubber;
 use crate::adapters::network::{ip_literal, NetworkAdapter};
 use crate::adapters::remote::{
-    AgentSource, AuthMethod, ConnectOptions, Credentials, HostKeyVerifier, Prompter, PtySize, RemoteAdapter,
-    SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
+    AgentSource, AuthMethod, ConnectOptions, Credentials, HostKeyVerifier, PromptShell, Prompter, PtySize,
+    RemoteAdapter, RemoteFiles, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
 };
 use crate::domain::{Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -413,6 +420,10 @@ pub enum TerminalEvent {
         after_secs: u64,
         how: FinishedHow,
     },
+    /// SS-08: the shell's folder, or how far it is known (each new connection starts over).
+    Folder {
+        folder: FolderInfo,
+    },
 }
 
 /// SS-10: what a pane's screen shows now, as far as its output tells.
@@ -444,11 +455,14 @@ pub struct PaneInfo {
     pub dirty: bool,
 }
 
-/// SS-10: what the job runner needs from the open terminals to finish a MultiExec line.
+/// What the job runner does in open terminals: SS-10 sends a MultiExec line's held Enter, SS-08
+/// uploads files over a terminal's SFTP channel.
 #[async_trait]
-pub trait TerminalKeys: Send + Sync {
+pub trait TerminalActions: Send + Sync {
     /// Sends keys to the terminal's live shell. Fails when it has closed or is not connected.
     async fn send(&self, terminal_id: Uuid, keys: &[u8]) -> Result<()>;
+    /// Uploads the files of a [`crate::command_bus::Command::FileUpload`], each audited as it lands.
+    async fn upload(&self, run: UploadRun<'_>, cancel: &CancellationToken) -> Result<UploadReport>;
 }
 
 /// A pane's connection, from [`Terminals::open`]. Input goes through [`Terminals`] by id.
@@ -498,6 +512,12 @@ struct Control {
     screen: Mutex<PaneScreen>,
     /// SS-10: text typed on the line outside MultiExec since the last Enter or Ctrl+C.
     dirty: AtomicBool,
+    /// SS-08: the live connection's files (SFTP), while connected.
+    files: Mutex<Option<Arc<dyn RemoteFiles>>>,
+    /// SS-08: the shell's folder.
+    folder: Mutex<FolderInfo>,
+    /// SS-08: the login's home folder on this connection, once asked.
+    home: Mutex<Option<String>>,
 }
 
 impl Control {
@@ -548,6 +568,8 @@ struct Inner {
     tuning: Mutex<TerminalTuning>,
     /// QL-07: from the settings; open panes follow a change at once.
     watch: Mutex<WatchConfig>,
+    /// SS-08: every pane's file transfers.
+    transfers: Transfers,
 }
 
 /// A pane about to open.
@@ -588,6 +610,7 @@ impl Terminals {
                 tasks: Mutex::default(),
                 tuning: Mutex::new(TerminalTuning::default()),
                 watch: Mutex::new(TerminalSettings::default().watch()),
+                transfers: Transfers::default(),
             }),
         }
     }
@@ -804,6 +827,9 @@ impl Terminals {
             typed: Mutex::default(),
             screen: Mutex::default(),
             dirty: AtomicBool::new(false),
+            files: Mutex::default(),
+            folder: Mutex::default(),
+            home: Mutex::default(),
         });
         audit(
             &self.inner.store,
@@ -1267,9 +1293,13 @@ async fn remember_typed(control: &Control, secret: &SecretString) -> bool {
 }
 
 #[async_trait]
-impl TerminalKeys for Terminals {
+impl TerminalActions for Terminals {
     async fn send(&self, terminal_id: Uuid, keys: &[u8]) -> Result<()> {
         self.send_keys(terminal_id, keys).await
+    }
+
+    async fn upload(&self, run: UploadRun<'_>, cancel: &CancellationToken) -> Result<UploadReport> {
+        self.run_upload(run, cancel).await
     }
 }
 
@@ -1401,6 +1431,22 @@ const DIM: &str = "2";
 const YELLOW: &str = "33";
 const RED: &str = "31";
 
+/// SS-01: how long a session's startup command waits for the SS-08 prompt hook at most.
+const STARTUP_WAIT: Duration = Duration::from_secs(3);
+
+/// A live shell, as the pump keeps it.
+struct Live {
+    input: mpsc::Sender<ShellInput>,
+    /// QL-06, QL-07, SS-10: what the shell shows and whether a command runs.
+    watch: RunWatch,
+    /// SS-08: the prompt hook, and the folders the shell reports.
+    hook: PromptHook,
+    folders: FolderWatch,
+    /// SS-01: the startup command's lines, until typed.
+    startup: Vec<String>,
+    startup_until: Instant,
+}
+
 /// What ended a live connection.
 enum Pump {
     Closed,
@@ -1480,12 +1526,12 @@ impl Pane {
             };
             let Some(connected) = connected else { break };
             let wait = match connected {
-                Ok(shell) => {
+                Ok((shell, startup)) => {
                     connections += 1;
                     attempt = 0;
                     last_error = None;
                     self.status(TerminalStatus::Connected).await;
-                    match self.pump(shell).await {
+                    match self.pump(shell, startup).await {
                         Pump::Closed => break,
                         Pump::Reconnect => continue,
                         Pump::Ended(ShellEnd::Exited { status }) => {
@@ -1603,8 +1649,10 @@ impl Pane {
         }
     }
 
-    /// One connection: the session as saved now, its secrets from the vault, then the adapter.
-    async fn connect(&mut self) -> Result<ShellHandle> {
+    /// One connection: the session as saved now, its secrets from the vault, then the adapter. Also
+    /// returns the session's startup command (SS-01), which the pump types once the SS-08 prompt hook
+    /// is out of the way.
+    async fn connect(&mut self) -> Result<(ShellHandle, Vec<String>)> {
         let spec = self.spec().await?;
         if let Some(jump) = &spec.jump {
             return Err(CoreError::JumpHostUnsupported {
@@ -1667,19 +1715,16 @@ impl Pane {
                 })
                 .await;
         }
-        // SS-01: the session's startup command, typed into each new shell.
-        if let Some(command) = &spec.startup_command {
-            for line in command.lines() {
-                let _ = shell
-                    .input
-                    .send(ShellInput::Data(format!("{line}\r").into_bytes()))
-                    .await;
-            }
-        }
+        // SS-01: the session's startup command, typed into each new shell by the pump.
+        let startup = spec
+            .startup_command
+            .as_deref()
+            .map(|command| command.lines().map(str::to_owned).collect())
+            .unwrap_or_default();
         if let Some(ip) = shell.peer_ip {
             self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
         }
-        Ok(shell)
+        Ok((shell, startup))
     }
 
     /// QL-03: fills in what the session lacks, beside the connection so a slow DNS server never
@@ -1765,48 +1810,157 @@ impl Pane {
             .await;
     }
 
+    /// SS-08: changes the shell's folder as the UI knows it, and tells it when that changed.
+    async fn update_folder(&self, change: impl FnOnce(&mut FolderInfo)) {
+        let folder = {
+            let mut folder = locks::lock(&self.control.folder);
+            let before = folder.clone();
+            change(&mut folder);
+            if *folder == before {
+                return;
+            }
+            folder.clone()
+        };
+        let _ = self.events.send(TerminalEvent::Folder { folder }).await;
+    }
+
+    /// SS-08: how far the folder is known, from the hook, unless the shell reported one already.
+    async fn sync_folder(&self, hook: &PromptHook) {
+        let tracking = hook.tracking();
+        self.update_folder(|folder| {
+            if folder.path.is_none() {
+                folder.tracking = tracking;
+            }
+        })
+        .await;
+    }
+
+    /// Output the user sees: the session log, QL-07's watch, MultiExec's screen, the folder the shell
+    /// reports (SS-08), then the pane. False when the pane has gone away.
+    async fn pass(&self, bytes: Vec<u8>, live: &mut Live) -> bool {
+        if bytes.is_empty() {
+            return true;
+        }
+        self.tee(&bytes).await;
+        let done = live.watch.output(&bytes, Instant::now());
+        self.show_screen(&live.watch);
+        if let Some(path) = live.folders.feed(&bytes) {
+            self.update_folder(|folder| {
+                folder.path = Some(path);
+                folder.tracking = FolderTracking::Following;
+            })
+            .await;
+        }
+        if self.output.send(bytes).await.is_err() {
+            return false;
+        }
+        if let Some(done) = done {
+            self.finished(done).await;
+        }
+        true
+    }
+
     /// Moves bytes between the pane and the shell until one side ends.
-    async fn pump(&mut self, shell: ShellHandle) -> Pump {
+    async fn pump(&mut self, shell: ShellHandle, startup: Vec<String>) -> Pump {
         let ShellHandle {
             input: shell_input,
             output: mut shell_output,
             peer_ip: _,
             hostname: mut hostname_answer,
+            shell: shell_answer,
+            files,
         } = shell;
-        // QL-06, QL-07: a new shell, watched from its first output.
-        let watch = RunWatch::new(self.watch_config());
+        // SS-08: this connection's files; the folder is learnt again.
+        *locks::lock(&self.control.files) = Some(files);
+        locks::lock(&self.control.home).take();
+        self.update_folder(|folder| *folder = FolderInfo::default()).await;
+        let now = Instant::now();
+        let live = Live {
+            input: shell_input,
+            // QL-06, QL-07: a new shell, watched from its first output.
+            watch: RunWatch::new(self.watch_config()),
+            hook: PromptHook::new(&Uuid::new_v4().simple().to_string(), now),
+            folders: FolderWatch::new(),
+            startup,
+            startup_until: now + STARTUP_WAIT,
+        };
         // SS-10: a new shell has nothing typed on its line yet.
         self.control.dirty.store(false, Ordering::SeqCst);
-        self.show_screen(&watch);
+        self.show_screen(&live.watch);
         let end = self
-            .pump_shell(shell_input, &mut shell_output, &mut hostname_answer, watch)
+            .pump_shell(live, &mut shell_output, &mut hostname_answer, shell_answer)
             .await;
         *locks::lock(&self.control.screen) = PaneScreen::default();
+        locks::lock(&self.control.files).take();
         end
+    }
+
+    /// SS-01: types the session's startup command once the SS-08 hook is set up or given up (or after
+    /// [`STARTUP_WAIT`]), never while the hook is out and unanswered.
+    async fn type_startup(&self, live: &mut Live) -> bool {
+        if live.startup.is_empty() || live.hook.typing() {
+            return true;
+        }
+        if !live.hook.settled() && Instant::now() < live.startup_until {
+            return true;
+        }
+        // Like typing: the hook gives up or shows the prompt it held.
+        let shown = live.hook.input();
+        if !self.pass(shown, live).await {
+            return false;
+        }
+        for line in std::mem::take(&mut live.startup) {
+            let _ = live
+                .input
+                .send(ShellInput::Data(format!("{line}\r").into_bytes()))
+                .await;
+        }
+        self.sync_folder(&live.hook).await;
+        true
     }
 
     /// The loop of [`Pane::pump`].
     async fn pump_shell(
         &mut self,
-        shell_input: mpsc::Sender<ShellInput>,
+        mut live: Live,
         shell_output: &mut mpsc::Receiver<ShellOutput>,
         hostname_answer: &mut oneshot::Receiver<Option<String>>,
-        mut watch: RunWatch,
+        mut shell_answer: oneshot::Receiver<Option<PromptShell>>,
     ) -> Pump {
         let mut hostname_pending = true;
+        let mut shell_pending = true;
         let cancel = self.control.cancel.clone();
         loop {
-            watch.set_config(self.watch_config());
-            let deadline = watch.deadline();
+            if !self.type_startup(&mut live).await {
+                let _ = live.input.send(ShellInput::Close).await;
+                return Pump::Closed;
+            }
+            live.watch.set_config(self.watch_config());
+            let startup_due = (!live.startup.is_empty()).then_some(live.startup_until);
+            let deadline = [live.watch.deadline(), live.hook.deadline(), startup_due]
+                .into_iter()
+                .flatten()
+                .min();
             tokio::select! {
                 () = cancel.cancelled() => {
-                    let _ = shell_input.send(ShellInput::Close).await;
+                    let _ = live.input.send(ShellInput::Close).await;
                     return Pump::Closed;
                 }
                 () = sleep_until(deadline), if deadline.is_some() => {
-                    if let Some(done) = watch.tick(Instant::now()) {
+                    let now = Instant::now();
+                    if let Some(done) = live.watch.tick(now) {
                         self.finished(done).await;
                     }
+                    // SS-08: the hook goes out at the first quiet prompt; what it held is shown.
+                    let tick = live.hook.tick(now, live.watch.line(), live.watch.alternate());
+                    if let Some(hook) = tick.type_now {
+                        let _ = live.input.send(ShellInput::Data(hook)).await;
+                    }
+                    if !self.pass(tick.show, &mut live).await {
+                        let _ = live.input.send(ShellInput::Close).await;
+                        return Pump::Closed;
+                    }
+                    self.sync_folder(&live.hook).await;
                 }
                 answer = &mut *hostname_answer, if hostname_pending => {
                     hostname_pending = false;
@@ -1817,55 +1971,69 @@ impl Pane {
                     self.control.hostname_answered.store(true, std::sync::atomic::Ordering::SeqCst);
                     keep_facts(&self.inner.store, &self.ctx, &self.control).await;
                 }
-                msg = self.input.recv() => match msg {
-                    None | Some(TerminalInput::Close) => {
-                        let _ = shell_input.send(ShellInput::Close).await;
-                        return Pump::Closed;
-                    }
-                    Some(TerminalInput::Data(bytes) | TerminalInput::Keys(bytes)) => {
-                        // A settings change while waiting applies to this Enter already.
-                        watch.set_config(self.watch_config());
-                        watch.input(&bytes, Instant::now());
-                        let _ = shell_input.send(ShellInput::Data(bytes)).await;
-                    }
-                    Some(TerminalInput::TypeSecret { secret, force, reply, until }) => {
-                        if Instant::now() > until {
-                            continue;
-                        }
-                        // Checked here, where the output arrives, so the prompt can't change in between.
-                        let prompt = is_password_prompt(watch.line());
-                        if !prompt && !force {
-                            let _ = reply.send(Err(CoreError::NoPasswordPrompt));
-                            continue;
-                        }
-                        let mut bytes = Zeroizing::new(secret.expose().as_bytes().to_vec());
-                        bytes.push(b'\r');
-                        let _ = shell_input.send(ShellInput::Data(bytes.to_vec())).await;
-                        watch.input(b"\r", Instant::now());
-                        let _ = reply.send(Ok(prompt));
-                    }
-                    Some(TerminalInput::Resize { cols, rows }) => {
-                        self.size = PtySize { cols, rows };
-                        let _ = shell_input.send(ShellInput::Resize { cols, rows }).await;
-                    }
-                    Some(TerminalInput::Reconnect) => {
-                        let _ = shell_input.send(ShellInput::Close).await;
-                        self.say(notice(DIM, "Reconnecting")).await;
-                        return Pump::Reconnect;
-                    }
-                },
-                out = shell_output.recv() => match out {
-                    Some(ShellOutput::Data(bytes)) => {
-                        self.tee(&bytes).await;
-                        let done = watch.output(&bytes, Instant::now());
-                        self.show_screen(&watch);
-                        if self.output.send(bytes).await.is_err() {
-                            let _ = shell_input.send(ShellInput::Close).await;
+                answer = &mut shell_answer, if shell_pending => {
+                    shell_pending = false;
+                    live.hook.probe(answer.ok().flatten());
+                    self.sync_folder(&live.hook).await;
+                }
+                msg = self.input.recv() => {
+                    // SS-08: the user's keys never mix with the hook: before it went out it is given up,
+                    // and a prompt it held is shown first.
+                    if matches!(msg, Some(TerminalInput::Data(_) | TerminalInput::Keys(_) | TerminalInput::TypeSecret { .. })) {
+                        let shown = live.hook.input();
+                        if !self.pass(shown, &mut live).await {
+                            let _ = live.input.send(ShellInput::Close).await;
                             return Pump::Closed;
                         }
-                        if let Some(done) = done {
-                            self.finished(done).await;
+                        self.sync_folder(&live.hook).await;
+                    }
+                    match msg {
+                        None | Some(TerminalInput::Close) => {
+                            let _ = live.input.send(ShellInput::Close).await;
+                            return Pump::Closed;
                         }
+                        Some(TerminalInput::Data(bytes) | TerminalInput::Keys(bytes)) => {
+                            // A settings change while waiting applies to this Enter already.
+                            live.watch.set_config(self.watch_config());
+                            live.watch.input(&bytes, Instant::now());
+                            let _ = live.input.send(ShellInput::Data(bytes)).await;
+                        }
+                        Some(TerminalInput::TypeSecret { secret, force, reply, until }) => {
+                            if Instant::now() > until {
+                                continue;
+                            }
+                            // Checked here, where the output arrives, so the prompt can't change in between.
+                            let prompt = is_password_prompt(live.watch.line());
+                            if !prompt && !force {
+                                let _ = reply.send(Err(CoreError::NoPasswordPrompt));
+                                continue;
+                            }
+                            let mut bytes = Zeroizing::new(secret.expose().as_bytes().to_vec());
+                            bytes.push(b'\r');
+                            let _ = live.input.send(ShellInput::Data(bytes.to_vec())).await;
+                            live.watch.input(b"\r", Instant::now());
+                            let _ = reply.send(Ok(prompt));
+                        }
+                        Some(TerminalInput::Resize { cols, rows }) => {
+                            self.size = PtySize { cols, rows };
+                            let _ = live.input.send(ShellInput::Resize { cols, rows }).await;
+                        }
+                        Some(TerminalInput::Reconnect) => {
+                            let _ = live.input.send(ShellInput::Close).await;
+                            self.say(notice(DIM, "Reconnecting")).await;
+                            return Pump::Reconnect;
+                        }
+                    }
+                }
+                out = shell_output.recv() => match out {
+                    Some(ShellOutput::Data(bytes)) => {
+                        // SS-08: the hook's own echo stays hidden.
+                        let shown = live.hook.output(&bytes, Instant::now());
+                        if !self.pass(shown, &mut live).await {
+                            let _ = live.input.send(ShellInput::Close).await;
+                            return Pump::Closed;
+                        }
+                        self.sync_folder(&live.hook).await;
                     }
                     Some(ShellOutput::Closed(end)) => return Pump::Ended(end),
                     None => return Pump::Ended(ShellEnd::Lost { reason: "the connection was lost".into() }),

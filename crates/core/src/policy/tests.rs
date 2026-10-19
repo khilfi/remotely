@@ -1676,3 +1676,137 @@ fn multiexec_summaries_name_the_line_without_secrets() {
     let summary = line("mysql --password=hunter2-secret", false, &t).summary(3);
     assert!(!summary.contains("hunter2-secret"), "{summary}");
 }
+
+// ---- SS-08: uploads ------------------------------------------------------------------------------
+
+fn upload(files: &[(&str, bool)], targets: &[Target]) -> Command {
+    Command::FileUpload {
+        targets: refs(targets),
+        folder: "/srv/www".into(),
+        files: files
+            .iter()
+            .map(|(name, replace)| crate::command_bus::UploadFile {
+                local_path: format!(r"C:\Users\alice\Documents\{name}"),
+                name: (*name).into(),
+                size: 1500,
+                replace: *replace,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn uploading_new_files_is_low_and_runs_without_asking() {
+    let t = vec![terminal(Environment::Lab)];
+    let d = engine().evaluate(&upload(&[("index.html", false), ("app.js", false)], &t), &t);
+    assert_eq!(d.action, ActionKind::FileUpload);
+    assert_eq!(d.tier, Tier::Low);
+    assert!(d.steps.is_empty());
+}
+
+#[test]
+fn replacing_a_file_by_uploading_asks_for_a_confirm() {
+    let t = vec![terminal(Environment::Lab)];
+    let d = engine().evaluate(&upload(&[("index.html", true), ("app.js", false)], &t), &t);
+    assert_eq!(d.action, ActionKind::FileReplace);
+    assert_eq!(d.tier, Tier::Medium);
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+}
+
+#[test]
+fn a_prod_terminal_raises_uploads_one_tier() {
+    let t = vec![terminal(Environment::Prod)];
+    let d = engine().evaluate(&upload(&[("index.html", false)], &t), &t);
+    assert_eq!(d.tier, Tier::Medium, "a new file on Prod: one confirm");
+    assert!(d.reasons.iter().any(|r| r.contains("Prod")), "{:?}", d.reasons);
+    let d = engine().evaluate(&upload(&[("index.html", true)], &t), &t);
+    assert_eq!(d.tier, Tier::High, "replacing a file on Prod: the full approval");
+    assert!(d.steps.contains(&ApprovalStep::Reason));
+    assert!(!d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })));
+}
+
+#[test]
+fn replacing_files_can_never_be_set_below_a_confirm() {
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(ActionKind::FileReplace, TierRule::same(Tier::Low));
+    let err = PolicyEngine::new(rules).err().expect("rejected");
+    assert!(err.to_string().contains("always asks"), "{err}");
+    // Raising it is fine, and so is making plain uploads ask.
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(ActionKind::FileReplace, TierRule::same(Tier::High));
+    rules.tiers.insert(ActionKind::FileUpload, TierRule::same(Tier::Medium));
+    let e = PolicyEngine::new(rules).unwrap();
+    let t = vec![terminal(Environment::Lab)];
+    assert_eq!(e.evaluate(&upload(&[("a", false)], &t), &t).tier, Tier::Medium);
+    assert_eq!(e.evaluate(&upload(&[("a", true)], &t), &t).tier, Tier::High);
+}
+
+#[test]
+fn uploads_go_to_one_open_terminal_with_plain_names() {
+    let t = vec![terminal(Environment::Lab)];
+    assert!(upload(&[("a.txt", false)], &t).validate().is_ok());
+    let two = terminals(2);
+    assert!(
+        upload(&[("a.txt", false)], &two).validate().is_err(),
+        "one terminal at a time"
+    );
+    let hosts = vec![host(Environment::Lab)];
+    assert!(
+        upload(&[("a.txt", false)], &hosts).validate().is_err(),
+        "through a terminal"
+    );
+    for bad in ["", "..", "a/b", "line\nbreak"] {
+        assert!(upload(&[(bad, false)], &t).validate().is_err(), "{bad:?}");
+    }
+    assert!(upload(&[("a", false), ("a", true)], &t).validate().is_err(), "twice");
+    assert!(upload(&[], &t).validate().is_err(), "nothing to upload");
+    let Command::FileUpload { targets, files, .. } = upload(&[("a", false)], &t) else {
+        unreachable!()
+    };
+    let relative = Command::FileUpload {
+        targets: targets.clone(),
+        folder: "srv/www".into(),
+        files: files.clone(),
+    };
+    assert!(relative.validate().is_err(), "the host folder must be absolute");
+    let mut local = files;
+    local[0].local_path = r"Documents\a".into();
+    let local = Command::FileUpload {
+        targets,
+        folder: "/srv".into(),
+        files: local,
+    };
+    assert!(local.validate().is_err(), "the PC's path must be absolute");
+}
+
+#[test]
+fn upload_summaries_name_the_files_the_size_and_what_they_replace() {
+    let t = vec![terminal(Environment::Lab)];
+    assert_eq!(
+        upload(&[("index.html", false)], &t).summary(1),
+        "Upload 'index.html' (1.5 KB) to /srv/www"
+    );
+    assert_eq!(
+        upload(&[("index.html", true)], &t).summary(1),
+        "Upload 'index.html' (1.5 KB) to /srv/www, replacing the file there"
+    );
+    assert_eq!(
+        upload(&[("a", true), ("b", false), ("c", true)], &t).summary(1),
+        "Upload 3 files (4.5 KB) to /srv/www, replacing 2 files there"
+    );
+    assert!(
+        upload(&[("a", false)], &t).with_targets(refs(&t)).is_some(),
+        "a failed upload can be retried"
+    );
+    assert!(!safety_snapshot_applies(&upload(&[("a", true)], &t)));
+}
+
+#[test]
+fn sizes_read_naturally() {
+    use crate::command_bus::human_size;
+    assert_eq!(human_size(0), "0 B");
+    assert_eq!(human_size(999), "999 B");
+    assert_eq!(human_size(1500), "1.5 KB");
+    assert_eq!(human_size(25_000_000), "25 MB");
+    assert_eq!(human_size(3_200_000_000), "3.2 GB");
+}

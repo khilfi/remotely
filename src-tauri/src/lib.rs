@@ -1,9 +1,10 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`] and
-//! [`clipboard`], never vmrun or SSH directly.
+//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
+//! [`files`] and [`clipboard`], never vmrun or SSH directly.
 
 mod clipboard;
 mod command_panel;
+mod files;
 mod ipc;
 mod multiexec;
 mod terminal;
@@ -16,7 +17,7 @@ use std::sync::Arc;
 use remotely_core::adapters::updater::{DisabledUpdater, UpdaterAdapter};
 use remotely_core::{Core, CoreConfig};
 use tauri::utils::config::AppDirectoriesOverride;
-use tauri::{Emitter, Manager};
+use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 
@@ -135,6 +136,21 @@ pub fn run() {
                 }
             });
 
+            // SS-08: file transfers (queued, progress, done) -> UI.
+            let mut transfers = core.terminals.subscribe_transfers();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                loop {
+                    match transfers.recv().await {
+                        Ok(transfer) => {
+                            let _ = handle.emit("files://transfer", &transfer);
+                        }
+                        Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed transfer events"),
+                        Err(RecvError::Closed) => break,
+                    }
+                }
+            });
+
             // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
             let reachability = Arc::clone(&core.reachability);
             tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -154,6 +170,14 @@ pub fn run() {
 
             app.manage(AppState { core });
             Ok(())
+        })
+        // SS-08: files dropped on the window are staged in Rust; the UI only learns where they fell.
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, position }) = event {
+                if !paths.is_empty() {
+                    files::dropped(window, paths, *position);
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             ipc::app_info,
@@ -286,6 +310,17 @@ pub fn run() {
             command_panel::terminal_type_secret,
             command_panel::notify_command_finished,
             clipboard::clipboard_read_text,
+            files::files_folder,
+            files::files_list,
+            files::files_look_up,
+            files::files_pick_upload,
+            files::files_upload,
+            files::files_unstage,
+            files::files_download,
+            files::files_transfers,
+            files::files_cancel,
+            files::files_retry,
+            files::files_open_folder,
         ])
         .build(context);
 

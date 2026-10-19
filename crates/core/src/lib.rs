@@ -22,6 +22,8 @@
 //!     vault passwords typed at a prompt (QL-06), long runs finishing (QL-07)
 //!     MultiExec (SS-10): typed into several at once; each line's Enter is a command on the bus, and the
 //!     job runner sends it to the terminals
+//!     files (SS-08): SFTP on each terminal's connection; the shell's folder (OSC 7); downloads are
+//!     audited reads, uploads are commands on the bus that the job runner carries out in the terminal
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
@@ -87,6 +89,7 @@ use snapshots::SnapshotReader;
 use snippets::Snippets;
 use ssh_keys::KeyManager;
 use store::{NewAuditEntry, Store};
+use terminal::files::FileTransfers;
 use terminal::multiexec::MultiExec;
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use transfer::Transfer;
@@ -155,6 +158,8 @@ pub struct Core {
     pub terminals: Terminals,
     /// SS-10: what is typed into one terminal goes to several; each line's Enter goes through the bus.
     pub multiexec: MultiExec,
+    /// SS-08: uploads (commands on the bus) and retries; listing and downloads are on [`Core::terminals`].
+    pub files: FileTransfers,
     /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
     /// classified by the bus's policy engine.
     pub snippets: Snippets,
@@ -272,6 +277,7 @@ impl Core {
         let keys = KeyManager::new(store.clone(), Arc::clone(&adapters.vault));
         let snippets = Snippets::new(store.clone(), bus.policy());
         let multiexec = MultiExec::new(ctx, terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
+        let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         Ok(Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
@@ -286,6 +292,7 @@ impl Core {
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
             terminals,
             multiexec,
+            files,
             snippets,
             reachability,
             metrics,

@@ -88,3 +88,19 @@ export function connectedReason(input: { open: boolean; connected: boolean }): s
   if (!input.connected) return "This terminal has not connected yet";
   return null;
 }
+
+/** SS-08: uploading into a terminal (the toolbar's button, the drawer's, a drop). */
+export function uploadReason(input: { open: boolean; connected: boolean }): string | null {
+  if (!input.open) return "Open a terminal first: files are uploaded through it";
+  if (!input.connected) return "This terminal is not connected, so nothing can be uploaded through it";
+  return null;
+}
+
+/** SS-08: the drawer's Download buttons, for the picked entries. */
+export function downloadReason(input: { connected: boolean; picked: { kind: "file" | "folder" | "other" }[] }) {
+  if (!input.connected) return "This terminal is not connected, so its files can't be reached";
+  if (input.picked.length === 0) return "Tick the files to download first";
+  if (input.picked.some((e) => e.kind === "folder")) return "Folders aren't downloaded: open the folder and pick files";
+  if (input.picked.some((e) => e.kind === "other")) return "Only regular files can be downloaded";
+  return null;
+}
