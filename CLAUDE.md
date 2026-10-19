@@ -63,7 +63,9 @@ crates/core/          remotely-core: all app logic
   migrations/         sqlx migrations
   src/
     command_bus.rs
-    policy/
+    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit
+    presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
+                      with the bus and every service that edits the app's data (Change)
     jobs.rs
     adapters/         vmware.rs, remote.rs (SSH shell and exec, every path through the SS-07 jump host chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
@@ -129,10 +131,14 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel, MultiExec bar, WhyDisabled for QL-08,
-                      FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07)
+                      FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
+                      for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output)
-  lib/                api.ts (typed IPC wrappers), theme.ts, utils.ts, multiexec.ts, transfers.ts, tunnels.ts (SS-07
-                      chains and forwards); pure helpers with
+  lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
+                      masker), theme.ts, utils.ts, multiexec.ts, transfers.ts, tunnels.ts (SS-07 chains and forwards),
+                      presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker),
+                      presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
+                      `data-presentation-skip` for terminals), presentation-state.ts; pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```
@@ -198,4 +204,10 @@ src/                  React + TypeScript UI
 - Dark mode is the `dark` class on `<html>`, set by `src/lib/theme.ts` ("system" follows Windows).
 - App icon: the master is `src-tauri/app-icon.png` (1024×1024, transparent). After changing it, run `npx tauri icon src-tauri/app-icon.png`, delete the generated `src-tauri/icons/android` and `src-tauri/icons/ios` folders (desktop only), and copy `src-tauri/icons/128x128.png` to `src/assets/remotely-logo.png` and `src-tauri/icons/64x64.png` to `public/favicon.png`.
 - Every policy-engine rule has a unit test.
+- FD-03 presentation mode masks what is on screen at the DOM (`src/lib/presentation-dom.ts`), so new UI needs nothing
+  for text. An element or input that holds exactly one host, IP, user or `user@host:port` gets
+  `data-mask="host|ip|user|address"` (inputs then show dots while presenting). Text shown outside the window (Windows
+  notifications) goes through `maskedOutside`. A new IPC field holding a host, IP or user should use one of the names
+  `learnFields` knows (`host`, `hostname`, `ip`, `username`, ...). A new state-changing core method that skips the bus
+  starts with `store.read_only().check(Change::…)`.
 - Commit messages start with the requirement ID where one applies, e.g. `VM-02: bulk suspend and resume`.
