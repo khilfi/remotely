@@ -35,6 +35,8 @@ const GROUPS: { title: string; kinds: ActionKind[] }[] = [
   { title: "Snapshots", kinds: ["snapshotTake", "snapshotRevert", "snapshotDelete"] },
   { title: "Do not touch", kinds: ["vmProtect", "vmUnprotect"] },
   { title: "Commands on hosts", kinds: ["execReadOnly", "execOther", "execDangerous", "sshKeyPush"] },
+  { title: "Files", kinds: ["fileUpload", "fileReplace"] },
+  { title: "Tunnels", kinds: ["tunnelLocal", "tunnelRemote", "tunnelShared"] },
   { title: "This app", kinds: ["appUpdate"] },
 ];
 

@@ -38,6 +38,11 @@
 //! * SS-08 ([`files`]): SFTP on each pane's own connection: the "Files here" drawer, downloads and
 //!   uploads (a command on the bus). bash and zsh report their folder through a prompt hook typed
 //!   invisibly on connect ([`folder`]), so the drawer and uploads follow the shell's folder.
+//! * SS-07: a session behind jump hosts connects through each of them in turn (the adapter's chain);
+//!   each hop's host key is checked and asked about like the session's own, naming the jump host, and
+//!   a password typed for a jump host is kept for reconnects like the session's. Port forwards
+//!   ([`tunnels`]) open on the pane's connection through the command bus, and open again after a
+//!   reconnect.
 
 pub mod activity;
 pub mod files;
@@ -46,12 +51,13 @@ pub mod log;
 pub mod multiexec;
 pub mod output;
 pub mod quick;
+pub mod tunnels;
 
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -68,16 +74,20 @@ use self::folder::{FolderInfo, FolderTracking, FolderWatch, PromptHook};
 use self::log::{LogMessage, SessionLog};
 use self::output::{SaveLayout, SavedOutput, TerminalText};
 use self::quick::{QuickConnect, QuickOpened};
+use self::tunnels::{TunnelInfo, TunnelRun, TunnelTable};
 use crate::adapters::exec_output::Scrubber;
 use crate::adapters::network::{ip_literal, NetworkAdapter};
+use crate::adapters::remote::forward::RemoteForwards;
 use crate::adapters::remote::{
     AgentSource, AuthMethod, ConnectOptions, Credentials, HostKeyVerifier, PromptShell, Prompter, PtySize,
     RemoteAdapter, RemoteFiles, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
 };
+use crate::command_bus::CommandBus;
 use crate::domain::{Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
 use crate::locks;
+use crate::policy::Tier;
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
@@ -355,6 +365,9 @@ pub struct HostFacts {
     pub hostname_from: Option<FactSource>,
     pub ip: Option<String>,
     pub ip_from: Option<FactSource>,
+    /// SS-07: the jump hosts the connection goes through, by session name, in the order they are
+    /// connected; empty for a direct connection.
+    pub via: Vec<String>,
 }
 
 impl HostFacts {
@@ -400,15 +413,18 @@ pub enum TerminalEvent {
         status: TerminalStatus,
     },
     /// SS-05: a host seen for the first time. The connection waits for [`Terminals::answer_host_key`].
+    /// `jump`: SS-07, the jump host on the way that presented it, if it is not the session's own host.
     HostKeyUnknown {
         key: HostKey,
         other_key_types: Vec<String>,
+        jump: Option<String>,
     },
     /// SS-05: the host key changed and the connection was blocked. [`Terminals::replace_host_key`]
-    /// trusts the new key and connects again.
+    /// trusts the new key and connects again. `jump`: as for `HostKeyUnknown`.
     HostKeyChanged {
         key: HostKey,
         previous: KnownHost,
+        jump: Option<String>,
     },
     /// QL-03: what is known about the host so far.
     Host {
@@ -423,6 +439,10 @@ pub enum TerminalEvent {
     /// SS-08: the shell's folder, or how far it is known (each new connection starts over).
     Folder {
         folder: FolderInfo,
+    },
+    /// SS-07: the terminal's tunnels, after any of them changed.
+    Tunnels {
+        tunnels: Vec<TunnelInfo>,
     },
 }
 
@@ -456,13 +476,15 @@ pub struct PaneInfo {
 }
 
 /// What the job runner does in open terminals: SS-10 sends a MultiExec line's held Enter, SS-08
-/// uploads files over a terminal's SFTP channel.
+/// uploads files over a terminal's SFTP channel, SS-07 opens a tunnel on a terminal's connection.
 #[async_trait]
 pub trait TerminalActions: Send + Sync {
     /// Sends keys to the terminal's live shell. Fails when it has closed or is not connected.
     async fn send(&self, terminal_id: Uuid, keys: &[u8]) -> Result<()>;
     /// Uploads the files of a [`crate::command_bus::Command::FileUpload`], each audited as it lands.
     async fn upload(&self, run: UploadRun<'_>, cancel: &CancellationToken) -> Result<UploadReport>;
+    /// Opens the forward of a [`crate::command_bus::Command::OpenTunnel`]. Returns where it listens.
+    async fn open_tunnel(&self, run: TunnelRun<'_>) -> Result<String>;
 }
 
 /// A pane's connection, from [`Terminals::open`]. Input goes through [`Terminals`] by id.
@@ -497,6 +519,8 @@ struct Control {
     /// A password typed for this terminal (in the terminal itself or the quick-connect form): for its
     /// reconnects, and for another pane opened like it. Zeroized when the terminal closes.
     remembered: Mutex<Option<SecretString>>,
+    /// SS-07: passwords typed for jump hosts on the way, by session, kept like `remembered`.
+    jump_passwords: Mutex<HashMap<Uuid, SecretString>>,
     /// SS-11: what the last connection logged in with, scrubbed from saved output and logs.
     secrets: Mutex<Vec<SecretString>>,
     /// QL-03.
@@ -518,6 +542,14 @@ struct Control {
     folder: Mutex<FolderInfo>,
     /// SS-08: the login's home folder on this connection, once asked.
     home: Mutex<Option<String>>,
+    /// SS-07: the live connection's port forwards, while connected.
+    forwards: Mutex<Option<Arc<dyn RemoteForwards>>>,
+    /// SS-07: the tunnels and their state.
+    tunnels: Mutex<TunnelTable>,
+    /// SS-07: one tunnel change at a time (starting, opening, stopping, reconnecting).
+    tunnel_ops: tokio::sync::Mutex<()>,
+    /// The pane's events, for changes made outside its task (SS-07 tunnels opened by the job runner).
+    events: mpsc::Sender<TerminalEvent>,
 }
 
 impl Control {
@@ -529,6 +561,7 @@ impl Control {
     fn known_secrets(&self) -> Vec<SecretString> {
         let mut secrets = locks::lock(&self.secrets).clone();
         secrets.extend(locks::lock(&self.remembered).clone());
+        secrets.extend(locks::lock(&self.jump_passwords).values().cloned());
         secrets.extend(locks::lock(&self.typed).iter().cloned());
         secrets
     }
@@ -570,6 +603,8 @@ struct Inner {
     watch: Mutex<WatchConfig>,
     /// SS-08: every pane's file transfers.
     transfers: Transfers,
+    /// SS-07: the command bus tunnels go through (set once the core is put together).
+    bus: OnceLock<Weak<CommandBus>>,
 }
 
 /// A pane about to open.
@@ -578,6 +613,8 @@ struct NewPane {
     target: Option<Target>,
     name: String,
     remembered: Option<SecretString>,
+    /// SS-07: passwords typed for jump hosts (a pane opened like another).
+    jump_passwords: HashMap<Uuid, SecretString>,
     /// The audit entry's action and detail.
     action: String,
     detail: String,
@@ -611,6 +648,7 @@ impl Terminals {
                 tuning: Mutex::new(TerminalTuning::default()),
                 watch: Mutex::new(TerminalSettings::default().watch()),
                 transfers: Transfers::default(),
+                bus: OnceLock::new(),
             }),
         }
     }
@@ -633,18 +671,21 @@ impl Terminals {
             .unwrap_or_default())
     }
 
-    /// Opens a pane to a saved session and starts connecting. Fails at once, opening nothing, for a
-    /// session with a jump host (SS-07, v2) or a key login with no key chosen.
+    /// Opens a pane to a saved session and starts connecting, through its jump hosts if it has any
+    /// (SS-07). Fails at once, opening nothing, for a key login with no key chosen or jump hosts that
+    /// go round in a loop.
     pub async fn open(&self, ctx: &Context, session_id: Uuid, size: PtySize) -> Result<TerminalHandle> {
-        self.open_saved(ctx, session_id, None, size, "Opened a terminal to", "")
+        self.open_saved(ctx, session_id, None, HashMap::new(), size, "Opened a terminal to", "")
             .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn open_saved(
         &self,
         ctx: &Context,
         session_id: Uuid,
         remembered: Option<SecretString>,
+        jump_passwords: HashMap<Uuid, SecretString>,
         size: PtySize,
         verb: &str,
         // How the audit names a password typed before this terminal opened.
@@ -656,11 +697,6 @@ impl Terminals {
             .session_spec(ctx, session_id)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(format!("session {session_id}")))?;
-        if let Some(jump) = &spec.jump {
-            return Err(CoreError::JumpHostUnsupported {
-                jump: jump.name.clone(),
-            });
-        }
         let (_, environment, protected) = self.inner.store.find_session_target(ctx, session_id).await?.unwrap_or((
             spec.name.clone(),
             spec.environment,
@@ -676,13 +712,15 @@ impl Terminals {
             (AuthMethod::Password(None), Some(_)) => typed_how,
             (auth, _) => describe_auth(auth),
         };
+        let via = spec.route().map(|route| format!("; via {route}")).unwrap_or_default();
         let pane = NewPane {
             source: Source::Saved(session_id),
             name: spec.name.clone(),
             action: format!("{verb} '{}'", spec.name),
-            detail: format!("{}, {auth}", spec.address()),
+            detail: format!("{}, {auth}{via}", spec.address()),
             target: Some(target),
             remembered,
+            jump_passwords,
         };
         let handle = self.start(ctx, pane, size).await?;
         // QL-02: Recent sessions. Not worth failing the terminal over.
@@ -707,6 +745,7 @@ impl Terminals {
                     ctx,
                     session.id,
                     typed,
+                    HashMap::new(),
                     size,
                     "Opened a terminal to",
                     "password typed in the quick-connect form",
@@ -729,6 +768,7 @@ impl Terminals {
             target: None,
             name: address.clone(),
             remembered: typed,
+            jump_passwords: HashMap::new(),
             action: format!("Opened a quick-connect terminal to {address}"),
             detail: format!("{address}, {auth}; not saved as a session"),
         };
@@ -747,12 +787,14 @@ impl Terminals {
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;
         let remembered = locks::lock(&control.remembered).clone();
+        let jump_passwords = locks::lock(&control.jump_passwords).clone();
         match &control.source {
             Source::Saved(session_id) => {
                 self.open_saved(
                     ctx,
                     *session_id,
                     remembered,
+                    jump_passwords,
                     size,
                     "Opened another terminal to",
                     "password typed earlier",
@@ -770,6 +812,7 @@ impl Terminals {
                     target: None,
                     name: address.clone(),
                     remembered,
+                    jump_passwords,
                     action: format!("Opened another quick-connect terminal to {address}"),
                     detail: format!("{address}, {auth}; not saved as a session"),
                 };
@@ -820,6 +863,7 @@ impl Terminals {
             answer: Mutex::default(),
             blocked: Mutex::default(),
             remembered: Mutex::new(pane.remembered),
+            jump_passwords: Mutex::new(pane.jump_passwords),
             secrets: Mutex::default(),
             facts: Mutex::default(),
             hostname_answered: std::sync::atomic::AtomicBool::new(false),
@@ -830,6 +874,10 @@ impl Terminals {
             files: Mutex::default(),
             folder: Mutex::default(),
             home: Mutex::default(),
+            forwards: Mutex::default(),
+            tunnels: Mutex::default(),
+            tunnel_ops: tokio::sync::Mutex::default(),
+            events: events_tx.clone(),
         });
         audit(
             &self.inner.store,
@@ -1301,6 +1349,10 @@ impl TerminalActions for Terminals {
     async fn upload(&self, run: UploadRun<'_>, cancel: &CancellationToken) -> Result<UploadReport> {
         self.run_upload(run, cancel).await
     }
+
+    async fn open_tunnel(&self, run: TunnelRun<'_>) -> Result<String> {
+        Terminals::open_tunnel(self, run).await
+    }
 }
 
 /// Where a `select!` timer waits when there is nothing to wait for.
@@ -1389,14 +1441,29 @@ async fn audit(
     targets: &[Target],
     detail: &str,
 ) -> Result<()> {
+    audit_entry(store, ctx, event, action, None, None, targets, detail).await
+}
+
+/// An audit entry that may name the tier and job it belongs to (SS-07: a tunnel opened by a job).
+#[allow(clippy::too_many_arguments)]
+async fn audit_entry(
+    store: &Store,
+    ctx: &Context,
+    event: &str,
+    action: &str,
+    tier: Option<Tier>,
+    job_id: Option<Uuid>,
+    targets: &[Target],
+    detail: &str,
+) -> Result<()> {
     store
         .append_audit(
             ctx,
             NewAuditEntry {
                 event,
                 action,
-                tier: None,
-                job_id: None,
+                tier,
+                job_id,
                 targets,
                 approval: None,
                 result: None,
@@ -1570,6 +1637,7 @@ impl Pane {
                     if matches!(err, CoreError::AuthFailed(_)) {
                         // A typed password the server refused is no use for the next try: ask again.
                         locks::lock(&self.control.remembered).take();
+                        locks::lock(&self.control.jump_passwords).clear();
                     }
                     let tuning = self.tuning();
                     if attempt > 0 && retryable(&err) && attempt < tuning.max_attempts {
@@ -1609,8 +1677,14 @@ impl Pane {
         if let Err(err) = stop_log(&self.inner.store, &self.ctx, &self.control).await {
             tracing::error!(error = %err, "could not audit a session log stopping");
         }
+        // SS-07: every tunnel closes with the terminal.
+        let terminals = Terminals {
+            inner: Arc::clone(&self.inner),
+        };
+        tunnels::closed(&terminals, &self.ctx, &self.control).await;
         // Nothing typed outlives the terminal.
         locks::lock(&self.control.remembered).take();
+        locks::lock(&self.control.jump_passwords).clear();
         locks::lock(&self.control.secrets).clear();
         locks::lock(&self.control.typed).clear();
         let open_for = human_duration(opened.elapsed());
@@ -1654,19 +1728,35 @@ impl Pane {
     /// is out of the way.
     async fn connect(&mut self) -> Result<(ShellHandle, Vec<String>)> {
         let spec = self.spec().await?;
-        if let Some(jump) = &spec.jump {
-            return Err(CoreError::JumpHostUnsupported {
-                jump: jump.name.clone(),
-            });
-        }
-        self.say(format!("\x1b[2mConnecting to {}…\x1b[0m\r\n", spec.address()).into_bytes())
+        // SS-07: the chain, as the tab and the session details show it.
+        let via: Vec<String> = spec.jumps().iter().map(|j| j.name.clone()).collect();
+        let route = match spec.route() {
+            Some(route) => format!(" via {route}"),
+            None => String::new(),
+        };
+        self.learn(|facts| {
+            let changed = facts.via != via;
+            facts.via.clone_from(&via);
+            changed
+        })
+        .await;
+        self.say(format!("\x1b[2mConnecting to {}{route}…\x1b[0m\r\n", spec.address()).into_bytes())
             .await;
         if !self.asked_dns {
             self.asked_dns = true;
-            self.ask_dns(&spec.host);
+            if via.is_empty() {
+                self.ask_dns(&spec.host);
+            } else if let Some(ip) = ip_literal(&spec.host) {
+                // Behind a jump host a name means what it means there, not here: no DNS from this PC.
+                self.learn(|facts| facts.learn_ip(ip, FactSource::Dns)).await;
+            }
         }
         let credentials = self.credentials(&spec).await?;
-        *locks::lock(&self.control.secrets) = login_secrets(&credentials);
+        let typed = locks::lock(&self.control.jump_passwords).clone();
+        let jump_credentials = crate::sessions::jump_credentials(&*self.inner.vault, &self.ctx, &spec, &typed).await?;
+        let mut secrets = login_secrets(&credentials);
+        secrets.extend(jump_credentials.iter().flat_map(login_secrets));
+        *locks::lock(&self.control.secrets) = secrets;
         let tuning = self.tuning();
         let keepalive = tuning.keepalive_interval.or(match self.settings.keepalive_secs {
             0 => None,
@@ -1693,12 +1783,15 @@ impl Pane {
             output: &self.output,
             size: &mut self.size,
             remembered: &self.control.remembered,
+            jump_passwords: &self.control.jump_passwords,
+            jump: None,
         };
         let shell = remote
             .open_shell(
                 ShellRequest {
                     session: &spec,
                     credentials,
+                    jump_credentials,
                     size,
                     options: &options,
                     verifier,
@@ -1869,9 +1962,22 @@ impl Pane {
             hostname: mut hostname_answer,
             shell: shell_answer,
             files,
+            forwards,
         } = shell;
         // SS-08: this connection's files; the folder is learnt again.
         *locks::lock(&self.control.files) = Some(files);
+        // SS-07: tunnels approved for this terminal open again on the new connection, and its first
+        // connection asks for the session's that start with it (through the bus, so beside the shell).
+        *locks::lock(&self.control.forwards) = Some(forwards);
+        let terminals = Terminals {
+            inner: Arc::clone(&self.inner),
+        };
+        tokio::spawn(tunnels::connected(
+            terminals,
+            self.ctx,
+            self.id,
+            Arc::clone(&self.control),
+        ));
         locks::lock(&self.control.home).take();
         self.update_folder(|folder| *folder = FolderInfo::default()).await;
         let now = Instant::now();
@@ -1892,6 +1998,18 @@ impl Pane {
             .await;
         *locks::lock(&self.control.screen) = PaneScreen::default();
         locks::lock(&self.control.files).take();
+        locks::lock(&self.control.forwards).take();
+        // SS-07: open tunnels close with the connection and wait for the next one; closing the
+        // terminal closes them for good (see `finish`).
+        let reason = match &end {
+            Pump::Closed => None,
+            Pump::Reconnect => Some("the terminal reconnected".to_owned()),
+            Pump::Ended(ShellEnd::Exited { .. }) => Some("the shell ended".to_owned()),
+            Pump::Ended(ShellEnd::Lost { reason }) => Some(reason.clone()),
+        };
+        if let Some(reason) = reason {
+            tunnels::disconnected(&self.inner.store, &self.ctx, &self.control, &reason).await;
+        }
         end
     }
 
@@ -2123,7 +2241,8 @@ struct PaneVerifier {
 
 #[async_trait]
 impl HostKeyVerifier for PaneVerifier {
-    async fn verify(&self, key: &HostKey) -> Result<()> {
+    async fn verify(&self, key: &HostKey, jump: Option<&str>) -> Result<()> {
+        let jump = jump.map(str::to_owned);
         match self.known_hosts.check(&self.ctx, key).await? {
             HostKeyCheck::Trusted => Ok(()),
             HostKeyCheck::Changed { previous } => {
@@ -2136,9 +2255,13 @@ impl HostKeyVerifier for PaneVerifier {
                     .send(TerminalEvent::HostKeyChanged {
                         key: key.clone(),
                         previous,
+                        jump: jump.clone(),
                     })
                     .await;
-                Err(CoreError::HostKeyChanged { address: key.address() })
+                Err(CoreError::HostKeyChanged {
+                    address: key.address(),
+                    jump,
+                })
             }
             HostKeyCheck::Unknown { other_key_types } => {
                 let (answer, decision) = oneshot::channel();
@@ -2148,6 +2271,7 @@ impl HostKeyVerifier for PaneVerifier {
                     .send(TerminalEvent::HostKeyUnknown {
                         key: key.clone(),
                         other_key_types,
+                        jump: jump.clone(),
                     })
                     .await;
                 let trusted = tokio::time::timeout(self.wait, decision)
@@ -2157,7 +2281,10 @@ impl HostKeyVerifier for PaneVerifier {
                     .unwrap_or(false);
                 locks::lock(&self.control.answer).take();
                 if !trusted {
-                    return Err(CoreError::HostKeyRejected { address: key.address() });
+                    return Err(CoreError::HostKeyRejected {
+                        address: key.address(),
+                        jump,
+                    });
                 }
                 self.known_hosts
                     .trust(&self.ctx, key, self.control.target.as_ref())
@@ -2173,6 +2300,9 @@ struct PanePrompter<'a> {
     output: &'a mpsc::Sender<Vec<u8>>,
     size: &'a mut PtySize,
     remembered: &'a Mutex<Option<SecretString>>,
+    jump_passwords: &'a Mutex<HashMap<Uuid, SecretString>>,
+    /// SS-07: the jump host logging in now, or `None` for the session itself.
+    jump: Option<Uuid>,
 }
 
 /// Where the line reader is in an escape sequence (arrow keys and the like), which it skips.
@@ -2269,8 +2399,17 @@ impl Prompter for PanePrompter<'_> {
         let _ = self.output.send(text.into_bytes()).await;
     }
 
+    fn hop(&mut self, session: &SessionSpec, jump: bool) {
+        self.jump = jump.then_some(session.id);
+    }
+
     fn password_accepted(&mut self, password: &SecretString) {
-        *locks::lock(self.remembered) = Some(password.clone());
+        match self.jump {
+            Some(id) => {
+                locks::lock(self.jump_passwords).insert(id, password.clone());
+            }
+            None => *locks::lock(self.remembered) = Some(password.clone()),
+        }
     }
 }
 
@@ -2381,7 +2520,8 @@ mod tests {
         }));
         assert!(!retryable(&CoreError::AuthFailed("refused".into())));
         assert!(!retryable(&CoreError::HostKeyChanged {
-            address: "web01.example.com:22".into()
+            address: "web01.example.com:22".into(),
+            jump: Some("bastion".into()),
         }));
         assert!(!retryable(&CoreError::VaultLocked));
         assert!(!retryable(&CoreError::Cancelled));

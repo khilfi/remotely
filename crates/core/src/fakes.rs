@@ -22,6 +22,9 @@ use zeroize::Zeroizing;
 use crate::adapters::exec_output::OutputCollector;
 use crate::adapters::host_counters::{DiskSpace, HostCounters, HostTotals, SystemCpuTimes, VmProcess};
 use crate::adapters::network::{ip_literal, NetworkAdapter};
+use crate::adapters::remote::forward::{
+    self, Duplex, ForwardKind, ForwardSpec, Opener, RemoteForwards, RunningForward,
+};
 use crate::adapters::remote::{
     ConnectRequest, Credentials, EntryKind, ExecRequest, ExecResult, ExecSession, PromptShell, Prompter, RemoteAdapter,
     RemoteEntry, RemoteFiles, RemoteRead, RemoteWrite, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
@@ -552,7 +555,13 @@ impl RemoteAdapter for FakeRemote {
     }
 
     async fn open_shell(&self, request: ShellRequest<'_>, _: &mut dyn Prompter) -> Result<ShellHandle> {
-        locks::lock(&self.calls).push(format!("{}: shell", request.session.host));
+        // SS-07: a shell through jump hosts is recorded with them, e.g. `db01.test: shell via bastion`.
+        let via: Vec<&str> = request.session.jumps().iter().map(|j| j.name.as_str()).collect();
+        let via = match via.as_slice() {
+            [] => String::new(),
+            names => format!(" via {}", names.join(", ")),
+        };
+        locks::lock(&self.calls).push(format!("{}: shell{via}", request.session.host));
         Ok(loopback_shell_with(self.files.clone(), None))
     }
 
@@ -674,6 +683,43 @@ pub fn loopback_shell_with(files: FakeFiles, shell: Option<PromptShell>) -> Shel
         hostname: hostname_rx,
         shell: shell_rx,
         files: std::sync::Arc::new(files),
+        forwards: std::sync::Arc::new(DirectForwards),
+    }
+}
+
+/// SS-07 port forwards for terminals on [`FakeRemote`]: local and SOCKS forwards listen on this PC
+/// like the real ones, and each connection goes straight to its destination from this PC, as if the
+/// host had opened it. A fake host can't listen, so remote forwards fail.
+pub struct DirectForwards;
+
+struct DirectOpener;
+
+#[async_trait]
+impl Opener for DirectOpener {
+    async fn open(
+        &self,
+        host: &str,
+        port: u16,
+        _from: std::net::SocketAddr,
+    ) -> std::result::Result<Box<dyn Duplex>, String> {
+        let stream = tokio::net::TcpStream::connect((host, port))
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(Box::new(stream))
+    }
+}
+
+#[async_trait]
+impl RemoteForwards for DirectForwards {
+    async fn start(&self, spec: &ForwardSpec) -> Result<RunningForward> {
+        match spec.kind {
+            ForwardKind::Remote => Err(CoreError::Tunnel(
+                "the fake host can't listen for remote forwards".into(),
+            )),
+            ForwardKind::Local | ForwardKind::Dynamic => {
+                forward::listen_here(spec, std::sync::Arc::new(DirectOpener)).await
+            }
+        }
     }
 }
 

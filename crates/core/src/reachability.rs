@@ -7,6 +7,11 @@
 //! each host and port once however many sessions share it, a few at a time, and each no more often
 //! than the interval in the terminal settings. The settings can turn it off; by default it is off for
 //! libraries of more than [`AUTO_MAX_SESSIONS`] sessions.
+//!
+//! SS-07: a session behind jump hosts is not checked from this PC (its name may only resolve over
+//! there, and its port is only open to the jump host). Its dot shows the first jump host's check,
+//! the one this PC dials, and says so ([`Reachability::via`]); it is never red because the session
+//! itself can't be reached from here.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -22,6 +27,7 @@ use crate::adapters::network::NetworkAdapter;
 use crate::domain::{now_rfc3339, Context};
 use crate::error::Result;
 use crate::locks;
+use crate::sessions::{SessionRecord, MAX_JUMP_DEPTH};
 use crate::store::Store;
 use crate::terminal::{ReachabilityMode, TerminalSettings, TERMINAL_SETTINGS_KEY};
 
@@ -72,6 +78,9 @@ pub struct Reachability {
     /// Why it is down.
     pub reason: Option<String>,
     pub checked_at: String,
+    /// SS-07: the session is behind jump hosts, and this is the first one's state (by name): the one
+    /// this PC reaches. The session itself was not checked.
+    pub via: Option<String>,
 }
 
 /// What the UI gets after each round that changed something.
@@ -182,14 +191,19 @@ impl ReachabilityChecker {
         let interval = Duration::from_secs(settings.reachability_secs);
         let now = Instant::now();
         let known: HashSet<Uuid> = locks::lock(&self.results).keys().copied().collect();
-        let mut due: HashMap<Endpoint, Vec<Uuid>> = HashMap::new();
+        let mut due: HashMap<Endpoint, Vec<(Uuid, Option<String>)>> = HashMap::new();
         {
             let last = locks::lock(&self.last_probe);
+            let by_id: HashMap<Uuid, &SessionRecord> = sessions.iter().map(|s| (s.id, s)).collect();
             for session in sessions.iter().filter(|s| watched.contains(&s.id)) {
-                let endpoint = (session.host.to_lowercase(), session.port);
+                // SS-07: behind jump hosts, the first one stands in; a chain that loops is not checked.
+                let Some((checked, via)) = first_hop(session, &by_id) else {
+                    continue;
+                };
+                let endpoint = (checked.host.to_lowercase(), checked.port);
                 let fresh = last.get(&endpoint).is_some_and(|at| now.duration_since(*at) < interval);
                 if !fresh || !known.contains(&session.id) {
-                    due.entry(endpoint).or_default().push(session.id);
+                    due.entry(endpoint).or_default().push((session.id, via));
                 }
             }
         }
@@ -214,7 +228,7 @@ impl ReachabilityChecker {
             let Ok((endpoint, ids, result)) = done else { continue };
             locks::lock(&self.last_probe).insert(endpoint, Instant::now());
             let checked_at = now_rfc3339();
-            for session_id in ids {
+            for (session_id, via) in ids {
                 let state = match &result {
                     Ok(took) => Reachability {
                         session_id,
@@ -222,6 +236,7 @@ impl ReachabilityChecker {
                         latency_ms: Some(u64::try_from(took.as_millis()).unwrap_or(u64::MAX)),
                         reason: None,
                         checked_at: checked_at.clone(),
+                        via,
                     },
                     Err(err) => Reachability {
                         session_id,
@@ -229,10 +244,12 @@ impl ReachabilityChecker {
                         latency_ms: None,
                         reason: Some(err.to_string()),
                         checked_at: checked_at.clone(),
+                        via,
                     },
                 };
                 let previous = locks::lock(&self.results).insert(session_id, state.clone());
-                let same = previous.is_some_and(|p| p.state == state.state && p.reason == state.reason);
+                let same =
+                    previous.is_some_and(|p| p.state == state.state && p.reason == state.reason && p.via == state.via);
                 if !same {
                     changed.push(state);
                 }
@@ -261,4 +278,21 @@ impl ReachabilityChecker {
             }
         }
     }
+}
+
+/// SS-07: what this PC checks for a session: the session itself, or behind jump hosts the first one
+/// (the one this PC dials) and its name. `None` for jump hosts that go round in a loop.
+fn first_hop<'a>(
+    session: &'a SessionRecord,
+    by_id: &HashMap<Uuid, &'a SessionRecord>,
+) -> Option<(&'a SessionRecord, Option<String>)> {
+    let mut hop = session;
+    for _ in 0..=MAX_JUMP_DEPTH {
+        match hop.jump_session_id.and_then(|id| by_id.get(&id)) {
+            Some(jump) => hop = jump,
+            None if hop.id == session.id => return Some((session, None)),
+            None => return Some((hop, Some(hop.name.clone()))),
+        }
+    }
+    None
 }

@@ -34,8 +34,10 @@ use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::adapters::remote::forward::ForwardKind;
 use crate::domain::{now_rfc3339, Context, Environment};
 use crate::error::{CoreError, Result};
+use crate::forwards::{ForwardInput, Forwards};
 use crate::known_hosts::{address, HostKey, KnownHost, KnownHosts};
 use crate::locks;
 use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord};
@@ -137,6 +139,41 @@ struct SessionEntry {
     vm: Option<VmHint>,
     #[serde(default)]
     imported_from: Option<String>,
+    /// SS-07: its saved port forwards, in order. Files from before 0.3.0 have none.
+    #[serde(default)]
+    forwards: Vec<ForwardEntry>,
+}
+
+/// SS-07: one saved port forward of a session.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForwardEntry {
+    #[serde(default)]
+    label: Option<String>,
+    kind: ForwardKind,
+    bind_address: String,
+    bind_port: u16,
+    #[serde(default)]
+    dest_host: String,
+    #[serde(default)]
+    dest_port: u16,
+    #[serde(default)]
+    auto_start: bool,
+}
+
+impl ForwardEntry {
+    fn input(&self) -> ForwardInput {
+        ForwardInput {
+            id: None,
+            label: self.label.clone(),
+            kind: self.kind,
+            bind_address: self.bind_address.clone(),
+            bind_port: self.bind_port,
+            dest_host: self.dest_host.clone(),
+            dest_port: self.dest_port,
+            auto_start: self.auto_start,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -218,6 +255,8 @@ pub struct ExportReport {
     pub secret_values: bool,
     /// BX-08 favourite commands.
     pub favourites: usize,
+    /// SS-07 saved port forwards, over all sessions.
+    pub forwards: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +400,8 @@ pub struct TransferReport {
     pub known_hosts: Counts,
     pub secrets: Counts,
     pub favourites: Counts,
+    /// SS-07: port forwards saved with the imported sessions.
+    pub forwards: usize,
     pub folders_added: usize,
     /// Sessions imported without the password or key they used (not in the file, not here).
     pub without_credentials: usize,
@@ -941,6 +982,7 @@ impl Transfer {
                 generated: key.is_some_and(|k| k.generated),
             });
         }
+        let mut forwards = self.store.all_forwards(ctx).await?;
         let mut entries = Vec::with_capacity(sessions.len());
         for s in sessions {
             let vm = match &s.vm_id {
@@ -966,6 +1008,20 @@ impl Transfer {
                 tags: s.tags,
                 vm,
                 imported_from: s.imported_from,
+                forwards: forwards
+                    .remove(&s.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|f| ForwardEntry {
+                        label: f.label,
+                        kind: f.spec.kind,
+                        bind_address: f.spec.bind_address,
+                        bind_port: f.spec.bind_port,
+                        dest_host: f.spec.dest_host,
+                        dest_port: f.spec.dest_port,
+                        auto_start: f.auto_start,
+                    })
+                    .collect(),
             });
         }
         let payload = Payload {
@@ -1009,6 +1065,7 @@ impl Transfer {
             secrets: payload.secrets.len(),
             secret_values: include_secrets,
             favourites: payload.favourites.len(),
+            forwards: payload.sessions.iter().map(|s| s.forwards.len()).sum(),
         };
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
         drop(payload);
@@ -1022,11 +1079,12 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
             plural(report.favourites, "favourite command"),
+            plural(report.forwards, "port forward"),
             report.path
         );
         self.audit(
@@ -1323,7 +1381,8 @@ impl Transfer {
             .folders(ctx, &payload, &session_actions, &local, library, &mut report)
             .await?;
 
-        // 3. Sessions, jump hosts first.
+        // 3. Sessions, jump hosts first (so each keeps its jump host link), with their port forwards.
+        let forwards = Forwards::new(self.store.clone());
         let mut session_map: HashMap<Uuid, Uuid> = HashMap::new();
         let mut taken_names: HashSet<String> = local.sessions.iter().map(|s| s.name.to_lowercase()).collect();
         let mut used_ids: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
@@ -1388,6 +1447,17 @@ impl Transfer {
                         report.without_credentials += 1;
                     }
                     report.sessions.count(action);
+                    // SS-07: a file without forwards (or from before 0.3.0) leaves this laptop's alone.
+                    if !entry.forwards.is_empty() {
+                        let inputs: Vec<ForwardInput> = entry.forwards.iter().map(ForwardEntry::input).collect();
+                        match forwards.restore(ctx, saved.id, &inputs).await {
+                            Ok(saved_forwards) => report.forwards += saved_forwards.len(),
+                            Err(err) => report.problems.push(ItemProblem {
+                                name: format!("{} (port forwards)", entry.name),
+                                reason: err.to_string(),
+                            }),
+                        }
+                    }
                 }
                 Err(err) => report.problems.push(ItemProblem {
                     name: entry.name.clone(),
@@ -1475,6 +1545,12 @@ impl Transfer {
             report.secrets.describe(),
             report.favourites.describe()
         );
+        if report.forwards > 0 {
+            detail.push_str(&format!(
+                "; {} saved with them",
+                plural(report.forwards, "port forward")
+            ));
+        }
         if report.without_credentials > 0 {
             detail.push_str(&format!(
                 "; {} without their saved password or key",
@@ -1822,7 +1898,18 @@ mod tests {
             tags: vec![],
             vm: None,
             imported_from: None,
+            forwards: vec![],
         }
+    }
+
+    #[test]
+    fn files_from_before_port_forwards_still_read() {
+        // A session as 0.2.x wrote it: no `forwards`.
+        let old = r#"{"id":"7d1f0f0e-63f8-4a5b-9f3a-2f9d8f1d2c3b","name":"web01","host":"web01.example.com",
+            "port":22,"auth":{"method":"agent"},"jumpSessionId":null}"#;
+        let entry: SessionEntry = serde_json::from_str(old).unwrap();
+        assert!(entry.forwards.is_empty());
+        assert_eq!(entry.name, "web01");
     }
 
     #[test]

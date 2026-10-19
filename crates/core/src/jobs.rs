@@ -55,6 +55,7 @@ use crate::snapshots::safety_snapshot_name;
 use crate::ssh_keys;
 use crate::store::{NewAuditEntry, NewJob, Store, TargetResult};
 use crate::terminal::files::UploadRun;
+use crate::terminal::tunnels::TunnelRun;
 use crate::terminal::TerminalActions;
 use crate::vault::{SecretId, SecretString, Vault};
 
@@ -316,19 +317,26 @@ struct BulkVerifier {
 
 #[async_trait]
 impl HostKeyVerifier for BulkVerifier {
-    async fn verify(&self, key: &HostKey) -> Result<()> {
+    async fn verify(&self, key: &HostKey, jump: Option<&str>) -> Result<()> {
+        let jump = jump.map(str::to_owned);
         match self.known_hosts.check(&self.ctx, key).await? {
             HostKeyCheck::Trusted => Ok(()),
             HostKeyCheck::Changed { previous } => {
                 self.known_hosts
                     .record_blocked(&self.ctx, key, &previous, Some(&self.target))
                     .await?;
-                Err(CoreError::HostKeyChanged { address: key.address() })
+                Err(CoreError::HostKeyChanged {
+                    address: key.address(),
+                    jump,
+                })
             }
             HostKeyCheck::Unknown { .. } if self.trust_new => {
                 self.known_hosts.trust(&self.ctx, key, Some(&self.target)).await
             }
-            HostKeyCheck::Unknown { .. } => Err(CoreError::HostKeyUnknown { address: key.address() }),
+            HostKeyCheck::Unknown { .. } => Err(CoreError::HostKeyUnknown {
+                address: key.address(),
+                jump,
+            }),
         }
     }
 }
@@ -870,6 +878,24 @@ impl JobRunner {
                     note: Some(report.summary(folder)),
                 })
             }
+            (Command::OpenTunnel { forward, .. }, TargetRef::Terminal { terminal_id, .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                // SS-07: on the terminal's own connection; it stays open after the job.
+                let run = TunnelRun {
+                    ctx: spec.ctx,
+                    job_id,
+                    tier: spec.decision.tier,
+                    terminal_id: *terminal_id,
+                    forward,
+                };
+                let at = self.terminals.open_tunnel(run).await?;
+                Ok(TargetOutcome {
+                    note: Some(format!("listening on {at}")),
+                    ..TargetOutcome::done()
+                })
+            }
             (command, other) => Err(CoreError::WrongTargetKind {
                 action: command.summary(1),
                 target: format!("a {} target", other.kind()),
@@ -891,15 +917,13 @@ impl JobRunner {
             .session_spec(&spec.ctx, session_id)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
-        if let Some(jump) = &session.jump {
-            return Err(CoreError::JumpHostUnsupported {
-                jump: jump.name.clone(),
-            });
-        }
         if token.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
         let credentials = crate::sessions::credentials(&*self.vault, &spec.ctx, &session, None).await?;
+        // SS-07: each jump host on the way logs in with its own session's credentials.
+        let jump_credentials =
+            crate::sessions::jump_credentials(&*self.vault, &spec.ctx, &session, &Default::default()).await?;
         let sudo_password = match run.sudo {
             true => Some(self.sudo_password(&spec.ctx, &session, run.sudo_password_id).await?),
             false => None,
@@ -920,6 +944,7 @@ impl JobRunner {
         let exec = self.remote.exec(ExecRequest {
             session: &session,
             credentials,
+            jump_credentials,
             script: run.script,
             sudo_password,
             options: &options,
@@ -1080,8 +1105,8 @@ impl JobRunner {
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
-            // SS-08: one terminal, its files one after another.
-            Command::FileUpload { .. } => 1,
+            // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal.
+            Command::FileUpload { .. } | Command::OpenTunnel { .. } => 1,
         };
         n.max(1)
     }
@@ -1142,6 +1167,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::VmProtect { .. } => "protect",
         Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::TerminalLine { .. } => "command",
         Command::FileUpload { .. } => "upload",
+        Command::OpenTunnel { .. } => "tunnel",
         Command::AppUpdate { .. } => "update",
     }
 }

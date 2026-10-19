@@ -4,6 +4,8 @@
 //
 // Reachability dots (MO-08 lite): the core checks the port of each session the tree shows, in the
 // background; collapsed groups are not checked, which keeps large libraries light. A setting turns it off.
+// SS-07: a session behind jump hosts says which one it goes through ("via inner"); its dot is a ring showing the
+// first jump host's check (the one this PC dials), since the session itself is not reachable from here.
 //
 // BX-03 Compare (post-MVP P6): Ctrl+click picks sessions to run a command on without opening tabs (Ctrl+click a
 // group picks every session in it, for large runs); the footer opens Compare output with them.
@@ -33,6 +35,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ColorDot } from "@/components/Badges";
+import { jumpChain, routeText, viaText, type JumpLink } from "@/lib/tunnels";
 import {
   api,
   errorMessage,
@@ -99,6 +102,8 @@ export function SessionTree({ active, version, openSessions, onOpen, picks, onPi
   const [text, setText] = useState("");
   const [tree, setTree] = useState<Tree | null>(null);
   const [recent, setRecent] = useState<SessionRecord[]>([]);
+  /** SS-07: every session, for the names of jump hosts the search left out. */
+  const [links, setLinks] = useState<Map<string, JumpLink>>(new Map());
   const [open, setOpen] = useState<Record<string, boolean>>(() => readJson(OPEN_KEY, {}));
   const [reach, setReach] = useState<{ enabled: boolean; states: Map<string, Reachability> }>({
     enabled: false,
@@ -112,10 +117,11 @@ export function SessionTree({ active, version, openSessions, onOpen, picks, onPi
     if (!active) return;
     const timer = window.setTimeout(
       () => {
-        Promise.all([api.sessionTree(grouping, { text }), api.recentSessions(8)]).then(
-          ([t, r]) => {
+        Promise.all([api.sessionTree(grouping, { text }), api.recentSessions(8), api.sessions()]).then(
+          ([t, r, all]) => {
             setTree(t);
             setRecent(r);
+            setLinks(new Map(all.map((s) => [s.id, s])));
           },
           (err) => toast.error(errorMessage(err)),
         );
@@ -197,6 +203,7 @@ export function SessionTree({ active, version, openSessions, onOpen, picks, onPi
       <SessionRow
         key={`${from}:${id}`}
         session={s}
+        via={jumpChain(id, links).names}
         depth={depth}
         picked={picked === `${from}:${id}`}
         checked={pickSet.has(id)}
@@ -299,6 +306,7 @@ export function SessionTree({ active, version, openSessions, onOpen, picks, onPi
                   <SessionRow
                     key={`recent:${s.id}`}
                     session={s}
+                    via={jumpChain(s.id, links).names}
                     depth={1}
                     picked={picked === `recent:${s.id}`}
                     checked={pickSet.has(s.id)}
@@ -350,6 +358,19 @@ function ReachDot({ reach }: { reach: Reachability | null | undefined }) {
   if (reach === undefined) return null;
   if (reach === null)
     return <span className="size-1.5 shrink-0 rounded-full bg-muted-foreground/40" aria-label="Not checked yet" />;
+  // SS-07: a ring is a jump host's state, not the session's own.
+  if (reach.via)
+    return reach.state === "up" ? (
+      <span
+        className="size-2 shrink-0 rounded-full border-[1.5px] border-success"
+        aria-label={`Through ${reach.via}, which is reachable`}
+      />
+    ) : (
+      <span
+        className="size-2 shrink-0 rounded-full border-[1.5px] border-destructive"
+        aria-label={`Through ${reach.via}, which is not reachable`}
+      />
+    );
   return reach.state === "up" ? (
     <span className="size-1.5 shrink-0 rounded-full bg-success" aria-label="Port open" />
   ) : (
@@ -360,6 +381,11 @@ function ReachDot({ reach }: { reach: Reachability | null | undefined }) {
 function reachText(reach: Reachability | null | undefined) {
   if (!reach) return null;
   const when = formatWhen(reach.checkedAt);
+  if (reach.via) {
+    return reach.state === "up"
+      ? `Reached through ${reach.via}, whose port is open (${reach.latencyMs ?? 0} ms), checked ${when}. The session itself is not checked from this PC.`
+      : `Reached through ${reach.via}, which is not reachable: ${reach.reason ?? "no answer"}, checked ${when}`;
+  }
   return reach.state === "up"
     ? `Port open (${reach.latencyMs ?? 0} ms), checked ${when}`
     : `Not reachable: ${reach.reason ?? "no answer"}, checked ${when}`;
@@ -367,6 +393,7 @@ function reachText(reach: Reachability | null | undefined) {
 
 function SessionRow({
   session,
+  via,
   depth,
   picked,
   checked,
@@ -377,6 +404,8 @@ function SessionRow({
   onOpen,
 }: {
   session: SessionRecord;
+  /** SS-07: the jump hosts on the way, first one first. */
+  via: string[];
   depth: number;
   picked: boolean;
   /** BX-03: picked for Compare output. */
@@ -393,6 +422,7 @@ function SessionRow({
     session.lastHostname || session.lastIp ? [session.lastHostname, session.lastIp].filter(Boolean).join(" · ") : null;
   const tooltip = [
     `${session.name} (${sessionAddress(session)})`,
+    via.length > 0 && `Through ${routeText(via)}`,
     seen && `Last seen as ${seen}, ${formatWhen(session.lastSeenAt)}`,
     reachText(reach),
     checked && "Picked for Compare output",
@@ -426,6 +456,9 @@ function SessionRow({
       )}
       {session.color ? <ColorDot color={session.color} className="size-2" /> : <span className="size-2 shrink-0" />}
       <span className={cn("truncate", open && "font-medium")}>{session.name}</span>
+      {via.length > 0 && (
+        <span className="max-w-24 shrink truncate text-[11px] text-muted-foreground">{viaText(via)}</span>
+      )}
       {session.environment !== "none" && (
         <span className={cn("shrink-0 text-[10px] font-semibold uppercase", ENV_TEXT[session.environment])}>
           {session.environment}

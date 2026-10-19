@@ -76,6 +76,40 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
 - With MultiExec on, uploads and downloads still go through one terminal: the current one. ZMODEM (`sz`/`rz`) is not
   supported.
 
+### Jump hosts and tunnels
+
+SS-07: a session can name another session as its jump host, and that one its own, and so on (up to 8 hops). Remotely
+connects through each in turn over SSH direct-tcpip channels, as `ssh -J` does, so a session's name only has to resolve
+on its jump host.
+
+- **Every hop checks its host key** with the usual first-use question, which names the jump host it is about; a changed
+  key at any hop blocks the connection there and names that hop. Each hop logs in with its own session's login: a
+  password or key from the vault, the SSH agent, or (in a terminal) a password typed at `bob@bastion's password:`, kept
+  for that terminal's reconnects like the session's own. Jump hosts that lead back to a session on the way are refused
+  when the session is saved and again when connecting.
+- **Everything goes through the chain**: terminals (keep-alive, reconnect, SFTP), Compare output and other commands, SSH
+  key pushes and the dashboard's guest metrics. The tab and the session tree say "via <jump host>", and the tooltip
+  shows the whole route.
+- **Reachability**: a session behind jump hosts is not probed from this PC. Its dot is a ring with the first jump host's
+  state (the one this PC dials), never red because the session itself can't be reached from here.
+- **Port forwards**: each session keeps local (`ssh -L`), remote (`ssh -R`) and SOCKS (`ssh -D`, SOCKS 4, 4a and 5)
+  forwards, edited with the session. They listen on 127.0.0.1 unless you type another address (the host side of a
+  remote forward defaults to localhost); port 0 takes any free port. Those marked "starts with the terminal" open when
+  the terminal first connects; the terminal's Tunnels button lists them with their state (listening where and how many
+  connections, waiting for a reconnect, failed and why) and starts or stops them. A tunnel rides the terminal's
+  connection: behind jump hosts it starts from the session's host, it opens again by itself after a reconnect, and it
+  closes with the terminal.
+- **Approvals**: opening a tunnel is a command on the bus. A local or SOCKS tunnel only this PC can use is Low (so
+  Medium on a Prod host, as the PRD's tier table says). A remote tunnel is Medium: the host listens, and whatever
+  reaches that port gets into the network this PC is on. A tunnel that listens on a network address (0.0.0.0, a LAN
+  IP), on either side, is Medium and never lower: other computers can use it without logging in, and the dialog says
+  so. Forwards that start with the terminal go through the same approval. Opening and closing are audited with the
+  session, kind, addresses and ports, never what goes through.
+- Exports to another laptop carry each session's jump host and port forwards.
+
+Not done here: importing port forwards from PuTTY, MobaXterm or OpenSSH config files (the jump host link is imported),
+and a jump host in quick connect.
+
 Disabled buttons say why they are disabled (QL-08), in a tooltip or under the menu item.
 
 ## Prerequisites
@@ -100,6 +134,18 @@ so the migrations it applies never reach the installed app's database and the tw
 process. To use another folder, set `REMOTELY_DATA_DIR` to an absolute path outside the repository. The app finds
 `vmrun.exe` from Settings, then the `REMOTELY_VMRUN` environment variable, then the registry, then the default install
 folders.
+
+To try the terminal, MultiExec, Compare output, guest metrics, file transfer, jump hosts and tunnels without a real
+host, run the toy SSH servers (they print the user, one fresh password and each host key):
+
+```bash
+cargo run -p remotely-core --example dev_ssh_server --features fakes 2222 3
+```
+
+They listen on 127.0.0.1:2222 to 2224 and reach each other by the names `dev-host-01.test` to `dev-host-03.test`,
+which this PC can't resolve. For a two-hop chain, save `dev-host-01` as 127.0.0.1:2222, then `dev-host-02.test` (port 22) with it as the jump host, then `dev-host-03.test` with that one as its jump host. `web.test:80` is a small web page
+they all reach: a local forward `127.0.0.1:8080 -> web.test:80` on any of them serves it at http://127.0.0.1:8080, and a
+SOCKS forward on 1080 serves it to `curl --socks5-hostname 127.0.0.1:1080 http://web.test/`.
 
 ## Checks
 
@@ -233,32 +279,32 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 
 | Module            | Path                                                | PRD requirements                                                                                                             | State                                                                                                                                                                          |
 | ----------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Command bus       | `crates/core/src/command_bus.rs`                    | AP-01 (saves rules), AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, SS-08, SS-10, FD-14                                    | Working: the only way to enqueue a job (MultiExec lines and uploads too); checks snapshot names; audits rule changes                                                           |
-| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), SS-08, SS-10, BX-06, VM-05, VM-07 (warnings add a confirm)                       | Working; rules are checked before they are saved; every tier rule has a unit test; a MultiExec line it could not follow, or replacing a file, is at least a confirm            |
+| Command bus       | `crates/core/src/command_bus.rs`                    | AP-01 (saves rules), AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, SS-07, SS-08, SS-10, FD-14                             | Working: the only way to enqueue a job (MultiExec lines, uploads and tunnels too); checks snapshot names; audits rule changes                                                  |
+| Policy engine     | `crates/core/src/policy/`                           | AP-01, AP-04, SS-06 (Prod raises the tier), SS-07, SS-08, SS-10, BX-06, VM-05, VM-07 (warnings add a confirm)                | Working; every tier rule has a unit test; a MultiExec line it could not follow, replacing a file or a tunnel other computers can use is at least a confirm                     |
 | Impact preview    | `crates/core/src/impact.rs`                         | AP-02                                                                                                                        | Working: state, uptime (from `vmware.log`) and snapshot count per VM; logged-in users and dependent VMs later                                                                  |
 | Snapshot reads    | `crates/core/src/snapshots.rs`                      | VM-04, VM-05                                                                                                                 | Working: tree order, 30-day flag, safety snapshot names                                                                                                                        |
 | Audit export      | `crates/core/src/export.rs`                         | AP-05                                                                                                                        | Working: CSV with hashes, secrets redacted, formula cells guarded                                                                                                              |
 | Job runner        | `crates/core/src/jobs.rs`                           | VM-03 (shutdown wait), VM-05, VM-06, AP-03 (countdown), AP-04, BX-02, BX-04, SS-08, SS-10, FD-14 (runs alone)                | Working; sends a MultiExec line's held Enter to its terminals; carries out uploads through a terminal                                                                          |
 | VMware adapter    | `crates/core/src/adapters/vmware.rs`                | VM-01, VM-02, VM-03, VM-04, AP-02                                                                                            | Library, folder scan, `.vmx` and `.vmsd` reading, `vmware.log` start time, `vmrun` list, power and snapshots; vmrest later                                                     |
-| Remote adapter    | `crates/core/src/adapters/remote.rs`, `remote/`     | SS-03, SS-05, SS-08, BX-02, BX-07, MO-02                                                                                     | Working: terminal shells, SFTP on a terminal's connection, bulk exec with sudo, and connections kept open between guest-metric rounds                                          |
+| Remote adapter    | `crates/core/src/adapters/remote.rs`, `remote/`     | SS-03, SS-05, SS-07, SS-08, BX-02, BX-07, MO-02                                                                              | Working: jump host chains, terminal shells, SFTP and port forwards (local, remote, SOCKS) on a terminal's connection, bulk exec with sudo, kept connections for guest metrics  |
 | Host counters     | `crates/core/src/adapters/host_counters.rs`         | MO-01, MO-04, VM-07                                                                                                          | Working: host RAM, CPUs, CPU times, free disk, and each `vmware-vmx.exe` process's CPU, working set and I/O                                                                    |
 | Updater           | `crates/core/src/adapters/updater.rs`, `github.rs`  | FD-14                                                                                                                        | Works: GitHub Releases of the private repo with the token from the vault; install is a Medium-tier job that runs alone                                                         |
 | Inventory         | `crates/core/src/inventory.rs`                      | VM-01, VM-02, SS-06 (VM labels)                                                                                              | Every VM from the library, chosen folders and `vmrun list`; filters; audited environment labels                                                                                |
 | Capacity check    | `crates/core/src/capacity.rs`                       | VM-07, MO-04                                                                                                                 | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                      |
 | Metrics collector | `crates/core/src/metrics/`                          | MO-01, MO-02, MO-03, MO-04                                                                                                   | Working: host-side and SSH guest sources every 5 s, 30 minutes of history in memory, collector cost                                                                            |
 | Vault             | `crates/core/src/vault/`                            | SS-04, AP-06                                                                                                                 | Working: AES-256-GCM per item; DPAPI and Argon2id key wrapping; 15-minute idle lock; values never leave it except to adapters                                                  |
-| Session library   | `crates/core/src/sessions.rs`                       | SS-01, SS-06, QL-04                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host checks, audited changes, the tree                                                                        |
+| Session library   | `crates/core/src/sessions.rs`, `forwards.rs`        | SS-01, SS-06, SS-07, QL-04                                                                                                   | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                   |
 | Export and import | `crates/core/src/transfer/`                         | FD-07                                                                                                                        | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                          |
 | SSH key manager   | `crates/core/src/ssh_keys.rs`                       | SS-09                                                                                                                        | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                      |
-| Terminal          | `crates/core/src/terminal/`                         | SS-03, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                       | Working: supervised panes, quick connect, host name and IP, output saved or logged with secrets scrubbed, vault passwords typed at prompts, long runs noticed, MultiExec       |
+| Terminal          | `crates/core/src/terminal/`                         | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                | Working: supervised panes through jump hosts, tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec         |
 | MultiExec         | `crates/core/src/terminal/multiexec.rs`             | SS-10                                                                                                                        | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                    |
 | File transfer     | `crates/core/src/terminal/files.rs`, `folder.rs`    | SS-08                                                                                                                        | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, transfers with cancel and retry                  |
 | Compare output    | `crates/core/src/bulk.rs`                           | BX-01, BX-03, BX-05                                                                                                          | Working: hosts from picked tabs and tree sessions, results grouped by output, diff, CSV, JSON and HTML export                                                                  |
 | Command panel     | `crates/core/src/snippets/`                         | BX-08                                                                                                                        | Working: favourite commands in folders (audited), a built-in library, variables, marks from the policy engine                                                                  |
-| Reachability      | `crates/core/src/reachability.rs`                   | QL-04 (MO-08 lite)                                                                                                           | Working: TCP checks of the sessions the tree shows, once per host and port, a few at a time                                                                                    |
+| Reachability      | `crates/core/src/reachability.rs`                   | QL-04 (MO-08 lite), SS-07                                                                                                    | Working: TCP checks of the sessions the tree shows, once per host and port, a few at a time; the first jump host's for sessions behind one                                     |
 | VM links          | `crates/core/src/vm_links.rs`                       | QL-01, BX-01                                                                                                                 | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept                                                                          |
 | Network adapter   | `crates/core/src/adapters/network.rs`               | QL-01, QL-03, QL-04                                                                                                          | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                |
 | Store             | `crates/core/src/store/`, `crates/core/migrations/` | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                           | Working: hash-chained audit log, job journal, inventory, sessions, vault ciphertext, tags, saved filters                                                                       |
-| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                                                                           | One fake per outside system; the test SSH server has SFTP on a temp folder                                                                                                     |
+| Fake adapters     | `crates/core/src/fakes.rs`                          | Development safety                                                                                                           | One fake per outside system; the test SSH server has SFTP on a temp folder and forwards (direct-tcpip, tcpip-forward) with internal names                                      |
 | Tauri shell       | `src-tauri/src/`                                    | All IPC                                                                                                                      | Working                                                                                                                                                                        |
 | UI                | `src/`                                              | FD-01, FD-07, VM-01 to VM-06, AP-01 to AP-06, SS-01 to SS-06, SS-08 to SS-11, BX-01 to BX-08, MO-01 to MO-04, QL-01 to QL-08 | All pages, the approval dialog with countdown, MultiExec, Compare output and Files here in the Terminal page, the dashboard with live uPlot charts, the Ctrl+K command palette |

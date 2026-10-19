@@ -25,6 +25,14 @@
 //! with [`TestSshServer::with_login_shell`], a login shell the shell probe calls bash or zsh: its
 //! interactive shell then answers Remotely's prompt hook (prints the hook's marker, then OSC 7 before
 //! each prompt) and knows `cd` and `pwd`.
+//!
+//! SS-07: it forwards like OpenSSH with `AllowTcpForwarding yes`. A direct-tcpip channel (a jump
+//! host's hop, a local or SOCKS forward) connects from here to where it asks; names set with
+//! [`TestSshServer::with_route`] lead to another port on 127.0.0.1, so a second server is reachable
+//! "only through this one" by a name this PC can't resolve (`db01.test`). tcpip-forward (a remote
+//! forward) listens on 127.0.0.1 and sends each connection back over the client's connection.
+//! [`TestSshServer::without_forwarding`] refuses both. The log says what was asked
+//! (`direct-tcpip db01.test:22`, `tcpip-forward localhost:9000`), never what went through.
 
 mod sftp;
 
@@ -125,9 +133,17 @@ struct State {
     sftp_off: AtomicBool,
     /// SS-08: what the shell probe says the login shell is.
     login_shell: Mutex<Option<String>>,
+    /// SS-07: names that lead to a port on 127.0.0.1 (lower case), as an internal DNS would.
+    routes: Mutex<HashMap<String, u16>>,
+    /// SS-07: refuse direct-tcpip and tcpip-forward, like `AllowTcpForwarding no`.
+    no_forwarding: AtomicBool,
+    /// SS-07: remote forwards listening, by (address, port), with the connection that asked.
+    listeners: Mutex<HashMap<(String, u32), (usize, tokio::task::AbortHandle)>>,
 }
 
 struct Link {
+    /// Which connection (counted from 1).
+    id: usize,
     freeze: watch::Sender<bool>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -143,6 +159,8 @@ impl State {
                 task.abort();
             }
         }
+        // Their remote forwards' listeners went with them.
+        locks::lock(&self.listeners).clear();
     }
 }
 
@@ -236,6 +254,31 @@ impl TestSshServer {
 
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// SS-07: a direct-tcpip channel to `name` (any port) connects to 127.0.0.1:`port`, like a name
+    /// only this host's network resolves. A jump host's next hop is usually such a name.
+    pub fn with_route(self, name: &str, port: u16) -> Self {
+        self.set_route(name, port);
+        self
+    }
+
+    /// [`TestSshServer::with_route`] while the server runs.
+    pub fn set_route(&self, name: &str, port: u16) {
+        locks::lock(&self.state.routes).insert(name.to_lowercase(), port);
+    }
+
+    /// SS-07: refuses port forwarding and jump host channels, like `AllowTcpForwarding no`.
+    pub fn without_forwarding(self) -> Self {
+        self.state.no_forwarding.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// SS-07: the ports remote forwards listen on now.
+    pub fn forwarded_ports(&self) -> Vec<u32> {
+        let mut ports: Vec<u32> = locks::lock(&self.state.listeners).keys().map(|(_, p)| *p).collect();
+        ports.sort_unstable();
+        ports
     }
 
     pub fn with_password(self, user: &str, password: &str) -> Self {
@@ -373,6 +416,9 @@ impl Drop for TestSshServer {
     fn drop(&mut self) {
         self.accept.abort();
         self.drop_connections();
+        for (_, (_, listener)) in locks::lock(&self.state.listeners).drain() {
+            listener.abort();
+        }
         if let Some(root) = locks::lock(&self.state.sftp_root).take() {
             let _ = std::fs::remove_dir_all(root);
         }
@@ -381,7 +427,7 @@ impl Drop for TestSshServer {
 
 async fn accept_loop(listener: TcpListener, state: Arc<State>) {
     while let Ok((socket, _)) = listener.accept().await {
-        state.connections.fetch_add(1, Ordering::SeqCst);
+        let link = state.connections.fetch_add(1, Ordering::SeqCst) + 1;
         let Some(host_key) = locks::lock(&state.host_key).clone() else {
             continue;
         };
@@ -406,6 +452,7 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
         let (relay_end, server_end) = tokio::io::duplex(64 * 1024);
         let handler = ServerHandler {
             state: Arc::clone(&state),
+            link,
             user: String::new(),
             first_factor: false,
             asking: HashMap::new(),
@@ -414,20 +461,32 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             execs: HashMap::new(),
             unclaimed: HashMap::new(),
             sftp: HashSet::new(),
+            forwarded: HashSet::new(),
             folders: HashMap::new(),
             hooked: HashSet::new(),
         };
-        let session = tokio::spawn(async move {
-            if let Ok(running) = server::run_stream(config, server_end, handler).await {
-                let _ = running.await;
-            }
-        });
+        let session = {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move {
+                if let Ok(running) = server::run_stream(config, server_end, handler).await {
+                    let _ = running.await;
+                }
+                // SS-07: like sshd, its remote forwards stop listening with the connection.
+                locks::lock(&state.listeners).retain(|_, (by, listener)| {
+                    if *by == link {
+                        listener.abort();
+                    }
+                    *by != link
+                });
+            })
+        };
         let (freeze, frozen) = watch::channel(false);
         let (socket_read, socket_write) = socket.into_split();
         let (relay_read, relay_write) = tokio::io::split(relay_end);
         let up = tokio::spawn(relay(socket_read, relay_write, frozen.clone()));
         let down = tokio::spawn(relay(relay_read, socket_write, frozen));
         locks::lock(&state.links).push(Link {
+            id: link,
             freeze,
             tasks: vec![up, down, session],
         });
@@ -454,6 +513,8 @@ async fn relay(mut from: impl AsyncRead + Unpin, mut to: impl AsyncWrite + Unpin
 
 struct ServerHandler {
     state: Arc<State>,
+    /// SS-07: this connection's [`Link`], so what it forwards is cut with it.
+    link: usize,
     user: String,
     /// The password or key was accepted; a one-time code may still be due.
     first_factor: bool,
@@ -470,6 +531,8 @@ struct ServerHandler {
     unclaimed: HashMap<ChannelId, Channel<Msg>>,
     /// SS-08: channels running SFTP: their data is not shell input.
     sftp: HashSet<ChannelId>,
+    /// SS-07: direct-tcpip channels: their data is relayed, not shell input.
+    forwarded: HashSet<ChannelId>,
     /// SS-08: each interactive shell's folder (`cd`).
     folders: HashMap<ChannelId, String>,
     /// SS-08: shells that ran Remotely's prompt hook, and so print OSC 7 before each prompt.
@@ -843,17 +906,128 @@ impl server::Handler for ServerHandler {
         Ok(())
     }
 
+    /// SS-07: a jump host's next hop, or a local or SOCKS forward: connects from here, through a
+    /// route if the name has one.
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: Channel<Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: server::ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.state
+            .note(format!("direct-tcpip {host_to_connect}:{port_to_connect}"));
+        if self.state.no_forwarding.load(Ordering::SeqCst) {
+            reply
+                .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
+        let routed = locks::lock(&self.state.routes)
+            .get(&host_to_connect.to_lowercase())
+            .copied();
+        let target = match (routed, u16::try_from(port_to_connect)) {
+            (Some(port), _) => ("127.0.0.1".to_owned(), port),
+            (None, Ok(port)) => (host_to_connect.to_owned(), port),
+            (None, Err(_)) => {
+                reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+                return Ok(());
+            }
+        };
+        let connected = tokio::time::timeout(Duration::from_secs(5), tokio::net::TcpStream::connect(target)).await;
+        let Ok(Ok(mut socket)) = connected else {
+            reply.reject(russh::ChannelOpenFailure::ConnectFailed).await;
+            return Ok(());
+        };
+        self.forwarded.insert(channel.id());
+        reply.accept().await;
+        let task = tokio::spawn(async move {
+            let mut stream = channel.into_stream();
+            let _ = tokio::io::copy_bidirectional(&mut stream, &mut socket).await;
+        });
+        // Cut with the connection it rides on, like a network failure would.
+        if let Some(link) = locks::lock(&self.state.links).iter_mut().find(|l| l.id == self.link) {
+            link.tasks.push(task);
+        }
+        Ok(())
+    }
+
+    /// SS-07: a remote forward: listens on 127.0.0.1 and sends each connection back over this
+    /// connection.
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut Session,
+    ) -> Result<bool, Self::Error> {
+        self.state.note(format!("tcpip-forward {address}:{port}"));
+        if self.state.no_forwarding.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        let Ok(asked) = u16::try_from(*port) else {
+            return Ok(false);
+        };
+        // Tests never listen beyond this PC, whatever address is asked for.
+        let Ok(listener) = TcpListener::bind(("127.0.0.1", asked)).await else {
+            return Ok(false);
+        };
+        let bound = listener.local_addr().map(|a| u32::from(a.port())).unwrap_or(*port);
+        *port = bound;
+        let handle = session.handle();
+        let connected_address = address.to_owned();
+        let task = tokio::spawn(async move {
+            while let Ok((mut socket, from)) = listener.accept().await {
+                let handle = handle.clone();
+                let connected_address = connected_address.clone();
+                tokio::spawn(async move {
+                    let opened = handle
+                        .channel_open_forwarded_tcpip(
+                            connected_address,
+                            bound,
+                            from.ip().to_string(),
+                            u32::from(from.port()),
+                        )
+                        .await;
+                    if let Ok(channel) = opened {
+                        let mut stream = channel.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut socket).await;
+                    }
+                });
+            }
+        });
+        locks::lock(&self.state.listeners).insert((address.to_owned(), bound), (self.link, task.abort_handle()));
+        if let Some(link) = locks::lock(&self.state.links).iter_mut().find(|l| l.id == self.link) {
+            link.tasks.push(task);
+        }
+        Ok(true)
+    }
+
+    async fn cancel_tcpip_forward(&mut self, address: &str, port: u32, _: &mut Session) -> Result<bool, Self::Error> {
+        self.state.note(format!("cancel-tcpip-forward {address}:{port}"));
+        match locks::lock(&self.state.listeners).remove(&(address.to_owned(), port)) {
+            Some((_, listener)) => {
+                listener.abort();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     async fn channel_close(&mut self, channel: ChannelId, _: &mut Session) -> Result<(), Self::Error> {
         self.unclaimed.remove(&channel);
         self.sftp.remove(&channel);
+        self.forwarded.remove(&channel);
         self.folders.remove(&channel);
         self.hooked.remove(&channel);
         Ok(())
     }
 
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
-        // SS-08: SFTP reads its own channel.
-        if self.sftp.contains(&channel) {
+        // SS-08: SFTP reads its own channel; SS-07: so does a forwarded connection's relay.
+        if self.sftp.contains(&channel) || self.forwarded.contains(&channel) {
             return Ok(());
         }
         if let Some((_, stdin)) = self.execs.get_mut(&channel) {

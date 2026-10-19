@@ -24,6 +24,9 @@
 //!     job runner sends it to the terminals
 //!     files (SS-08): SFTP on each terminal's connection; the shell's folder (OSC 7); downloads are
 //!     audited reads, uploads are commands on the bus that the job runner carries out in the terminal
+//!     jump hosts (SS-07): every SSH connection goes through the session's jump host chain
+//!     tunnels (SS-07): saved port forwards (forwards) open on a terminal's connection; opening one is
+//!     a command on the bus, which the job runner carries out in the terminal; closing is audited
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
@@ -42,6 +45,7 @@ pub mod error;
 pub mod export;
 #[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
+pub mod forwards;
 pub mod impact;
 pub mod import;
 pub mod inventory;
@@ -75,6 +79,7 @@ use bulk::BulkRuns;
 use capacity::CapacityChecker;
 use command_bus::CommandBus;
 use domain::Context;
+use forwards::Forwards;
 use impact::ImpactPreviewer;
 use import::Importer;
 use inventory::{Inventory, StoreDirectory};
@@ -144,6 +149,8 @@ pub struct Core {
     pub vault: VaultService,
     /// SS-01, SS-06: saved sessions and their folders.
     pub sessions: SessionLibrary,
+    /// SS-07: each session's saved port forwards. Opening one is on [`Core::terminals`] (the bus).
+    pub forwards: Forwards,
     /// QL-01: links between sessions and the VMs they reach, automatic (by IP) or chosen by hand.
     pub links: Arc<VmLinks>,
     /// SS-02: session lists from PuTTY, MobaXterm, OpenSSH and CSV.
@@ -274,6 +281,8 @@ impl Core {
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::REMOTE_LIMIT_KEY).await? {
             jobs.set_remote_limit(limit.clamp(1, JobLimits::MAX_REMOTE));
         }
+        // SS-07: tunnels go through the bus, which reaches the terminals through the job runner.
+        terminals.set_bus(&bus);
         let keys = KeyManager::new(store.clone(), Arc::clone(&adapters.vault));
         let snippets = Snippets::new(store.clone(), bus.policy());
         let multiexec = MultiExec::new(ctx, terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
@@ -284,6 +293,7 @@ impl Core {
             inventory: Inventory::new(store.clone(), vmware_dyn, Arc::clone(&links)),
             vault: VaultService::new(adapters.vault, store.clone()),
             sessions: SessionLibrary::new(store.clone(), Arc::clone(&links)),
+            forwards: Forwards::new(store.clone()),
             links,
             import: Importer::new(store.clone()),
             known_hosts,

@@ -1,6 +1,7 @@
 // SS-05: host key decisions. A first connection shows the server's SHA-256 fingerprint and asks before
 // trusting it. A changed key has already blocked the connection: the dialog says so plainly, and
-// replacing the saved key takes a deliberate extra step (audited in the core).
+// replacing the saved key takes a deliberate extra step (audited in the core). SS-07: through jump hosts,
+// each hop asks on its own, and the dialog names the jump host it is about.
 
 import { useState } from "react";
 import { ShieldAlertIcon, ShieldQuestionIcon } from "lucide-react";
@@ -68,6 +69,8 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
     }
   }
 
+  // SS-07: which hop of the chain this is about.
+  const hop = question.jump ? `the jump host '${question.jump}', on the way to ${sessionName}` : sessionName;
   if (question.kind === "unknown") {
     const { key, otherKeyTypes } = question;
     return (
@@ -77,10 +80,12 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
             <AlertDialogMedia>
               <ShieldQuestionIcon />
             </AlertDialogMedia>
-            <AlertDialogTitle>Trust {address(key)}?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {question.jump ? `Trust the jump host ${address(key)}?` : `Trust ${address(key)}?`}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Remotely has not connected to this host before ({sessionName}). Check that the fingerprint below matches
-              the host's own, for example with its owner or on its console, before you trust it.
+              Remotely has not connected to this host before ({hop}). Check that the fingerprint below matches the
+              host's own, for example with its owner or on its console, before you trust it.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <Fingerprint label="Fingerprint (SHA-256)" keyType={key.keyType} fingerprint={key.fingerprint} />
@@ -124,11 +129,13 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
           <AlertDialogMedia className="bg-destructive/10 text-destructive">
             <ShieldAlertIcon />
           </AlertDialogMedia>
-          <AlertDialogTitle>The host key of {address(key)} has changed</AlertDialogTitle>
+          <AlertDialogTitle>
+            The host key of {question.jump ? `the jump host ${address(key)}` : address(key)} has changed
+          </AlertDialogTitle>
           <AlertDialogDescription>
-            The key this host presented is not the one you trusted, so Remotely did not connect and sent nothing (no
-            password, no key). Someone may be intercepting the connection, or the host was reinstalled or had its keys
-            replaced.
+            The key this host ({hop}) presented is not the one you trusted, so Remotely did not connect and sent nothing
+            to it (no password, no key){question.jump ? ", nor went any further" : ""}. Someone may be intercepting the
+            connection, or the host was reinstalled or had its keys replaced.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <div className="grid gap-3">

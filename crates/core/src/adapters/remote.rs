@@ -7,8 +7,13 @@
 //! a connection kept open between rounds: [`RemoteAdapter::connect`]). A shell also reports the address
 //! it reached and what `hostname` prints on the same connection (QL-03), which shell it runs (SS-08,
 //! [`SHELL_PROBE`]), and gives SFTP on channels of that same connection ([`RemoteFiles`], SS-08), so file
-//! transfers need no second login. Jump hosts (SS-07, v2) will chain through russh's direct-tcpip
-//! channels.
+//! transfers need no second login.
+//!
+//! SS-07: a session behind jump hosts is reached through a chain. The first jump host is dialled from
+//! this PC; each next hop, and the session itself, is an SSH connection inside a direct-tcpip channel
+//! of the hop before. Every hop checks its own host key (the verifier is told which jump host it is)
+//! and logs in with its own session's credentials. Port forwards ([`forward`]) ride the session's own
+//! connection, so through jump hosts they start from the session's host.
 //!
 //! The core reads secrets from the vault just before a connection and hands them over as
 //! [`Credentials`]; this adapter never sees the vault, the UI never sees the secrets, and no secret
@@ -16,7 +21,9 @@
 //! saved, a key's passphrase, a one-time code) asks through the [`Prompter`], which the terminal
 //! shows like PuTTY does.
 
+pub mod forward;
 mod sftp;
+mod socks;
 
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -50,7 +57,8 @@ pub struct SessionSpec {
     /// Empty: the terminal asks for it ("login as").
     pub username: String,
     pub auth: AuthMethod,
-    /// The jump host (SS-07, v2). Resolved one level, so the terminal can name it.
+    /// SS-07: the jump host, with its own jump host in turn, and so on: the whole chain, each hop
+    /// with its own login.
     pub jump: Option<Box<SessionSpec>>,
     pub environment: Environment,
     pub startup_command: Option<String>,
@@ -65,6 +73,32 @@ impl SessionSpec {
             format!("{}@", self.username)
         };
         format!("{user}{}", address(&self.host, self.port))
+    }
+
+    /// SS-07: the jump hosts on the way, in the order they are connected: first the one this PC
+    /// dials, last the session's own jump host. Empty for a session reached directly.
+    pub fn jumps(&self) -> Vec<&SessionSpec> {
+        let mut chain = Vec::new();
+        let mut next = self.jump.as_deref();
+        while let Some(hop) = next {
+            chain.push(hop);
+            next = hop.jump.as_deref();
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// SS-07: `'outer' -> 'bastion'`, the jump hosts in the order they are connected, for messages
+    /// and the audit log. `None` for a session reached directly.
+    pub fn route(&self) -> Option<String> {
+        let jumps = self.jumps();
+        (!jumps.is_empty()).then(|| {
+            jumps
+                .iter()
+                .map(|j| format!("'{}'", j.name))
+                .collect::<Vec<_>>()
+                .join(" -> ")
+        })
     }
 }
 
@@ -135,7 +169,9 @@ impl Default for ConnectOptions {
 /// [`CoreError::HostKeyChanged`] or [`CoreError::HostKeyRejected`] stop it.
 #[async_trait]
 pub trait HostKeyVerifier: Send + Sync {
-    async fn verify(&self, key: &HostKey) -> Result<()>;
+    /// `jump`: SS-07, the name of the jump host that presented the key, or `None` for the session's
+    /// own host. Every hop of a chain is checked.
+    async fn verify(&self, key: &HostKey, jump: Option<&str>) -> Result<()>;
 }
 
 /// Asks the user for what a login needs, in the terminal.
@@ -148,8 +184,13 @@ pub trait Prompter: Send {
     /// Shows a message, e.g. the server's login banner.
     async fn show(&mut self, text: &str);
 
-    /// A typed password worked. The terminal may keep it in memory to log in again after a dropped
-    /// connection (SS-03 auto-reconnect); it is never stored.
+    /// SS-07: what follows (banners, questions, an accepted password) is for this hop of the chain:
+    /// a jump host (`jump`), or the session itself. Called before each hop logs in.
+    fn hop(&mut self, _session: &SessionSpec, _jump: bool) {}
+
+    /// A typed password worked, for the hop last named by [`Prompter::hop`]. The terminal may keep it
+    /// in memory to log in again after a dropped connection (SS-03 auto-reconnect); it is never
+    /// stored.
     fn password_accepted(&mut self, _password: &SecretString) {}
 }
 
@@ -164,6 +205,8 @@ pub struct PtySize {
 pub struct ShellRequest<'a> {
     pub session: &'a SessionSpec,
     pub credentials: Credentials,
+    /// SS-07: each jump host's login, in the order of [`SessionSpec::jumps`].
+    pub jump_credentials: Vec<Credentials>,
     pub size: PtySize,
     pub options: &'a ConnectOptions,
     pub verifier: Arc<dyn HostKeyVerifier>,
@@ -173,6 +216,8 @@ pub struct ShellRequest<'a> {
 pub struct ExecRequest<'a> {
     pub session: &'a SessionSpec,
     pub credentials: Credentials,
+    /// SS-07: each jump host's login, in the order of [`SessionSpec::jumps`].
+    pub jump_credentials: Vec<Credentials>,
     /// One command or a multi-line script, run by the login shell.
     pub script: &'a str,
     /// BX-07: run the script under `sudo`, which reads this password from stdin. Never echoed,
@@ -189,6 +234,8 @@ pub struct ExecRequest<'a> {
 pub struct ConnectRequest<'a> {
     pub session: &'a SessionSpec,
     pub credentials: Credentials,
+    /// SS-07: each jump host's login, in the order of [`SessionSpec::jumps`].
+    pub jump_credentials: Vec<Credentials>,
     pub options: &'a ConnectOptions,
     pub verifier: Arc<dyn HostKeyVerifier>,
 }
@@ -253,6 +300,8 @@ pub struct ShellHandle {
     pub shell: oneshot::Receiver<Option<PromptShell>>,
     /// SS-08: files on the host, over SFTP channels of this same connection.
     pub files: Arc<dyn RemoteFiles>,
+    /// SS-07: port forwards on this same connection.
+    pub forwards: Arc<dyn forward::RemoteForwards>,
 }
 
 /// How long the `hostname` beside a new shell may take.
@@ -393,6 +442,7 @@ impl RemoteAdapter for RusshAdapter {
         let ExecRequest {
             session,
             credentials,
+            jump_credentials,
             script,
             sudo_password,
             options,
@@ -400,33 +450,31 @@ impl RemoteAdapter for RusshAdapter {
             max_output,
         } = request;
         let started = std::time::Instant::now();
-        if session.username.is_empty() {
-            return Err(CoreError::AuthFailed(format!(
-                "'{}' has no user name, and a bulk run can't ask for one. Add it to the session",
-                session.name
-            )));
-        }
+        need_user_names(session, "a bulk run")?;
         // BX-07: every secret of this run is scrubbed from what the host prints.
         let mut secrets: Vec<SecretString> = sudo_password.iter().cloned().collect();
         if let Credentials::Password(Some(password)) = &credentials {
             secrets.push(password.clone());
         }
-        let (mut handle, shared, _) = connect(session, options, verifier).await?;
-        let mut prompter = NoPrompter {
-            session: &session.name,
-            who: "a bulk run",
-        };
-        authenticate(
-            &mut handle,
-            &session.username,
+        let mut prompter = NoPrompter::new(session, "a bulk run");
+        let chain = Chain {
+            session,
             credentials,
+            jump_credentials,
             options,
-            &mut prompter,
-            &shared,
+            verifier,
+        };
+        let connected = connect_chain(chain, &mut prompter, false).await?;
+        let result = run_command(
+            &connected.handle,
+            &connected.shared,
+            script,
+            sudo_password.as_ref(),
+            &secrets,
+            max_output,
         )
-        .await?;
-        let result = run_command(&handle, &shared, script, sudo_password.as_ref(), &secrets, max_output).await;
-        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        .await;
+        connected.close().await;
         let (exit_code, signal, output) = result?;
         Ok(ExecResult {
             exit_code,
@@ -440,73 +488,70 @@ impl RemoteAdapter for RusshAdapter {
         let ConnectRequest {
             session,
             credentials,
+            jump_credentials,
             options,
             verifier,
         } = request;
-        if session.username.is_empty() {
-            return Err(CoreError::AuthFailed(format!(
-                "'{}' has no user name, and the dashboard can't ask for one. Add it to the session",
-                session.name
-            )));
-        }
+        need_user_names(session, "the dashboard")?;
         let mut secrets = Vec::new();
         if let Credentials::Password(Some(password)) = &credentials {
             secrets.push(password.clone());
         }
-        let (mut handle, shared, _) = connect(session, options, verifier).await?;
-        let mut prompter = NoPrompter {
-            session: &session.name,
-            who: "the dashboard",
-        };
-        let logged_in = authenticate(
-            &mut handle,
-            &session.username,
+        let mut prompter = NoPrompter::new(session, "the dashboard");
+        let chain = Chain {
+            session,
             credentials,
+            jump_credentials,
             options,
-            &mut prompter,
-            &shared,
-        )
-        .await;
-        if let Err(err) = logged_in {
-            let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
-            return Err(err);
-        }
-        Ok(Box::new(RusshSession {
-            handle,
-            shared,
-            secrets,
-        }))
+            verifier,
+        };
+        let connected = connect_chain(chain, &mut prompter, false).await?;
+        Ok(Box::new(RusshSession { connected, secrets }))
     }
 
     async fn open_shell(&self, request: ShellRequest<'_>, prompter: &mut dyn Prompter) -> Result<ShellHandle> {
         let ShellRequest {
             session,
             credentials,
+            jump_credentials,
             size,
             options,
             verifier,
         } = request;
-        let (mut handle, shared, peer_ip) = connect(session, options, verifier).await?;
-        show_banners(&shared, prompter).await;
-        let user = match session.username.as_str() {
-            "" => {
-                let typed = prompter.ask("login as: ", true).await?;
-                typed.expose().trim().to_owned()
-            }
-            user => user.to_owned(),
+        let chain = Chain {
+            session,
+            credentials,
+            jump_credentials,
+            options,
+            verifier,
         };
-        if user.is_empty() {
-            return Err(CoreError::AuthFailed("no user name was given".into()));
-        }
-        authenticate(&mut handle, &user, credentials, options, prompter, &shared).await?;
-        open_pty(handle, shared, size, &options.term, peer_ip, user).await
+        let connected = connect_chain(chain, prompter, true).await?;
+        open_pty(connected, size, &options.term).await
     }
+}
+
+/// A bulk run or the dashboard can't ask for a user name: every hop needs one saved.
+fn need_user_names(session: &SessionSpec, who: &str) -> Result<()> {
+    for jump in session.jumps() {
+        if jump.username.is_empty() {
+            return Err(CoreError::AuthFailed(format!(
+                "the jump host '{}' has no user name, and {who} can't ask for one. Add it to that session",
+                jump.name
+            )));
+        }
+    }
+    if session.username.is_empty() {
+        return Err(CoreError::AuthFailed(format!(
+            "'{}' has no user name, and {who} can't ask for one. Add it to the session",
+            session.name
+        )));
+    }
+    Ok(())
 }
 
 /// MO-02: a logged-in russh connection kept for more commands.
 struct RusshSession {
-    handle: client::Handle<Handler>,
-    shared: Arc<Mutex<Shared>>,
+    connected: Connected,
     /// The login password, scrubbed from what the host prints.
     secrets: Vec<SecretString>,
 }
@@ -514,13 +559,20 @@ struct RusshSession {
 #[async_trait]
 impl ExecSession for RusshSession {
     async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult> {
-        if self.handle.is_closed() {
-            let reason = disconnect_reason(&self.shared).await;
+        if self.connected.handle.is_closed() {
+            let reason = self.connected.lost_reason().await;
             return Err(CoreError::Ssh(format!("the connection was lost: {reason}")));
         }
         let started = std::time::Instant::now();
-        let (exit_code, signal, output) =
-            run_command(&self.handle, &self.shared, script, None, &self.secrets, max_output).await?;
+        let (exit_code, signal, output) = run_command(
+            &self.connected.handle,
+            &self.connected.shared,
+            script,
+            None,
+            &self.secrets,
+            max_output,
+        )
+        .await?;
         Ok(ExecResult {
             exit_code,
             signal,
@@ -530,11 +582,11 @@ impl ExecSession for RusshSession {
     }
 
     fn is_closed(&self) -> bool {
-        self.handle.is_closed()
+        self.connected.handle.is_closed()
     }
 
     async fn close(&self) {
-        let _ = self.handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        self.connected.close().await;
     }
 }
 
@@ -549,11 +601,15 @@ struct Shared {
     banners: Vec<String>,
     /// Why the connection ended, once it has.
     disconnect: Option<String>,
+    /// SS-07: remote forwards the server listens for, and where their connections go.
+    routes: Vec<forward::Route>,
 }
 
 struct Handler {
     host: String,
     port: u16,
+    /// SS-07: the jump host's name when this connection is one on the way.
+    jump: Option<String>,
     verifier: Arc<dyn HostKeyVerifier>,
     shared: Arc<Mutex<Shared>>,
 }
@@ -573,13 +629,40 @@ impl client::Handler for Handler {
             fingerprint: key.fingerprint(HashAlg::Sha256).to_string(),
         };
         locks::lock(&self.shared).key_presented = true;
-        match self.verifier.verify(&host_key).await {
+        match self.verifier.verify(&host_key, self.jump.as_deref()).await {
             Ok(()) => Ok(true),
             Err(err) => {
                 locks::lock(&self.shared).verify_error = Some(err);
                 Ok(false)
             }
         }
+    }
+
+    /// SS-07: a connection to a remote forward's port on the host. It goes to that forward, or is
+    /// refused when no forward of this connection listens there.
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        let route = forward::find_route(&locks::lock(&self.shared).routes, connected_address, connected_port);
+        match route {
+            Some(to) => {
+                reply.accept().await;
+                let _ = to.send(channel);
+            }
+            None => {
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+            }
+        }
+        Ok(())
     }
 
     async fn auth_banner(&mut self, banner: &str, _: &mut client::Session) -> std::result::Result<(), Self::Error> {
@@ -633,9 +716,225 @@ fn dial_host(host: &str) -> &str {
     host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
-/// Reaches the host and agrees on keys. Also returns the address reached (QL-03).
+/// What connecting needs: the session, its login, and each jump host's login on the way (SS-07).
+struct Chain<'a> {
+    session: &'a SessionSpec,
+    credentials: Credentials,
+    jump_credentials: Vec<Credentials>,
+    options: &'a ConnectOptions,
+    verifier: Arc<dyn HostKeyVerifier>,
+}
+
+/// One logged-in hop of a chain.
+struct Link {
+    handle: client::Handle<Handler>,
+    shared: Arc<Mutex<Shared>>,
+    peer_ip: Option<IpAddr>,
+    user: String,
+}
+
+/// SS-07: the jump hosts' connections under a session's own, in the order they were made, kept open
+/// as long as it is.
+#[derive(Default)]
+struct Jumps {
+    hops: Vec<(String, Link)>,
+}
+
+impl Jumps {
+    fn last(&self) -> Option<(&str, &client::Handle<Handler>)> {
+        self.hops.last().map(|(name, link)| (name.as_str(), &link.handle))
+    }
+
+    /// Closes them, the innermost first.
+    async fn close(&self) {
+        for (_, link) in self.hops.iter().rev() {
+            let _ = link.handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        }
+    }
+
+    /// Why the first of them that dropped did, naming it: a jump host that drops takes every
+    /// connection behind it along. russh does not always say why (a cut connection may fail to shut
+    /// down first), so a closed one counts too.
+    fn lost(&self) -> Option<String> {
+        self.hops.iter().find_map(|(name, link)| {
+            let reason = locks::lock(&link.shared).disconnect.clone();
+            match reason {
+                Some(reason) => Some(format!("jump host '{name}': {reason}")),
+                None if link.handle.is_closed() => Some(format!("jump host '{name}': the connection was lost")),
+                None => None,
+            }
+        })
+    }
+}
+
+/// A logged-in connection to a session, through its jump hosts if it has any.
+struct Connected {
+    handle: client::Handle<Handler>,
+    shared: Arc<Mutex<Shared>>,
+    /// QL-03: the address this PC reached. `None` behind jump hosts: this PC only reached the first.
+    peer_ip: Option<IpAddr>,
+    user: String,
+    jumps: Jumps,
+}
+
+impl Connected {
+    async fn close(&self) {
+        let _ = self.handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        self.jumps.close().await;
+    }
+
+    /// Why the connection ended: a jump host on the way, or the session's own host.
+    async fn lost_reason(&self) -> String {
+        chain_lost_reason(&self.jumps, &self.shared).await
+    }
+}
+
+/// Connects and logs in, hop by hop: each jump host in turn, each through the one before, then the
+/// session through the last (SS-07). Each hop checks its host key and logs in with its own
+/// credentials. `ask_user`: a hop without a user name asks for one ("login as"), like PuTTY.
+async fn connect_chain(chain: Chain<'_>, prompter: &mut dyn Prompter, ask_user: bool) -> Result<Connected> {
+    let Chain {
+        session,
+        credentials,
+        jump_credentials,
+        options,
+        verifier,
+    } = chain;
+    let hops = session.jumps();
+    if hops.len() != jump_credentials.len() {
+        return Err(CoreError::InvalidInput(format!(
+            "the logins for the jump hosts of '{}' are missing",
+            session.name
+        )));
+    }
+    let mut jumps = Jumps::default();
+    for (hop, credentials) in hops.into_iter().zip(jump_credentials) {
+        prompter.hop(hop, true);
+        let link = login(
+            hop,
+            true,
+            credentials,
+            jumps.last(),
+            options,
+            &verifier,
+            prompter,
+            ask_user,
+        )
+        .await;
+        match link {
+            Ok(link) => jumps.hops.push((hop.name.clone(), link)),
+            Err(err) => {
+                jumps.close().await;
+                return Err(err);
+            }
+        }
+    }
+    prompter.hop(session, false);
+    match login(
+        session,
+        false,
+        credentials,
+        jumps.last(),
+        options,
+        &verifier,
+        prompter,
+        ask_user,
+    )
+    .await
+    {
+        Ok(link) => Ok(Connected {
+            peer_ip: if jumps.hops.is_empty() { link.peer_ip } else { None },
+            handle: link.handle,
+            shared: link.shared,
+            user: link.user,
+            jumps,
+        }),
+        Err(err) => {
+            jumps.close().await;
+            Err(err)
+        }
+    }
+}
+
+/// SS-07: names the jump host in what went wrong with it. Host key errors name it already.
+fn at_jump(err: CoreError, name: &str) -> CoreError {
+    let at = |message: String| format!("jump host '{name}': {message}");
+    match err {
+        CoreError::Ssh(message) => CoreError::Ssh(at(message)),
+        CoreError::AuthFailed(message) => CoreError::AuthFailed(at(message)),
+        CoreError::AgentUnavailable(message) => CoreError::AgentUnavailable(at(message)),
+        CoreError::Timeout { command, seconds } => CoreError::Timeout {
+            command: format!("{command} (jump host '{name}')"),
+            seconds,
+        },
+        other => other,
+    }
+}
+
+/// One hop: reach it (from this PC, or through `via`, the hop before), agree on keys and log in.
+#[allow(clippy::too_many_arguments)]
+async fn login(
+    spec: &SessionSpec,
+    jump: bool,
+    credentials: Credentials,
+    via: Option<(&str, &client::Handle<Handler>)>,
+    options: &ConnectOptions,
+    verifier: &Arc<dyn HostKeyVerifier>,
+    prompter: &mut dyn Prompter,
+    ask_user: bool,
+) -> Result<Link> {
+    let name = jump.then_some(spec.name.as_str());
+    let reached = match via {
+        None => connect(spec, name, options, Arc::clone(verifier)).await,
+        Some((through, handle)) => connect_through(through, handle, spec, name, options, Arc::clone(verifier)).await,
+    };
+    let (mut handle, shared, peer_ip) = match (reached, name) {
+        (Ok(reached), _) => reached,
+        // Reaching a hop through another names both already.
+        (Err(err), Some(name)) if via.is_none() => return Err(at_jump(err, name)),
+        (Err(err), _) => return Err(err),
+    };
+    show_banners(&shared, prompter).await;
+    let user = match spec.username.as_str() {
+        "" if ask_user => {
+            let prompt = match name {
+                Some(name) => format!("login as (jump host '{name}'): "),
+                None => "login as: ".to_owned(),
+            };
+            let typed = prompter.ask(&prompt, true).await;
+            typed.map(|t| t.expose().trim().to_owned()).unwrap_or_default()
+        }
+        user => user.to_owned(),
+    };
+    let logged_in = if user.is_empty() {
+        Err(CoreError::AuthFailed("no user name was given".into()))
+    } else {
+        // OpenSSH's "bob@bastion's password:" tells a jump host's prompt from the session's.
+        let who = match name {
+            Some(_) => format!("{user}@{}", spec.host),
+            None => user.clone(),
+        };
+        authenticate(&mut handle, &user, &who, credentials, options, prompter, &shared).await
+    };
+    if let Err(err) = logged_in {
+        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        return Err(match name {
+            Some(name) => at_jump(err, name),
+            None => err,
+        });
+    }
+    Ok(Link {
+        handle,
+        shared,
+        peer_ip,
+        user,
+    })
+}
+
+/// Reaches the host from this PC and agrees on keys. Also returns the address reached (QL-03).
 async fn connect(
     session: &SessionSpec,
+    jump: Option<&str>,
     options: &ConnectOptions,
     verifier: Arc<dyn HostKeyVerifier>,
 ) -> Result<(client::Handle<Handler>, Arc<Mutex<Shared>>, Option<IpAddr>)> {
@@ -654,7 +953,58 @@ async fn connect(
     // Keystrokes are small; send each at once.
     let _ = stream.set_nodelay(true);
     let peer_ip = stream.peer_addr().ok().map(|addr| addr.ip().to_canonical());
+    let (handle, shared) = handshake(stream, session, jump, options, verifier).await?;
+    Ok((handle, shared, peer_ip))
+}
 
+/// SS-07: reaches the host from the hop before it (`through`), over a direct-tcpip channel of that
+/// hop's connection, and agrees on keys over it.
+async fn connect_through(
+    through: &str,
+    via: &client::Handle<Handler>,
+    session: &SessionSpec,
+    jump: Option<&str>,
+    options: &ConnectOptions,
+    verifier: Arc<dyn HostKeyVerifier>,
+) -> Result<(client::Handle<Handler>, Arc<Mutex<Shared>>, Option<IpAddr>)> {
+    let target = address(&session.host, session.port);
+    let what = match jump {
+        Some(name) => format!("{target} (the jump host '{name}')"),
+        None => target.clone(),
+    };
+    let seconds = options.connect_timeout.as_secs().max(1);
+    let channel = tokio::time::timeout(
+        options.connect_timeout,
+        via.channel_open_direct_tcpip(dial_host(&session.host), u32::from(session.port), "127.0.0.1", 0),
+    )
+    .await
+    .map_err(|_| CoreError::Timeout {
+        command: format!("reaching {what} through the jump host '{through}'"),
+        seconds,
+    })?
+    .map_err(|err| {
+        CoreError::Ssh(format!(
+            "the jump host '{through}' could not reach {what}: {}",
+            forward::open_failure(&err)
+        ))
+    })?;
+    let (handle, shared) = handshake(channel.into_stream(), session, jump, options, verifier).await?;
+    Ok((handle, shared, None))
+}
+
+/// Agrees on keys over a stream to the host: a TCP connection, or a channel through a jump host.
+async fn handshake<S>(
+    stream: S,
+    session: &SessionSpec,
+    jump: Option<&str>,
+    options: &ConnectOptions,
+    verifier: Arc<dyn HostKeyVerifier>,
+) -> Result<(client::Handle<Handler>, Arc<Mutex<Shared>>)>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let target = address(&session.host, session.port);
+    let seconds = options.connect_timeout.as_secs().max(1);
     let config = Arc::new(client::Config {
         keepalive_interval: options.keepalive_interval,
         keepalive_max: options.keepalive_max,
@@ -666,6 +1016,7 @@ async fn connect(
     let handler = Handler {
         host: session.host.clone(),
         port: session.port,
+        jump: jump.map(str::to_owned),
         verifier,
         shared: Arc::clone(&shared),
     };
@@ -687,7 +1038,7 @@ async fn connect(
         }
     };
     match handle {
-        Ok(handle) => Ok((handle, shared, peer_ip)),
+        Ok(handle) => Ok((handle, shared)),
         Err(err) => {
             if let Some(refused) = locks::lock(&shared).verify_error.take() {
                 return Err(refused);
@@ -742,10 +1093,12 @@ fn ssh_err(err: russh::Error) -> CoreError {
     CoreError::Ssh(format!("login failed: {err}"))
 }
 
-/// Logs in. Errors name the method and user, never a secret.
+/// Logs in. Errors name the method and user, never a secret. `who` is how password prompts name
+/// the login: the user, or `user@host` for a jump host (SS-07).
 async fn authenticate(
     handle: &mut client::Handle<Handler>,
     user: &str,
+    who: &str,
     credentials: Credentials,
     options: &ConnectOptions,
     prompter: &mut dyn Prompter,
@@ -758,7 +1111,7 @@ async fn authenticate(
         Step::More(methods) | Step::Refused(methods) => methods,
     };
     let step = match credentials {
-        Credentials::Password(saved) => password_login(handle, user, saved, &methods, prompter).await?,
+        Credentials::Password(saved) => password_login(handle, user, who, saved, &methods, prompter).await?,
         Credentials::PrivateKey { key, passphrase, label } => {
             key_login(handle, user, &key, passphrase, &label, &methods, prompter).await?
         }
@@ -779,7 +1132,7 @@ async fn authenticate(
         let step = if has(&methods, MethodKind::KeyboardInteractive) {
             keyboard_interactive(handle, user, None, prompter).await?
         } else if has(&methods, MethodKind::Password) {
-            let typed = prompter.ask(&format!("{user}'s password: "), false).await?;
+            let typed = prompter.ask(&format!("{who}'s password: "), false).await?;
             Step::from(
                 handle
                     .authenticate_password(user, typed.expose())
@@ -812,6 +1165,7 @@ async fn authenticate(
 async fn password_login(
     handle: &mut client::Handle<Handler>,
     user: &str,
+    who: &str,
     saved: Option<SecretString>,
     methods: &MethodSet,
     prompter: &mut dyn Prompter,
@@ -847,7 +1201,7 @@ async fn password_login(
             prompter.show("Access denied\r\n").await;
         }
         let step = if password {
-            let typed = prompter.ask(&format!("{user}'s password: "), false).await?;
+            let typed = prompter.ask(&format!("{who}'s password: "), false).await?;
             let step = Step::from(
                 handle
                     .authenticate_password(user, typed.expose())
@@ -1106,21 +1460,44 @@ async fn agent_login(
 
 /// Opens a session channel with a PTY and a shell, then pumps it from a task of its own. Beside it,
 /// the same task asks the server for its `hostname` once (QL-03) and which shell it runs (SS-08).
-/// SFTP (SS-08) opens channels on the same connection when it is first used.
-async fn open_pty(
-    handle: client::Handle<Handler>,
-    shared: Arc<Mutex<Shared>>,
+/// SFTP (SS-08) and port forwards (SS-07) open channels on the same connection when they are used.
+/// The jump hosts' connections (SS-07) stay open as long as the shell's.
+async fn open_pty(connected: Connected, size: PtySize, term: &str) -> Result<ShellHandle> {
+    let Connected {
+        handle,
+        shared,
+        peer_ip,
+        user,
+        jumps,
+    } = connected;
+    let handle = Arc::new(handle);
+    let opened = handle.channel_open_session().await;
+    let mut channel = match opened {
+        Ok(channel) => channel,
+        Err(err) => {
+            let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+            jumps.close().await;
+            return Err(CoreError::Ssh(format!("the server did not open a session: {err}")));
+        }
+    };
+    match ask_for_shell(&mut channel, &shared, size, term).await {
+        Ok(early) => Ok(pump_pty(handle, shared, channel, early, peer_ip, user, jumps)),
+        Err(err) => {
+            let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+            jumps.close().await;
+            Err(err)
+        }
+    }
+}
+
+/// Asks for a PTY and a shell on the channel. Output that arrives before the replies (rare) is
+/// returned, to be sent first.
+async fn ask_for_shell(
+    channel: &mut russh::Channel<client::Msg>,
+    shared: &Arc<Mutex<Shared>>,
     size: PtySize,
     term: &str,
-    peer_ip: Option<IpAddr>,
-    user: String,
-) -> Result<ShellHandle> {
-    let handle = Arc::new(handle);
-    let mut channel = handle
-        .channel_open_session()
-        .await
-        .map_err(|err| CoreError::Ssh(format!("the server did not open a session: {err}")))?;
-    // Output that arrives before the replies (rare) is kept and sent first.
+) -> Result<Vec<Vec<u8>>> {
     let mut early: Vec<Vec<u8>> = Vec::new();
     for (what, request) in [("a terminal (PTY)", 0), ("a shell", 1)] {
         let sent = if request == 0 {
@@ -1142,7 +1519,7 @@ async fn open_pty(
                 }
                 Some(_) => {}
                 None => {
-                    let reason = locks::lock(&shared)
+                    let reason = locks::lock(shared)
                         .disconnect
                         .clone()
                         .unwrap_or_else(|| "the connection closed".into());
@@ -1151,97 +1528,129 @@ async fn open_pty(
             }
         }
     }
+    Ok(early)
+}
 
+/// Pumps the shell's channel from a task of its own until the shell or the connection ends.
+fn pump_pty(
+    handle: Arc<client::Handle<Handler>>,
+    shared: Arc<Mutex<Shared>>,
+    mut channel: russh::Channel<client::Msg>,
+    early: Vec<Vec<u8>>,
+    peer_ip: Option<IpAddr>,
+    user: String,
+    jumps: Jumps,
+) -> ShellHandle {
     let (input_tx, mut input_rx) = mpsc::channel::<ShellInput>(256);
     let (output_tx, output_rx) = mpsc::channel::<ShellOutput>(256);
     let (hostname_tx, hostname_rx) = oneshot::channel();
     let (shell_tx, shell_rx) = oneshot::channel();
     let files: Arc<dyn RemoteFiles> = Arc::new(sftp::SftpFiles::new(Arc::clone(&handle), Arc::clone(&shared), user));
+    let forwards: Arc<dyn forward::RemoteForwards> =
+        Arc::new(forward::RusshForwards::new(Arc::clone(&handle), Arc::clone(&shared)));
     tokio::spawn(async move {
-        for data in early {
-            if output_tx.send(ShellOutput::Data(data)).await.is_err() {
-                return;
+        let end = async {
+            for data in early {
+                if output_tx.send(ShellOutput::Data(data)).await.is_err() {
+                    return None;
+                }
             }
-        }
-        let mut hostname_tx = Some(hostname_tx);
-        let hostname = tokio::time::timeout(
-            HOSTNAME_WAIT,
-            run_command(&handle, &shared, "hostname", None, &[], 1024),
-        );
-        tokio::pin!(hostname);
-        let mut shell_tx = Some(shell_tx);
-        let probe = tokio::time::timeout(
-            HOSTNAME_WAIT,
-            run_command(&handle, &shared, SHELL_PROBE, None, &[], 256),
-        );
-        tokio::pin!(probe);
-        let mut exit_status: Option<u32> = None;
-        let end = loop {
-            tokio::select! {
-                answer = &mut hostname, if hostname_tx.is_some() => {
-                    let name = match answer {
-                        Ok(Ok((code, _, output))) => parse_hostname(&output.stdout, code),
-                        _ => None,
-                    };
-                    if let Some(tx) = hostname_tx.take() {
-                        let _ = tx.send(name);
-                    }
-                }
-                answer = &mut probe, if shell_tx.is_some() => {
-                    let shell = match answer {
-                        Ok(Ok((code, _, output))) => parse_shell_probe(&output.stdout, code),
-                        _ => None,
-                    };
-                    if let Some(tx) = shell_tx.take() {
-                        let _ = tx.send(shell);
-                    }
-                }
-                msg = input_rx.recv() => match msg {
-                    Some(ShellInput::Data(bytes)) => {
-                        // A failed write shows up as the channel closing below.
-                        let _ = channel.data_bytes(bytes).await;
-                    }
-                    Some(ShellInput::Resize { cols, rows }) => {
-                        let _ = channel.window_change(u32::from(cols), u32::from(rows), 0, 0).await;
-                    }
-                    Some(ShellInput::Close) | None => {
-                        let _ = channel.close().await;
-                        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
-                        break ShellEnd::Exited { status: exit_status };
-                    }
-                },
-                msg = channel.wait() => match msg {
-                    Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
-                        if output_tx.send(ShellOutput::Data(data.to_vec())).await.is_err() {
-                            let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
-                            return;
+            let mut hostname_tx = Some(hostname_tx);
+            let hostname = tokio::time::timeout(
+                HOSTNAME_WAIT,
+                run_command(&handle, &shared, "hostname", None, &[], 1024),
+            );
+            tokio::pin!(hostname);
+            let mut shell_tx = Some(shell_tx);
+            let probe = tokio::time::timeout(
+                HOSTNAME_WAIT,
+                run_command(&handle, &shared, SHELL_PROBE, None, &[], 256),
+            );
+            tokio::pin!(probe);
+            let mut exit_status: Option<u32> = None;
+            let end = loop {
+                tokio::select! {
+                    answer = &mut hostname, if hostname_tx.is_some() => {
+                        let name = match answer {
+                            Ok(Ok((code, _, output))) => parse_hostname(&output.stdout, code),
+                            _ => None,
+                        };
+                        if let Some(tx) = hostname_tx.take() {
+                            let _ = tx.send(name);
                         }
                     }
-                    Some(ChannelMsg::ExitStatus { exit_status: status }) => exit_status = Some(status),
-                    Some(ChannelMsg::Close) => {
-                        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
-                        break ShellEnd::Exited { status: exit_status };
+                    answer = &mut probe, if shell_tx.is_some() => {
+                        let shell = match answer {
+                            Ok(Ok((code, _, output))) => parse_shell_probe(&output.stdout, code),
+                            _ => None,
+                        };
+                        if let Some(tx) = shell_tx.take() {
+                            let _ = tx.send(shell);
+                        }
                     }
-                    Some(_) => {}
-                    None => {
-                        if exit_status.is_some() {
+                    msg = input_rx.recv() => match msg {
+                        Some(ShellInput::Data(bytes)) => {
+                            // A failed write shows up as the channel closing below.
+                            let _ = channel.data_bytes(bytes).await;
+                        }
+                        Some(ShellInput::Resize { cols, rows }) => {
+                            let _ = channel.window_change(u32::from(cols), u32::from(rows), 0, 0).await;
+                        }
+                        Some(ShellInput::Close) | None => {
+                            let _ = channel.close().await;
                             break ShellEnd::Exited { status: exit_status };
                         }
-                        break ShellEnd::Lost { reason: disconnect_reason(&shared).await };
-                    }
-                },
-            }
-        };
-        let _ = output_tx.send(ShellOutput::Closed(end)).await;
+                    },
+                    msg = channel.wait() => match msg {
+                        Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            if output_tx.send(ShellOutput::Data(data.to_vec())).await.is_err() {
+                                return None;
+                            }
+                        }
+                        Some(ChannelMsg::ExitStatus { exit_status: status }) => exit_status = Some(status),
+                        Some(ChannelMsg::Close) => break ShellEnd::Exited { status: exit_status },
+                        Some(_) => {}
+                        None => {
+                            if exit_status.is_some() {
+                                break ShellEnd::Exited { status: exit_status };
+                            }
+                            break ShellEnd::Lost { reason: chain_lost_reason(&jumps, &shared).await };
+                        }
+                    },
+                }
+            };
+            Some(end)
+        }
+        .await;
+        let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        jumps.close().await;
+        if let Some(end) = end {
+            let _ = output_tx.send(ShellOutput::Closed(end)).await;
+        }
     });
-    Ok(ShellHandle {
+    ShellHandle {
         input: input_tx,
         output: output_rx,
         peer_ip,
         hostname: hostname_rx,
         shell: shell_rx,
         files,
-    })
+        forwards,
+    }
+}
+
+/// Why a connection ended. SS-07: a jump host that dropped takes the connections behind it along,
+/// and says why a moment after they notice, so it is waited for briefly first.
+async fn chain_lost_reason(jumps: &Jumps, shared: &Arc<Mutex<Shared>>) -> String {
+    if !jumps.hops.is_empty() {
+        for _ in 0..10 {
+            if let Some(reason) = jumps.lost() {
+                return reason;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    disconnect_reason(shared).await
 }
 
 /// The handler may record why the connection ended a moment after the channel closes.
@@ -1256,15 +1665,25 @@ async fn disconnect_reason(shared: &Arc<Mutex<Shared>>) -> String {
 }
 
 /// A bulk run or the dashboard can't ask anything: a login that needs something typed fails, saying
-/// what.
-struct NoPrompter<'a> {
-    session: &'a str,
+/// what, and for which hop (SS-07).
+struct NoPrompter {
+    /// The hop logging in now.
+    session: String,
     /// Who could not ask, e.g. "a bulk run".
     who: &'static str,
 }
 
+impl NoPrompter {
+    fn new(session: &SessionSpec, who: &'static str) -> Self {
+        Self {
+            session: session.name.clone(),
+            who,
+        }
+    }
+}
+
 #[async_trait]
-impl Prompter for NoPrompter<'_> {
+impl Prompter for NoPrompter {
     async fn ask(&mut self, prompt: &str, _echo: bool) -> Result<SecretString> {
         let asked = prompt.trim().trim_end_matches(':').trim();
         let advice = if asked.to_lowercase().contains("password") {
@@ -1279,6 +1698,10 @@ impl Prompter for NoPrompter<'_> {
     }
 
     async fn show(&mut self, _text: &str) {}
+
+    fn hop(&mut self, session: &SessionSpec, _jump: bool) {
+        self.session.clone_from(&session.name);
+    }
 }
 
 /// `text` as one word for a POSIX shell: in single quotes, with each `'` written as `'\''`.

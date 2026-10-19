@@ -307,8 +307,8 @@ pub const MAX_HOST_LEN: usize = 253;
 pub const MAX_USERNAME_LEN: usize = 100;
 pub const MAX_STARTUP_COMMAND: usize = 4096;
 pub const MAX_TAGS: usize = 20;
-/// Jump hosts followed before a chain counts as too long (SS-07 chains are v2).
-const MAX_JUMP_DEPTH: usize = 8;
+/// SS-07: the most jump hosts a chain may have.
+pub const MAX_JUMP_DEPTH: usize = 8;
 
 fn invalid<T>(message: impl Into<String>) -> Result<T> {
     Err(CoreError::InvalidInput(message.into()))
@@ -439,6 +439,22 @@ pub(crate) async fn credentials(
         }
         AuthMethod::Agent => Credentials::Agent,
     })
+}
+
+/// SS-07: what each jump host on the way to `spec` logs in with, in the order they are connected
+/// ([`SessionSpec::jumps`]). `typed`: passwords typed in the terminal earlier, by session, for jump
+/// hosts with no saved one.
+pub(crate) async fn jump_credentials(
+    vault: &dyn Vault,
+    ctx: &Context,
+    spec: &SessionSpec,
+    typed: &HashMap<Uuid, SecretString>,
+) -> Result<Vec<Credentials>> {
+    let mut all = Vec::new();
+    for jump in spec.jumps() {
+        all.push(credentials(vault, ctx, jump, typed.get(&jump.id).cloned()).await?);
+    }
+    Ok(all)
 }
 
 pub struct SessionLibrary {

@@ -201,7 +201,9 @@ export type Command =
   /** SS-10: the held Enter of a MultiExec line. The UI never submits it itself: MultiExec does. */
   | { type: "terminalLine"; targets: TargetRef[]; line: string; unreliable: boolean; keys: string }
   /** SS-08: an upload. Never submitted by the UI: `filesUpload` builds it in Rust from picked or dropped files. */
-  | { type: "fileUpload"; targets: TargetRef[]; folder: string; files: UploadFile[] };
+  | { type: "fileUpload"; targets: TargetRef[]; folder: string; files: UploadFile[] }
+  /** SS-07: a saved port forward opened on a terminal. Never submitted by the UI: `terminalTunnelStart` builds it. */
+  | { type: "openTunnel"; targets: TargetRef[]; forward: PortForward };
 
 /** SS-08: one file of an upload. */
 export interface UploadFile {
@@ -281,6 +283,18 @@ export interface ApprovalRequest {
   exec: ExecDetails | null;
   /** SS-08: for an upload, the folder and the files (which ones replace a file there). */
   upload: UploadDetails | null;
+  /** SS-07: for a tunnel, where it listens, where it leads and who can use it. */
+  tunnel: TunnelDetails | null;
+}
+
+/** SS-07: a tunnel as the approval dialog shows it. */
+export interface TunnelDetails {
+  forward: PortForward;
+  /** e.g. 127.0.0.1:8080, or localhost:9000 on the host. */
+  listens: string;
+  leads: string;
+  /** Who can use it, in words. */
+  exposes: string;
 }
 
 export type SubmitOutcome =
@@ -459,6 +473,9 @@ export type ActionKind =
   | "sshKeyPush"
   | "fileUpload"
   | "fileReplace"
+  | "tunnelLocal"
+  | "tunnelRemote"
+  | "tunnelShared"
   | "appUpdate";
 
 export interface TierRule {
@@ -659,20 +676,89 @@ export interface HostFacts {
   hostnameFrom: FactSource | null;
   ip: string | null;
   ipFrom: FactSource | null;
+  /** SS-07: the jump hosts the connection goes through, by session name, first one first; empty when direct. */
+  via: string[];
 }
 
 export type TerminalEvent =
   | { event: "status"; status: TerminalStatus }
-  /** SS-05: first connection to a host; answer with `terminalHostKeyAnswer`. */
-  | { event: "hostKeyUnknown"; key: HostKey; otherKeyTypes: string[] }
-  /** SS-05: the key changed and the connection was blocked. */
-  | { event: "hostKeyChanged"; key: HostKey; previous: KnownHost }
+  /**
+   * SS-05: first connection to a host; answer with `terminalHostKeyAnswer`. `jump`: SS-07, the jump host on the way
+   * that presented it, or null for the session's own host.
+   */
+  | { event: "hostKeyUnknown"; key: HostKey; otherKeyTypes: string[]; jump: string | null }
+  /** SS-05: the key changed and the connection was blocked. `jump` as above. */
+  | { event: "hostKeyChanged"; key: HostKey; previous: KnownHost; jump: string | null }
+  /** SS-07: the terminal's tunnels, after any of them changed. */
+  | { event: "tunnels"; tunnels: TunnelInfo[] }
   /** QL-03: what is known about the host so far. */
   | { event: "host"; facts: HostFacts }
   /** QL-07: a command that ran at least the threshold ended (its prompt came back, or its output stopped). */
   | { event: "commandFinished"; afterSecs: number; how: FinishedHow }
   /** SS-08: the shell's folder, or how far it is known (each connection starts over). */
   | { event: "folder"; folder: FolderInfo };
+
+// ---- SS-07 port forwards and tunnels ----
+
+/** local: a port on this PC to a host the session's host reaches; remote: a port on the host back here; dynamic: SOCKS. */
+export type ForwardKind = "local" | "remote" | "dynamic";
+
+/** SS-07: a saved port forward of a session. */
+export interface PortForward {
+  id: string;
+  sessionId: string;
+  label: string | null;
+  kind: ForwardKind;
+  /** Where it listens: on this PC (local, SOCKS) or on the host (remote). */
+  bindAddress: string;
+  /** 0: any free port, shown once it listens. */
+  bindPort: number;
+  /** Where it leads; empty for SOCKS. */
+  destHost: string;
+  destPort: number;
+  /** Opens when the session's terminal connects (through the approval flow). */
+  autoStart: boolean;
+}
+
+/** What the session dialog sends for one forward. `id` keeps an existing one; null adds one. */
+export interface ForwardInput {
+  id: string | null;
+  label: string | null;
+  kind: ForwardKind;
+  /** Empty: 127.0.0.1 on this PC, localhost on the host. */
+  bindAddress: string;
+  bindPort: number;
+  destHost: string;
+  destPort: number;
+  autoStart: boolean;
+}
+
+export type TunnelState =
+  | { state: "stopped" }
+  /** The approval waits for an answer (`terminalTunnelRequest` gives it). */
+  | { state: "asking" }
+  | { state: "opening" }
+  | { state: "listening"; at: string }
+  /** Approved; the terminal is reconnecting and it opens again then. */
+  | { state: "waiting"; reason: string }
+  | { state: "failed"; message: string };
+
+/** SS-07: one tunnel of a terminal. */
+export interface TunnelInfo {
+  forward: PortForward;
+  state: TunnelState;
+  /** Connections it carried since it opened, and open now. */
+  connections: number;
+  open: number;
+  /** Why the last connection through it failed. */
+  lastError: string | null;
+  /** Still one of the session's saved forwards. */
+  saved: boolean;
+  /** The saved forward was edited since it opened: stop and start it to use the edit. */
+  changed: boolean;
+}
+
+export type TunnelStart = { status: "opening"; jobId: string } | { status: "needsApproval"; request: ApprovalRequest };
 
 // ---- SS-08 file transfer ----
 
@@ -901,6 +987,11 @@ export interface Reachability {
   latencyMs: number | null;
   reason: string | null;
   checkedAt: string;
+  /**
+   * SS-07: the session is behind jump hosts; this is the first one's state (by name), the one this PC reaches. The
+   * session itself is not checked from here.
+   */
+  via: string | null;
 }
 
 export interface ReachabilityUpdate {
@@ -1022,6 +1113,8 @@ export interface ExportReport {
   secretValues: boolean;
   /** BX-08 favourite commands. */
   favourites: number;
+  /** SS-07 saved port forwards, over all sessions. */
+  forwards: number;
 }
 
 export type TransferStatus = "new" | "same" | "conflict";
@@ -1073,6 +1166,8 @@ export interface TransferReport {
   knownHosts: TransferCounts;
   secrets: TransferCounts;
   favourites: TransferCounts;
+  /** SS-07: port forwards saved with the imported sessions. */
+  forwards: number;
   foldersAdded: number;
   /** Sessions imported without the password or key they used. */
   withoutCredentials: number;
@@ -1577,6 +1672,22 @@ export const api = {
   ambiguousVmLinks: () => invoke<AmbiguousLink[]>("vm_links_ambiguous"),
   /** folderId null: the top level. */
   moveSessions: (ids: string[], folderId: string | null) => invoke<void>("sessions_move", { ids, folderId }),
+  // SS-07: saved port forwards and a terminal's tunnels.
+  forwards: (sessionId: string) => invoke<PortForward[]>("forwards_list", { sessionId }),
+  allForwards: () => invoke<Record<string, PortForward[]>>("forwards_all"),
+  saveForwards: (sessionId: string, forwards: ForwardInput[]) =>
+    invoke<PortForward[]>("forwards_save", { sessionId, forwards }),
+  terminalTunnels: (terminalId: string) => invoke<TunnelInfo[]>("terminal_tunnels", { terminalId }),
+  terminalTunnelStart: (terminalId: string, forwardId: string) =>
+    invoke<TunnelStart>("terminal_tunnel_start", { terminalId, forwardId }),
+  terminalTunnelRequest: (terminalId: string, forwardId: string) =>
+    invoke<ApprovalRequest | null>("terminal_tunnel_request", { terminalId, forwardId }),
+  terminalTunnelApprove: (terminalId: string, forwardId: string, answers: ApprovalAnswers) =>
+    invoke<string>("terminal_tunnel_approve", { terminalId, forwardId, answers }),
+  terminalTunnelDecline: (terminalId: string, forwardId: string) =>
+    invoke<void>("terminal_tunnel_decline", { terminalId, forwardId }),
+  terminalTunnelStop: (terminalId: string, forwardId: string) =>
+    invoke<void>("terminal_tunnel_stop", { terminalId, forwardId }),
   createFolder: (name: string, parentId: string | null) => invoke<SessionFolder>("folder_create", { name, parentId }),
   renameFolder: (id: string, name: string) => invoke<SessionFolder>("folder_rename", { id, name }),
   moveFolder: (id: string, parentId: string | null) => invoke<SessionFolder>("folder_move", { id, parentId }),

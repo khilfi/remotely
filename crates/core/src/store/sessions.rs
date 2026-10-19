@@ -10,7 +10,7 @@ use super::{parse_uuid, Store};
 use crate::adapters::remote::{AuthMethod, SessionSpec};
 use crate::domain::{now_rfc3339, Context, Environment};
 use crate::error::{CoreError, Result};
-use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionRecord};
+use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionRecord, MAX_JUMP_DEPTH};
 use crate::vault::SecretId;
 use crate::vm_links::VmLink;
 
@@ -553,30 +553,67 @@ impl Store {
         Ok(by_vm)
     }
 
-    /// Connection details for the remote adapter. The jump host (SS-07, v2) is resolved one level, so
-    /// the terminal can name it. A key login with no key chosen can't connect, so it is an error here.
+    /// Connection details for the remote adapter, with the whole jump host chain (SS-07): the
+    /// session's jump host, that one's own, and so on, each with its own login. Jump hosts that lead
+    /// back to a session on the way, or more than [`MAX_JUMP_DEPTH`] of them, can't connect: an
+    /// error that names them. So is a key login with no key chosen, here or on a jump host.
     pub async fn session_spec(&self, ctx: &Context, id: Uuid) -> Result<Option<SessionSpec>> {
         let Some(session) = self.get_session(ctx, id).await? else {
             return Ok(None);
         };
-        let auth = match &session.auth {
-            SessionAuth::Key { key_id: None, .. } => {
-                return Err(CoreError::InvalidInput(format!(
-                    "'{}' logs in with a key, but no key is chosen. Edit the session to choose one.",
-                    session.name
-                )))
+        let mut names = vec![session.name.clone()];
+        let mut seen = vec![session.id];
+        let mut jumps: Vec<SessionRecord> = Vec::new();
+        let mut next = session.jump_session_id;
+        while let Some(jump_id) = next {
+            if let Some(at) = seen.iter().position(|s| *s == jump_id) {
+                let mut route = names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>();
+                route.push(format!("'{}'", names[at]));
+                return Err(CoreError::JumpChain(format!(
+                    "the jump hosts of '{}' go round in a loop ({}), so it can't connect. Choose another jump host for one of them",
+                    session.name,
+                    route.join(" -> ")
+                )));
             }
-            auth => auth_method(auth),
-        };
-        let jump = match session.jump_session_id {
-            Some(jump) => self
-                .get_session(ctx, jump)
-                .await?
-                .map(|j| Box::new(spec_of(j, AuthMethod::Agent, None))),
-            None => None,
-        };
-        Ok(Some(spec_of(session, auth, jump)))
+            if jumps.len() == MAX_JUMP_DEPTH {
+                return Err(CoreError::JumpChain(format!(
+                    "'{}' goes through more than {MAX_JUMP_DEPTH} jump hosts, so it can't connect",
+                    session.name
+                )));
+            }
+            // A jump host deleted meanwhile leaves the chain shorter (the link is cleared with it).
+            let Some(jump) = self.get_session(ctx, jump_id).await? else {
+                break;
+            };
+            seen.push(jump.id);
+            names.push(jump.name.clone());
+            next = jump.jump_session_id;
+            jumps.push(jump);
+        }
+        // Built from the outermost jump host inwards, each holding the one before it.
+        let mut via: Option<Box<SessionSpec>> = None;
+        for jump in jumps.into_iter().rev() {
+            let auth = spec_auth(&jump, Some(&session.name))?;
+            via = Some(Box::new(spec_of(jump, auth, via)));
+        }
+        let auth = spec_auth(&session, None)?;
+        Ok(Some(spec_of(session, auth, via)))
     }
+}
+
+/// How a session logs in, for connecting. A key login with no key chosen can't connect; `jump_of`
+/// names the session it is the jump host of, if it is one.
+fn spec_auth(session: &SessionRecord, jump_of: Option<&str>) -> Result<AuthMethod> {
+    if let SessionAuth::Key { key_id: None, .. } = &session.auth {
+        let what = match jump_of {
+            Some(of) => format!("The jump host '{}' (of '{of}')", session.name),
+            None => format!("'{}'", session.name),
+        };
+        return Err(CoreError::InvalidInput(format!(
+            "{what} logs in with a key, but no key is chosen. Edit that session to choose one."
+        )));
+    }
+    Ok(auth_method(&session.auth))
 }
 
 /// QL-02: connection details for a quick connection that is not saved. `input` must already be
@@ -608,7 +645,7 @@ fn auth_method(auth: &SessionAuth) -> AuthMethod {
             key: *key,
             passphrase: *passphrase_id,
         },
-        // Only for a jump host's spec, which is never connected to in the MVP.
+        // A key login with no key chosen never gets here (see `spec_auth`, `unsaved_spec`).
         SessionAuth::Key { key_id: None, .. } | SessionAuth::Agent => AuthMethod::Agent,
     }
 }

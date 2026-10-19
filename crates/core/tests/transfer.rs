@@ -948,3 +948,76 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
     assert_eq!(report.without_credentials, 2);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// SS-07: saved port forwards travel with their sessions, and a two-hop chain keeps its jump host
+/// links on the other laptop.
+#[tokio::test]
+async fn port_forwards_and_jump_host_chains_move_with_their_sessions() {
+    use remotely_core::adapters::remote::forward::ForwardKind;
+    use remotely_core::forwards::ForwardInput;
+
+    let dir = temp_folder("transfer-forwards");
+    let a = laptop().await;
+    let lib = fill(&a).await;
+    // A second hop: app01 goes through db01, which goes through the bastion.
+    let mut app = input("app01", "app01.test");
+    app.jump_session_id = Some(lib.db);
+    let app = a.sessions.create(&a.ctx, app).await.unwrap();
+    let forward = |kind, port, dest: &str, dest_port, auto_start| ForwardInput {
+        id: None,
+        label: (kind == ForwardKind::Local).then(|| "Postgres".to_owned()),
+        kind,
+        bind_address: String::new(),
+        bind_port: port,
+        dest_host: dest.into(),
+        dest_port,
+        auto_start,
+    };
+    let saved = a
+        .forwards
+        .save(
+            &a.ctx,
+            app.id,
+            &[
+                forward(ForwardKind::Local, 15432, "pg.test", 5432, true),
+                forward(ForwardKind::Dynamic, 1080, "", 0, false),
+            ],
+        )
+        .await
+        .unwrap();
+    let path = export(&a, &dir, false).await;
+    let exported = audit(&a)
+        .await
+        .into_iter()
+        .find(|e| e.event == "data_exported")
+        .unwrap();
+    assert!(exported.detail.unwrap().contains("2 port forwards"));
+
+    let b = laptop().await;
+    let preview = open(&b, &path).await;
+    let report = commit(&b, &preview, &[]).await;
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_eq!(report.forwards, 2);
+    let app_b = by_name(&b, "app01").await;
+    let db_b = by_name(&b, "db01").await;
+    assert_eq!(app_b.jump_session_id, Some(db_b.id));
+    assert_eq!(db_b.jump_session_id, Some(by_name(&b, "bastion").await.id));
+    let moved = b.forwards.list(&b.ctx, app_b.id).await.unwrap();
+    assert_eq!(moved.len(), 2);
+    for (here, there) in moved.iter().zip(&saved) {
+        assert_eq!(here.spec, there.spec);
+        assert_eq!((&here.label, here.auto_start), (&there.label, there.auto_start));
+    }
+    assert_eq!(moved[0].spec.bind_address, "127.0.0.1", "loopback, as saved");
+    let b_audit = audit(&b).await;
+    assert!(b_audit
+        .iter()
+        .any(|e| e.event == "session_changed" && e.action == "Imported the port forwards of 'app01'"));
+    let imported = b_audit.iter().find(|e| e.event == "data_imported").unwrap();
+    assert!(imported
+        .detail
+        .as_deref()
+        .unwrap()
+        .contains("2 port forwards saved with them"));
+    let _ = std::fs::remove_dir_all(dir);
+}
