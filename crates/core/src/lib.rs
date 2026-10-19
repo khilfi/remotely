@@ -16,7 +16,7 @@
 //!   sessions (SS-01), vault (SS-04), known_hosts (SS-05): the app's own data; changes are audited
 //!   transfer (FD-07): encrypted export and import of that data; ssh_keys (SS-09): keys in the vault
 //!   (pushing one to hosts is a command on the bus)
-//!   vm_links (QL-01): sessions linked to the VMs they reach, by IP (adapters::dns) or by hand
+//!   vm_links (QL-01): sessions linked to the VMs they reach, by IP (adapters::network) or by hand
 //!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
 //!     quick connect (QL-02), host name and IP (QL-03 ──► adapters::network), output and logs (SS-11)
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
@@ -58,7 +58,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use adapters::dns::{Resolver, SystemResolver};
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::network::{NetworkAdapter, SystemNetwork};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
@@ -107,10 +106,9 @@ pub struct Adapters {
     pub vault: Arc<dyn Vault>,
     pub host_counters: Arc<dyn HostCounters>,
     pub updater: Arc<dyn UpdaterAdapter>,
-    /// QL-03 DNS lookups and QL-04 reachability probes.
+    /// DNS lookups (QL-01 linking sessions to VMs, QL-03 host name and IP) and QL-04 reachability
+    /// probes.
     pub network: Arc<dyn NetworkAdapter>,
-    /// QL-01: host names to IP addresses, for linking sessions to VMs.
-    pub resolver: Arc<dyn Resolver>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -182,7 +180,6 @@ impl Core {
                 host_counters: Arc::new(WindowsCounters::new()),
                 updater: config.updater,
                 network: Arc::new(SystemNetwork),
-                resolver: Arc::new(SystemResolver),
             },
             JobLimits::default(),
         )
@@ -195,7 +192,7 @@ impl Core {
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
-        let links = Arc::new(VmLinks::new(store.clone(), adapters.resolver));
+        let links = Arc::new(VmLinks::new(store.clone(), Arc::clone(&adapters.network)));
         let terminals = Terminals::new(
             store.clone(),
             Arc::clone(&adapters.vault),
