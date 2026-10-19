@@ -298,7 +298,10 @@ export function PolicyRulesEditor() {
           <Label htmlFor="read-only">Read-only commands</Label>
           <p className="text-sm text-muted-foreground">
             One per line. A command whose every part starts with one of these, and that writes no file, is Low. Entries
-            can&apos;t hold shell operators such as ; | &gt; or $.
+            can&apos;t hold shell operators such as ; | &gt; or $. Forms that change something, such as ip link set,
+            date -s or journalctl --vacuum-size, are never read-only. Nor is a command set up with an environment
+            variable other than the locale, time zone, terminal or colours (LC_ALL=C sort and TZ=UTC date are fine;
+            LD_PRELOAD=… or PAGER=… are not).
           </p>
           <Textarea
             id="read-only"
