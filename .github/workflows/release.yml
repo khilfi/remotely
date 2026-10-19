@@ -64,9 +64,15 @@ jobs:
         shell: bash
         env:
           TAG: ${{ github.ref_name }}
+          # Read the tag through the API with the workflow's token: the checkout keeps no credentials,
+          # and the repository is private, so a plain `git fetch` of the tag has no login.
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git fetch --force --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
-          notes="$(git tag -l --format='%(contents)' "$TAG")"
+          notes=""
+          if [ "$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.type)" = "tag" ]; then
+            sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq .object.sha)"
+            notes="$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq .message)"
+          fi
           if [ -z "$notes" ]; then notes="Remotely ${TAG}"; fi
           {
             echo "body<<__RELEASE_NOTES__"
