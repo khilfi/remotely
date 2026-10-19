@@ -65,7 +65,8 @@ crates/core/          remotely-core: all app logic
     command_bus.rs
     policy/
     jobs.rs
-    adapters/         vmware.rs, remote.rs (SSH shell and exec), exec_output.rs (BX-02/BX-07 output cap, hashes,
+    adapters/         vmware.rs, remote.rs (SSH shell and exec; remote/sftp.rs SS-08 SFTP on a terminal's own
+                      connection, behind the RemoteFiles trait), exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs, updater.rs, github.rs (FD-14 GitHub Releases API with the
                       update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe)
@@ -86,7 +87,11 @@ crates/core/          remotely-core: all app logic
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
                       detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
                       a line buffer, Enter held and the line rated on the bus (Command::TerminalLine), password prompts
-                      and full-screen programs passed straight through
+                      and full-screen programs passed straight through; folder.rs SS-08 the shell's folder (OSC 7) and
+                      the invisible prompt hook typed into bash and zsh on connect (hidden from the terminal, logs,
+                      MultiExec and QL-07; the startup command waits for it); files.rs SS-08 the "Files here" listing,
+                      downloads (audited reads), the upload job's work (Command::FileUpload on the bus), the transfers
+                      list with cancel and retry, and FileTransfers (Core.files: staged files, uploads, retries)
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
                       library (library.rs), {{variables}} (variables.rs); classified by the bus's policy engine
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only)
@@ -101,17 +106,21 @@ crates/core/          remotely-core: all app logic
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only)
-    fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests
+    fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
+                      subsystem on a temp folder (SS-08)
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec and Compare by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
-                      panel and notifications (command_panel.rs), clipboard read for right-click paste
+                      panel and notifications (command_panel.rs), clipboard read for right-click paste, SS-08 file
+                      transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder")
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
-  components/         app components (approval dialog, badges, Compare panel, MultiExec bar, WhyDisabled for QL-08)
+  components/         app components (approval dialog, badges, Compare panel, MultiExec bar, WhyDisabled for QL-08,
+                      FilesDrawer and TransfersList for SS-08)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output)
-  lib/                api.ts (typed IPC wrappers), theme.ts, utils.ts, multiexec.ts; pure helpers with *.test.ts
+  lib/                api.ts (typed IPC wrappers), theme.ts, utils.ts, multiexec.ts, transfers.ts; pure helpers with
+                      *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```
 
@@ -141,7 +150,10 @@ src/                  React + TypeScript UI
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, and runs exec requests in a toy
   shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C and a
   full-screen `top`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
-  them (`tests/multiexec.rs`).
+  them (`tests/multiexec.rs`). SS-08: it serves SFTP from a temp folder deleted with it (`with_sftp_file`,
+  `with_protected`, `without_sftp`), and with `with_login_shell("bash")` its shell answers the folder hook and knows
+  `cd` and `pwd`; `fakes::FakeFiles` is the in-memory version for the fake remote adapter (`tests/files.rs`). Uploads
+  and downloads in tests use files made at run time in the system temp folder, never in the repo.
 
 ## Commands
 
@@ -151,7 +163,8 @@ src/                  React + TypeScript UI
 - Try the terminal, MultiExec or Compare output without a real host:
   `cargo run -p remotely-core --example dev_ssh_server --features fakes [port] [count]` (default 2222 and 1 server;
   prints the user, one fresh password for all of them, which sudo takes too, and each host key fingerprint). Each also
-  serves moving /proc counters, so watching it on the dashboard shows live guest metrics.
+  serves moving /proc counters, so watching it on the dashboard shows live guest metrics, and SFTP from a temp folder
+  (SS-08) with a bash login, so the "Files here" drawer follows `cd`.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM)
