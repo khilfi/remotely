@@ -356,7 +356,8 @@ pub fn resolve(base: &str, home: &str, path: &str) -> String {
     format!("/{}", parts.join("/"))
 }
 
-/// A file name for this PC: what Windows can't hold in a name becomes `_`.
+/// A file name for this PC: what Windows can't hold in a name becomes `_`, and a device name gets a `_`
+/// in front, so a host file named `nul` or `com1.txt` is saved as a file instead of going to a device.
 fn local_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
@@ -369,9 +370,29 @@ fn local_name(name: &str) -> String {
     let cleaned = cleaned.trim_end_matches(['.', ' ']).to_owned();
     if cleaned.is_empty() {
         "download".to_owned()
+    } else if is_device_name(&cleaned) {
+        format!("_{cleaned}")
     } else {
         cleaned
     }
+}
+
+/// Windows opens a device for these names, with or without an extension (`nul`, `nul.txt`, `Com1`),
+/// on Windows 10 and 11 alike: CON, PRN, AUX, NUL, CONIN$, CONOUT$, and COM or LPT with one digit,
+/// superscript ¹ ² ³ included. Only the part before the first `.` counts, its trailing spaces and dots
+/// dropped; names that only start with one (`console.log`, `nullable.txt`) are files.
+fn is_device_name(name: &str) -> bool {
+    let base = name.split('.').next().unwrap_or(name).trim_end_matches([' ', '.']);
+    let upper = base.to_uppercase();
+    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
+        return true;
+    }
+    ["COM", "LPT"].iter().any(|port| {
+        upper.strip_prefix(port).is_some_and(|rest| {
+            let mut chars = rest.chars();
+            matches!((chars.next(), chars.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
+        })
+    })
 }
 
 /// Creates a new file in `folder` named `name`, or `name (1)`, `name (2)`... when that is taken, so a
@@ -1087,6 +1108,45 @@ mod tests {
         assert_eq!(local_name("..."), "download");
     }
 
+    #[test]
+    fn device_names_are_saved_as_files() {
+        for (host, here) in [
+            ("nul", "_nul"),
+            ("NUL", "_NUL"),
+            ("nul.txt", "_nul.txt"),
+            ("Com1", "_Com1"),
+            ("com1.log", "_com1.log"),
+            ("LPT9.tar.gz", "_LPT9.tar.gz"),
+            ("lpt0", "_lpt0"),
+            ("con", "_con"),
+            ("Prn.pdf", "_Prn.pdf"),
+            ("aux.c", "_aux.c"),
+            ("CONIN$", "_CONIN$"),
+            ("conout$.txt", "_conout$.txt"),
+            ("COM¹", "_COM¹"),
+            ("lpt³.txt", "_lpt³.txt"),
+            ("nul .txt", "_nul .txt"),
+            ("aux. ", "_aux"),
+            ("nul..", "_nul"),
+        ] {
+            assert_eq!(local_name(host), here, "{host}");
+        }
+        for file in [
+            "console.log",
+            "nullable.txt",
+            "auxiliary",
+            "prnt.txt",
+            "com10",
+            "lpt",
+            "com",
+            "comx.txt",
+            "my.nul",
+            "connect.sh",
+        ] {
+            assert_eq!(local_name(file), file, "{file}");
+        }
+    }
+
     #[tokio::test]
     async fn a_download_never_overwrites_a_file_on_this_pc() {
         let dir = std::env::temp_dir().join(format!("remotely-claim-{}", Uuid::new_v4()));
@@ -1099,6 +1159,12 @@ mod tests {
         assert_eq!(second.file_name().unwrap(), "app (1).log");
         assert_eq!(third.file_name().unwrap(), "README");
         assert_eq!(fourth.file_name().unwrap(), "README (1)");
+        // A device name lands in the folder as a real file, numbered like any other.
+        let (device, _) = claim_file(&dir, "nul.txt").await.unwrap();
+        let (again, _) = claim_file(&dir, "nul.txt").await.unwrap();
+        assert_eq!(device, dir.join("_nul.txt"));
+        assert_eq!(again, dir.join("_nul (1).txt"));
+        assert!(device.is_file() && again.is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
