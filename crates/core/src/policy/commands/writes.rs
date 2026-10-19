@@ -8,6 +8,10 @@
 //! Where a command has a short list of forms that only read (ip, the systemd tools, env, firewall-cmd)
 //! anything else writes. Elsewhere the options and arguments that write are named, and a word holding
 //! `$` writes too: at run time it can expand to any option.
+//!
+//! The environment a command runs with counts too. [`harmless_assignment`] says which `NAME=value`
+//! settings, in front of a command or given to `env`, leave it read-only; [`env_command`] finds the
+//! command `env` runs so that it is classified like any other.
 
 use std::iter::Peekable;
 
@@ -48,12 +52,13 @@ pub(super) fn writes(words: &[String]) -> bool {
             )
         }
         "env" => {
-            // Shows the environment, or runs the command that follows it with a changed one.
+            // Shows the environment. A command it runs only gets here when `env_command` would not
+            // take it apart (another option, a variable that isn't harmless), so it writes.
             let p = parse("uC", "", &["unset", "chdir"]);
             expands
                 || p.has_short("S")
                 || p.has_long(&["split-string"])
-                || p.operands.iter().any(|w| *w != "-" && !is_assignment(w))
+                || p.operands.iter().any(|w| *w != "-" && !harmless_assignment(w))
         }
         "journalctl" => {
             // `--cursor` reads; `--cursor-file` saves the last cursor in a file.
@@ -125,6 +130,78 @@ pub(super) fn writes(words: &[String]) -> bool {
         }
         _ => false,
     }
+}
+
+/// True when `word` is a `NAME=value` setting that leaves a read-only command read-only, whether it
+/// stands in front of the command (`LC_ALL=C sort`), is given to `env` (`env TZ=UTC date`) or stands
+/// alone (`TZ=UTC; date`, which MultiExec's shell keeps for the lines after it).
+///
+/// Only names that change how output looks pass. Far more make a program load code (`LD_PRELOAD`,
+/// `GCONV_PATH`), run another program (`PATH`, `PAGER`, `LESSOPEN`, `EDITOR`, `KUBECONFIG` with an exec
+/// plugin, `DOCKER_HOST=ssh://…`), run shell code (`BASH_ENV`, `ENV`, `PS4`, `PROMPT_COMMAND`) or add
+/// options that write (`LESS=-o file`, `SYSTEMD_LESS`), and that list has no end.
+pub(super) fn harmless_assignment(word: &str) -> bool {
+    let Some((name, value)) = word.split_once('=').filter(|_| is_assignment(word)) else {
+        return false;
+    };
+    match name {
+        // A locale with `/` is a folder of locale files to load.
+        "LANG" | "LANGUAGE" => !value.contains(['/', '$']),
+        name if name.starts_with("LC_") => !value.contains(['/', '$']),
+        "TZ" | "TIME_STYLE" | "S_TIME_FORMAT" => true,
+        "TERM" | "COLUMNS" | "LINES" | "NO_COLOR" | "SYSTEMD_COLORS" => true,
+        // Empty or `cat` turns the pager off; systemd reads both.
+        "PAGER" | "SYSTEMD_PAGER" => matches!(value, "" | "cat"),
+        _ => false,
+    }
+}
+
+/// The command `env` runs (`args` follow `env`) when before it env only clears the environment (`-i`,
+/// `-`), unsets variables (`-u NAME`) and sets harmless ones: `env -i LC_ALL=C sort x` runs `sort x`.
+/// None when env runs nothing, sets another variable or takes another option (`-S` splits a string
+/// into a command, `-C` changes folder, …); [`writes`] then judges `env` itself.
+pub(super) fn env_command(args: &[String]) -> Option<&[String]> {
+    // Options come first; the first setting or `--` ends them.
+    let mut options = true;
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        at += 1;
+        if word.contains('$') {
+            return None;
+        }
+        if is_assignment(word) {
+            if !harmless_assignment(word) {
+                return None;
+            }
+            options = false;
+        } else if options && word == "--" {
+            options = false;
+        } else if let Some(long) = word.strip_prefix("--").filter(|_| options) {
+            match long.split_once('=') {
+                None if prefix_of(long, &["ignore-environment"]) => {}
+                None if prefix_of(long, &["unset"]) => at += 1,
+                Some((name, _)) if prefix_of(name, &["unset"]) => {}
+                _ => return None,
+            }
+        } else if let Some(cluster) = word.strip_prefix('-').filter(|_| options) {
+            // `-` alone is `-i`; a cluster such as `-iu NAME` or `-iuNAME`.
+            for (i, letter) in cluster.char_indices() {
+                match letter {
+                    'i' => {}
+                    'u' => {
+                        if i + 1 == cluster.len() {
+                            at += 1;
+                        }
+                        break;
+                    }
+                    _ => return None,
+                }
+            }
+        } else {
+            return Some(&args[at - 1..]);
+        }
+    }
+    None
 }
 
 /// Verbs of `systemctl` that only read; without a verb it lists units.

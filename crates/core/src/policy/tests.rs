@@ -1101,10 +1101,30 @@ fn timedatectl_and_hostnamectl_read_only_when_they_show() {
 }
 
 #[test]
-fn env_reads_only_when_it_runs_no_command() {
+fn env_reads_alone_or_when_it_runs_a_read_only_command_with_harmless_settings() {
     reads_and_writes(
         None,
-        &["env", "env | sort", "env -0", "env -u HOME", "env -i", "env --null"],
+        &[
+            "env",
+            "env | sort",
+            "env -0",
+            "env -u HOME",
+            "env -i",
+            "env --null",
+            "env LC_ALL=C",
+            // The command env runs is classified like any other.
+            "env cat /etc/hosts",
+            "env LC_ALL=C sort /tmp/table",
+            "env TZ=UTC date",
+            "env -i TZ=UTC date +%F",
+            "env -u PAGER -u LESS systemctl status sshd",
+            "env -iu PAGER uptime",
+            "env --unset=PAGER uptime",
+            "env - LANG=C ls /var/log",
+            "env -- LC_ALL=C sort /tmp/table",
+            "sudo env LANG=C journalctl -u nginx",
+            "LC_ALL=C env TZ=UTC date",
+        ],
         &[
             "env systemctl stop nginx",
             "env LANG=C apt-get -y upgrade",
@@ -1112,6 +1132,78 @@ fn env_reads_only_when_it_runs_no_command() {
             "env -S 'systemctl stop nginx'",
             "env -u HOME journalctl --vacuum-time=1d",
             "env $COMMAND",
+            "env TZ=UTC date -s 12:00",
+            "env LC_ALL=C sort -o /tmp/out /tmp/table",
+            // Settings that are not harmless, with a command or without one.
+            "env LD_PRELOAD=/tmp/x.so cat /etc/hosts",
+            "env PAGER=/tmp/x systemctl status sshd",
+            "env LESSOPEN='|/tmp/x %s' less /etc/hosts",
+            "env -i PATH=/tmp/bin uptime",
+            "env TZ=UTC LD_PRELOAD=/tmp/x.so date",
+            "env LANG=C env LD_PRELOAD=/tmp/x.so cat /etc/hosts",
+            "env LD_PRELOAD=/tmp/x.so",
+            // Options other than -i, - and -u.
+            "env -C /tmp cat x",
+            "env --chdir=/tmp cat x",
+            "env -v uptime",
+            "env --ignore-signal=INT uptime",
+        ],
+    );
+}
+
+#[test]
+fn a_setting_that_can_load_code_or_run_a_program_is_not_read_only() {
+    // The locale, time zone, terminal and colours only change what the output looks like; most other
+    // variables can make a read-only command load a library, start a program or write a file.
+    reads_and_writes(
+        None,
+        &[
+            "LC_ALL=C sort /tmp/table",
+            "TZ=UTC date",
+            "TZ='America/New_York' date",
+            "LANG=en_US.UTF-8 ls -l /var/log",
+            "LC_ALL=C LANG=C df -h",
+            "LC_TIME=C.UTF-8 last -n 5",
+            "TERM=dumb top -b -n 1",
+            "COLUMNS=200 ps aux",
+            "NO_COLOR=1 SYSTEMD_COLORS=0 systemctl status sshd",
+            "TIME_STYLE=long-iso ls -l",
+            "S_TIME_FORMAT=ISO iostat -x 1 2",
+            "SYSTEMD_PAGER= systemctl status sshd",
+            "PAGER=cat journalctl -u nginx",
+            "sudo LC_ALL=C journalctl -u nginx",
+            "TZ=UTC; date",
+            "uptime && LC_ALL=C sort /tmp/table | head",
+        ],
+        &[
+            "LD_PRELOAD=/tmp/x.so cat /etc/hosts",
+            "LD_LIBRARY_PATH=/tmp cat /etc/hosts",
+            "GCONV_PATH=/tmp cat /etc/hosts",
+            "LESSOPEN='|/tmp/x %s' less /etc/hosts",
+            "LESS=-o/tmp/log less /etc/hosts",
+            "LESSKEY=/tmp/keys less /etc/hosts",
+            "SYSTEMD_LESS=-o/tmp/log systemctl status sshd",
+            "PAGER=/tmp/x systemctl status sshd",
+            "SYSTEMD_PAGER='sh -c /tmp/x' journalctl",
+            "PAGER=$P journalctl",
+            "PATH=/tmp/bin:$PATH uptime",
+            "BASH_ENV=/tmp/x uptime",
+            "ENV=/tmp/x uptime",
+            "EDITOR=/tmp/x systemctl status sshd",
+            "KUBECONFIG=/tmp/kubeconfig kubectl get pods",
+            "DOCKER_HOST=ssh://bob@web01.example.com docker ps",
+            "GIT_SSH_COMMAND=/tmp/x ls",
+            // A locale with `/` is a folder to load.
+            "LC_ALL=/tmp/locale sort /tmp/table",
+            "LANG=$L ls",
+            // On their own they last for the rest of the script, and in MultiExec's shell for the lines
+            // after it; PROMPT_COMMAND runs before every prompt.
+            "PATH=/tmp/bin; uptime",
+            "PROMPT_COMMAND=/tmp/x; uptime",
+            "LC_ALL=C LD_PRELOAD=/tmp/x.so sort /tmp/table",
+            "LD_PRELOAD=/tmp/x.so sudo cat /etc/shadow",
+            "sudo LD_PRELOAD=/tmp/x.so cat /etc/shadow",
+            "uptime; LD_PRELOAD=/tmp/x.so cat /etc/hosts",
         ],
     );
 }
