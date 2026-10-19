@@ -272,12 +272,8 @@ pub fn default_read_only_commands() -> Vec<String> {
         "httpd -S",
         "httpd -M",
         "httpd -v",
-        // --- Databases (reading prefixes; version strings) ---
-        "mysqladmin status",
-        "mysqladmin ping",
-        "mysqladmin processlist",
-        "mysqladmin variables",
-        "mysqladmin extended-status",
+        // --- Databases (bare mysqladmin: every command word must read, see writes.rs; version strings) ---
+        "mysqladmin",
         "mysql --version",
         "mariadb --version",
         "psql --version",
@@ -295,7 +291,6 @@ pub fn default_read_only_commands() -> Vec<String> {
         "chronyc serverstats",
         "chronyc clients",
         "ntpq -p",
-        "ntpq -c",
         "hwclock --show",
         "hwclock -r",
         // --- Identity (AD/LDAP, SSSD reading subcommands) ---

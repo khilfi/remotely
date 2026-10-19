@@ -49,9 +49,9 @@ approval rules make of it (read-only, changes, dangerous), so you see before you
     (SELinux, AppArmor, sudo, `sshd -T`, auditd, fail2ban); TLS certificates; firewall; web servers (nginx, Apache);
     databases (MySQL/MariaDB, PostgreSQL); cron and timers; time sync (NTP/chrony); identity (AD/LDAP, SSSD); VMware
     Tools in the guest; Docker; Podman; Kubernetes; Helm.
-  Most entries are read-only checks; the fixes (restart or reload a service, vacuum the journal, extend an LV and grow
-  its filesystem, resync the clock, clear a failed unit, open a firewall port) are marked as changes and ask before
-  they run. A command can appear both in a symptom runbook and in its area group.
+    Most entries are read-only checks; the fixes (restart or reload a service, vacuum the journal, extend an LV and grow
+    its filesystem, resync the clock, clear a failed unit, open a firewall port) are marked as changes and ask before
+    they run. A command can appear both in a symptom runbook and in its area group.
 
 ### MultiExec and Compare output
 
@@ -371,7 +371,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | MultiExec         | `crates/core/src/terminal/multiexec.rs`                       | SS-10                                                                                                                               | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                    |
 | File transfer     | `crates/core/src/terminal/files.rs`, `folder.rs`              | SS-08                                                                                                                               | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, transfers with cancel and retry                  |
 | Compare output    | `crates/core/src/bulk.rs`                                     | BX-01, BX-03, BX-05                                                                                                                 | Working: hosts from picked tabs and tree sessions, results grouped by output, diff, CSV, JSON and HTML export                                                                  |
-| Command panel     | `crates/core/src/snippets/`                                   | BX-08                                                                                                                               | Working: favourite commands in folders (audited), a large built-in Linux library (Troubleshoot runbooks and 25 area groups), variables, marks from the policy engine            |
+| Command panel     | `crates/core/src/snippets/`                                   | BX-08                                                                                                                               | Working: favourite commands in folders (audited), a large built-in Linux library (Troubleshoot runbooks and 25 area groups), variables, marks from the policy engine           |
 | Reachability      | `crates/core/src/reachability.rs`                             | QL-04 (MO-08 lite), SS-07                                                                                                           | Working: TCP checks of the sessions the tree shows, once per host and port, a few at a time; the first jump host's for sessions behind one                                     |
 | VM links          | `crates/core/src/vm_links.rs`                                 | QL-01, BX-01                                                                                                                        | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept                                                                          |
 | Network adapter   | `crates/core/src/adapters/network.rs`                         | QL-01, QL-03, QL-04                                                                                                                 | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                |

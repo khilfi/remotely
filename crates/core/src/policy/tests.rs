@@ -1748,6 +1748,7 @@ fn sysctl_reads_a_parameter_and_writes_when_it_sets_one() {
             "sudo sysctl -p /etc/sysctl.conf",
             "sudo sysctl --system",
             "sudo sysctl --load=/etc/sysctl.conf",
+            "sudo sysctl -f /etc/sysctl.conf",
             "sysctl -w $PARAM",
         ],
     );
@@ -1769,6 +1770,10 @@ fn openssl_inspects_certs_and_writes_when_it_creates_files_or_keys() {
             "openssl pkey -in /tmp/k.pem -noout -text",
             "openssl s_client -connect host.test:443 -servername host.test",
             "echo | openssl s_client -connect host.test:443",
+            "openssl crl -in /tmp/c.crl -noout -text",
+            "openssl ciphers -v",
+            "openssl list -digest-algorithms",
+            "openssl version",
         ],
         &[
             "openssl req -new -newkey rsa:2048 -keyout /tmp/k.pem -out /tmp/r.csr",
@@ -1780,6 +1785,114 @@ fn openssl_inspects_certs_and_writes_when_it_creates_files_or_keys() {
             "sudo openssl ca -config /etc/pki/tls/openssl.cnf",
             "openssl rehash /etc/ssl/certs",
             "openssl x509 -in /tmp/c.pem -out $DEST",
+            // Review #3: more write forms an allow-list has to cover.
+            "openssl s_client -connect host.test:443 -sess_out /tmp/sess",
+            "openssl s_client -connect host.test:443 -keylogfile /tmp/keys",
+            "openssl req -new -x509 -keyout /tmp/k.pem -days 365",
+            "openssl req -newkey rsa:2048 -nodes",
+            "openssl dhparam -out /tmp/dh.pem 2048",
+            "openssl ecparam -name prime256v1 -genkey",
+            "openssl s_server -accept 4433 -cert /tmp/c.pem",
+            "openssl rand -writerand /tmp/rnd",
+        ],
+    );
+}
+
+#[test]
+fn library_prefixes_catch_multiple_commands_and_last_option_wins() {
+    // Review of PR #25: several new read-only prefixes could be turned into host changes by packing a
+    // second command into one call, or by a later option overriding an earlier read one. Each writing
+    // form must stay "other" so MultiExec and Compare ask first.
+    reads_and_writes(
+        None,
+        &[
+            // Still plain reads.
+            "sudo mysqladmin status",
+            "sudo mysqladmin ping",
+            "sudo mysqladmin -u alice -h db.example.com -P 3306 status",
+            "sudo mysqladmin status extended-status processlist",
+            "sudo nft list ruleset",
+            "sudo nft list tables",
+            "sudo nft list ruleset -a",
+            "sudo auditctl -l",
+            "sudo auditctl -s",
+            "sudo multipath -ll",
+            "sudo multipath -l -v 2",
+            "swapon --show",
+            "chronyc tracking",
+            "chronyc sources -v",
+            "ntpq -p -n",
+            "crontab -l",
+            "sudo crontab -l -u bob",
+            "sudo hwclock --show",
+            "sudo nginx -t",
+            "sudo nginx -T",
+            "sudo apachectl configtest",
+            "sudo httpd -t",
+            "mysql --version",
+            "psql --version",
+            "kubectl config view",
+        ],
+        &[
+            // mysqladmin: a second command word runs too (`status shutdown` is caught even harder, as
+            // Dangerous by the shutdown rule; these stay "other").
+            "sudo mysqladmin status reload",
+            "sudo mysqladmin ping flush-hosts",
+            "sudo mysqladmin flush-logs",
+            "sudo mysqladmin -u alice status create appdb",
+            // nft: extra statements in one argument, or -f/-I.
+            "sudo nft -f /tmp/rules.nft",
+            "sudo nft list ruleset -f /tmp/x",
+            "sudo nft -I /tmp/inc list ruleset",
+            "nft $'list ruleset\\nflush ruleset'",
+            // auditctl / multipath: the last option wins.
+            "sudo auditctl -l -D",
+            "sudo auditctl -D",
+            "sudo auditctl -l -w /etc/passwd -p wa",
+            "sudo multipath -ll -F",
+            "sudo multipath -l -r",
+            "swapon --show -a",
+            // chronyc -m, ntpq -c, crontab -r.
+            "chronyc tracking -m makestep",
+            "ntpq -p -c writevar",
+            "ntpq -p -c ':config server x'",
+            "crontab -l -r",
+            // hwclock / nginx / apache control actions reached via a read flag.
+            "sudo hwclock --show --systohc",
+            "sudo nginx -t -s reload",
+            "sudo apachectl -t -k graceful",
+            "sudo httpd -t -k restart",
+            // SQL clients: --version plus a query.
+            "mysql --version -e 'SELECT 1'",
+            "psql --version -c 'SELECT 1'",
+            // kubectl config view --raw leaks credentials.
+            "kubectl config view --raw",
+        ],
+    );
+}
+
+#[test]
+fn library_prefixes_catch_commands_that_write_files() {
+    // Review of PR #25, like `sort -o`: a read command that can be pointed at an output file.
+    reads_and_writes(
+        None,
+        &[
+            "sudo ausearch -m avc -ts recent",
+            "sudo lshw -short",
+            "sudo sshd -T",
+            "sudo sshd -t",
+            "nfsstat -c",
+            "apt-cache search nginx",
+            "apt-cache policy nginx",
+        ],
+        &[
+            "sudo ausearch -m avc --checkpoint /tmp/cp",
+            "sudo lshw -dump /tmp/hw.db",
+            "sudo sshd -t -E /tmp/sshd.log",
+            "sudo sshd -T -E /tmp/sshd.log",
+            "nfsstat -z",
+            "nfsstat --zero",
+            "apt-cache gencaches",
         ],
     );
 }

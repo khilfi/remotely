@@ -118,9 +118,14 @@ pub(super) fn writes(words: &[String]) -> bool {
             expands || p.has_short("Z") || p.has_long(&["zero"])
         }
         "nft" => {
-            // -f runs the commands in a file.
-            let p = parse("ID", "", &[]);
-            expands || p.has_short("f") || p.has_long(&["file"])
+            // Only `list`/`describe` read. -f/-I run or include a file, and a `;` or newline inside an
+            // argument (quoting, `$'…\n…'`) packs extra statements such as `flush ruleset` into one call.
+            let p = parse("fI", "", &["file", "includepath"]);
+            expands
+                || p.has_short("fI")
+                || p.has_long(&["file", "includepath"])
+                || args.iter().any(|a| a.contains(';') || a.contains('\n'))
+                || !matches!(p.operands.first().copied(), Some("list" | "describe"))
         }
         "smartctl" => {
             // Reads health, attributes and logs (-H, -a, -A, -x, -i, -l, ...). Writes to the device
@@ -130,35 +135,165 @@ pub(super) fn writes(words: &[String]) -> bool {
         }
         "sysctl" => {
             // Reads a parameter (`sysctl -a`, `sysctl net.ipv4.ip_forward`); writes one with `-w`, a
-            // `name=value` operand, or by loading a file (`-p`, --load, --system).
+            // `name=value` operand, or by loading a file (`-p`/`-f`, --load, --system).
             let p = parse("", "", &[]);
             expands
-                || p.has_short("wp")
-                || p.has_long(&["write", "load", "system"])
+                || p.has_short("wpf")
+                || p.has_long(&["write", "load", "system", "files"])
                 || p.operands.iter().any(|o| o.contains('='))
         }
         "openssl" => {
-            // Inspects certificates and keys and connects to TLS servers (x509, s_client, verify, req
-            // with -noout). Writes a file with -out/-keyout/-CAout, and the ca and rehash subcommands,
-            // and the key generators, write by design.
-            let writes_file = args.iter().any(|a| {
+            // An allow-list of read subcommands: version, x509, s_client, verify, crl, ciphers, list
+            // always read; req/rsa/pkey/ec/dsa and the param tools only with -noout/-check/-text and no
+            // key generation. Any file-writing option (-out, -keyout, -sess_out, -keylogfile, ...) writes.
+            let sub = args.first().map(String::as_str).unwrap_or("");
+            let file_opt = args.iter().any(|a| {
                 matches!(
                     a.as_str(),
-                    "-out" | "-keyout" | "-CAout" | "-CAkeyout" | "-signkey" | "-outfile"
+                    "-out"
+                        | "-keyout"
+                        | "-CAout"
+                        | "-CAkeyout"
+                        | "-signkey"
+                        | "-outfile"
+                        | "-sess_out"
+                        | "-keylogfile"
+                        | "-writerand"
+                        | "-respout"
+                        | "-reqout"
                 )
             });
-            let generates = matches!(
-                args.first().map(String::as_str),
-                Some("ca" | "rehash" | "c_rehash" | "genrsa" | "genpkey" | "gendsa")
-            );
-            expands || writes_file || generates
+            let generates = args
+                .iter()
+                .any(|a| matches!(a.as_str(), "-new" | "-newkey" | "-x509" | "-genkey"));
+            let read_sub = match sub {
+                "version" | "x509" | "verify" | "crl" | "ciphers" | "list" | "s_client" | "errstr" | "asn1parse" => {
+                    true
+                }
+                "req" | "rsa" | "pkey" | "ec" | "dsa" | "ecparam" | "dsaparam" | "pkeyparam" => {
+                    args.iter().any(|a| a == "-noout" || a == "-check" || a == "-text")
+                }
+                _ => false,
+            };
+            expands || file_opt || generates || !read_sub
         }
         "firewall-cmd" => firewall_cmd_writes(args),
         "kubectl" => {
+            let has = |w: &str| args.iter().any(|a| a == w);
             // `kubectl cluster-info dump --output-directory DIR` writes files.
-            let dump = args.iter().any(|a| a == "cluster-info") && args.iter().any(|a| a == "dump");
-            dump && (expands || args.iter().any(|a| a.starts_with("--output-directory")))
+            let dump = has("cluster-info")
+                && has("dump")
+                && (expands || args.iter().any(|a| a.starts_with("--output-directory")));
+            // `kubectl config view --raw` prints cluster credentials; plain `config view` redacts them.
+            let raw = has("config") && has("view") && args.iter().any(|a| a == "--raw" || a.starts_with("--raw="));
+            dump || raw
         }
+        "mysqladmin" => {
+            // Several commands run in one call (`mysqladmin status shutdown`), so every command word
+            // must read; option values (-u alice, -h db, -P 3306, -p[pass]) are skipped.
+            const READS: &[&str] = &[
+                "status",
+                "ping",
+                "processlist",
+                "variables",
+                "extended-status",
+                "version",
+            ];
+            let p = parse(
+                "uhPSic",
+                "pw",
+                &[
+                    "user",
+                    "host",
+                    "port",
+                    "socket",
+                    "sleep",
+                    "count",
+                    "default-character-set",
+                    "protocol",
+                ],
+            );
+            expands || p.operands.iter().any(|o| !READS.contains(o))
+        }
+        "mysql" | "mariadb" => {
+            // The read entry is just --version; -e/--execute runs arbitrary SQL.
+            expands
+                || args
+                    .iter()
+                    .any(|a| a == "-e" || a == "--execute" || a.starts_with("--execute="))
+        }
+        "psql" => {
+            // The read entry is just --version; -c/-f run SQL or a script file.
+            expands
+                || args
+                    .iter()
+                    .any(|a| a == "-c" || a.starts_with("--command") || a == "-f" || a.starts_with("--file"))
+        }
+        "auditctl" => {
+            // Only -l (list), -s (status), -v (version) read; every other option changes the config,
+            // and options apply in order (`auditctl -l -D` lists then deletes every rule).
+            let p = parse("", "", &[]);
+            expands
+                || !p.short.iter().all(|&c| matches!(c, 'l' | 's' | 'v' | 'h'))
+                || !p.long.is_empty()
+                || !p.operands.is_empty()
+        }
+        "multipath" => {
+            // -l/-ll show; the last action option wins, so `multipath -ll -F` flushes every map. Only
+            // -l and -v (verbosity) are safe.
+            let p = parse("v", "", &[]);
+            expands || !p.short.iter().all(|&c| matches!(c, 'l' | 'v')) || !p.long.is_empty() || !p.operands.is_empty()
+        }
+        "swapon" => {
+            // --show/-s display; -a/--all and a device operand enable swap.
+            let p = parse("LUpo", "", &["priority", "label", "uuid"]);
+            let shows = p.has_short("s") || p.long.iter().any(|n| prefix_of(n, &["show", "summary"]));
+            expands || !shows || p.has_short("a") || p.has_long(&["all"]) || !p.operands.is_empty()
+        }
+        "chronyc" => {
+            // `-m` runs several commands in one call (`chronyc -m tracking makestep`); without it only
+            // the one read command named by the entry runs.
+            expands || args.iter().any(|a| a == "-m" || a == "--multi")
+        }
+        "ntpq" => {
+            // `-c` runs an ntpq command, which can write (`writevar`, `:config`); the read entry uses none.
+            expands || args.iter().any(|a| a == "-c" || a.starts_with("--command"))
+        }
+        "crontab" => {
+            // `-l` lists; `-r`/`-e`/`-i` remove or edit, and a file operand installs a new crontab.
+            let p = parse("u", "", &["user"]);
+            expands || p.short.iter().any(|&c| matches!(c, 'r' | 'e' | 'i')) || !p.operands.is_empty()
+        }
+        "hwclock" => {
+            // --show/-r read the RTC; --systohc/--hctosys/--set/--adjust change a clock.
+            expands
+                || args.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "-w" | "--systohc" | "-s" | "--hctosys" | "--set" | "--adjust" | "--predict" | "--setepoch"
+                    )
+                })
+        }
+        "nginx" => {
+            // -t/-T/-v/-V test or print; -s sends a signal (reload/stop/quit) to the running server.
+            expands || args.iter().any(|a| a == "-s")
+        }
+        "apachectl" | "apache2ctl" | "httpd" | "apache2" => {
+            // configtest/-t/-S/-M/-v inspect; -k and start/stop/restart/graceful control the server.
+            expands
+                || args.iter().any(|a| a == "-k")
+                || args.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "start" | "stop" | "restart" | "graceful" | "graceful-stop" | "startssl"
+                    )
+                })
+        }
+        "nfsstat" => expands || args.iter().any(|a| a == "-z" || a == "--zero"),
+        "ausearch" => expands || args.iter().any(|a| a == "--checkpoint"),
+        "lshw" => expands || args.iter().any(|a| a == "-dump"),
+        "sshd" => expands || args.iter().any(|a| a == "-E"),
+        "apt-cache" => expands || args.iter().any(|a| a == "gencaches"),
         _ => false,
     }
 }
