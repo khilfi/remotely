@@ -676,7 +676,10 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
           vault={vault}
           onVaultChanged={onVaultChanged}
           onExported={(report) =>
-            toast.success(`Exported ${plural(report.sessions, "session")}`, { description: report.path })
+            toast.success(
+              `Exported ${plural(report.sessions, "session")}${report.favourites ? ` and ${plural(report.favourites, "favourite command")}` : ""}`,
+              { description: report.path },
+            )
           }
           onClose={() => setDialog(null)}
         />

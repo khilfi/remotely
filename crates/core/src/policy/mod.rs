@@ -549,17 +549,21 @@ impl PolicyEngine {
             },
             Command::VmProtect { protected: true, .. } => ActionKind::VmProtect,
             Command::VmProtect { protected: false, .. } => ActionKind::VmUnprotect,
-            Command::RemoteExec { script, .. } => {
-                if !self.dangerous_matches(script).is_empty() {
-                    ActionKind::ExecDangerous
-                } else if commands::is_read_only(script, &self.rules.read_only_commands) {
-                    ActionKind::ExecReadOnly
-                } else {
-                    ActionKind::ExecOther
-                }
-            }
+            Command::RemoteExec { script, .. } => self.classify_script(script),
             Command::AppUpdate { .. } => ActionKind::AppUpdate,
             Command::PushSshKey { .. } => ActionKind::SshKeyPush,
+        }
+    }
+
+    /// A shell command on its own: dangerous (BX-06), read-only, or other. Bulk runs use it, and the
+    /// command panel (BX-08) shows it for each saved and built-in command.
+    pub fn classify_script(&self, script: &str) -> ActionKind {
+        if !self.dangerous_matches(script).is_empty() {
+            ActionKind::ExecDangerous
+        } else if commands::is_read_only(script, &self.rules.read_only_commands) {
+            ActionKind::ExecReadOnly
+        } else {
+            ActionKind::ExecOther
         }
     }
 

@@ -188,6 +188,7 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
             &core.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                favourites: vec![],
                 sessions: choices(sessions),
                 known_hosts: vec![],
                 secrets: vec![],
@@ -195,6 +196,7 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
             &core.sessions,
             &core.vault,
             &core.known_hosts,
+            &core.snippets,
         )
         .await
         .unwrap()
@@ -555,6 +557,7 @@ async fn a_closed_preview_can_not_be_imported() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
@@ -562,6 +565,7 @@ async fn a_closed_preview_can_not_be_imported() {
             &b.sessions,
             &b.vault,
             &b.known_hosts,
+            &b.snippets,
         )
         .await
         .unwrap_err();
@@ -702,6 +706,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![ItemChoice {
                     index: host_row.index,
@@ -712,6 +717,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.sessions,
             &b.vault,
             &b.known_hosts,
+            &b.snippets,
         )
         .await
         .unwrap_err();
@@ -727,6 +733,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                favourites: vec![],
                 sessions: vec![
                     ItemChoice {
                         index: index_of(&preview, "web01"),
@@ -753,6 +760,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.sessions,
             &b.vault,
             &b.known_hosts,
+            &b.snippets,
         )
         .await
         .unwrap();
@@ -915,6 +923,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![ItemChoice {
@@ -925,6 +934,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
             &b.sessions,
             &b.vault,
             &b.known_hosts,
+            &b.snippets,
         )
         .await
         .unwrap_err();

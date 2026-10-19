@@ -38,6 +38,8 @@ url = "2"
 tauri-plugin-dialog = "2"
 # QL-05: right-click paste reads the clipboard's text here, so WebView2 never asks for clipboard permission.
 arboard = { version = "3", default-features = false }
+# QL-07: a Windows notification when a long command in a background tab finishes, shown from Rust.
+tauri-plugin-notification = "2"
 
 [dev-dependencies]
 # FD-14: the updater against a local fake GitHub, with a throwaway signing key, on Tauri's mock runtime.

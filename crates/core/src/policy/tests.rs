@@ -153,6 +153,86 @@ fn commands_that_are_not_read_only_are_medium() {
 }
 
 #[test]
+fn the_command_panels_read_only_commands_are_low_and_their_writing_cousins_are_not() {
+    let t = vec![host(Environment::Lab)];
+    for script in [
+        "systemd-detect-virt",
+        "findmnt --real",
+        "mpstat -P ALL 1 3",
+        "tracepath web01.example.com",
+        "ip neigh show",
+        "systemctl list-unit-files --type=service",
+        "systemctl list-timers --all",
+        "systemctl cat nginx",
+        "systemd-analyze blame | head -20",
+        "apt-cache policy nginx",
+        "dpkg -S /usr/bin/ssh",
+        "rpm -qa | sort",
+        "rpm -qf /usr/bin/ssh",
+        "dnf check-update",
+        "dnf info nginx",
+        "dnf repolist",
+        "dnf history list",
+        "getent group wheel",
+        "sudo chage -l alice",
+        "sudo lastb -n 20",
+        "sudo ufw status verbose",
+        "sudo firewall-cmd --list-all",
+        "sudo firewall-cmd --state",
+        "sudo iptables -L -n -v --line-numbers",
+        "sudo iptables -S",
+        "sudo nft list ruleset",
+        "docker logs --tail 200 web",
+        "docker stats --no-stream",
+        "docker inspect web",
+        "docker system df",
+        "docker network ls",
+        "docker compose ps",
+        "kubectl logs web-1 -n shop --tail=200",
+        "kubectl top pods -A",
+        "kubectl config get-contexts",
+        "kubectl cluster-info",
+        "kubectl version",
+    ] {
+        assert_eq!(tier(exec(script, &t), &t), Tier::Low, "{script}");
+    }
+    for script in [
+        "ip neigh add 192.0.2.1 lladdr 00:00:5e:00:53:01 dev eth0",
+        "systemctl list-timers; systemctl stop nginx",
+        "sudo ufw allow 22/tcp",
+        "sudo firewall-cmd --add-port=80/tcp",
+        "sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT",
+        "sudo nft flush ruleset",
+        "docker logs web > /tmp/web.log",
+        "docker system prune",
+        "docker network rm shop",
+        "docker compose down",
+        "kubectl config use-context prod",
+        "dnf history undo 5",
+        "rpm -e nginx",
+    ] {
+        assert_eq!(tier(exec(script, &t), &t), Tier::Medium, "{script}");
+    }
+}
+
+#[test]
+fn a_script_on_its_own_is_classified_like_a_remote_command() {
+    let e = engine();
+    let t = vec![host(Environment::Lab)];
+    for script in [
+        "uptime",
+        "systemctl restart nginx",
+        "sudo systemctl reboot",
+        "rm -rf /tmp/x",
+    ] {
+        assert_eq!(e.classify_script(script), e.classify(&exec(script, &t)), "{script}");
+    }
+    assert_eq!(e.classify_script("df -h"), ActionKind::ExecReadOnly);
+    assert_eq!(e.classify_script("apt upgrade"), ActionKind::ExecOther);
+    assert_eq!(e.classify_script("sudo systemctl reboot"), ActionKind::ExecDangerous);
+}
+
+#[test]
 fn medium_tier_is_one_confirm() {
     let t = vms(1);
     let d = engine().evaluate(&power(PowerOp::Suspend, &t), &t);

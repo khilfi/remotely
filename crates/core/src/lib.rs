@@ -18,7 +18,9 @@
 //!   (pushing one to hosts is a command on the bus)
 //!   vm_links (QL-01): sessions linked to the VMs they reach, by IP (adapters::network) or by hand
 //!   terminal (SS-03): interactive SSH panes ──► adapters::remote; opening and closing are audited
-//!     quick connect (QL-02), host name and IP (QL-03 ──► adapters::network), output and logs (SS-11)
+//!     quick connect (QL-02), host name and IP (QL-03 ──► adapters::network), output and logs (SS-11),
+//!     vault passwords typed at a prompt (QL-06), long runs finishing (QL-07)
+//!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //! ```
@@ -46,6 +48,7 @@ pub mod policy;
 pub mod reachability;
 pub mod sessions;
 pub mod snapshots;
+pub mod snippets;
 pub mod ssh_keys;
 pub mod store;
 pub mod terminal;
@@ -78,6 +81,7 @@ use reachability::ReachabilityChecker;
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
+use snippets::Snippets;
 use ssh_keys::KeyManager;
 use store::{NewAuditEntry, Store};
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
@@ -145,6 +149,9 @@ pub struct Core {
     pub transfer: Transfer,
     /// SS-03: open terminal panes and their SSH connections.
     pub terminals: Terminals,
+    /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
+    /// classified by the bus's policy engine.
+    pub snippets: Snippets,
     /// QL-04: background checks of the sessions the Terminal page's tree shows. Reads only. The shell
     /// starts it with [`ReachabilityChecker::run`].
     pub reachability: Arc<ReachabilityChecker>,
@@ -256,6 +263,7 @@ impl Core {
             jobs.set_remote_limit(limit.clamp(1, JobLimits::MAX_REMOTE));
         }
         let keys = KeyManager::new(store.clone(), Arc::clone(&adapters.vault));
+        let snippets = Snippets::new(store.clone(), bus.policy());
         Ok(Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
@@ -268,6 +276,7 @@ impl Core {
             keys,
             transfer: Transfer::new(store.clone()),
             terminals,
+            snippets,
             reachability,
             bulk: BulkRuns::new(store.clone()),
             metrics,
@@ -491,6 +500,7 @@ impl Core {
         self.store
             .put_setting(&self.ctx, TERMINAL_SETTINGS_KEY, &settings)
             .await?;
+        self.terminals.apply_settings(&settings);
         self.reachability.poke();
         self.audit_setting("Set the terminal settings", &settings.describe())
             .await

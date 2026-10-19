@@ -392,7 +392,8 @@ struct Pending {
 }
 
 pub struct CommandBus {
-    policy: RwLock<PolicyEngine>,
+    /// Shared with the command panel (BX-08), which shows how each saved command classifies.
+    policy: Arc<RwLock<PolicyEngine>>,
     directory: Arc<dyn TargetDirectory>,
     jobs: Arc<JobRunner>,
     store: Store,
@@ -413,7 +414,7 @@ impl CommandBus {
         impact: ImpactPreviewer,
     ) -> Self {
         Self {
-            policy: RwLock::new(policy),
+            policy: Arc::new(RwLock::new(policy)),
             directory,
             jobs,
             store,
@@ -426,6 +427,11 @@ impl CommandBus {
 
     pub fn rules(&self) -> PolicyRules {
         locks::read(&self.policy).rules().clone()
+    }
+
+    /// The engine itself, for readers that classify without submitting (BX-08's command panel).
+    pub(crate) fn policy(&self) -> Arc<RwLock<PolicyEngine>> {
+        Arc::clone(&self.policy)
     }
 
     /// AP-01: tier rules are editable. Invalid rules are rejected with the reason and the old ones

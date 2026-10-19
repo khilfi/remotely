@@ -9,7 +9,9 @@
 //! `port` (default 2222) up, each with its own host key, user `alice` and one password made at start,
 //! and sudo taking that same password. In the terminal's shell, `drop-connection` simulates a network
 //! failure (the terminal reconnects) and `change-host-key` gives the next connection a new host key (the
-//! terminal blocks it). Commands a bulk run can try: `hostname`, `uptime`, `cat /etc/os-release` (the
+//! terminal blocks it). For P5's helpers: `sudo <command>` asks for the password without echoing it
+//! (try "Type vault password"), `sleep <s>` brings the prompt back after that long and `work <s>`
+//! prints for that long, then goes quiet (QL-07 notifications). Commands a bulk run can try: `hostname`, `uptime`, `cat /etc/os-release` (the
 //! last of 3 or more servers has another release, so the results show two groups), `seq <n>`,
 //! `sleep <s>`, `exit <code>`, and any of them with sudo. Each server also serves an Ubuntu guest's
 //! /proc files and `df`, with counters that move every 5 seconds, so watching it on the dashboard shows
@@ -65,6 +67,7 @@ async fn main() {
     println!("User:        alice");
     println!("Password:    {password} (sudo takes it too)");
     println!("Shell commands: whoami, echo <text>, exit [code], drop-connection, change-host-key");
+    println!("  and for P5: sudo <command> (no echo), sleep <s> (prompt back after), work <s> (output, then quiet)");
     println!("Bulk run commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>, exit <code>");
     println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");
     println!("Stop with Ctrl+C.");

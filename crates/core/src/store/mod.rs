@@ -1,9 +1,10 @@
 //! Store: one local SQLite file (WAL mode, via sqlx) for inventory, sessions, the vault's ciphertext,
-//! jobs, metrics and the audit log. Reads (inventory, metrics) go straight here and skip the command bus.
+//! jobs, metrics, favourite commands and the audit log. Reads (inventory, metrics) go straight here and skip the command bus.
 //!
 //! Queries are checked at runtime, not with `query!`, so building needs no `DATABASE_URL`.
 
 mod audit;
+mod favourites;
 mod inventory;
 mod jobs;
 mod known_hosts;
@@ -30,6 +31,7 @@ use crate::domain::{now_rfc3339, Context, UserId, WorkspaceId};
 use crate::error::Result;
 
 pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
+pub(crate) use favourites::{FavouriteFields, FavouriteRow};
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, JobTargetRecord, TargetResult};

@@ -25,7 +25,15 @@
 //! * SS-11: the UI's scrollback is saved, printed or copied with the pane's login secrets scrubbed
 //!   ([`output`]); a pane can log its output to a file with timestamps ([`log`]). Saving and logging
 //!   are audited with the file's path, never the output.
+//! * QL-06: [`Terminals::type_secret`] types a vault password into the terminal for a sudo or su
+//!   prompt. The value goes from the vault to the shell only (never the UI or the clipboard), only
+//!   while the terminal shows a password prompt unless the user insists, and is scrubbed from saved
+//!   output and logs like the login's. Audited with the secret's label and the session, never the value.
+//! * QL-07: each pane watches its shell ([`activity::RunWatch`]) and reports a command that ran long
+//!   when its prompt comes back or its output stops ([`TerminalEvent::CommandFinished`]); the UI shows a
+//!   Windows notification when that tab is in the background.
 
+pub mod activity;
 pub mod log;
 pub mod output;
 pub mod quick;
@@ -44,6 +52,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use self::activity::{is_password_prompt, FinishedHow, RunWatch, WatchConfig};
 use self::log::{LogMessage, SessionLog};
 use self::output::{SaveLayout, SavedOutput, TerminalText};
 use self::quick::{QuickConnect, QuickOpened};
@@ -59,7 +68,7 @@ use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
 use crate::locks;
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
-use crate::vault::{SecretString, Vault};
+use crate::vault::{SecretId, SecretKind, SecretString, Vault};
 use crate::vm_links::VmLinks;
 
 /// The terminal settings (JSON) in the settings table.
@@ -77,6 +86,11 @@ pub const MAX_SCROLLBACK: u32 = 100_000;
 /// QL-04: how often reachability is checked, in seconds.
 pub const MIN_REACHABILITY_SECS: u64 = 15;
 pub const MAX_REACHABILITY_SECS: u64 = 3600;
+/// QL-07: the shortest and longest run that counts as long, and quiet spell that ends one, in seconds.
+pub const MIN_NOTIFY_SECS: u64 = 5;
+pub const MAX_NOTIFY_SECS: u64 = 3600;
+/// QL-06: how long typing a vault password waits for the terminal (it may be connecting).
+pub const TYPE_SECRET_WAIT: Duration = Duration::from_secs(30);
 
 /// QL-04: whether the session tree checks each session's port in the background.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +131,13 @@ pub struct TerminalSettings {
     pub reachability: ReachabilityMode,
     /// QL-04: seconds between two checks of the same session.
     pub reachability_secs: u64,
+    /// QL-07: a Windows notification when a long command in a background tab finishes.
+    pub notify_finished: bool,
+    /// QL-07: seconds a command must run to count as long.
+    pub notify_after_secs: u64,
+    /// QL-07: seconds without output, after some came, that end a run whose prompt was not
+    /// recognized; 0 waits for the prompt only.
+    pub notify_quiet_secs: u64,
 }
 
 impl Default for TerminalSettings {
@@ -129,6 +150,9 @@ impl Default for TerminalSettings {
             scrollback: 10_000,
             reachability: ReachabilityMode::Auto,
             reachability_secs: 60,
+            notify_finished: true,
+            notify_after_secs: 30,
+            notify_quiet_secs: 30,
         }
     }
 }
@@ -155,7 +179,26 @@ impl TerminalSettings {
                 "reachability checks must be {MIN_REACHABILITY_SECS} to {MAX_REACHABILITY_SECS} seconds apart"
             )));
         }
+        if !(MIN_NOTIFY_SECS..=MAX_NOTIFY_SECS).contains(&self.notify_after_secs) {
+            return Err(CoreError::InvalidSetting(format!(
+                "a long command must run {MIN_NOTIFY_SECS} to {MAX_NOTIFY_SECS} seconds"
+            )));
+        }
+        if self.notify_quiet_secs != 0 && !(MIN_NOTIFY_SECS..=MAX_NOTIFY_SECS).contains(&self.notify_quiet_secs) {
+            return Err(CoreError::InvalidSetting(format!(
+                "the quiet spell that ends a command must be 0 (wait for the prompt) or {MIN_NOTIFY_SECS} to {MAX_NOTIFY_SECS} seconds"
+            )));
+        }
         Ok(())
+    }
+
+    /// QL-07: how each pane watches for long runs.
+    pub fn watch(&self) -> WatchConfig {
+        WatchConfig {
+            enabled: self.notify_finished,
+            threshold: Duration::from_secs(self.notify_after_secs),
+            quiet: (self.notify_quiet_secs > 0).then(|| Duration::from_secs(self.notify_quiet_secs)),
+        }
     }
 
     /// For the audit log.
@@ -165,8 +208,16 @@ impl TerminalSettings {
             secs => format!("keep-alive every {secs} s"),
         };
         let on = |b: bool| if b { "on" } else { "off" };
+        let notify = match (self.notify_finished, self.notify_quiet_secs) {
+            (false, _) => "notifications off".to_owned(),
+            (true, 0) => format!("notify after commands of {} s or more", self.notify_after_secs),
+            (true, quiet) => format!(
+                "notify after commands of {} s or more (or {quiet} s quiet)",
+                self.notify_after_secs
+            ),
+        };
         format!(
-            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s)",
+            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}",
             on(self.auto_reconnect),
             on(self.copy_on_select),
             self.font_size,
@@ -192,6 +243,10 @@ pub struct TerminalTuning {
     pub agent: AgentSource,
     /// How long a host key question waits for an answer.
     pub host_key_wait: Duration,
+    /// QL-07: the long-run threshold and the quiet spell instead of the settings' (whole seconds, at
+    /// least 5), so tests can use milliseconds. Whether notifications are on still comes from the
+    /// settings.
+    pub notify_timing: Option<(Duration, Option<Duration>)>,
 }
 
 impl Default for TerminalTuning {
@@ -205,6 +260,7 @@ impl Default for TerminalTuning {
             keepalive_max: 3,
             agent: AgentSource::System,
             host_key_wait: Duration::from_secs(600),
+            notify_timing: None,
         }
     }
 }
@@ -227,6 +283,15 @@ pub enum TerminalInput {
     /// Connect again now (also drops a live connection first).
     Reconnect,
     Close,
+    /// QL-06: a vault secret to type, followed by Enter, if the terminal shows a password prompt (or
+    /// `force`). The answer says whether a prompt was showing.
+    TypeSecret {
+        secret: SecretString,
+        force: bool,
+        reply: oneshot::Sender<Result<bool>>,
+        /// Not typed after this: the caller stopped waiting.
+        until: Instant,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -334,6 +399,12 @@ pub enum TerminalEvent {
     Host {
         facts: HostFacts,
     },
+    /// QL-07: a command that ran at least the threshold ended: its prompt came back, or its output
+    /// stopped. The UI notifies when the tab is in the background.
+    CommandFinished {
+        after_secs: u64,
+        how: FinishedHow,
+    },
 }
 
 /// A pane's connection, from [`Terminals::open`]. Input goes through [`Terminals`] by id.
@@ -377,6 +448,8 @@ struct Control {
     hostname_answered: std::sync::atomic::AtomicBool,
     /// SS-11: the session log, while one runs.
     log: Mutex<Option<SessionLog>>,
+    /// QL-06: vault secrets typed into this terminal, scrubbed from saved output and logs too.
+    typed: Mutex<Vec<SecretString>>,
 }
 
 impl Control {
@@ -388,6 +461,7 @@ impl Control {
     fn known_secrets(&self) -> Vec<SecretString> {
         let mut secrets = locks::lock(&self.secrets).clone();
         secrets.extend(locks::lock(&self.remembered).clone());
+        secrets.extend(locks::lock(&self.typed).iter().cloned());
         secrets
     }
 
@@ -407,6 +481,8 @@ struct Inner {
     open: Mutex<HashMap<Uuid, Arc<Control>>>,
     tasks: Mutex<HashMap<Uuid, JoinHandle<()>>>,
     tuning: Mutex<TerminalTuning>,
+    /// QL-07: from the settings; open panes follow a change at once.
+    watch: Mutex<WatchConfig>,
 }
 
 /// A pane about to open.
@@ -445,8 +521,14 @@ impl Terminals {
                 open: Mutex::default(),
                 tasks: Mutex::default(),
                 tuning: Mutex::new(TerminalTuning::default()),
+                watch: Mutex::new(TerminalSettings::default().watch()),
             }),
         }
+    }
+
+    /// Settings that open panes follow at once (QL-07's notifications).
+    pub fn apply_settings(&self, settings: &TerminalSettings) {
+        *locks::lock(&self.inner.watch) = settings.watch();
     }
 
     pub fn set_tuning(&self, tuning: TerminalTuning) {
@@ -635,6 +717,7 @@ impl Terminals {
 
     async fn start(&self, ctx: &Context, pane: NewPane, size: PtySize) -> Result<TerminalHandle> {
         let settings = self.settings(ctx).await?;
+        self.apply_settings(&settings);
         let (input_tx, input_rx) = mpsc::channel(256);
         let (output_tx, output_rx) = mpsc::channel(256);
         let (events_tx, events_rx) = mpsc::channel(64);
@@ -652,6 +735,7 @@ impl Terminals {
             facts: Mutex::default(),
             hostname_answered: std::sync::atomic::AtomicBool::new(false),
             log: Mutex::default(),
+            typed: Mutex::default(),
         });
         audit(
             &self.inner.store,
@@ -934,6 +1018,114 @@ impl Terminals {
         self.control(id)
             .and_then(|c| locks::lock(&c.log).as_ref().map(|l| l.path.clone()))
     }
+
+    // ---- QL-06: a vault password typed at a prompt -----------------------------------------------------
+
+    /// QL-06: types a vault password or passphrase into the terminal, then Enter, for a sudo, su or
+    /// key prompt. Only while the terminal shows a password prompt, unless `force`: at a shell prompt
+    /// it would run as a command and stay in the shell's history. The value goes from the vault to the
+    /// shell only, and from now on is scrubbed from this terminal's saved output and log. Audited with
+    /// the secret's label and the session, never the value.
+    pub async fn type_secret(&self, ctx: &Context, id: Uuid, secret_id: SecretId, force: bool) -> Result<()> {
+        let control = self
+            .control(id)
+            .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;
+        let meta = self
+            .inner
+            .vault
+            .list(ctx)
+            .await?
+            .into_iter()
+            .find(|m| m.id == secret_id)
+            .ok_or_else(|| CoreError::UnknownTarget(format!("secret {secret_id}")))?;
+        if !matches!(meta.kind, SecretKind::Password | SecretKind::Passphrase) {
+            return Err(CoreError::InvalidInput(
+                "Only passwords and passphrases can be typed into a terminal, not private keys.".into(),
+            ));
+        }
+        let secret = self.inner.vault.get(ctx, secret_id).await?;
+        if secret.expose().contains(['\r', '\n']) {
+            return Err(CoreError::InvalidInput(format!(
+                "The {} '{}' holds a line break, so it can't be typed at a prompt.",
+                meta.kind.label(),
+                meta.label
+            )));
+        }
+        // Scrubbed before it can show up in the output.
+        let added = remember_typed(&control, &secret).await;
+        let (reply, answer) = oneshot::channel();
+        let input = TerminalInput::TypeSecret {
+            secret,
+            force,
+            reply,
+            until: Instant::now() + TYPE_SECRET_WAIT,
+        };
+        let closed = || CoreError::InvalidInput("That terminal has closed.".into());
+        let outcome = match control.input.send(input).await {
+            Err(_) => Err(closed()),
+            Ok(()) => match tokio::time::timeout(TYPE_SECRET_WAIT, answer).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(closed()),
+                Err(_) => Err(CoreError::Timeout {
+                    command: "typing the password".into(),
+                    seconds: TYPE_SECRET_WAIT.as_secs(),
+                }),
+            },
+        };
+        let prompt = match outcome {
+            Ok(prompt) => prompt,
+            Err(err) => {
+                if added {
+                    locks::lock(&control.typed).pop();
+                }
+                return Err(err);
+            }
+        };
+        let detail = if prompt {
+            "at a password prompt"
+        } else {
+            "no password prompt was showing; typed at the user's request"
+        };
+        audit(
+            &self.inner.store,
+            ctx,
+            "vault_secret_typed",
+            &format!(
+                "Typed the {} '{}' into the terminal to {}",
+                meta.kind.label(),
+                meta.label,
+                quoted_name(&control)
+            ),
+            control.targets(),
+            detail,
+        )
+        .await
+    }
+}
+
+/// QL-06: a secret about to be typed joins the ones scrubbed from this terminal's saved output and
+/// its running log. True when it was new.
+async fn remember_typed(control: &Control, secret: &SecretString) -> bool {
+    let added = {
+        let mut typed = locks::lock(&control.typed);
+        if typed.iter().any(|s| s.expose() == secret.expose()) {
+            false
+        } else {
+            typed.push(secret.clone());
+            true
+        }
+    };
+    let log = locks::lock(&control.log).as_ref().map(|l| l.sender.clone());
+    if let Some(log) = log {
+        let _ = log.send(LogMessage::Secret(secret.clone())).await;
+    }
+    added
+}
+
+/// Where a `select!` timer waits when there is nothing to wait for.
+fn sleep_until(deadline: Option<Instant>) -> tokio::time::Sleep {
+    let far = Instant::now() + Duration::from_secs(86_400 * 365);
+    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline.unwrap_or(far)))
 }
 
 /// `'web01'`, or `alice@192.0.2.10:22 (not saved)`.
@@ -1223,6 +1415,7 @@ impl Pane {
         // Nothing typed outlives the terminal.
         locks::lock(&self.control.remembered).take();
         locks::lock(&self.control.secrets).clear();
+        locks::lock(&self.control.typed).clear();
         let open_for = human_duration(opened.elapsed());
         let detail = match (connections, last_error) {
             (0, Some(err)) => format!("open {open_for}; never connected: {err}"),
@@ -1392,6 +1585,27 @@ impl Pane {
         crate::sessions::credentials(&*self.inner.vault, &self.ctx, spec, remembered).await
     }
 
+    /// QL-07: the current notification settings.
+    fn watch_config(&self) -> WatchConfig {
+        let mut config = *locks::lock(&self.inner.watch);
+        if let Some((threshold, quiet)) = locks::lock(&self.inner.tuning).notify_timing {
+            config.threshold = threshold;
+            config.quiet = quiet;
+        }
+        config
+    }
+
+    /// QL-07: tells the UI a long command ended.
+    async fn finished(&self, done: activity::Finished) {
+        let _ = self
+            .events
+            .send(TerminalEvent::CommandFinished {
+                after_secs: done.after.as_secs(),
+                how: done.how,
+            })
+            .await;
+    }
+
     /// Moves bytes between the pane and the shell until one side ends.
     async fn pump(&mut self, shell: ShellHandle) -> Pump {
         let ShellHandle {
@@ -1402,11 +1616,20 @@ impl Pane {
         } = shell;
         let mut hostname_pending = true;
         let cancel = self.control.cancel.clone();
+        // QL-06, QL-07: a new shell, watched from its first output.
+        let mut watch = RunWatch::new(self.watch_config());
         loop {
+            watch.set_config(self.watch_config());
+            let deadline = watch.deadline();
             tokio::select! {
                 () = cancel.cancelled() => {
                     let _ = shell_input.send(ShellInput::Close).await;
                     return Pump::Closed;
+                }
+                () = sleep_until(deadline), if deadline.is_some() => {
+                    if let Some(done) = watch.tick(Instant::now()) {
+                        self.finished(done).await;
+                    }
                 }
                 answer = &mut hostname_answer, if hostname_pending => {
                     hostname_pending = false;
@@ -1423,7 +1646,26 @@ impl Pane {
                         return Pump::Closed;
                     }
                     Some(TerminalInput::Data(bytes)) => {
+                        // A settings change while waiting applies to this Enter already.
+                        watch.set_config(self.watch_config());
+                        watch.input(&bytes, Instant::now());
                         let _ = shell_input.send(ShellInput::Data(bytes)).await;
+                    }
+                    Some(TerminalInput::TypeSecret { secret, force, reply, until }) => {
+                        if Instant::now() > until {
+                            continue;
+                        }
+                        // Checked here, where the output arrives, so the prompt can't change in between.
+                        let prompt = is_password_prompt(watch.line());
+                        if !prompt && !force {
+                            let _ = reply.send(Err(CoreError::NoPasswordPrompt));
+                            continue;
+                        }
+                        let mut bytes = Zeroizing::new(secret.expose().as_bytes().to_vec());
+                        bytes.push(b'\r');
+                        let _ = shell_input.send(ShellInput::Data(bytes.to_vec())).await;
+                        watch.input(b"\r", Instant::now());
+                        let _ = reply.send(Ok(prompt));
                     }
                     Some(TerminalInput::Resize { cols, rows }) => {
                         self.size = PtySize { cols, rows };
@@ -1438,9 +1680,13 @@ impl Pane {
                 out = shell_output.recv() => match out {
                     Some(ShellOutput::Data(bytes)) => {
                         self.tee(&bytes).await;
+                        let done = watch.output(&bytes, Instant::now());
                         if self.output.send(bytes).await.is_err() {
                             let _ = shell_input.send(ShellInput::Close).await;
                             return Pump::Closed;
+                        }
+                        if let Some(done) = done {
+                            self.finished(done).await;
                         }
                     }
                     Some(ShellOutput::Closed(end)) => return Pump::Ended(end),
@@ -1510,6 +1756,12 @@ impl Pane {
                 None
             }
             Some(TerminalInput::Data(_)) => None,
+            Some(TerminalInput::TypeSecret { reply, .. }) => {
+                let _ = reply.send(Err(CoreError::InvalidInput(
+                    "This terminal is not connected, so nothing was typed. Reconnect it first.".into(),
+                )));
+                None
+            }
         }
     }
 }
@@ -1600,6 +1852,25 @@ impl Prompter for PanePrompter<'_> {
                 }
                 Some(TerminalInput::Reconnect) => continue,
                 Some(TerminalInput::Data(bytes)) => Zeroizing::new(bytes),
+                // QL-06 at a login prompt: the vault's password answers it.
+                Some(TerminalInput::TypeSecret {
+                    secret,
+                    force,
+                    reply,
+                    until,
+                }) => {
+                    if Instant::now() > until {
+                        continue;
+                    }
+                    let shown = is_password_prompt(prompt);
+                    if !shown && !force {
+                        let _ = reply.send(Err(CoreError::NoPasswordPrompt));
+                        continue;
+                    }
+                    let _ = reply.send(Ok(shown));
+                    let _ = self.output.send(b"\r\n".to_vec()).await;
+                    return Ok(secret);
+                }
             };
             let mut echoed = String::new();
             for ch in String::from_utf8_lossy(&bytes).chars() {
@@ -1698,6 +1969,18 @@ mod tests {
                 reachability_secs: MIN_REACHABILITY_SECS - 1,
                 ..Default::default()
             },
+            TerminalSettings {
+                notify_after_secs: MIN_NOTIFY_SECS - 1,
+                ..Default::default()
+            },
+            TerminalSettings {
+                notify_after_secs: MAX_NOTIFY_SECS + 1,
+                ..Default::default()
+            },
+            TerminalSettings {
+                notify_quiet_secs: 1,
+                ..Default::default()
+            },
         ];
         for settings in bad {
             assert!(settings.validate().is_err(), "{settings:?}");
@@ -1705,8 +1988,21 @@ mod tests {
         assert_eq!(
             TerminalSettings::default().describe(),
             "keep-alive every 30 s, auto-reconnect on, copy on select on, font 13 pt, 10000 lines of scrollback, \
-             reachability checks auto (every 60 s)"
+             reachability checks auto (every 60 s), notify after commands of 30 s or more (or 30 s quiet)"
         );
+        let quiet_off = TerminalSettings {
+            notify_quiet_secs: 0,
+            ..Default::default()
+        };
+        assert!(quiet_off.validate().is_ok());
+        assert!(quiet_off.describe().ends_with("notify after commands of 30 s or more"));
+        let off = TerminalSettings {
+            notify_finished: false,
+            ..Default::default()
+        };
+        assert!(off.describe().ends_with("notifications off"));
+        assert!(!off.watch().enabled);
+        assert_eq!(quiet_off.watch().quiet, None);
     }
 
     #[test]
@@ -1717,6 +2013,8 @@ mod tests {
         assert_eq!(old.font_size, 13);
         assert_eq!(old.scrollback, 10_000);
         assert_eq!(old.reachability, ReachabilityMode::Auto);
+        assert!(old.notify_finished, "QL-07 is on for settings saved before it");
+        assert_eq!(old.notify_after_secs, 30);
     }
 
     #[test]

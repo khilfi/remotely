@@ -182,6 +182,8 @@ pub fn offset_label(at: OffsetDateTime) -> String {
 /// What the terminal sends its log.
 pub(crate) enum LogMessage {
     Output(Vec<u8>),
+    /// QL-06: a vault secret typed into the terminal, scrubbed from here on.
+    Secret(SecretString),
     Stop,
 }
 
@@ -222,6 +224,7 @@ pub(crate) async fn start(path: &Path, heading: String, secrets: Vec<SecretStrin
                             }
                         }
                     }
+                    Some(LogMessage::Secret(secret)) => scrubber.add(&secret),
                     Some(LogMessage::Stop) | None => break,
                 },
                 _ = flush.tick() => {

@@ -587,7 +587,12 @@ export type TerminalEvent =
   /** SS-05: the key changed and the connection was blocked. */
   | { event: "hostKeyChanged"; key: HostKey; previous: KnownHost }
   /** QL-03: what is known about the host so far. */
-  | { event: "host"; facts: HostFacts };
+  | { event: "host"; facts: HostFacts }
+  /** QL-07: a command that ran at least the threshold ended (its prompt came back, or its output stopped). */
+  | { event: "commandFinished"; afterSecs: number; how: FinishedHow };
+
+/** QL-07: how a long command was seen to end. */
+export type FinishedHow = "prompt" | "quiet";
 
 /** QL-04: "auto" checks libraries of up to 200 sessions. */
 export type ReachabilityMode = "auto" | "on" | "off";
@@ -605,6 +610,81 @@ export interface TerminalSettings {
   reachability: ReachabilityMode;
   /** QL-04: seconds between two checks of a session, 15 to 3600. */
   reachabilitySecs: number;
+  /** QL-07: a Windows notification when a long command in a background tab finishes. */
+  notifyFinished: boolean;
+  /** QL-07: seconds a command must run to count as long, 5 to 3600. */
+  notifyAfterSecs: number;
+  /** QL-07: seconds without output that end a command whose prompt is not recognised; 0: wait for the prompt. */
+  notifyQuietSecs: number;
+}
+
+// ---- BX-08 command panel ----
+
+/** BX-08: a `{{variable}}` asked when a command is pasted. */
+export interface CommandVariable {
+  name: string;
+  default: string | null;
+}
+
+/** BX-08: what the policy engine makes of a command with the current rules (BX-06). */
+export interface CommandRisk {
+  action: Extract<ActionKind, "execReadOnly" | "execOther" | "execDangerous">;
+  /** The dangerous-command rules it matches, by name. */
+  dangerous: string[];
+}
+
+/** BX-08: a saved command. */
+export interface Favourite {
+  id: string;
+  /** null: at the top level. */
+  folder: string | null;
+  name: string;
+  command: string;
+  description: string | null;
+  variables: CommandVariable[];
+  risk: CommandRisk;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface FavouriteInput {
+  folder: string | null;
+  name: string;
+  command: string;
+  description: string | null;
+}
+
+export type LibraryGroup =
+  | "systemInfo"
+  | "disk"
+  | "memory"
+  | "processes"
+  | "network"
+  | "services"
+  | "logs"
+  | "packagesApt"
+  | "packagesDnf"
+  | "users"
+  | "firewall"
+  | "docker"
+  | "kubernetes";
+
+/** BX-08: a built-in command. */
+export interface LibraryEntry {
+  id: string;
+  group: LibraryGroup;
+  groupLabel: string;
+  name: string;
+  command: string;
+  description: string;
+  variables: CommandVariable[];
+  risk: CommandRisk;
+}
+
+/** BX-08: a command's variables and risk, while it is typed. */
+export interface CommandInfo {
+  variables: CommandVariable[];
+  risk: CommandRisk;
 }
 
 /** QL-02: what the New terminal form sends. A typed password goes to the core only. */
@@ -778,6 +858,8 @@ export interface ExportReport {
   secrets: number;
   /** Their values are in the file too. */
   secretValues: boolean;
+  /** BX-08 favourite commands. */
+  favourites: number;
 }
 
 export type TransferStatus = "new" | "same" | "conflict";
@@ -807,6 +889,8 @@ export interface TransferPreview {
   knownHosts: TransferItem[];
   secrets: TransferItem[];
   secretValues: boolean;
+  /** BX-08 favourite commands. */
+  favourites: TransferItem[];
   warnings: string[];
 }
 
@@ -826,6 +910,7 @@ export interface TransferReport {
   sessions: TransferCounts;
   knownHosts: TransferCounts;
   secrets: TransferCounts;
+  favourites: TransferCounts;
   foldersAdded: number;
   /** Sessions imported without the password or key they used. */
   withoutCredentials: number;
@@ -1369,6 +1454,7 @@ export const api = {
     sessions: TransferChoice[];
     knownHosts: TransferChoice[];
     secrets: TransferChoice[];
+    favourites: TransferChoice[];
   }) => invoke<TransferReport>("transfer_commit", { request }),
 
   /** SS-09 SSH keys in the vault. Pushing one is `submit` with a pushSshKey command. */
@@ -1490,4 +1576,27 @@ export const api = {
    * null: no text on the clipboard.
    */
   clipboardReadText: () => invoke<string | null>("clipboard_read_text"),
+
+  /** BX-08 favourite commands; changes are audited (name and folder, not the command). */
+  favourites: () => invoke<Favourite[]>("favourites_list"),
+  addFavourite: (input: FavouriteInput) => invoke<Favourite>("favourite_add", { input }),
+  updateFavourite: (id: string, input: FavouriteInput) => invoke<Favourite>("favourite_update", { id, input }),
+  deleteFavourite: (id: string) => invoke<void>("favourite_delete", { id }),
+  /** One folder's favourites in a new order; `folder` null for the top level. */
+  reorderFavourites: (folder: string | null, ids: string[]) =>
+    invoke<Favourite[]>("favourites_reorder", { folder, ids }),
+  /** BX-08 built-in commands, classified with the current rules. */
+  commandLibrary: () => invoke<LibraryEntry[]>("command_library"),
+  /** BX-08: a command's variables and what the policy engine makes of it. */
+  commandInspect: (command: string) => invoke<CommandInfo>("command_inspect", { command }),
+  /** BX-08: the command with its variables filled in, ready to paste. */
+  commandFill: (command: string, values: Record<string, string>) => invoke<string>("command_fill", { command, values }),
+  /**
+   * QL-06: types a vault password or passphrase, then Enter, into the terminal when it shows a password prompt (or
+   * with `force`). The value never reaches the UI. Fails with `no_password_prompt` at a shell prompt.
+   */
+  terminalTypeSecret: (id: string, secretId: string, force: boolean) =>
+    invoke<void>("terminal_type_secret", { id, secretId, force }),
+  /** QL-07: a Windows notification that a long command finished in a background tab. */
+  notifyCommandFinished: (title: string, body: string) => invoke<void>("notify_command_finished", { title, body }),
 };
