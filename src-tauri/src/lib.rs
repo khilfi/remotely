@@ -1,6 +1,7 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`] and [`terminal`], never vmrun or SSH directly.
+//! reaches it only through the commands in [`ipc`], [`terminal`] and [`clipboard`], never vmrun or SSH directly.
 
+mod clipboard;
 mod ipc;
 mod terminal;
 pub mod updater;
@@ -248,6 +249,7 @@ pub fn run() {
             terminal::terminal_output_save,
             terminal::terminal_log_start,
             terminal::terminal_log_stop,
+            clipboard::clipboard_read_text,
         ])
         .build(context);
 

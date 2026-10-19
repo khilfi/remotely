@@ -1485,4 +1485,9 @@ export const api = {
   terminalLogStart: (id: string, title: string) => invoke<string | null>("terminal_log_start", { id, title }),
   terminalLogStop: (id: string) => invoke<boolean>("terminal_log_stop", { id }),
   removeKnownHost: (id: string) => invoke<void>("known_host_remove", { id }),
+  /**
+   * QL-05 right-click paste: the clipboard's text, read by the shell so WebView2 never asks for permission.
+   * null: no text on the clipboard.
+   */
+  clipboardReadText: () => invoke<string | null>("clipboard_read_text"),
 };

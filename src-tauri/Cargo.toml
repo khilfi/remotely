@@ -36,6 +36,8 @@ tauri-plugin-updater = "2"
 url = "2"
 # AP-05: the save dialog for audit exports, opened from Rust so the UI never picks a path itself.
 tauri-plugin-dialog = "2"
+# QL-05: right-click paste reads the clipboard's text here, so WebView2 never asks for clipboard permission.
+arboard = { version = "3", default-features = false }
 
 [dev-dependencies]
 # FD-14: the updater against a local fake GitHub, with a throwaway signing key, on Tauri's mock runtime.

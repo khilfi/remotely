@@ -42,6 +42,16 @@ pub struct IpcError {
     message: String,
 }
 
+impl IpcError {
+    /// An error from the shell itself rather than the core.
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
 impl From<CoreError> for IpcError {
     fn from(err: CoreError) -> Self {
         Self {
