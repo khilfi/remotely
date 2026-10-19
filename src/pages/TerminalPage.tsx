@@ -42,6 +42,7 @@ import {
   FolderOpenIcon,
   GitCompareArrowsIcon,
   LoaderCircleIcon,
+  LockKeyholeIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PlusIcon,
@@ -79,6 +80,7 @@ import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
+import { usePresentation } from "@/components/Presentation";
 import { SessionTree } from "@/components/SessionTree";
 import { TunnelsButton } from "@/components/TunnelsPanel";
 import { TypeSecretMenu } from "@/components/TypeSecretMenu";
@@ -121,6 +123,7 @@ import {
   type PaneOptions,
   type PaneSnapshot,
 } from "@/lib/terminal-session";
+import { maskedOutside, readOnlyLocked } from "@/lib/presentation-state";
 import type { ResolvedTheme } from "@/lib/theme";
 import { formatSize, isActive, mergeTransfer } from "@/lib/transfers";
 import { routeText, viaText } from "@/lib/tunnels";
@@ -276,6 +279,8 @@ export function TerminalPage({
   onSubmitted,
   onOpenVault,
 }: Props) {
+  // FD-03: the read-only lock turns MultiExec and uploads off (QL-08 says why); typing into one terminal stays.
+  const presentation = usePresentation();
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [selection, setSelection] = useState<TabSelection>(NO_SELECTION);
@@ -564,7 +569,10 @@ export function TerminalPage({
       const tab = tabs.find((t) => allPanes(t.layout).includes(pane));
       if (!tab || !notifyOn || !tab.notify || !inBackground(tab.key, activeTab, active)) return;
       const { title, body } = finishedText(nameOf(pane), finished);
-      api.notifyCommandFinished(title, body).catch((err) => console.warn("notification failed", err));
+      // FD-03: Windows shows it outside the window, so it is masked here while presenting.
+      api
+        .notifyCommandFinished(maskedOutside(title), maskedOutside(body))
+        .catch((err) => console.warn("notification failed", err));
       if (tab.key !== activeTab || !active)
         setAttention((prev) => (prev.includes(tab.key) ? prev : [...prev, tab.key]));
     };
@@ -835,7 +843,7 @@ export function TerminalPage({
   /** Uploads staged files through a pane: into `folder`, or the terminal's own folder. */
   async function uploadStaged(pane: PaneSession, staged: StagedFiles, folder: string | null) {
     const id = pane.terminalId;
-    const why = uploadReason({ open: true, connected: pane.connected });
+    const why = uploadReason({ open: true, connected: pane.connected, readOnly: readOnlyLocked() });
     if (!id || why) {
       void api.filesUnstage(staged.id).catch(() => undefined);
       toast.info(`Not uploaded: ${why ?? "this terminal has not connected yet"}`);
@@ -969,7 +977,11 @@ export function TerminalPage({
   const uploadsHere = transfers.filter(
     (t) => t.terminalId === currentPane?.terminalId && t.direction === "upload" && t.state === "done",
   ).length;
-  const uploadBlocked = uploadReason({ open: Boolean(currentPane), connected: currentConnected });
+  const uploadBlocked = uploadReason({
+    open: Boolean(currentPane),
+    connected: currentConnected,
+    readOnly: readOnlyLocked(presentation),
+  });
   const drawer = (
     <FilesDrawer
       terminalId={currentPane?.terminalId ?? null}
@@ -1220,6 +1232,15 @@ export function TerminalPage({
             </IconButton>
           </div>
         )}
+        {readOnlyLocked(presentation) && (
+          <span
+            className="mb-1 inline-flex shrink-0 items-center gap-1 px-1.5 text-xs font-medium text-presenting"
+            title="Read-only while presenting: MultiExec, Compare runs, uploads, tunnels and saving sessions are blocked. Typing into one terminal still works: it is your own shell."
+          >
+            <LockKeyholeIcon className="size-3.5" />
+            Read-only
+          </span>
+        )}
         <IconButton
           label={
             multiExec
@@ -1228,7 +1249,7 @@ export function TerminalPage({
           }
           onClick={() => (multiExec ? stopMultiExec() : startMultiExec())}
           className={cn("mb-1", multiExec && "bg-primary/15 text-primary")}
-          disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec })}
+          disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec, readOnly: readOnlyLocked(presentation) })}
           pressed={multiExec}
         >
           <RadioTowerIcon />
@@ -1951,7 +1972,7 @@ function PaneView({
     el.appendChild(pane.element);
     pane.fit();
     pane.start().catch(() => undefined);
-    pane.term.refresh(0, pane.term.rows - 1);
+    pane.refresh();
     const observer = new ResizeObserver(() => pane.fit());
     observer.observe(el);
     return () => {

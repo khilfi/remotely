@@ -213,6 +213,8 @@ pub fn run() {
             ipc::settings_set_shutdown_wait,
             ipc::settings_set_update_checks,
             ipc::settings_set_bulk_parallel,
+            ipc::presentation_get,
+            ipc::presentation_set,
             ipc::update_check,
             ipc::update_token_set,
             ipc::update_token_test,

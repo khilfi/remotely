@@ -23,11 +23,13 @@ import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SortableHead } from "@/components/SortableHead";
+import { usePresentation } from "@/components/Presentation";
 import { TransfersList } from "@/components/TransfersList";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type FolderListing, type FolderTracking, type TransferInfo } from "@/lib/api";
 import { downloadReason, uploadReason } from "@/lib/disabled-reasons";
 import { plural } from "@/lib/format";
+import { readOnlyLocked } from "@/lib/presentation-state";
 import { crumbs, formatSize, joinPath, sortEntries, type SortKey } from "@/lib/transfers";
 import type { PaneSnapshot } from "@/lib/terminal-session";
 import { cn } from "@/lib/utils";
@@ -77,6 +79,8 @@ export function FilesDrawer({
   onClearTransfers,
   onClose,
 }: Props) {
+  // FD-03: uploads say why they are off while the read-only lock applies.
+  const presentation = usePresentation();
   const connected = terminalId !== null && snapshot.status.state === "connected";
   const shellFolder = snapshot.folder?.path ?? null;
   /** A folder opened by hand, per terminal; none: the shell's folder (or home). */
@@ -149,7 +153,9 @@ export function FilesDrawer({
   const note = trackingNote(snapshot.folder?.tracking, browse === null);
   const files = pickedEntries.filter((e) => e.kind === "file");
   const download = downloadReason({ connected, picked: pickedEntries });
-  const upload = uploadReason({ open: terminalId !== null, connected }) ?? (listing ? null : "Open a folder first");
+  const upload =
+    uploadReason({ open: terminalId !== null, connected, readOnly: readOnlyLocked(presentation) }) ??
+    (listing ? null : "Open a folder first");
   const allFiles = entries.filter((e) => e.kind === "file");
 
   return (

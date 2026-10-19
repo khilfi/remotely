@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::{Context, Target};
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
 
 /// The key a server presented, as the remote adapter saw it.
@@ -150,6 +151,7 @@ impl KnownHosts {
 
     /// Forgets a key, so the next connection asks again.
     pub async fn remove(&self, ctx: &Context, id: Uuid) -> Result<()> {
+        self.store.read_only().check(Change::KnownHosts)?;
         let known = self
             .store
             .get_known_host(ctx, id)

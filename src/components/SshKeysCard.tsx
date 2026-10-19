@@ -511,8 +511,10 @@ function AttachKeyDialog({
                     />
                     <span className="font-medium">{s.name}</span>
                     <span className="truncate text-muted-foreground">
-                      {s.username ? `${s.username}@` : ""}
-                      {s.host}
+                      <span data-mask="address">
+                        {s.username ? `${s.username}@` : ""}
+                        {s.host}
+                      </span>
                     </span>
                     {uses(s) && <span className="ml-auto text-xs text-muted-foreground">uses it</span>}
                   </label>

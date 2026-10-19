@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::adapters::remote::sh_quote;
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 use crate::sessions::{SessionAuth, SessionLibrary, SessionRecord};
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{clean_label, SecretId, SecretKind, SecretString, Vault, VaultStatus};
@@ -296,6 +297,7 @@ impl KeyManager {
     /// SS-09: makes a new key pair and saves the private key in the vault, which must be unlocked.
     /// Audited with the key's type and fingerprint.
     pub async fn generate(&self, ctx: &Context, request: GenerateKey) -> Result<SshKey> {
+        self.store.read_only().check(Change::SshKeys)?;
         let label = clean_label(&request.label)?;
         let comment = match check_comment(&request.comment)? {
             empty if empty.is_empty() => check_comment(&label)?,
@@ -358,6 +360,7 @@ impl KeyManager {
         session_ids: &[Uuid],
         library: &SessionLibrary,
     ) -> Result<Vec<SessionRecord>> {
+        self.store.read_only().check(Change::SshKeys)?;
         if session_ids.is_empty() {
             return Err(CoreError::NoTargets);
         }

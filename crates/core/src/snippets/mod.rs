@@ -29,6 +29,7 @@ use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::policy::{ActionKind, PolicyEngine};
+use crate::presentation::Change;
 use crate::store::{FavouriteFields, FavouriteRow, NewAuditEntry, Store};
 
 pub const MAX_NAME: usize = 80;
@@ -263,6 +264,7 @@ impl Snippets {
 
     /// Saves a new favourite at the end of its folder. Audited.
     pub async fn add(&self, ctx: &Context, input: FavouriteInput) -> Result<Favourite> {
+        self.store.read_only().check(Change::Favourites)?;
         let mut clean = clean(&input)?;
         let rows = self.store.list_favourites(ctx).await?;
         if rows.len() >= MAX_FAVOURITES {
@@ -285,6 +287,7 @@ impl Snippets {
     /// Changes a favourite; moved to another folder, it goes to that folder's end. Audited with what
     /// changed (never the command text).
     pub async fn update(&self, ctx: &Context, id: Uuid, input: FavouriteInput) -> Result<Favourite> {
+        self.store.read_only().check(Change::Favourites)?;
         let before = self.row(ctx, id).await?;
         let mut clean = clean(&input)?;
         let rows = self.store.list_favourites(ctx).await?;
@@ -317,6 +320,7 @@ impl Snippets {
 
     /// Audited.
     pub async fn delete(&self, ctx: &Context, id: Uuid) -> Result<()> {
+        self.store.read_only().check(Change::Favourites)?;
         let row = self.row(ctx, id).await?;
         self.store.delete_favourite(ctx, id).await?;
         self.audit(
@@ -330,6 +334,7 @@ impl Snippets {
     /// Puts one folder's favourites in this order (`None`: the top level). `ids` must be exactly
     /// that folder's favourites. Audited.
     pub async fn reorder(&self, ctx: &Context, folder: Option<&str>, ids: &[Uuid]) -> Result<Vec<Favourite>> {
+        self.store.read_only().check(Change::Favourites)?;
         let folder = folder.map(str::trim).unwrap_or("");
         let rows = self.store.list_favourites(ctx).await?;
         let mut current: Vec<Uuid> = rows

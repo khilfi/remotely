@@ -214,6 +214,11 @@ pub enum CoreError {
     #[error("{0}")]
     Sftp(String),
 
+    /// FD-03: presentation mode's read-only lock refused a change. `what` is the action or edit, as Settings and the
+    /// audit log name it.
+    #[error("read-only while presenting: \"{what}\" is blocked until the read-only lock is turned off")]
+    ReadOnlyLock { what: String },
+
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
 }
@@ -269,6 +274,7 @@ impl CoreError {
             CoreError::RemoteFileExists { .. } => "file_exists",
             CoreError::RemoteNotFound { .. } => "not_found",
             CoreError::Sftp(_) => "sftp",
+            CoreError::ReadOnlyLock { .. } => "read_only_lock",
             CoreError::NotImplemented(_) => "not_implemented",
         }
     }

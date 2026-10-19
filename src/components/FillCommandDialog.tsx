@@ -17,6 +17,7 @@ import { Label } from "@/components/ui/label";
 import { RiskBadge } from "@/components/Badges";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type CommandRisk, type CommandVariable } from "@/lib/api";
+import { namesAHost } from "@/lib/presentation";
 
 interface Props {
   name: string;
@@ -83,6 +84,8 @@ export function FillCommandDialog({ name, command, variables, risk, target, run,
               </Label>
               <Input
                 id={`variable-${v.name}`}
+                // FD-03: a host, address or user shows as dots while presenting.
+                data-mask={namesAHost(v.name) ? "host" : undefined}
                 value={values[v.name] ?? ""}
                 placeholder={v.default ? `Default: ${v.default}` : undefined}
                 autoFocus={i === 0}

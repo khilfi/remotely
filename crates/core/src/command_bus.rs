@@ -22,6 +22,7 @@ use crate::impact::{ImpactPreviewer, TargetImpact};
 use crate::jobs::{JobRunner, JobSpec, TargetStatus};
 use crate::locks;
 use crate::policy::{ActionKind, ApprovalStep, DangerousMatch, Decision, PolicyEngine, PolicyRules, Tier};
+use crate::presentation::Change;
 use crate::snapshots::{is_safety_name, SAFETY_PREFIX};
 use crate::ssh_keys;
 use crate::store::{NewAuditEntry, Store};
@@ -728,6 +729,11 @@ impl CommandBus {
         locks::read(&self.policy).rules().clone()
     }
 
+    /// FD-03: presentation mode's read-only lock, which refuses every command here while it is on.
+    pub fn read_only(&self) -> &crate::presentation::ReadOnlyLock {
+        self.store.read_only()
+    }
+
     /// The engine itself, for readers that classify without submitting (BX-08's command panel).
     pub(crate) fn policy(&self) -> Arc<RwLock<PolicyEngine>> {
         Arc::clone(&self.policy)
@@ -738,6 +744,7 @@ impl CommandBus {
     /// returns those changes (none: nothing saved or logged). Approvals already open keep the steps
     /// they were asked with.
     pub async fn set_rules(&self, ctx: &Context, rules: PolicyRules) -> Result<Vec<String>> {
+        self.store.read_only().check(Change::ApprovalRules)?;
         let rules = rules.normalized();
         let engine = PolicyEngine::new(rules.clone())?;
         let changes = self.rules().changes(&rules);
@@ -926,6 +933,8 @@ impl CommandBus {
     }
 
     async fn submit_job(&self, ctx: &Context, command: Command, retry_of: Option<Uuid>) -> Result<SubmitOutcome> {
+        // FD-03: nothing is checked, logged or asked while the read-only lock is on.
+        locks::read(&self.policy).check_read_only(self.store.read_only().is_locked(), &command)?;
         if command.targets().is_empty() {
             return Err(CoreError::NoTargets);
         }
@@ -1030,6 +1039,13 @@ impl CommandBus {
         let pending = locks::lock(&self.pending)
             .remove(&request_id)
             .ok_or(CoreError::UnknownApproval(request_id))?;
+        // FD-03: a request asked before the read-only lock came on waits; the user can cancel it, or approve it
+        // once the lock is off.
+        let locked = self.store.read_only().is_locked();
+        if let Err(err) = locks::read(&self.policy).check_read_only(locked, &pending.command) {
+            locks::lock(&self.pending).insert(request_id, pending);
+            return Err(err);
+        }
 
         match self.check_answers(&pending, &answers).await {
             Ok(record) => {

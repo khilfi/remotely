@@ -23,6 +23,7 @@ use crate::adapters::vmware::{path_key, with_backslashes, ToolsState, VmwareAdap
 use crate::command_bus::TargetDirectory;
 use crate::domain::{Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 use crate::store::{self, DiscoveredVm, NewAuditEntry, Store, VmRecord};
 use crate::terminal::Terminals;
 use crate::vm_links::{AutoLinkReport, VmLinks};
@@ -301,6 +302,7 @@ impl Inventory {
         vmx_paths: &[String],
         environment: Environment,
     ) -> Result<Vec<VmRecord>> {
+        self.store.read_only().check(Change::VmLabels)?;
         if vmx_paths.is_empty() {
             return Err(CoreError::NoTargets);
         }

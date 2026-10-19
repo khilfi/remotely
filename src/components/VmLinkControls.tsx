@@ -116,7 +116,9 @@ export function SessionVmLink({
         {matching.map((v) => (
           <DropdownMenuItem key={v.id} onSelect={() => link(v)}>
             <LinkIcon /> Link to {v.displayName}
-            <span className="ml-auto font-mono text-xs text-muted-foreground">{v.ipAddress}</span>
+            <span className="ml-auto font-mono text-xs text-muted-foreground" data-mask="ip">
+              {v.ipAddress}
+            </span>
           </DropdownMenuItem>
         ))}
         <DropdownMenuSub>
@@ -127,7 +129,11 @@ export function SessionVmLink({
             {others.map((v) => (
               <DropdownMenuItem key={v.id} onSelect={() => link(v)}>
                 {v.displayName}
-                {v.ipAddress && <span className="ml-auto font-mono text-xs text-muted-foreground">{v.ipAddress}</span>}
+                {v.ipAddress && (
+                  <span className="ml-auto font-mono text-xs text-muted-foreground" data-mask="ip">
+                    {v.ipAddress}
+                  </span>
+                )}
               </DropdownMenuItem>
             ))}
           </DropdownMenuSubContent>
@@ -193,7 +199,9 @@ export function VmSessionLinks({
                     <span className="truncate font-medium">{s.name}</span>
                     {s.vmLink === "auto" && <AutoBadge />}
                   </div>
-                  <div className="truncate font-mono text-xs text-muted-foreground">{s.host}</div>
+                  <div className="truncate font-mono text-xs text-muted-foreground" data-mask="host">
+                    {s.host}
+                  </div>
                 </div>
                 {s.vmLink === "auto" && (
                   <Button
@@ -239,7 +247,9 @@ export function VmSessionLinks({
                   }
                 >
                   <span className="truncate">{s.name}</span>
-                  <span className="ml-auto truncate font-mono text-xs text-muted-foreground">{s.host}</span>
+                  <span className="ml-auto truncate font-mono text-xs text-muted-foreground" data-mask="host">
+                    {s.host}
+                  </span>
                 </CommandItem>
               ))}
             </CommandGroup>

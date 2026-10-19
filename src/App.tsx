@@ -5,6 +5,9 @@
 //
 // FD-01 keyboard: Ctrl+K opens the command palette (Ctrl+Shift+K inside a terminal, where Ctrl+K belongs
 // to the shell), Ctrl+1 to Ctrl+9 open the pages in sidebar order and Ctrl+, opens Settings.
+//
+// FD-03: the top bar's Present button (Presenting menu while on) and the palette start and stop presentation mode,
+// its read-only lock and "Hide terminal output" (Presentation.tsx).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -21,6 +24,7 @@ import {
   LockOpenIcon,
   MonitorIcon,
   MoonIcon,
+  PresentationIcon,
   RadioTowerIcon,
   RefreshCwIcon,
   SearchIcon,
@@ -55,6 +59,18 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
+import {
+  PresentationButton,
+  PresentationLayer,
+  READ_ONLY_PAGES,
+  ReadOnlyNotice,
+  requestReadOnlyLock,
+  requestStopPresenting,
+  setHideTerminals,
+  startPresenting,
+  usePresentation,
+  useReadOnlyReason,
+} from "@/components/Presentation";
 import { UpdateBanner, UpdateNotice } from "@/components/UpdateBanner";
 import {
   api,
@@ -152,6 +168,9 @@ export default function App() {
   // Bumped when the palette refreshed the VM list.
   const [inventoryVersion, setInventoryVersion] = useState(0);
   const { preference, setPreference, resolved } = useTheme();
+  // FD-03: presenting, the read-only lock (QL-08: the update banner's Install says why it is off).
+  const presentation = usePresentation();
+  const readOnlyReason = useReadOnlyReason();
 
   const openPalette = useCallback((vm: string | null) => setPalette((p) => ({ open: true, vm, n: p.n + 1 })), []);
 
@@ -417,6 +436,37 @@ export default function App() {
       keywords: "appearance dark light colour",
       run: () => setPreference(t.value),
     })),
+    presentation.presenting
+      ? {
+          id: "stop-presenting",
+          label: "Stop presenting…",
+          icon: PresentationIcon,
+          keywords: "presentation mode screen share mask unmask",
+          run: () => requestStopPresenting(),
+        }
+      : {
+          id: "present",
+          label: "Present: mask host names, IP addresses and user names",
+          icon: PresentationIcon,
+          keywords: "presentation mode screen share call hide mask demo",
+          run: () => void startPresenting(),
+        },
+    {
+      id: "read-only-lock",
+      label: presentation.readOnly ? "Turn the read-only lock off…" : "Turn the read-only lock on (while presenting)",
+      icon: presentation.readOnly ? LockOpenIcon : LockIcon,
+      keywords: "presentation mode block changes safe demo",
+      run: () => requestReadOnlyLock(!presentation.readOnly),
+    },
+    {
+      id: "hide-terminals",
+      label: presentation.hideTerminals
+        ? "Show terminal output while presenting"
+        : "Hide terminal output while presenting",
+      icon: TerminalIcon,
+      keywords: "presentation mode blur screen share",
+      run: () => setHideTerminals(!presentation.hideTerminals),
+    },
     {
       id: "update",
       label: "Check for updates",
@@ -536,6 +586,7 @@ export default function App() {
               Search or run an action…
               <Kbd className="ml-auto">Ctrl K</Kbd>
             </Button>
+            <PresentationButton />
             <ToggleGroup
               type="single"
               variant="outline"
@@ -552,9 +603,11 @@ export default function App() {
             </ToggleGroup>
           </header>
           <div className="min-h-0 flex-1 overflow-auto p-6">
+            {READ_ONLY_PAGES[page] && <ReadOnlyNotice {...READ_ONLY_PAGES[page]} />}
             {offered && laterFor !== offered.version && (
               <UpdateBanner
                 update={offered}
+                disabledReason={readOnlyReason}
                 onInstall={() => void installUpdate(offered.version)}
                 onLater={() => setLaterFor(offered.version)}
               />
@@ -685,6 +738,7 @@ export default function App() {
         onOpenSnapshots={openSnapshots}
       />
       <Toaster theme={resolved} position="bottom-right" />
+      <PresentationLayer />
     </TooltipProvider>
   );
 }

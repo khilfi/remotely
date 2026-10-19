@@ -13,6 +13,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
+import { PresentationCard } from "@/components/Presentation";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
 import { api, errorMessage, type Settings, type UpdateCheck, type VaultInfo } from "@/lib/api";
@@ -171,6 +172,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
         <PolicyRulesEditor />
       </TabsContent>
       <TabsContent value="general" className="flex flex-col gap-6">
+        <PresentationCard />
         <Card>
           <CardHeader>
             <CardTitle>VMware Workstation</CardTitle>

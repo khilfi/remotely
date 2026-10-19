@@ -1,8 +1,10 @@
 // SS-11: terminals' whole scrollback copied, printed or saved, one terminal or several at once. The text
 // is read from xterm.js here; the core scrubs each terminal's login secrets from it first, and saving
-// (in a dialog the core opens) and printing are audited there, never the text itself.
+// (in a dialog the core opens) and printing are audited there, never the text itself. FD-03: copies and saves keep the
+// real text while presenting (they don't go on screen); printing shows a preview on screen, so it prints masked text.
 
 import { api, type HostFacts, type SaveLayout, type TerminalText } from "@/lib/api";
+import { maskedOutside } from "@/lib/presentation-state";
 import { factsTitle, type PaneSession } from "@/lib/terminal-session";
 
 /** A terminal as the output actions name it: the session's name and what the host said. */
@@ -54,7 +56,7 @@ export async function printOutput(panes: NamedPane[]) {
     frame.remove();
     throw new Error("Printing is not available here.");
   }
-  doc.title = clean.length === 1 ? clean[0].title : `Output of ${clean.length} terminals`;
+  doc.title = clean.length === 1 ? maskedOutside(clean[0].title) : `Output of ${clean.length} terminals`;
   const style = doc.createElement("style");
   style.textContent = `
     body { font-family: 'Cascadia Mono', Consolas, monospace; margin: 0; }
@@ -66,10 +68,10 @@ export async function printOutput(panes: NamedPane[]) {
   for (const item of clean) {
     const section = doc.createElement("section");
     const heading = doc.createElement("h1");
-    heading.textContent = item.title;
+    heading.textContent = maskedOutside(item.title);
     const pre = doc.createElement("pre");
     // Text only: nothing the host printed can become markup.
-    pre.textContent = item.text;
+    pre.textContent = maskedOutside(item.text);
     section.append(heading, pre);
     doc.body.appendChild(section);
   }

@@ -11,6 +11,7 @@ import {
   downloadReason,
   multiExecIdleReason,
   multiExecReason,
+  READ_ONLY_REASON,
   splitReason,
   uploadReason,
 } from "./disabled-reasons.ts";
@@ -125,4 +126,15 @@ test("SS-08: downloads take files, not folders", () => {
   assert.match(downloadReason({ connected: true, picked: [file, { kind: "folder" }] }) ?? "", /Folders aren't/);
   assert.match(downloadReason({ connected: true, picked: [{ kind: "other" }] }) ?? "", /regular files/);
   assert.equal(downloadReason({ connected: true, picked: [file, file] }), null);
+});
+
+test("FD-03: with the read-only lock on, changing actions say so first", () => {
+  assert.equal(compareRunReason({ ...ready, readOnly: true }), READ_ONLY_REASON);
+  assert.equal(compareRunReason({ ...ready, readOnly: false }), null);
+  assert.equal(multiExecReason({ tabs: 2, on: false, readOnly: true }), READ_ONLY_REASON);
+  // Already on: the switch turns it off, which the lock never blocks.
+  assert.equal(multiExecReason({ tabs: 2, on: true, readOnly: true }), null);
+  assert.equal(uploadReason({ open: true, connected: true, readOnly: true }), READ_ONLY_REASON);
+  assert.equal(uploadReason({ open: true, connected: true }), null);
+  assert.match(READ_ONLY_REASON, /read-only lock/);
 });

@@ -22,6 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { TierBadge } from "@/components/Badges";
 import { BulkResultsView } from "@/components/BulkResultsView";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { usePresentation } from "@/components/Presentation";
 import {
   api,
   errorMessage,
@@ -36,6 +37,7 @@ import {
 } from "@/lib/api";
 import { compareRunReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
+import { readOnlyLocked } from "@/lib/presentation-state";
 
 interface Props {
   active: boolean;
@@ -80,6 +82,8 @@ export function ComparePanel({
   onOpenVault,
   onClose,
 }: Props) {
+  // FD-03: Run says why it is off while the read-only lock applies.
+  const presentation = usePresentation();
   const [resolved, setResolved] = useState<ResolvedTargets | null>(null);
   const [script, setScript] = useState("");
   const [sudo, setSudo] = useState(false);
@@ -119,6 +123,7 @@ export function ComparePanel({
     script,
     timeoutOk,
     submitting,
+    readOnly: readOnlyLocked(presentation),
   });
 
   useEffect(() => {

@@ -22,6 +22,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ColorDot, EnvBadge } from "@/components/Badges";
+import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
@@ -84,7 +85,10 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
   const [secretId, setSecretId] = useState(NONE);
   const [passphraseId, setPassphraseId] = useState(NONE);
   const [password, setPassword] = useState("");
-  const [save, setSave] = useState(false);
+  const [saveTicked, setSave] = useState(false);
+  // FD-03: the read-only lock keeps quick connections unsaved (connecting stays possible).
+  const readOnly = useReadOnlyReason();
+  const save = saveTicked && !readOnly;
   const [name, setName] = useState("");
   const [folderId, setFolderId] = useState(NONE);
   const [label, setLabel] = useState<Environment>("none");
@@ -231,6 +235,7 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
                 <Label htmlFor="qc-host">Host</Label>
                 <Input
                   id="qc-host"
+                  data-mask="address"
                   autoFocus
                   autoComplete="off"
                   spellCheck={false}
@@ -255,6 +260,7 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
                 <Label htmlFor="qc-user">User</Label>
                 <Input
                   id="qc-user"
+                  data-mask="user"
                   autoComplete="off"
                   spellCheck={false}
                   placeholder="Asked when empty"
@@ -339,7 +345,14 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
 
             <div className="grid gap-3 rounded-lg border p-3">
               <div className="flex items-center gap-2">
-                <Checkbox id="qc-save" checked={save} onCheckedChange={(v) => setSave(v === true)} />
+                <WhyDisabled reason={readOnly}>
+                  <Checkbox
+                    id="qc-save"
+                    checked={save}
+                    disabled={readOnly !== null}
+                    onCheckedChange={(v) => setSave(v === true)}
+                  />
+                </WhyDisabled>
                 <Label htmlFor="qc-save" className="font-normal">
                   Save as session
                 </Label>

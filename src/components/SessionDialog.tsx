@@ -44,6 +44,7 @@ import { ColorDot, SESSION_COLORS } from "./Badges";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ForwardsEditor } from "./ForwardsEditor";
 import { SecretDialog } from "./SecretDialog";
+import { useReadOnlyReason } from "./Presentation";
 import { WhyDisabled } from "./WhyDisabled";
 
 /** Radix Select can't hold an empty value, so "none" stands for no choice. */
@@ -104,6 +105,8 @@ export function SessionDialog({
   onSaved,
   onClose,
 }: Props) {
+  // FD-03: saving is blocked by the read-only lock (the core refuses it too).
+  const readOnly = useReadOnlyReason();
   const [name, setName] = useState(session?.name ?? "");
   const [folder, setFolder] = useState<string>(session ? (session.folderId ?? NONE) : (folderId ?? NONE));
   const [host, setHost] = useState(session?.host ?? "");
@@ -300,6 +303,7 @@ export function SessionDialog({
                 <Label htmlFor="session-host">Host</Label>
                 <Input
                   id="session-host"
+                  data-mask="host"
                   autoFocus={!session}
                   autoComplete="off"
                   spellCheck={false}
@@ -326,6 +330,7 @@ export function SessionDialog({
                 <Label htmlFor="session-user">User</Label>
                 <Input
                   id="session-user"
+                  data-mask="user"
                   autoComplete="off"
                   spellCheck={false}
                   placeholder="alice"
@@ -569,8 +574,11 @@ export function SessionDialog({
               <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
                 Cancel
               </Button>
-              <WhyDisabled reason={forwards ? forwardsIssue : "The port forwards are still loading."}>
-                <Button type="submit" disabled={!host.trim() || !portOk || busy || !forwards || forwardsIssue !== null}>
+              <WhyDisabled reason={readOnly ?? (forwards ? forwardsIssue : "The port forwards are still loading.")}>
+                <Button
+                  type="submit"
+                  disabled={!host.trim() || !portOk || busy || !forwards || forwardsIssue !== null || readOnly !== null}
+                >
                   {session ? "Save" : "Create session"}
                 </Button>
               </WhyDisabled>

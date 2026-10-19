@@ -19,6 +19,7 @@ use crate::adapters::network::ip_literal;
 use crate::adapters::remote::forward::{ForwardKind, ForwardSpec};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
 
 /// Forwards one session keeps.
@@ -311,6 +312,7 @@ impl Forwards {
     /// what changed; a save that changes nothing writes nothing. Tunnels open in a terminal keep
     /// running as they were opened until they are stopped.
     pub async fn save(&self, ctx: &Context, session_id: Uuid, inputs: &[ForwardInput]) -> Result<Vec<PortForward>> {
+        self.store.read_only().check(Change::Forwards)?;
         self.save_as(ctx, session_id, inputs, "Changed").await
     }
 

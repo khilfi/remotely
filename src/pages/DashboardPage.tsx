@@ -263,7 +263,9 @@ function WatchPicker({ watched, onWatch }: { watched: Set<string>; onWatch: (id:
                   >
                     <CheckIcon className={cn("size-4", on ? "opacity-100" : "opacity-0")} />
                     <span className="truncate">{s.name}</span>
-                    <span className="ml-auto truncate text-xs text-muted-foreground">{s.host}</span>
+                    <span className="ml-auto truncate text-xs text-muted-foreground" data-mask="host">
+                      {s.host}
+                    </span>
                   </CommandItem>
                 );
               })}

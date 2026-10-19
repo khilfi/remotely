@@ -14,6 +14,7 @@ use crate::adapters::github::clean_token;
 use crate::adapters::updater::{TokenReport, UpdateInfo};
 use crate::domain::{now_rfc3339, Context};
 use crate::error::{CoreError, Result};
+use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
 use crate::Core;
@@ -134,6 +135,7 @@ impl Core {
     /// FD-14: saves the token in the vault, replacing the one there. Needs the vault unlocked.
     /// Audited without the value.
     pub async fn set_update_token(&self, token: SecretString) -> Result<UpdateTokenInfo> {
+        self.store.read_only().check(Change::Settings)?;
         let token = clean_token(&token)?;
         let vault = self.vault.vault();
         let action = match token_id(&self.store, vault.as_ref(), &self.ctx).await? {
@@ -157,6 +159,7 @@ impl Core {
 
     /// FD-14: deletes the token from the vault. Update checks then say there is none. Audited.
     pub async fn remove_update_token(&self) -> Result<UpdateTokenInfo> {
+        self.store.read_only().check(Change::Settings)?;
         let vault = self.vault.vault();
         if let Some(id) = token_id(&self.store, vault.as_ref(), &self.ctx).await? {
             vault.delete(&self.ctx, id).await?;

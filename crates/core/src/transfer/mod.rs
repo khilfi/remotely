@@ -40,6 +40,7 @@ use crate::error::{CoreError, Result};
 use crate::forwards::{ForwardInput, Forwards};
 use crate::known_hosts::{address, HostKey, KnownHost, KnownHosts};
 use crate::locks;
+use crate::presentation::Change;
 use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord};
 use crate::snippets::{FavouriteInput, Snippets};
 use crate::ssh_keys::PublicKeyInfo;
@@ -1294,6 +1295,7 @@ impl Transfer {
         known_hosts: &KnownHosts,
         snippets: &Snippets,
     ) -> Result<TransferReport> {
+        self.store.read_only().check(Change::Transfer)?;
         let opened = {
             let mut slot = locks::lock(&self.opened);
             match slot.take() {
