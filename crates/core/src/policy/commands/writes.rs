@@ -143,36 +143,44 @@ pub(super) fn writes(words: &[String]) -> bool {
                 || p.operands.iter().any(|o| o.contains('='))
         }
         "openssl" => {
-            // An allow-list of read subcommands: version, x509, s_client, verify, crl, ciphers, list
-            // always read; req/rsa/pkey/ec/dsa and the param tools only with -noout/-check/-text and no
-            // key generation. Any file-writing option (-out, -keyout, -sess_out, -keylogfile, ...) writes.
-            let sub = args.first().map(String::as_str).unwrap_or("");
-            let file_opt = args.iter().any(|a| {
+            // openssl takes `-opt`, `--opt` and `-opt=value` (apps/lib/opt.c), so each word is compared
+            // on its bare name. An allow-list of read subcommands: version, x509, s_client, verify, crl,
+            // ciphers, list always read; req/rsa/pkey/ec/dsa and the param tools only with
+            // -noout/-check/-text and no key generation. Any file-writing option writes.
+            let sub = args.first().map(|a| bare_opt(a)).unwrap_or("");
+            let flag = |a: &String| a.starts_with('-');
+            let file_opt = args.iter().filter(|a| flag(a)).any(|a| {
                 matches!(
-                    a.as_str(),
-                    "-out"
-                        | "-keyout"
-                        | "-CAout"
-                        | "-CAkeyout"
-                        | "-signkey"
-                        | "-outfile"
-                        | "-sess_out"
-                        | "-keylogfile"
-                        | "-writerand"
-                        | "-respout"
-                        | "-reqout"
+                    bare_opt(a),
+                    "out"
+                        | "keyout"
+                        | "CAout"
+                        | "CAkeyout"
+                        | "signkey"
+                        | "outfile"
+                        | "sess_out"
+                        | "keylogfile"
+                        | "writerand"
+                        | "respout"
+                        | "reqout"
+                        | "CAserial"
+                        | "CAcreateserial"
                 )
             });
+            // Skip the subcommand so the `x509` command is not read as the `-x509` option.
             let generates = args
                 .iter()
-                .any(|a| matches!(a.as_str(), "-new" | "-newkey" | "-x509" | "-genkey"));
+                .skip(1)
+                .filter(|a| flag(a))
+                .any(|a| matches!(bare_opt(a), "new" | "newkey" | "x509" | "genkey"));
             let read_sub = match sub {
                 "version" | "x509" | "verify" | "crl" | "ciphers" | "list" | "s_client" | "errstr" | "asn1parse" => {
                     true
                 }
-                "req" | "rsa" | "pkey" | "ec" | "dsa" | "ecparam" | "dsaparam" | "pkeyparam" => {
-                    args.iter().any(|a| a == "-noout" || a == "-check" || a == "-text")
-                }
+                "req" | "rsa" | "pkey" | "ec" | "dsa" | "ecparam" | "dsaparam" | "pkeyparam" => args
+                    .iter()
+                    .filter(|a| flag(a))
+                    .any(|a| matches!(bare_opt(a), "noout" | "check" | "text")),
                 _ => false,
             };
             expands || file_opt || generates || !read_sub
@@ -216,18 +224,24 @@ pub(super) fn writes(words: &[String]) -> bool {
             expands || p.operands.iter().any(|o| !READS.contains(o))
         }
         "mysql" | "mariadb" => {
-            // The read entry is just --version; -e/--execute runs arbitrary SQL.
-            expands
-                || args
-                    .iter()
-                    .any(|a| a == "-e" || a == "--execute" || a.starts_with("--execute="))
+            // The read entry is just --version; -e/--execute runs arbitrary SQL (also when attached,
+            // `-eSELECT`, or clustered). Other value options are declared so clusters parse right.
+            let p = parse(
+                "ehPDuS",
+                "p",
+                &["execute", "host", "port", "database", "user", "socket"],
+            );
+            expands || p.has_short("e") || p.has_long(&["execute"])
         }
         "psql" => {
-            // The read entry is just --version; -c/-f run SQL or a script file.
-            expands
-                || args
-                    .iter()
-                    .any(|a| a == "-c" || a.starts_with("--command") || a == "-f" || a.starts_with("--file"))
+            // The read entry is just --version; -c/-f run SQL or a script file, and -o/-L write output
+            // or a log file.
+            let p = parse(
+                "cfdhpUoLvPFRT",
+                "wW",
+                &["command", "file", "output", "log-file", "dbname", "host", "username"],
+            );
+            expands || p.has_short("cfoL") || p.has_long(&["command", "file", "output", "log-file"])
         }
         "auditctl" => {
             // Only -l (list), -s (status), -v (version) read; every other option changes the config,
@@ -251,13 +265,16 @@ pub(super) fn writes(words: &[String]) -> bool {
             expands || !shows || p.has_short("a") || p.has_long(&["all"]) || !p.operands.is_empty()
         }
         "chronyc" => {
-            // `-m` runs several commands in one call (`chronyc -m tracking makestep`); without it only
-            // the one read command named by the entry runs.
-            expands || args.iter().any(|a| a == "-m" || a == "--multi")
+            // `-m` runs several commands in one call (`chronyc -m tracking makestep`, or clustered
+            // `-nm`); without it only the one read command named by the entry runs. -f/-h/-p take values.
+            let p = parse("fhp", "", &[]);
+            expands || p.has_short("m")
         }
         "ntpq" => {
-            // `-c` runs an ntpq command, which can write (`writevar`, `:config`); the read entry uses none.
-            expands || args.iter().any(|a| a == "-c" || a.starts_with("--command"))
+            // `-c` runs an ntpq command, which can write (`writevar`, `:config`), attached or clustered;
+            // the read entry uses none.
+            let p = parse("c", "", &["command"]);
+            expands || p.has_short("c") || p.has_long(&["command"])
         }
         "crontab" => {
             // `-l` lists; `-r`/`-e`/`-i` remove or edit, and a file operand installs a new crontab.
@@ -265,34 +282,49 @@ pub(super) fn writes(words: &[String]) -> bool {
             expands || p.short.iter().any(|&c| matches!(c, 'r' | 'e' | 'i')) || !p.operands.is_empty()
         }
         "hwclock" => {
-            // --show/-r read the RTC; --systohc/--hctosys/--set/--adjust change a clock.
+            // --show/-r read the RTC; -w/--systohc, -s/--hctosys, -a/--adjust, --set change a clock.
+            // getopt_long, so abbreviations (`--sys`) and clusters count; --date takes a value.
+            let p = parse("f", "", &["date"]);
             expands
-                || args.iter().any(|a| {
-                    matches!(
-                        a.as_str(),
-                        "-w" | "--systohc" | "-s" | "--hctosys" | "--set" | "--adjust" | "--predict" | "--setepoch"
-                    )
-                })
+                || p.has_short("wsa")
+                || p.has_long(&["systohc", "hctosys", "set", "adjust", "setepoch", "param-set"])
         }
         "nginx" => {
-            // -t/-T/-v/-V test or print; -s sends a signal (reload/stop/quit) to the running server.
-            expands || args.iter().any(|a| a == "-s")
+            // -t/-T/-v/-V test or print; -s sends a signal (reload/stop/quit), attached or clustered
+            // (`-ts stop`). -s/-c/-g/-p/-e take values.
+            let p = parse("scgpe", "", &[]);
+            expands || p.has_short("s")
         }
         "apachectl" | "apache2ctl" | "httpd" | "apache2" => {
-            // configtest/-t/-S/-M/-v inspect; -k and start/stop/restart/graceful control the server.
+            // configtest/-t/-S/-M/-v inspect; -k ACTION controls the server (attached/clustered too),
+            // as does a start/stop/restart/graceful word. Value options are declared so -k parses.
+            let p = parse("CcdDeEfkn", "", &[]);
             expands
-                || args.iter().any(|a| a == "-k")
-                || args.iter().any(|a| {
+                || p.has_short("k")
+                || p.operands.iter().any(|o| {
                     matches!(
-                        a.as_str(),
+                        *o,
                         "start" | "stop" | "restart" | "graceful" | "graceful-stop" | "startssl"
                     )
                 })
         }
-        "nfsstat" => expands || args.iter().any(|a| a == "-z" || a == "--zero"),
-        "ausearch" => expands || args.iter().any(|a| a == "--checkpoint"),
-        "lshw" => expands || args.iter().any(|a| a == "-dump"),
-        "sshd" => expands || args.iter().any(|a| a == "-E"),
+        "nfsstat" => {
+            // -z/--zero resets the counters (attached/clustered, e.g. `-sz`). -o takes a type value.
+            let p = parse("o", "", &["zero"]);
+            expands || p.has_short("z") || p.has_long(&["zero"])
+        }
+        "ausearch" => {
+            // --checkpoint FILE (or =FILE, or the abbreviation --check) writes a checkpoint file.
+            let p = parse("", "", &["checkpoint"]);
+            expands || p.has_long(&["checkpoint"])
+        }
+        "lshw" => expands || args.iter().any(|a| a.starts_with('-') && bare_opt(a) == "dump"),
+        "sshd" => {
+            // -E FILE appends a log (attached `-E/tmp/log`, or clustered `-tE /tmp/log`). The value
+            // options are declared so clusters and attached values parse right.
+            let p = parse("bCEfghopu", "", &[]);
+            expands || p.has_short("E")
+        }
         "apt-cache" => expands || args.iter().any(|a| a == "gencaches"),
         _ => false,
     }
@@ -584,6 +616,13 @@ impl Parsed<'_> {
     fn has_long(&self, options: &[&str]) -> bool {
         self.long.iter().any(|name| prefix_of(name, options))
     }
+}
+
+/// The bare name of an option word for tools that accept `-opt`, `--opt` and `-opt=value` the same way
+/// (openssl's apps/lib/opt.c, lshw): leading dashes and a trailing `=value` are dropped, so
+/// `--keylogfile=/tmp/k`, `-keylogfile` and `--out=x` become `keylogfile`, `keylogfile`, `out`.
+fn bare_opt(word: &str) -> &str {
+    word.trim_start_matches('-').split('=').next().unwrap_or("")
 }
 
 /// True when `name` is one of `options` or an abbreviation of one. getopt_long takes any unambiguous

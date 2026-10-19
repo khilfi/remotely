@@ -1840,33 +1840,47 @@ fn library_prefixes_catch_multiple_commands_and_last_option_wins() {
             "sudo mysqladmin ping flush-hosts",
             "sudo mysqladmin flush-logs",
             "sudo mysqladmin -u alice status create appdb",
-            // nft: extra statements in one argument, or -f/-I.
+            // nft: extra statements in one argument, or -f/-I, clustered or attached.
             "sudo nft -f /tmp/rules.nft",
             "sudo nft list ruleset -f /tmp/x",
             "sudo nft -I /tmp/inc list ruleset",
             "nft $'list ruleset\\nflush ruleset'",
-            // auditctl / multipath: the last option wins.
+            // auditctl / multipath: the last option wins, clustered too.
             "sudo auditctl -l -D",
+            "sudo auditctl -lD",
             "sudo auditctl -D",
             "sudo auditctl -l -w /etc/passwd -p wa",
             "sudo multipath -ll -F",
+            "sudo multipath -llF",
             "sudo multipath -l -r",
             "swapon --show -a",
-            // chronyc -m, ntpq -c, crontab -r.
+            // chronyc -m (clustered -nm), ntpq -c (attached/clustered), crontab -r (clustered -lr).
             "chronyc tracking -m makestep",
+            "chronyc -nm tracking makestep",
             "ntpq -p -c writevar",
+            "ntpq -p -cwritevar",
+            "ntpq -pc writevar",
             "ntpq -p -c ':config server x'",
             "crontab -l -r",
-            // hwclock / nginx / apache control actions reached via a read flag.
+            "crontab -lr",
+            // hwclock / nginx / apache control actions reached via a read flag, attached/clustered.
             "sudo hwclock --show --systohc",
+            "sudo hwclock --show --sys",
             "sudo nginx -t -s reload",
+            "sudo nginx -ts stop",
             "sudo apachectl -t -k graceful",
-            "sudo httpd -t -k restart",
-            // SQL clients: --version plus a query.
+            "sudo apachectl -tk stop",
+            "sudo httpd -t -kstop",
+            // SQL clients: --version plus a query, attached or with =.
             "mysql --version -e 'SELECT 1'",
+            "mysql --version -e'SELECT 1'",
+            "mysql --version --execute='SELECT 1'",
             "psql --version -c 'SELECT 1'",
-            // kubectl config view --raw leaks credentials.
+            "psql --version --command='SELECT 1'",
+            "psql --version -o /tmp/out",
+            // kubectl config view --raw leaks credentials (plain and =true).
             "kubectl config view --raw",
+            "kubectl config view --raw=true",
         ],
     );
 }
@@ -1887,12 +1901,43 @@ fn library_prefixes_catch_commands_that_write_files() {
         ],
         &[
             "sudo ausearch -m avc --checkpoint /tmp/cp",
+            "sudo ausearch --checkpoint=/tmp/cp",
+            "sudo ausearch --check /tmp/cp",
             "sudo lshw -dump /tmp/hw.db",
+            "sudo lshw --dump=/tmp/hw.db",
             "sudo sshd -t -E /tmp/sshd.log",
             "sudo sshd -T -E /tmp/sshd.log",
+            "sudo sshd -E/tmp/sshd.log -T",
+            "sudo sshd -tE /tmp/sshd.log",
             "nfsstat -z",
+            "nfsstat -sz",
             "nfsstat --zero",
             "apt-cache gencaches",
+        ],
+    );
+}
+
+#[test]
+fn openssl_option_spellings_are_normalised() {
+    // Review of PR #25: openssl takes -opt, --opt and -opt=value, so equivalent spellings must not
+    // slip past the allow-list as read-only.
+    reads_and_writes(
+        None,
+        &[
+            "openssl x509 -in /tmp/c.pem -noout -text",
+            "openssl s_client -connect host.test:443",
+            "openssl req -in /tmp/r.csr -noout -text",
+        ],
+        &[
+            "openssl s_client -connect host.test:443 --keylogfile=/tmp/k",
+            "openssl s_client -connect host.test:443 -sess_out=/tmp/s",
+            "openssl x509 -in /tmp/c.pem --out=/tmp/c.der",
+            "openssl req --newkey rsa:2048 -nodes",
+            "openssl req --new --x509 --keyout=/tmp/k.pem",
+            "openssl x509 -in /tmp/c.pem -CAcreateserial -CA /tmp/ca.pem",
+            "openssl x509 -in /tmp/c.pem -CAserial=/tmp/ca.srl",
+            "openssl ca -config /etc/pki/tls/openssl.cnf",
+            "openssl dhparam -out /tmp/dh.pem 2048",
         ],
     );
 }
