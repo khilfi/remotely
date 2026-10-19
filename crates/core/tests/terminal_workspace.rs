@@ -799,6 +799,57 @@ async fn reachability_checks_the_watched_sessions_once_per_host_and_port() {
     assert!(audit(&core).await.iter().all(|e| !e.action.contains("reach")));
 }
 
+/// SS-07: a session behind jump hosts is never probed from this PC; its dot is the first jump
+/// host's, and says so.
+#[tokio::test]
+async fn sessions_behind_a_jump_host_show_the_first_hops_reachability() {
+    let network = Arc::new(FakeNetwork::default().with_open_port("bastion.example.com", 22));
+    let core = Setup::new(FakeVmware::default())
+        .with_network(network.clone())
+        .build()
+        .await;
+    let bastion = core
+        .sessions
+        .create(
+            &core.ctx,
+            session_input("bastion", "bastion.example.com", 22, SessionAuth::Agent),
+        )
+        .await
+        .unwrap();
+    let mut inner = session_input("inner", "inner.test", 22, SessionAuth::Agent);
+    inner.jump_session_id = Some(bastion.id);
+    let inner = core.sessions.create(&core.ctx, inner).await.unwrap();
+    let mut db = session_input("db01", "db01.test", 22, SessionAuth::Agent);
+    db.jump_session_id = Some(inner.id);
+    let db = core.sessions.create(&core.ctx, db).await.unwrap();
+
+    core.reachability.set_watched([inner.id, db.id]);
+    let changed = core.reachability.check_once().await.unwrap();
+    assert_eq!(changed.len(), 2);
+    for state in &changed {
+        assert_eq!(state.state, ReachState::Up, "{state:?}");
+        assert_eq!(state.via.as_deref(), Some("bastion"));
+    }
+    let probes = network.calls();
+    assert_eq!(
+        probes,
+        ["probe bastion.example.com:22"],
+        "the hidden hosts are never probed from here"
+    );
+
+    // The first hop down: honest about which one, never the session's own fault.
+    network.set_open("bastion.example.com", 22, false);
+    core.reachability.poke();
+    let changed = core.reachability.check_once().await.unwrap();
+    assert!(changed
+        .iter()
+        .all(|s| s.state == ReachState::Down && s.via.as_deref() == Some("bastion")));
+    // A session reached directly has no `via`.
+    core.reachability.set_watched([bastion.id]);
+    let changed = core.reachability.check_once().await.unwrap();
+    assert_eq!(changed[0].via, None);
+}
+
 #[tokio::test]
 async fn reachability_follows_the_setting_and_skips_large_libraries_on_auto() {
     let network = Arc::new(FakeNetwork::default().with_open_port("web01.example.com", 22));

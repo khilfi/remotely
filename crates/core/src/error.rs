@@ -135,22 +135,25 @@ pub enum CoreError {
     #[error("{0}")]
     AgentUnavailable(String),
 
-    /// SS-05: the server presented a different key than the one trusted for it. Blocked.
+    /// SS-05: the server presented a different key than the one trusted for it. Blocked. `jump`: SS-07,
+    /// the jump host that presented it, when it was one on the way.
     #[error(
-        "the host key of {address} has changed, so Remotely did not connect. Someone may be intercepting the connection, or the host was reinstalled"
+        "the host key of {} has changed, so Remotely did not connect. Someone may be intercepting the connection, or the host was reinstalled",
+        key_place(address, jump.as_deref())
     )]
-    HostKeyChanged { address: String },
+    HostKeyChanged { address: String, jump: Option<String> },
 
     /// SS-05: the user did not trust a new host key.
-    #[error("the host key of {address} was not trusted, so Remotely did not connect")]
-    HostKeyRejected { address: String },
+    #[error("the host key of {} was not trusted, so Remotely did not connect", key_place(address, jump.as_deref()))]
+    HostKeyRejected { address: String, jump: Option<String> },
 
     /// BX-02: a bulk run can't ask about a host key it has not seen, and the run did not say to trust
     /// new ones.
     #[error(
-        "the host key of {address} is not trusted yet. Connect to it once in a terminal to check and trust it, or tick 'Trust new host keys' for the run"
+        "the host key of {} is not trusted yet. Connect to it once in a terminal to check and trust it, or tick 'Trust new host keys' for the run",
+        key_place(address, jump.as_deref())
     )]
-    HostKeyUnknown { address: String },
+    HostKeyUnknown { address: String, jump: Option<String> },
 
     /// BX-07: sudo did not take the password from the vault. Never holds the password.
     #[error("sudo refused the password from the vault")]
@@ -165,11 +168,14 @@ pub enum CoreError {
     #[error("cancelled while the command was running; it may still finish on the host")]
     CancelledRemote,
 
-    /// SS-07 is v2: a session with a jump host is not connected directly.
-    #[error(
-        "this session connects through the jump host '{jump}'. Jump hosts arrive in a later version (SS-07), so Remotely doesn't connect to it directly"
-    )]
-    JumpHostUnsupported { jump: String },
+    /// SS-07: a session's jump hosts lead back to one of them, or go on for too many hops.
+    #[error("{0}")]
+    JumpChain(String),
+
+    /// SS-07: a port forward could not start: its port is taken on this PC, or the host refused to
+    /// listen. Never holds traffic.
+    #[error("{0}")]
+    Tunnel(String),
 
     /// QL-06: the terminal's last line is no password prompt, so a vault password was not typed: at a
     /// shell prompt it would run as a command and land in the shell's history.
@@ -255,7 +261,8 @@ impl CoreError {
             CoreError::SudoPasswordRefused => "sudo_password_refused",
             CoreError::NoSudoPassword(_) => "no_sudo_password",
             CoreError::CancelledRemote => "cancelled_remote",
-            CoreError::JumpHostUnsupported { .. } => "jump_host_unsupported",
+            CoreError::JumpChain(_) => "jump_chain",
+            CoreError::Tunnel(_) => "tunnel",
             CoreError::NoPasswordPrompt => "no_password_prompt",
             CoreError::Network(_) => "network",
             CoreError::RemotePermissionDenied { .. } => "permission_denied",
@@ -264,6 +271,14 @@ impl CoreError {
             CoreError::Sftp(_) => "sftp",
             CoreError::NotImplemented(_) => "not_implemented",
         }
+    }
+}
+
+/// SS-07: `bastion.example.com:22`, or `the jump host 'bastion' (bastion.example.com:22)`.
+fn key_place(address: &str, jump: Option<&str>) -> String {
+    match jump {
+        Some(name) => format!("the jump host '{name}' ({address})"),
+        None => address.to_owned(),
     }
 }
 

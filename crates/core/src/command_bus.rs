@@ -12,10 +12,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::adapters::remote::forward::ForwardKind;
 use crate::capacity::CapacityChecker;
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
+use crate::forwards::PortForward;
 use crate::impact::{ImpactPreviewer, TargetImpact};
 use crate::jobs::{JobRunner, JobSpec, TargetStatus};
 use crate::locks;
@@ -95,6 +97,16 @@ pub enum Command {
         /// The host folder, absolute.
         folder: String,
         files: Vec<UploadFile>,
+    },
+    /// SS-07 open a saved port forward on one open terminal's connection
+    /// ([`crate::terminal::tunnels`]): it listens until it is stopped or the terminal closes, and
+    /// opens again by itself after a reconnect. Never built by the UI: the terminal builds it from
+    /// the session's saved forward, when its terminal connects or the user starts it.
+    OpenTunnel {
+        /// One [`TargetRef::Terminal`].
+        targets: Vec<TargetRef>,
+        /// The forward as saved when it was asked for: what is approved is what opens.
+        forward: PortForward,
     },
 }
 
@@ -263,6 +275,19 @@ fn validate_upload(targets: &[TargetRef], folder: &str, files: &[UploadFile]) ->
     Ok(())
 }
 
+/// SS-07: a tunnel rides one open terminal's connection.
+fn validate_tunnel(targets: &[TargetRef]) -> Result<()> {
+    match targets {
+        [TargetRef::Terminal { .. }] => Ok(()),
+        [_] => Err(CoreError::InvalidInput(
+            "A tunnel opens on an open terminal's connection.".into(),
+        )),
+        _ => Err(CoreError::InvalidInput(
+            "A tunnel opens on one terminal at a time.".into(),
+        )),
+    }
+}
+
 /// "1.2 MB", for summaries and messages.
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -336,6 +361,7 @@ impl Command {
                 validate_line(line, keys, *unreliable)
             }
             Command::FileUpload { targets, folder, files } => validate_upload(targets, folder, files),
+            Command::OpenTunnel { targets, .. } => validate_tunnel(targets),
             _ => Ok(()),
         }
     }
@@ -351,8 +377,8 @@ impl Command {
             | Command::PushSshKey { targets, .. }
             | Command::FileUpload { targets, .. } => *targets = new,
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
-            // after something else.
-            Command::AppUpdate { .. } | Command::TerminalLine { .. } => return None,
+            // after something else. SS-07: a tunnel belongs to its terminal.
+            Command::AppUpdate { .. } | Command::TerminalLine { .. } | Command::OpenTunnel { .. } => return None,
         }
         Some(command)
     }
@@ -365,7 +391,8 @@ impl Command {
             | Command::RemoteExec { targets, .. }
             | Command::PushSshKey { targets, .. }
             | Command::TerminalLine { targets, .. }
-            | Command::FileUpload { targets, .. } => targets,
+            | Command::FileUpload { targets, .. }
+            | Command::OpenTunnel { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -442,6 +469,7 @@ impl Command {
                 };
                 format!("Upload {what} to {folder}{replacing}")
             }
+            Command::OpenTunnel { forward, .. } => format!("Open a tunnel: {}", forward.describe()),
         }
     }
 }
@@ -487,6 +515,72 @@ pub struct ApprovalRequest {
     pub exec: Option<Box<ExecDetails>>,
     /// SS-08: for an upload, the folder and the files (which ones replace a file there).
     pub upload: Option<Box<UploadDetails>>,
+    /// SS-07: for a tunnel, where it listens, where it leads and who can use it.
+    pub tunnel: Option<Box<TunnelDetails>>,
+}
+
+/// SS-07: a tunnel as the approval dialog shows it.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TunnelDetails {
+    pub forward: PortForward,
+    /// Where it listens, e.g. `127.0.0.1:8080`, or `localhost:9000 on the host`.
+    pub listens: String,
+    /// Where its connections go.
+    pub leads: String,
+    /// Who can use it, in words.
+    pub exposes: String,
+}
+
+impl TunnelDetails {
+    fn of(command: &Command) -> Option<Box<Self>> {
+        let Command::OpenTunnel { forward, .. } = command else {
+            return None;
+        };
+        let spec = &forward.spec;
+        let (listens, leads, exposes) = match spec.kind {
+            ForwardKind::Local | ForwardKind::Dynamic => {
+                let leads = match spec.kind {
+                    ForwardKind::Dynamic => "wherever each program that uses it asks, reached from the host".to_owned(),
+                    _ => format!("{}, reached from the host", spec.destination()),
+                };
+                let exposes = if spec.loopback_only() {
+                    "Only programs on this PC can use it.".to_owned()
+                } else {
+                    format!(
+                        "It listens on {}, so other computers that can reach this PC can use it to reach what the host reaches, without logging in.",
+                        spec.bind_address
+                    )
+                };
+                (spec.listen_address(), leads, exposes)
+            }
+            ForwardKind::Remote => {
+                let exposes = if spec.loopback_only() {
+                    format!(
+                        "Programs on the host can reach {} through it, as if they were on this PC.",
+                        spec.destination()
+                    )
+                } else {
+                    format!(
+                        "The host listens on {}, so other computers that reach the host can reach {} through it, as if they were on this PC.",
+                        spec.bind_address,
+                        spec.destination()
+                    )
+                };
+                (
+                    format!("{} on the host", spec.listen_address()),
+                    format!("{}, reached from this PC", spec.destination()),
+                    exposes,
+                )
+            }
+        };
+        Some(Box::new(Self {
+            forward: forward.clone(),
+            listens,
+            leads,
+            exposes,
+        }))
+    }
 }
 
 /// SS-08: an upload as the approval dialog shows it.
@@ -893,6 +987,7 @@ impl CommandBus {
             impact: self.impact.preview(ctx, &decision.targets).await,
             exec: self.exec_details(ctx, &command, retry_of).await?,
             upload: UploadDetails::of(&command),
+            tunnel: TunnelDetails::of(&command),
         };
         let detail = decision
             .reasons

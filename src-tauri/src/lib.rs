@@ -8,6 +8,7 @@ mod files;
 mod ipc;
 mod multiexec;
 mod terminal;
+mod tunnels;
 pub mod updater;
 
 use std::ffi::OsString;
@@ -293,6 +294,15 @@ pub fn run() {
             terminal::terminal_output_save,
             terminal::terminal_log_start,
             terminal::terminal_log_stop,
+            tunnels::forwards_list,
+            tunnels::forwards_all,
+            tunnels::forwards_save,
+            tunnels::terminal_tunnels,
+            tunnels::terminal_tunnel_start,
+            tunnels::terminal_tunnel_request,
+            tunnels::terminal_tunnel_approve,
+            tunnels::terminal_tunnel_decline,
+            tunnels::terminal_tunnel_stop,
             multiexec::multiexec_set_targets,
             multiexec::multiexec_stop,
             multiexec::multiexec_status,

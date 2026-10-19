@@ -157,9 +157,15 @@ impl Failure {
         };
         let message = match err {
             // The bulk-run wording offers a checkbox the dashboard doesn't have.
-            CoreError::HostKeyUnknown { address } => format!(
-                "the host key of {address} is not trusted yet. Connect to it once in a terminal to check and trust it"
-            ),
+            CoreError::HostKeyUnknown { address, jump } => {
+                let place = match jump {
+                    Some(name) => format!("the jump host '{name}' ({address})"),
+                    None => address.clone(),
+                };
+                format!(
+                    "the host key of {place} is not trusted yet. Connect to it once in a terminal to check and trust it"
+                )
+            }
             other => other.to_string(),
         };
         Self {
@@ -181,7 +187,8 @@ struct GuestVerifier {
 
 #[async_trait]
 impl HostKeyVerifier for GuestVerifier {
-    async fn verify(&self, key: &HostKey) -> Result<()> {
+    async fn verify(&self, key: &HostKey, jump: Option<&str>) -> Result<()> {
+        let jump = jump.map(str::to_owned);
         match self.known_hosts.check(&self.ctx, key).await? {
             HostKeyCheck::Trusted => Ok(()),
             HostKeyCheck::Changed { previous } => {
@@ -190,16 +197,26 @@ impl HostKeyVerifier for GuestVerifier {
                         .record_blocked(&self.ctx, key, &previous, Some(&self.target))
                         .await?;
                 }
-                Err(CoreError::HostKeyChanged { address: key.address() })
+                Err(CoreError::HostKeyChanged {
+                    address: key.address(),
+                    jump,
+                })
             }
-            HostKeyCheck::Unknown { .. } => Err(CoreError::HostKeyUnknown { address: key.address() }),
+            HostKeyCheck::Unknown { .. } => Err(CoreError::HostKeyUnknown {
+                address: key.address(),
+                jump,
+            }),
         }
     }
 }
 
-/// What a connection depends on: host, port, user, login method and its vault ids.
+/// What a connection depends on: host, port, user, login method and its vault ids, for the session
+/// and each jump host on the way (SS-07).
 fn spec_key(spec: &SessionSpec) -> String {
-    format!("{}|{}|{}|{:?}", spec.host, spec.port, spec.username, spec.auth)
+    let hop = |s: &SessionSpec| format!("{}|{}|{}|{:?}", s.host, s.port, s.username, s.auth);
+    let mut key: Vec<String> = spec.jumps().into_iter().map(hop).collect();
+    key.push(hop(spec));
+    key.join(" > ")
 }
 
 fn needs_vault(auth: &AuthMethod) -> bool {
@@ -388,11 +405,6 @@ async fn read_once(
         Ok(None) => return Err(Failure::new(GuestState::Error, "the session was deleted")),
         Err(err) => return Err(Failure::from_error(&err)),
     };
-    if let Some(jump) = &spec.jump {
-        return Err(Failure::from_error(&CoreError::JumpHostUnsupported {
-            jump: jump.name.clone(),
-        }));
-    }
     let key = spec_key(&spec);
     if host.spec_key != key {
         host.disconnect().await;
@@ -481,28 +493,37 @@ async fn connect(
     spec: &SessionSpec,
     blocked_recorded: bool,
 ) -> std::result::Result<Box<dyn ExecSession>, Failure> {
-    if spec.auth == AuthMethod::Password(None) {
-        return Err(Failure::new(
-            GuestState::LoginFailed,
-            format!(
-                "no password is saved for '{}'. Save it in the vault and choose it in the session, so the dashboard can log in",
-                spec.name
-            ),
-        ));
-    }
-    if needs_vault(&spec.auth) && shared.vault.status() != VaultStatus::Unlocked {
-        return Err(Failure {
-            retry_now: true,
-            ..Failure::new(
-                GuestState::VaultLocked,
+    // SS-07: every jump host on the way logs in too, with its own saved login.
+    let mut hops = spec.jumps();
+    hops.push(spec);
+    for hop in &hops {
+        let what = if hop.id == spec.id {
+            format!("'{}'", hop.name)
+        } else {
+            format!("the jump host '{}'", hop.name)
+        };
+        if hop.auth == AuthMethod::Password(None) {
+            return Err(Failure::new(
+                GuestState::LoginFailed,
                 format!(
-                    "the vault is locked, and logging in to '{}' needs a secret from it",
-                    spec.name
+                    "no password is saved for {what}. Save it in the vault and choose it in that session, so the dashboard can log in"
                 ),
-            )
-        });
+            ));
+        }
+        if needs_vault(&hop.auth) && shared.vault.status() != VaultStatus::Unlocked {
+            return Err(Failure {
+                retry_now: true,
+                ..Failure::new(
+                    GuestState::VaultLocked,
+                    format!("the vault is locked, and logging in to {what} needs a secret from it"),
+                )
+            });
+        }
     }
     let credentials = sessions::credentials(shared.vault.as_ref(), &shared.ctx, spec, None)
+        .await
+        .map_err(|err| Failure::from_error(&err))?;
+    let jump_credentials = sessions::jump_credentials(shared.vault.as_ref(), &shared.ctx, spec, &HashMap::new())
         .await
         .map_err(|err| Failure::from_error(&err))?;
     let options = ConnectOptions {
@@ -528,6 +549,7 @@ async fn connect(
         shared.remote.connect(ConnectRequest {
             session: spec,
             credentials,
+            jump_credentials,
             options: &options,
             verifier,
         }),
@@ -563,12 +585,14 @@ mod tests {
         assert_eq!(state(CoreError::Ssh("refused".into())), GuestState::Unreachable);
         assert_eq!(
             state(CoreError::HostKeyChanged {
-                address: "web01.example.com:22".into()
+                address: "web01.example.com:22".into(),
+                jump: None,
             }),
             GuestState::HostKey
         );
         let unknown = Failure::from_error(&CoreError::HostKeyUnknown {
             address: "web01.example.com:22".into(),
+            jump: None,
         });
         assert!(unknown.message.contains("in a terminal"), "{}", unknown.message);
         assert!(
@@ -576,6 +600,11 @@ mod tests {
             "no bulk-run advice: {}",
             unknown.message
         );
+        let at_jump = Failure::from_error(&CoreError::HostKeyUnknown {
+            address: "bastion.example.com:22".into(),
+            jump: Some("bastion".into()),
+        });
+        assert!(at_jump.message.contains("jump host 'bastion'"), "{}", at_jump.message);
         assert!(Failure::from_error(&CoreError::VaultLocked).retry_now);
         assert!(!Failure::from_error(&CoreError::Ssh("x".into())).retry_now);
     }

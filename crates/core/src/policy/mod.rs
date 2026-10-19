@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::remote::forward::ForwardKind;
 use crate::command_bus::{Command, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -89,11 +90,19 @@ pub enum ActionKind {
     FileUpload,
     /// Upload files that replace files on the host (SS-08). Never below Medium: replacing asks.
     FileReplace,
+    /// Open a local or SOCKS tunnel only this PC can use (SS-07).
+    TunnelLocal,
+    /// Open a remote tunnel: the host listens, and connections to it reach a host this PC reaches
+    /// (SS-07).
+    TunnelRemote,
+    /// Open a tunnel that listens on a network address, so other computers can use it (SS-07). Never
+    /// below Medium.
+    TunnelShared,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 20] = [
+    pub const ALL: [ActionKind; 23] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -113,6 +122,9 @@ impl ActionKind {
         ActionKind::SshKeyPush,
         ActionKind::FileUpload,
         ActionKind::FileReplace,
+        ActionKind::TunnelLocal,
+        ActionKind::TunnelRemote,
+        ActionKind::TunnelShared,
         ActionKind::AppUpdate,
     ];
 
@@ -139,6 +151,9 @@ impl ActionKind {
             ActionKind::SshKeyPush => "Add an SSH key to hosts",
             ActionKind::FileUpload => "Upload files",
             ActionKind::FileReplace => "Upload files that replace files on the host",
+            ActionKind::TunnelLocal => "Open a tunnel for this PC only",
+            ActionKind::TunnelRemote => "Open a remote tunnel (the host listens)",
+            ActionKind::TunnelShared => "Open a tunnel other computers can use",
         }
     }
 }
@@ -198,6 +213,8 @@ pub struct PolicyRules {
 
 /// SS-08: replacing a file on a host always asks at least for a confirm.
 pub const MIN_REPLACE_TIER: Tier = Tier::Medium;
+/// SS-07: a tunnel other computers can use always asks at least for a confirm, which says so.
+pub const MIN_SHARED_TUNNEL_TIER: Tier = Tier::Medium;
 
 /// AP-01: the editable numbers stay within these bounds.
 pub const MAX_BULK_THRESHOLD: usize = 1000;
@@ -240,6 +257,15 @@ impl PolicyRules {
                     format!(
                         "replacing a file always asks first, so this can't be lower than {}",
                         MIN_REPLACE_TIER.as_str()
+                    ),
+                );
+            }
+            if kind == ActionKind::TunnelShared && rule.single < MIN_SHARED_TUNNEL_TIER {
+                return invalid(
+                    kind.label(),
+                    format!(
+                        "a tunnel other computers can use always asks first, so this can't be lower than {}",
+                        MIN_SHARED_TUNNEL_TIER.as_str()
                     ),
                 );
             }
@@ -437,6 +463,12 @@ impl Default for PolicyRules {
             // SS-08: a new file in a folder the user can write to anyway; replacing one asks first.
             (FileUpload, TierRule::same(Low)),
             (FileReplace, TierRule::same(Medium)),
+            // SS-07: a tunnel only this PC can use reaches what the terminal reaches anyway (the PRD:
+            // Medium on a Prod host, which the Prod rule gives). A remote one opens a port on the host
+            // into this PC's network; a shared one lets other computers in without logging in.
+            (TunnelLocal, TierRule::same(Low)),
+            (TunnelRemote, TierRule::same(Medium)),
+            (TunnelShared, TierRule::same(Medium)),
         ]);
         Self {
             tiers,
@@ -584,6 +616,10 @@ impl PolicyEngine {
             // SS-08: replacing a file loses what was there; adding one does not.
             Command::FileUpload { files, .. } if files.iter().any(|f| f.replace) => ActionKind::FileReplace,
             Command::FileUpload { .. } => ActionKind::FileUpload,
+            // SS-07: who can use the tunnel decides, then which way it goes.
+            Command::OpenTunnel { forward, .. } if !forward.spec.loopback_only() => ActionKind::TunnelShared,
+            Command::OpenTunnel { forward, .. } if forward.spec.kind == ForwardKind::Remote => ActionKind::TunnelRemote,
+            Command::OpenTunnel { .. } => ActionKind::TunnelLocal,
         }
     }
 
@@ -621,6 +657,20 @@ impl PolicyEngine {
             let hits = self.dangerous_matches(script);
             if !hits.is_empty() {
                 reasons.push(format!("flagged dangerous: {}", hits.join(", ")));
+            }
+        }
+
+        // SS-07: say why a tunnel is rated as one other computers can use, for the dialog and the audit log.
+        if let Command::OpenTunnel { forward, .. } = command {
+            if !forward.spec.loopback_only() {
+                let side = match forward.spec.kind {
+                    ForwardKind::Remote => "the host listens",
+                    ForwardKind::Local | ForwardKind::Dynamic => "it listens",
+                };
+                reasons.push(format!(
+                    "{side} on {}, which other computers can reach",
+                    forward.spec.listen_address()
+                ));
             }
         }
 
@@ -706,7 +756,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::AppUpdate { .. }
         | Command::PushSshKey { .. }
         | Command::TerminalLine { .. }
-        | Command::FileUpload { .. } => false,
+        | Command::FileUpload { .. }
+        | Command::OpenTunnel { .. } => false,
     };
     on_vms && can_lose_state
 }

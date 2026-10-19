@@ -18,7 +18,7 @@ use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::AuditEntry;
 use remotely_core::terminal::{TerminalEvent, TerminalHandle, TerminalStatus, TerminalTuning};
 use remotely_core::vault::{SecretId, SecretKind, SecretString};
-use remotely_core::{Core, CoreError};
+use remotely_core::Core;
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -193,8 +193,13 @@ async fn a_password_from_the_vault_opens_a_shell_after_the_host_key_is_trusted()
     // SS-05: first contact shows the fingerprint and waits for an answer.
     let key = pane
         .expect_event(|e| match e {
-            TerminalEvent::HostKeyUnknown { key, other_key_types } => {
+            TerminalEvent::HostKeyUnknown {
+                key,
+                other_key_types,
+                jump,
+            } => {
                 assert!(other_key_types.is_empty());
+                assert_eq!(*jump, None, "the session's own host");
                 Some(key.clone())
             }
             _ => None,
@@ -513,7 +518,7 @@ async fn a_changed_host_key_blocks_the_connection_until_it_is_replaced() {
     let mut pane = Pane::open(&core, session_id).await;
     let (key, previous) = pane
         .expect_event(|e| match e {
-            TerminalEvent::HostKeyChanged { key, previous } => Some((key.clone(), previous.clone())),
+            TerminalEvent::HostKeyChanged { key, previous, .. } => Some((key.clone(), previous.clone())),
             _ => None,
         })
         .await;
@@ -684,8 +689,10 @@ async fn an_ended_shell_waits_for_enter_and_the_startup_command_runs_each_time()
     assert_eq!(starts, 2);
 }
 
+/// SS-07: the library refuses a jump host loop when a session is saved; one that got into the data
+/// some other way is refused when connecting, naming the hops, and nothing opens.
 #[tokio::test]
-async fn sessions_with_a_jump_host_are_not_connected_directly() {
+async fn jump_hosts_that_go_round_in_a_loop_are_refused() {
     let core = core().await;
     let mut bastion = SessionInput {
         name: "bastion".into(),
@@ -705,15 +712,28 @@ async fn sessions_with_a_jump_host_are_not_connected_directly() {
     bastion.name = "inner".into();
     bastion.host = "inner.example.com".into();
     bastion.jump_session_id = Some(bastion_id);
-    let inner = create(&core, bastion).await;
+    let inner = create(&core, bastion.clone()).await;
+    // The editor won't save it.
+    let back = core.sessions.get(&core.ctx, bastion_id).await.unwrap();
+    let input = SessionInput {
+        jump_session_id: Some(inner),
+        name: back.name.clone(),
+        host: back.host.clone(),
+        ..bastion
+    };
+    let refused = core.sessions.update(&core.ctx, bastion_id, input).await.unwrap_err();
+    assert!(refused.to_string().contains("through its own jump host"), "{refused}");
+    // Written behind the library's back, it can't connect.
+    sqlx::query("UPDATE sessions SET jump_session_id = ? WHERE id = ?")
+        .bind(inner.to_string())
+        .bind(bastion_id.to_string())
+        .execute(core.store.pool())
+        .await
+        .unwrap();
     let before = audit(&core).await.len();
     let err = core.terminals.open(&core.ctx, inner, SIZE).await.err().unwrap();
-    assert!(
-        matches!(&err, CoreError::JumpHostUnsupported { jump } if jump == "bastion"),
-        "{err}"
-    );
-    assert_eq!(err.code(), "jump_host_unsupported");
-    assert!(err.to_string().contains("SS-07"));
+    assert_eq!(err.code(), "jump_chain", "{err}");
+    assert!(err.to_string().contains("'inner' -> 'bastion' -> 'inner'"), "{err}");
     assert_eq!(audit(&core).await.len(), before, "nothing was opened");
     assert_eq!(core.terminals.open_count(), 0);
 }

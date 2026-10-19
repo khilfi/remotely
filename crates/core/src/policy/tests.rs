@@ -1810,3 +1810,128 @@ fn sizes_read_naturally() {
     assert_eq!(human_size(25_000_000), "25 MB");
     assert_eq!(human_size(3_200_000_000), "3.2 GB");
 }
+
+// ---- SS-07: tunnels -----------------------------------------------------------------------------
+
+fn tunnel(kind: crate::adapters::remote::forward::ForwardKind, bind: &str, targets: &[Target]) -> Command {
+    use crate::adapters::remote::forward::{ForwardKind, ForwardSpec};
+    Command::OpenTunnel {
+        targets: refs(targets),
+        forward: crate::forwards::PortForward {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            label: None,
+            spec: ForwardSpec {
+                kind,
+                bind_address: bind.into(),
+                bind_port: 8080,
+                dest_host: if kind == ForwardKind::Dynamic {
+                    String::new()
+                } else {
+                    "db01.example.com".into()
+                },
+                dest_port: if kind == ForwardKind::Dynamic { 0 } else { 5432 },
+            },
+            auto_start: true,
+        },
+    }
+}
+
+#[test]
+fn a_tunnel_only_this_pc_can_use_is_low_and_medium_on_prod() {
+    use crate::adapters::remote::forward::ForwardKind;
+    let lab = vec![terminal(Environment::Lab)];
+    for kind in [ForwardKind::Local, ForwardKind::Dynamic] {
+        let d = engine().evaluate(&tunnel(kind, "127.0.0.1", &lab), &lab);
+        assert_eq!((d.action, d.tier), (ActionKind::TunnelLocal, Tier::Low), "{kind:?}");
+        assert!(d.steps.is_empty());
+    }
+    // The PRD tier table: "open a tunnel to a Prod host" is Medium.
+    let prod = vec![terminal(Environment::Prod)];
+    let d = engine().evaluate(&tunnel(ForwardKind::Local, "localhost", &prod), &prod);
+    assert_eq!(d.tier, Tier::Medium);
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+}
+
+#[test]
+fn a_remote_tunnel_asks_for_a_confirm() {
+    use crate::adapters::remote::forward::ForwardKind;
+    let lab = vec![terminal(Environment::Lab)];
+    let d = engine().evaluate(&tunnel(ForwardKind::Remote, "localhost", &lab), &lab);
+    assert_eq!((d.action, d.tier), (ActionKind::TunnelRemote, Tier::Medium));
+    let prod = vec![terminal(Environment::Prod)];
+    assert_eq!(
+        engine()
+            .evaluate(&tunnel(ForwardKind::Remote, "localhost", &prod), &prod)
+            .tier,
+        Tier::High
+    );
+}
+
+#[test]
+fn a_tunnel_other_computers_can_use_asks_and_says_why() {
+    use crate::adapters::remote::forward::ForwardKind;
+    let lab = vec![terminal(Environment::Lab)];
+    for (kind, bind) in [
+        (ForwardKind::Local, "0.0.0.0"),
+        (ForwardKind::Dynamic, "192.0.2.10"),
+        (ForwardKind::Remote, "0.0.0.0"),
+        (ForwardKind::Dynamic, "::"),
+    ] {
+        let d = engine().evaluate(&tunnel(kind, bind, &lab), &lab);
+        assert_eq!(
+            (d.action, d.tier),
+            (ActionKind::TunnelShared, Tier::Medium),
+            "{kind:?} {bind}"
+        );
+        assert!(
+            d.reasons.iter().any(|r| r.contains("which other computers can reach")),
+            "{:?}",
+            d.reasons
+        );
+    }
+    let prod = vec![terminal(Environment::Prod)];
+    assert_eq!(
+        engine()
+            .evaluate(&tunnel(ForwardKind::Local, "0.0.0.0", &prod), &prod)
+            .tier,
+        Tier::High
+    );
+}
+
+#[test]
+fn shared_tunnels_can_never_be_set_below_a_confirm() {
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(ActionKind::TunnelShared, TierRule::same(Tier::Low));
+    let err = PolicyEngine::new(rules).err().expect("rejected");
+    assert!(err.to_string().contains("always asks first"), "{err}");
+    // The others can go either way.
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(ActionKind::TunnelRemote, TierRule::same(Tier::Low));
+    rules
+        .tiers
+        .insert(ActionKind::TunnelLocal, TierRule::same(Tier::Medium));
+    assert!(PolicyEngine::new(rules).is_ok());
+}
+
+#[test]
+fn tunnels_open_on_one_terminal_and_are_never_retried_elsewhere() {
+    use crate::adapters::remote::forward::ForwardKind;
+    let t = vec![terminal(Environment::Lab)];
+    let open = tunnel(ForwardKind::Local, "127.0.0.1", &t);
+    assert!(open.validate().is_ok());
+    assert_eq!(
+        open.summary(1),
+        "Open a tunnel: local 127.0.0.1:8080 -> db01.example.com:5432"
+    );
+    assert!(
+        open.with_targets(refs(&t)).is_none(),
+        "a tunnel belongs to its terminal"
+    );
+    assert!(!safety_snapshot_applies(&open));
+    assert!(tunnel(ForwardKind::Local, "127.0.0.1", &terminals(2))
+        .validate()
+        .is_err());
+    let hosts = vec![host(Environment::Lab)];
+    assert!(tunnel(ForwardKind::Local, "127.0.0.1", &hosts).validate().is_err());
+}

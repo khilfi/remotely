@@ -5,6 +5,7 @@
 
 mod audit;
 mod favourites;
+mod forwards;
 mod inventory;
 mod jobs;
 mod known_hosts;

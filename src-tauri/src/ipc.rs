@@ -176,6 +176,13 @@ pub async fn command_submit(state: State<'_, AppState>, command: Command) -> Ipc
             "Uploads start from a terminal: its upload button, or files dropped on it.",
         ));
     }
+    // SS-07: a tunnel opens a saved forward on an open terminal; `terminal_tunnel_start` builds it.
+    if matches!(command, Command::OpenTunnel { .. }) {
+        return Err(IpcError::new(
+            "invalid_input",
+            "Tunnels start from a terminal's Tunnels panel, from the session's saved port forwards.",
+        ));
+    }
     let core = &state.core;
     Ok(core.bus.submit(&core.ctx, command).await?)
 }
