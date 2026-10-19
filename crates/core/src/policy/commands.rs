@@ -1,5 +1,7 @@
 //! Classifying shell commands for bulk execution: dangerous (BX-06) or read-only.
 
+mod writes;
+
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -41,6 +43,8 @@ pub fn default_dangerous_patterns() -> Vec<DangerousPattern> {
 }
 
 /// First words of commands that only read. Multi-word entries match as a prefix ("systemctl status").
+/// The forms of these commands that change something (`ip link set`, `date -s`, `journalctl --vacuum-…`)
+/// are never read-only, whatever the list says (`commands/writes.rs`).
 pub fn default_read_only_commands() -> Vec<String> {
     [
         "cat",
@@ -173,23 +177,26 @@ pub fn default_read_only_commands() -> Vec<String> {
 // input here, so it is allowed despite the no-expect rule.
 #[allow(clippy::expect_used)]
 static REDIRECT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\d*>>?\s*(&?[^\s;&|]+)").expect("valid redirect regex"));
+    LazyLock::new(|| Regex::new(r"\d*(&>>?|>\||>>?&?)\s*([^\s;&|<>()]*)").expect("valid redirect regex"));
 #[allow(clippy::expect_used)]
 static SEPARATOR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\r?\n|;|&&|\|\||\||&").expect("valid separator regex"));
 #[allow(clippy::expect_used)]
 static ENV_ASSIGN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=\S*$").expect("valid assignment regex"));
+    LazyLock::new(|| Regex::new(r"^[A-Za-z_][A-Za-z0-9_]*=").expect("valid assignment regex"));
 
-/// True when every part of the script starts with a read-only command and nothing writes a file.
+/// True when every part of the script starts with a read-only command, none of them is a form of it
+/// that writes, and nothing writes a file.
 pub(crate) fn is_read_only(script: &str, read_only: &[String]) -> bool {
-    // Command substitution can hide anything.
-    if script.contains("$(") || script.contains('`') {
+    // Command and process substitution can hide anything.
+    if ["$(", "`", "<(", ">("].iter().any(|s| script.contains(s)) {
         return false;
     }
     for cap in REDIRECT.captures_iter(script) {
-        let to = &cap[1];
-        if !(to.starts_with('&') || to == "/dev/null") {
+        let (op, to) = (&cap[1], &cap[2]);
+        // `2>&1`, `>&2` and `>&-` point at another stream; `>&file` writes a file, as `>|file` does.
+        let stream = op.ends_with('&') && (to == "-" || (!to.is_empty() && to.bytes().all(|b| b.is_ascii_digit())));
+        if !(stream || to == "/dev/null") {
             return false;
         }
     }
@@ -207,7 +214,8 @@ pub(crate) fn is_read_only(script: &str, read_only: &[String]) -> bool {
             let entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
             line == entry || line.starts_with(&format!("{entry} "))
         });
-        if !allowed {
+        // An entry matches the first words only: "ip link" matches `ip link set eth0 down` too.
+        if !allowed || writes::writes(&words) {
             return false;
         }
     }
@@ -215,16 +223,57 @@ pub(crate) fn is_read_only(script: &str, read_only: &[String]) -> bool {
 }
 
 /// Words of one command with leading `VAR=value` assignments and `sudo [flags]` removed.
-fn command_words(segment: &str) -> Vec<&str> {
-    let mut words: Vec<&str> = segment.split_whitespace().collect();
-    while words.first().is_some_and(|w| ENV_ASSIGN.is_match(w)) {
+fn command_words(segment: &str) -> Vec<String> {
+    let mut words = shell_words(segment);
+    while words.first().is_some_and(|w| is_assignment(w)) {
         words.remove(0);
     }
-    if words.first() == Some(&"sudo") {
+    if words.first().is_some_and(|w| w == "sudo") {
         words.remove(0);
         while words.first().is_some_and(|w| w.starts_with('-')) {
             words.remove(0);
         }
     }
+    words
+}
+
+fn is_assignment(word: &str) -> bool {
+    ENV_ASSIGN.is_match(word)
+}
+
+/// The words of one command as the shell splits them: quotes (`'…'`, `"…"`, `$'…'`) and backslashes
+/// removed, a `#` comment dropped. Expansions stay as written: `$HOME` is still `$HOME`.
+fn shell_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word: Option<String> = None;
+    let mut chars = segment.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            c if c.is_whitespace() => words.extend(word.take()),
+            '#' if word.is_none() => break,
+            // `$'…'` and `$"…"` are quotes too; the next round reads them.
+            '$' if matches!(chars.peek(), Some('\'' | '"')) => {}
+            '\'' => {
+                let w = word.get_or_insert_with(String::new);
+                w.extend(chars.by_ref().take_while(|&c| c != '\''));
+            }
+            '"' => {
+                let w = word.get_or_insert_with(String::new);
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => break,
+                        '\\' if matches!(chars.peek(), Some('"' | '\\' | '$' | '`')) => w.extend(chars.next()),
+                        c => w.push(c),
+                    }
+                }
+            }
+            '\\' => {
+                let w = word.get_or_insert_with(String::new);
+                w.extend(chars.next());
+            }
+            c => word.get_or_insert_with(String::new).push(c),
+        }
+    }
+    words.extend(word);
     words
 }
