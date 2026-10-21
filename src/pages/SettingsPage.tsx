@@ -62,6 +62,8 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
   const [vmrunMessage, setVmrunMessage] = useState<Message>(null);
   const [vboxPath, setVboxPath] = useState("");
   const [vboxMessage, setVboxMessage] = useState<Message>(null);
+  const [dockerPath, setDockerPath] = useState("");
+  const [dockerMessage, setDockerMessage] = useState<Message>(null);
   const [updateMessage, setUpdateMessage] = useState<Message>(null);
   const [newFolder, setNewFolder] = useState("");
   const [folderMessage, setFolderMessage] = useState<Message>(null);
@@ -78,6 +80,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
         setSettings(s);
         setPath(s.vmrunPathSaved ?? "");
         setVboxPath(s.vboxmanagePathSaved ?? "");
+        setDockerPath(s.dockerPathSaved ?? "");
         setPowerOnLimit(String(s.powerOnLimit));
         setShutdownWait(String(s.shutdownWaitSecs));
         setBulkLimit(String(s.bulkParallelLimit));
@@ -115,6 +118,22 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
       onChanged();
     } catch (err) {
       setVboxMessage({ ok: false, text: errorMessage(err) });
+    }
+  }
+
+  /** CT-02: Docker Desktop's docker.exe. */
+  async function saveDocker(next: string | null) {
+    try {
+      const s = await api.setDockerPath(next);
+      setSettings(s);
+      setDockerPath(s.dockerPathSaved ?? "");
+      setDockerMessage({
+        ok: s.dockerPathInUse !== null,
+        text: s.dockerPathInUse ? `Using ${s.dockerPathInUse}` : "docker.exe was not found",
+      });
+      onChanged();
+    } catch (err) {
+      setDockerMessage({ ok: false, text: errorMessage(err) });
     }
   }
 
@@ -257,6 +276,37 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
           <CardFooter className="gap-2">
             <Button onClick={() => void saveVboxmanage(vboxPath)}>Save</Button>
             <Button variant="outline" onClick={() => void saveVboxmanage(null)}>
+              Find automatically
+            </Button>
+          </CardFooter>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Docker Desktop on this PC</CardTitle>
+            <CardDescription>
+              The Containers page lists this PC&apos;s containers through Docker Desktop&apos;s docker.exe, when it is
+              installed. Leave the path empty to find it: REMOTELY_DOCKER first, then Docker Desktop&apos;s folder.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2">
+            <Label htmlFor="docker-path">docker.exe path</Label>
+            <Input
+              id="docker-path"
+              className="font-mono"
+              placeholder="Found automatically"
+              spellCheck={false}
+              value={dockerPath}
+              onChange={(e) => setDockerPath(e.currentTarget.value)}
+            />
+            <p className="text-sm text-muted-foreground">
+              In use: <span className="font-mono">{settings?.dockerPathInUse ?? "not found"}</span>
+            </p>
+            <StatusLine message={dockerMessage} />
+          </CardContent>
+          <CardFooter className="gap-2">
+            <Button onClick={() => void saveDocker(dockerPath)}>Save</Button>
+            <Button variant="outline" onClick={() => void saveDocker(null)}>
               Find automatically
             </Button>
           </CardFooter>

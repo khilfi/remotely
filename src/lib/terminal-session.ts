@@ -36,6 +36,7 @@ import {
   errorCode,
   errorMessage,
   type ApprovalAnswers,
+  type EngineKind,
   type FinishedHow,
   type FolderInfo,
   type HostFacts,
@@ -82,7 +83,9 @@ export type PaneOpener =
   /** QL-02. The typed password, if any, is dropped as soon as the core has it. */
   | { kind: "quick"; request: QuickConnectRequest }
   /** Another connection like an open pane, with a password typed for it (a split). */
-  | { kind: "like"; terminalId: string };
+  | { kind: "like"; terminalId: string }
+  /** CT-01: a shell in a running container on a session's host (`docker exec -it`), audited like a terminal. */
+  | { kind: "container"; sessionId: string; engine: EngineKind; containerId: string };
 
 export interface PaneSnapshot {
   status: PaneStatus;
@@ -173,6 +176,8 @@ export class PaneSession {
   private readonly realHost: HTMLDivElement;
   /** How the pane is named before the core says more: the session's or the typed address. */
   readonly label: string;
+  /** CT-01: the label stays the title (a container's shell is named after the container, not the session). */
+  readonly fixedTitle: boolean;
   private readonly fitAddon: FitAddon;
   private readonly searchAddon: SearchAddon;
   private readonly serializer: SerializeAddon;
@@ -203,18 +208,26 @@ export class PaneSession {
   /** SS-07: a tunnel started waiting for the user's approval (the page fetches the request and shows it). */
   onTunnelAsking: ((pane: PaneSession, forwardId: string) => void) | null = null;
 
-  constructor(key: string, opener: PaneOpener, label: string, theme: ResolvedTheme, options: PaneOptions) {
+  constructor(
+    key: string,
+    opener: PaneOpener,
+    label: string,
+    theme: ResolvedTheme,
+    options: PaneOptions,
+    fixedTitle = false,
+  ) {
     this.key = key;
     this.opener = opener;
     this.theme = theme;
     this.label = label;
+    this.fixedTitle = fixedTitle;
     this.snapshot = {
       status: { state: "opening" },
       statusAt: Date.now(),
       question: null,
       changedKey: null,
       facts: null,
-      sessionId: opener.kind === "session" ? opener.sessionId : null,
+      sessionId: opener.kind === "session" || opener.kind === "container" ? opener.sessionId : null,
       logPath: null,
       searching: false,
       searchResults: null,
@@ -512,6 +525,17 @@ export class PaneSession {
         // A saved quick connection is a session from now on: reconnects and splits follow it.
         this.opener = opened.session ? { kind: "session", sessionId: opened.session.id } : null;
         if (opened.session) this.update({ sessionId: opened.session.id });
+      } else if (opener.kind === "container") {
+        const opened = await api.containerShellOpen(
+          opener.sessionId,
+          opener.engine,
+          opener.containerId,
+          cols,
+          rows,
+          this.onOutput,
+          this.onEvent,
+        );
+        id = opened.id;
       } else {
         id = await api.terminalOpenLike(opener.terminalId, cols, rows, this.onOutput, this.onEvent);
         this.opener = null;

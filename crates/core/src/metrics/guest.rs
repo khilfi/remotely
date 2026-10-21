@@ -178,11 +178,11 @@ impl Failure {
 
 /// SS-05 for guest polling: trusted keys pass, unknown keys fail (no one is there to ask), and a
 /// changed key blocks the connection and is audited.
-struct GuestVerifier {
-    known_hosts: Arc<KnownHosts>,
-    ctx: Context,
-    target: Target,
-    record_blocked: bool,
+pub(crate) struct GuestVerifier {
+    pub(crate) known_hosts: Arc<KnownHosts>,
+    pub(crate) ctx: Context,
+    pub(crate) target: Target,
+    pub(crate) record_blocked: bool,
 }
 
 #[async_trait]
@@ -212,7 +212,7 @@ impl HostKeyVerifier for GuestVerifier {
 
 /// What a connection depends on: host, port, user, login method and its vault ids, for the session
 /// and each jump host on the way (SS-07).
-fn spec_key(spec: &SessionSpec) -> String {
+pub(crate) fn spec_key(spec: &SessionSpec) -> String {
     let hop = |s: &SessionSpec| format!("{}|{}|{}|{:?}", s.host, s.port, s.username, s.auth);
     let mut key: Vec<String> = spec.jumps().into_iter().map(hop).collect();
     key.push(hop(spec));

@@ -4,6 +4,7 @@
 
 mod clipboard;
 mod command_panel;
+mod containers;
 mod files;
 mod ipc;
 mod multiexec;
@@ -300,6 +301,21 @@ pub fn run() {
             terminal::terminal_output_save,
             terminal::terminal_log_start,
             terminal::terminal_log_stop,
+            containers::containers_hosts,
+            containers::containers_marks,
+            containers::containers_set_marks,
+            containers::containers_detect,
+            containers::containers_version,
+            containers::containers_list,
+            containers::containers_stats,
+            containers::containers_details,
+            containers::containers_logs,
+            containers::containers_images,
+            containers::containers_volumes,
+            containers::containers_networks,
+            containers::containers_release,
+            containers::container_shell_open,
+            ipc::settings_set_docker_path,
             tunnels::forwards_list,
             tunnels::forwards_all,
             tunnels::forwards_save,

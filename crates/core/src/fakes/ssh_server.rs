@@ -37,7 +37,15 @@
 //! forward) listens on 127.0.0.1 and sends each connection back over the client's connection.
 //! [`TestSshServer::without_forwarding`] refuses both. The log says what was asked
 //! (`direct-tcpip db01.test:22`, `tcpip-forward localhost:9000`), never what went through.
+//!
+//! CT-01: with [`TestSshServer::with_containers`], `docker` and `podman` programs answer from a
+//! [`Fixture`] in each CLI's JSON and change it like the CLIs ([`docker`]); the log names each call
+//! (`docker stop 4f1e…`). Docker refuses the user unless it runs as root or
+//! [`TestSshServer::without_docker_group`] was not called. The interactive shell enters a running
+//! container on `exec [sudo [-n]] docker exec -it <id> sh -c ...` (prompt `root@<id>:/# `; `exit` ends
+//! the shell, since `exec` replaced it).
 
+pub mod docker;
 mod sftp;
 
 use std::collections::{HashMap, HashSet};
@@ -56,6 +64,8 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::adapters::containers::{ContainerState, EngineKind};
+use crate::fakes::containers::Fixture;
 use crate::locks;
 use crate::vault::SecretString;
 
@@ -145,6 +155,10 @@ struct State {
     no_forwarding: AtomicBool,
     /// SS-07: remote forwards listening, by (address, port), with the connection that asked.
     listeners: Mutex<HashMap<(String, u32), (usize, tokio::task::AbortHandle)>>,
+    /// CT-01: the `docker` and `podman` programs, by program name, and what they hold.
+    engines: Mutex<HashMap<String, Fixture>>,
+    /// CT-01: the login user is not in the `docker` group, so Docker refuses it without sudo.
+    no_docker_group: AtomicBool,
 }
 
 struct Link {
@@ -371,6 +385,26 @@ impl TestSshServer {
         locks::lock(&self.state.modes).get(path).copied()
     }
 
+    /// CT-01: a `docker` or `podman` program holding `fixture` (see [`docker`]).
+    pub fn with_containers(self, engine: EngineKind, fixture: Fixture) -> Self {
+        locks::lock(&self.state.engines).insert(engine.program().to_owned(), fixture);
+        self
+    }
+
+    /// CT-01: the user is not in the `docker` group: Docker answers only under sudo.
+    pub fn without_docker_group(self) -> Self {
+        self.state.no_docker_group.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// CT-01: what an engine holds now.
+    pub fn containers(&self, engine: EngineKind) -> Fixture {
+        locks::lock(&self.state.engines)
+            .get(engine.program())
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// A program that prints `stdout` whatever its arguments, e.g. `df`.
     pub fn with_program(self, name: &str, stdout: &str) -> Self {
         locks::lock(&self.state.programs).insert(name.into(), stdout.into());
@@ -480,6 +514,7 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             folders: HashMap::new(),
             hooked: HashSet::new(),
             switched: HashMap::new(),
+            in_container: HashMap::new(),
         };
         let session = {
             let state = Arc::clone(&state);
@@ -565,6 +600,8 @@ struct ServerHandler {
     /// QL-09: shells started with `su` in each interactive shell, innermost last: the user and its
     /// folder. They have no hook.
     switched: HashMap<ChannelId, Vec<(String, String)>>,
+    /// CT-01: shells that went into a container (`exec docker exec -it`), with its short id.
+    in_container: HashMap<ChannelId, String>,
 }
 
 impl ServerHandler {
@@ -614,6 +651,9 @@ impl ServerHandler {
     /// The prompt: `$ `, after OSC 7 with the folder and the user report once the prompt hook ran
     /// (SS-08, QL-09). A shell started with `su` shows `bob@host:~$ ` (`#` for root) and no hook.
     fn prompt(&self, channel: ChannelId) -> Vec<u8> {
+        if let Some(short) = self.in_container.get(&channel) {
+            return format!("root@{short}:/# ").into_bytes();
+        }
         if let Some((user, folder)) = self.switched.get(&channel).and_then(|s| s.last()) {
             let home = home_of(user);
             let shown = match folder.strip_prefix(&home) {
@@ -644,7 +684,68 @@ impl ServerHandler {
             format!("line {line}")
         });
         let mut words = line.split_whitespace();
+        // CT-01: inside a container's shell.
+        if self.in_container.contains_key(&channel) {
+            match words.next() {
+                Some("exit") => {
+                    self.in_container.remove(&channel);
+                    session.data(channel, b"exit\r\n".to_vec())?;
+                    session.exit_status_request(channel, 0)?;
+                    session.eof(channel)?;
+                    return session.close(channel);
+                }
+                Some("hostname") => {
+                    let short = self.in_container.get(&channel).cloned().unwrap_or_default();
+                    session.data(channel, format!("{short}\r\n").into_bytes())?;
+                }
+                Some("whoami") => session.data(channel, b"root\r\n".to_vec())?,
+                Some(other) => session.data(channel, format!("sh: {other}: not found\r\n").into_bytes())?,
+                None => {}
+            }
+            return session.data(channel, self.prompt(channel));
+        }
         match words.next() {
+            // CT-01: "Open a shell": `exec [sudo [-n]] docker|podman exec -it <id> sh -c '...'`.
+            Some("exec") => {
+                let mut rest: Vec<&str> = words.collect();
+                if rest.first() == Some(&"sudo") {
+                    rest.remove(0);
+                    if rest.first() == Some(&"-n") {
+                        rest.remove(0);
+                    }
+                }
+                let (program, id) = match rest.as_slice() {
+                    [program @ ("docker" | "podman"), "exec", "-it", id, ..] => {
+                        ((*program).to_owned(), (*id).to_owned())
+                    }
+                    _ => {
+                        session.data(channel, b"exec: only container shells are supported here\r\n".to_vec())?;
+                        return session.data(channel, self.prompt(channel));
+                    }
+                };
+                let running = locks::lock(&self.state.engines).get(&program).and_then(|f| {
+                    f.containers
+                        .iter()
+                        .find(|c| c.id.starts_with(&id))
+                        .map(|c| (c.short_id().to_owned(), c.state == ContainerState::Running))
+                });
+                match running {
+                    Some((short, true)) => {
+                        self.state.note(format!("container shell {program} {short}"));
+                        self.in_container.insert(channel, short);
+                    }
+                    other => {
+                        let why = match other {
+                            Some(_) => format!("Error response from daemon: container {id} is not running\r\n"),
+                            None => format!("Error response from daemon: No such container: {id}\r\n"),
+                        };
+                        session.data(channel, why.into_bytes())?;
+                        session.exit_status_request(channel, 1)?;
+                        session.eof(channel)?;
+                        return session.close(channel);
+                    }
+                }
+            }
             // SS-08: Remotely's prompt hook, in a shell the probe called bash or zsh: it prints its
             // marker, and OSC 7 comes before each prompt from now on.
             Some(_) if hook && locks::lock(&self.state.login_shell).is_some() => {
@@ -1974,7 +2075,8 @@ impl<'a> ToyShell<'a> {
             "command" => match args {
                 [flag, name] if flag == "-v" => {
                     let known = BUILTINS.contains(&name.as_str())
-                        || locks::lock(&self.state.programs).contains_key(name.as_str());
+                        || locks::lock(&self.state.programs).contains_key(name.as_str())
+                        || locks::lock(&self.state.engines).contains_key(name.as_str());
                     if known {
                         self.print(&format!("{name}\n"));
                     }
@@ -1985,6 +2087,22 @@ impl<'a> ToyShell<'a> {
                     2
                 }
             },
+            // CT-01: the container CLIs.
+            program @ ("docker" | "podman") if locks::lock(&self.state.engines).contains_key(program) => {
+                let state = self.state;
+                let access = self.user == "root" || !state.no_docker_group.load(Ordering::SeqCst);
+                let ran = {
+                    let mut engines = locks::lock(&state.engines);
+                    match engines.get_mut(program) {
+                        Some(fixture) => docker::run(fixture, program, args, access),
+                        None => return 127,
+                    }
+                };
+                state.note(format!("{program} {}", args.join(" ")));
+                self.print(&ran.stdout);
+                self.err(&ran.stderr);
+                ran.status
+            }
             other if locks::lock(&self.state.programs).contains_key(other) => {
                 let text = locks::lock(&self.state.programs)
                     .get(other)

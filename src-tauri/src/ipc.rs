@@ -370,6 +370,10 @@ pub struct Settings {
     shutdown_wait_secs: u64,
     /// BX-02: how many hosts a bulk run reaches at once.
     bulk_parallel_limit: usize,
+    /// CT-02: the docker.exe path the user chose; `None`: find it.
+    docker_path_saved: Option<String>,
+    /// CT-02: the docker.exe in use; `None`: Docker Desktop was not found.
+    docker_path_in_use: Option<String>,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -389,6 +393,8 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
         power_on_limit: core.power_on_limit(),
         shutdown_wait_secs: core.shutdown_wait_secs(),
         bulk_parallel_limit: core.bulk_parallel_limit(),
+        docker_path_saved: core.saved_docker_path().await?.map(|p| p.display().to_string()),
+        docker_path_in_use: core.docker_path().map(|p| p.display().to_string()),
     })
 }
 
@@ -416,6 +422,17 @@ pub async fn settings_set_vboxmanage_path(state: State<'_, AppState>, path: Opti
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
     state.core.set_vboxmanage_path(path).await?;
+    settings(&state.core).await
+}
+
+/// CT-02: Docker Desktop's docker.exe. `None` or an empty string goes back to finding it.
+#[tauri::command]
+pub async fn settings_set_docker_path(state: State<'_, AppState>, path: Option<String>) -> IpcResult<Settings> {
+    let path = path
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    state.core.set_docker_path(path).await?;
     settings(&state.core).await
 }
 

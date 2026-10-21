@@ -4,6 +4,7 @@
 //! Compiled for the crate's own unit tests and, through the `fakes` feature, for the integration
 //! tests in `tests/`. The app never enables that feature.
 
+pub mod containers;
 pub mod github_server;
 pub mod ssh_server;
 
@@ -450,6 +451,8 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
     }
     found
 }
+
+pub use containers::FakeContainers;
 
 /// VM-18: VirtualBox in memory. VMs are registered with a UUID, a name and a state; power calls
 /// change the state and snapshot calls the tree the way VBoxManage would, through the same checks as
@@ -1040,6 +1043,19 @@ impl ExecSession for FakeSession {
             exit_code: Some(self.exit_code),
             signal: None,
             output: OutputCollector::collect(self.stdout.as_bytes(), b"", &[], max_output),
+            duration_ms: 1,
+        })
+    }
+
+    async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult> {
+        if self.is_closed() {
+            return Err(CoreError::Ssh("the connection was lost: the connection was cut".into()));
+        }
+        locks::lock(&self.calls).push(format!("{}: {script} [sudo]", self.host));
+        Ok(ExecResult {
+            exit_code: Some(self.exit_code),
+            signal: None,
+            output: OutputCollector::collect(self.stdout.as_bytes(), b"", &[password], max_output),
             duration_ms: 1,
         })
     }

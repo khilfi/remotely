@@ -37,15 +37,17 @@ import {
   type ApprovalAnswers,
   type ApprovalRequest,
   type ApprovalStep,
+  type ContainerImpact,
   type TargetImpact,
   type VaultInfo,
 } from "@/lib/api";
+import { containerTargetKey, formatBytes } from "@/lib/containers";
 import { isLoopback } from "@/lib/tunnels";
 import { approveReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { targetLocation } from "@/lib/hypervisors";
 import { formatSize } from "@/lib/transfers";
-import { EnvBadge, StateBadge, TierBadge } from "./Badges";
+import { ContainerStateBadge, EnvBadge, StateBadge, TierBadge } from "./Badges";
 import { WhyDisabled } from "./WhyDisabled";
 
 interface Props {
@@ -72,7 +74,32 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
   if (target.kind === "vm") return target.vmxPath;
   if (target.kind === "session") return target.sessionId;
   if (target.kind === "terminal") return target.terminalId;
+  if (target.kind === "container") return containerTargetKey(target);
   return "app";
+}
+
+/** CT-01, CT-02: what a container target is and what it touches. */
+function ContainerImpactLines({ impact }: { impact: ContainerImpact }) {
+  return (
+    <div className="grid gap-0.5 text-xs text-muted-foreground">
+      {impact.image && <div>Image {impact.image}</div>}
+      {impact.ports.length > 0 && <div>Ports {impact.ports.join(", ")}</div>}
+      {impact.usedBy.length > 0 && <div>Used by {impact.usedBy.join(", ")}</div>}
+      {impact.removes.length > 0 && (
+        <div className="text-tier-high">
+          Removes:
+          <ul className="list-disc pl-4">
+            {impact.removes.map((r) => (
+              <li key={r}>{r}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {impact.kind === "engine" && impact.removes.length === 0 && impact.usedBy.length === 0 && (
+        <div>Nothing listed to remove</div>
+      )}
+    </div>
+  );
 }
 
 /** After approval: the job waits until `until` and can be cancelled meanwhile (AP-03). */
@@ -96,6 +123,8 @@ export function ApprovalDialog({
   const risky = tier === "high" || tier === "critical";
   const impact = new Map<string, TargetImpact>(request.impact.map((i) => [i.target, i]));
   const hasVms = request.targets.some((t) => t.target.kind === "vm");
+  // CT-01, CT-02: containers show their state, image and uptime; images and volumes what uses them.
+  const hasContainers = request.impact.some((i) => i.container);
 
   const [safetySnapshot, setSafetySnapshot] = useState(snapshot?.defaultOn ?? false);
   const [typed, setTyped] = useState("");
@@ -207,6 +236,12 @@ export function ApprovalDialog({
                       <TableHead className="text-right">Snapshots</TableHead>
                     </>
                   )}
+                  {hasContainers && (
+                    <>
+                      <TableHead>State</TableHead>
+                      <TableHead>Now</TableHead>
+                    </>
+                  )}
                   <TableHead className="w-20">Label</TableHead>
                 </TableRow>
               </TableHeader>
@@ -223,12 +258,28 @@ export function ApprovalDialog({
                             {targetLocation(t.target.vmxPath)}
                           </div>
                         )}
+                        {now?.container && <ContainerImpactLines impact={now.container} />}
                         {now?.notes.map((note) => (
                           <div key={note} className="text-xs text-tier-medium">
                             {note}
                           </div>
                         ))}
                       </TableCell>
+                      {hasContainers && (
+                        <>
+                          <TableCell>
+                            {now?.container?.state ? (
+                              <ContainerStateBadge state={now.container.state} />
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-sm whitespace-normal text-muted-foreground">
+                            {now?.container?.status ??
+                              (now?.container?.sizeBytes != null ? formatBytes(now.container.sizeBytes) : "—")}
+                          </TableCell>
+                        </>
+                      )}
                       {hasVms && (
                         <>
                           <TableCell>

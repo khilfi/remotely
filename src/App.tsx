@@ -19,6 +19,7 @@ import {
   CameraIcon,
   DownloadIcon,
   GaugeIcon,
+  ContainerIcon,
   GitCompareArrowsIcon,
   HistoryIcon,
   KeyRoundIcon,
@@ -91,6 +92,7 @@ import {
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
+import { ContainersPage, type ContainerShellRequest } from "@/pages/ContainersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
@@ -101,14 +103,16 @@ import { VmsPage, type VmPageRequest } from "@/pages/VmsPage";
 import { navTarget, shortcutTarget, type NavTarget } from "@/lib/navigation";
 import type { VmView } from "@/lib/vm-snapshots";
 
-type PageId = "vms" | "dashboard" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
+type PageId =
+  "vms" | "dashboard" | "containers" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-/** In sidebar order, each with its own shortcut. Ctrl+3 is free for Containers (Q6). */
+/** In sidebar order, each with its own shortcut. Ctrl+3 is Containers (Q6); the old Snapshots alias stops. */
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
+  { id: "containers", label: "Containers", title: "Containers", icon: ContainerIcon, shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
   { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon, shortcut: "Ctrl+5" },
   { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon, shortcut: "Ctrl+6" },
@@ -141,8 +145,12 @@ export default function App() {
   const offered = updateCheck?.status === "available" ? updateCheck.update : null;
   // QL-14: a VM (or the snapshot view) to show on the Virtual machines page.
   const [vmRequest, setVmRequest] = useState<VmPageRequest | null>(null);
-  // SS-03: a session to open in a new terminal tab.
-  const [terminalOpen, setTerminalOpen] = useState<{ sessionId: string; n: number } | null>(null);
+  // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
+  const [terminalOpen, setTerminalOpen] = useState<{
+    sessionId: string;
+    n: number;
+    container?: ContainerShellRequest;
+  } | null>(null);
   // QL-02: the New terminal form, opened from the palette.
   const [terminalNew, setTerminalNew] = useState(0);
   // BX-03, SS-10: Compare output and MultiExec, opened from the palette.
@@ -370,6 +378,12 @@ export default function App() {
 
   function openTerminal(sessionId: string) {
     setTerminalOpen((prev) => ({ sessionId, n: (prev?.n ?? 0) + 1 }));
+    setPage("terminal");
+  }
+
+  /** CT-01 "Open a shell": a terminal tab inside a container on a session's host. */
+  function openContainerShell(container: ContainerShellRequest) {
+    setTerminalOpen((prev) => ({ sessionId: container.sessionId, n: (prev?.n ?? 0) + 1, container }));
     setPage("terminal");
   }
 
@@ -683,6 +697,15 @@ export default function App() {
                 onActions={(vmxPath) => openPalette(vmxPath)}
                 onOpenVms={() => setPage("vms")}
                 onOpenSessions={() => setPage("sessions")}
+              />
+            </section>
+            <section hidden={page !== "containers"} className="h-full">
+              <ContainersPage
+                active={page === "containers"}
+                onSubmitted={submitted}
+                onOpenShell={openContainerShell}
+                onOpenSettings={() => setPage("settings")}
+                refreshKey={jobsFinished + settingsVersion}
               />
             </section>
             <section hidden={page !== "sessions"}>

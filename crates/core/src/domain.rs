@@ -8,6 +8,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::adapters::containers::{ContainerId, EngineKind, ImageId, VolumeName};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct WorkspaceId(pub Uuid);
@@ -127,6 +129,100 @@ pub enum TargetRef {
         #[serde(default)]
         session_id: Option<Uuid>,
     },
+    /// CT-01, CT-02: a container, image or volume on a container host, or the engine itself (pulls and
+    /// prunes). Ids and names are checked when they are read, so a hostile one never gets this far.
+    Container {
+        host: ContainerHost,
+        engine: EngineKind,
+        object: ContainerObject,
+    },
+}
+
+/// CT-01, CT-02: where containers run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ContainerHost {
+    /// A saved session marked as a container host (CT-01).
+    Session { session_id: Uuid },
+    /// Docker Desktop on this PC (CT-02).
+    ThisPc,
+}
+
+impl ContainerHost {
+    /// The session's id, or `this-pc`.
+    pub fn key(&self) -> String {
+        match self {
+            ContainerHost::Session { session_id } => session_id.to_string(),
+            ContainerHost::ThisPc => THIS_PC_KEY.to_owned(),
+        }
+    }
+
+    pub fn parse_key(key: &str) -> Option<Self> {
+        if key == THIS_PC_KEY {
+            return Some(ContainerHost::ThisPc);
+        }
+        Uuid::parse_str(key)
+            .ok()
+            .map(|session_id| ContainerHost::Session { session_id })
+    }
+}
+
+/// [`ContainerHost::ThisPc`]'s key.
+pub const THIS_PC_KEY: &str = "this-pc";
+
+/// CT-01, CT-02: what on a container host a command acts on.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ContainerObject {
+    Container {
+        id: ContainerId,
+    },
+    Image {
+        id: ImageId,
+    },
+    Volume {
+        name: VolumeName,
+    },
+    /// The engine itself: pulling an image, pruning.
+    Engine,
+}
+
+impl ContainerObject {
+    pub fn key(&self) -> String {
+        match self {
+            ContainerObject::Container { id } => format!("container:{id}"),
+            ContainerObject::Image { id } => format!("image:{id}"),
+            ContainerObject::Volume { name } => format!("volume:{name}"),
+            ContainerObject::Engine => "engine".to_owned(),
+        }
+    }
+
+    pub fn parse_key(key: &str) -> Option<Self> {
+        if key == "engine" {
+            return Some(ContainerObject::Engine);
+        }
+        let (kind, value) = key.split_once(':')?;
+        match kind {
+            "container" => ContainerId::parse(value)
+                .ok()
+                .map(|id| ContainerObject::Container { id }),
+            "image" => ImageId::parse(value).ok().map(|id| ContainerObject::Image { id }),
+            "volume" => VolumeName::parse(value)
+                .ok()
+                .map(|name| ContainerObject::Volume { name }),
+            _ => None,
+        }
+    }
+
+    /// "container", "image", "volume", "engine".
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ContainerObject::Container { .. } => "container",
+            ContainerObject::Image { .. } => "image",
+            ContainerObject::Volume { .. } => "volume",
+            ContainerObject::Engine => "engine",
+        }
+    }
 }
 
 impl TargetRef {
@@ -136,6 +232,7 @@ impl TargetRef {
             TargetRef::Session { .. } => "session",
             TargetRef::App => "app",
             TargetRef::Terminal { .. } => "terminal",
+            TargetRef::Container { .. } => "container",
         }
     }
 
@@ -146,7 +243,22 @@ impl TargetRef {
             TargetRef::Session { session_id } => session_id.to_string(),
             TargetRef::App => "app".to_owned(),
             TargetRef::Terminal { terminal_id, .. } => terminal_id.to_string(),
+            // CT-01: `<session id or this-pc>/<engine>/<object>`, e.g. `…/docker/container:4f1e…`.
+            TargetRef::Container { host, engine, object } => {
+                format!("{}/{}/{}", host.key(), engine.as_str(), object.key())
+            }
         }
+    }
+
+    /// CT-01: a container target from its [`TargetRef::key`] (BX-04 retry).
+    pub fn container_from_key(key: &str) -> Option<TargetRef> {
+        let (host, rest) = key.split_once('/')?;
+        let (engine, object) = rest.split_once('/')?;
+        Some(TargetRef::Container {
+            host: ContainerHost::parse_key(host)?,
+            engine: EngineKind::parse(engine)?,
+            object: ContainerObject::parse_key(object)?,
+        })
     }
 }
 

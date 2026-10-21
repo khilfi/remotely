@@ -34,6 +34,14 @@
 //! port after the last server, for trying a local forward (`127.0.0.1:8080 -> web.test:80`, then
 //! http://127.0.0.1:8080) or a SOCKS one (`curl --socks5-hostname 127.0.0.1:1080 http://web.test/`). A
 //! remote forward listens on 127.0.0.1 of this PC (the servers run here), on the port it asks for.
+//!
+//! Containers (CT-01): every server has `docker` and `podman` programs (`fakes::containers`) holding a
+//! small shop (web, api, db and worker from one Compose project, a paused cache, an old job) with images,
+//! volumes and networks; start, stop, remove, pull and prune change it until the server stops, and the
+//! running web container logs a line at each read, so following its log shows something. On the second
+//! and later servers alice is not in the `docker` group, so Docker needs sudo there (the password above);
+//! Podman runs rootless everywhere. Mark a session as a container host on the Containers page (or let it
+//! detect the CLIs), and "Open a shell" enters a running container (`exit` ends that terminal).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -43,6 +51,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use remotely_core::adapters::containers::EngineKind;
+use remotely_core::fakes::containers::Fixture;
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::metrics::procfs::samples;
 
@@ -122,7 +132,11 @@ async fn main() {
             // QL-09: another user's folder that alice can't open.
             .with_sftp_file("/home/bob/notes.txt", b"bob's notes\n")
             .with_unreadable("/home/bob/.app")
-            .with_sftp_file("/home/bob/.app/app.ini", b"[app]\n");
+            .with_sftp_file("/home/bob/.app/app.ini", b"[app]\n")
+            // CT-01: Docker and Podman with a small shop; from the second server on, Docker needs sudo.
+            .with_containers(EngineKind::Docker, Fixture::sample())
+            .with_containers(EngineKind::Podman, Fixture::sample());
+        let server = if i > 0 { server.without_docker_group() } else { server };
         // SS-07: the other servers and the web page, by names only they resolve.
         let mut server = server;
         for other in 0..count {
@@ -148,6 +162,7 @@ async fn main() {
     println!("MultiExec and Compare output commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>");
     println!("Files: cd <dir> and pwd move the shell (the drawer follows); /etc refuses uploads");
     println!("  and for QL-09: cd /home/bob/.app (alice can't open it over SFTP); su [-] [user] switches user");
+    println!("Containers: docker and podman on every server; from the second on, docker needs sudo");
     println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");
     if count >= 2 {
         println!(

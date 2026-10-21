@@ -110,11 +110,13 @@ pub enum Change {
     ApprovalRules,
     /// SS-10: turning MultiExec on (each line would be refused anyway).
     MultiExec,
+    /// CT-01: marking sessions as container hosts, and how their engines run.
+    ContainerHosts,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 13] = [
+    pub const ALL: [Change; 14] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -128,6 +130,7 @@ impl Change {
         Change::Settings,
         Change::ApprovalRules,
         Change::MultiExec,
+        Change::ContainerHosts,
     ];
 
     pub fn label(self) -> &'static str {
@@ -145,6 +148,7 @@ impl Change {
             Change::Settings => "Change settings",
             Change::ApprovalRules => "Change the approval rules",
             Change::MultiExec => "Turn MultiExec on",
+            Change::ContainerHosts => "Mark container hosts",
         }
     }
 }

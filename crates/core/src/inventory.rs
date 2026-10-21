@@ -542,16 +542,27 @@ fn label_change(before: &[VmRecord], to: Environment) -> String {
 pub struct StoreDirectory {
     store: Store,
     terminals: Option<Terminals>,
+    containers: Option<crate::containers::Containers>,
 }
 
 impl StoreDirectory {
     pub fn new(store: Store) -> Self {
-        Self { store, terminals: None }
+        Self {
+            store,
+            terminals: None,
+            containers: None,
+        }
     }
 
     /// SS-10: terminal targets are the open panes.
     pub fn with_terminals(mut self, terminals: Terminals) -> Self {
         self.terminals = Some(terminals);
+        self
+    }
+
+    /// CT-01, CT-02: container targets are what the engines list.
+    pub fn with_containers(mut self, containers: crate::containers::Containers) -> Self {
+        self.containers = Some(containers);
         self
     }
 }
@@ -603,6 +614,10 @@ impl TargetDirectory for StoreDirectory {
             TargetRef::Terminal { terminal_id, .. } => match &self.terminals {
                 Some(terminals) => terminals.target(ctx, *terminal_id).await,
                 None => Err(CoreError::UnknownTarget(format!("terminal {terminal_id}"))),
+            },
+            TargetRef::Container { .. } => match &self.containers {
+                Some(containers) => containers.target(ctx, target).await,
+                None => Err(CoreError::UnknownTarget(target.key())),
             },
         }
     }

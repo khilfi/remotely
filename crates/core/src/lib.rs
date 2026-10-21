@@ -32,6 +32,9 @@
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //!     (the Terminal page's Compare output)
+//!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
+//!     ──► adapters::containers (their CLIs, over adapters::remote or on this PC); reads skip the bus,
+//!     changes are commands on it that the job runner carries out there
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -41,6 +44,7 @@ pub mod adapters;
 pub mod bulk;
 pub mod capacity;
 pub mod command_bus;
+pub mod containers;
 pub mod domain;
 pub mod error;
 pub mod export;
@@ -72,6 +76,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use adapters::containers::cli::{validate_docker_path, CliEngines};
+use adapters::containers::ContainerEngines;
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::hypervisor::Hypervisors;
 use adapters::network::{NetworkAdapter, SystemNetwork};
@@ -82,6 +88,7 @@ use adapters::vmware::{SwitchableVmware, VmwareAdapter};
 use bulk::BulkRuns;
 use capacity::CapacityChecker;
 use command_bus::CommandBus;
+use containers::Containers;
 use domain::Context;
 use forwards::Forwards;
 use impact::ImpactPreviewer;
@@ -135,6 +142,8 @@ pub struct Adapters {
     /// DNS lookups (QL-01 linking sessions to VMs, QL-03 host name and IP) and QL-04 reachability
     /// probes.
     pub network: Arc<dyn NetworkAdapter>,
+    /// CT-01, CT-02: container engines: their CLIs over SSH and Docker Desktop's on this PC.
+    pub containers: Arc<dyn ContainerEngines>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -186,6 +195,9 @@ pub struct Core {
     pub reachability: Arc<ReachabilityChecker>,
     /// BX-01, BX-03, BX-05: Compare targets, results, diffs and exports. Running is the bus.
     pub bulk: BulkRuns,
+    /// CT-01, CT-02: container hosts, their containers, images, volumes and networks. Reads only;
+    /// changes go through [`Core::bus`].
+    pub containers: Containers,
     /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
     /// The shell starts its polling with [`Metrics::run`].
     pub metrics: Arc<Metrics>,
@@ -208,6 +220,7 @@ impl Core {
         let ctx = store.ensure_identity(&config.account, &config.display_name).await?;
         let saved = saved_vmrun_path(&store, &ctx).await?;
         let vmware: Arc<dyn VmwareAdapter> = Arc::from(adapters::vmware::connect(config.vmrun_path.or(saved)));
+        let docker = saved_docker_path(&store, &ctx).await?;
         let saved_vbox = saved_vboxmanage_path(&store, &ctx).await?;
         let virtualbox: Arc<dyn VirtualBoxAdapter> =
             Arc::from(adapters::virtualbox::connect(config.vboxmanage_path.or(saved_vbox)));
@@ -224,6 +237,7 @@ impl Core {
                 host_counters: Arc::new(WindowsCounters::new()),
                 updater: config.updater,
                 network: Arc::new(SystemNetwork),
+                containers: Arc::new(CliEngines::new(docker.as_deref())),
             },
             JobLimits::default(),
         )
@@ -242,6 +256,13 @@ impl Core {
         let hypervisors = Hypervisors::new(vmware_dyn, virtualbox.clone());
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
         let links = Arc::new(VmLinks::new(store.clone(), Arc::clone(&adapters.network)));
+        let containers = Containers::new(
+            store.clone(),
+            Arc::clone(&adapters.vault),
+            Arc::clone(&adapters.remote),
+            Arc::clone(&known_hosts),
+            Arc::clone(&adapters.containers),
+        );
         let terminals = Terminals::new(
             store.clone(),
             Arc::clone(&adapters.vault),
@@ -279,14 +300,20 @@ impl Core {
             Arc::new(terminals.clone()),
             limits,
         );
+        // CT-01, CT-02: container changes go from the job runner to the containers service.
+        jobs.set_containers(Arc::new(containers.clone()));
         let bus = Arc::new(CommandBus::new(
             policy,
-            Arc::new(StoreDirectory::new(store.clone()).with_terminals(terminals.clone())),
+            Arc::new(
+                StoreDirectory::new(store.clone())
+                    .with_terminals(terminals.clone())
+                    .with_containers(containers.clone()),
+            ),
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
             CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
-            ImpactPreviewer::new(store.clone(), hypervisors.clone()),
+            ImpactPreviewer::new(store.clone(), hypervisors.clone()).with_containers(containers.clone()),
         ));
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
@@ -316,6 +343,7 @@ impl Core {
             keys,
             transfer: Transfer::new(store.clone()),
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
+            containers,
             terminals,
             multiexec,
             files,
@@ -364,6 +392,41 @@ impl Core {
                 .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
         );
         self.audit_setting("Set the vmrun.exe path", &detail).await?;
+        Ok(in_use)
+    }
+
+    /// CT-02: the docker.exe in use (Docker Desktop's CLI), or `None` when it was not found.
+    pub fn docker_path(&self) -> Option<PathBuf> {
+        self.containers.this_pc_cli()
+    }
+
+    /// CT-02: the docker.exe path saved in Settings, if any.
+    pub async fn saved_docker_path(&self) -> Result<Option<PathBuf>> {
+        saved_docker_path(&self.store, &self.ctx).await
+    }
+
+    /// CT-02: saves the docker.exe path (`None` = find it: `REMOTELY_DOCKER`, then Docker Desktop's
+    /// folder) and looks for it again at once. The path must be an existing docker.exe. Audited, since it
+    /// decides which program this PC's container actions run.
+    pub async fn set_docker_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            validate_docker_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx, containers::DOCKER_PATH_KEY, &as_text)
+            .await?;
+        self.containers.find_this_pc_cli(path.as_deref());
+        let in_use = self.docker_path();
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the docker.exe path", &detail).await?;
         Ok(in_use)
     }
 
@@ -626,6 +689,13 @@ async fn load_policy(store: &Store, ctx: &Context) -> Result<PolicyEngine> {
             PolicyEngine::new(defaults)
         }
     }
+}
+
+async fn saved_docker_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
+    let saved = store
+        .get_setting::<Option<String>>(ctx, containers::DOCKER_PATH_KEY)
+        .await?;
+    Ok(saved.flatten().map(PathBuf::from))
 }
 
 async fn saved_vmrun_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {

@@ -78,7 +78,17 @@ crates/core/          remotely-core: all app logic
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
                       VBoxHeadless.exe), updater.rs, github.rs (FD-14 GitHub Releases API with the
                       update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
-                      TCP probe)
+                      TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
+                      the docker and podman CLIs over a kept SSH connection's exec channels, with sudo from the vault
+                      (ExecSession::run_sudo) or NOPASSWD, and docker.exe on this PC, found like vmrun; parse.rs both
+                      CLIs' JSON field by field (env values never leave it); names.rs checked ids, volume names and
+                      image references, every word shell-quoted on hosts)
+    containers/       CT-01, CT-02 container hosts: marks.rs (sessions marked Docker or Podman, how each runs: as the
+                      user or with sudo; migration 0013, audited like session edits, Change::ContainerHosts, FD-07);
+                      mod.rs the Containers service: detection, reads on kept connections (closed when idle), target
+                      names from the engines' own lists (StoreDirectory), the AP-02 impact preview, ContainerActions
+                      for the job runner (Command::Container), and "Open a shell" (Terminals::open_container_shell
+                      types docker/podman exec -it instead of the startup command)
     updates.rs        FD-14 update checks and the GitHub update token in the vault
     inventory.rs      VM-01 Workstation's and (VM-18) VirtualBox's VMs; a VirtualBox VM is kept when VirtualBox can't
                       be asked
@@ -144,17 +154,20 @@ crates/core/          remotely-core: all app logic
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
                       subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
-                      through another) and tcpip-forward; QL-09 `su [-] [user]` in its shell, a shell without the hook
+                      through another) and tcpip-forward; QL-09 `su [-] [user]` in its shell, a shell without the hook;
+                      ssh_server/docker.rs CT-01 its `docker` and `podman` programs (each CLI's JSON from a fixture)
+    fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
-                      chains and tunnels by hand
+                      chains, tunnels and the Containers page by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation); opt-in
                       workstation_it.rs and virtualbox_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
                       (command_panel.rs), clipboard read for right-click paste, SS-08 file
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
-                      SS-07 port forwards and tunnels (tunnels.rs)
+                      SS-07 port forwards and tunnels (tunnels.rs), CT-01 the Containers page's reads, marks and
+                      container shells (containers.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -162,14 +175,18 @@ src/                  React + TypeScript UI
                       bar, WhyDisabled for QL-08,
                       FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
-                      VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list)
+                      VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
+                      ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
+                      volumes, networks) for CT-01)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
-                      is VMs and snapshots, with the selection's bulk snapshot actions and the details panel)
+                      is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
+                      ContainersPage at Ctrl+3)
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), theme.ts, utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
                       and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
-                      navigation.ts (page shortcuts by page; the old Snapshots id and Ctrl+3 open the VM page's snapshot
-                      view until Containers takes slot 3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints),
+                      navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
+                      Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
+                      (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals), presentation-state.ts; pure helpers with
@@ -268,6 +285,10 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
   resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on
   127.0.0.1. Tunnel tests bind loopback with port 0; never a network address.
+- Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use
+  `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
+  (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).
+  `Setup::with_ssh()` uses `CliEngines::without_this_pc()`, so no test ever finds or runs this PC's Docker Desktop.
 
 ## Commands
 
@@ -281,7 +302,8 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   (SS-08) with a bash login, so the "Files here" drawer follows `cd` (QL-09: `cd /home/bob/.app`, a folder alice
   can't open over SFTP, and `su bob` to switch user). SS-07: the servers reach each other as
   `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
-  `web.test:80`, for trying chains and tunnels.
+  `web.test:80`, for trying chains and tunnels. CT-01: each has `docker` and `podman` with a small shop of containers
+  (from the second server on, docker needs sudo); mark a session as a container host on the Containers page.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Opt-in test against real VirtualBox (reads only: `list vms`, then for `it-` VMs only `showvminfo`, snapshots, guest properties and their processes): `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)

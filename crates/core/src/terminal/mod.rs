@@ -92,6 +92,7 @@ use crate::adapters::remote::{
     RemoteAdapter, RemoteFiles, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
 };
 use crate::command_bus::CommandBus;
+use crate::containers::ContainerShell;
 use crate::domain::{Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
@@ -583,6 +584,8 @@ struct Control {
     tunnel_ops: tokio::sync::Mutex<()>,
     /// The pane's events, for changes made outside its task (SS-07 tunnels opened by the job runner).
     events: mpsc::Sender<TerminalEvent>,
+    /// CT-01: a shell in a container: typed instead of the session's startup command at each connection.
+    container: Option<ContainerShell>,
 }
 
 impl Control {
@@ -651,6 +654,8 @@ struct NewPane {
     /// The audit entry's action and detail.
     action: String,
     detail: String,
+    /// CT-01: a shell in a container.
+    container: Option<ContainerShell>,
 }
 
 /// The open terminal panes. Cloning gives another handle to the same panes.
@@ -708,7 +713,30 @@ impl Terminals {
     /// (SS-07). Fails at once, opening nothing, for a key login with no key chosen or jump hosts that
     /// go round in a loop.
     pub async fn open(&self, ctx: &Context, session_id: Uuid, size: PtySize) -> Result<TerminalHandle> {
-        self.open_saved(ctx, session_id, None, HashMap::new(), size, "Opened a terminal to", "")
+        self.open_saved(
+            ctx,
+            session_id,
+            None,
+            HashMap::new(),
+            size,
+            "Opened a terminal to",
+            "",
+            None,
+        )
+        .await
+    }
+
+    /// CT-01 "Open a shell": a pane to the session that types `shell.command` (`docker exec -it` into a
+    /// running container, from [`crate::containers::Containers::shell`]) once the login shell is ready,
+    /// instead of the session's startup command. Audited like opening a terminal, naming the container.
+    pub async fn open_container_shell(
+        &self,
+        ctx: &Context,
+        session_id: Uuid,
+        shell: ContainerShell,
+        size: PtySize,
+    ) -> Result<TerminalHandle> {
+        self.open_saved(ctx, session_id, None, HashMap::new(), size, "", "", Some(shell))
             .await
     }
 
@@ -723,6 +751,7 @@ impl Terminals {
         verb: &str,
         // How the audit names a password typed before this terminal opened.
         typed_how: &str,
+        container: Option<ContainerShell>,
     ) -> Result<TerminalHandle> {
         let spec = self
             .inner
@@ -746,14 +775,25 @@ impl Terminals {
             (auth, _) => describe_auth(auth),
         };
         let via = spec.route().map(|route| format!("; via {route}")).unwrap_or_default();
+        let (action, detail) = match &container {
+            Some(shell) => (
+                shell.action.clone(),
+                format!("{}, {auth}{via}; {}", spec.address(), shell.detail),
+            ),
+            None => (
+                format!("{verb} '{}'", spec.name),
+                format!("{}, {auth}{via}", spec.address()),
+            ),
+        };
         let pane = NewPane {
             source: Source::Saved(session_id),
             name: spec.name.clone(),
-            action: format!("{verb} '{}'", spec.name),
-            detail: format!("{}, {auth}{via}", spec.address()),
+            action,
+            detail,
             target: Some(target),
             remembered,
             jump_passwords,
+            container,
         };
         let handle = self.start(ctx, pane, size).await?;
         // QL-02: Recent sessions. Not worth failing the terminal over.
@@ -782,6 +822,7 @@ impl Terminals {
                     size,
                     "Opened a terminal to",
                     "password typed in the quick-connect form",
+                    None,
                 )
                 .await?;
             return Ok(QuickOpened {
@@ -804,6 +845,7 @@ impl Terminals {
             jump_passwords: HashMap::new(),
             action: format!("Opened a quick-connect terminal to {address}"),
             detail: format!("{address}, {auth}; not saved as a session"),
+            container: None,
         };
         let handle = self.start(ctx, pane, size).await?;
         self.inner
@@ -823,6 +865,11 @@ impl Terminals {
         let jump_passwords = locks::lock(&control.jump_passwords).clone();
         match &control.source {
             Source::Saved(session_id) => {
+                // CT-01: a split of a container's shell is another shell in that container.
+                let container = control.container.clone().map(|mut shell| {
+                    shell.action = shell.action.replacen("Opened a shell", "Opened another shell", 1);
+                    shell
+                });
                 self.open_saved(
                     ctx,
                     *session_id,
@@ -831,6 +878,7 @@ impl Terminals {
                     size,
                     "Opened another terminal to",
                     "password typed earlier",
+                    container,
                 )
                 .await
             }
@@ -848,6 +896,7 @@ impl Terminals {
                     jump_passwords,
                     action: format!("Opened another quick-connect terminal to {address}"),
                     detail: format!("{address}, {auth}; not saved as a session"),
+                    container: None,
                 };
                 self.start(ctx, pane, size).await
             }
@@ -912,6 +961,7 @@ impl Terminals {
             tunnels: Mutex::default(),
             tunnel_ops: tokio::sync::Mutex::default(),
             events: events_tx.clone(),
+            container: pane.container,
         });
         audit(
             &self.inner.store,
@@ -1915,12 +1965,16 @@ impl Pane {
                 })
                 .await;
         }
-        // SS-01: the session's startup command, typed into each new shell by the pump.
-        let startup = spec
-            .startup_command
-            .as_deref()
-            .map(|command| command.lines().map(str::to_owned).collect())
-            .unwrap_or_default();
+        // SS-01: the session's startup command, typed into each new shell by the pump. CT-01: a container's
+        // shell instead, in a pane opened for one.
+        let startup = match &self.control.container {
+            Some(shell) => vec![shell.command.clone()],
+            None => spec
+                .startup_command
+                .as_deref()
+                .map(|command| command.lines().map(str::to_owned).collect())
+                .unwrap_or_default(),
+        };
         if let Some(ip) = shell.peer_ip {
             self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
         }

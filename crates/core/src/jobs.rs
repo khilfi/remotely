@@ -28,6 +28,9 @@
 //!   policy engine held back ([`TerminalActions`]), to terminals that are still connected.
 //! * SS-08 uploads: through the one open terminal, over its SFTP channel ([`TerminalActions::upload`]);
 //!   each file is audited as it lands, and the end of the job says what landed and what did not.
+//! * CT-01, CT-02 container changes: through the containers service ([`ContainerActions`]), one target
+//!   (container, image, volume or a host's engine) at a time per slot. The CLI's output is kept with the
+//!   job; the audit entry at the end says only what each target did ("reclaimed 1.2GB").
 //! * Every job and target is journaled in the store, and the audit log gets an entry when the job
 //!   starts and when it ends (NFR Audit, NFR Reliability).
 
@@ -43,7 +46,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::adapters::exec_output::{CollectedOutput, MAX_OUTPUT_PER_STREAM};
+use crate::adapters::exec_output::{CollectedOutput, OutputCollector, MAX_OUTPUT_PER_STREAM};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::remote::{
     AgentSource, AuthMethod, ConnectOptions, ExecRequest, HostKeyVerifier, RemoteAdapter, SessionSpec,
@@ -51,6 +54,7 @@ use crate::adapters::remote::{
 use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::{path_key, ToolsState};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp, StopMode};
+use crate::containers::ContainerActions;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
@@ -358,6 +362,8 @@ pub struct JobRunner {
     known_hosts: Arc<KnownHosts>,
     /// SS-10, SS-08: the open terminals a MultiExec line's Enter and an upload go to.
     terminals: Arc<dyn TerminalActions>,
+    /// CT-01, CT-02: container hosts (set once the core is put together).
+    containers: RwLock<Option<Arc<dyn ContainerActions>>>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -390,6 +396,7 @@ impl JobRunner {
             vault,
             known_hosts,
             terminals,
+            containers: RwLock::new(None),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -415,6 +422,11 @@ impl JobRunner {
     /// BX-02: how many hosts a bulk run reaches at once, from the next job on. At least 1.
     pub fn set_remote_limit(&self, limit: usize) {
         locks::write(&self.limits).remote = limit.max(1);
+    }
+
+    /// CT-01, CT-02: where container changes go.
+    pub fn set_containers(&self, containers: Arc<dyn ContainerActions>) {
+        *locks::write(&self.containers) = Some(containers);
     }
 
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
@@ -744,7 +756,10 @@ impl JobRunner {
             let vmware = cancelled_in_flight.iter().any(|t| {
                 matches!(&t.target, TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::Vmware)
             });
-            let what = if matches!(spec.command, Command::RemoteExec { .. } | Command::PushSshKey { .. }) {
+            let what = if matches!(
+                spec.command,
+                Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::Container { .. }
+            ) {
                 "cancelled while the command was running, so the host may still finish it"
             } else if virtualbox && vmware {
                 "cancelled while vmrun or VBoxManage was running, so Workstation or VirtualBox may still finish it"
@@ -916,6 +931,31 @@ impl JobRunner {
                 let at = self.terminals.open_tunnel(run).await?;
                 Ok(TargetOutcome {
                     note: Some(format!("listening on {at}")),
+                    ..TargetOutcome::done()
+                })
+            }
+            (Command::Container { op, .. }, container @ TargetRef::Container { .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let containers = locks::read(&self.containers)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("container hosts"))?;
+                // Cancel stops waiting; the engine may still finish what it was asked.
+                let done = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(CoreError::CancelledRemote),
+                    done = containers.change(&spec.ctx, container, op) => done?,
+                };
+                let output = OutputCollector::collect(
+                    done.stdout.as_bytes(),
+                    done.stderr.as_bytes(),
+                    &[],
+                    MAX_OUTPUT_PER_STREAM,
+                );
+                Ok(TargetOutcome {
+                    output: Some(output),
+                    note: done.note.map(|note| format!("{}: {note}", target.name)),
                     ..TargetOutcome::done()
                 })
             }
@@ -1187,7 +1227,7 @@ impl JobRunner {
                 ..
             } => limits.power_on,
             Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => limits.vm_ops,
-            Command::RemoteExec { .. } | Command::PushSshKey { .. } => limits.remote,
+            Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::Container { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
@@ -1254,6 +1294,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::TerminalLine { .. } => "command",
         Command::FileUpload { .. } => "upload",
         Command::OpenTunnel { .. } => "tunnel",
+        Command::Container { .. } => "container",
         Command::AppUpdate { .. } => "update",
     }
 }

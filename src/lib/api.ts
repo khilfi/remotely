@@ -1,5 +1,5 @@
-// Typed wrappers over the Tauri IPC commands in src-tauri/src/ipc.rs, terminal.rs, multiexec.rs, command_panel.rs and
-// files.rs.
+// Typed wrappers over the Tauri IPC commands in src-tauri/src/ipc.rs, terminal.rs, multiexec.rs, command_panel.rs,
+// files.rs and containers.rs.
 // The UI talks to the Rust core only through these; it never runs vmrun or SSH itself.
 // Types mirror the serde shapes in crates/core.
 
@@ -40,7 +40,9 @@ export type TargetRef =
   | { kind: "session"; sessionId: string }
   | { kind: "app" }
   /** SS-10: an open terminal (MultiExec); the core fills in the session behind it. */
-  | { kind: "terminal"; terminalId: string; sessionId?: string | null };
+  | { kind: "terminal"; terminalId: string; sessionId?: string | null }
+  /** CT-01, CT-02: a container, image or volume on a container host, or the engine itself (pull, prune). */
+  | { kind: "container"; host: ContainerHost; engine: EngineKind; object: ContainerObject };
 
 export interface Target {
   target: TargetRef;
@@ -247,7 +249,9 @@ export type Command =
   /** SS-08: an upload. Never submitted by the UI: `filesUpload` builds it in Rust from picked or dropped files. */
   | { type: "fileUpload"; targets: TargetRef[]; folder: string; files: UploadFile[] }
   /** SS-07: a saved port forward opened on a terminal. Never submitted by the UI: `terminalTunnelStart` builds it. */
-  | { type: "openTunnel"; targets: TargetRef[]; forward: PortForward };
+  | { type: "openTunnel"; targets: TargetRef[]; forward: PortForward }
+  /** CT-01, CT-02: every target a container target whose object fits the op. */
+  | { type: "container"; targets: TargetRef[]; op: ContainerOp };
 
 /** SS-08: one file of an upload. */
 export interface UploadFile {
@@ -275,6 +279,24 @@ export interface TargetImpact {
   oldSnapshotCount: number | null;
   /** What could not be read. */
   notes: string[];
+  /** CT-01, CT-02: a container target as it is now (the VM fields are empty then). */
+  container?: ContainerImpact;
+}
+
+/** CT-01, CT-02: one container, image or volume target now, or what a pull or prune does on a host. */
+export interface ContainerImpact {
+  kind: ContainerObject["kind"];
+  name: string;
+  state: ContainerState | null;
+  /** The engine's words, e.g. "Up 2 hours (healthy)". */
+  status: string | null;
+  image: string | null;
+  ports: string[];
+  sizeBytes: number | null;
+  /** Containers using the image or volume, with their state. */
+  usedBy: string[];
+  /** What a prune or a volume removal deletes (at most 50). */
+  removes: string[];
 }
 
 export type ApprovalStep =
@@ -623,6 +645,19 @@ export type ActionKind =
   | "tunnelLocal"
   | "tunnelRemote"
   | "tunnelShared"
+  | "containerStart"
+  | "containerUnpause"
+  | "containerPause"
+  | "containerRestart"
+  | "containerStop"
+  | "containerRemove"
+  | "imagePull"
+  | "imageRemove"
+  | "volumeRemove"
+  | "pruneContainers"
+  | "pruneImages"
+  | "pruneBuildCache"
+  | "pruneVolumes"
   | "appUpdate";
 
 export interface TierRule {
@@ -696,6 +731,10 @@ export interface Settings {
   shutdownWaitSecs: number;
   /** BX-02: how many hosts a bulk run reaches at once (1 to 50, default 10). */
   bulkParallelLimit: number;
+  /** CT-02: the docker.exe the user chose; null: find it. */
+  dockerPathSaved: string | null;
+  /** CT-02: the docker.exe in use; null: Docker Desktop was not found. */
+  dockerPathInUse: string | null;
 }
 
 /** SS-04. */
@@ -1766,6 +1805,236 @@ export interface AppInfo {
   vboxmanagePath: string | null;
 }
 
+// ---- CT-01, CT-02 containers ----
+
+export type EngineKind = "docker" | "podman";
+
+/** Where containers run: a session marked as a container host, or Docker Desktop on this PC. */
+export type ContainerHost = { kind: "session"; sessionId: string } | { kind: "thisPc" };
+
+export type ContainerObject =
+  | { kind: "container"; id: string }
+  | { kind: "image"; id: string }
+  | { kind: "volume"; name: string }
+  /** The engine itself: pulls and prunes. */
+  | { kind: "engine" };
+
+export type PruneWhat = "containers" | "images" | "volumes" | "buildCache";
+
+export type ContainerOp =
+  | { kind: "start" }
+  | { kind: "stop" }
+  | { kind: "restart" }
+  | { kind: "pause" }
+  | { kind: "unpause" }
+  /** `force`: a running container is killed first. */
+  | { kind: "remove"; force: boolean }
+  | { kind: "removeImage" }
+  | { kind: "removeVolume" }
+  | { kind: "pull"; reference: string }
+  | { kind: "prune"; what: PruneWhat };
+
+export type ContainerState =
+  "created" | "running" | "paused" | "restarting" | "removing" | "exited" | "dead" | "unknown";
+
+/** How sudo runs a host's engine. */
+export type SudoMode =
+  | { kind: "off" }
+  /** sudo -S with this vault password, or the session's login password (null). */
+  | { kind: "password"; passwordId: string | null }
+  /** sudo -n: NOPASSWD in sudoers. */
+  | { kind: "noPassword" };
+
+export interface ContainerMark {
+  sessionId: string;
+  engine: EngineKind;
+  sudo: SudoMode;
+}
+
+export interface MarkInput {
+  engine: EngineKind;
+  sudo: SudoMode;
+}
+
+export interface HostEngine {
+  engine: EngineKind;
+  sudo: SudoMode;
+  /** "as the login user", "with sudo (the login password)"... */
+  runs: string;
+}
+
+export interface ContainerHostInfo {
+  host: ContainerHost;
+  /** The session's name, or "This PC". */
+  name: string;
+  hostname: string | null;
+  username: string | null;
+  port: number | null;
+  environment: Environment;
+  protected: boolean;
+  engines: HostEngine[];
+  /** SS-07: the jump hosts on the way. */
+  via: string[];
+  /** CT-02: the docker.exe in use. */
+  cliPath: string | null;
+}
+
+export interface PortMapping {
+  hostIp: string | null;
+  hostPort: number | null;
+  containerPort: number;
+  protocol: string;
+}
+
+export interface ContainerSummary {
+  id: string;
+  name: string;
+  image: string;
+  command: string | null;
+  state: ContainerState;
+  /** The engine's words: "Up 2 hours (healthy)", "Exited (0) 3 days ago". */
+  status: string;
+  createdAt: string | null;
+  startedAt: string | null;
+  ports: PortMapping[];
+  networks: string[];
+  mounts: string[];
+  /** The Compose project. */
+  project: string | null;
+  health: string | null;
+}
+
+export interface ContainerList {
+  containers: ContainerSummary[];
+  readAt: string;
+  /** The CLI ran under sudo. */
+  sudo: boolean;
+}
+
+export interface ContainerStats {
+  id: string;
+  name: string | null;
+  cpuPct: number | null;
+  memBytes: number | null;
+  memLimitBytes: number | null;
+  memPct: number | null;
+  netRxBytes: number | null;
+  netTxBytes: number | null;
+  blockReadBytes: number | null;
+  blockWriteBytes: number | null;
+  pids: number | null;
+}
+
+export interface MountInfo {
+  kind: string;
+  name: string | null;
+  source: string | null;
+  destination: string;
+  readOnly: boolean;
+}
+
+export interface NetworkAttachment {
+  name: string;
+  ipAddress: string | null;
+  gateway: string | null;
+}
+
+/** `inspect`: environment variables by name only, never their values. */
+export interface ContainerDetails {
+  id: string;
+  name: string;
+  image: string;
+  imageId: string | null;
+  createdAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  state: ContainerState;
+  exitCode: number | null;
+  error: string | null;
+  oomKilled: boolean;
+  health: { status: string; failingStreak: number | null } | null;
+  restartPolicy: string | null;
+  restartCount: number | null;
+  command: string | null;
+  entrypoint: string | null;
+  workingDir: string | null;
+  runsAs: string | null;
+  envNames: string[];
+  mounts: MountInfo[];
+  networks: NetworkAttachment[];
+  ports: PortMapping[];
+  project: string | null;
+  platform: string | null;
+}
+
+export interface LogLine {
+  at: string | null;
+  stream: "stdout" | "stderr";
+  text: string;
+}
+
+export interface LogQuery {
+  tail: number;
+  since?: string | null;
+}
+
+export interface Logs {
+  lines: LogLine[];
+  truncated: boolean;
+}
+
+export interface ImageSummary {
+  id: string;
+  tags: string[];
+  digest: string | null;
+  createdAt: string | null;
+  sizeBytes: number | null;
+  containers: number | null;
+  dangling: boolean;
+}
+
+export interface VolumeSummary {
+  name: string;
+  driver: string | null;
+  mountpoint: string | null;
+  scope: string | null;
+  createdAt: string | null;
+  project: string | null;
+  anonymous: boolean;
+}
+
+export interface NetworkSummary {
+  id: string;
+  name: string;
+  driver: string | null;
+  scope: string | null;
+  internal: boolean | null;
+  ipv6: boolean | null;
+  subnets: string[];
+  createdAt: string | null;
+}
+
+export interface EngineVersion {
+  client: string | null;
+  server: string | null;
+  api: string | null;
+  platform: string | null;
+}
+
+export interface DetectedEngine {
+  engine: EngineKind;
+  installed: boolean;
+  version: EngineVersion | null;
+  /** How it worked, if it did: what to mark. */
+  suggested: SudoMode | null;
+  problem: string | null;
+}
+
+export interface Detection {
+  sessionId: string;
+  engines: DetectedEngine[];
+}
+
 /** Error shape from src-tauri/src/ipc.rs. */
 export interface IpcError {
   code: string;
@@ -2180,4 +2449,57 @@ export const api = {
     listen<TransferInfo>("files://transfer", (e) => handler(e.payload)),
   onFilesDropped: (handler: (dropped: DroppedFiles) => void): Promise<UnlistenFn> =>
     listen<DroppedFiles>("files://dropped", (e) => handler(e.payload)),
+
+  // CT-01, CT-02: container hosts and what runs on them. Reads only; changes are `submit` with a container command.
+  /** The marked sessions, then this PC when Docker Desktop is there. No connection. */
+  containerHosts: () => invoke<ContainerHostInfo[]>("containers_hosts"),
+  containerMarks: (sessionId: string) => invoke<ContainerMark[]>("containers_marks", { sessionId }),
+  /** Replaces a session's engines (empty: no container host any more). Audited like a session edit. */
+  setContainerMarks: (sessionId: string, marks: MarkInput[]) =>
+    invoke<ContainerMark[]>("containers_set_marks", { sessionId, marks }),
+  /** Which CLIs the host has and whether they need sudo. A read: nothing is marked. */
+  detectContainers: (sessionId: string, sudoPasswordId: string | null = null) =>
+    invoke<Detection>("containers_detect", { sessionId, sudoPasswordId }),
+  containerVersion: (host: ContainerHost, engine: EngineKind) =>
+    invoke<EngineVersion>("containers_version", { host, engine }),
+  containers: (host: ContainerHost, engine: EngineKind) => invoke<ContainerList>("containers_list", { host, engine }),
+  containerStats: (host: ContainerHost, engine: EngineKind) =>
+    invoke<ContainerStats[]>("containers_stats", { host, engine }),
+  containerDetails: (host: ContainerHost, engine: EngineKind, id: string) =>
+    invoke<ContainerDetails>("containers_details", { host, engine, id }),
+  containerLogs: (host: ContainerHost, engine: EngineKind, id: string, query: LogQuery) =>
+    invoke<Logs>("containers_logs", { host, engine, id, query }),
+  containerImages: (host: ContainerHost, engine: EngineKind) =>
+    invoke<ImageSummary[]>("containers_images", { host, engine }),
+  containerVolumes: (host: ContainerHost, engine: EngineKind) =>
+    invoke<VolumeSummary[]>("containers_volumes", { host, engine }),
+  containerNetworks: (host: ContainerHost, engine: EngineKind) =>
+    invoke<NetworkSummary[]>("containers_networks", { host, engine }),
+  /** Closes a host's kept connection now. */
+  releaseContainerHost: (sessionId: string) => invoke<void>("containers_release", { sessionId }),
+  /** "Open a shell": a terminal pane that enters the running container. Audited like opening a terminal. */
+  containerShellOpen: (
+    sessionId: string,
+    engine: EngineKind,
+    containerId: string,
+    cols: number,
+    rows: number,
+    onOutput: (data: Uint8Array) => void,
+    onEvent: (event: TerminalEvent) => void,
+  ) => {
+    const output = new Channel<ArrayBuffer>();
+    output.onmessage = (data) => onOutput(new Uint8Array(data));
+    const events = eventChannel(onEvent);
+    return invoke<{ id: string; title: string }>("container_shell_open", {
+      sessionId,
+      engine,
+      containerId,
+      cols,
+      rows,
+      onOutput: output,
+      onEvent: events,
+    });
+  },
+  /** CT-02: Docker Desktop's docker.exe; null or "" goes back to finding it. */
+  setDockerPath: (path: string | null) => invoke<Settings>("settings_set_docker_path", { path }),
 };

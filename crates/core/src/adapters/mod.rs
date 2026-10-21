@@ -2,6 +2,7 @@
 //! module. Each sits behind a trait; [`crate::fakes`] has a fake of each for tests. VM-18:
 //! [`hypervisor`] routes each VM to Workstation or VirtualBox by its key.
 
+pub mod containers;
 pub mod exec_output;
 pub mod github;
 pub mod host_counters;

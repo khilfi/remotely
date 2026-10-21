@@ -37,6 +37,24 @@ const GROUPS: { title: string; kinds: ActionKind[] }[] = [
   { title: "Commands on hosts", kinds: ["execReadOnly", "execOther", "execDangerous", "sshKeyPush"] },
   { title: "Files", kinds: ["fileUpload", "fileReplace"] },
   { title: "Tunnels", kinds: ["tunnelLocal", "tunnelRemote", "tunnelShared"] },
+  {
+    title: "Containers",
+    kinds: [
+      "containerStart",
+      "containerUnpause",
+      "containerPause",
+      "containerRestart",
+      "containerStop",
+      "containerRemove",
+      "imagePull",
+      "imageRemove",
+      "volumeRemove",
+      "pruneContainers",
+      "pruneImages",
+      "pruneBuildCache",
+      "pruneVolumes",
+    ],
+  },
   { title: "This app", kinds: ["appUpdate"] },
 ];
 

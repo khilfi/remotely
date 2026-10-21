@@ -34,7 +34,9 @@ use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+use crate::adapters::containers::EngineKind;
 use crate::adapters::remote::forward::ForwardKind;
+use crate::containers::{ContainerMarks, MarkInput, SudoMode};
 use crate::domain::{now_rfc3339, Context, Environment};
 use crate::error::{CoreError, Result};
 use crate::forwards::{ForwardInput, Forwards};
@@ -143,6 +145,35 @@ struct SessionEntry {
     /// SS-07: its saved port forwards, in order. Files from before 0.3.0 have none.
     #[serde(default)]
     forwards: Vec<ForwardEntry>,
+    /// CT-01: the container engines it is marked with. Files from before 0.4.0 have none.
+    #[serde(default)]
+    containers: Vec<ContainerEntry>,
+}
+
+/// CT-01: one engine of a session marked as a container host.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContainerEntry {
+    engine: EngineKind,
+    /// A chosen sudo password is a vault item in the file, by id; one that did not come along means the
+    /// login password here.
+    #[serde(default)]
+    sudo: SudoMode,
+}
+
+impl ContainerEntry {
+    fn input(&self, secrets: &HashMap<SecretId, SecretId>) -> MarkInput {
+        let sudo = match self.sudo {
+            SudoMode::Password { password_id: Some(id) } => SudoMode::Password {
+                password_id: secrets.get(&id).copied(),
+            },
+            other => other,
+        };
+        MarkInput {
+            engine: self.engine,
+            sudo,
+        }
+    }
 }
 
 /// SS-07: one saved port forward of a session.
@@ -258,6 +289,8 @@ pub struct ExportReport {
     pub favourites: usize,
     /// SS-07 saved port forwards, over all sessions.
     pub forwards: usize,
+    /// CT-01 sessions marked as container hosts.
+    pub container_hosts: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +436,8 @@ pub struct TransferReport {
     pub favourites: Counts,
     /// SS-07: port forwards saved with the imported sessions.
     pub forwards: usize,
+    /// CT-01: imported sessions marked as container hosts.
+    pub container_hosts: usize,
     pub folders_added: usize,
     /// Sessions imported without the password or key they used (not in the file, not here).
     pub without_credentials: usize,
@@ -984,6 +1019,7 @@ impl Transfer {
             });
         }
         let mut forwards = self.store.all_forwards(ctx).await?;
+        let mut container_marks = self.store.container_marks_by_session(ctx).await?;
         let mut entries = Vec::with_capacity(sessions.len());
         for s in sessions {
             let vm = match &s.vm_id {
@@ -1021,6 +1057,15 @@ impl Transfer {
                         dest_host: f.spec.dest_host,
                         dest_port: f.spec.dest_port,
                         auto_start: f.auto_start,
+                    })
+                    .collect(),
+                containers: container_marks
+                    .remove(&s.id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|m| ContainerEntry {
+                        engine: m.engine,
+                        sudo: m.sudo,
                     })
                     .collect(),
             });
@@ -1067,6 +1112,7 @@ impl Transfer {
             secret_values: include_secrets,
             favourites: payload.favourites.len(),
             forwards: payload.sessions.iter().map(|s| s.forwards.len()).sum(),
+            container_hosts: payload.sessions.iter().filter(|s| !s.containers.is_empty()).count(),
         };
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
         drop(payload);
@@ -1080,12 +1126,13 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
             plural(report.favourites, "favourite command"),
             plural(report.forwards, "port forward"),
+            plural(report.container_hosts, "container host"),
             report.path
         );
         self.audit(
@@ -1385,6 +1432,7 @@ impl Transfer {
 
         // 3. Sessions, jump hosts first (so each keeps its jump host link), with their port forwards.
         let forwards = Forwards::new(self.store.clone());
+        let marks = ContainerMarks::new(self.store.clone());
         let mut session_map: HashMap<Uuid, Uuid> = HashMap::new();
         let mut taken_names: HashSet<String> = local.sessions.iter().map(|s| s.name.to_lowercase()).collect();
         let mut used_ids: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
@@ -1456,6 +1504,17 @@ impl Transfer {
                             Ok(saved_forwards) => report.forwards += saved_forwards.len(),
                             Err(err) => report.problems.push(ItemProblem {
                                 name: format!("{} (port forwards)", entry.name),
+                                reason: err.to_string(),
+                            }),
+                        }
+                    }
+                    // CT-01: likewise, a file without container marks leaves this laptop's alone.
+                    if !entry.containers.is_empty() {
+                        let inputs: Vec<MarkInput> = entry.containers.iter().map(|c| c.input(&secret_map)).collect();
+                        match marks.restore(ctx, saved.id, &inputs, SOURCE).await {
+                            Ok(_) => report.container_hosts += 1,
+                            Err(err) => report.problems.push(ItemProblem {
+                                name: format!("{} (container engines)", entry.name),
                                 reason: err.to_string(),
                             }),
                         }
@@ -1551,6 +1610,12 @@ impl Transfer {
             detail.push_str(&format!(
                 "; {} saved with them",
                 plural(report.forwards, "port forward")
+            ));
+        }
+        if report.container_hosts > 0 {
+            detail.push_str(&format!(
+                "; {} marked as container hosts",
+                plural(report.container_hosts, "session")
             ));
         }
         if report.without_credentials > 0 {
@@ -1901,6 +1966,7 @@ mod tests {
             vm: None,
             imported_from: None,
             forwards: vec![],
+            containers: vec![],
         }
     }
 
