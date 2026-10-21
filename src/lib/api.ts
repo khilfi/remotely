@@ -1096,6 +1096,16 @@ export interface SavedOutput {
 /** SS-02 import sources. */
 export type ImportSource = "putty" | "puttyFile" | "mobaxterm" | "openssh" | "csv";
 
+/** QL-10: how the import reads one format, made from its parser's own tables. */
+export interface FormatGuide {
+  source: ImportSource;
+  title: string;
+  intro: string[];
+  sections: { heading: string; text: string[]; table: { headings: string[]; rows: string[][] } | null }[];
+  /** The sample file's name, as the save dialog suggests it. */
+  sampleName: string;
+}
+
 export type CandidateAuth = { method: "password" } | { method: "keyFile"; path: string } | { method: "agent" };
 
 /** One session an import source has. */
@@ -1789,6 +1799,10 @@ export const api = {
   /** Saves the picked rows of a preview; key files go into the vault when addKeys. */
   importCommit: (request: { previewId: string; rows: number[]; folderId: string | null; addKeys: boolean }) =>
     invoke<ImportReport>("import_commit", { request }),
+  /** QL-10: the format guide for a source. */
+  importGuide: (source: ImportSource) => invoke<FormatGuide>("import_guide", { source }),
+  /** QL-10: saves the source's sample file where the user picks (a Rust save dialog). null when cancelled. */
+  importSaveSample: (source: ImportSource) => invoke<string | null>("import_save_sample", { source }),
 
   /**
    * FD-07: asks where to save (Documents by default), then writes the encrypted export. Secret values go

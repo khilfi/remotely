@@ -246,6 +246,8 @@ pub fn run() {
             ipc::folder_move,
             ipc::folder_delete,
             ipc::import_preview,
+            ipc::import_guide,
+            ipc::import_save_sample,
             ipc::import_commit,
             ipc::transfer_export,
             ipc::transfer_choose,

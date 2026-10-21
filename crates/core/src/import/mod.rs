@@ -14,6 +14,7 @@
 //! `sessions::tidy`), so the preview shows what would really be saved.
 
 pub mod csv;
+pub mod guide;
 mod importer;
 pub mod mobaxterm;
 pub mod openssh;

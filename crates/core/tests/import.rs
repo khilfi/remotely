@@ -364,3 +364,159 @@ async fn a_mobaxterm_export_keeps_its_folders_and_leaves_passwords_out() {
     let audit = format!("{:?}", core.store.recent_audit(ctx, 50).await.unwrap());
     assert!(!audit.contains("placeholder-not-real"));
 }
+
+// ---- QL-10: the sample files behind the format guides ------------------------------------------------
+
+/// A preview row as the guide describes it: name, address, folder, tags, environment, login, colour,
+/// jump host, startup command.
+fn described(row: &import::PreviewRow) -> String {
+    let c = &row.candidate;
+    let user = c.username.as_deref().map(|u| format!("{u}@")).unwrap_or_default();
+    let login = match &c.auth {
+        import::CandidateAuth::Password => "password".to_owned(),
+        import::CandidateAuth::KeyFile { path } => format!("key {path}"),
+        import::CandidateAuth::Agent => "agent".to_owned(),
+    };
+    let colour = c.color.map(|c| c.as_str()).unwrap_or("-");
+    format!(
+        "{} | {user}{}:{} | {} | {} | {:?} | {login} | {colour} | {} | {}",
+        c.name,
+        c.host,
+        c.port,
+        c.folder.join("/"),
+        c.tags.join(","),
+        c.environment,
+        c.jump.as_deref().unwrap_or("-"),
+        c.startup_command.as_deref().unwrap_or("-"),
+    )
+}
+
+/// Saves the sample to a temp folder, previews it through the real parser, imports every row and
+/// returns the preview.
+async fn import_sample(core: &Core, source: ImportSource) -> import::ImportPreview {
+    let ctx = &core.ctx;
+    let sample = import::guide::sample(source);
+    let dir = temp_folder("import-sample");
+    let path = dir.join(sample.file_name);
+    std::fs::write(&path, &sample.text).unwrap();
+    let preview = core.import.preview_file(ctx, source, &path).await.unwrap();
+    assert_eq!(preview.file.as_deref(), Some(sample.file_name));
+    assert!(preview.warnings.is_empty(), "{source:?}: {:?}", preview.warnings);
+    assert!(
+        preview.rows.iter().all(|r| r.selected),
+        "{source:?}: every sample row is new"
+    );
+    let report = core
+        .import
+        .commit(
+            ctx,
+            &ImportRequest {
+                preview_id: preview.id,
+                rows: preview.rows.iter().map(|r| r.index).collect(),
+                folder_id: None,
+                add_keys: false,
+            },
+            &core.sessions,
+            &core.vault,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.created, preview.rows.len(), "{source:?}: {:?}", report.problems);
+    // The jump host the guide promises: another session of the same file, linked once saved.
+    let sessions = core.sessions.list(ctx, &SessionFilter::default()).await.unwrap();
+    let id = |name: &str| sessions.iter().find(|s| s.name.starts_with(name)).unwrap();
+    assert_eq!(
+        id("db01").jump_session_id,
+        Some(id("bastion").id),
+        "{source:?}: db01 goes through bastion"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+    preview
+}
+
+#[tokio::test]
+async fn the_csv_sample_imports_as_its_guide_says() {
+    let core = core().await;
+    let preview = import_sample(&core, ImportSource::Csv).await;
+    let rows: Vec<String> = preview.rows.iter().map(described).collect();
+    assert_eq!(
+        rows,
+        [
+            "web01 | alice@web01.example.com:22 | Customer A/Web | web,frontend | Prod | password | red | - | -",
+            r"db01 | bob@192.0.2.20:2222 | Customer A/DB | db,postgres | Staging | key C:\Users\alice\.ssh\id_ed25519 | amber | bastion | cd /var/lib; ls",
+            "bastion | alice@bastion.example.org:22 | Customer A | jump | Prod | agent | slate | - | -",
+            "lab01 | alice@lab01.test:2200 | Lab | lab | Lab | password | teal | - | -",
+            "198.51.100.7 | 198.51.100.7:22 |  |  | None | password | - | - | -",
+        ]
+    );
+    assert!(preview.skipped.is_empty());
+    assert!(preview.rows.iter().all(|r| r.candidate.notes.is_empty()));
+    // The folders the folder column names were made, one inside the other.
+    let folders = core.sessions.folders(&core.ctx).await.unwrap();
+    let customer = folders.iter().find(|f| f.name == "Customer A").unwrap();
+    let web = folders.iter().find(|f| f.name == "Web").unwrap();
+    assert_eq!(web.parent_id, Some(customer.id));
+}
+
+#[tokio::test]
+async fn the_putty_sample_imports_as_its_guide_says() {
+    let core = core().await;
+    let preview = import_sample(&core, ImportSource::PuttyFile).await;
+    let rows: Vec<String> = preview.rows.iter().map(described).collect();
+    assert_eq!(
+        rows,
+        [
+            "web01 | alice@web01.example.com:22 |  |  | None | password | - | - | -",
+            r"db01 (Customer A) | bob@192.0.2.20:2222 |  |  | None | key C:\Users\alice\.ssh\db01.ppk | - | alice@bastion.example.org | uptime",
+            "bastion | alice@bastion.example.org:22 |  |  | None | password | - | - | -",
+        ],
+        "Default Settings is no session"
+    );
+    let skipped: Vec<(&str, &str)> = preview
+        .skipped
+        .iter()
+        .map(|s| (s.name.as_str(), s.reason.as_str()))
+        .collect();
+    assert_eq!(skipped, [("switch01", "telnet session: only SSH is imported")]);
+}
+
+#[tokio::test]
+async fn the_mobaxterm_sample_imports_as_its_guide_says() {
+    let core = core().await;
+    let preview = import_sample(&core, ImportSource::Mobaxterm).await;
+    let home = import::home_dir().display().to_string();
+    let home = home.trim_end_matches(['\\', '/']);
+    let rows: Vec<String> = preview.rows.iter().map(described).collect();
+    assert_eq!(
+        rows,
+        [
+            "web01 | alice@web01.example.com:22 |  |  | None | password | - | - | -".to_owned(),
+            "bastion | alice@bastion.example.org:22 | Customer A |  | None | password | - | - | -".to_owned(),
+            format!(
+                r"db01 | bob@192.0.2.20:2222 | Customer A/DB |  | None | key {home}\.ssh\id_ed25519 | - | alice@bastion.example.org | sudo -i; uptime"
+            ),
+        ]
+    );
+    assert_eq!(preview.skipped.len(), 1);
+    assert_eq!(preview.skipped[0].name, "rdp01");
+    assert_eq!(preview.skipped[0].reason, "not an SSH session (MobaXterm type 4)");
+}
+
+#[tokio::test]
+async fn the_openssh_sample_imports_as_its_guide_says() {
+    let core = core().await;
+    let preview = import_sample(&core, ImportSource::Openssh).await;
+    let key = import::home_dir().join(".ssh").join("id_ed25519").display().to_string();
+    let rows: Vec<String> = preview.rows.iter().map(described).collect();
+    assert_eq!(
+        rows,
+        [
+            format!("web01 | alice@web01.example.com:22 |  |  | None | key {key} | - | - | -"),
+            format!("db01 | bob@192.0.2.20:2222 |  |  | None | key {key} | - | bastion | uptime"),
+            format!("bastion | alice@bastion.example.org:22 |  |  | None | key {key} | - | - | -"),
+            "lab01 | alice@lab01.test:22 |  |  | None | agent | - | - | -".to_owned(),
+        ],
+        "the first value wins; wildcard blocks apply by name; no IdentityFile means the agent"
+    );
+    assert!(preview.skipped.is_empty());
+}

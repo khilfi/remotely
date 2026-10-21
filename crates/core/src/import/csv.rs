@@ -1,16 +1,19 @@
 //! CSV session lists (SS-02), e.g. exported from a spreadsheet or another tool.
 //!
 //! A header row is required; the delimiter (`,`, `;` or tab) is taken from it. Columns are matched
-//! ignoring letter case, spaces, `_` and `-`:
+//! ignoring letter case, spaces, `_` and `-`. [`COLUMNS`] lists every column with the header names it
+//! accepts; [`ENVIRONMENTS`], [`AUTH_METHODS`] and [`SessionColor::ALL`] the values. The import
+//! dialog's format guide (QL-10, [`super::guide`]) is made from these same tables, so it says exactly
+//! what is read:
 //!
 //! ```text
 //! name | session | label                  host | hostname | address | ip   (required)
 //! port                                    user | username | login
 //! folder | group | path   ("A/B")         tags | tag   ("a;b", "a|b" or "a,b")
 //! environment | env   (lab, staging, prod, none)
-//! auth | authmethod | method   (password, key, agent)
-//! key | keyfile | identityfile | privatekey   (path of a private key file)
-//! startupcommand | command                color | colour                jump | jumphost | proxyjump
+//! auth | auth_method | method   (password, key, agent)
+//! key_file | key | identity_file | private_key   (path of a private key file)
+//! startup_command | command               color | colour            jump_host | jump | proxy_jump
 //! ```
 //!
 //! The host cell may be `user@host`, `host:port` or `[2001:db8::1]:port`; the user and port columns
@@ -24,7 +27,7 @@ use crate::domain::Environment;
 use crate::sessions::SessionColor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Column {
+pub(crate) enum Column {
     Name,
     Host,
     Port,
@@ -41,28 +44,136 @@ enum Column {
     Password,
 }
 
-fn column(header: &str) -> Option<Column> {
-    let key = header
+/// One column the import reads.
+pub(crate) struct ColumnSpec {
+    pub column: Column,
+    /// The header names it accepts, the one the sample file uses first.
+    pub headers: &'static [&'static str],
+    /// What it holds, for the format guide.
+    pub holds: &'static str,
+}
+
+/// QL-10: every column the import reads, in the sample file's order.
+pub(crate) const COLUMNS: &[ColumnSpec] = &[
+    ColumnSpec {
+        column: Column::Name,
+        headers: &["name", "session", "label"],
+        holds: "The session's name. Empty: it is named after its host.",
+    },
+    ColumnSpec {
+        column: Column::Host,
+        headers: &["host", "hostname", "address", "ip"],
+        holds: "Required. A host name or IP address; user@host, host:port and [2001:db8::1]:port work too (the user and port columns win).",
+    },
+    ColumnSpec {
+        column: Column::Port,
+        headers: &["port"],
+        holds: "The SSH port. Empty: 22.",
+    },
+    ColumnSpec {
+        column: Column::User,
+        headers: &["user", "username", "login"],
+        holds: "The user to log in as. Empty: asked when connecting.",
+    },
+    ColumnSpec {
+        column: Column::Folder,
+        headers: &["folder", "group", "path"],
+        holds: "The folder in the session tree, made if it is new; / or \\ puts folders inside folders (Customer A/Web).",
+    },
+    ColumnSpec {
+        column: Column::Tags,
+        headers: &["tags", "tag"],
+        holds: "Tags, separated by ; | or , (web;frontend).",
+    },
+    ColumnSpec {
+        column: Column::Environment,
+        headers: &["environment", "env"],
+        holds: "The environment label. Prod raises every action's approval tier one step.",
+    },
+    ColumnSpec {
+        column: Column::Auth,
+        headers: &["auth", "auth_method", "method"],
+        holds: "How to log in. Empty: key when a key file is given, otherwise password.",
+    },
+    ColumnSpec {
+        column: Column::Key,
+        headers: &["key_file", "key", "identity_file", "private_key"],
+        holds: "The path of a private key file on this PC. Importing can add it to the vault.",
+    },
+    ColumnSpec {
+        column: Column::StartupCommand,
+        headers: &["startup_command", "command"],
+        holds: "A command typed in the shell after login.",
+    },
+    ColumnSpec {
+        column: Column::Color,
+        headers: &["color", "colour"],
+        holds: "The session's colour in the tree.",
+    },
+    ColumnSpec {
+        column: Column::Jump,
+        headers: &["jump_host", "jump", "proxy_jump"],
+        holds: "A jump host: the name or host of another session, saved already or in the same file.",
+    },
+];
+
+/// Password columns: noticed, never read.
+pub(crate) const PASSWORD_HEADERS: &[&str] = &["password", "pass", "secret"];
+
+/// QL-10: the environment values, each with the words that mean it.
+pub(crate) const ENVIRONMENTS: &[(Environment, &[&str])] = &[
+    (Environment::Lab, &["lab"]),
+    (Environment::Staging, &["staging", "stage"]),
+    (Environment::Prod, &["prod", "production"]),
+    (Environment::None, &["none"]),
+];
+
+/// How a row logs in, as the auth column says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthWord {
+    Password,
+    Key,
+    Agent,
+}
+
+/// QL-10: the auth column's values, and what each means.
+pub(crate) const AUTH_METHODS: &[(AuthWord, &str, &str)] = &[
+    (
+        AuthWord::Password,
+        "password",
+        "a password, asked when connecting (passwords are never imported)",
+    ),
+    (AuthWord::Key, "key", "the private key in the key_file column"),
+    (
+        AuthWord::Agent,
+        "agent",
+        "the SSH agent (Pageant, or Windows' OpenSSH agent)",
+    ),
+];
+
+/// Where the tags column splits.
+pub(crate) const TAG_SEPARATORS: [char; 3] = [';', '|', ','];
+/// Where the folder column goes one folder deeper.
+pub(crate) const FOLDER_SEPARATORS: [char; 2] = ['/', '\\'];
+
+/// A header as it is compared: lower case, without spaces, `_` and `-`.
+fn header_key(header: &str) -> String {
+    header
         .chars()
         .filter(|c| !matches!(c, ' ' | '_' | '-'))
         .collect::<String>()
-        .to_lowercase();
-    Some(match key.as_str() {
-        "name" | "session" | "label" => Column::Name,
-        "host" | "hostname" | "address" | "ip" => Column::Host,
-        "port" => Column::Port,
-        "user" | "username" | "login" => Column::User,
-        "folder" | "group" | "path" => Column::Folder,
-        "tags" | "tag" => Column::Tags,
-        "environment" | "env" => Column::Environment,
-        "auth" | "authmethod" | "method" => Column::Auth,
-        "key" | "keyfile" | "identityfile" | "privatekey" => Column::Key,
-        "startupcommand" | "command" => Column::StartupCommand,
-        "color" | "colour" => Column::Color,
-        "jump" | "jumphost" | "proxyjump" => Column::Jump,
-        "password" | "pass" | "secret" => Column::Password,
-        _ => return None,
-    })
+        .to_lowercase()
+}
+
+fn column(header: &str) -> Option<Column> {
+    let key = header_key(header);
+    if PASSWORD_HEADERS.iter().any(|h| header_key(h) == key) {
+        return Some(Column::Password);
+    }
+    COLUMNS
+        .iter()
+        .find(|spec| spec.headers.iter().any(|h| header_key(h) == key))
+        .map(|spec| spec.column)
 }
 
 /// Which column of the file holds what. The password column is not in it, so it cannot be read.
@@ -205,8 +316,11 @@ fn row_candidate(layout: &Layout, record: &StringRecord, row: usize) -> Result<C
     let mut c = Candidate::new(name, address.host);
     c.port = port;
     c.username = non_empty(cell(Column::User)).or(address.user);
-    c.folder = cell(Column::Folder).split(['/', '\\']).map(str::to_owned).collect();
-    c.tags = cell(Column::Tags).split([';', '|', ',']).map(str::to_owned).collect();
+    c.folder = cell(Column::Folder)
+        .split(FOLDER_SEPARATORS)
+        .map(str::to_owned)
+        .collect();
+    c.tags = cell(Column::Tags).split(TAG_SEPARATORS).map(str::to_owned).collect();
     c.environment = environment(cell(Column::Environment), &mut c.notes);
     c.auth = auth(cell(Column::Auth), cell(Column::Key), &mut c.notes);
     c.startup_command = non_empty(cell(Column::StartupCommand));
@@ -216,12 +330,13 @@ fn row_candidate(layout: &Layout, record: &StringRecord, row: usize) -> Result<C
 }
 
 fn environment(text: &str, notes: &mut Vec<String>) -> Environment {
-    match text.to_lowercase().as_str() {
-        "" | "none" => Environment::None,
-        "lab" => Environment::Lab,
-        "staging" | "stage" => Environment::Staging,
-        "prod" | "production" => Environment::Prod,
-        _ => {
+    let word = text.to_lowercase();
+    if word.is_empty() {
+        return Environment::None;
+    }
+    match ENVIRONMENTS.iter().find(|(_, words)| words.contains(&word.as_str())) {
+        Some((environment, _)) => *environment,
+        None => {
             notes.push(format!(
                 "the environment {text} is not lab, staging or prod, so none was set"
             ));
@@ -238,25 +353,32 @@ fn auth(method: &str, key: &str, notes: &mut Vec<String>) -> CandidateAuth {
             "the key file was not used, since the auth column says {method}"
         ));
     };
-    match method.to_lowercase().as_str() {
-        "" => key_file.unwrap_or(CandidateAuth::Password),
-        "password" => {
+    let word = method.to_lowercase();
+    if word.is_empty() {
+        return key_file.unwrap_or(CandidateAuth::Password);
+    }
+    let said = AUTH_METHODS
+        .iter()
+        .find(|(_, name, _)| *name == word)
+        .map(|(w, _, _)| *w);
+    match said {
+        Some(AuthWord::Password) => {
             if key_file.is_some() {
                 unused_key(notes, "password");
             }
             CandidateAuth::Password
         }
-        "key" => key_file.unwrap_or_else(|| {
+        Some(AuthWord::Key) => key_file.unwrap_or_else(|| {
             notes.push("the auth column says key but no key file is given, so the password will be asked".into());
             CandidateAuth::Password
         }),
-        "agent" => {
+        Some(AuthWord::Agent) => {
             if key_file.is_some() {
                 unused_key(notes, "agent");
             }
             CandidateAuth::Agent
         }
-        _ => {
+        None => {
             notes.push(format!("the auth method {method} is not password, key or agent"));
             key_file.unwrap_or(CandidateAuth::Password)
         }
@@ -437,6 +559,53 @@ spaced,web 03.example.com,
         );
         let header_only = parse("name,host\n");
         assert_eq!(header_only.warnings, ["The file has no sessions below its header row"]);
+    }
+
+    /// QL-10: the format guide is made from COLUMNS, ENVIRONMENTS and AUTH_METHODS; each entry there is
+    /// read the way the guide says.
+    #[test]
+    fn every_header_and_value_in_the_tables_is_read() {
+        for spec in COLUMNS {
+            for header in spec.headers {
+                assert_eq!(column(header), Some(spec.column), "{header}");
+                assert_eq!(
+                    column(&header.to_uppercase().replace('_', " ")),
+                    Some(spec.column),
+                    "{header}"
+                );
+            }
+        }
+        for header in PASSWORD_HEADERS {
+            assert_eq!(column(header), Some(Column::Password));
+        }
+        for (environment, words) in ENVIRONMENTS {
+            for word in *words {
+                let mut notes = Vec::new();
+                assert_eq!(super::environment(&word.to_uppercase(), &mut notes), *environment);
+                assert!(notes.is_empty(), "{word}");
+            }
+        }
+        for (word, name, _) in AUTH_METHODS {
+            let mut notes = Vec::new();
+            let auth = auth(name, r"C:\Users\alice\.ssh\id_ed25519", &mut notes);
+            let expected = match word {
+                AuthWord::Password => matches!(auth, CandidateAuth::Password),
+                AuthWord::Key => matches!(auth, CandidateAuth::KeyFile { .. }),
+                AuthWord::Agent => matches!(auth, CandidateAuth::Agent),
+            };
+            assert!(expected, "{name}: {auth:?}");
+        }
+        for colour in SessionColor::ALL {
+            let mut notes = Vec::new();
+            assert_eq!(color(&colour.as_str().to_uppercase(), &mut notes), Some(colour));
+        }
+        // Every column has a name of its own.
+        let mut seen = std::collections::HashSet::new();
+        for spec in COLUMNS {
+            for header in spec.headers {
+                assert!(seen.insert(header_key(header)), "{header} twice");
+            }
+        }
     }
 
     #[test]
