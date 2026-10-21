@@ -1,6 +1,7 @@
-// Bulk snapshot actions (VM-04): take a snapshot of the selected VMs, or pick a snapshot name and
-// revert or delete it on every selected VM that has it. The dialog only builds the command; the
-// command bus decides the tier and asks for any approval (revert and delete are High).
+// Snapshot actions (VM-04) on the Virtual machines page (QL-14): take a snapshot of the selected VMs (or of the VM
+// whose details are open), or pick a snapshot name and revert or delete it on every selected VM that has it. The
+// dialog only builds the command; the command bus decides the tier and asks for any approval (revert and delete are
+// High by default).
 
 import { useState } from "react";
 import { CameraIcon, InfoIcon } from "lucide-react";
@@ -31,6 +32,11 @@ interface Props {
 }
 
 const vmRef = (vmxPath: string) => ({ kind: "vm" as const, vmxPath });
+
+/** "web01" for one VM, "3 VMs" for more. */
+function whom(vms: VmSnapshots[]) {
+  return vms.length === 1 ? vms[0].displayName : plural(vms.length, "VM");
+}
 
 function defaultName() {
   const now = new Date();
@@ -83,7 +89,7 @@ function TakeDialog({ action, limits, onSubmit, onClose }: Props) {
           }}
         >
           <DialogHeader>
-            <DialogTitle>Take a snapshot of {plural(action.vms.length, "VM")}</DialogTitle>
+            <DialogTitle>Take a snapshot of {whom(action.vms)}</DialogTitle>
             <DialogDescription>
               Each VM gets a snapshot with this name, taken from where it is now. A running VM&apos;s memory is saved
               too, which takes longer.
@@ -173,12 +179,15 @@ function PickDialog({ action, onSubmit, onClose }: Props) {
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>
-            {revert ? "Revert" : "Delete a snapshot on"} {plural(action.vms.length, "VM")}
+            {revert ? "Revert" : "Delete a snapshot on"} {whom(action.vms)}
           </DialogTitle>
           <DialogDescription>
             Pick a snapshot by name. It runs on each selected VM that has it; the others are left alone.
           </DialogDescription>
         </DialogHeader>
+        {choices.length === 0 && (
+          <p className="text-sm text-muted-foreground">None of these VMs has a snapshot vmrun can name.</p>
+        )}
         <RadioGroup value={picked} onValueChange={setPicked} className="max-h-72 gap-1 overflow-auto">
           {choices.map((c, i) => (
             <Label
