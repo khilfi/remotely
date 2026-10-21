@@ -398,8 +398,6 @@ const EXPECTED_NON_READ_ONLY: &[&str] = &[
     "lvm.mddetail",
     "lvm.mdexamine",
     "san.smart-test",
-    "san.iscsi-sessions",
-    "san.iscsi-nodes",
     "san.smb-shares",
     "san.fsck-check",
     "memory.dropcaches",
@@ -473,6 +471,57 @@ const EXPECTED_NON_READ_ONLY: &[&str] = &[
     "k8s.scale",
     "k8s.delete-pod",
     "helm.rollback",
+    // 0.4.0 additions. Disks: rescans, growing, partitioning, formatting (also Dangerous) and mounting.
+    "attach.rescan-hosts",
+    "attach.rescan-tool",
+    "attach.rescan-disk",
+    "attach.growpart-dry",
+    "attach.growpart",
+    "attach.pvresize",
+    "attach.lvextend-all",
+    "attach.vgextend",
+    "attach.partition",
+    "attach.format",
+    "attach.mount",
+    // fstab edits and mounts; mount --fake is not provably read-only.
+    "fstab.backup",
+    "fstab.add",
+    "fstab.mount-all",
+    "fstab.mount-preview",
+    "fstab.mount-one",
+    "fstab.unmount",
+    // iSCSI: discovery saves node records; logins, rescans and record changes; netcat.
+    "iscsi.portal-reach",
+    "iscsi.discover",
+    "iscsi.login",
+    "iscsi.startup",
+    "iscsi.logout",
+    "iscsi.rescan",
+    "iscsi.multipath-reload",
+    // locate's database rebuild.
+    "find.updatedb",
+    // Every scp and rsync, dry runs included, and find -exec.
+    "copy.scp-to",
+    "copy.scp-from",
+    "copy.scp-dir",
+    "copy.scp-limit",
+    "copy.rsync-to",
+    "copy.rsync-from",
+    "copy.rsync-preview",
+    "copy.rsync-mirror-preview",
+    "copy.rsync-mirror",
+    "copy.rsync-resume",
+    "copy.rsync-limit",
+    "copy.rsync-port",
+    "copy.rsync-verify",
+    "copy.checksum-folder",
+    // Time: time zone, NTP on/off, timesyncd and chrony changes.
+    "time.set-timezone",
+    "time.ntp-off",
+    "time.timesyncd-set",
+    "time.timesyncd-restart",
+    "time.chrony-reload",
+    "time.chrony-restart",
 ];
 
 #[tokio::test]
@@ -515,7 +564,13 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         .map(|e| (e.id, e.risk.dangerous.clone()))
         .collect();
     dangerous.dedup();
-    assert_eq!(dangerous, [("system.reboot", vec!["shutdown / reboot".to_owned()])]);
+    assert_eq!(
+        dangerous,
+        [
+            ("system.reboot", vec!["shutdown / reboot".to_owned()]),
+            ("attach.format", vec!["mkfs".to_owned()]),
+        ]
+    );
     // Spot checks on both sides of the line.
     for id in [
         "services.restart",
@@ -523,6 +578,11 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         "dnf.install",
         "users.add",
         "cpu.kill",
+        "copy.rsync-preview",
+        "iscsi.discover",
+        "iscsi.login",
+        "find.updatedb",
+        "fstab.mount-preview",
     ] {
         assert_eq!(by_id(id).risk.action, ActionKind::ExecOther, "{id}");
     }
@@ -537,6 +597,15 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         "sec.sshd-config",
         "cert.expiry",
         "lvm.pvs",
+        "find.files",
+        "find.big",
+        "find.grep-include",
+        "san.iscsi-sessions",
+        "iscsi.node-detail",
+        "fstab.verify",
+        "time.chrony-check",
+        "time.timesyncd-config",
+        "copy.checksum",
     ] {
         assert_eq!(by_id(id).risk.action, ActionKind::ExecReadOnly, "{id}");
     }

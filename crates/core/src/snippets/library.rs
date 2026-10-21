@@ -15,6 +15,9 @@
 //! Debian 12; where distros differ (apt vs dnf, ufw vs firewalld) both are given. None hangs or opens a
 //! pager (`--no-pager`, `top -b -n 1`, bounded `ping -c`, `--max-time`/`timeout`). Entries that need a
 //! tool not always installed (sysstat, smartmontools, mtr, iotop, ...) say so.
+//!
+//! Commands that wipe data are not offered as quick fixes. The one format step is for a NEW, empty
+//! disk, says so in its name and description, and the mkfs rule marks it dangerous.
 
 use serde::Serialize;
 
@@ -51,11 +54,20 @@ pub enum LibraryGroup {
     ClockWrong,
     CertExpired,
     PackageBroken,
+    DiskNotSeen,
+    DiskNotGrown,
+    MountFails,
+    IscsiMissing,
     // Area section.
     SystemInfo,
     Disk,
+    DiskSetup,
+    Mounts,
     StorageLvm,
     StorageSan,
+    Iscsi,
+    FindFiles,
+    FileTransfer,
     Memory,
     Processes,
     Network,
@@ -81,7 +93,7 @@ pub enum LibraryGroup {
 
 impl LibraryGroup {
     /// In the order the panel shows them: the Troubleshoot section first, then the area groups.
-    pub const ALL: [LibraryGroup; 35] = [
+    pub const ALL: [LibraryGroup; 44] = [
         LibraryGroup::SlowHost,
         LibraryGroup::OutOfMemory,
         LibraryGroup::DiskFull,
@@ -92,10 +104,19 @@ impl LibraryGroup {
         LibraryGroup::ClockWrong,
         LibraryGroup::CertExpired,
         LibraryGroup::PackageBroken,
+        LibraryGroup::DiskNotSeen,
+        LibraryGroup::DiskNotGrown,
+        LibraryGroup::MountFails,
+        LibraryGroup::IscsiMissing,
         LibraryGroup::SystemInfo,
         LibraryGroup::Disk,
+        LibraryGroup::DiskSetup,
+        LibraryGroup::Mounts,
         LibraryGroup::StorageLvm,
         LibraryGroup::StorageSan,
+        LibraryGroup::Iscsi,
+        LibraryGroup::FindFiles,
+        LibraryGroup::FileTransfer,
         LibraryGroup::Memory,
         LibraryGroup::Processes,
         LibraryGroup::Network,
@@ -123,7 +144,9 @@ impl LibraryGroup {
         use LibraryGroup::*;
         match self {
             SlowHost | OutOfMemory | DiskFull | CantReachService | DnsFails | ServiceWontStart | CantLoginSsh
-            | ClockWrong | CertExpired | PackageBroken => LibrarySection::Troubleshoot,
+            | ClockWrong | CertExpired | PackageBroken | DiskNotSeen | DiskNotGrown | MountFails | IscsiMissing => {
+                LibrarySection::Troubleshoot
+            }
             _ => LibrarySection::Area,
         }
     }
@@ -141,10 +164,19 @@ impl LibraryGroup {
             ClockWrong => "Clock is wrong",
             CertExpired => "Certificate expired or failing",
             PackageBroken => "Package manager broken",
+            DiskNotSeen => "Added disk isn't visible",
+            DiskNotGrown => "Disk enlarged, space didn't grow",
+            MountFails => "Mount fails or fstab is wrong",
+            IscsiMissing => "iSCSI disk missing",
             SystemInfo => "System info",
             Disk => "Disk and filesystems",
+            DiskSetup => "Disks: add and grow",
+            Mounts => "Mounts and /etc/fstab",
             StorageLvm => "Storage: LVM and RAID",
-            StorageSan => "Storage: SMART, SAN and shares",
+            StorageSan => "Storage: SMART, NFS and SMB",
+            Iscsi => "Storage: iSCSI and multipath",
+            FindFiles => "Find files and text",
+            FileTransfer => "Copy files (scp, rsync)",
             Memory => "Memory",
             Processes => "CPU and processes",
             Network => "Network",
@@ -159,7 +191,7 @@ impl LibraryGroup {
             WebServers => "Web servers (nginx, Apache)",
             Databases => "Databases (MySQL, PostgreSQL)",
             Scheduling => "Cron and timers",
-            TimeSync => "Time sync (NTP/chrony)",
+            TimeSync => "Time and NTP (chrony, timesyncd)",
             Identity => "Identity (AD/LDAP, SSSD)",
             VmwareGuest => "VMware Tools (guest)",
             Docker => "Docker",
@@ -238,7 +270,6 @@ pub const LIBRARY: &[BuiltIn] = &[
     entry("disk.devices", Disk, "Block devices", "lsblk -f", "Disks, partitions and LVM volumes with filesystems, labels and mount points."),
     entry("disk.mounts", Disk, "Mounted filesystems", "findmnt --real", "Real (not virtual) filesystems and where they are mounted."),
     entry("disk.mount-all", Disk, "All mounts", "findmnt", "Every mount, virtual filesystems included, as a tree."),
-    entry("disk.fstab", Disk, "Mounts at boot", "cat /etc/fstab", "Filesystems mounted at boot."),
     entry("disk.biggest", Disk, "Biggest folders", "sudo du -xh --max-depth=1 {{path:/var}} 2>/dev/null | sort -h | tail -20", "The 20 largest folders directly under a path, on the same filesystem."),
     entry("disk.usage-tree", Disk, "Folder sizes two deep", "sudo du -xh --max-depth=2 {{path:/var}} 2>/dev/null | sort -h | tail -30", "The 30 largest folders up to two levels under a path, same filesystem."),
     entry("disk.biggest-files", Disk, "Biggest files", "sudo du -xah {{path:/var}} 2>/dev/null | sort -h | tail -20", "The 20 largest files and folders under a path, on the same filesystem."),
@@ -251,6 +282,39 @@ pub const LIBRARY: &[BuiltIn] = &[
     entry("disk.by-id", Disk, "Disks by stable name", "ls -l /dev/disk/by-id", "Each disk's stable /dev/disk/by-id name and the device it points to."),
     entry("disk.swap", Disk, "Swap in use", "swapon --show", "Swap files and partitions, their size and how much is used."),
     entry("disk.ncdu", Disk, "Browse disk usage", "sudo ncdu -x {{path:/}}", "Walk a filesystem's usage interactively, staying on one filesystem (ncdu; may not be installed)."),
+
+    // ============================ Disks: add and grow ============================
+    entry("attach.list", DiskSetup, "Disks and partitions", "lsblk -o NAME,HCTL,SIZE,TYPE,FSTYPE,MOUNTPOINT", "Every disk with its SCSI address (host:channel:target:lun), size, filesystem and mount point. A new disk has no partitions or filesystem yet."),
+    entry("attach.dmesg", DiskSetup, "New disks in the kernel log", "sudo dmesg -T 2>/dev/null | grep -i -e 'attached scsi' -e 'capacity change' -e 'logical blocks' | tail -20", "The kernel's messages when it found a disk or saw one change size."),
+    entry("attach.rescan-hosts", DiskSetup, "Rescan for new disks", "echo '- - -' | sudo tee /sys/class/scsi_host/host*/scan >/dev/null", "Asks every SCSI controller to look for disks added since boot, such as one hot-added to a VM. Disks already there are not touched."),
+    entry("attach.rescan-tool", DiskSetup, "Rescan with rescan-scsi-bus.sh", "sudo rescan-scsi-bus.sh", "Looks for new disks on every SCSI bus (sg3_utils). Without -r it never removes a device."),
+    entry("attach.rescan-disk", DiskSetup, "Rescan a disk's size", "echo 1 | sudo tee /sys/class/block/{{disk:sdb}}/device/rescan", "Makes the kernel read a disk's size again after it was enlarged in the hypervisor (the name without /dev). Only the size the kernel sees changes."),
+    entry("attach.sizes", DiskSetup, "Sizes before and after", "lsblk {{disk:/dev/sda}}; sudo pvs 2>/dev/null; sudo lvs 2>/dev/null; df -hT {{mount:/}}", "A disk's partitions, the LVM volumes and a filesystem's size. Run it before and after growing to see each layer change."),
+    entry("attach.growpart-dry", DiskSetup, "Preview growing a partition", "sudo growpart -N {{disk:/dev/sda}} {{partition:3}}", "Shows what growpart would change to fill the free space after a partition, without changing it (cloud-utils-growpart / cloud-guest-utils)."),
+    entry("attach.growpart", DiskSetup, "Grow a partition", "sudo growpart {{disk:/dev/sda}} {{partition:3}}", "Grows a partition into the free space after it, online. Only a partition with free space right after it can grow; grow the PV or filesystem in it next."),
+    entry("attach.pvresize", DiskSetup, "Grow a physical volume", "sudo pvresize {{pv:/dev/sda3}}", "Makes LVM use all of a partition or disk that grew; its volume group gains the free space."),
+    entry("attach.lvextend-all", DiskSetup, "Extend an LV into all free space", "sudo lvextend -r -l +100%FREE {{lv:/dev/vg0/root}}", "Gives a logical volume all the free space left in its group and grows its filesystem (ext4/XFS, online)."),
+    entry("attach.vgextend", DiskSetup, "Add a NEW disk to a volume group", "sudo pvcreate {{device:/dev/sdb}} && sudo vgextend {{vg:vg0}} {{device:/dev/sdb}}", "Makes a new, empty disk an LVM physical volume and adds it to a group. pvcreate overwrites the start of the disk: check the name with lsblk first."),
+    entry("attach.partition", DiskSetup, "Partition a NEW empty disk", "sudo parted -s {{disk:/dev/sdb}} mklabel gpt mkpart primary 0% 100%", "Writes a new GPT partition table with one partition that fills the disk. NEW, empty disks only: it replaces any partition table, and what was on the disk is lost. Check the name with lsblk first."),
+    entry("attach.format", DiskSetup, "Format a NEW empty disk", "sudo mkfs -t {{fstype:xfs}} {{partition:/dev/sdb1}}", "Creates an empty xfs or ext4 filesystem on a new disk's partition. Everything on that partition is lost: check the name with lsblk first, and never run it on a disk in use."),
+    entry("attach.mount", DiskSetup, "Mount a new filesystem", "sudo mkdir -p {{mount:/data}} && sudo mount {{partition:/dev/sdb1}} {{mount:/data}}", "Creates a mount point and mounts a filesystem there until the next reboot. Add it to /etc/fstab to keep it."),
+
+    // ============================ Mounts and /etc/fstab ============================
+    entry("disk.fstab", Mounts, "Mounts at boot", "cat /etc/fstab", "Filesystems mounted at boot."),
+    entry("fstab.list", Mounts, "fstab as a table", "findmnt --fstab --evaluate", "Each /etc/fstab entry with UUID= and LABEL= turned into device names, so a missing disk stands out."),
+    entry("fstab.verify", Mounts, "Check /etc/fstab", "sudo findmnt --verify --verbose", "Checks every fstab entry: the device exists, the mount point is a folder and the filesystem type is known. Run it after editing fstab, before a reboot."),
+    entry("fstab.uuids", Mounts, "UUIDs of filesystems", "lsblk -o NAME,SIZE,FSTYPE,UUID,MOUNTPOINT", "Every filesystem's UUID, for an fstab line that keeps working when device names change."),
+    entry("fstab.uuid-of", Mounts, "A device's UUID", "sudo blkid {{device:/dev/sdb1}}", "The UUID, label and filesystem type of one partition or disk."),
+    entry("fstab.backup", Mounts, "Back up /etc/fstab", "sudo cp -a /etc/fstab /etc/fstab.$(date +%Y%m%d-%H%M%S).bak", "Copies /etc/fstab next to itself with the date and time in the name, before you edit it."),
+    entry("fstab.add", Mounts, "Add an fstab entry safely", "sudo cp -a /etc/fstab /etc/fstab.$(date +%Y%m%d-%H%M%S).bak && echo 'UUID={{uuid}} {{mount:/data}} {{fstype:xfs}} defaults,nofail 0 {{fsck-pass:0}}' | sudo tee -a /etc/fstab && sudo findmnt --verify && sudo systemctl daemon-reload", "Backs up fstab, adds a line by UUID with nofail (the host still boots if the disk is missing), checks the file and tells systemd. fsck-pass: 0 for xfs, 2 for ext4. If the check fails, fix the line before any reboot."),
+    entry("fstab.mount-all", Mounts, "Mount everything in fstab", "sudo mount -a", "Mounts every fstab entry not mounted yet, as the boot does: an error here would also stop a boot, so fix it now."),
+    entry("fstab.mount-preview", Mounts, "Preview mounting fstab", "sudo mount -fav", "Says what mount -a would mount, without mounting (--fake). Marked as a change: mount can still record what it faked."),
+    entry("fstab.mount-one", Mounts, "Mount one fstab entry", "sudo mount {{mount:/data}}", "Mounts a filesystem listed in fstab by its mount point, with fstab's options."),
+    entry("fstab.unmount", Mounts, "Unmount a filesystem", "sudo umount {{mount:/data}}", "Unmounts a filesystem. It fails while a process has files open on it (see what keeps a mount busy)."),
+    entry("fstab.busy", Mounts, "What keeps a mount busy", "sudo lsof +f -- {{mount:/data}} 2>/dev/null | head -40", "Processes with files open on a filesystem, which stop it unmounting."),
+    entry("fstab.mount-units", Mounts, "Mount units", "systemctl list-units --type=mount --all --no-pager", "The mounts systemd knows, from fstab and elsewhere, and whether each is active or failed."),
+    entry("fstab.failed-mount", Mounts, "Why a mount failed", "systemctl status {{unit:data.mount}} --no-pager", "A mount unit's state and last log lines. The unit is the path with - for / (data.mount, srv-backup.mount)."),
+    entry("fstab.options", Mounts, "The filesystem a path is on", "findmnt -T {{path:/var}}", "The device, type and mount options of the filesystem holding a path (ro after an error shows here)."),
 
     // ============================ Storage: LVM and RAID ============================
     entry("lvm.pvs", StorageLvm, "Physical volumes", "sudo pvs", "Each LVM physical volume: device, volume group, size and free space."),
@@ -276,9 +340,6 @@ pub const LIBRARY: &[BuiltIn] = &[
     entry("san.smart-attrs", StorageSan, "SMART attributes", "sudo smartctl -A {{device:/dev/sda}}", "SMART attributes, with reallocated, pending and uncorrectable sector counts."),
     entry("san.smart-scan", StorageSan, "Disks SMART can see", "sudo smartctl --scan", "The devices smartctl is able to query."),
     entry("san.smart-test", StorageSan, "Start a SMART self-test", "sudo smartctl -t short {{device:/dev/sda}}", "Starts a short self-test on a disk; read its result later with the SMART detail check."),
-    entry("san.multipath", StorageSan, "Multipath map", "sudo multipath -ll", "Multipath devices, their paths and each path's status."),
-    entry("san.iscsi-sessions", StorageSan, "iSCSI sessions", "sudo iscsiadm -m session -P 3", "Active iSCSI sessions and their targets, in detail."),
-    entry("san.iscsi-nodes", StorageSan, "iSCSI targets", "sudo iscsiadm -m node", "The iSCSI target nodes this host knows."),
     entry("san.nfs-mounts", StorageSan, "NFS mounts", "findmnt -t nfs,nfs4", "Mounted NFS filesystems, their servers and options."),
     entry("san.nfs-exports", StorageSan, "Exports on a NFS server", "showmount -e {{server:nfs01.test}}", "The exports a NFS server offers (showmount)."),
     entry("san.nfs-stat", StorageSan, "NFS client stats", "nfsstat -c", "NFS client operation counts, to spot retransmits (nfsstat)."),
@@ -287,6 +348,72 @@ pub const LIBRARY: &[BuiltIn] = &[
     entry("san.xfs-info", StorageSan, "XFS geometry", "sudo xfs_info {{mount:/}}", "Block sizes and geometry of a mounted XFS filesystem."),
     entry("san.ext-info", StorageSan, "ext4 superblock", "sudo dumpe2fs -h {{device:/dev/sda1}}", "An ext2/3/4 superblock: features, mount count and check interval (dumpe2fs)."),
     entry("san.fsck-check", StorageSan, "Check an ext filesystem read-only", "sudo e2fsck -fn {{device:/dev/sdb1}}", "Checks an UNMOUNTED ext filesystem without changing it (-n). Never run it on a mounted one."),
+
+    // ============================ Storage: iSCSI and multipath ============================
+    entry("iscsi.service", Iscsi, "iSCSI services", "systemctl status iscsid iscsi open-iscsi --no-pager 2>/dev/null", "Whether iscsid and the service that logs in at boot (iscsi on RHEL, open-iscsi on Debian/Ubuntu) are running."),
+    entry("iscsi.initiator", Iscsi, "Initiator name", "sudo cat /etc/iscsi/initiatorname.iscsi", "This host's iSCSI name (IQN), which the storage array must allow."),
+    entry("iscsi.discovery-list", Iscsi, "Known discovery portals", "sudo iscsiadm -m discovery", "The portals this host has run discovery against."),
+    entry("iscsi.portal-reach", Iscsi, "Reach a portal", "nc -vz -w 5 {{portal:192.0.2.10}} {{port:3260}}", "Whether a storage portal accepts connections on the iSCSI port (netcat; times out after 5 s)."),
+    entry("iscsi.discover", Iscsi, "Discover targets on a portal", "sudo iscsiadm -m discovery -t sendtargets -p {{portal:192.0.2.10}}", "Asks a portal which targets it offers and saves each as a node record. It does not log in."),
+    entry("san.iscsi-nodes", Iscsi, "iSCSI targets", "sudo iscsiadm -m node", "The iSCSI target nodes this host knows."),
+    entry("iscsi.node-detail", Iscsi, "A target's settings", "sudo iscsiadm -m node -T {{target}} -p {{portal:192.0.2.10}}", "A node record's settings: startup mode, timeouts and authentication (passwords hidden)."),
+    entry("iscsi.login", Iscsi, "Log in to a target", "sudo iscsiadm -m node -T {{target}} -p {{portal:192.0.2.10}} --login", "Connects to a target; its LUNs appear as new disks (see Disks by transport)."),
+    entry("iscsi.startup", Iscsi, "Log in at boot", "sudo iscsiadm -m node -T {{target}} -p {{portal:192.0.2.10}} -o update -n node.startup -v automatic", "Makes the host log in to a target automatically at boot."),
+    entry("iscsi.logout", Iscsi, "Log out of a target", "sudo iscsiadm -m node -T {{target}} -p {{portal:192.0.2.10}} --logout", "Disconnects a target, and its disks disappear: unmount them and stop what uses them first."),
+    entry("san.iscsi-sessions", Iscsi, "iSCSI sessions", "sudo iscsiadm -m session -P 3", "Active iSCSI sessions and their targets, in detail."),
+    entry("iscsi.session-list", Iscsi, "iSCSI sessions (short)", "sudo iscsiadm -m session", "One line per logged-in session: its number, portal and target."),
+    entry("iscsi.session-stats", Iscsi, "A session's counters", "sudo iscsiadm -m session -r {{sid:1}} -s", "Bytes, PDUs and errors of one session (its number from the short session list)."),
+    entry("iscsi.rescan", Iscsi, "Rescan iSCSI sessions", "sudo iscsiadm -m session --rescan", "Asks every session's target for new or resized LUNs."),
+    entry("iscsi.disks", Iscsi, "Disks by transport", "lsblk -S -o NAME,HCTL,TRAN,VENDOR,MODEL,SIZE", "SCSI disks and how each is attached (iscsi, sas, spi, ...), to tell which come from iSCSI."),
+    entry("iscsi.by-path", Iscsi, "iSCSI disks by path", "ls -l /dev/disk/by-path/ | grep -i iscsi", "Each iSCSI LUN's stable name (portal, target and LUN) and the disk it points to."),
+    entry("iscsi.log", Iscsi, "iSCSI kernel messages", "sudo dmesg -T 2>/dev/null | grep -i -e iscsi -e 'conn error' | tail -40", "Recent iSCSI messages from the kernel: logins, connection errors and recoveries."),
+    entry("iscsi.conf", Iscsi, "iscsid settings", "sudo grep -v -e '^#' -e '^$' -e password /etc/iscsi/iscsid.conf", "iscsid's active settings (startup, timeouts, authentication method), with password lines left out."),
+    entry("san.multipath", Iscsi, "Multipath map", "sudo multipath -ll", "Multipath devices, their paths and each path's status."),
+    entry("iscsi.multipathd", Iscsi, "multipathd service", "systemctl status multipathd --no-pager", "Whether multipathd, which watches the paths and fails over, is running."),
+    entry("iscsi.multipath-conf", Iscsi, "Multipath config", "cat /etc/multipath.conf 2>/dev/null", "The multipath settings: defaults, blacklist and per-array devices."),
+    entry("iscsi.multipath-reload", Iscsi, "Reload multipath maps", "sudo multipath -r", "Rebuilds the multipath maps, e.g. after logging in to a second path to the same LUN."),
+
+    // ============================ Find files and text ============================
+    entry("find.dirs", FindFiles, "Folders by name", "sudo find {{path:/}} -xdev -type d -iname '*{{name}}*' 2>/dev/null | head -50", "Folders whose name contains a word, in any letter case, on the path's filesystem only (first 50)."),
+    entry("find.files", FindFiles, "Files by name", "sudo find {{path:/}} -xdev -type f -iname '*{{name}}*' 2>/dev/null | head -50", "Files whose name contains a word, in any letter case, on the path's filesystem only (first 50)."),
+    entry("find.exact", FindFiles, "Files with an exact name", "sudo find {{path:/}} -xdev -name '{{name:sshd_config}}' 2>/dev/null | head -50", "Files and folders with exactly this name; wildcards such as *.conf work too."),
+    entry("find.locate", FindFiles, "Files by name (locate)", "locate -i -l 50 {{name}}", "A fast search of the file-name database (plocate or mlocate), in any letter case. It may miss files added since the database was last updated."),
+    entry("find.updatedb", FindFiles, "Update the locate database", "sudo updatedb", "Rebuilds the database locate searches (it also runs daily). Writes the database file."),
+    entry("find.big", FindFiles, "Files bigger than a size", "sudo find {{path:/}} -xdev -type f -size +{{size:100M}} -print0 2>/dev/null | sudo du -h --files0-from=- | sort -rh | head -30", "Files over a size (such as 100M or 1G) on the path's filesystem, largest first."),
+    entry("find.recent", FindFiles, "Files changed recently", "sudo find {{path:/etc}} -xdev -type f -mmin -{{minutes:60}} -printf '%TY-%Tm-%Td %TH:%TM  %p\\n' 2>/dev/null | sort | tail -50", "Files modified in the last minutes, oldest first: what changed before a problem started."),
+    entry("find.old", FindFiles, "Files older than some days", "sudo find {{path:/var/log}} -xdev -type f -mtime +{{days:30}} -printf '%TY-%Tm-%Td  %10s  %p\\n' 2>/dev/null | sort | head -50", "Files not modified for more than some days, oldest first, with their size in bytes. It only lists them."),
+    entry("find.owner", FindFiles, "Files owned by a user", "sudo find {{path:/home}} -xdev -type f -user {{user}} 2>/dev/null | head -50", "Files a user owns under a path (first 50)."),
+    entry("find.count", FindFiles, "Count files in a folder", "sudo find {{path:/srv}} -xdev -type f 2>/dev/null | wc -l", "How many files a folder holds on its filesystem, e.g. before and after a copy."),
+    entry("find.world-writable", FindFiles, "World-writable files", "sudo find {{path:/}} -xdev -type f -perm -0002 2>/dev/null | head -50", "Files anyone may change: a risk outside /tmp."),
+    entry("find.setuid", FindFiles, "Setuid programs", "sudo find {{path:/}} -xdev -type f -perm -4000 2>/dev/null", "Programs that run as their owner (often root), to spot unexpected ones."),
+    entry("find.grep", FindFiles, "Text in files", "sudo grep -rnI -e '{{text}}' {{path:/etc}} 2>/dev/null | head -50", "Lines holding a text under a folder, with file names and line numbers; binary files are skipped (first 50)."),
+    entry("find.grep-i", FindFiles, "Text in files, any case", "sudo grep -rniI -e '{{text}}' {{path:/etc}} 2>/dev/null | head -50", "Like text in files, ignoring upper and lower case."),
+    entry("find.grep-include", FindFiles, "Text in files of one kind", "sudo grep -rnI --include='{{include:*.conf}}' -e '{{text}}' {{path:/etc}} 2>/dev/null | head -50", "Searches only the files whose name matches a pattern, such as *.conf or *.log."),
+    entry("find.grep-exclude", FindFiles, "Text, skipping folders", "sudo grep -rnI --exclude-dir='{{exclude:.git}}' -e '{{text}}' {{path:/srv}} 2>/dev/null | head -50", "Searches a folder but skips folders with a given name, such as .git or node_modules."),
+    entry("find.grep-files", FindFiles, "Files holding a text", "sudo grep -rlI -e '{{text}}' {{path:/etc}} 2>/dev/null | head -50", "Only the names of the files that hold a text."),
+    entry("find.grep-word", FindFiles, "A whole word in files", "sudo grep -rnwI -e '{{word}}' {{path:/etc}} 2>/dev/null | head -50", "Lines where the text is a whole word: port matches, ports does not."),
+    entry("find.config-active", FindFiles, "A config file without comments", "grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' {{file:/etc/ssh/sshd_config}}", "Only the lines of a config file that take effect: comments and blank lines left out."),
+    entry("find.which", FindFiles, "Where a program is", "which -a {{name}}", "Every place on the PATH where a command is found; the first one runs."),
+
+    // ============================ Copy files (scp, rsync) ============================
+    entry("copy.size", FileTransfer, "Size before a copy", "sudo du -sh {{path:/srv/data}}", "How much a folder holds, to check the destination has room."),
+    entry("copy.room", FileTransfer, "Free space at the destination", "df -h {{path:/srv}}", "Free space on the filesystem a path is on; run it on the destination host."),
+    entry("copy.scp-to", FileTransfer, "Copy a file to a host (scp)", "scp -p {{file}} {{user}}@{{host}}:{{dest:/tmp/}}", "Copies a file to another host over SSH, keeping its times and modes. A file of the same name there is overwritten."),
+    entry("copy.scp-from", FileTransfer, "Copy a file from a host (scp)", "scp -p {{user}}@{{host}}:{{file}} {{dest:.}}", "Copies a file from another host to this one. A file of the same name here is overwritten."),
+    entry("copy.scp-dir", FileTransfer, "Copy a folder to a host (scp)", "scp -rp {{folder}} {{user}}@{{host}}:{{dest:/tmp/}}", "Copies a folder and everything in it to another host. Files of the same name there are overwritten."),
+    entry("copy.scp-limit", FileTransfer, "Copy with a speed limit (scp)", "scp -p -l {{kbits:8192}} {{file}} {{user}}@{{host}}:{{dest:/tmp/}}", "Copies a file to another host at most at a speed in Kbit/s (8192 is about 1 MB/s)."),
+    entry("copy.rsync-to", FileTransfer, "Copy a folder to a host (rsync)", "rsync -avh --progress {{src:/srv/data/}} {{user}}@{{host}}:{{dest:/srv/data/}}", "Copies a folder over SSH, sending only what changed; a trailing / copies its contents. Changed files there are overwritten; nothing is deleted."),
+    entry("copy.rsync-from", FileTransfer, "Copy a folder from a host (rsync)", "rsync -avh --progress {{user}}@{{host}}:{{src:/srv/data/}} {{dest:/srv/data/}}", "Copies a folder from another host, sending only what changed. Changed files here are overwritten; nothing is deleted."),
+    entry("copy.rsync-preview", FileTransfer, "Preview a copy (dry run)", "rsync -avhn --itemize-changes {{src:/srv/data/}} {{user}}@{{host}}:{{dest:/srv/data/}}", "Lists what a copy would send, changing nothing (--dry-run). Marked as a change: Remotely can't prove an rsync only reads."),
+    entry("copy.rsync-mirror-preview", FileTransfer, "Preview a mirror (dry run)", "rsync -avhn --delete --itemize-changes {{src:/srv/data/}} {{user}}@{{host}}:{{dest:/srv/data/}}", "Lists what a mirror would copy and which files there it would delete, changing nothing (--dry-run)."),
+    entry("copy.rsync-mirror", FileTransfer, "Mirror a folder (deletes extras)", "rsync -avh --delete {{src:/srv/data/}} {{user}}@{{host}}:{{dest:/srv/data/}}", "Makes the destination an exact copy: files there that the source doesn't have are DELETED. Preview the mirror first."),
+    entry("copy.rsync-resume", FileTransfer, "Resume a large copy", "rsync -avhP --append-verify {{file}} {{user}}@{{host}}:{{dest:/tmp/}}", "Carries on an interrupted copy where it stopped, then checks the whole file. -P keeps partial files and shows progress."),
+    entry("copy.rsync-limit", FileTransfer, "Copy with a speed limit (rsync)", "rsync -avhP --bwlimit={{rate:10M}} {{src:/srv/data/}} {{user}}@{{host}}:{{dest:/srv/data/}}", "Copies a folder at most at a rate per second (10M is 10 MiB/s), to spare a busy link."),
+    entry("copy.rsync-port", FileTransfer, "rsync over another SSH port", "rsync -avh -e 'ssh -p {{port:22}}' {{src:/srv/data/}} {{user}}@{{host}}:{{dest:/srv/data/}}", "Copies a folder over SSH on a port other than 22. Changed files there are overwritten."),
+    entry("copy.rsync-verify", FileTransfer, "Compare folders by checksum", "rsync -avhcn --delete {{src:/srv/data/}} {{user}}@{{host}}:{{dest:/srv/data/}}", "After a copy, lists files whose content differs and files only the destination has, by checksum, changing nothing (--dry-run)."),
+    entry("copy.checksum", FileTransfer, "Checksum a file", "sha256sum {{file}}", "A file's SHA-256. Run it on both hosts after a copy: the sums match when the copies are the same."),
+    entry("copy.checksum-folder", FileTransfer, "Checksums of a folder", "cd {{path:/srv/data}} && find . -type f -exec sha256sum {} + | sort -k 2", "The SHA-256 of every file in a folder, by name. Run it on both hosts in Compare to spot the files that differ. Marked as a change: find -exec runs a program."),
+    entry("copy.checksum-check", FileTransfer, "Check files against a sum list", "sha256sum -c {{list:SHA256SUMS}}", "Checks files against a saved list of SHA-256 sums and names any that differ or are missing."),
 
     // ============================ Memory ============================
     entry("memory.free", Memory, "Memory and swap", "free -h", "Total, used, free and available memory and swap."),
@@ -579,6 +706,21 @@ pub const LIBRARY: &[BuiltIn] = &[
     entry("time.hwclock", TimeSync, "Hardware clock", "sudo hwclock --show 2>/dev/null", "The time the hardware (RTC) clock holds."),
     entry("time.set-ntp", TimeSync, "Turn on NTP sync", "sudo timedatectl set-ntp true", "Enables automatic clock sync (timesyncd or chrony)."),
     entry("time.makestep", TimeSync, "Step the clock now", "sudo chronyc makestep 2>/dev/null", "Tells chrony to jump the clock straight to the right time instead of slewing."),
+    entry("time.which", TimeSync, "Which time service runs", "systemctl list-units --all --no-pager --type=service 'chrony*' 'systemd-timesyncd*' 'ntp*'", "Which of chrony, systemd-timesyncd and ntpd/NTPsec is installed and which is active. Only one should run."),
+    entry("time.ntp-on", TimeSync, "Is NTP on and synced", "timedatectl show -p NTP -p NTPSynchronized", "Whether automatic sync is on (NTP=yes) and whether the clock is synchronized now."),
+    entry("time.timezones", TimeSync, "Find a time zone", "timedatectl list-timezones | grep -i {{text:europe}}", "Time zone names that contain a word, for setting the time zone."),
+    entry("time.set-timezone", TimeSync, "Set the time zone", "sudo timedatectl set-timezone {{zone:UTC}}", "Sets the time zone (a name from the list, such as Europe/Berlin). Logs and scheduled jobs use it from now on."),
+    entry("time.ntp-off", TimeSync, "Turn off NTP sync", "sudo timedatectl set-ntp false", "Stops automatic clock sync, e.g. before setting the time by hand. Turn it on again afterwards."),
+    entry("time.timesyncd-status", TimeSync, "timesyncd status", "systemctl status systemd-timesyncd --no-pager", "Whether systemd-timesyncd runs, the server it uses and its last log lines."),
+    entry("time.timesyncd-detail", TimeSync, "timesyncd details", "timedatectl show-timesync --all", "Every systemd-timesyncd property: servers from its config and from DHCP, poll interval and the last sync."),
+    entry("time.timesyncd-config", TimeSync, "timesyncd config", "systemd-analyze cat-config systemd/timesyncd.conf --no-pager", "systemd-timesyncd's config file with its drop-ins, in the order they apply (NTP= and FallbackNTP= servers)."),
+    entry("time.timesyncd-set", TimeSync, "Set timesyncd's servers", "sudo mkdir -p /etc/systemd/timesyncd.conf.d && printf '[Time]\\nNTP={{servers:ntp1.example.test ntp2.example.test}}\\n' | sudo tee /etc/systemd/timesyncd.conf.d/50-ntp.conf && sudo systemctl restart systemd-timesyncd", "Writes a drop-in that sets the NTP servers (space separated) and restarts timesyncd; the shipped config file stays as it is."),
+    entry("time.timesyncd-restart", TimeSync, "Restart timesyncd", "sudo systemctl restart systemd-timesyncd", "Restarts systemd-timesyncd so it reads its config again and syncs."),
+    entry("time.chrony-config", TimeSync, "chrony config", "grep -sHv -e '^[[:space:]]*#' -e '^[[:space:]]*$' /etc/chrony.conf /etc/chrony/chrony.conf /etc/chrony/conf.d/*.conf /etc/chrony/sources.d/*.sources", "chrony's active config lines and the file each is in (RHEL: /etc/chrony.conf; Debian and Ubuntu: /etc/chrony/)."),
+    entry("time.chrony-check", TimeSync, "Check chrony config", "sudo chronyd -p", "Reads chrony's config, includes and all, and prints it as chronyd understands it; a mistake shows as an error. Changes nothing (chrony 4.0 and later)."),
+    entry("time.chrony-reload", TimeSync, "Reload chrony's sources", "sudo chronyc reload sources", "Reads the server files in chrony's sourcedir again (Debian/Ubuntu: /etc/chrony/sources.d) without a restart."),
+    entry("time.chrony-restart", TimeSync, "Restart chrony", "sudo systemctl restart chronyd 2>/dev/null || sudo systemctl restart chrony", "Restarts chrony (chronyd on RHEL, chrony on Debian/Ubuntu) so it reads its config again."),
+    entry("time.ntp-config", TimeSync, "ntpd config", "grep -sHv -e '^[[:space:]]*#' -e '^[[:space:]]*$' /etc/ntp.conf /etc/ntpsec/ntp.conf", "Classic ntpd's or NTPsec's active config lines: servers and restrictions."),
 
     // ============================ Identity (AD/LDAP, SSSD) ============================
     entry("id.realm", Identity, "Joined domains", "realm list 2>/dev/null", "The AD or IPA domains this host is joined to, and the login settings."),
@@ -698,7 +840,7 @@ pub const TROUBLESHOOT: &[Symptom] = &[
     ] },
     Symptom { group: DiskFull, steps: &[
         "disk.free", "disk.inodes", "disk.biggest", "disk.largest-logs", "disk.biggest-files",
-        "disk.deleted", "logs.usage", "disk.open-by-dir", "logs.vacuum", "docker.df",
+        "find.big", "disk.deleted", "logs.usage", "disk.open-by-dir", "logs.vacuum", "docker.df",
     ] },
     Symptom { group: CantReachService, steps: &[
         "network.ping", "network.default-route", "network.routes", "network.listening", "network.port",
@@ -718,8 +860,9 @@ pub const TROUBLESHOOT: &[Symptom] = &[
         "users.expiry", "sec.selinux-denials", "disk.free",
     ] },
     Symptom { group: ClockWrong, steps: &[
-        "time.status", "time.sync", "time.chrony-tracking", "time.chrony-sources", "time.ntpq",
-        "time.offset", "time.set-ntp", "time.makestep",
+        "time.status", "time.which", "time.ntp-on", "time.chrony-tracking", "time.chrony-sources",
+        "time.chrony-config", "time.chrony-check", "time.sync", "time.timesyncd-config", "time.ntpq",
+        "time.offset", "vmtools.timesync", "time.set-ntp", "time.makestep",
     ] },
     Symptom { group: CertExpired, steps: &[
         "cert.expiry", "cert.enddate", "cert.chain", "cert.verify", "cert.file",
@@ -728,5 +871,23 @@ pub const TROUBLESHOOT: &[Symptom] = &[
     Symptom { group: PackageBroken, steps: &[
         "apt.audit", "apt.fix-broken", "apt.held", "apt.clean", "apt.update",
         "dnf.verify", "dnf.clean", "dnf.makecache",
+    ] },
+    Symptom { group: DiskNotSeen, steps: &[
+        "attach.list", "attach.dmesg", "attach.rescan-hosts", "attach.rescan-tool", "disk.devices",
+        "disk.by-id", "iscsi.disks",
+    ] },
+    Symptom { group: DiskNotGrown, steps: &[
+        "attach.sizes", "attach.rescan-disk", "attach.dmesg", "attach.growpart-dry", "attach.growpart",
+        "attach.pvresize", "lvm.vg-free", "lvm.resize", "lvm.fsgrow-xfs", "lvm.fsgrow-ext", "disk.free",
+    ] },
+    Symptom { group: MountFails, steps: &[
+        "fstab.verify", "disk.fstab", "fstab.list", "fstab.uuids", "fstab.mount-units",
+        "fstab.failed-mount", "disk.mount-errors", "fstab.options", "services.daemon-reload",
+        "fstab.mount-all",
+    ] },
+    Symptom { group: IscsiMissing, steps: &[
+        "iscsi.service", "iscsi.initiator", "san.iscsi-sessions", "iscsi.discovery-list", "san.iscsi-nodes",
+        "iscsi.log", "iscsi.portal-reach", "iscsi.discover", "iscsi.login", "iscsi.rescan", "san.multipath",
+        "iscsi.disks",
     ] },
 ];

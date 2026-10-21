@@ -347,6 +347,15 @@ pub fn default_read_only_commands() -> Vec<String> {
         "smartctl",
         "openssl",
         "sysctl",
+        // BX-08 (0.4.0): finding files, iSCSI, time. Each has a rule in writes.rs: find without its
+        // actions that delete, run or write; locate without slocate's update; iscsiadm showing only;
+        // chronyd only printing its configuration.
+        "find",
+        "locate",
+        "plocate",
+        "iscsiadm",
+        "chronyd -p",
+        "systemd-analyze cat-config",
     ]
     .into_iter()
     .map(String::from)
