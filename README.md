@@ -43,15 +43,27 @@ approval rules make of it (read-only, changes, dangerous), so you see before you
   hangs. It has two sections, searchable together with collapsible groups:
   - **Troubleshoot** — runbooks by symptom (host is slow, out of memory, disk is full, can't reach a service, DNS
     fails, service won't start, can't log in over SSH, clock is wrong, certificate expired or failing, package manager
-    broken), each listing the checks to run in order.
-  - **By area** — 25 groups by topic: system info; disk and filesystems; storage (LVM, RAID, SMART, SAN, NFS/SMB);
-    memory; CPU and processes; network; services; logs; packages (apt and dnf); users and groups; security and access
-    (SELinux, AppArmor, sudo, `sshd -T`, auditd, fail2ban); TLS certificates; firewall; web servers (nginx, Apache);
-    databases (MySQL/MariaDB, PostgreSQL); cron and timers; time sync (NTP/chrony); identity (AD/LDAP, SSSD); VMware
-    Tools in the guest; Docker; Podman; Kubernetes; Helm.
+    broken, added disk isn't visible, disk enlarged but the space didn't grow, mount fails or fstab is wrong, iSCSI
+    disk missing), each listing the checks to run in order.
+  - **By area** — 30 groups by topic: system info; disk and filesystems; disks: add and grow (rescan the SCSI bus for
+    a disk added to a VM, grow a partition, PV, LV and filesystem with sizes before and after, partition, format and
+    mount a new disk); mounts and `/etc/fstab` (check it, UUIDs, add an entry safely); storage (LVM, RAID, SMART,
+    NFS/SMB); iSCSI and multipath (discovery, login and logout, sessions, rescan); find files and text (folders and
+    files by name, `locate`, size, age, owner, text inside files); copy files (`scp` and `rsync`: to and from a host,
+    mirror, dry-run previews, resume, speed limits, checksums after a copy); memory; CPU and processes; network;
+    services; logs; packages (apt and dnf); users and groups; security and access (SELinux, AppArmor, sudo, `sshd -T`,
+    auditd, fail2ban); TLS certificates; firewall; web servers (nginx, Apache); databases (MySQL/MariaDB, PostgreSQL);
+    cron and timers; time and NTP (timedatectl, chrony and systemd-timesyncd: status, config, which daemon runs, time
+    zone); identity (AD/LDAP, SSSD); VMware Tools in the guest; Docker; Podman; Kubernetes; Helm.
     Most entries are read-only checks; the fixes (restart or reload a service, vacuum the journal, extend an LV and grow
-    its filesystem, resync the clock, clear a failed unit, open a firewall port) are marked as changes and ask before
-    they run. A command can appear both in a symptom runbook and in its area group.
+    its filesystem, resync the clock, clear a failed unit, open a firewall port, mount, log in to an iSCSI target) are
+    marked as changes and ask before they run. Every `scp` and `rsync` is a change, dry runs included: rsync's options
+    can run programs or write files. The one format step is for a new, empty disk; the mkfs rule marks it dangerous. A
+    command can appear both in a symptom runbook and in its area group.
+  - **Manual** (QL-13): each library command has a link to its official manual page (the man-pages project at
+    man7.org, freedesktop.org for systemd's tools, a project's own documentation for Docker, Podman, kubectl, Helm,
+    nginx, Apache, MySQL, PostgreSQL, chrony, firewalld, OpenSSL and rsync, and Debian's or Ubuntu's manual pages
+    otherwise). It opens in your default browser; Remotely opens only addresses on that list of documentation sites.
 
 ### MultiExec and Compare output
 
@@ -371,7 +383,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | MultiExec         | `crates/core/src/terminal/multiexec.rs`                       | SS-10                                                                                                                               | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                    |
 | File transfer     | `crates/core/src/terminal/files.rs`, `folder.rs`              | SS-08                                                                                                                               | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, transfers with cancel and retry                  |
 | Compare output    | `crates/core/src/bulk.rs`                                     | BX-01, BX-03, BX-05                                                                                                                 | Working: hosts from picked tabs and tree sessions, results grouped by output, diff, CSV, JSON and HTML export                                                                  |
-| Command panel     | `crates/core/src/snippets/`                                   | BX-08                                                                                                                               | Working: favourite commands in folders (audited), a large built-in Linux library (Troubleshoot runbooks and 25 area groups), variables, marks from the policy engine           |
+| Command panel     | `crates/core/src/snippets/`                                   | BX-08, QL-13                                                                                                                        | Working: favourite commands in folders (audited), a built-in Linux library (Troubleshoot runbooks, 30 area groups, manual links), variables, marks from the policy engine      |
 | Reachability      | `crates/core/src/reachability.rs`                             | QL-04 (MO-08 lite), SS-07                                                                                                           | Working: TCP checks of the sessions the tree shows, once per host and port, a few at a time; the first jump host's for sessions behind one                                     |
 | VM links          | `crates/core/src/vm_links.rs`                                 | QL-01, BX-01                                                                                                                        | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept                                                                          |
 | Network adapter   | `crates/core/src/adapters/network.rs`                         | QL-01, QL-03, QL-04                                                                                                                 | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                |
