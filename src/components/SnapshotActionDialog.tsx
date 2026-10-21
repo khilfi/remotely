@@ -20,6 +20,8 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import type { Command, SnapshotLimits, VmSnapshots } from "@/lib/api";
 import { plural } from "@/lib/format";
+import { slashIsPath } from "@/lib/hypervisors";
+import { unreachableByName } from "@/lib/vm-snapshots";
 
 export type SnapshotAction = { kind: "take" | "revert" | "delete"; vms: VmSnapshots[] };
 
@@ -44,11 +46,15 @@ function defaultName() {
   return `Snapshot ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
 }
 
-/** The same checks the core makes, so the user sees the problem before submitting. */
-function nameProblem(name: string, limits: SnapshotLimits) {
+/**
+ * The same checks the core makes, so the user sees the problem before submitting. `vmware`: a VMware VM is among the
+ * targets, and vmrun reads '/' as a path (VM-18: VBoxManage doesn't).
+ */
+function nameProblem(name: string, limits: SnapshotLimits, vmware: boolean) {
   if (name.trim() === "") return "Give the snapshot a name.";
   if (name.trim() !== name) return "A snapshot name can't start or end with a space.";
-  if (name.includes("/")) return "A snapshot name can't contain '/': vmrun reads it as the path to a child snapshot.";
+  if (vmware && name.includes("/"))
+    return "A snapshot name can't contain '/': vmrun reads it as the path to a child snapshot.";
   if (name.length > limits.maxNameLength) return `A snapshot name can be at most ${limits.maxNameLength} characters.`;
   if (name.startsWith(limits.safetyPrefix))
     return `Names starting with '${limits.safetyPrefix}' are kept for safety snapshots.`;
@@ -62,8 +68,13 @@ export function SnapshotActionDialog(props: Props) {
 function TakeDialog({ action, limits, onSubmit, onClose }: Props) {
   const [name, setName] = useState(defaultName);
   const [busy, setBusy] = useState(false);
-  const problem = nameProblem(name, limits);
-  // vmrun refuses a name the VM already has; leave those VMs out rather than fail them.
+  const problem = nameProblem(
+    name,
+    limits,
+    action.vms.some((v) => slashIsPath(v.hypervisor)),
+  );
+  // vmrun refuses a name the VM already has, and Remotely keeps VirtualBox names unique too; leave those VMs out
+  // rather than fail them.
   const clash = action.vms.filter((v) => v.snapshots.some((s) => s.name === name));
   const targets = action.vms.filter((v) => !clash.includes(v));
 
@@ -139,11 +150,11 @@ interface Choice {
 function PickDialog({ action, onSubmit, onClose }: Props) {
   const revert = action.kind === "revert";
   const byName = new Map<string, Choice>();
-  // vmrun reads '/' in a name as a path, so it cannot name those snapshots.
+  // vmrun reads '/' in a name as a path, so it cannot name those snapshots (VM-18: VirtualBox can).
   let unreachable = 0;
   for (const vm of action.vms) {
     for (const s of vm.snapshots) {
-      if (s.name.includes("/")) {
+      if (unreachableByName(s, vm.hypervisor)) {
         unreachable += 1;
         continue;
       }
@@ -186,7 +197,7 @@ function PickDialog({ action, onSubmit, onClose }: Props) {
           </DialogDescription>
         </DialogHeader>
         {choices.length === 0 && (
-          <p className="text-sm text-muted-foreground">None of these VMs has a snapshot vmrun can name.</p>
+          <p className="text-sm text-muted-foreground">None of these VMs has a snapshot to pick.</p>
         )}
         <RadioGroup value={picked} onValueChange={setPicked} className="max-h-72 gap-1 overflow-auto">
           {choices.map((c, i) => (

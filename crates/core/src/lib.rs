@@ -8,7 +8,8 @@
 //!   metrics (in memory)                  │  impact preview, approvals, audit
 //!                                        │  vault (AP-06 re-auth)
 //!                                        ▼
-//!                                   jobs (runner) ──► adapters::vmware (vmrun)
+//!                                   jobs (runner) ──► adapters::hypervisor ──► adapters::vmware (vmrun)
+//!                                                 │                      └─► adapters::virtualbox (VBoxManage, VM-18)
 //!                                                 ├─► adapters::remote (russh)
 //!                                                 └─► adapters::updater (FD-14)
 //!                                                       └─► adapters::github (token from the vault)
@@ -72,9 +73,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adapters::host_counters::{HostCounters, WindowsCounters};
+use adapters::hypervisor::Hypervisors;
 use adapters::network::{NetworkAdapter, SystemNetwork};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::UpdaterAdapter;
+use adapters::virtualbox::{SwitchableVirtualBox, VirtualBoxAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
 use bulk::BulkRuns;
 use capacity::CapacityChecker;
@@ -110,6 +113,9 @@ pub struct CoreConfig {
     /// Full path to vmrun.exe. Overrides the path saved in Settings; when neither is set,
     /// `REMOTELY_VMRUN`, the registry and the default install folders are tried.
     pub vmrun_path: Option<PathBuf>,
+    /// VM-18: full path to VBoxManage.exe. Overrides the path saved in Settings; when neither is set,
+    /// `REMOTELY_VBOXMANAGE`, the registry and the default install folder are tried.
+    pub vboxmanage_path: Option<PathBuf>,
     /// Windows account (DOMAIN\user) that owns the data.
     pub account: String,
     pub display_name: String,
@@ -120,6 +126,8 @@ pub struct CoreConfig {
 /// The outside systems the core talks to: the real ones in the app, fakes in tests.
 pub struct Adapters {
     pub vmware: Arc<dyn VmwareAdapter>,
+    /// VM-18: Oracle VirtualBox through VBoxManage.
+    pub virtualbox: Arc<dyn VirtualBoxAdapter>,
     pub remote: Arc<dyn RemoteAdapter>,
     pub vault: Arc<dyn Vault>,
     pub host_counters: Arc<dyn HostCounters>,
@@ -143,7 +151,8 @@ pub struct Core {
     pub ctx: Context,
     pub store: Store,
     pub inventory: Inventory,
-    /// VM-04: snapshot trees, read from each VM's .vmsd. Changes go through [`Core::bus`].
+    /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
+    /// through [`Core::bus`].
     pub snapshots: SnapshotReader,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
@@ -185,6 +194,8 @@ pub struct Core {
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
+    /// VM-18: swapped when the VBoxManage path changes in Settings.
+    virtualbox: Arc<SwitchableVirtualBox>,
 }
 
 impl Core {
@@ -197,6 +208,9 @@ impl Core {
         let ctx = store.ensure_identity(&config.account, &config.display_name).await?;
         let saved = saved_vmrun_path(&store, &ctx).await?;
         let vmware: Arc<dyn VmwareAdapter> = Arc::from(adapters::vmware::connect(config.vmrun_path.or(saved)));
+        let saved_vbox = saved_vboxmanage_path(&store, &ctx).await?;
+        let virtualbox: Arc<dyn VirtualBoxAdapter> =
+            Arc::from(adapters::virtualbox::connect(config.vboxmanage_path.or(saved_vbox)));
         // SS-04: the vault in this database, unlocked by the Windows login (DPAPI) or the master password.
         let vault = LocalVault::open(store.clone(), ctx, Arc::new(Dpapi), VaultOptions::default()).await?;
         Self::assemble(
@@ -204,6 +218,7 @@ impl Core {
             ctx,
             Adapters {
                 vmware,
+                virtualbox,
                 remote: Arc::new(RusshAdapter::new()),
                 vault: Arc::new(vault),
                 host_counters: Arc::new(WindowsCounters::new()),
@@ -222,6 +237,9 @@ impl Core {
         let presentation = PresentationMode::load(store.clone(), ctx).await;
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
+        let virtualbox = Arc::new(SwitchableVirtualBox::new(adapters.virtualbox));
+        // VM-18: every module that reads or changes VMs reaches both hypervisors through this.
+        let hypervisors = Hypervisors::new(vmware_dyn, virtualbox.clone());
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
         let links = Arc::new(VmLinks::new(store.clone(), Arc::clone(&adapters.network)));
         let terminals = Terminals::new(
@@ -249,15 +267,11 @@ impl Core {
                 Arc::clone(&adapters.vault),
                 Arc::clone(&known_hosts),
             ),
-            capacity: CapacityChecker::new(
-                store.clone(),
-                Arc::clone(&vmware_dyn),
-                Arc::clone(&adapters.host_counters),
-            ),
+            capacity: CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
         }));
         let jobs = JobRunner::new(
             store.clone(),
-            Arc::clone(&vmware_dyn),
+            hypervisors.clone(),
             adapters.remote,
             Arc::clone(&adapters.updater),
             Arc::clone(&adapters.vault),
@@ -271,12 +285,8 @@ impl Core {
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
-            CapacityChecker::new(
-                store.clone(),
-                Arc::clone(&vmware_dyn),
-                Arc::clone(&adapters.host_counters),
-            ),
-            ImpactPreviewer::new(store.clone(), Arc::clone(&vmware_dyn)),
+            CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
+            ImpactPreviewer::new(store.clone(), hypervisors.clone()),
         ));
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
@@ -295,8 +305,8 @@ impl Core {
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         Ok(Self {
             ctx,
-            snapshots: SnapshotReader::new(store.clone(), Arc::clone(&vmware_dyn)),
-            inventory: Inventory::new(store.clone(), vmware_dyn, Arc::clone(&links)),
+            snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
+            inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
             vault: VaultService::new(adapters.vault, store.clone()),
             sessions: SessionLibrary::new(store.clone(), Arc::clone(&links)),
             forwards: Forwards::new(store.clone()),
@@ -319,6 +329,7 @@ impl Core {
             host_counters: adapters.host_counters,
             updater: adapters.updater,
             vmware,
+            virtualbox,
         })
     }
 
@@ -353,6 +364,41 @@ impl Core {
                 .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
         );
         self.audit_setting("Set the vmrun.exe path", &detail).await?;
+        Ok(in_use)
+    }
+
+    /// VM-18: path of the VBoxManage.exe in use, or `None` when VirtualBox was not found.
+    pub fn vboxmanage_path(&self) -> Option<PathBuf> {
+        self.virtualbox.tool_path()
+    }
+
+    /// VM-18: the VBoxManage path saved in Settings, if any.
+    pub async fn saved_vboxmanage_path(&self) -> Result<Option<PathBuf>> {
+        saved_vboxmanage_path(&self.store, &self.ctx).await
+    }
+
+    /// VM-18: saves the VBoxManage path (`None` = find it automatically) and switches to it right
+    /// away. The path must be an existing VBoxManage.exe. Audited, since it decides which program runs
+    /// every VirtualBox VM action.
+    pub async fn set_vboxmanage_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::virtualbox::validate_vboxmanage_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx, store::VBOXMANAGE_PATH_KEY, &as_text)
+            .await?;
+        self.virtualbox.replace(Arc::from(adapters::virtualbox::connect(path)));
+        let in_use = self.vboxmanage_path();
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the VBoxManage.exe path", &detail).await?;
         Ok(in_use)
     }
 
@@ -584,5 +630,12 @@ async fn load_policy(store: &Store, ctx: &Context) -> Result<PolicyEngine> {
 
 async fn saved_vmrun_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
     let saved = store.get_setting::<Option<String>>(ctx, store::VMRUN_PATH_KEY).await?;
+    Ok(saved.flatten().map(PathBuf::from))
+}
+
+async fn saved_vboxmanage_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
+    let saved = store
+        .get_setting::<Option<String>>(ctx, store::VBOXMANAGE_PATH_KEY)
+        .await?;
     Ok(saved.flatten().map(PathBuf::from))
 }

@@ -3,7 +3,8 @@
 // selection's Snapshots menu opens; these helpers work on whatever has been read. QL-08: every reason says why an
 // action is off; `null` means it is available.
 
-import type { ApprovalStep, SnapshotNode, Tier, VmSnapshots } from "./api.ts";
+import type { ApprovalStep, Hypervisor, SnapshotNode, Tier, VmSnapshots } from "./api.ts";
+import { slashIsPath } from "./hypervisors.ts";
 
 /** Where a VM's details panel opens: its details, or its snapshot tree and actions. */
 export type VmView = "details" | "snapshots";
@@ -13,12 +14,18 @@ export const PROTECTED_REASON = "Protected: actions skip this VM until it is unp
 
 const BUSY_REASON = "Sending the last action…";
 
-/** vmrun reads '/' in a snapshot name as a path to a child snapshot, so it cannot name those. */
-export function unreachableByName(node: SnapshotNode) {
-  return node.name.includes("/");
+/**
+ * vmrun reads '/' in a snapshot name as a path to a child snapshot, so it cannot name those. VM-18: VBoxManage takes
+ * any name, so a VirtualBox VM has no such snapshot.
+ */
+export function unreachableByName(node: SnapshotNode, hypervisor: Hypervisor = "vmware") {
+  return slashIsPath(hypervisor) && node.name.includes("/");
 }
 
-/** The name to give vmrun: the plain name, or the path form when this VM has two snapshots with that name. */
+/**
+ * The name to give the hypervisor: the plain name, or when this VM has two snapshots with that name, the node's path
+ * (vmrun's path form, or VirtualBox's snapshot UUID).
+ */
 export function snapshotArg(vm: VmSnapshots, node: SnapshotNode) {
   const twins = vm.snapshots.filter((s) => s.name === node.name).length;
   return twins > 1 ? node.path : node.name;
@@ -43,13 +50,15 @@ export function takeReason(input: {
 /** VM-04: why reverting to or deleting one snapshot is off. */
 export function snapshotActionReason(input: {
   node: SnapshotNode;
+  /** VM-18: the VM's hypervisor; VMware when left out. */
+  hypervisor?: Hypervisor;
   readOnly: string | null;
   protected: boolean;
   busy: boolean;
 }): string | null {
   if (input.readOnly) return input.readOnly;
   if (input.protected) return PROTECTED_REASON;
-  if (unreachableByName(input.node))
+  if (unreachableByName(input.node, input.hypervisor))
     return "vmrun reads '/' in a name as a path, so manage this snapshot in Workstation";
   if (input.busy) return BUSY_REASON;
   return null;
@@ -119,7 +128,7 @@ export function bulkSnapshotReasons(input: {
         : `None of the ${input.selected.length} selected VMs has a snapshot`,
     );
   }
-  if (open.every((t) => t.snapshots.every(unreachableByName))) {
+  if (open.every((t) => t.snapshots.every((s) => unreachableByName(s, t.hypervisor)))) {
     return pickers("Their snapshots have '/' in the name, which vmrun can't name: manage them in Workstation");
   }
   return every(null);

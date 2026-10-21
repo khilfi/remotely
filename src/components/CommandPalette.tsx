@@ -408,7 +408,7 @@ export function CommandPalette({
                   {vms.map((v) => (
                     <CommandItem
                       key={v.vmxPath}
-                      value={`vm ${v.displayName} ${v.ipAddress ?? ""} ${v.tags.join(" ")} ${v.vmxPath}`}
+                      value={`vm ${v.displayName} ${v.ipAddress ?? ""} ${v.tags.join(" ")} ${v.vmxPath} ${v.hypervisor}`}
                       onSelect={() => goTo({ kind: "vm", vmxPath: v.vmxPath })}
                     >
                       <MonitorIcon />

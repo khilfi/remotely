@@ -8,6 +8,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::Store;
+use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::vmware::{path_key, VmxInfo};
 use crate::domain::{now_rfc3339, Context, Environment, PowerState};
 use crate::error::{CoreError, Result};
@@ -16,17 +17,24 @@ use crate::error::{CoreError, Result};
 #[serde(rename_all = "camelCase")]
 pub struct VmRecord {
     pub id: String,
+    /// The VM's key: its .vmx path (VMware), or its UUID (VirtualBox, VM-18).
     pub vmx_path: String,
+    /// VM-18: the hypervisor that runs it.
+    pub hypervisor: Hypervisor,
+    /// VM-18: a VirtualBox VM's settings file (.vbox); `None` for VMware, whose key is its .vmx.
+    pub config_path: Option<String>,
     pub display_name: String,
-    /// Workstation's guest OS id, e.g. `ubuntu-64`.
+    /// The guest OS chosen for the VM: Workstation's id (`ubuntu-64`) or VirtualBox's OS type
+    /// ("Ubuntu (64-bit)").
     pub guest_os: Option<String>,
-    /// What the guest calls itself through VMware Tools, e.g. "Ubuntu 24.04 LTS".
+    /// What the guest calls itself through VMware Tools ("Ubuntu 24.04 LTS") or the Guest Additions.
     pub guest_os_name: Option<String>,
     pub num_vcpus: Option<u32>,
     pub memsize_mb: Option<u32>,
     pub power_state: PowerState,
     pub ip_address: Option<String>,
-    /// [`crate::adapters::vmware::ToolsState`] as text; `None` when the VM is not running.
+    /// [`crate::adapters::vmware::ToolsState`] (VMware Tools or Guest Additions) as text; `None` when
+    /// the VM is not running.
     pub tools_state: Option<String>,
     pub environment: Environment,
     pub protected: bool,
@@ -38,12 +46,26 @@ pub struct VmRecord {
 /// A VM found by an inventory refresh (VM-01).
 #[derive(Debug, Clone)]
 pub struct DiscoveredVm {
+    /// The VM's key: .vmx path or VirtualBox UUID.
     pub vmx_path: String,
     pub display_name: String,
     pub info: VmxInfo,
     pub power_state: PowerState,
     pub tools_state: Option<String>,
     pub ip_address: Option<String>,
+    pub hypervisor: Hypervisor,
+    /// VM-18: a VirtualBox VM's .vbox file.
+    pub config_path: Option<String>,
+}
+
+impl VmRecord {
+    /// The folder holding the VM's files: the .vmx's, or the .vbox's (VM-07, MO-04 free space).
+    pub fn folder(&self) -> Option<&Path> {
+        match self.hypervisor {
+            Hypervisor::Vmware => Path::new(&self.vmx_path).parent(),
+            Hypervisor::VirtualBox => self.config_path.as_deref().and_then(|p| Path::new(p).parent()),
+        }
+    }
 }
 
 /// Separates tag names in the `tags` column of `vm_columns!` (SQL `char(31)`); tag names cannot
@@ -52,7 +74,7 @@ const TAG_SEPARATOR: char = '\u{1f}';
 
 macro_rules! vm_columns {
     () => {
-        "id, vmx_path, display_name, guest_os, guest_os_name, num_vcpus, memsize_mb, power_state, ip_address,
+        "id, vmx_path, hypervisor, config_path, display_name, guest_os, guest_os_name, num_vcpus, memsize_mb, power_state, ip_address,
          tools_state, environment, protected, last_seen_at,
          (SELECT group_concat(t.name, char(31)) FROM target_tags tt JOIN tags t ON t.id = tt.tag_id
           WHERE tt.target_kind = 'vm' AND tt.target_id = vms.id) AS tags"
@@ -65,34 +87,54 @@ impl Store {
     /// paused stays paused while vmrun still lists it as running, with its last Tools state and IP
     /// (a paused guest cannot answer).
     pub async fn record_inventory(&self, ctx: &Context, found: &[DiscoveredVm]) -> Result<()> {
+        self.record_inventory_for(ctx, found, &Hypervisor::ALL).await
+    }
+
+    /// VM-18: the same, where the refresh read only the hypervisors in `read` in full. VMs of the
+    /// others are left as they were (VirtualBox could not be asked this time), not marked missing. A
+    /// VirtualBox VM reports its own pause, so only a VMware VM stays paused while it is listed as
+    /// running; either keeps its last Tools state and IP while paused.
+    pub async fn record_inventory_for(&self, ctx: &Context, found: &[DiscoveredVm], read: &[Hypervisor]) -> Result<()> {
         let ws = ctx.workspace_id.to_string();
         let user = ctx.user_id.to_string();
         let now = now_rfc3339();
         let mut tx = self.pool.begin().await?;
 
-        sqlx::query("UPDATE vms SET missing = 1, updated_at = ? WHERE workspace_id = ? AND missing = 0")
+        for hypervisor in read {
+            sqlx::query(
+                "UPDATE vms SET missing = 1, updated_at = ? WHERE workspace_id = ? AND missing = 0 AND hypervisor = ?",
+            )
             .bind(&now)
             .bind(&ws)
+            .bind(hypervisor.as_str())
             .execute(&mut *tx)
             .await?;
+        }
 
         for vm in found {
             sqlx::query(
-                "INSERT INTO vms (id, workspace_id, user_id, vmx_path, display_name, guest_os, guest_os_name,
-                                  num_vcpus, memsize_mb, power_state, ip_address, tools_state, missing,
-                                  last_seen_at, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                "INSERT INTO vms (id, workspace_id, user_id, vmx_path, hypervisor, config_path, display_name,
+                                  guest_os, guest_os_name, num_vcpus, memsize_mb, power_state, ip_address,
+                                  tools_state, missing, last_seen_at, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
                  ON CONFLICT(workspace_id, vmx_path) DO UPDATE SET
+                     hypervisor    = excluded.hypervisor,
+                     config_path   = excluded.config_path,
                      display_name  = excluded.display_name,
                      guest_os      = excluded.guest_os,
                      guest_os_name = COALESCE(excluded.guest_os_name, vms.guest_os_name),
                      num_vcpus     = excluded.num_vcpus,
                      memsize_mb    = excluded.memsize_mb,
                      power_state   = CASE WHEN excluded.power_state = 'running' AND vms.power_state = 'paused'
+                                               AND excluded.hypervisor = 'vmware'
                                           THEN 'paused' ELSE excluded.power_state END,
-                     ip_address    = CASE WHEN excluded.power_state = 'running' AND vms.power_state = 'paused'
+                     ip_address    = CASE WHEN (excluded.power_state = 'running' AND vms.power_state = 'paused'
+                                                AND excluded.hypervisor = 'vmware')
+                                               OR excluded.power_state = 'paused'
                                           THEN vms.ip_address ELSE excluded.ip_address END,
-                     tools_state   = CASE WHEN excluded.power_state = 'running' AND vms.power_state = 'paused'
+                     tools_state   = CASE WHEN (excluded.power_state = 'running' AND vms.power_state = 'paused'
+                                                AND excluded.hypervisor = 'vmware')
+                                               OR excluded.power_state = 'paused'
                                           THEN vms.tools_state ELSE excluded.tools_state END,
                      missing       = 0,
                      last_seen_at  = excluded.last_seen_at,
@@ -102,6 +144,8 @@ impl Store {
             .bind(&ws)
             .bind(&user)
             .bind(&vm.vmx_path)
+            .bind(vm.hypervisor.as_str())
+            .bind(&vm.config_path)
             .bind(&vm.display_name)
             .bind(&vm.info.guest_os)
             .bind(&vm.info.guest_os_name)
@@ -147,7 +191,8 @@ impl Store {
         row.as_ref().map(row_to_vm).transpose()
     }
 
-    /// A VM by .vmx path (any letter case), including one the last refresh did not find.
+    /// A VM by its key (.vmx path or VirtualBox UUID, any letter case), including one the last
+    /// refresh did not find.
     pub async fn find_vm(&self, ctx: &Context, vmx_path: &str) -> Result<Option<VmRecord>> {
         let row = sqlx::query(concat!(
             "SELECT ",
@@ -245,6 +290,7 @@ impl Store {
 
 fn row_to_vm(row: &sqlx::sqlite::SqliteRow) -> Result<VmRecord> {
     let env: String = row.try_get("environment")?;
+    let hypervisor: String = row.try_get("hypervisor")?;
     let state: String = row.try_get("power_state")?;
     let protected: i64 = row.try_get("protected")?;
     let cpus: Option<i64> = row.try_get("num_vcpus")?;
@@ -260,6 +306,8 @@ fn row_to_vm(row: &sqlx::sqlite::SqliteRow) -> Result<VmRecord> {
     Ok(VmRecord {
         id: row.try_get("id")?,
         vmx_path: row.try_get("vmx_path")?,
+        hypervisor: Hypervisor::parse(&hypervisor),
+        config_path: row.try_get("config_path")?,
         display_name: row.try_get("display_name")?,
         guest_os: row.try_get("guest_os")?,
         guest_os_name: row.try_get("guest_os_name")?,

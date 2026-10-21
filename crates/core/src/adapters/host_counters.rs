@@ -1,5 +1,6 @@
 //! Host counters adapter (MO-01, MO-04, VM-07): what Windows knows about this machine and about the
-//! `vmware-vmx.exe` process behind each running VM. Reads only, no login needed.
+//! process behind each running VM (`vmware-vmx.exe`; VM-18 VirtualBox's `VirtualBoxVM.exe` or
+//! `VBoxHeadless.exe`). Reads only, no login needed.
 //!
 //! [`WindowsCounters`] reads physical RAM (`GlobalMemoryStatusEx`), logical CPUs
 //! (`GetActiveProcessorCount`), the host's CPU times (`GetSystemTimes`) and free disk space
@@ -9,6 +10,11 @@
 //! set (`GetProcessMemoryInfo`) and I/O bytes (`GetProcessIoCounters`) are read every round, and the
 //! rates come from the difference to the previous round. Process APIs rather than PDH counters: PDH
 //! names processes `vmware-vmx#3`, which says nothing about which VM it is, and costs more per read.
+//!
+//! VM-18: a VirtualBox VM's process names it with `--startvm <uuid>` (and `--comment <name>`). On
+//! Windows VirtualBox starts each VM process through two hardening stubs with the same command line,
+//! so the processes of one VM are counted as one: the largest working set (the VM's own process),
+//! and the CPU and disk rates of all of them added up.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -23,14 +29,20 @@ use crate::locks;
 
 /// The process behind each running Workstation VM.
 pub const VMX_PROCESS: &str = "vmware-vmx.exe";
+/// VM-18: the processes behind a running VirtualBox VM: with a window, and headless.
+pub const VBOX_PROCESSES: [&str; 2] = ["VirtualBoxVM.exe", "VBoxHeadless.exe"];
 
-/// One `vmware-vmx.exe` process.
+/// One running VM's process (`vmware-vmx.exe`; VirtualBox's processes for one VM taken together).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VmProcess {
     pub pid: u32,
-    /// Taken from the process command line; `None` when it could not be read.
+    /// The VM's key, from the process command line: the .vmx path, or a VirtualBox VM's UUID. `None`
+    /// when it could not be read.
     pub vmx_path: Option<String>,
+    /// VM-18: the VM's name on a VirtualBox process's command line (`--comment`, or a `--startvm` that
+    /// names the VM), so a process started without a UUID can still be matched by name.
+    pub name: Option<String>,
     /// Share of the host's whole CPU (every logical processor), as Task Manager shows it. `None` on
     /// the first read of a process: a rate needs two.
     pub cpu_pct: Option<f64>,
@@ -139,8 +151,8 @@ impl HostCounters for WindowsCounters {
         blocking(move || {
             let cpus = win::host_totals()?.logical_cpus;
             let mut tracker = locks::lock(&tracker);
-            let raw = win::read_processes(VMX_PROCESS, &tracker)?;
-            Ok(tracker.update(Instant::now(), raw, cpus))
+            let raw = win::read_processes(&vm_executables(), &tracker)?;
+            Ok(merge_vm_processes(tracker.update(Instant::now(), raw, cpus)))
         })
         .await
     }
@@ -171,6 +183,8 @@ pub(crate) struct RawProcess {
     /// its pid.
     pub created: u64,
     pub vmx_path: Option<String>,
+    /// VM-18: the VirtualBox VM's name on the command line.
+    pub name: Option<String>,
     /// Kernel plus user time, in 100 ns units.
     pub cpu_time: u64,
     pub working_set: Option<u64>,
@@ -186,12 +200,15 @@ pub(crate) struct ProcessTracker {
 }
 
 impl ProcessTracker {
-    /// The .vmx path read earlier for this process, if it is the same process.
-    pub fn known_path(&self, pid: u32, created: u64) -> Option<Option<String>> {
+    /// The VM key and name read earlier for this process, if it is the same process.
+    pub fn known_path(&self, pid: u32, created: u64) -> Option<ProcessVm> {
         self.last
             .get(&pid)
             .filter(|(raw, _)| raw.created == created)
-            .map(|(raw, _)| raw.vmx_path.clone())
+            .map(|(raw, _)| ProcessVm {
+                key: raw.vmx_path.clone(),
+                name: raw.name.clone(),
+            })
     }
 
     /// Rates against the previous reading; forgets processes that are gone.
@@ -228,6 +245,7 @@ impl ProcessTracker {
             out.push(VmProcess {
                 pid: process.pid,
                 vmx_path: process.vmx_path.clone(),
+                name: process.name.clone(),
                 cpu_pct,
                 working_set_bytes: process.working_set,
                 read_bps,
@@ -238,6 +256,86 @@ impl ProcessTracker {
         self.last = next;
         out
     }
+}
+
+/// Which VM a process runs, read from its command line once per process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProcessVm {
+    /// .vmx path or VirtualBox UUID.
+    pub key: Option<String>,
+    /// VM-18: a VirtualBox VM's name.
+    pub name: Option<String>,
+}
+
+/// The executables whose processes are VMs, and how each names its VM on its command line.
+pub(crate) type VmExecutable = (&'static str, fn(&str) -> ProcessVm);
+
+pub(crate) fn vm_executables() -> Vec<VmExecutable> {
+    let mut exes: Vec<VmExecutable> = vec![(VMX_PROCESS, vmware_process_vm)];
+    exes.extend(
+        VBOX_PROCESSES
+            .iter()
+            .map(|exe| (*exe, virtualbox_process_vm as fn(&str) -> ProcessVm)),
+    );
+    exes
+}
+
+fn vmware_process_vm(command_line: &str) -> ProcessVm {
+    ProcessVm {
+        key: vmx_from_command_line(command_line),
+        name: None,
+    }
+}
+
+/// VM-18: the UUID after `--startvm`, the name after `--comment`.
+pub fn virtualbox_process_vm(command_line: &str) -> ProcessVm {
+    let vm = crate::adapters::virtualbox::vbox_vm_from_args(&split_command_line(command_line));
+    ProcessVm {
+        key: vm.uuid,
+        name: vm.name,
+    }
+}
+
+/// VM-18: one entry per VM. VirtualBox runs each VM in a process started through two hardening stubs
+/// with the same command line (and `--type separate` adds a second process): the entry takes the
+/// pid and working set of the largest (the VM's own process) and the CPU and disk rates of them all.
+/// Processes whose VM could not be read are kept as they are.
+pub fn merge_vm_processes(processes: Vec<VmProcess>) -> Vec<VmProcess> {
+    let mut out: Vec<VmProcess> = Vec::with_capacity(processes.len());
+    let mut index: HashMap<String, usize> = HashMap::new();
+    let add = |a: Option<f64>, b: Option<f64>| match (a, b) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    for process in processes {
+        let group = match (&process.vmx_path, &process.name) {
+            (Some(key), _) => Some(format!("key:{}", key.to_lowercase())),
+            (None, Some(name)) => Some(format!("name:{}", name.to_lowercase())),
+            (None, None) => None,
+        };
+        let Some(group) = group else {
+            out.push(process);
+            continue;
+        };
+        match index.get(&group) {
+            None => {
+                index.insert(group, out.len());
+                out.push(process);
+            }
+            Some(&i) => {
+                let kept = &mut out[i];
+                kept.cpu_pct = add(kept.cpu_pct, process.cpu_pct).map(|pct| pct.min(100.0));
+                kept.read_bps = add(kept.read_bps, process.read_bps);
+                kept.write_bps = add(kept.write_bps, process.write_bps);
+                if process.working_set_bytes.unwrap_or(0) > kept.working_set_bytes.unwrap_or(0) {
+                    kept.pid = process.pid;
+                    kept.working_set_bytes = process.working_set_bytes;
+                }
+                kept.name = kept.name.take().or(process.name);
+            }
+        }
+    }
+    out
 }
 
 /// MO-01: the .vmx path in a `vmware-vmx.exe` command line: the last argument ending in `.vmx`,
@@ -324,7 +422,7 @@ mod win {
         ALL_PROCESSOR_GROUPS, IO_COUNTERS, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    use super::{vmx_from_command_line, DiskSpace, HostTotals, ProcessTracker, RawProcess, SystemCpuTimes};
+    use super::{DiskSpace, HostTotals, ProcessTracker, ProcessVm, RawProcess, SystemCpuTimes, VmExecutable};
     use crate::error::{CoreError, Result};
 
     fn os_error(call: &str, err: windows::core::Error) -> CoreError {
@@ -407,7 +505,14 @@ mod win {
     }
 
     /// Process ids of every process whose executable is named `exe` (any letter case).
+    #[cfg(test)]
     pub fn pids_named(exe: &str) -> Result<Vec<u32>> {
+        Ok(pids_named_any(&[exe])?.into_iter().map(|(pid, _)| pid).collect())
+    }
+
+    /// Process ids of every process whose executable is one of `exes` (any letter case), with the
+    /// index of the name it matched.
+    pub fn pids_named_any(exes: &[&str]) -> Result<Vec<(u32, usize)>> {
         // SAFETY: takes no pointers; the snapshot handle is closed by `Owned`.
         let snapshot = Owned(
             unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
@@ -426,8 +531,9 @@ mod win {
                 .iter()
                 .position(|&c| c == 0)
                 .unwrap_or(entry.szExeFile.len());
-            if String::from_utf16_lossy(&entry.szExeFile[..len]).eq_ignore_ascii_case(exe) {
-                pids.push(entry.th32ProcessID);
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            if let Some(which) = exes.iter().position(|exe| name.eq_ignore_ascii_case(exe)) {
+                pids.push((entry.th32ProcessID, which));
             }
             // SAFETY: as above.
             found = unsafe { Process32NextW(snapshot.0, &mut entry) };
@@ -435,22 +541,29 @@ mod win {
         Ok(pids)
     }
 
-    /// Every running process named `exe`, read now. The command line is read only for processes the
-    /// tracker has not seen. Processes that can't be opened (gone, or another user's) are left out.
-    pub fn read_processes(exe: &str, tracker: &ProcessTracker) -> Result<Vec<RawProcess>> {
-        Ok(pids_named(exe)?
+    /// Every running VM process (each of `exes`), read now. The command line is read only for
+    /// processes the tracker has not seen. Processes that can't be opened (gone, or another user's)
+    /// are left out.
+    pub fn read_processes(exes: &[VmExecutable], tracker: &ProcessTracker) -> Result<Vec<RawProcess>> {
+        let names: Vec<&str> = exes.iter().map(|(exe, _)| *exe).collect();
+        Ok(pids_named_any(&names)?
             .into_iter()
-            .filter_map(|pid| read_process(pid, |created| tracker.known_path(pid, created)))
+            .filter_map(|(pid, which)| read_process(pid, |created| tracker.known_path(pid, created), exes[which].1))
             .collect())
     }
 
-    /// One process's counters; `known_path` returns the .vmx path read earlier for the same process.
-    pub fn read_process(pid: u32, known_path: impl FnOnce(u64) -> Option<Option<String>>) -> Option<RawProcess> {
+    /// One process's counters; `known` returns the VM read earlier for the same process, and
+    /// `from_line` reads it from the command line otherwise.
+    pub fn read_process(
+        pid: u32,
+        known: impl FnOnce(u64) -> Option<ProcessVm>,
+        from_line: fn(&str) -> ProcessVm,
+    ) -> Option<RawProcess> {
         // SAFETY: takes no pointers; the handle is closed by `Owned`.
         let process = Owned(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?);
         let (created, cpu_time) = process_times(process.0).ok()?;
-        let vmx_path =
-            known_path(created).unwrap_or_else(|| command_line(process.0).and_then(|l| vmx_from_command_line(&l)));
+        let vm =
+            known(created).unwrap_or_else(|| command_line(process.0).map(|line| from_line(&line)).unwrap_or_default());
 
         let mut memory = PROCESS_MEMORY_COUNTERS {
             cb: u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).unwrap_or(u32::MAX),
@@ -466,7 +579,8 @@ mod win {
         Some(RawProcess {
             pid,
             created,
-            vmx_path,
+            vmx_path: vm.key,
+            name: vm.name,
             cpu_time,
             working_set,
             read_bytes: io.map(|io| io.ReadTransferCount),
@@ -518,7 +632,7 @@ mod win {
     use std::path::Path;
     use std::time::Duration;
 
-    use super::{DiskSpace, HostTotals, ProcessTracker, RawProcess, SystemCpuTimes};
+    use super::{DiskSpace, HostTotals, ProcessTracker, RawProcess, SystemCpuTimes, VmExecutable};
     use crate::error::{CoreError, Result};
 
     pub fn host_totals() -> Result<HostTotals> {
@@ -537,7 +651,7 @@ mod win {
         Err(CoreError::NotImplemented("free disk space outside Windows"))
     }
 
-    pub fn read_processes(_exe: &str, _tracker: &ProcessTracker) -> Result<Vec<RawProcess>> {
+    pub fn read_processes(_exes: &[VmExecutable], _tracker: &ProcessTracker) -> Result<Vec<RawProcess>> {
         Err(CoreError::NotImplemented("VM processes outside Windows"))
     }
 }
@@ -576,6 +690,7 @@ mod tests {
             pid,
             created,
             vmx_path: Some(format!(r"C:\VMs\vm{pid}\vm{pid}.vmx")),
+            name: None,
             cpu_time,
             working_set: Some(512 << 20),
             read_bytes: Some(read),
@@ -590,7 +705,10 @@ mod tests {
         let first = tracker.update(start, vec![raw(7, 1, 0, 0)], 4);
         assert_eq!(first[0].cpu_pct, None, "one reading has no rate");
         assert_eq!(first[0].read_bps, None);
-        assert_eq!(tracker.known_path(7, 1), Some(Some(r"C:\VMs\vm7\vm7.vmx".into())));
+        assert_eq!(
+            tracker.known_path(7, 1).and_then(|vm| vm.key),
+            Some(r"C:\VMs\vm7\vm7.vmx".into())
+        );
         assert_eq!(tracker.known_path(7, 2), None, "a new process that reused the pid");
 
         // 5 s later: 10 s of CPU over 4 CPUs is 50% of the host; 50 MB read is 10 MB/s.
@@ -607,6 +725,53 @@ mod tests {
         // Gone processes are forgotten.
         tracker.update(later + Duration::from_secs(10), Vec::new(), 4);
         assert_eq!(tracker.known_path(7, 9), None);
+    }
+
+    #[test]
+    fn a_virtualbox_command_line_names_the_vm_by_uuid() {
+        let line = r#""C:\Program Files\Oracle\VirtualBox\VirtualBoxVM.exe" --comment "web 01" --startvm "3f0c1a2b-1111-4222-8333-444455556666" --no-startvm-errormsgbox"#;
+        assert_eq!(
+            virtualbox_process_vm(line),
+            ProcessVm {
+                key: Some("3f0c1a2b-1111-4222-8333-444455556666".into()),
+                name: Some("web 01".into()),
+            }
+        );
+        // The hardening stubs' command line starts with a marker and keeps the rest.
+        let stub = r#""C:\Program Files\Oracle\VirtualBox\VBoxHeadless.exe" 60eaff78-4bdd-042d-2e72-669728efd737-suplib-2ndchild --comment db01 --startvm 9d1e2f3a-0000-4000-8000-0000000000aa --vrde config"#;
+        assert_eq!(
+            virtualbox_process_vm(stub).key.as_deref(),
+            Some("9d1e2f3a-0000-4000-8000-0000000000aa")
+        );
+        assert_eq!(virtualbox_process_vm(r#""VirtualBoxVM.exe""#), ProcessVm::default());
+    }
+
+    #[test]
+    fn one_virtualbox_vm_with_several_processes_counts_once() {
+        let vbox = "3f0c1a2b-1111-4222-8333-444455556666";
+        let p = |pid: u32, key: Option<&str>, cpu: Option<f64>, ws: u64| VmProcess {
+            pid,
+            vmx_path: key.map(String::from),
+            name: None,
+            cpu_pct: cpu,
+            working_set_bytes: Some(ws),
+            read_bps: Some(1.0),
+            write_bps: None,
+        };
+        let merged = merge_vm_processes(vec![
+            p(10, Some(vbox), Some(0.1), 10 << 20),
+            p(11, Some(r"C:\VMs\a\a.vmx"), Some(5.0), 900 << 20),
+            p(12, Some(&vbox.to_uppercase()), Some(20.0), 2048 << 20),
+            p(13, None, Some(1.0), 1 << 20),
+            p(14, None, Some(1.0), 1 << 20),
+        ]);
+        assert_eq!(merged.len(), 4, "the unreadable ones stay apart");
+        let vm = &merged[0];
+        assert_eq!(vm.pid, 12, "the largest working set is the VM's own process");
+        assert_eq!(vm.working_set_bytes, Some(2048 << 20));
+        assert_eq!(vm.cpu_pct, Some(20.1));
+        assert_eq!(vm.read_bps, Some(2.0));
+        assert_eq!(merged[1].pid, 11);
     }
 
     #[test]
@@ -665,7 +830,7 @@ mod tests {
         async fn lists_vm_processes_without_failing() {
             let counters = WindowsCounters::new();
             for process in counters.vm_processes().await.unwrap() {
-                assert!(process.vmx_path.is_some(), "{process:?}");
+                assert!(process.vmx_path.is_some() || process.name.is_some(), "{process:?}");
             }
         }
 
@@ -674,7 +839,7 @@ mod tests {
         #[test]
         fn reads_a_process_command_line_and_counters() {
             let me = std::process::id();
-            let read = win::read_process(me, |_| None).unwrap();
+            let read = win::read_process(me, |_| None, super::virtualbox_process_vm).unwrap();
             assert_eq!(read.pid, me);
             assert!(read.working_set.unwrap() > 0);
             assert!(read.read_bytes.is_some());
@@ -698,7 +863,7 @@ mod tests {
             };
             let readable: Vec<u32> = pids
                 .into_iter()
-                .filter(|pid| win::read_process(*pid, |_| None).is_some())
+                .filter(|pid| win::read_process(*pid, |_| None, super::vmware_process_vm).is_some())
                 .collect();
             assert!(!readable.is_empty());
             let fifty: Vec<u32> = readable.iter().copied().cycle().take(50).collect();
@@ -712,7 +877,13 @@ mod tests {
                 let _ = win::pids_named(VMX_PROCESS).unwrap();
                 let raw: Vec<RawProcess> = fifty
                     .iter()
-                    .filter_map(|&pid| win::read_process(pid, |created| tracker.known_path(pid, created)))
+                    .filter_map(|&pid| {
+                        win::read_process(
+                            pid,
+                            |created| tracker.known_path(pid, created),
+                            super::vmware_process_vm,
+                        )
+                    })
                     .collect();
                 tracker.update(Instant::now(), raw, 8);
             }

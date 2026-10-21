@@ -30,9 +30,12 @@ use crate::adapters::remote::{
     RemoteEntry, RemoteFiles, RemoteRead, RemoteWrite, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
 };
 use crate::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
+use crate::adapters::virtualbox::{
+    self as vbox, VboxListedVm, VboxNic, VboxVmInfo, VirtualBoxAdapter, GUEST_NET_COUNT, GUEST_OS_PRODUCT,
+};
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
-use crate::domain::Context;
+use crate::domain::{Context, PowerState};
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::snapshots::is_safety_name;
@@ -419,6 +422,7 @@ fn take_snapshot(tree: &mut SnapshotTree, name: &str, at: OffsetDateTime) {
         name: name.to_owned(),
         description: None,
         created_at: Some(at),
+        id: None,
     });
     tree.current_uid = Some(uid);
 }
@@ -445,6 +449,420 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
         parent = Some(found?);
     }
     found
+}
+
+/// VM-18: VirtualBox in memory. VMs are registered with a UUID, a name and a state; power calls
+/// change the state and snapshot calls the tree the way VBoxManage would, through the same checks as
+/// the real adapter ([`vbox::check_snapshot_op`]): a revert powers a running VM off first, and a
+/// snapshot with two children can't be deleted. A soft stop presses the ACPI button and waits until
+/// the guest is off (forever for a guest that ignores it); a graceful restart needs the Guest
+/// Additions. Records every power and snapshot call as text, e.g. `power Suspend <uuid>` and
+/// `snapshot take safety <uuid>`. Default: installed, with no VMs.
+#[derive(Default)]
+pub struct FakeVirtualBox {
+    not_installed: bool,
+    failing_list: AtomicBool,
+    vms: Mutex<Vec<VboxVmInfo>>,
+    properties: HashMap<String, HashMap<String, String>>,
+    ignores_acpi: HashSet<String>,
+    unreadable: HashSet<String>,
+    failing_snapshots: HashSet<String>,
+    power_delay: Duration,
+    in_flight: AtomicUsize,
+    max_in_flight: AtomicUsize,
+    calls: Mutex<Vec<String>>,
+    snapshot_reads: Mutex<Vec<String>>,
+}
+
+/// The VBoxManage `VMState` for a power state.
+fn vbox_state(state: PowerState) -> &'static str {
+    match state {
+        PowerState::Running => "running",
+        PowerState::Paused => "paused",
+        PowerState::Suspended => "saved",
+        PowerState::NotRunning => "poweroff",
+        PowerState::Unknown => "unknown",
+    }
+}
+
+impl FakeVirtualBox {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// VBoxManage.exe is not on this PC.
+    pub fn not_installed() -> Self {
+        Self {
+            not_installed: true,
+            ..Default::default()
+        }
+    }
+
+    /// A registered VM: 2 CPUs, 2048 MB, "Ubuntu (64-bit)", one NAT adapter, its .vbox under
+    /// `C:\Users\alice\VirtualBox VMs\<name>\`, and Guest Additions running while it is on.
+    pub fn with_vm(self, uuid: &str, name: &str, state: PowerState) -> Self {
+        let uuid = crate::adapters::hypervisor::virtualbox_key(uuid).unwrap_or_else(|| uuid.to_owned());
+        let info = VboxVmInfo {
+            uuid,
+            name: name.to_owned(),
+            accessible: true,
+            os_type: Some("Ubuntu (64-bit)".into()),
+            cpus: Some(2),
+            memory_mb: Some(2048),
+            state: vbox_state(state).to_owned(),
+            state_changed_at: Some(OffsetDateTime::now_utc()),
+            config_file: Some(PathBuf::from(format!(
+                r"C:\Users\alice\VirtualBox VMs\{name}\{name}.vbox"
+            ))),
+            disks: vec![PathBuf::from(format!(
+                r"C:\Users\alice\VirtualBox VMs\{name}\{name}.vdi"
+            ))],
+            additions_run_level: state.is_on().then_some(2),
+            additions_version: state.is_on().then(|| "7.2.22 r175245".to_owned()),
+            nics: vec![VboxNic {
+                slot: 1,
+                attachment: "nat".into(),
+                mac: Some("080027000001".into()),
+            }],
+            snapshots: SnapshotTree::default(),
+        };
+        locks::lock(&self.vms).push(info);
+        self
+    }
+
+    /// Changes what `showvminfo` says about a VM.
+    pub fn with_info(self, uuid: &str, change: impl FnOnce(&mut VboxVmInfo)) -> Self {
+        if let Some(vm) = locks::lock(&self.vms).iter_mut().find(|v| v.uuid == uuid) {
+            change(vm);
+        }
+        self
+    }
+
+    /// The VM's Guest Additions don't run (no run level).
+    pub fn without_guest_additions(self, uuid: &str) -> Self {
+        self.with_info(uuid, |vm| {
+            vm.additions_run_level = None;
+            vm.additions_version = None;
+        })
+    }
+
+    /// A guest property the Guest Additions set, while the VM is on.
+    pub fn with_guest_property(mut self, uuid: &str, name: &str, value: &str) -> Self {
+        self.properties
+            .entry(uuid.to_owned())
+            .or_default()
+            .insert(name.to_owned(), value.to_owned());
+        self
+    }
+
+    /// The guest reports one adapter with this address, and Linux as its OS.
+    pub fn with_ip(self, uuid: &str, ip: &str) -> Self {
+        self.with_guest_property(uuid, GUEST_NET_COUNT, "1")
+            .with_guest_property(uuid, "/VirtualBox/GuestInfo/Net/0/V4/IP", ip)
+            .with_guest_property(uuid, "/VirtualBox/GuestInfo/Net/0/MAC", "080027000001")
+            .with_guest_property(uuid, GUEST_OS_PRODUCT, "Linux")
+    }
+
+    /// VM-03: the guest ignores the ACPI power button, so a soft stop never ends.
+    pub fn ignores_acpi(mut self, uuid: &str) -> Self {
+        self.ignores_acpi.insert(uuid.to_owned());
+        self
+    }
+
+    /// `list vms` fails (VirtualBox busy or broken).
+    pub fn failing_list(self) -> Self {
+        self.set_failing_list(true);
+        self
+    }
+
+    /// From now on `list vms` fails, or works again.
+    pub fn set_failing_list(&self, on: bool) {
+        self.failing_list.store(on, Ordering::SeqCst);
+    }
+
+    /// `showvminfo` of this VM fails.
+    pub fn unreadable(mut self, uuid: &str) -> Self {
+        self.unreadable.insert(uuid.to_owned());
+        self
+    }
+
+    /// Every snapshot call on this VM fails (VM-05).
+    pub fn failing_snapshots(mut self, uuid: &str) -> Self {
+        self.failing_snapshots.insert(uuid.to_owned());
+        self
+    }
+
+    /// VM-06: each power call takes this long.
+    pub fn with_power_delay(mut self, delay: Duration) -> Self {
+        self.power_delay = delay;
+        self
+    }
+
+    /// VM-04: a snapshot taken at `at` from the VM's current one; it becomes the current one.
+    pub fn with_snapshot(self, uuid: &str, name: &str, at: OffsetDateTime) -> Self {
+        if let Some(vm) = locks::lock(&self.vms).iter_mut().find(|v| v.uuid == uuid) {
+            take_vbox_snapshot(&mut vm.snapshots, name, at);
+        }
+        self
+    }
+
+    pub fn calls(&self) -> Vec<String> {
+        locks::lock(&self.calls).clone()
+    }
+
+    /// The VMs whose snapshot tree was read, in order.
+    pub fn snapshot_reads(&self) -> Vec<String> {
+        locks::lock(&self.snapshot_reads).clone()
+    }
+
+    pub fn power_state(&self, uuid: &str) -> PowerState {
+        self.find(uuid).map_or(PowerState::Unknown, |vm| vm.power_state())
+    }
+
+    pub fn snapshot_names(&self, uuid: &str) -> Vec<String> {
+        self.find(uuid)
+            .map(|vm| vm.snapshots.snapshots.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    pub fn current_snapshot(&self, uuid: &str) -> Option<String> {
+        let vm = self.find(uuid)?;
+        let uid = vm.snapshots.current_uid?;
+        vm.snapshots
+            .snapshots
+            .iter()
+            .find(|s| s.uid == uid)
+            .map(|s| s.name.clone())
+    }
+
+    pub fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(Ordering::SeqCst)
+    }
+
+    /// Power calls in progress now; one the job runner gave up on no longer counts.
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    fn find(&self, uuid: &str) -> Option<VboxVmInfo> {
+        locks::lock(&self.vms).iter().find(|v| v.uuid == uuid).cloned()
+    }
+
+    fn installed(&self) -> Result<()> {
+        if self.not_installed {
+            Err(CoreError::VboxManageNotFound)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn record(&self, call: String) {
+        locks::lock(&self.calls).push(call);
+    }
+
+    fn failed(command: &str, message: &str) -> CoreError {
+        CoreError::VboxManage {
+            command: command.to_owned(),
+            message: message.to_owned(),
+        }
+    }
+
+    fn set_state(&self, uuid: &str, state: PowerState) {
+        if let Some(vm) = locks::lock(&self.vms).iter_mut().find(|v| v.uuid == uuid) {
+            let was_on = vm.power_state().is_on();
+            vm.state = vbox_state(state).to_owned();
+            if state.is_on() != was_on {
+                vm.state_changed_at = Some(OffsetDateTime::now_utc());
+            }
+            if !state.is_on() {
+                vm.additions_run_level = None;
+            } else if vm.additions_version.is_some() {
+                vm.additions_run_level = Some(2);
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl VirtualBoxAdapter for FakeVirtualBox {
+    fn tool_path(&self) -> Option<PathBuf> {
+        (!self.not_installed).then(|| PathBuf::from(vbox::DEFAULT_VBOXMANAGE))
+    }
+
+    async fn list_vms(&self) -> Result<Vec<VboxListedVm>> {
+        self.installed()?;
+        if self.failing_list.load(Ordering::SeqCst) {
+            return Err(Self::failed("list vms", "The object is not ready"));
+        }
+        Ok(locks::lock(&self.vms)
+            .iter()
+            .map(|vm| VboxListedVm {
+                name: vm.name.clone(),
+                uuid: vm.uuid.clone(),
+            })
+            .collect())
+    }
+
+    async fn list_running(&self) -> Result<Vec<String>> {
+        self.installed()?;
+        Ok(locks::lock(&self.vms)
+            .iter()
+            .filter(|vm| vm.power_state().is_on())
+            .map(|vm| vm.uuid.clone())
+            .collect())
+    }
+
+    async fn vm_info(&self, uuid: &str) -> Result<VboxVmInfo> {
+        self.installed()?;
+        if self.unreadable.contains(uuid) {
+            return Err(Self::failed("showvminfo", "The VM's settings could not be read"));
+        }
+        let mut info = self.find(uuid).ok_or_else(|| {
+            Self::failed(
+                "showvminfo",
+                &format!("Could not find a registered machine named '{uuid}'"),
+            )
+        })?;
+        // showvminfo prints no snapshot times; they are in the .vbox file.
+        for snapshot in &mut info.snapshots.snapshots {
+            snapshot.created_at = None;
+        }
+        Ok(info)
+    }
+
+    async fn guest_property(&self, uuid: &str, name: &str) -> Result<Option<String>> {
+        self.installed()?;
+        let on = self.find(uuid).is_some_and(|vm| vm.power_state().is_on());
+        Ok(self
+            .properties
+            .get(uuid)
+            .and_then(|props| props.get(name))
+            .cloned()
+            .filter(|_| on))
+    }
+
+    async fn power(&self, uuid: &str, op: PowerOp) -> Result<()> {
+        self.installed()?;
+        self.record(format!("power {op:?} {uuid}"));
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+        let _done = InFlight(&self.in_flight);
+        if !self.power_delay.is_zero() {
+            tokio::time::sleep(self.power_delay).await;
+        }
+        let vm = self.find(uuid).ok_or_else(|| {
+            Self::failed(
+                "controlvm",
+                &format!("Could not find a registered machine named '{uuid}'"),
+            )
+        })?;
+        let state = vm.power_state();
+        let not_running = || Self::failed("controlvm", &format!("Machine '{}' is not currently running", vm.name));
+        match op {
+            PowerOp::Start { .. } if state.is_on() => {
+                return Err(Self::failed(
+                    "startvm",
+                    &format!("The machine '{}' is already locked by a session", vm.name),
+                ))
+            }
+            PowerOp::Start { .. } => self.set_state(uuid, PowerState::Running),
+            _ if !state.is_on() => return Err(not_running()),
+            PowerOp::Stop { mode: StopMode::Soft } => {
+                if self.ignores_acpi.contains(uuid) {
+                    std::future::pending::<()>().await;
+                }
+                self.set_state(uuid, PowerState::NotRunning);
+            }
+            PowerOp::Stop { mode: StopMode::Hard } => self.set_state(uuid, PowerState::NotRunning),
+            PowerOp::Reset { mode: StopMode::Soft } => {
+                if vm.additions_run_level.unwrap_or(0) < 1 {
+                    return Err(Self::failed(
+                        "controlvm reboot",
+                        "The guest needs the Guest Additions to reboot",
+                    ));
+                }
+            }
+            PowerOp::Reset { mode: StopMode::Hard } => {}
+            PowerOp::Suspend => self.set_state(uuid, PowerState::Suspended),
+            PowerOp::Pause => self.set_state(uuid, PowerState::Paused),
+            PowerOp::Unpause => self.set_state(uuid, PowerState::Running),
+        }
+        Ok(())
+    }
+
+    async fn snapshot(&self, uuid: &str, op: &SnapshotOp) -> Result<()> {
+        self.installed()?;
+        let what = match op {
+            SnapshotOp::Take { name } if is_safety_name(name) => "take safety".to_owned(),
+            SnapshotOp::Take { name } => format!("take {name}"),
+            SnapshotOp::Revert { name } => format!("restore {name}"),
+            SnapshotOp::Delete { name } => format!("delete {name}"),
+        };
+        self.record(format!("snapshot {what} {uuid}"));
+        if self.failing_snapshots.contains(uuid) {
+            return Err(Self::failed("snapshot", "Not enough free space"));
+        }
+        let info = self.vm_info(uuid).await?;
+        vbox::check_snapshot_op(&info, op)?;
+        if matches!(op, SnapshotOp::Revert { .. }) && info.power_state().is_on() {
+            self.record(format!("power poweroff before restore {uuid}"));
+            self.set_state(uuid, PowerState::NotRunning);
+        }
+        let mut vms = locks::lock(&self.vms);
+        let Some(vm) = vms.iter_mut().find(|v| v.uuid == uuid) else {
+            return Err(Self::failed("snapshot", "The VM is gone"));
+        };
+        let tree = &mut vm.snapshots;
+        match op {
+            SnapshotOp::Take { name } => take_vbox_snapshot(tree, name, OffsetDateTime::now_utc()),
+            SnapshotOp::Revert { name } => {
+                let uid = vbox::find_snapshot(tree, name).map(|s| s.uid);
+                tree.current_uid = uid;
+            }
+            SnapshotOp::Delete { name } => {
+                let Some((uid, parent)) = vbox::find_snapshot(tree, name).map(|s| (s.uid, s.parent_uid)) else {
+                    return Err(Self::failed("snapshot delete", "No such snapshot"));
+                };
+                if tree.snapshots.iter().filter(|s| s.parent_uid == Some(uid)).count() > 1 {
+                    return Err(Self::failed(
+                        "snapshot delete",
+                        &format!("Snapshot '{name}' has more than one child snapshot"),
+                    ));
+                }
+                tree.snapshots.retain(|s| s.uid != uid);
+                for child in tree.snapshots.iter_mut().filter(|s| s.parent_uid == Some(uid)) {
+                    child.parent_uid = parent;
+                }
+                if tree.current_uid == Some(uid) {
+                    tree.current_uid = parent;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn snapshots(&self, uuid: &str) -> Result<SnapshotTree> {
+        self.installed()?;
+        locks::lock(&self.snapshot_reads).push(uuid.to_owned());
+        if self.unreadable.contains(uuid) {
+            return Err(Self::failed("showvminfo", "The VM's settings could not be read"));
+        }
+        Ok(self.find(uuid).map(|vm| vm.snapshots).unwrap_or_default())
+    }
+}
+
+/// Adds a snapshot from the current one, with a new UUID, and makes it current.
+fn take_vbox_snapshot(tree: &mut SnapshotTree, name: &str, at: OffsetDateTime) {
+    let uid = tree.snapshots.iter().map(|s| s.uid).max().unwrap_or(0) + 1;
+    tree.snapshots.push(SnapshotInfo {
+        uid,
+        parent_uid: tree.current_uid,
+        name: name.to_owned(),
+        description: None,
+        created_at: Some(at),
+        id: Some(Uuid::new_v4().hyphenated().to_string()),
+    });
+    tree.current_uid = Some(uid);
 }
 
 /// Remote hosts that answer every command with `ok from <host>` and exit code 0, unless a host is

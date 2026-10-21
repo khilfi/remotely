@@ -32,6 +32,7 @@ fn process(pid: u32, vmx_path: &str, cpu_pct: Option<f64>) -> VmProcess {
     VmProcess {
         pid,
         vmx_path: Some(vmx_path.into()),
+        name: None,
         cpu_pct,
         working_set_bytes: Some(GB),
         read_bps: Some(1_000_000.0),

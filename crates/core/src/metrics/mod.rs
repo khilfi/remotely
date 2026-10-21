@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::adapters::host_counters::{HostCounters, SystemCpuTimes};
+use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::vmware::path_key;
 use crate::capacity::{CapacityChecker, HostCapacity};
 use crate::domain::{now_rfc3339, Context, Environment, PowerState, TargetRef};
@@ -238,10 +239,18 @@ impl MetricsSource for HostProcessSource {
         let vms = self.store.list_vms(&self.ctx).await.unwrap_or_default();
         let by_path: HashMap<String, &crate::store::VmRecord> =
             vms.iter().map(|v| (path_key(Path::new(&v.vmx_path)), v)).collect();
+        // VM-18: a VirtualBox process started with the VM's name instead of its UUID.
+        let vbox_by_name = virtualbox_names(&vms);
         let samples = processes
             .into_iter()
             .filter_map(|p| {
-                let vmx = p.vmx_path?;
+                let by_name = || {
+                    p.name
+                        .as_deref()
+                        .and_then(|name| vbox_by_name.get(&name.to_lowercase()))
+                        .map(|vm| vm.vmx_path.clone())
+                };
+                let vmx = p.vmx_path.clone().or_else(by_name)?;
                 let vm = by_path.get(&path_key(Path::new(&vmx))).copied();
                 let vcpus = vm.and_then(|v| v.num_vcpus);
                 Some(MetricSample {
@@ -280,7 +289,24 @@ impl MetricsSource for HostProcessSource {
     }
 }
 
-/// Which series a sample belongs to: its source and its target's key (.vmx path or session id).
+/// VM-18: VirtualBox VMs by their name (lower case), for processes that name their VM rather than
+/// giving its UUID. A name two VMs share matches neither.
+fn virtualbox_names(vms: &[crate::store::VmRecord]) -> HashMap<String, &crate::store::VmRecord> {
+    let mut by_name: HashMap<String, Option<&crate::store::VmRecord>> = HashMap::new();
+    for vm in vms.iter().filter(|v| v.hypervisor == Hypervisor::VirtualBox) {
+        by_name
+            .entry(vm.display_name.to_lowercase())
+            .and_modify(|seen| *seen = None)
+            .or_insert(Some(vm));
+    }
+    by_name
+        .into_iter()
+        .filter_map(|(name, vm)| vm.map(|vm| (name, vm)))
+        .collect()
+}
+
+/// Which series a sample belongs to: its source and its target's key (.vmx path, VirtualBox UUID or
+/// session id).
 type SeriesKey = (MetricSource, String);
 
 #[derive(Default)]
@@ -439,9 +465,11 @@ pub enum RowKind {
 #[serde(rename_all = "camelCase")]
 pub struct DashboardRow {
     pub kind: RowKind,
-    /// The .vmx path or the session id.
+    /// The VM's key (.vmx path or VirtualBox UUID) or the session id.
     pub key: String,
     pub name: String,
+    /// VM-18: a VM row's hypervisor; `None` for a session.
+    pub hypervisor: Option<Hypervisor>,
     pub environment: Environment,
     pub protected: bool,
     pub tags: Vec<String>,
@@ -676,6 +704,7 @@ impl Metrics {
                 kind: RowKind::Vm,
                 key: vm.vmx_path.clone(),
                 name: vm.display_name.clone(),
+                hypervisor: Some(vm.hypervisor),
                 environment: vm.environment,
                 protected: vm.protected,
                 tags: vm.tags.clone(),
@@ -696,13 +725,18 @@ impl Metrics {
             if known_vmx.contains(&path_key(Path::new(&vmx))) {
                 continue;
             }
-            let name = Path::new(&vmx)
-                .file_stem()
-                .map_or_else(|| vmx.clone(), |s| s.to_string_lossy().into_owned());
+            let hypervisor = Hypervisor::of_key(&vmx);
+            let name = match hypervisor {
+                Hypervisor::Vmware => Path::new(&vmx)
+                    .file_stem()
+                    .map_or_else(|| vmx.clone(), |s| s.to_string_lossy().into_owned()),
+                Hypervisor::VirtualBox => format!("VirtualBox VM {}", vmx.get(..8).unwrap_or(&vmx)),
+            };
             rows.push(DashboardRow {
                 kind: RowKind::Vm,
                 key: vmx.clone(),
                 name,
+                hypervisor: Some(hypervisor),
                 environment: Environment::None,
                 protected: false,
                 tags: Vec::new(),
@@ -727,6 +761,7 @@ impl Metrics {
                 kind: RowKind::Session,
                 key: session.id.to_string(),
                 name: session.name.clone(),
+                hypervisor: None,
                 environment: session.environment,
                 protected: session.protected,
                 tags: session.tags.clone(),

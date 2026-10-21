@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::remote::forward::ForwardKind;
 use crate::capacity::CapacityChecker;
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
@@ -189,8 +190,9 @@ impl SnapshotOp {
         }
     }
 
-    /// VM-04: a name vmrun will take and the snapshot manager can find again.
-    fn validate(&self) -> Result<()> {
+    /// VM-04: a name the hypervisors will take and the snapshot manager can find again. vmrun reads
+    /// `/` as a path, so a new name for any VMware target can't hold one (VM-18: VBoxManage takes it).
+    fn validate(&self, targets: &[TargetRef]) -> Result<()> {
         let name = self.name();
         let invalid = |message: String| Err(CoreError::InvalidInput(message));
         if name.trim().is_empty() {
@@ -208,7 +210,10 @@ impl SnapshotOp {
             if name.trim() != name {
                 return invalid("A snapshot name can't start or end with a space.".into());
             }
-            if name.contains('/') {
+            let vmware = targets
+                .iter()
+                .any(|t| matches!(t, TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::Vmware));
+            if vmware && name.contains('/') {
                 return invalid(
                     "A snapshot name can't contain '/': vmrun reads it as the path to a child snapshot.".into(),
                 );
@@ -289,6 +294,33 @@ fn validate_tunnel(targets: &[TargetRef]) -> Result<()> {
     }
 }
 
+/// VM-18: a VirtualBox VM target.
+fn is_virtualbox(target: &Target) -> bool {
+    matches!(&target.target, TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::VirtualBox)
+}
+
+/// VM-18: the VirtualBox targets of a revert that are running (or paused) now, which VirtualBox can
+/// only restore once they are powered off.
+fn virtualbox_revert_warnings(targets: &[Target], impact: &[TargetImpact]) -> Vec<String> {
+    let names: Vec<&str> = targets
+        .iter()
+        .filter(|t| is_virtualbox(t))
+        .filter(|t| {
+            impact
+                .iter()
+                .any(|i| i.target == t.target.key() && i.power_state.is_on())
+        })
+        .map(|t| t.name.as_str())
+        .collect();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    vec![format!(
+        "VirtualBox restores a snapshot only on a VM that is not running, so Remotely powers off {} first, without shutting the guest down.",
+        names.join(", ")
+    )]
+}
+
 /// "1.2 MB", for summaries and messages.
 pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -336,7 +368,7 @@ impl Command {
     /// Checks what the caller typed, before any target is looked up.
     pub fn validate(&self) -> Result<()> {
         match self {
-            Command::VmSnapshot { op, .. } => op.validate(),
+            Command::VmSnapshot { op, targets } => op.validate(targets),
             Command::RemoteExec {
                 script, timeout_secs, ..
             } => validate_script(script, *timeout_secs),
@@ -958,6 +990,20 @@ impl CommandBus {
             let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
             decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
         }
+        // VM-18: VirtualBox restores a snapshot only on a VM that is not running, so the revert powers
+        // a running one off first; the preview says which, and the user confirms it.
+        let mut impact = None;
+        if let Command::VmSnapshot {
+            op: SnapshotOp::Revert { .. },
+            ..
+        } = &command
+        {
+            if decision.targets.iter().any(is_virtualbox) {
+                let preview = self.impact.preview(ctx, &decision.targets).await;
+                decision.add_warnings(virtualbox_revert_warnings(&decision.targets, &preview));
+                impact = Some(preview);
+            }
+        }
         let summary = command.summary(decision.targets.len());
 
         if decision.steps.is_empty() {
@@ -993,7 +1039,10 @@ impl CommandBus {
             skipped: decision.skipped.clone(),
             reasons: decision.reasons.clone(),
             warnings: decision.warnings.clone(),
-            impact: self.impact.preview(ctx, &decision.targets).await,
+            impact: match impact {
+                Some(impact) => impact,
+                None => self.impact.preview(ctx, &decision.targets).await,
+            },
             exec: self.exec_details(ctx, &command, retry_of).await?,
             upload: UploadDetails::of(&command),
             tunnel: TunnelDetails::of(&command),

@@ -1,12 +1,11 @@
 //! Snapshot manager reads (VM-04) and safety snapshot names (VM-05).
 //!
 //! Reads skip the command bus: the tree and creation times come from each VM's .vmsd file through
-//! the VMware adapter (vmrun only gives names). Taking, reverting and deleting snapshots are
+//! the VMware adapter (vmrun only gives names), or for a VirtualBox VM (VM-18) from `showvminfo` and
+//! its .vbox file. Taking, reverting and deleting snapshots are
 //! [`crate::command_bus::Command::VmSnapshot`] commands, which go through the bus.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
-use std::sync::Arc;
 
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
@@ -14,7 +13,8 @@ use time::macros::format_description;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
-use crate::adapters::vmware::{SnapshotInfo, SnapshotTree, VmwareAdapter};
+use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
+use crate::adapters::vmware::{SnapshotInfo, SnapshotTree};
 use crate::domain::{Context, Environment, PowerState};
 use crate::error::Result;
 use crate::store::Store;
@@ -50,8 +50,8 @@ pub struct SnapshotNode {
     pub uid: u32,
     pub parent_uid: Option<u32>,
     pub name: String,
-    /// vmrun's path form, e.g. `base/child one`. It names the snapshot even when another snapshot
-    /// of the VM has the same name.
+    /// What names this snapshot to its hypervisor even when another snapshot of the VM has the same
+    /// name: vmrun's path form (`base/child one`), or VirtualBox's snapshot UUID (VM-18).
     pub path: String,
     pub description: Option<String>,
     /// RFC 3339 UTC; `None` when the .vmsd has no time for it.
@@ -72,6 +72,8 @@ pub struct SnapshotNode {
 #[serde(rename_all = "camelCase")]
 pub struct VmSnapshots {
     pub vmx_path: String,
+    /// VM-18: vmrun reads `/` in a name as a path; VBoxManage doesn't.
+    pub hypervisor: Hypervisor,
     pub display_name: String,
     pub power_state: PowerState,
     pub environment: Environment,
@@ -134,12 +136,18 @@ pub fn tree_nodes(tree: &SnapshotTree, now: OffsetDateTime) -> Vec<SnapshotNode>
         if let Some(kids) = children.get(&Some(snapshot.uid)) {
             stack.extend(kids.iter().rev().map(|&i| (i, depth + 1, path.clone())));
         }
-        nodes.push(node(snapshot, depth, path));
+        // VM-18: VirtualBox finds a snapshot by its UUID; it has no path form.
+        let reference = snapshot.id.clone().unwrap_or(path);
+        nodes.push(node(snapshot, depth, reference));
     }
     // A loop of parents (a damaged .vmsd) never reaches a first snapshot; list those at the end.
     for snapshot in &tree.snapshots {
         if seen.insert(snapshot.uid) {
-            nodes.push(node(snapshot, 0, snapshot.name.clone()));
+            nodes.push(node(
+                snapshot,
+                0,
+                snapshot.id.clone().unwrap_or_else(|| snapshot.name.clone()),
+            ));
         }
     }
     nodes
@@ -164,15 +172,15 @@ pub fn counts(tree: &SnapshotTree, now: OffsetDateTime) -> SnapshotCounts {
     }
 }
 
-/// VM-04: reads every VM's snapshot tree. Reads only; no vmrun call.
+/// VM-04: reads every VM's snapshot tree. Reads only; no vmrun call (VirtualBox: `showvminfo`).
 pub struct SnapshotReader {
     store: Store,
-    vmware: Arc<dyn VmwareAdapter>,
+    hypervisors: Hypervisors,
 }
 
 impl SnapshotReader {
-    pub fn new(store: Store, vmware: Arc<dyn VmwareAdapter>) -> Self {
-        Self { store, vmware }
+    pub fn new(store: Store, hypervisors: Hypervisors) -> Self {
+        Self { store, hypervisors }
     }
 
     /// The snapshots of the VMs the last inventory refresh found, or of `only` those .vmx paths. A
@@ -188,7 +196,7 @@ impl SnapshotReader {
             {
                 continue;
             }
-            let (snapshots, error) = match self.vmware.snapshots(Path::new(&vm.vmx_path)).await {
+            let (snapshots, error) = match self.hypervisors.snapshots(&vm.vmx_path).await {
                 Ok(tree) => (tree_nodes(&tree, now), None),
                 Err(err) => (Vec::new(), Some(format!("Could not read the snapshot list: {err}"))),
             };
@@ -196,6 +204,7 @@ impl SnapshotReader {
                 old_count: snapshots.iter().filter(|s| s.old).count(),
                 safety_count: snapshots.iter().filter(|s| s.safety).count(),
                 vmx_path: vm.vmx_path,
+                hypervisor: vm.hypervisor,
                 display_name: vm.display_name,
                 power_state: vm.power_state,
                 environment: vm.environment,
@@ -223,6 +232,7 @@ mod tests {
             name: name.into(),
             description: None,
             created_at: Some(at),
+            id: None,
         }
     }
 
@@ -317,6 +327,22 @@ mod tests {
             current_uid: Some(1),
         };
         assert!(tree_nodes(&tree, NOW)[0].safety);
+    }
+
+    #[test]
+    fn a_virtualbox_snapshot_is_named_by_its_uuid() {
+        let mut base = snap(1, None, "same", NOW);
+        base.id = Some("5b1c0000-0000-4000-8000-000000000001".into());
+        let mut child = snap(2, Some(1), "same", NOW);
+        child.id = Some("5b1c0000-0000-4000-8000-000000000002".into());
+        let tree = SnapshotTree {
+            snapshots: vec![base, child],
+            current_uid: Some(2),
+        };
+        let nodes = tree_nodes(&tree, NOW);
+        assert_eq!(nodes[1].path, "5b1c0000-0000-4000-8000-000000000002");
+        assert_eq!(nodes[1].name, "same");
+        assert_eq!(nodes[1].depth, 1);
     }
 
     #[test]

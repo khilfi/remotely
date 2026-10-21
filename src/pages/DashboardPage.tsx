@@ -58,6 +58,7 @@ import {
   type SessionRecord,
 } from "@/lib/api";
 import { plural } from "@/lib/format";
+import { hypervisorName } from "@/lib/hypervisors";
 import {
   compareNullsLast as compare,
   DEFAULT_THRESHOLDS,
@@ -520,7 +521,12 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
                     <TableCell>
                       <div className="flex items-center gap-2">
                         {row.kind === "vm" ? (
-                          <MonitorIcon className="size-4 shrink-0 text-muted-foreground" aria-label="VM" />
+                          <span title={row.hypervisor ? `${hypervisorName(row.hypervisor)} VM` : "VM"} className="flex">
+                            <MonitorIcon
+                              className="size-4 shrink-0 text-muted-foreground"
+                              aria-label={row.hypervisor ? `${hypervisorName(row.hypervisor)} VM` : "VM"}
+                            />
+                          </span>
                         ) : (
                           <ServerIcon className="size-4 shrink-0 text-muted-foreground" aria-label="Host" />
                         )}

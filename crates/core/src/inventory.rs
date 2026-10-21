@@ -4,6 +4,11 @@
 //! folders chosen in Settings (scanned for .vmx files) and `vmrun list`. For running VMs it also asks
 //! vmrun for the VMware Tools state and the guest's IP address.
 //!
+//! VM-18: it also lists VirtualBox's registered VMs (`VBoxManage list vms`, then `showvminfo` for
+//! each), and for running ones whose Guest Additions run, the guest's IP address and OS name. Without
+//! VirtualBox there are simply no VirtualBox VMs; when VirtualBox can't be asked, its VMs stay listed
+//! as the last refresh found them, with a warning.
+//!
 //! A VM's environment label (SS-06, as for sessions) is the app's own data: setting it changes no VM,
 //! so it skips the bus too, and it is audited like a setting.
 //!
@@ -19,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-use crate::adapters::vmware::{path_key, with_backslashes, ToolsState, VmwareAdapter, VmxInfo};
+use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
+use crate::adapters::virtualbox::{self, VboxListedVm, VboxVmInfo, VirtualBoxAdapter};
+use crate::adapters::vmware::{path_key, with_backslashes, ToolsState, VmxInfo};
 use crate::command_bus::TargetDirectory;
 use crate::domain::{Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -66,11 +73,14 @@ pub struct RefreshReport {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct VmFilter {
-    /// Case-insensitive text in the name, .vmx path, guest OS, IP address or a tag.
+    /// Case-insensitive text in the name, .vmx path (VirtualBox: UUID or .vbox path), guest OS, IP
+    /// address or a tag.
     pub text: String,
     pub tags: Vec<String>,
     pub power_states: Vec<PowerState>,
     pub environments: Vec<Environment>,
+    /// VM-18: VMware, VirtualBox or both.
+    pub hypervisors: Vec<Hypervisor>,
     /// `Some(true)`: only protected VMs; `Some(false)`: only unprotected ones.
     pub protected: Option<bool>,
 }
@@ -82,6 +92,7 @@ impl VmFilter {
             let fields = [
                 Some(&vm.display_name),
                 Some(&vm.vmx_path),
+                vm.config_path.as_ref(),
                 vm.guest_os.as_ref(),
                 vm.guest_os_name.as_ref(),
                 vm.ip_address.as_ref(),
@@ -109,13 +120,16 @@ impl VmFilter {
         if !self.environments.is_empty() && !self.environments.contains(&vm.environment) {
             return false;
         }
+        if !self.hypervisors.is_empty() && !self.hypervisors.contains(&vm.hypervisor) {
+            return false;
+        }
         self.protected.is_none_or(|p| vm.protected == p)
     }
 }
 
 pub struct Inventory {
     store: Store,
-    vmware: Arc<dyn VmwareAdapter>,
+    hypervisors: Hypervisors,
     links: Arc<VmLinks>,
 }
 
@@ -126,8 +140,12 @@ struct Candidate {
 }
 
 impl Inventory {
-    pub fn new(store: Store, vmware: Arc<dyn VmwareAdapter>, links: Arc<VmLinks>) -> Self {
-        Self { store, vmware, links }
+    pub fn new(store: Store, hypervisors: Hypervisors, links: Arc<VmLinks>) -> Self {
+        Self {
+            store,
+            hypervisors,
+            links,
+        }
     }
 
     /// VM-01: folders scanned for .vmx files, as saved in Settings.
@@ -143,6 +161,40 @@ impl Inventory {
     /// read (vmrun missing, a folder gone) becomes a warning instead of failing the refresh.
     pub async fn refresh(&self, ctx: &Context) -> Result<RefreshReport> {
         let mut warnings = Vec::new();
+        let mut found = self.refresh_vmware(ctx, &mut warnings).await?;
+        let mut read = vec![Hypervisor::Vmware];
+        // VM-18: someone who uses only VirtualBox has no Workstation and no Workstation VM; saying so on
+        // every refresh would be noise. With a Workstation VM listed, the warning stays.
+        if found.is_empty() && self.hypervisors.virtualbox().tool_path().is_some() {
+            warnings.retain(|w| w.code != CoreError::VmrunNotFound.code());
+        }
+        // VM-18: VirtualBox's VMs, unless it could not be asked this time.
+        let (vbox, vbox_read) = self.refresh_virtualbox(&mut warnings).await;
+        found.extend(vbox);
+        if vbox_read {
+            read.push(Hypervisor::VirtualBox);
+        }
+        self.store.record_inventory_for(ctx, &found, &read).await?;
+        let links = match self.links.auto_link(ctx).await {
+            Ok(links) => links,
+            Err(err) => {
+                warnings.push(InventoryWarning::new(
+                    "Could not link sessions to VMs by IP address",
+                    &err,
+                ));
+                AutoLinkReport::default()
+            }
+        };
+        Ok(RefreshReport {
+            vms: self.store.list_vms(ctx).await?,
+            warnings,
+            links,
+        })
+    }
+
+    /// VM-01: Workstation's VMs: the library, the scanned folders and `vmrun list`.
+    async fn refresh_vmware(&self, ctx: &Context, warnings: &mut Vec<InventoryWarning>) -> Result<Vec<DiscoveredVm>> {
+        let vmware = self.hypervisors.vmware();
         let mut candidates: Vec<Candidate> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut add = |path: PathBuf, library_name: Option<String>| {
@@ -154,12 +206,12 @@ impl Inventory {
             }
         };
 
-        match self.vmware.library().await {
+        match vmware.library().await {
             Ok(entries) => entries.into_iter().for_each(|e| add(e.vmx_path, e.display_name)),
             Err(err) => warnings.push(InventoryWarning::new("Could not read the Workstation library", &err)),
         }
         for folder in self.scan_folders(ctx).await? {
-            match self.vmware.scan_folder(&folder).await {
+            match vmware.scan_folder(&folder).await {
                 Ok(paths) => paths.into_iter().for_each(|p| add(p, None)),
                 Err(err) => warnings.push(InventoryWarning::new(
                     &format!("Could not scan {}", folder.display()),
@@ -167,7 +219,7 @@ impl Inventory {
                 )),
             }
         }
-        let running: Option<HashSet<String>> = match self.vmware.list_running().await {
+        let running: Option<HashSet<String>> = match vmware.list_running().await {
             Ok(paths) => {
                 let keys = paths.iter().map(|p| path_key(p)).collect();
                 paths.into_iter().for_each(|p| add(p, None));
@@ -188,7 +240,7 @@ impl Inventory {
         for candidate in candidates {
             let key = path_key(&candidate.path);
             let is_running = running.as_ref().map(|r| r.contains(&key));
-            let info = match self.vmware.read_vmx(&candidate.path).await {
+            let info = match vmware.read_vmx(&candidate.path).await {
                 Ok(info) => info,
                 Err(err) if is_running == Some(true) => {
                     tracing::warn!(vmx = %candidate.path.display(), error = %err, "could not read a running VM's .vmx");
@@ -224,26 +276,61 @@ impl Inventory {
                 power_state,
                 tools_state: None,
                 ip_address: None,
+                hypervisor: Hypervisor::Vmware,
+                config_path: None,
             });
         }
 
         self.query_guests(&mut found, &to_query).await;
-        self.store.record_inventory(ctx, &found).await?;
-        let links = match self.links.auto_link(ctx).await {
-            Ok(links) => links,
+        Ok(found)
+    }
+
+    /// VM-18: VirtualBox's registered VMs, and whether they were all read. Not installed: none, read.
+    /// `list vms` failing, or a VM's `showvminfo`: a warning, and not read, so no VirtualBox VM drops
+    /// out of the list because VirtualBox was busy. A VM whose settings VirtualBox can't open
+    /// (`accessible="off"`) is left out, like a .vmx gone from disk.
+    async fn refresh_virtualbox(&self, warnings: &mut Vec<InventoryWarning>) -> (Vec<DiscoveredVm>, bool) {
+        let vbox = Arc::clone(self.hypervisors.virtualbox());
+        let listed = match vbox.list_vms().await {
+            Ok(listed) => listed,
+            Err(CoreError::VboxManageNotFound) => return (Vec::new(), true),
             Err(err) => {
-                warnings.push(InventoryWarning::new(
-                    "Could not link sessions to VMs by IP address",
-                    &err,
-                ));
-                AutoLinkReport::default()
+                warnings.push(InventoryWarning::new("Could not ask VirtualBox for its VMs", &err));
+                return (Vec::new(), false);
             }
         };
-        Ok(RefreshReport {
-            vms: self.store.list_vms(ctx).await?,
-            warnings,
-            links,
-        })
+        let limit = Arc::new(Semaphore::new(GUEST_QUERY_PARALLELISM));
+        let mut tasks = JoinSet::new();
+        for (index, vm) in listed.into_iter().enumerate() {
+            let vbox = Arc::clone(&vbox);
+            let limit = Arc::clone(&limit);
+            tasks.spawn(async move {
+                let _permit = limit.acquire_owned().await.ok();
+                let read = read_virtualbox_vm(vbox.as_ref(), &vm).await;
+                (index, vm, read)
+            });
+        }
+        let mut read: Vec<(usize, DiscoveredVm)> = Vec::new();
+        let mut complete = true;
+        while let Some(joined) = tasks.join_next().await {
+            let Ok((index, vm, result)) = joined else {
+                complete = false;
+                continue;
+            };
+            match result {
+                Ok(Some(found)) => read.push((index, found)),
+                Ok(None) => tracing::debug!(uuid = %vm.uuid, "skipping an inaccessible VirtualBox VM"),
+                Err(err) => {
+                    complete = false;
+                    warnings.push(InventoryWarning::new(
+                        &format!("Could not read VirtualBox VM '{}'", vm.name),
+                        &err,
+                    ));
+                }
+            }
+        }
+        read.sort_by_key(|(index, _)| *index);
+        (read.into_iter().map(|(_, vm)| vm).collect(), complete)
     }
 
     /// Tools state, then the IP address when Tools is running, for each VM in `indexes`. A failing
@@ -252,7 +339,7 @@ impl Inventory {
         let limit = Arc::new(Semaphore::new(GUEST_QUERY_PARALLELISM));
         let mut tasks = JoinSet::new();
         for &index in indexes {
-            let vmware = Arc::clone(&self.vmware);
+            let vmware = Arc::clone(self.hypervisors.vmware());
             let limit = Arc::clone(&limit);
             let vmx = PathBuf::from(&found[index].vmx_path);
             tasks.spawn(async move {
@@ -353,6 +440,65 @@ impl Inventory {
     }
 }
 
+/// VM-18: one VirtualBox VM as a refresh finds it. For a running VM whose Guest Additions run, also
+/// the guest's IP address and OS name; a guest that can't be asked leaves them empty. `None` for a VM
+/// VirtualBox can't open.
+async fn read_virtualbox_vm(vbox: &dyn VirtualBoxAdapter, listed: &VboxListedVm) -> Result<Option<DiscoveredVm>> {
+    let info = vbox.vm_info(&listed.uuid).await?;
+    if !info.accessible {
+        return Ok(None);
+    }
+    let power_state = info.power_state();
+    let tools = info.tools_state();
+    let (mut ip, mut os_name) = (None, None);
+    // A paused guest can't answer; the store keeps what it last reported.
+    if power_state == PowerState::Running && tools == Some(ToolsState::Running) {
+        ip = virtualbox::guest_ip(vbox, &listed.uuid, &info.nics)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::debug!(uuid = %listed.uuid, error = %err, "could not read the guest's IP address");
+                None
+            });
+        os_name = virtualbox::guest_os_name(vbox, &listed.uuid)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::debug!(uuid = %listed.uuid, error = %err, "could not read the guest's OS name");
+                None
+            });
+    }
+    Ok(Some(virtualbox_discovered(listed, info, tools, ip, os_name)))
+}
+
+fn virtualbox_discovered(
+    listed: &VboxListedVm,
+    info: VboxVmInfo,
+    tools: Option<ToolsState>,
+    ip_address: Option<String>,
+    guest_os_name: Option<String>,
+) -> DiscoveredVm {
+    let display_name = Some(info.name.clone())
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| listed.name.clone());
+    let power_state = info.power_state();
+    DiscoveredVm {
+        vmx_path: listed.uuid.clone(),
+        display_name: display_name.clone(),
+        info: VmxInfo {
+            display_name: Some(display_name),
+            guest_os: info.os_type.clone(),
+            guest_os_name,
+            num_vcpus: info.cpus,
+            memsize_mb: info.memory_mb,
+            suspended: power_state == PowerState::Suspended,
+        },
+        power_state,
+        tools_state: tools.map(|t| t.as_str().to_owned()),
+        ip_address,
+        hypervisor: Hypervisor::VirtualBox,
+        config_path: info.config_file.map(|p| p.display().to_string()),
+    }
+}
+
 fn file_stem(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -426,7 +572,10 @@ impl TargetDirectory for StoreDirectory {
                     // Not in the inventory yet: no label, not protected.
                     None => Target {
                         target: target.clone(),
-                        name: file_stem(Path::new(vmx_path)),
+                        name: match Hypervisor::of_key(vmx_path) {
+                            Hypervisor::Vmware => file_stem(Path::new(vmx_path)),
+                            Hypervisor::VirtualBox => format!("VirtualBox VM {vmx_path}"),
+                        },
                         environment: Environment::None,
                         protected: false,
                     },
@@ -467,6 +616,8 @@ mod tests {
         VmRecord {
             id: name.into(),
             vmx_path: format!(r"C:\VMs\{name}\{name}.vmx"),
+            hypervisor: Hypervisor::Vmware,
+            config_path: None,
             display_name: name.into(),
             guest_os: Some("ubuntu-64".into()),
             guest_os_name: Some("Ubuntu 24.04 LTS".into()),
@@ -538,6 +689,36 @@ mod tests {
         assert!(!protected.matches(&web));
         web.protected = true;
         assert!(protected.matches(&web));
+    }
+
+    #[test]
+    fn the_hypervisor_filter_picks_vmware_or_virtualbox_vms() {
+        let web = vm("web01");
+        let vbox = VmRecord {
+            vmx_path: "3f0c1a2b-1111-4222-8333-444455556666".into(),
+            hypervisor: Hypervisor::VirtualBox,
+            config_path: Some(r"D:\VirtualBox VMs\db01\db01.vbox".into()),
+            ..vm("db01")
+        };
+        let only = |h: Hypervisor| VmFilter {
+            hypervisors: vec![h],
+            ..Default::default()
+        };
+        assert!(only(Hypervisor::Vmware).matches(&web));
+        assert!(!only(Hypervisor::Vmware).matches(&vbox));
+        assert!(only(Hypervisor::VirtualBox).matches(&vbox));
+        let both = VmFilter {
+            hypervisors: Hypervisor::ALL.to_vec(),
+            ..Default::default()
+        };
+        assert!(both.matches(&web) && both.matches(&vbox));
+        let by_file = VmFilter {
+            text: "virtualbox vms\\db01".into(),
+            ..Default::default()
+        };
+        assert!(by_file.matches(&vbox), "the .vbox path counts as text");
+        let parsed: VmFilter = serde_json::from_str(r#"{"hypervisors":["virtualbox"]}"#).unwrap();
+        assert_eq!(parsed.hypervisors, [Hypervisor::VirtualBox]);
     }
 
     #[test]
