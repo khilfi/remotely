@@ -4,7 +4,8 @@
 // action is a command for the bus; the tiers shown come from the policy engine's preview, and the approval dialog
 // (AP-02 impact preview, VM-05 safety snapshot) follows the submit as from anywhere else.
 //
-// Q5 (VM-18): the hypervisor and its own facts go in `detailRows` (a "Hypervisor" row, then per-hypervisor rows).
+// VM-18: the hypervisor comes first in `detailRows`, then its own facts (a VirtualBox VM's UUID), and the guest tools
+// row is named for it ("VMware Tools" or "Guest Additions").
 // Q7 (MO-13): OS and specs can be another section of the Details tab, or a tab of their own.
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -41,6 +42,7 @@ import {
   type VmSnapshots,
 } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
+import { HYPERVISORS, toolsName, vmLocation } from "@/lib/hypervisors";
 import { formatPct, HOST_SHARE_HINT, type Thresholds } from "@/lib/metrics";
 import { approvalHint, PROTECTED_REASON, takeReason, type VmView } from "@/lib/vm-snapshots";
 
@@ -106,7 +108,7 @@ export function VmDetailsPanel(props: Props) {
             {vm.environment !== "none" && <EnvBadge env={vm.environment} />}
             <StateBadge state={vm.powerState} />
           </div>
-          <div className="font-mono text-xs break-all text-muted-foreground">{vm.vmxPath}</div>
+          <div className="font-mono text-xs break-all text-muted-foreground">{vmLocation(vm)}</div>
         </div>
         <Button size="icon-sm" variant="ghost" aria-label="Close the details" onClick={onClose}>
           <XIcon />
@@ -154,11 +156,22 @@ interface DetailRow {
   hint?: string;
 }
 
-/** The Details tab's rows, in order. Q5 adds the hypervisor here. */
+/** The Details tab's rows, in order: the hypervisor and its own facts first (VM-18). */
 function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props): DetailRow[] {
   const hostCpu = usage?.hostCpuPct ?? null;
   const hostMem = usage?.hostMemPct ?? null;
+  const hypervisor: DetailRow[] = [
+    { label: "Hypervisor", value: HYPERVISORS.find((h) => h.value === vm.hypervisor)?.label ?? vm.hypervisor },
+  ];
+  if (vm.hypervisor === "virtualbox") {
+    hypervisor.push({
+      label: "UUID",
+      hint: "VirtualBox's id for the VM; it stays the same when the VM is renamed or moved",
+      value: <span className="font-mono text-xs break-all">{vm.vmxPath}</span>,
+    });
+  }
   const rows: DetailRow[] = [
+    ...hypervisor,
     { label: "Guest OS", value: vm.guestOsName ?? vm.guestOs ?? dash },
     { label: "vCPUs", value: vm.numVcpus ?? dash },
     { label: "RAM", value: formatRam(vm.memsizeMb) },
@@ -172,7 +185,7 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
         dash
       ),
     },
-    { label: "VMware Tools", value: <ToolsLabel state={vm.toolsState} /> },
+    { label: toolsName(vm.hypervisor), value: <ToolsLabel state={vm.toolsState} /> },
     {
       label: "% of host CPU",
       hint: HOST_SHARE_HINT.cpu,

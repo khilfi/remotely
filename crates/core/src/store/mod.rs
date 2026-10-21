@@ -47,6 +47,8 @@ pub(crate) use vault::VaultMetaRow;
 pub const POLICY_RULES_KEY: &str = "policy.rules";
 /// Full path to vmrun.exe chosen in Settings; JSON null means "find it automatically".
 pub const VMRUN_PATH_KEY: &str = "vmware.vmrunPath";
+/// VM-18: full path to VBoxManage.exe chosen in Settings; JSON null means "find it automatically".
+pub const VBOXMANAGE_PATH_KEY: &str = "virtualbox.vboxmanagePath";
 /// FD-14: whether the app checks GitHub Releases for updates; off for air-gapped sites. Default on.
 pub const UPDATE_CHECKS_KEY: &str = "updates.checkEnabled";
 /// VM-01: folders scanned for .vmx files, besides Workstation's library. A JSON list of paths.

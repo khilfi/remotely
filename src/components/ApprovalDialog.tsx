@@ -45,6 +45,7 @@ import { containerTargetKey, formatBytes } from "@/lib/containers";
 import { isLoopback } from "@/lib/tunnels";
 import { approveReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
+import { targetLocation } from "@/lib/hypervisors";
 import { formatSize } from "@/lib/transfers";
 import { ContainerStateBadge, EnvBadge, StateBadge, TierBadge } from "./Badges";
 import { WhyDisabled } from "./WhyDisabled";
@@ -253,7 +254,9 @@ export function ApprovalDialog({
                       <TableCell className="whitespace-normal">
                         <div className="font-medium">{t.name}</div>
                         {t.target.kind === "vm" && (
-                          <div className="font-mono text-xs break-all text-muted-foreground">{t.target.vmxPath}</div>
+                          <div className="font-mono text-xs break-all text-muted-foreground">
+                            {targetLocation(t.target.vmxPath)}
+                          </div>
                         )}
                         {now?.container && <ContainerImpactLines impact={now.container} />}
                         {now?.notes.map((note) => (

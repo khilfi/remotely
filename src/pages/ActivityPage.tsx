@@ -1,6 +1,6 @@
 // Jobs and audit log (AP-03, AP-05, VM-05). Open jobs can be cancelled here: a job in its countdown
 // shows the time left and touches nothing if cancelled, and a running job stops targets that have
-// not started and stops waiting for VM power actions in progress (Workstation may still finish
+// not started and stops waiting for VM power actions in progress (Workstation or VirtualBox may still finish
 // those). A job's results show each target's outcome and the safety snapshot taken on it. The audit
 // log can be verified and exported to CSV.
 
@@ -178,7 +178,7 @@ export function ActivityPage({ version, active }: { version: number; active: boo
                             variant="destructive"
                             title={
                               job.status === "running"
-                                ? "Stops the targets that have not started and stops waiting for VM power actions in progress; Workstation may still finish those. A snapshot in progress finishes."
+                                ? "Stops the targets that have not started and stops waiting for VM power actions in progress; Workstation or VirtualBox may still finish those. A snapshot in progress finishes."
                                 : "Nothing has been done yet; no target is touched"
                             }
                             onClick={(e) => {

@@ -73,6 +73,7 @@ pub fn run() {
             let config = CoreConfig {
                 db_path: data_dir.join("remotely.db"),
                 vmrun_path: None,
+                vboxmanage_path: None,
                 account: windows_account(),
                 display_name: std::env::var("USERNAME").unwrap_or_else(|_| "user".into()),
                 updater,
@@ -209,6 +210,7 @@ pub fn run() {
             ipc::audit_export_csv,
             ipc::settings_get,
             ipc::settings_set_vmrun_path,
+            ipc::settings_set_vboxmanage_path,
             ipc::settings_set_scan_folders,
             ipc::settings_set_power_on_limit,
             ipc::settings_set_shutdown_wait,

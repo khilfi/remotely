@@ -546,6 +546,7 @@ async fn the_power_on_limit_is_a_saved_setting() {
         core.ctx,
         Adapters {
             vmware: Arc::new(FakeVmware::default()),
+            virtualbox: Arc::new(remotely_core::fakes::FakeVirtualBox::new()),
             remote: Arc::new(FakeRemote::default()),
             vault: Arc::new(FakeVault::with_password("x")),
             host_counters: Arc::new(FakeHostCounters::default()),

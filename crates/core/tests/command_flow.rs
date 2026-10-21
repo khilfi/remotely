@@ -57,6 +57,7 @@ async fn core_with(
     }
     let adapters = Adapters {
         vmware: fake,
+        virtualbox: Arc::new(remotely_core::fakes::FakeVirtualBox::new()),
         remote: Arc::new(FakeRemote::default()),
         vault,
         host_counters: Arc::new(FakeHostCounters::default()),

@@ -67,12 +67,16 @@ crates/core/          remotely-core: all app logic
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     jobs.rs
-    adapters/         vmware.rs, remote.rs (SSH shell and exec, every path through the SS-07 jump host chain over
+    adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
+                      snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
+                      Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec, every path
+                      through the SS-07 jump host chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
                       terminal's own connection, behind the RemoteFiles trait; remote/forward.rs SS-07 port forwards on
                       it, local, remote and SOCKS, behind RemoteForwards; remote/socks.rs SOCKS 4/4a/5),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
-                      secret scrubbing), host_counters.rs, updater.rs, github.rs (FD-14 GitHub Releases API with the
+                      secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
+                      VBoxHeadless.exe), updater.rs, github.rs (FD-14 GitHub Releases API with the
                       update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
                       the docker and podman CLIs over a kept SSH connection's exec channels, with sudo from the vault
@@ -86,9 +90,11 @@ crates/core/          remotely-core: all app logic
                       for the job runner (Command::Container), and "Open a shell" (Terminals::open_container_shell
                       types docker/podman exec -it instead of the startup command)
     updates.rs        FD-14 update checks and the GitHub update token in the vault
-    inventory.rs
+    inventory.rs      VM-01 Workstation's and (VM-18) VirtualBox's VMs; a VirtualBox VM is kept when VirtualBox can't
+                      be asked
     capacity.rs       VM-07 capacity check before power-on
-    snapshots.rs      VM-04 snapshot trees (from .vmsd), VM-05 safety snapshot names
+    snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
+                      names
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows), guest.rs (MO-02 SSH
@@ -144,7 +150,7 @@ crates/core/          remotely-core: all app logic
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample)
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
     store/
-    fakes.rs          one fake per adapter (feature `fakes`; tests only)
+    fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
                       subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
@@ -154,7 +160,8 @@ crates/core/          remotely-core: all app logic
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels and the Containers page by hand
-  tests/              end-to-end tests with fakes; opt-in workstation_it.rs
+  tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation); opt-in
+                      workstation_it.rs and virtualbox_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
                       (command_panel.rs), clipboard read for right-click paste, SS-08 file
@@ -205,10 +212,65 @@ src/                  React + TypeScript UI
 - `vmrest.exe` (same folder) is a local REST API, by default on 127.0.0.1:8697. It needs a one-time credential setup (`vmrest -C`, which is interactive). Treat it as optional and fall back to `vmrun`.
 - Each running VM is a `vmware-vmx.exe` process whose command line contains the `.vmx` path. Use that to map Windows performance counters (CPU, memory, I/O) to a VM.
 
+## VirtualBox facts
+
+VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm reboot` came with 7.0.
+
+- `VBoxManage.exe` is in `C:\Program Files\Oracle\VirtualBox\` by default, and `HKLM\SOFTWARE\Oracle\VirtualBox`
+  `InstallDir` names its folder. Never hard-code it: the app uses the path saved in Settings, then
+  `REMOTELY_VBOXMANAGE`, then the registry (and the installer's `VBOX_MSI_INSTALL_PATH`), then the default folder
+  (`adapters::virtualbox::locate_vboxmanage`). Without it the list simply has no VirtualBox VMs (no warning); an action
+  on one fails with `vboxmanage_not_found`. With VirtualBox found and no Workstation VM at all, a missing vmrun is no
+  warning either.
+- A VirtualBox VM's key (`vms.vmx_path`, `TargetRef::Vm`, job targets, the audit log) is its UUID in lower case without
+  braces; `vms.hypervisor` says `virtualbox` and `vms.config_path` holds its .vbox (migration 0012). No .vmx path can be a
+  UUID, so `Hypervisor::of_key` routes each VM by its key. VBoxManage takes the UUID wherever it takes a VM name, and it
+  stays the same when the VM is renamed or moved (its files move with a rename).
+- `list vms` prints `"name" {uuid}` per line (`"<inaccessible>"` for a VM whose settings file is gone); `list
+  runningvms` the same for running and paused VMs.
+- `showvminfo <uuid> --machinereadable`: `key=value` lines. Strings are quoted, with `"` and `\` escaped by a backslash
+  (Windows paths print as `C:\\Users\\...`); a value may run over lines (a snapshot description). Numbers are bare.
+  Storage keys are quoted: `"SATA-0-0"="...vdi"`, `"SATA-ImageUUID-0-0"`, `emptydrive` or `none` for an empty drive.
+  Keys used: `name`, `UUID`, `ostype` (the chosen type's description, "Ubuntu (64-bit)"), `memory` (MB), `cpus`,
+  `VMState`, `VMStateChangeTime` (UTC without an offset, 9 fraction digits: the VM's start or resume while it runs),
+  `CfgFile`, `accessible` (`off` when its settings file is gone: the VM is left out), `nicN` and `macaddressN`,
+  `GuestAdditionsRunLevel` (only while they run: 1 VBoxService, 2 user, 3 desktop) and `GuestAdditionsVersion`. `VMState`
+  is `running`, `paused` (VirtualBox reports a pause itself, unlike vmrun), `saved` (suspended), `poweroff`, `aborted`
+  (crashed or killed: off), `aborted-saved`, or a busy state (`starting`, `stopping`, `saving`, `restoring`,
+  `livesnapshotting`...; `adapters::virtualbox::power_state_of`).
+- Snapshots: `showvminfo` (like `snapshot <uuid> list --machinereadable`) gives `SnapshotName`, `SnapshotUUID` and
+  `SnapshotDescription` for the first snapshot, `-1`, `-2` for its children, `-1-1` for theirs, and
+  `CurrentSnapshotNode="SnapshotName-1"` for "you are here". There is one root. Neither prints times: each
+  `<Snapshot uuid="{...}" timeStamp="2026-10-18T01:59:23Z">` in the .vbox file has one. `snapshot list` fails (with a
+  translated message) on a VM without snapshots, so the app reads the tree from `showvminfo`.
+- Snapshot names: any text, `/` included (there is no path form). VirtualBox takes a second snapshot with a name the VM
+  has, and `restore` and `delete` take the first by name, or a snapshot's UUID; so Remotely refuses a name the VM already
+  has, and names a twin by its UUID (`SnapshotNode.path`). VirtualBox restores only a VM that is not running: the adapter
+  powers a running or paused one off first, and the bus adds a warning to the approval. It can't delete a snapshot with
+  two or more children. A snapshot of a running VM saves its memory (paused while it does; no `--live`).
+- Power: `startvm <uuid> --type headless|gui` (a saved VM resumes); `controlvm <uuid>` `acpipowerbutton` (soft stop:
+  returns at once, and works only if the guest OS handles ACPI, with or without Guest Additions; the adapter polls
+  `showvminfo` until the VM is off, and the job runner stops waiting after the shutdown wait, VM-03), `poweroff`, `reset`
+  (hard), `reboot` (soft restart through the Guest Additions, so the job runner checks their run level first, as it
+  checks VMware Tools), `savestate` (suspend; needs nothing from the guest), `pause`, `resume`. `controlvm` on a VM that
+  is not running fails ("is not currently running"). Each call has vmrun's time limit for its operation
+  (`adapters::vmware::power_timeout`); job cancel kills VBoxManage, but VirtualBox may still finish.
+- Guest properties (`guestproperty get <uuid> <name>` prints `Value: <value>` or `No value set!`):
+  `/VirtualBox/GuestInfo/Net/Count`, `/Net/N/V4/IP`, `/Net/N/MAC` (as in `macaddressN`), `/OS/Product` ("Linux" for any
+  distribution, "Windows 11"), `/OS/Release`. A NAT adapter's guest address (10.0.2.15 by default, in every VM) can't be
+  reached from the host, so with a NAT and a host-only or bridged adapter the app takes the other one's address, matched
+  by MAC (`adapters::virtualbox::guest_ip`).
+- Each running VM is a `VirtualBoxVM.exe` (window) or `VBoxHeadless.exe` (headless) process with `--comment <name>
+  --startvm <uuid>` on its command line. On Windows hardening starts it through two stub processes with the same command
+  line, so the processes of one VM count as one (`host_counters::merge_vm_processes`).
+- VBoxManage writes errors to stderr as `VBoxManage.exe: error: <message>` lines, then `Details:` and `Context:` lines;
+  the app keeps the first kind. Guest control (`guestcontrol`) would put guest credentials on the command line: the app
+  never uses it.
+
 ## Development safety
 
-- Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter.
-- Tests against real Workstation are opt-in: they run only when `REMOTELY_IT=1` is set, and only touch VMs whose display name starts with `it-`.
+- Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
+- Tests against real Workstation or VirtualBox are opt-in: they run only when `REMOTELY_IT=1` is set, read only, and only touch VMs whose display name starts with `it-`.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, and runs exec requests in a toy
   shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C, a
@@ -243,6 +305,7 @@ src/                  React + TypeScript UI
   `web.test:80`, for trying chains and tunnels. CT-01: each has `docker` and `podman` with a small shop of containers
   (from the second server on, docker needs sudo); mark a session as a container host on the Containers page.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
+- Opt-in test against real VirtualBox (reads only: `list vms`, then for `it-` VMs only `showvminfo`, snapshots, guest properties and their processes): `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM)
 - Format: `cargo fmt --all`, `npm run format`

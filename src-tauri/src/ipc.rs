@@ -71,6 +71,8 @@ pub struct AppInfo {
     workspace_id: String,
     user_id: String,
     vmrun_path: Option<String>,
+    /// VM-18: the VBoxManage.exe in use; `None` when VirtualBox was not found.
+    vboxmanage_path: Option<String>,
 }
 
 #[tauri::command]
@@ -81,11 +83,12 @@ pub fn app_info(state: State<'_, AppState>) -> AppInfo {
         workspace_id: core.ctx.workspace_id.to_string(),
         user_id: core.ctx.user_id.to_string(),
         vmrun_path: core.vmrun_path().map(|p| p.display().to_string()),
+        vboxmanage_path: core.vboxmanage_path().map(|p| p.display().to_string()),
     }
 }
 
-/// VM-01: finds every VM (Workstation's library, the chosen folders, `vmrun list`), saves the result
-/// and returns it with any sources that could not be read.
+/// VM-01: finds every VM (Workstation's library, the chosen folders, `vmrun list`; VM-18 VirtualBox's
+/// registered VMs), saves the result and returns it with any sources that could not be read.
 #[tauri::command]
 pub async fn vm_refresh(state: State<'_, AppState>) -> IpcResult<RefreshReport> {
     let core = &state.core;
@@ -351,6 +354,10 @@ pub struct Settings {
     vmrun_path_saved: Option<String>,
     /// What the app is using now; `None` means Workstation was not found.
     vmrun_path_in_use: Option<String>,
+    /// VM-18: what the user chose; `None` means "find VBoxManage.exe automatically".
+    vboxmanage_path_saved: Option<String>,
+    /// VM-18: what the app is using now; `None` means VirtualBox was not found.
+    vboxmanage_path_in_use: Option<String>,
     /// FD-14: check GitHub Releases for updates (off at air-gapped sites).
     update_checks: bool,
     /// FD-14: whether the GitHub update token is in the vault, and when it expires. Never the token.
@@ -373,6 +380,8 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
     Ok(Settings {
         vmrun_path_saved: core.saved_vmrun_path().await?.map(|p| p.display().to_string()),
         vmrun_path_in_use: core.vmrun_path().map(|p| p.display().to_string()),
+        vboxmanage_path_saved: core.saved_vboxmanage_path().await?.map(|p| p.display().to_string()),
+        vboxmanage_path_in_use: core.vboxmanage_path().map(|p| p.display().to_string()),
         update_checks: core.update_checks_enabled().await?,
         update_token: core.update_token_info().await?,
         scan_folders: core
@@ -402,6 +411,17 @@ pub async fn settings_set_vmrun_path(state: State<'_, AppState>, path: Option<St
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
     state.core.set_vmrun_path(path).await?;
+    settings(&state.core).await
+}
+
+/// VM-18: `None` or an empty string goes back to finding VBoxManage.exe automatically.
+#[tauri::command]
+pub async fn settings_set_vboxmanage_path(state: State<'_, AppState>, path: Option<String>) -> IpcResult<Settings> {
+    let path = path
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    state.core.set_vboxmanage_path(path).await?;
     settings(&state.core).await
 }
 

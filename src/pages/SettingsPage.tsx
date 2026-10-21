@@ -1,4 +1,5 @@
-// Settings: the vmrun.exe path (configurable, never hard-coded), the folders scanned for VMs (VM-01),
+// Settings: the vmrun.exe and (VM-18) VBoxManage.exe paths (configurable, never hard-coded), the folders scanned for
+// VMs (VM-01),
 // power-on limit (VM-06), shutdown wait (VM-03), hosts Compare output reaches at once (BX-02), and update
 // checks with the GitHub update token (FD-14) under General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
@@ -59,6 +60,8 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
   const [settings, setSettings] = useState<Settings | null>(null);
   const [path, setPath] = useState("");
   const [vmrunMessage, setVmrunMessage] = useState<Message>(null);
+  const [vboxPath, setVboxPath] = useState("");
+  const [vboxMessage, setVboxMessage] = useState<Message>(null);
   const [dockerPath, setDockerPath] = useState("");
   const [dockerMessage, setDockerMessage] = useState<Message>(null);
   const [updateMessage, setUpdateMessage] = useState<Message>(null);
@@ -76,6 +79,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
       (s) => {
         setSettings(s);
         setPath(s.vmrunPathSaved ?? "");
+        setVboxPath(s.vboxmanagePathSaved ?? "");
         setDockerPath(s.dockerPathSaved ?? "");
         setPowerOnLimit(String(s.powerOnLimit));
         setShutdownWait(String(s.shutdownWaitSecs));
@@ -97,6 +101,23 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
       onChanged();
     } catch (err) {
       setVmrunMessage({ ok: false, text: errorMessage(err) });
+    }
+  }
+
+  async function saveVboxmanage(next: string | null) {
+    try {
+      const s = await api.setVboxmanagePath(next);
+      setSettings(s);
+      setVboxPath(s.vboxmanagePathSaved ?? "");
+      setVboxMessage({
+        ok: true,
+        text: s.vboxmanagePathInUse
+          ? `Using ${s.vboxmanagePathInUse}`
+          : "VBoxManage.exe was not found: no VirtualBox VMs are listed",
+      });
+      onChanged();
+    } catch (err) {
+      setVboxMessage({ ok: false, text: errorMessage(err) });
     }
   }
 
@@ -220,6 +241,41 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
           <CardFooter className="gap-2">
             <Button onClick={() => void saveVmrun(path)}>Save</Button>
             <Button variant="outline" onClick={() => void saveVmrun(null)}>
+              Find automatically
+            </Button>
+          </CardFooter>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Oracle VirtualBox</CardTitle>
+            <CardDescription>
+              Remotely lists the VMs registered in VirtualBox (7.0 or later) and runs every action on them through
+              VBoxManage.exe. Leave the path empty to find it automatically: the REMOTELY_VBOXMANAGE variable, the
+              registry, then the default install folder. Without VirtualBox, the list just has no VirtualBox VMs.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2">
+            <Label htmlFor="vboxmanage-path">VBoxManage.exe path</Label>
+            <Input
+              id="vboxmanage-path"
+              className="font-mono"
+              placeholder="Found automatically"
+              spellCheck={false}
+              value={vboxPath}
+              onChange={(e) => setVboxPath(e.currentTarget.value)}
+            />
+            <p className="text-sm text-muted-foreground">
+              In use:{" "}
+              <span className="font-mono">
+                {settings?.vboxmanagePathInUse ?? "not found (VirtualBox not installed)"}
+              </span>
+            </p>
+            <StatusLine message={vboxMessage} />
+          </CardContent>
+          <CardFooter className="gap-2">
+            <Button onClick={() => void saveVboxmanage(vboxPath)}>Save</Button>
+            <Button variant="outline" onClick={() => void saveVboxmanage(null)}>
               Find automatically
             </Button>
           </CardFooter>

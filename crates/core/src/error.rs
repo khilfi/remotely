@@ -33,6 +33,28 @@ pub enum CoreError {
         advice: &'static str,
     },
 
+    /// VM-18: VirtualBox is not installed, or VBoxManage.exe is not where Settings says. The VM list
+    /// just has no VirtualBox VMs then; only an action on one says this.
+    #[error(
+        "VBoxManage.exe was not found. Install Oracle VirtualBox 7.0 or later, or set its path in Settings (or REMOTELY_VBOXMANAGE)."
+    )]
+    VboxManageNotFound,
+
+    /// VM-18: VBoxManage answered with an error; `message` is its own text.
+    #[error("VBoxManage {command} failed: {message}")]
+    VboxManage { command: String, message: String },
+
+    /// VM-18: a VBoxManage power call did not return in time.
+    #[error(
+        "VBoxManage {command} got no answer within {seconds} s. The VM may be busy or waiting for an answer in VirtualBox: open it there to check"
+    )]
+    VboxPowerTimeout { command: String, seconds: u64 },
+
+    /// VM-18, BX-04: cancelled while its VBoxManage power call was running. VBoxManage is stopped, but
+    /// VirtualBox may still carry out what it was asked.
+    #[error("cancelled while VBoxManage was running; VirtualBox may still finish the action, so check the VM's state")]
+    VboxCancelledInFlight,
+
     #[error("database error: {0}")]
     Db(#[from] sqlx::Error),
 
@@ -267,6 +289,10 @@ impl CoreError {
             CoreError::Timeout { .. } => "timeout",
             CoreError::PowerTimeout { .. } => "power_timeout",
             CoreError::ToolsNotRunning { .. } => "tools_not_running",
+            CoreError::VboxManageNotFound => "vboxmanage_not_found",
+            CoreError::VboxManage { .. } => "vboxmanage_failed",
+            CoreError::VboxPowerTimeout { .. } => "power_timeout",
+            CoreError::VboxCancelledInFlight => "cancelled_in_flight",
             CoreError::Db(_) | CoreError::Migrate(_) => "database",
             CoreError::Io(_) => "io",
             CoreError::Json(_) => "json",

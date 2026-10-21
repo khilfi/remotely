@@ -14,7 +14,8 @@ use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
 use remotely_core::adapters::updater::UpdaterAdapter;
 use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{
-    FakeContainers, FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault, FakeVmware,
+    FakeContainers, FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault,
+    FakeVirtualBox, FakeVmware,
 };
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::PolicyRules;
@@ -28,6 +29,8 @@ pub const VAULT_PASSWORD: &str = "correct horse";
 
 pub struct Setup {
     pub vmware: Arc<FakeVmware>,
+    /// VM-18: installed, with no VMs, unless a test gives its own ([`Setup::with_virtualbox`]).
+    pub virtualbox: Arc<FakeVirtualBox>,
     pub host: FakeHostCounters,
     pub rules: PolicyRules,
     /// The app's own vault (fake DPAPI, fast key derivation), set up with [`VAULT_PASSWORD`] and the
@@ -49,6 +52,7 @@ impl Setup {
     pub fn new(vmware: FakeVmware) -> Self {
         Self {
             vmware: Arc::new(vmware),
+            virtualbox: Arc::new(FakeVirtualBox::new()),
             host: FakeHostCounters::default(),
             // Keep tests fast; the countdown has its own test in command_flow.rs.
             rules: PolicyRules {
@@ -66,6 +70,12 @@ impl Setup {
     /// CT-01, CT-02: other container engines, e.g. [`FakeContainers`] with hosts.
     pub fn with_containers(mut self, containers: Arc<dyn ContainerEngines>) -> Self {
         self.containers = containers;
+        self
+    }
+
+    /// VM-18: VirtualBox's VMs.
+    pub fn with_virtualbox(mut self, virtualbox: FakeVirtualBox) -> Self {
+        self.virtualbox = Arc::new(virtualbox);
         self
     }
 
@@ -123,6 +133,7 @@ impl Setup {
         };
         let adapters = Adapters {
             vmware: self.vmware,
+            virtualbox: self.virtualbox,
             remote: self.remote,
             vault,
             host_counters: Arc::new(self.host),
@@ -143,6 +154,13 @@ pub fn vmx(name: &str) -> String {
 
 pub fn vm(name: &str) -> TargetRef {
     TargetRef::Vm { vmx_path: vmx(name) }
+}
+
+/// VM-18: a VirtualBox VM's target, by its UUID.
+pub fn vbox_vm(uuid: &str) -> TargetRef {
+    TargetRef::Vm {
+        vmx_path: uuid.to_owned(),
+    }
 }
 
 pub fn running(fake: &FakeVmware) -> Vec<String> {

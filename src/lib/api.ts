@@ -53,16 +53,27 @@ export interface Target {
 
 export type PowerState = "unknown" | "running" | "not_running" | "suspended" | "paused";
 
-/** VMware Tools state from `vmrun checkToolsState`; null when the VM is not running. */
-export type ToolsState = "running" | "installed" | "notInstalled" | "unknown";
+/**
+ * The guest tools' state, null when the VM is not running: VMware Tools from `vmrun checkToolsState`, or VM-18
+ * VirtualBox's Guest Additions ("notRunning": no run level, so not started or not installed).
+ */
+export type ToolsState = "running" | "installed" | "notInstalled" | "notRunning" | "unknown";
+
+/** VM-18: the hypervisor that runs a VM. */
+export type Hypervisor = "vmware" | "virtualbox";
 
 export interface VmRecord {
   id: string;
+  /** The VM's key: its .vmx path (VMware), or its UUID (VirtualBox). */
   vmxPath: string;
+  /** VM-18. */
+  hypervisor: Hypervisor;
+  /** VM-18: a VirtualBox VM's settings file (.vbox); null for VMware. */
+  configPath: string | null;
   displayName: string;
-  /** Workstation's guest OS id, e.g. "ubuntu-64". */
+  /** The guest OS chosen for the VM: Workstation's id ("ubuntu-64") or VirtualBox's OS type ("Ubuntu (64-bit)"). */
   guestOs: string | null;
-  /** What the guest calls itself through VMware Tools, e.g. "Ubuntu 24.04 LTS". */
+  /** What the guest calls itself through VMware Tools ("Ubuntu 24.04 LTS") or the Guest Additions. */
   guestOsName: string | null;
   numVcpus: number | null;
   memsizeMb: number | null;
@@ -118,11 +129,13 @@ export interface AutoLinkReport {
  * is set, and any one of the values listed in a field.
  */
 export interface VmFilter {
-  /** Case-insensitive text in the name, .vmx path, guest OS, IP address or a tag. */
+  /** Case-insensitive text in the name, .vmx path (VirtualBox: UUID or .vbox path), guest OS, IP address or a tag. */
   text?: string;
   tags?: string[];
   powerStates?: PowerState[];
   environments?: Environment[];
+  /** VM-18: VMware, VirtualBox or both. */
+  hypervisors?: Hypervisor[];
   /** true: only protected VMs; false: only unprotected ones. */
   protected?: boolean | null;
 }
@@ -153,7 +166,10 @@ export type PowerOp =
   | { kind: "pause" }
   | { kind: "unpause" };
 
-/** VM-04. Revert and delete take a name, or vmrun's path form ("base/child") when a VM has two snapshots with one name. */
+/**
+ * VM-04. Revert and delete take a name, or when a VM has two snapshots with one name, vmrun's path form ("base/child")
+ * or VirtualBox's snapshot UUID (the node's `path`).
+ */
 export type SnapshotOp =
   { kind: "take"; name: string } | { kind: "revert"; name: string } | { kind: "delete"; name: string };
 
@@ -162,7 +178,7 @@ export interface SnapshotNode {
   uid: number;
   parentUid: number | null;
   name: string;
-  /** vmrun's path form, e.g. "base/child one". */
+  /** Names this one snapshot even when another has its name: vmrun's path form ("base/child one") or VirtualBox's UUID. */
   path: string;
   description: string | null;
   /** RFC 3339 UTC; null when the .vmsd has no time for it. */
@@ -180,6 +196,8 @@ export interface SnapshotNode {
 
 export interface VmSnapshots {
   vmxPath: string;
+  /** VM-18: vmrun reads '/' in a snapshot name as a path; VBoxManage doesn't. */
+  hypervisor: Hypervisor;
   displayName: string;
   powerState: PowerState;
   environment: Environment;
@@ -697,6 +715,10 @@ export interface Settings {
   vmrunPathSaved: string | null;
   /** What the app is using now; null means Workstation was not found. */
   vmrunPathInUse: string | null;
+  /** VM-18: what the user chose; null means "find VBoxManage.exe automatically". */
+  vboxmanagePathSaved: string | null;
+  /** VM-18: what the app is using now; null means VirtualBox was not found. */
+  vboxmanagePathInUse: string | null;
   /** FD-14: check GitHub Releases for updates (off at air-gapped sites). */
   updateChecks: boolean;
   /** FD-14: the GitHub update token in the vault. Never the token itself. */
@@ -1681,9 +1703,11 @@ export interface LinkedSession {
 /** MO-03: a VM (host-side metrics, plus a watched linked session's guest metrics) or a watched host. */
 export interface DashboardRow {
   kind: "vm" | "session";
-  /** The .vmx path or the session id. */
+  /** The VM's key (.vmx path or VirtualBox UUID) or the session id. */
   key: string;
   name: string;
+  /** VM-18: a VM row's hypervisor; null for a session. */
+  hypervisor: Hypervisor | null;
   environment: Environment;
   protected: boolean;
   tags: string[];
@@ -1777,6 +1801,8 @@ export interface AppInfo {
   workspaceId: string;
   userId: string;
   vmrunPath: string | null;
+  /** VM-18: the VBoxManage.exe in use; null when VirtualBox was not found. */
+  vboxmanagePath: string | null;
 }
 
 // ---- CT-01, CT-02 containers ----
@@ -2028,7 +2054,7 @@ export function errorCode(err: unknown): string | undefined {
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
 
-  /** VM-01: finds every VM (Workstation's library, chosen folders, vmrun list) via the core. */
+  /** VM-01: finds every VM (Workstation's library, chosen folders, vmrun list; VM-18 VirtualBox's VMs) via the core. */
   vmRefresh: () => invoke<RefreshReport>("vm_refresh"),
   /** VM-01, VM-02: the VMs the last refresh found that match the filter, without asking Workstation. */
   vmList: (filter?: VmFilter) => invoke<VmRecord[]>("vm_list", { filter: filter ?? null }),
@@ -2068,7 +2094,7 @@ export const api = {
   /** AP-05: asks where to save, then writes the audit log there as CSV. null when the user cancels. */
   exportAudit: () => invoke<AuditExport | null>("audit_export_csv"),
 
-  /** VM-04: snapshot trees read from each VM's .vmsd (no vmrun call). Changes go through `submit`. */
+  /** VM-04: snapshot trees read from each VM's .vmsd (no vmrun call; VirtualBox: showvminfo). Changes go through `submit`. */
   snapshots: (vmxPaths?: string[]) => invoke<VmSnapshots[]>("snapshots_list", { vmxPaths: vmxPaths ?? null }),
   snapshotLimits: () => invoke<SnapshotLimits>("snapshot_limits"),
 
@@ -2088,6 +2114,8 @@ export const api = {
     invoke<Presentation>("presentation_set", { enabled: p.enabled, readOnly: p.readOnly }),
   /** null or "" goes back to finding vmrun.exe automatically. */
   setVmrunPath: (path: string | null) => invoke<Settings>("settings_set_vmrun_path", { path }),
+  /** VM-18: null or "" goes back to finding VBoxManage.exe automatically. */
+  setVboxmanagePath: (path: string | null) => invoke<Settings>("settings_set_vboxmanage_path", { path }),
   setUpdateChecks: (enabled: boolean) => invoke<Settings>("settings_set_update_checks", { enabled }),
   /** VM-01: each folder must exist. */
   setScanFolders: (folders: string[]) => invoke<Settings>("settings_set_scan_folders", { folders }),

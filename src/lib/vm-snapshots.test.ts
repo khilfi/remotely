@@ -37,6 +37,7 @@ function node(uid: number, name: string, extra: Partial<SnapshotNode> = {}): Sna
 function vm(name: string, snapshots: SnapshotNode[], extra: Partial<VmSnapshots> = {}): VmSnapshots {
   return {
     vmxPath: `D:\\VMs\\${name}\\${name}.vmx`,
+    hypervisor: "vmware",
     displayName: name,
     powerState: "not_running",
     environment: "none",
@@ -48,6 +49,13 @@ function vm(name: string, snapshots: SnapshotNode[], extra: Partial<VmSnapshots>
     ...extra,
   };
 }
+
+test("a VirtualBox snapshot with a twin is named by its UUID", () => {
+  const first = node(1, "same", { path: "5b1c0000-0000-4000-8000-000000000001" });
+  const second = node(2, "same", { parentUid: 1, depth: 1, path: "5b1c0000-0000-4000-8000-000000000002" });
+  const tree = vm("vbox", [first, second], { hypervisor: "virtualbox" });
+  assert.equal(snapshotArg(tree, second), "5b1c0000-0000-4000-8000-000000000002");
+});
 
 test("a snapshot is named by its path only when the VM has two with that name", () => {
   const base = node(1, "base");
@@ -64,6 +72,8 @@ test("revert and delete on one snapshot say why they are off", () => {
   assert.equal(snapshotActionReason({ ...ok, readOnly: READ_ONLY_REASON }), READ_ONLY_REASON);
   assert.equal(snapshotActionReason({ ...ok, protected: true }), PROTECTED_REASON);
   assert.match(snapshotActionReason({ ...ok, node: node(2, "a/b") }) ?? "", /manage this snapshot in Workstation/);
+  // VM-18: VBoxManage takes the name as it is.
+  assert.equal(snapshotActionReason({ ...ok, node: node(2, "a/b"), hypervisor: "virtualbox" }), null);
   assert.match(snapshotActionReason({ ...ok, busy: true }) ?? "", /Sending/);
   // The lock comes first: it is the one thing the user has to change before anything else works.
   assert.equal(snapshotActionReason({ ...ok, readOnly: READ_ONLY_REASON, protected: true }), READ_ONLY_REASON);
@@ -100,6 +110,12 @@ test("the selection's snapshot actions follow what the selected VMs have", () =>
 
   const slashes = bulkSnapshotReasons({ ...plain, selected: one, trees: [vm("a", [node(1, "x/y")])] });
   assert.match(slashes.revert ?? "", /'\/'/);
+  const vboxSlashes = bulkSnapshotReasons({
+    ...plain,
+    selected: one,
+    trees: [vm("a", [node(1, "x/y")], { hypervisor: "virtualbox", vmxPath: "3f0c1a2b-1111-4222-8333-444455556666" })],
+  });
+  assert.equal(vboxSlashes.revert, null, "VM-18: VirtualBox names any snapshot");
 
   const ready = bulkSnapshotReasons({ ...plain, selected: two, trees: [vm("a", [node(1, "base")]), vm("b", [])] });
   assert.deepEqual(ready, { take: null, revert: null, delete: null });

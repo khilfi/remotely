@@ -1,5 +1,6 @@
 //! VM-07: capacity check before power-on. Warns when the RAM assigned to running VMs (each .vmx's
-//! `memsize`) would exceed the host's physical RAM, or when a VM folder's drive has under 10% free.
+//! `memsize`, each VirtualBox VM's `memory`) would exceed the host's physical RAM, or when a VM
+//! folder's drive has under 10% free. VMware and VirtualBox VMs share the host, so both count.
 //! MO-04: the same reads make the dashboard's host capacity panel ([`CapacityChecker::host_capacity`]).
 //!
 //! It only warns: the command bus shows the warnings and asks for a confirm (see
@@ -7,15 +8,16 @@
 //! warning too, so a failed read never passes silently.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
 
 use crate::adapters::host_counters::HostCounters;
-use crate::adapters::vmware::{path_key, VmwareAdapter};
+use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
+use crate::adapters::vmware::path_key;
 use crate::domain::{Context, Target, TargetRef};
-use crate::store::Store;
+use crate::store::{Store, VmRecord};
 
 /// A VM folder's drive with less free space than this is flagged.
 pub const MIN_FREE_DISK_PCT: f64 = 10.0;
@@ -113,16 +115,42 @@ pub fn power_on_warnings(
     warnings
 }
 
-/// Gathers what [`power_on_warnings`] needs: reads only (vmrun list, .vmx files, Windows counters).
+/// Gathers what [`power_on_warnings`] needs: reads only (vmrun list, .vmx files, `VBoxManage list
+/// runningvms` and `showvminfo`, Windows counters).
 pub struct CapacityChecker {
     store: Store,
-    vmware: Arc<dyn VmwareAdapter>,
+    hypervisors: Hypervisors,
     host: Arc<dyn HostCounters>,
 }
 
 impl CapacityChecker {
-    pub fn new(store: Store, vmware: Arc<dyn VmwareAdapter>, host: Arc<dyn HostCounters>) -> Self {
-        Self { store, vmware, host }
+    pub fn new(store: Store, hypervisors: Hypervisors, host: Arc<dyn HostCounters>) -> Self {
+        Self {
+            store,
+            hypervisors,
+            host,
+        }
+    }
+
+    /// The keys of the VMs running now: each hypervisor's own list, or for one that can't be asked,
+    /// what the last refresh saw of its VMs.
+    async fn running(&self, inventory: &[VmRecord]) -> Vec<String> {
+        let now = self.hypervisors.running().await;
+        let last_seen = |hypervisor: Hypervisor| {
+            inventory
+                .iter()
+                .filter(move |v| v.hypervisor == hypervisor && v.power_state.is_on())
+                .map(|v| v.vmx_path.clone())
+        };
+        let mut keys: Vec<String> = match now.vmware {
+            Ok(paths) => paths,
+            Err(_) => last_seen(Hypervisor::Vmware).collect(),
+        };
+        match now.virtualbox {
+            Ok(uuids) => keys.extend(uuids),
+            Err(_) => keys.extend(last_seen(Hypervisor::VirtualBox)),
+        }
+        keys
     }
 
     /// Warnings for powering on `targets` (VMs that are already running are not counted twice).
@@ -130,21 +158,14 @@ impl CapacityChecker {
     pub async fn check_power_on(&self, ctx: &Context, targets: &[Target]) -> Vec<CapacityWarning> {
         let mut warnings = Vec::new();
 
-        let running: Vec<String> = match self.vmware.list_running().await {
-            Ok(paths) => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-            // Fall back to what the last refresh saw.
-            Err(_) => match self.store.list_vms(ctx).await {
-                Ok(vms) => vms
-                    .into_iter()
-                    .filter(|v| v.power_state.is_on())
-                    .map(|v| v.vmx_path)
-                    .collect(),
-                Err(err) => {
-                    warnings.push(unchecked("which VMs are running", &err));
-                    Vec::new()
-                }
-            },
+        let inventory = match self.store.list_vms(ctx).await {
+            Ok(vms) => vms,
+            Err(err) => {
+                warnings.push(unchecked("which VMs are running", &err));
+                Vec::new()
+            }
         };
+        let running = self.running(&inventory).await;
         let running_keys: HashSet<String> = running.iter().map(|p| path_key(Path::new(p))).collect();
         let starting: Vec<&str> = targets
             .iter()
@@ -175,15 +196,15 @@ impl CapacityChecker {
         };
 
         // One free-space read per drive, through one of its VM folders.
-        let mut folders: BTreeMap<String, &Path> = BTreeMap::new();
+        let mut folders: BTreeMap<String, PathBuf> = BTreeMap::new();
         for path in &starting {
-            if let Some(folder) = Path::new(path).parent() {
-                folders.entry(drive_of(folder)).or_insert(folder);
+            if let Some(folder) = self.folder(ctx, path).await {
+                folders.entry(drive_of(&folder)).or_insert(folder);
             }
         }
         let mut drives = Vec::new();
         for (drive, folder) in folders {
-            match self.host.free_disk_pct(folder).await {
+            match self.host.free_disk_pct(&folder).await {
                 Ok(free) => drives.push((drive, free)),
                 Err(err) => warnings.push(unchecked(&format!("free space on {drive}"), &err)),
             }
@@ -198,25 +219,59 @@ impl CapacityChecker {
         self.size(ctx, vmx_path).await.0.map_or(0, u64::from)
     }
 
-    /// The VM's assigned RAM (MB) and vCPUs: from the inventory, else its .vmx.
+    /// The VM's assigned RAM (MB) and vCPUs: from the inventory, else its .vmx (VirtualBox:
+    /// `showvminfo`).
     async fn size(&self, ctx: &Context, vmx_path: &str) -> (Option<u32>, Option<u32>) {
         let (mut ram, mut cpus) = match self.store.find_vm(ctx, vmx_path).await {
             Ok(Some(vm)) => (vm.memsize_mb, vm.num_vcpus),
             _ => (None, None),
         };
         if ram.is_none() || cpus.is_none() {
-            if let Ok(info) = self.vmware.read_vmx(Path::new(vmx_path)).await {
-                ram = ram.or(info.memsize_mb);
-                // Workstation's default when the .vmx leaves numvcpus out.
-                cpus = cpus.or(info.num_vcpus).or(Some(1));
+            match Hypervisor::of_key(vmx_path) {
+                Hypervisor::Vmware => {
+                    if let Ok(info) = self.hypervisors.vmware().read_vmx(Path::new(vmx_path)).await {
+                        ram = ram.or(info.memsize_mb);
+                        // Workstation's default when the .vmx leaves numvcpus out.
+                        cpus = cpus.or(info.num_vcpus).or(Some(1));
+                    }
+                }
+                Hypervisor::VirtualBox => {
+                    if let Ok(info) = self.hypervisors.virtualbox().vm_info(vmx_path).await {
+                        ram = ram.or(info.memory_mb);
+                        cpus = cpus.or(info.cpus);
+                    }
+                }
             }
         }
         (ram, cpus)
     }
 
+    /// The folder holding a VM's files: from the inventory, else the .vmx's folder (VirtualBox: the
+    /// .vbox's, from `showvminfo`).
+    async fn folder(&self, ctx: &Context, key: &str) -> Option<PathBuf> {
+        if let Ok(Some(vm)) = self.store.find_vm(ctx, key).await {
+            if let Some(folder) = vm.folder() {
+                return Some(folder.to_path_buf());
+            }
+        }
+        match Hypervisor::of_key(key) {
+            Hypervisor::Vmware => Path::new(key).parent().map(Path::to_path_buf),
+            Hypervisor::VirtualBox => self
+                .hypervisors
+                .virtualbox()
+                .vm_info(key)
+                .await
+                .ok()?
+                .config_file?
+                .parent()
+                .map(Path::to_path_buf),
+        }
+    }
+
     /// MO-04: assigned RAM and vCPUs of the running VMs against the host's, and free space on each
-    /// drive that holds a VM folder. `running` is the .vmx paths running now (from the metrics
-    /// collector's process list); `None` asks vmrun, then falls back to the last inventory refresh.
+    /// drive that holds a VM folder. `running` is the keys of the VMs running now (from the metrics
+    /// collector's process list); `None` asks vmrun and VBoxManage, then falls back to the last
+    /// inventory refresh.
     /// Never fails: what cannot be read becomes a [`CapacityWarning::Unchecked`].
     pub async fn host_capacity(&self, ctx: &Context, running: Option<Vec<String>>) -> HostCapacity {
         let mut capacity = HostCapacity::default();
@@ -229,14 +284,7 @@ impl CapacityChecker {
         };
         let running = match running {
             Some(paths) => paths,
-            None => match self.vmware.list_running().await {
-                Ok(paths) => paths.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
-                Err(_) => inventory
-                    .iter()
-                    .filter(|v| v.power_state.is_on())
-                    .map(|v| v.vmx_path.clone())
-                    .collect(),
-            },
+            None => self.running(&inventory).await,
         };
         capacity.running_vms = running.len();
         for path in &running {
@@ -263,19 +311,20 @@ impl CapacityChecker {
             Err(err) => capacity.warnings.push(unchecked("the host's RAM and CPUs", &err)),
         }
 
-        // One read per drive, through one of its VM folders. Running VMs count even when the
-        // inventory has not seen them.
+        // One read per drive, through one of its VM folders. Running VMware VMs count even when the
+        // inventory has not seen them (a VirtualBox VM's key says nothing about where it lives).
         let mut folders: BTreeMap<String, (&Path, usize)> = BTreeMap::new();
         let mut seen = HashSet::new();
-        let paths = inventory
+        let known = inventory.iter().map(|v| (v.vmx_path.as_str(), v.folder()));
+        let unseen = running
             .iter()
-            .map(|v| v.vmx_path.as_str())
-            .chain(running.iter().map(String::as_str));
-        for path in paths {
-            if !seen.insert(path_key(Path::new(path))) {
+            .filter(|key| Hypervisor::of_key(key) == Hypervisor::Vmware)
+            .map(|key| (key.as_str(), Path::new(key.as_str()).parent()));
+        for (key, folder) in known.chain(unseen) {
+            if !seen.insert(path_key(Path::new(key))) {
                 continue;
             }
-            if let Some(folder) = Path::new(path).parent() {
+            if let Some(folder) = folder {
                 folders.entry(drive_of(folder)).or_insert((folder, 0)).1 += 1;
             }
         }

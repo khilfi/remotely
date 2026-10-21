@@ -601,6 +601,22 @@ export default function App() {
                   <span>{info?.vmrunPath ? "Workstation found" : "Workstation not found"}</span>
                 </SidebarMenuButton>
               </SidebarMenuItem>
+              {/* VM-18: optional, so not finding it is grey rather than red. */}
+              <SidebarMenuItem>
+                <SidebarMenuButton
+                  tooltip={info?.vboxmanagePath ?? "VBoxManage.exe was not found: no VirtualBox VMs are listed"}
+                  onClick={() => setPage("settings")}
+                >
+                  <span
+                    className={cn(
+                      "size-2 shrink-0 rounded-full",
+                      info?.vboxmanagePath ? "bg-success" : "bg-muted-foreground/40",
+                    )}
+                    aria-hidden
+                  />
+                  <span>{info?.vboxmanagePath ? "VirtualBox found" : "VirtualBox not found"}</span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
             </SidebarMenu>
           </SidebarFooter>
           <SidebarRail />

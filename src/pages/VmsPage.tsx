@@ -1,8 +1,9 @@
 // The Virtual machines page (QL-14: VMs and their snapshots on one page). The VM list (VM-01) with selection by
 // click, shift-click, tag, saved filter or snapshots, and bulk power actions (VM-02, VM-03), protect and unprotect
 // (AP-04), environment labels (SS-06) and bulk snapshot actions (VM-04) on the selection. Listing asks the core to read
-// Workstation's library, the chosen folders and `vmrun list`; every action is a command submitted to the command bus,
-// never a vmrun call. Tags and labels are the app's own data, so they skip the bus.
+// Workstation's library, the chosen folders and `vmrun list`, and VirtualBox's registered VMs (VM-18); every action is
+// a command submitted to the command bus, never a vmrun or VBoxManage call. Tags and labels are the app's own data, so
+// they skip the bus.
 //
 // A click on a VM's name opens its details beside the list (VmDetailsPanel): what the inventory knows, and its
 // snapshot tree with take, revert and delete. Trees are read from the .vmsd (no vmrun call) only for the VM whose
@@ -14,8 +15,9 @@
 // 5-second round in memory: no extra polling. The sessions linked to each VM (QL-01, made automatically by IP address)
 // show in their own column, where they can be kept, changed or removed. Columns sort by a click on their header.
 //
-// Q5 (VM-18): the "Hypervisor" column goes in `columns` (after Name), its filter in VmFilterBar (a `hypervisors`
-// field of VmFilter, matched by the core like the others), and per-hypervisor facts in VmDetailsPanel's `detailRows`.
+// VM-18: each VM's hypervisor (VMware or VirtualBox) has its own column after Name and a filter in VmFilterBar (the
+// `hypervisors` field of VmFilter, matched by the core like the others); VmDetailsPanel shows its own facts. A
+// VirtualBox VM's key is its UUID, so the line under its name shows its .vbox file.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import {
@@ -62,7 +64,7 @@ import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTi
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { EnvBadge, StateBadge, ToolsLabel } from "@/components/Badges";
+import { EnvBadge, HypervisorLabel, StateBadge, ToolsLabel } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { MetricCell } from "@/components/MetricBits";
 import { NameDialog } from "@/components/NameDialog";
@@ -94,6 +96,7 @@ import {
   type VmRecord,
   type VmSnapshots,
 } from "@/lib/api";
+import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
 import { cn } from "@/lib/utils";
 import {
@@ -156,7 +159,7 @@ const LABELS: { value: Environment; label: string }[] = [
 ];
 
 type LoadError = { code?: string; message: string };
-type SortKey = "name" | "vcpus" | "ram" | "state" | "hostCpu" | "hostMem" | "label";
+type SortKey = "name" | "hypervisor" | "vcpus" | "ram" | "state" | "hostCpu" | "hostMem" | "label";
 
 /** Running first, then the states a VM passes through on its way down. */
 const STATE_ORDER: PowerState[] = ["running", "paused", "suspended", "not_running", "unknown"];
@@ -171,6 +174,8 @@ function sortValue(vm: VmRecord, key: SortKey, usage: VmHostUsage | undefined): 
   switch (key) {
     case "name":
       return vm.displayName.toLowerCase();
+    case "hypervisor":
+      return hypervisorName(vm.hypervisor).toLowerCase();
     case "vcpus":
       return vm.numVcpus;
     case "ram":
@@ -478,7 +483,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
       else
         setNotice(
           wanted.size > 0
-            ? "That VM is no longer in the list. Refresh to ask Workstation again."
+            ? "That VM is no longer in the list. Refresh to ask Workstation and VirtualBox again."
             : "Snapshots are in each VM's details: click a VM's name. To work on several VMs, select them and use the Snapshots button.",
         );
     }
@@ -659,6 +664,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
   // Ticked in the Label menu when every selected VM has it.
   const sharedLabel = selectedLabels.size === 1 ? [...selectedLabels][0] : "";
   const missingWorkstation = warnings.some((w) => w.code === "vmrun_not_found");
+  const virtualboxTrouble = warnings.some((w) => w.code.startsWith("vboxmanage"));
   const filtered = !isEmptyFilter(filter);
   const oldAfterDays = limits?.oldAfterDays ?? 30;
 
@@ -673,7 +679,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
     />
   );
 
-  // The list's columns, in order. Q5 puts "Hypervisor" after Name.
+  // The list's columns, in order.
   const columns: Column[] = [
     {
       id: "name",
@@ -708,9 +714,14 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
               </Badge>
             ))}
           </div>
-          <div className="font-mono text-xs break-all whitespace-normal text-muted-foreground">{vm.vmxPath}</div>
+          <div className="font-mono text-xs break-all whitespace-normal text-muted-foreground">{vmLocation(vm)}</div>
         </>
       ),
+    },
+    {
+      id: "hypervisor",
+      head: sortHead("hypervisor", "Hypervisor"),
+      cell: (vm) => <HypervisorLabel hypervisor={vm.hypervisor} />,
     },
     {
       id: "guestOs",
@@ -1091,7 +1102,11 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
         <Alert>
           <TriangleAlertIcon />
           <AlertTitle>
-            {missingWorkstation ? "VMware Workstation was not found" : "Some VMs may be missing from the list"}
+            {missingWorkstation
+              ? "VMware Workstation was not found"
+              : virtualboxTrouble
+                ? "VirtualBox could not be asked about every VM"
+                : "Some VMs may be missing from the list"}
           </AlertTitle>
           <AlertDescription>
             <ul className="list-disc pl-5">
@@ -1116,8 +1131,9 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
             </EmptyMedia>
             <EmptyTitle>No VMs found</EmptyTitle>
             <EmptyDescription>
-              Remotely lists the VMs in VMware Workstation&apos;s library and in folders you choose. Open a VM in
-              Workstation once, or add the folder that holds your VMs.
+              Remotely lists the VMs in VMware Workstation&apos;s library and in folders you choose, and the VMs
+              registered in Oracle VirtualBox. Open a VM in Workstation once, add the folder that holds your VMs, or
+              register the VM in VirtualBox.
             </EmptyDescription>
           </EmptyHeader>
           <EmptyContent>

@@ -1,12 +1,14 @@
 // Status badges on top of the shadcn Badge. Colours come from the app tokens in src/styles.css.
 
 import { Badge } from "@/components/ui/badge";
+import { HYPERVISORS, hypervisorName } from "@/lib/hypervisors";
 import { cn } from "@/lib/utils";
 import type {
   CommandRisk,
   ContainerState,
   EngineKind,
   Environment,
+  Hypervisor,
   JobStatus,
   PowerState,
   SecretKind,
@@ -100,10 +102,21 @@ const TOOLS: Record<ToolsState, { label: string; className: string }> = {
   running: { label: "Running", className: "text-success" },
   installed: { label: "Not running", className: "text-tier-medium" },
   notInstalled: { label: "Not installed", className: "text-tier-medium" },
+  notRunning: { label: "Not running", className: "text-tier-medium" },
   unknown: { label: "Unknown", className: "text-muted-foreground" },
 };
 
-/** VM-01 VMware Tools state. VMs that are off show a dash. */
+/** VM-18: which hypervisor runs the VM, with its full name on hover. */
+export function HypervisorLabel({ hypervisor }: { hypervisor: Hypervisor }) {
+  const label = HYPERVISORS.find((h) => h.value === hypervisor)?.label ?? hypervisor;
+  return (
+    <span className="text-sm whitespace-nowrap" title={label}>
+      {hypervisorName(hypervisor)}
+    </span>
+  );
+}
+
+/** VM-01 VMware Tools (VM-18: or Guest Additions) state. VMs that are off show a dash. */
 export function ToolsLabel({ state }: { state: ToolsState | null }) {
   if (!state) return <span className="text-muted-foreground">—</span>;
   const { label, className } = TOOLS[state];

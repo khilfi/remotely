@@ -1,7 +1,7 @@
-// VM-02: narrows the VM list by text, tag and power state, and keeps named filters. The core does the
-// matching (`vm_list` with a filter), so the CLI and bulk-run target picker (BX-01) match the same way.
+// VM-02: narrows the VM list by text, tag, power state and (VM-18) hypervisor, and keeps named filters. The core does
+// the matching (`vm_list` with a filter), so the CLI and bulk-run target picker (BX-01) match the same way.
 
-import { BookmarkIcon, ChevronDownIcon, SearchIcon, TagIcon, XIcon, ZapIcon } from "lucide-react";
+import { BookmarkIcon, ChevronDownIcon, LayersIcon, SearchIcon, TagIcon, XIcon, ZapIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import type { PowerState, SavedFilter, Tag, VmFilter } from "@/lib/api";
+import { HYPERVISORS } from "@/lib/hypervisors";
 
 export const POWER_STATES: { value: PowerState; label: string }[] = [
   { value: "running", label: "Running" },
@@ -34,6 +35,7 @@ export function isEmptyFilter(f: VmFilter) {
     !f.tags?.length &&
     !f.powerStates?.length &&
     !f.environments?.length &&
+    !f.hypervisors?.length &&
     (f.protected === undefined || f.protected === null)
   );
 }
@@ -65,6 +67,7 @@ export function VmFilterBar({
 }: Props) {
   const tagCount = filter.tags?.length ?? 0;
   const stateCount = filter.powerStates?.length ?? 0;
+  const hypervisorCount = filter.hypervisors?.length ?? 0;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -124,6 +127,29 @@ export function VmFilterBar({
               onSelect={(e) => e.preventDefault()}
             >
               {s.label}
+            </DropdownMenuCheckboxItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button variant="outline">
+            <LayersIcon data-icon="inline-start" />
+            Hypervisor
+            {hypervisorCount > 0 && <Badge variant="secondary">{hypervisorCount}</Badge>}
+            <ChevronDownIcon data-icon="inline-end" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-52">
+          {HYPERVISORS.map((h) => (
+            <DropdownMenuCheckboxItem
+              key={h.value}
+              checked={filter.hypervisors?.includes(h.value) ?? false}
+              onCheckedChange={() => onChange({ ...filter, hypervisors: toggle(filter.hypervisors, h.value) })}
+              onSelect={(e) => e.preventDefault()}
+            >
+              {h.label}
             </DropdownMenuCheckboxItem>
           ))}
         </DropdownMenuContent>

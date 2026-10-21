@@ -9,15 +9,15 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{vm, vmx, wait_finished, Setup, VAULT_PASSWORD};
+use common::{vbox_vm, vm, vmx, wait_finished, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::containers::{
     ContainerId, ContainerState, EngineKind, ImageId, LogQuery, PruneWhat, VolumeName,
 };
 use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, Command, ContainerOp, SubmitOutcome};
 use remotely_core::containers::{MarkInput, SudoMode};
-use remotely_core::domain::{ContainerHost, ContainerObject, Environment, TargetRef};
+use remotely_core::domain::{ContainerHost, ContainerObject, Environment, PowerState, TargetRef};
 use remotely_core::fakes::containers::{FakeContainer, Fixture};
-use remotely_core::fakes::{FakeContainers, FakeVmware};
+use remotely_core::fakes::{FakeContainers, FakeVirtualBox, FakeVmware};
 use remotely_core::jobs::JobStatus;
 use remotely_core::policy::{ApprovalStep, Tier};
 use remotely_core::sessions::{SessionAuth, SessionInput};
@@ -518,6 +518,61 @@ async fn a_prod_host_raises_the_tier_and_a_protected_host_is_skipped() {
         mixed.skipped[0].name
     );
     core.bus.cancel_approval(mixed.id).await.unwrap();
+    assert!(fake.changes().is_empty());
+}
+
+/// AP-04 with VM-18: a session that reaches a protected VirtualBox VM is a protected container host,
+/// as with a Workstation VM, and a Prod label on the VM raises its containers' tier.
+#[tokio::test]
+async fn a_session_reaching_a_virtualbox_vm_takes_its_protection_and_prod_label() {
+    const UUID: &str = "4f4f4f4f-1111-4222-8333-444455556666";
+    let fake = FakeContainers::default().with_host("vbox-web", DOCKER, Fixture::sample());
+    let core = Setup::new(FakeVmware::default())
+        .with_virtualbox(FakeVirtualBox::new().with_vm(UUID, "vbox-web", PowerState::Running))
+        .with_real_vault()
+        .with_containers(Arc::new(fake.clone()))
+        .build()
+        .await;
+    let ctx = &core.ctx;
+    core.inventory.refresh(ctx).await.unwrap();
+    let vm_id = core.store.find_vm(ctx, UUID).await.unwrap().unwrap().id;
+    let linked = core
+        .sessions
+        .create(
+            ctx,
+            SessionInput {
+                vm_id: Some(vm_id),
+                ..input("vbox-web", Environment::Lab, SessionAuth::Agent)
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    mark(&core, linked, DOCKER, SudoMode::Off).await;
+    let worker = id_of(&fake, "vbox-web", "shop-worker-1");
+
+    core.inventory
+        .set_environment(ctx, &[UUID.to_owned()], Environment::Prod)
+        .await
+        .unwrap();
+    let request = needs_approval(&core, op(vec![container(linked, &worker)], ContainerOp::Start)).await;
+    assert_eq!(request.tier, Tier::Medium, "Low, raised by the VM's Prod label");
+    core.bus.cancel_approval(request.id).await.unwrap();
+
+    run(
+        &core,
+        Command::VmProtect {
+            targets: vec![vbox_vm(UUID)],
+            protected: true,
+        },
+    )
+    .await;
+    let err = core
+        .bus
+        .submit(ctx, op(vec![container(linked, &worker)], ContainerOp::Start))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "all_targets_protected");
     assert!(fake.changes().is_empty());
 }
 

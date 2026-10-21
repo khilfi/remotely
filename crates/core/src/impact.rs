@@ -4,19 +4,19 @@
 //!
 //! Reads only, and none needs a guest login: `vmrun list` for the power state (the .vmx tells a
 //! suspended VM from one that is off), the first line of the VM's `vmware.log` for how long it has
-//! been running, and its .vmsd for the snapshot count. Users logged in to the guest need a guest
-//! login, and dependent VMs need lab blueprints (VM-08, v2); neither is shown yet.
+//! been running, and its .vmsd for the snapshot count. A VirtualBox VM (VM-18) answers all three
+//! through `showvminfo` (its state, when that state began, its snapshots) and its .vbox file (snapshot
+//! times). Users logged in to the guest need a guest login, and dependent VMs need lab blueprints
+//! (VM-08, v2); neither is shown yet.
 
-use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
 
 use serde::Serialize;
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use crate::adapters::containers::ContainerState;
-use crate::adapters::vmware::{path_key, VmwareAdapter};
+use crate::adapters::hypervisor::{Hypervisor, Hypervisors, RunningVms};
 use crate::command_bus::Command;
 use crate::containers::Containers;
 use crate::domain::{Context, PowerState, Target, TargetRef};
@@ -81,16 +81,16 @@ impl ContainerImpact {
 
 pub struct ImpactPreviewer {
     store: Store,
-    vmware: Arc<dyn VmwareAdapter>,
+    hypervisors: Hypervisors,
     /// CT-01, CT-02: container targets.
     containers: Option<Containers>,
 }
 
 impl ImpactPreviewer {
-    pub fn new(store: Store, vmware: Arc<dyn VmwareAdapter>) -> Self {
+    pub fn new(store: Store, hypervisors: Hypervisors) -> Self {
         Self {
             store,
-            vmware,
+            hypervisors,
             containers: None,
         }
     }
@@ -122,27 +122,31 @@ impl ImpactPreviewer {
         if vms.is_empty() {
             return Vec::new();
         }
-        let running: Result<HashSet<String>, String> = self
-            .vmware
-            .list_running()
-            .await
-            .map(|paths| paths.iter().map(|p| path_key(p)).collect())
-            .map_err(|err| err.to_string());
+        let running = if vms.iter().any(|key| Hypervisor::of_key(key) == Hypervisor::Vmware) {
+            Some(self.hypervisors.running().await)
+        } else {
+            None
+        };
         let now = OffsetDateTime::now_utc();
         let mut out = Vec::with_capacity(vms.len());
-        for vmx_path in vms {
-            out.push(self.one(ctx, vmx_path, running.as_ref(), now).await);
+        for key in vms {
+            let impact = match Hypervisor::of_key(key) {
+                Hypervisor::Vmware => self.one_vmware(ctx, key, running.as_ref(), now).await,
+                Hypervisor::VirtualBox => self.one_virtualbox(key, now).await,
+            };
+            out.push(impact);
         }
         out
     }
 
-    async fn one(
+    async fn one_vmware(
         &self,
         ctx: &Context,
         vmx_path: &str,
-        running: Result<&HashSet<String>, &String>,
+        running: Option<&RunningVms>,
         now: OffsetDateTime,
     ) -> TargetImpact {
+        let vmware = self.hypervisors.vmware();
         let vmx = Path::new(vmx_path);
         let mut notes = Vec::new();
         let stored = match self.store.find_vm(ctx, vmx_path).await {
@@ -152,16 +156,17 @@ impl ImpactPreviewer {
                 PowerState::Unknown
             }
         };
-        let power_state = match running {
+        let listed = running.map(|r| (r.contains(vmx_path), &r.vmware));
+        let power_state = match listed {
             // vmrun cannot see a pause; the app's own pause jobs can.
-            Ok(set) if set.contains(&path_key(vmx)) => {
+            Some((Some(true), _)) => {
                 if stored == PowerState::Paused {
                     PowerState::Paused
                 } else {
                     PowerState::Running
                 }
             }
-            Ok(_) => match self.vmware.read_vmx(vmx).await {
+            Some((Some(false), _)) => match vmware.read_vmx(vmx).await {
                 Ok(info) if info.suspended => PowerState::Suspended,
                 Ok(_) => PowerState::NotRunning,
                 Err(err) => {
@@ -169,17 +174,18 @@ impl ImpactPreviewer {
                     PowerState::NotRunning
                 }
             },
-            Err(err) => {
+            Some((None, Err(err))) => {
                 notes.push(format!(
                     "State from the last refresh; Workstation could not be asked: {err}"
                 ));
                 stored
             }
+            _ => stored,
         };
 
         let (mut running_since, mut uptime_secs) = (None, None);
         if power_state.is_on() {
-            match self.vmware.running_since(vmx).await {
+            match vmware.running_since(vmx).await {
                 Ok(Some(since)) => {
                     running_since = since.format(&Rfc3339).ok();
                     uptime_secs = u64::try_from((now - since).whole_seconds()).ok();
@@ -189,17 +195,7 @@ impl ImpactPreviewer {
             }
         }
 
-        let (snapshot_count, old_snapshot_count) = match self.vmware.snapshots(vmx).await {
-            Ok(tree) => {
-                let counts = snapshots::counts(&tree, now);
-                (Some(counts.total), Some(counts.old))
-            }
-            Err(err) => {
-                notes.push(format!("Could not read the snapshot list: {err}"));
-                (None, None)
-            }
-        };
-
+        let (snapshot_count, old_snapshot_count) = self.snapshot_counts(vmx_path, now, &mut notes).await;
         TargetImpact {
             target: vmx_path.to_owned(),
             power_state,
@@ -209,6 +205,54 @@ impl ImpactPreviewer {
             old_snapshot_count,
             notes,
             container: None,
+        }
+    }
+
+    /// VM-18: `showvminfo` gives the state and when it began; VirtualBox sees a pause itself.
+    async fn one_virtualbox(&self, uuid: &str, now: OffsetDateTime) -> TargetImpact {
+        let mut notes = Vec::new();
+        let (power_state, since) = match self.hypervisors.virtualbox().vm_info(uuid).await {
+            Ok(info) => (info.power_state(), info.running_since()),
+            Err(err) => {
+                notes.push(format!("VirtualBox could not be asked about the VM: {err}"));
+                (PowerState::Unknown, None)
+            }
+        };
+        let (mut running_since, mut uptime_secs) = (None, None);
+        if let Some(since) = since {
+            running_since = since.format(&Rfc3339).ok();
+            uptime_secs = u64::try_from((now - since).whole_seconds()).ok();
+        } else if power_state.is_on() {
+            notes.push("Uptime unknown: VirtualBox did not say when the VM started".into());
+        }
+        let (snapshot_count, old_snapshot_count) = self.snapshot_counts(uuid, now, &mut notes).await;
+        TargetImpact {
+            target: uuid.to_owned(),
+            power_state,
+            running_since,
+            uptime_secs,
+            snapshot_count,
+            old_snapshot_count,
+            notes,
+            container: None,
+        }
+    }
+
+    async fn snapshot_counts(
+        &self,
+        key: &str,
+        now: OffsetDateTime,
+        notes: &mut Vec<String>,
+    ) -> (Option<usize>, Option<usize>) {
+        match self.hypervisors.snapshots(key).await {
+            Ok(tree) => {
+                let counts = snapshots::counts(&tree, now);
+                (Some(counts.total), Some(counts.old))
+            }
+            Err(err) => {
+                notes.push(format!("Could not read the snapshot list: {err}"));
+                (None, None)
+            }
         }
     }
 }
