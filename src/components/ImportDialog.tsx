@@ -271,7 +271,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
             {report
               ? "Done."
               : guide && !preview
-                ? `How Remotely reads ${guide.title}, and a sample file to start from. The sample holds made-up example sessions only.`
+                ? "What Remotely reads from this format, and a sample file to start from. The sample holds made-up example sessions only."
                 : preview
                   ? `${plural(preview.rows.length, "session")} found in ${preview.file ?? SOURCE_NAME[preview.source]}: ${counts.fresh} new, ${plural(counts.duplicates, "duplicate")}, ${plural(counts.conflicts, "name")} already taken. Nothing is saved until you import.`
                   : "Pick where your sessions are. You'll see what was found, with duplicates and name conflicts, before anything is saved. Saved passwords are never imported."}
