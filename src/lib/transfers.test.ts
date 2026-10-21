@@ -1,7 +1,7 @@
 /// <reference types="node" />
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { RemoteEntry, TransferInfo } from "./api.ts";
+import type { RemoteEntry, ShellUsers, TransferInfo } from "./api.ts";
 import {
   crumbs,
   fileWordAt,
@@ -12,6 +12,7 @@ import {
   percent,
   secondsLeft,
   sortEntries,
+  userNote,
 } from "./transfers.ts";
 
 test("sizes read naturally, like the audit log's", () => {
@@ -118,4 +119,23 @@ test("a right-click finds the file name under the pointer", () => {
   assert.equal(fileWordAt("saved to ./out/build.zip.", 12), "./out/build.zip");
   assert.equal(fileWordAt("alice@web01:~$ ", 14), null, "a blank");
   assert.equal(fileWordAt("short", 10), null, "past the end");
+});
+
+test("QL-09: the drawer says who the shell runs as only when it may differ from the login", () => {
+  const login: ShellUsers = { username: "alice", shell: null, stopped: false };
+  assert.deepEqual(userNote(undefined), { kind: "same" });
+  assert.deepEqual(userNote(login), { kind: "same" });
+  assert.deepEqual(userNote({ ...login, shell: { username: "alice.admin", seenIn: "hook" } }), {
+    kind: "reported",
+    shell: "alice.admin",
+  });
+  assert.deepEqual(userNote({ ...login, shell: { username: "bob", seenIn: "prompt" }, stopped: true }), {
+    kind: "switched",
+    shell: "bob",
+  });
+  assert.deepEqual(userNote({ ...login, stopped: true }), { kind: "stopped" });
+  assert.deepEqual(userNote({ ...login, shell: { username: "root", seenIn: "prompt" } }), {
+    kind: "prompt",
+    shell: "root",
+  });
 });

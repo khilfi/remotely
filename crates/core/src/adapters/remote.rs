@@ -361,6 +361,8 @@ pub struct RemoteEntry {
 /// the user can't write to fails with [`CoreError::RemotePermissionDenied`].
 #[async_trait]
 pub trait RemoteFiles: Send + Sync {
+    /// QL-09: the user every transfer runs as: the SSH login user, whatever the shell switched to.
+    fn user(&self) -> String;
     /// The folder SFTP starts in: the login's home folder.
     async fn home(&self) -> Result<String>;
     /// A folder's entries, without `.` and `..`.

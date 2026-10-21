@@ -1,7 +1,7 @@
 // SS-08 file transfer in the terminal: pure helpers for the "Files here" drawer and the transfers panel (tested in
 // transfers.test.ts). Paths on the host are POSIX paths; nothing here touches this PC's paths.
 
-import type { RemoteEntry, TransferInfo } from "./api.ts";
+import type { RemoteEntry, ShellUsers, TransferInfo } from "./api.ts";
 
 /** "1.5 KB", "25 MB": decimal units, like the core's audit entries. */
 export function formatSize(bytes: number) {
@@ -73,6 +73,25 @@ export function crumbs(path: string): { label: string; path: string }[] {
   const out = [{ label: "/", path: "/" }];
   parts.forEach((part, i) => out.push({ label: part, path: `/${parts.slice(0, i + 1).join("/")}` }));
   return out;
+}
+
+/**
+ * QL-09: what the drawer says about the shell's user, beside "Transfers as <login>".
+ * - same: nothing more to say.
+ * - reported: Remotely's prompt hook reports another user than the login.
+ * - switched: the hook's shell stopped reporting after a command, and the prompt names someone else.
+ * - stopped: it stopped reporting, and the prompt names nobody else.
+ * - prompt: no hook, and the prompt names someone else.
+ */
+export type UserNote =
+  { kind: "same" } | { kind: "reported" | "switched" | "prompt"; shell: string } | { kind: "stopped" };
+
+export function userNote(user: ShellUsers | undefined): UserNote {
+  if (!user) return { kind: "same" };
+  const shell = user.shell?.username;
+  if (user.stopped) return shell ? { kind: "switched", shell } : { kind: "stopped" };
+  if (!shell) return { kind: "same" };
+  return { kind: user.shell?.seenIn === "hook" ? "reported" : "prompt", shell };
 }
 
 /** Characters that end a file name in terminal output. */

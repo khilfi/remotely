@@ -17,6 +17,11 @@
 //! * Other shells (sh, fish, tcsh, network gear) get nothing typed; the drawer starts in the home
 //!   folder there and the user picks folders by hand. So does a shell that answers the hook with
 //!   nothing: after [`HIDE_WAIT`] what was held back is shown and the hook is given up.
+//! * QL-09: the hook also reports its shell's user next to the folder, in a private OSC
+//!   (`ESC ] 7777 ; remotely-user=alice BEL`), asked once with `id -un` when the hook is set up (a
+//!   shell's user never changes; a switch starts another shell, see [`super::shell_user`]). Like OSC 7
+//!   it prints nothing in any terminal, and the line follower, the session log and saved output drop
+//!   it.
 //!
 //! Nothing here is logged: output is only looked at, the way [`super::activity`] does.
 
@@ -24,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use super::shell_user::UserInfo;
 use crate::adapters::remote::PromptShell;
 
 /// Output must have paused this long at the first prompt before the hook is typed.
@@ -41,14 +47,23 @@ const MAX_HELD: usize = 256 * 1024;
 /// The longest OSC 7 text read; a path is far shorter.
 const MAX_OSC: usize = 8192;
 
+/// The private OSC's number: the hook's marker and its user reports.
+const REMOTELY_OSC: &[u8] = b"7777";
 /// The marker's start; the hook line prints it (via printf, so its own echo never contains it).
 const MARKER_START: &str = "\x1b]7777;remotely-";
+/// QL-09: what a user report's text starts with; the user name follows, percent-encoded.
+const USER_REPORT: &str = "remotely-user=";
 
 /// The line typed into bash or zsh (see the module comment). `token` makes the marker unique.
 pub fn hook_line(token: &str) -> String {
     let function = concat!(
         r#"__remotely_cwd(){ local s=$? p=${PWD//\%/%25};p=${p//$'\n'/%0A};p=${p//$'\a'/%07};p=${p//$'\e'/%1B};"#,
-        r#"printf '\033]7;file://%s%s\033\\' "${HOSTNAME:-${HOST:-}}" "$p";return $s;}"#,
+        r#"printf '\033]7;file://%s%s\033\\\033]7777;remotely-user=%s\007' "${HOSTNAME:-${HOST:-}}" "$p" "$__remotely_u";return $s;}"#,
+    );
+    // QL-09: the shell's user, asked once (it never changes in this shell) and encoded like the path.
+    let user = concat!(
+        r#"__remotely_u=$(id -un 2>/dev/null);__remotely_u=${__remotely_u//\%/%25};"#,
+        r#"__remotely_u=${__remotely_u//$'\n'/%0A};__remotely_u=${__remotely_u//$'\a'/%07};__remotely_u=${__remotely_u//$'\e'/%1B}"#,
     );
     let register = concat!(
         r#"if [ -n "${ZSH_VERSION:-}" ];then autoload -Uz add-zsh-hook;add-zsh-hook precmd __remotely_cwd;"#,
@@ -56,7 +71,7 @@ pub fn hook_line(token: &str) -> String {
         r#"case $__remotely_h in *__remotely_cwd*)read -r __remotely_h _ <<<"$__remotely_h";history -d "$__remotely_h";;esac;"#,
         r#"unset __remotely_h;fi"#,
     );
-    format!(" {function};{register};printf '\\033]7777;remotely-%s\\007' {token}\r")
+    format!(" {function};{user};{register};printf '\\033]7777;remotely-%s\\007' {token}\r")
 }
 
 /// The bytes the hook line prints last.
@@ -86,6 +101,8 @@ pub struct FolderInfo {
     /// The shell's folder, once it reported one.
     pub path: Option<String>,
     pub tracking: FolderTracking,
+    /// QL-09: who transfers run as, and who the shell runs as when that differs.
+    pub user: UserInfo,
 }
 
 impl Default for FolderInfo {
@@ -93,8 +110,16 @@ impl Default for FolderInfo {
         Self {
             path: None,
             tracking: FolderTracking::Waiting,
+            user: UserInfo::default(),
         }
     }
+}
+
+/// What a piece of output reported: the folder (OSC 7) and the shell's user (QL-09), the last of each.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Reports {
+    pub folder: Option<String>,
+    pub user: Option<String>,
 }
 
 /// Where the OSC scanner is.
@@ -104,17 +129,27 @@ enum Scan {
     Esc,
     /// `ESC ]`: the number before `;`.
     OscNumber,
-    /// OSC 7's text.
-    Osc7,
+    /// The text of an OSC this reads: 7 (the folder) or Remotely's own (QL-09: the user).
+    Read(Osc),
     /// Another OSC (or DCS and the like): skipped to its end.
     OtherString,
     /// `ESC` inside a string: `\` ends it.
     StringEsc {
-        osc7: bool,
+        read: Option<Osc>,
     },
 }
 
-/// SS-08: follows the folders OSC 7 reports in a terminal's output.
+/// The OSCs [`FolderWatch`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Osc {
+    /// OSC 7: the folder.
+    Folder,
+    /// Remotely's private OSC: the hook's marker or its user report.
+    Remotely,
+}
+
+/// SS-08: follows the folders OSC 7 reports in a terminal's output, and (QL-09) the user the prompt
+/// hook reports next to them.
 pub struct FolderWatch {
     scan: Scan,
     number: Vec<u8>,
@@ -140,9 +175,9 @@ impl FolderWatch {
         }
     }
 
-    /// The last folder these bytes reported, if any.
-    pub fn feed(&mut self, bytes: &[u8]) -> Option<String> {
-        let mut found = None;
+    /// What these bytes reported, if anything.
+    pub fn feed(&mut self, bytes: &[u8]) -> Reports {
+        let mut found = Reports::default();
         for &b in bytes {
             self.scan = match (self.scan, b) {
                 (Scan::Text, 0x1b) => Scan::Esc,
@@ -154,35 +189,38 @@ impl FolderWatch {
                 (Scan::Esc, b'P' | b'X' | b'^' | b'_') => Scan::OtherString,
                 (Scan::Esc, 0x1b) => Scan::Esc,
                 (Scan::Esc, _) => Scan::Text,
-                (Scan::OscNumber, b';') if self.number == b"7" => {
+                (Scan::OscNumber, b';') => {
                     self.text.clear();
-                    Scan::Osc7
+                    match self.number.as_slice() {
+                        b"7" => Scan::Read(Osc::Folder),
+                        REMOTELY_OSC => Scan::Read(Osc::Remotely),
+                        _ => Scan::OtherString,
+                    }
                 }
-                (Scan::OscNumber, b';') => Scan::OtherString,
                 (Scan::OscNumber, 0x07) => Scan::Text,
-                (Scan::OscNumber, 0x1b) => Scan::StringEsc { osc7: false },
+                (Scan::OscNumber, 0x1b) => Scan::StringEsc { read: None },
                 (Scan::OscNumber, d) if d.is_ascii_digit() && self.number.len() < 8 => {
                     self.number.push(d);
                     Scan::OscNumber
                 }
                 (Scan::OscNumber, _) => Scan::OtherString,
-                (Scan::Osc7, 0x07) => {
-                    found = self.report().or(found);
+                (Scan::Read(osc), 0x07) => {
+                    self.finish(osc, &mut found);
                     Scan::Text
                 }
-                (Scan::Osc7, 0x1b) => Scan::StringEsc { osc7: true },
-                (Scan::Osc7, c) => {
+                (Scan::Read(osc), 0x1b) => Scan::StringEsc { read: Some(osc) },
+                (Scan::Read(osc), c) => {
                     if self.text.len() < MAX_OSC {
                         self.text.push(c);
                     }
-                    Scan::Osc7
+                    Scan::Read(osc)
                 }
                 (Scan::OtherString, 0x07) => Scan::Text,
-                (Scan::OtherString, 0x1b) => Scan::StringEsc { osc7: false },
+                (Scan::OtherString, 0x1b) => Scan::StringEsc { read: None },
                 (Scan::OtherString, _) => Scan::OtherString,
-                (Scan::StringEsc { osc7 }, b'\\') => {
-                    if osc7 {
-                        found = self.report().or(found);
+                (Scan::StringEsc { read }, b'\\') => {
+                    if let Some(osc) = read {
+                        self.finish(osc, &mut found);
                     }
                     Scan::Text
                 }
@@ -195,6 +233,22 @@ impl FolderWatch {
             };
         }
         found
+    }
+
+    /// A finished OSC this reads.
+    fn finish(&mut self, osc: Osc, found: &mut Reports) {
+        match osc {
+            Osc::Folder => {
+                if let Some(folder) = self.report() {
+                    found.folder = Some(folder);
+                }
+            }
+            Osc::Remotely => {
+                if let Some(user) = parse_user_report(&self.text) {
+                    found.user = Some(user);
+                }
+            }
+        }
     }
 
     /// The finished OSC 7 text as a folder, when it is one of this host's.
@@ -228,6 +282,13 @@ pub fn parse_osc7(text: &[u8]) -> Option<(Option<String>, String)> {
     };
     let path = percent_decode(encoded);
     (path.starts_with('/') && !path.contains('\0')).then_some((host, path))
+}
+
+/// QL-09: `remotely-user=alice` (percent-encoded): the user, unless empty or not printable.
+fn parse_user_report(text: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(text).ok()?.strip_prefix(USER_REPORT)?;
+    let user = percent_decode(text);
+    (!user.is_empty() && !user.chars().any(char::is_control)).then_some(user)
 }
 
 fn percent_decode(text: &str) -> String {
@@ -526,29 +587,65 @@ mod tests {
 
     const MS: Duration = Duration::from_millis(1);
 
+    fn folder(watch: &mut FolderWatch, bytes: &[u8]) -> Option<String> {
+        watch.feed(bytes).folder
+    }
+
     #[test]
     fn osc_7_reports_the_folder_split_or_whole() {
         let mut watch = FolderWatch::new();
         assert_eq!(
-            watch
-                .feed(b"\x1b]7;file://web01/home/alice\x07alice@web01:~$ ")
-                .as_deref(),
+            folder(&mut watch, b"\x1b]7;file://web01/home/alice\x07alice@web01:~$ ").as_deref(),
             Some("/home/alice")
         );
         // Split across reads, ended by ESC \, percent-encoded.
-        assert_eq!(watch.feed(b"\x1b]7;file://web01/srv/my%20"), None);
-        assert_eq!(watch.feed(b"site%25\x1b").as_deref(), None);
-        assert_eq!(watch.feed(b"\\$ ").as_deref(), Some("/srv/my site%"));
+        assert_eq!(folder(&mut watch, b"\x1b]7;file://web01/srv/my%20"), None);
+        assert_eq!(folder(&mut watch, b"site%25\x1b").as_deref(), None);
+        assert_eq!(folder(&mut watch, b"\\$ ").as_deref(), Some("/srv/my site%"));
         // A title (OSC 0) and colours are not folders.
-        assert_eq!(watch.feed(b"\x1b]0;alice@web01: /tmp\x07\x1b[01;32m$\x1b[0m "), None);
+        assert_eq!(
+            folder(&mut watch, b"\x1b]0;alice@web01: /tmp\x07\x1b[01;32m$\x1b[0m "),
+            None
+        );
         // A shell on another host reached from this one.
-        assert_eq!(watch.feed(b"\x1b]7;file://db01/var/lib\x07"), None);
-        assert_eq!(watch.feed(b"\x1b]7;file://WEB01/etc\x07").as_deref(), Some("/etc"));
+        assert_eq!(folder(&mut watch, b"\x1b]7;file://db01/var/lib\x07"), None);
+        assert_eq!(
+            folder(&mut watch, b"\x1b]7;file://WEB01/etc\x07").as_deref(),
+            Some("/etc")
+        );
         // Without a host, or as a bare path.
-        assert_eq!(watch.feed(b"\x1b]7;file:///opt\x07").as_deref(), Some("/opt"));
-        assert_eq!(watch.feed(b"\x1b]7;/var/log\x07").as_deref(), Some("/var/log"));
-        assert_eq!(watch.feed(b"\x1b]7;not a path\x07"), None);
-        assert_eq!(watch.feed(b"\x1b]77;file://web01/x\x07"), None, "OSC 77 is not 7");
+        assert_eq!(folder(&mut watch, b"\x1b]7;file:///opt\x07").as_deref(), Some("/opt"));
+        assert_eq!(folder(&mut watch, b"\x1b]7;/var/log\x07").as_deref(), Some("/var/log"));
+        assert_eq!(folder(&mut watch, b"\x1b]7;not a path\x07"), None);
+        assert_eq!(
+            folder(&mut watch, b"\x1b]77;file://web01/x\x07"),
+            None,
+            "OSC 77 is not 7"
+        );
+    }
+
+    /// QL-09: the hook's prompt prints OSC 7, then the user in Remotely's own OSC.
+    #[test]
+    fn the_hook_reports_the_user_next_to_the_folder() {
+        let mut watch = FolderWatch::new();
+        let found = watch.feed(b"\x1b]7;file://web01/home/alice\x1b\\\x1b]7777;remotely-user=alice\x07$ ");
+        assert_eq!(found.folder.as_deref(), Some("/home/alice"));
+        assert_eq!(found.user.as_deref(), Some("alice"));
+        // Split, ended by ESC \, percent-encoded.
+        assert_eq!(watch.feed(b"\x1b]7777;remotely-us"), Reports::default());
+        let found = watch.feed(b"er=CORP%25bob\x1b\\");
+        assert_eq!(found.user.as_deref(), Some("CORP%bob"));
+        assert_eq!(found.folder, None);
+        // The hook's marker, an empty user, a control character and OSC 777 are no user.
+        for other in [
+            &b"\x1b]7777;remotely-0123abcd\x07"[..],
+            b"\x1b]7777;remotely-user=\x07",
+            b"\x1b]7777;remotely-user=a%07b\x07",
+            b"\x1b]777;remotely-user=mallory\x07",
+            b"remotely-user=mallory",
+        ] {
+            assert_eq!(watch.feed(other), Reports::default(), "{other:?}");
+        }
     }
 
     #[test]
@@ -573,6 +670,12 @@ mod tests {
         assert!(line.contains("remotely-%s"));
         assert!(line.contains("PROMPT_COMMAND"));
         assert!(line.contains("add-zsh-hook precmd"));
+        // QL-09: the user is asked once, and reported with the folder.
+        assert_eq!(line.matches("id -un").count(), 1);
+        assert!(line.contains(r"\033]7777;remotely-user=%s\007"));
+        // The test server knows the hook by how it starts, and its token is the last word.
+        assert!(line.trim_start().starts_with("__remotely_cwd()"));
+        assert_eq!(line.split_whitespace().last(), Some("ab12"));
     }
 
     /// A bash login: banner, prompt, the probe's answer, quiet, hook typed, echo hidden, prompt redrawn.

@@ -30,9 +30,26 @@ pub fn files_folder(state: State<'_, AppState>, id: Uuid) -> Option<FolderInfo> 
 }
 
 /// SS-08: a folder on the terminal's host; without `path`, the shell's folder (or the home folder).
+/// QL-09: a relative `path` goes on from `from`, the folder the drawer shows; a folder that can't be
+/// opened comes back with its path and the reason.
 #[tauri::command]
-pub async fn files_list(state: State<'_, AppState>, id: Uuid, path: Option<String>) -> IpcResult<FolderListing> {
-    Ok(state.core.terminals.list_folder(id, path.as_deref()).await?)
+pub async fn files_list(
+    state: State<'_, AppState>,
+    id: Uuid,
+    path: Option<String>,
+    from: Option<String>,
+) -> IpcResult<FolderListing> {
+    Ok(state
+        .core
+        .terminals
+        .open_folder(id, path.as_deref(), from.as_deref())
+        .await?)
+}
+
+/// QL-09: the drawer's Back from the folder it shows.
+#[tauri::command]
+pub async fn files_back(state: State<'_, AppState>, id: Uuid, from: String) -> IpcResult<FolderListing> {
+    Ok(state.core.terminals.folder_back(id, &from).await?)
 }
 
 #[derive(Serialize)]

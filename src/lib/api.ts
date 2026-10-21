@@ -804,6 +804,20 @@ export type FolderTracking = "waiting" | "following" | "unsupported" | "missed";
 export interface FolderInfo {
   path: string | null;
   tracking: FolderTracking;
+  /** QL-09: who transfers run as, and who the shell runs as when that differs. */
+  user: ShellUsers;
+}
+
+/**
+ * QL-09: `username` is the SSH login, which every transfer runs as. `shell` is the shell's user when it is known to be
+ * someone else: reported by Remotely's prompt hook, or (`seenIn: "prompt"`) only named by the shell's prompt.
+ * `stopped`: the hook's shell stopped reporting after a command (su, sudo -i, bash, ssh), so the drawer can't follow.
+ * The fields are named `username` so presentation mode learns them.
+ */
+export interface ShellUsers {
+  username: string | null;
+  shell: { username: string; seenIn: "hook" | "prompt" } | null;
+  stopped: boolean;
 }
 
 /** SS-08: a link counts as what it points to, with `link` set; "other": a device, socket or broken link. */
@@ -821,9 +835,14 @@ export interface RemoteEntry {
 }
 
 export interface FolderListing {
+  /** Also when the folder could not be opened (QL-09). */
   path: string;
   parent: string | null;
   entries: RemoteEntry[];
+  /** QL-09: why the folder could not be opened; `code` is the core's (`permission_denied`, `not_found`, ...). */
+  error: { code: string; message: string } | null;
+  /** QL-09: where Back goes. */
+  back: string | null;
 }
 
 export interface StagedFiles {
@@ -1955,8 +1974,14 @@ export const api = {
 
   /** SS-08: the shell's folder as far as it is known. */
   filesFolder: (id: string) => invoke<FolderInfo | null>("files_folder", { id }),
-  /** SS-08: a folder on the terminal's host; without a path, the shell's folder (or home). */
-  filesList: (id: string, path: string | null) => invoke<FolderListing>("files_list", { id, path }),
+  /**
+   * SS-08: a folder on the terminal's host; without a path, the shell's folder (or home). QL-09: a relative path goes on
+   * from `from` (the folder the drawer shows); a folder that can't be opened comes back with its `error`.
+   */
+  filesList: (id: string, path: string | null, from: string | null = null) =>
+    invoke<FolderListing>("files_list", { id, path, from }),
+  /** QL-09: the drawer's Back from the folder it shows. */
+  filesBack: (id: string, from: string) => invoke<FolderListing>("files_back", { id, from }),
   /** SS-08: what a name right-clicked in the output is, from the shell's folder. null: nothing there. */
   filesLookUp: (id: string, path: string) =>
     invoke<{ path: string; entry: RemoteEntry } | null>("files_look_up", { id, path }),

@@ -251,12 +251,30 @@ impl Transfers {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FolderListing {
-    /// The folder, absolute.
+    /// The folder, absolute; also when it could not be opened (QL-09), so the drawer still shows where
+    /// it is and Up, the breadcrumbs and typed paths go on from there.
     pub path: String,
     /// The folder above, unless this is `/`.
     pub parent: Option<String>,
     pub entries: Vec<RemoteEntry>,
+    /// QL-09: why the folder could not be opened (the host refused the login user, it is gone...).
+    pub error: Option<FolderError>,
+    /// QL-09: where Back goes: the folder that opened before this one, or the last one that opened when
+    /// this one could not.
+    pub back: Option<String>,
 }
+
+/// QL-09: a folder the drawer could not open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderError {
+    /// `permission_denied`, `not_found`, `sftp`, ... ([`CoreError::code`]).
+    pub code: &'static str,
+    pub message: String,
+}
+
+/// QL-09: the folders the Back button goes through, per terminal.
+const MAX_OPENED: usize = 50;
 
 /// SS-08: an upload the job runner hands to the terminal it goes through.
 pub struct UploadRun<'a> {
@@ -315,6 +333,16 @@ pub fn join(folder: &str, name: &str) -> String {
         format!("{folder}{name}")
     } else {
         format!("{folder}/{name}")
+    }
+}
+
+/// QL-09: where in `opened` (the folders that opened, oldest first) Back goes from the folder shown:
+/// the one before it when it is the last that opened, otherwise (it could not be opened) the last.
+fn back_index(opened: &[String], shown: &str) -> Option<usize> {
+    match opened.last() {
+        Some(last) if last == shown => opened.len().checked_sub(2),
+        Some(_) => Some(opened.len() - 1),
+        None => None,
     }
 }
 
@@ -453,20 +481,71 @@ impl Terminals {
     /// SS-08: a folder on the terminal's host: `path` (absolute, or from the shell's folder), or with
     /// `None` the shell's folder, or the home folder when the shell has not said.
     pub async fn list_folder(&self, id: Uuid, path: Option<&str>) -> Result<FolderListing> {
+        self.open_folder(id, path, None).await
+    }
+
+    /// QL-09: like [`Terminals::list_folder`], with a relative `path` taken from `from`: the folder the
+    /// drawer shows, even one that could not be opened. A folder that can't be listed comes back with
+    /// its path and the reason ([`FolderListing::error`]) instead of failing, so the drawer can go on
+    /// from there. Errors are left for a terminal that can't reach its files at all.
+    pub async fn open_folder(&self, id: Uuid, path: Option<&str>, from: Option<&str>) -> Result<FolderListing> {
         let (control, files) = self.live(id)?;
         let home = home_of(&control, &files).await?;
-        let base = locks::lock(&control.folder)
+        let shell = locks::lock(&control.folder)
             .path
             .clone()
             .unwrap_or_else(|| home.clone());
-        let path = resolve(&base, &home, path.unwrap_or(&base));
-        let mut entries = files.list(&path).await?;
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(FolderListing {
+        let base = from.map_or_else(|| shell.clone(), |from| resolve("/", &home, from));
+        let path = resolve(&base, &home, path.unwrap_or(&shell));
+        Ok(self.listing(&control, &files, path).await)
+    }
+
+    /// QL-09: the drawer's Back from `from` (the folder it shows): the folder that opened before it,
+    /// or, when `from` could not be opened, the last one that did.
+    pub async fn folder_back(&self, id: Uuid, from: &str) -> Result<FolderListing> {
+        let (control, files) = self.live(id)?;
+        let target = {
+            let mut opened = locks::lock(&control.opened);
+            let at = back_index(&opened, from)
+                .ok_or_else(|| CoreError::InvalidInput("There is no folder to go back to.".into()))?;
+            opened.truncate(at + 1);
+            opened[at].clone()
+        };
+        Ok(self.listing(&control, &files, target).await)
+    }
+
+    /// Lists `path` (absolute), remembering it for Back when it opened.
+    async fn listing(&self, control: &Control, files: &Arc<dyn RemoteFiles>, path: String) -> FolderListing {
+        let (entries, error) = match files.list(&path).await {
+            Ok(mut entries) => {
+                entries.sort_by(|a, b| a.name.cmp(&b.name));
+                (entries, None)
+            }
+            Err(err) => (
+                Vec::new(),
+                Some(FolderError {
+                    code: err.code(),
+                    message: err.to_string(),
+                }),
+            ),
+        };
+        let back = {
+            let mut opened = locks::lock(&control.opened);
+            if error.is_none() && opened.last() != Some(&path) {
+                opened.push(path.clone());
+                if opened.len() > MAX_OPENED {
+                    opened.remove(0);
+                }
+            }
+            back_index(&opened, &path).map(|at| opened[at].clone())
+        };
+        FolderListing {
             parent: parent(&path),
             path,
             entries,
-        })
+            error,
+            back,
+        }
     }
 
     /// SS-08: what is at `path` (absolute, `~/...`, or from the shell's folder): for a file name

@@ -324,6 +324,7 @@ pub fn run() {
             clipboard::clipboard_read_text,
             files::files_folder,
             files::files_list,
+            files::files_back,
             files::files_look_up,
             files::files_pick_upload,
             files::files_upload,
