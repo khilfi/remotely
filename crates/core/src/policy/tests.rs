@@ -1942,6 +1942,240 @@ fn openssl_option_spellings_are_normalised() {
     );
 }
 
+// ---- BX-08 (0.4.0): finding files, iSCSI, time, copies -------------------------------------------
+
+#[test]
+fn find_lists_files_unless_an_action_deletes_runs_a_command_or_writes_a_file() {
+    reads_and_writes(
+        None,
+        &[
+            "find /etc -xdev -type d -iname '*ssh*'",
+            "sudo find / -xdev -type f -iname '*.conf' 2>/dev/null | head -50",
+            "sudo find /var -xdev -type f -size +100M -print0 2>/dev/null | sudo du -h --files0-from=- | sort -rh",
+            "find /etc -xdev -type f -mmin -60 -printf '%TY-%Tm-%Td %TH:%TM  %p\\n'",
+            "find /var/log -type f -mtime +30 -ls",
+            "find /srv -type f -print0",
+            "find . -name '*.log' -newer /tmp/mark",
+            "find -L /srv -maxdepth 2 -user alice",
+            "sudo find / -xdev -perm -4000 -type f",
+            "find /srv -type f | wc -l",
+        ],
+        &[
+            "find /tmp -name '*.tmp' -delete",
+            "find /var/log -mtime +30 -exec rm {} \\;",
+            "find /srv -type f -exec sha256sum {} +",
+            "find /srv -type d -execdir chmod 755 {} +",
+            "find /tmp -ok rm {} \\;",
+            "find /tmp -okdir rm {} \\;",
+            "find / -xdev -fprint /tmp/list",
+            "find / -xdev -fprint0 /tmp/list",
+            "find / -xdev -fprintf /tmp/list '%p\\n'",
+            "find / -xdev -fls /tmp/list",
+            // Quoted or escaped, the shell still hands find the same word.
+            "find /tmp -name x '-delete'",
+            "find /tmp -name x -del\\ete",
+            "find /tmp -name x \"-exec\" rm {} +",
+            // An expansion can become any action.
+            "find /tmp $ACTION",
+            "find /tmp -name x -o -delete",
+        ],
+    );
+    // The check is code, so a list the user saved with their own `find` entry gets it too.
+    reads_and_writes(
+        Some(&["find", "locate", "iscsiadm"]),
+        &["find /etc -name '*.conf'", "locate fstab", "iscsiadm -m session"],
+        &["find /tmp -delete", "locate -u", "iscsiadm -m node --login"],
+    );
+}
+
+#[test]
+fn locate_searches_the_database_and_rebuilding_it_writes() {
+    reads_and_writes(
+        None,
+        &[
+            "locate -i -l 50 sshd_config",
+            "locate -b '\\nginx.conf'",
+            "plocate -i nginx",
+            "locate -c '*.rpmnew'",
+            "locate -d /var/lib/plocate/plocate.db -i fstab",
+        ],
+        &[
+            "sudo updatedb",
+            // slocate's update options.
+            "locate -u",
+            "locate -U /srv",
+            "locate -iu nginx",
+            "locate --update",
+            "locate $PATTERN",
+        ],
+    );
+}
+
+#[test]
+fn iscsiadm_shows_sessions_and_records_and_writes_when_it_logs_in_discovers_or_changes() {
+    reads_and_writes(
+        None,
+        &[
+            "sudo iscsiadm -m session",
+            "sudo iscsiadm -m session -P 3",
+            "sudo iscsiadm -m session -P3",
+            "sudo iscsiadm -m session -r 1 -s",
+            "sudo iscsiadm -msession -P 1",
+            "sudo iscsiadm --mode session --print 3",
+            "sudo iscsiadm --mode=session --print=1",
+            "sudo iscsiadm -m node",
+            "sudo iscsiadm -m node -T iqn.2026-01.test.example:storage -p 192.0.2.10",
+            "sudo iscsiadm -m node -T iqn.2026-01.test.example:storage -p 192.0.2.10:3260 -o show",
+            "sudo iscsiadm -m node -o show",
+            "sudo iscsiadm -m node --op=show",
+            "sudo iscsiadm -m discovery",
+            "sudo iscsiadm -m discovery -P 1",
+            "sudo iscsiadm -m discovery -p 192.0.2.10",
+            "sudo iscsiadm -m discoverydb",
+            "sudo iscsiadm -m host",
+            "sudo iscsiadm -m host -P 1",
+            "iscsiadm -V",
+            "sudo iscsiadm -m session -P 3 | grep -i -e target -e 'attached scsi disk'",
+        ],
+        &[
+            // Logging in and out, one target or all.
+            "sudo iscsiadm -m node -T iqn.2026-01.test.example:storage -p 192.0.2.10 --login",
+            "sudo iscsiadm -m node -T iqn.2026-01.test.example:storage -p 192.0.2.10 -l",
+            "sudo iscsiadm -m node -T iqn.2026-01.test.example:storage -p 192.0.2.10 --logout",
+            "sudo iscsiadm -m node -u",
+            "sudo iscsiadm -m node --loginall=automatic",
+            "sudo iscsiadm -m node -L all",
+            "sudo iscsiadm -m session -U all",
+            "sudo iscsiadm -m session -r 1 -u",
+            // Discovery saves node records.
+            "sudo iscsiadm -m discovery -t sendtargets -p 192.0.2.10",
+            "sudo iscsiadm -m discovery -t st -p 192.0.2.10:3260",
+            "sudo iscsiadm -m discoverydb -t st -p 192.0.2.10 --discover",
+            "sudo iscsiadm -m discoverydb -t st -p 192.0.2.10 -D",
+            "sudo iscsiadm -m discovery -p 192.0.2.10 -D",
+            // Rescan, change or delete records, kill the daemon, show CHAP passwords.
+            "sudo iscsiadm -m session --rescan",
+            "sudo iscsiadm -m session -R",
+            "sudo iscsiadm -m node -T iqn.2026-01.test.example:storage -o update -n node.startup -v automatic",
+            "sudo iscsiadm -m node -o delete",
+            "sudo iscsiadm -m node -o new -T iqn.2026-01.test.example:storage -p 192.0.2.10",
+            "sudo iscsiadm -m node -o show -o delete",
+            "sudo iscsiadm -m node --op delete",
+            "sudo iscsiadm -m node --op=update",
+            "sudo iscsiadm -m node -odelete",
+            "sudo iscsiadm -m node -o nonpersistent",
+            "sudo iscsiadm -k 0",
+            "sudo iscsiadm -m node -S",
+            "sudo iscsiadm -m node --show",
+            "sudo iscsiadm -m node -o show -S",
+            // Clustered, attached or abbreviated.
+            "sudo iscsiadm -m node -sl",
+            "sudo iscsiadm -m node --log",
+            "sudo iscsiadm -m node --login",
+            "sudo iscsiadm -m session --r 1",
+            "sudo iscsiadm -m node --s",
+            // Modes that write or log in.
+            "sudo iscsiadm -m iface",
+            "sudo iscsiadm -m iface -I iface0 -o new",
+            "sudo iscsiadm -m fw",
+            "sudo iscsiadm -m fw -l",
+            "sudo iscsiadm -m session -m fw",
+            "sudo iscsiadm --mode=fw",
+            "sudo iscsiadm -m host -H 1 -C chap -o delete",
+            // Operands and expansions.
+            "sudo iscsiadm -m session extra",
+            "sudo iscsiadm -m $MODE",
+            "sudo iscsiadm -m node -o $OP",
+        ],
+    );
+}
+
+#[test]
+fn chronyd_only_reads_when_it_prints_its_configuration() {
+    reads_and_writes(
+        None,
+        &[
+            "sudo chronyd -p",
+            "sudo chronyd -p -f /etc/chrony.conf",
+            "sudo chronyd -p -f/etc/chrony/chrony.conf",
+            "chronyd -p 2>&1 | head -80",
+        ],
+        &[
+            "sudo chronyd",
+            "sudo chronyd -q",
+            "sudo chronyd -q 'server 192.0.2.123 iburst'",
+            "sudo chronyd -Q",
+            "sudo chronyd -d",
+            "sudo chronyd -p -q",
+            "sudo chronyd -pq",
+            "sudo chronyd -p -l /tmp/chrony.log",
+            "sudo chronyd -p -l/tmp/chrony.log",
+            "sudo chronyd -p -s",
+            "sudo chronyd -p 'server 192.0.2.123'",
+            "sudo chronyd -p --version",
+            "sudo chronyd -p -f $CONF",
+        ],
+    );
+}
+
+#[test]
+fn the_0_4_library_time_disk_and_copy_commands_read_or_write() {
+    reads_and_writes(
+        None,
+        &[
+            // Time and its daemons.
+            "timedatectl show-timesync --all",
+            "timedatectl timesync-status",
+            "timedatectl list-timezones | grep -i europe",
+            "systemctl status systemd-timesyncd --no-pager",
+            "systemctl list-units --all --no-pager --type=service 'chrony*' 'systemd-timesyncd*' 'ntp*'",
+            "systemd-analyze cat-config systemd/timesyncd.conf --no-pager",
+            "grep -sHv -e '^[[:space:]]*#' -e '^[[:space:]]*$' /etc/chrony.conf /etc/chrony/chrony.conf",
+            // fstab, disks and volumes.
+            "sudo findmnt --verify --verbose",
+            "findmnt --fstab --evaluate",
+            "sudo blkid /dev/sdb1",
+            "lsblk -o NAME,SIZE,TYPE,FSTYPE,UUID,MOUNTPOINT",
+            "lsblk -S -o NAME,HCTL,TRAN,VENDOR,MODEL,SIZE",
+            "sudo dmesg -T | grep -i -e 'attached scsi' -e 'capacity change' | tail -20",
+            "sudo lsof +f -- /data",
+            // Copies: sizes before, checksums after.
+            "du -sh /srv/data",
+            "sha256sum /srv/data/backup.tar",
+            "sudo cat /etc/iscsi/initiatorname.iscsi",
+        ],
+        &[
+            "sudo timedatectl set-timezone UTC",
+            "sudo timedatectl set-ntp false",
+            "sudo systemctl restart systemd-timesyncd",
+            "sudo chronyc reload sources",
+            "systemd-analyze log-level debug",
+            "systemd-analyze service-watchdogs off",
+            // Copies stay changes, dry runs included: -e, --rsync-path, --log-file and
+            // --write-batch can run programs or write files.
+            "scp -p /tmp/a.tar alice@host.test:/tmp/",
+            "scp -rp alice@host.test:/srv/data /tmp/",
+            "rsync -avh /srv/data/ alice@host.test:/srv/data/",
+            "rsync -avhn --delete /srv/data/ alice@host.test:/srv/data/",
+            "rsync --dry-run -avh /srv/data/ alice@host.test:/srv/data/",
+            "rsync -avhcn /srv/data/ alice@host.test:/srv/data/",
+            "rsync -n -e 'ssh -p 2222' /srv/data/ alice@host.test:/srv/data/",
+            // Disks: rescans, partitions, resizes and mounts.
+            "echo '- - -' | sudo tee /sys/class/scsi_host/host*/scan >/dev/null",
+            "echo 1 | sudo tee /sys/class/block/sdb/device/rescan",
+            "sudo rescan-scsi-bus.sh",
+            "sudo growpart -N /dev/sda 3",
+            "sudo growpart /dev/sda 3",
+            "sudo pvresize /dev/sda3",
+            "sudo parted -s /dev/sdb mklabel gpt mkpart primary 0% 100%",
+            "sudo mount -fav",
+            "sudo mount -a",
+            "sudo umount /data",
+            "sudo updatedb",
+        ],
+    );
+}
+
 // ---- SS-10: MultiExec lines ----------------------------------------------------------------------
 
 fn terminal(env: Environment) -> Target {

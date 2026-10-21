@@ -4007,6 +4007,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows",
  "zeroize",
 ]
 

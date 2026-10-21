@@ -108,9 +108,11 @@ crates/core/          remotely-core: all app logic
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
                       closed with the terminal, audited tunnel_opened and tunnel_closed
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
-                      library (library.rs: ~425 Linux commands in 25 area groups plus TROUBLESHOOT symptom runbooks
+                      library (library.rs: ~525 Linux commands in 30 area groups plus TROUBLESHOOT symptom runbooks
                       that reference them; two LibrarySections), {{variables}} (variables.rs); classified by the bus's
-                      policy engine (read-only additions in policy/commands.rs, writing forms in commands/writes.rs)
+                      policy engine (read-only additions in policy/commands.rs, writing forms in commands/writes.rs);
+                      QL-13 each entry's manual page (manual.rs: Manual, MANUAL_HOSTS, `checked` refuses any other
+                      address; opening one is not audited and the read-only lock allows it)
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only); SS-07 the first jump
                       host's for a session behind one, never the session itself
     bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
@@ -135,7 +137,8 @@ crates/core/          remotely-core: all app logic
                       chains and tunnels by hand
   tests/              end-to-end tests with fakes; opt-in workstation_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
-                      panel and notifications (command_panel.rs), clipboard read for right-click paste, SS-08 file
+                      panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
+                      (command_panel.rs), clipboard read for right-click paste, SS-08 file
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
                       SS-07 port forwards and tunnels (tunnels.rs)
 src/                  React + TypeScript UI

@@ -41,6 +41,11 @@ arboard = { version = "3", default-features = false }
 # QL-07: a Windows notification when a long command in a background tab finishes, shown from Rust.
 tauri-plugin-notification = "2"
 
+[target.'cfg(windows)'.dependencies]
+# QL-13: a library entry's manual page opens in the default browser (ShellExecuteW). The version the
+# core and Tauri already use.
+windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 # FD-14: the updater against a local fake GitHub, with a throwaway signing key, on Tauri's mock runtime.
 remotely-core = { workspace = true, features = ["fakes"] }
