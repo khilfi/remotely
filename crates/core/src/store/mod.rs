@@ -4,6 +4,7 @@
 //! Queries are checked at runtime, not with `query!`, so building needs no `DATABASE_URL`.
 
 mod audit;
+mod containers;
 mod favourites;
 mod forwards;
 mod inventory;

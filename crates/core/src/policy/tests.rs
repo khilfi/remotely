@@ -2624,6 +2624,9 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
             app,
         ),
     ]
+    .into_iter()
+    .chain(every_container_command())
+    .collect()
 }
 
 #[test]
@@ -2679,4 +2682,343 @@ fn the_read_only_lock_refuses_every_edit_of_the_apps_data() {
         assert!(err.to_string().contains(change.label()), "{err}");
         assert!(read_only_edit_refusal(false, change).is_ok());
     }
+}
+
+// ---- CT-01, CT-02: containers -------------------------------------------------------------------
+
+use crate::adapters::containers::{ContainerId, EngineKind, ImageId, PruneWhat, VolumeName};
+use crate::command_bus::ContainerOp;
+use crate::domain::{ContainerHost, ContainerObject};
+
+fn container_host(env: Environment) -> (ContainerHost, Environment) {
+    (
+        ContainerHost::Session {
+            session_id: Uuid::new_v4(),
+        },
+        env,
+    )
+}
+
+fn object_target(host: (ContainerHost, Environment), engine: EngineKind, object: ContainerObject) -> Target {
+    Target {
+        name: format!("{} on host", object.kind()),
+        target: TargetRef::Container {
+            host: host.0,
+            engine,
+            object,
+        },
+        environment: host.1,
+        protected: false,
+    }
+}
+
+/// `n` containers on one host labelled `env`.
+fn containers(n: usize, env: Environment) -> Vec<Target> {
+    let host = container_host(env);
+    (0..n)
+        .map(|i| {
+            let id = ContainerId::parse(&format!("{i:012x}{}", "0".repeat(52))).expect("hex");
+            object_target(host, EngineKind::Docker, ContainerObject::Container { id })
+        })
+        .collect()
+}
+
+fn image_target(env: Environment) -> Target {
+    let id = ImageId::parse(&format!("sha256:{}", "ab".repeat(32))).expect("hex");
+    object_target(container_host(env), EngineKind::Docker, ContainerObject::Image { id })
+}
+
+fn volume_target(env: Environment) -> Target {
+    let name = VolumeName::parse("pgdata").expect("name");
+    object_target(
+        container_host(env),
+        EngineKind::Docker,
+        ContainerObject::Volume { name },
+    )
+}
+
+fn engine_target(env: Environment, engine: EngineKind) -> Target {
+    object_target(container_host(env), engine, ContainerObject::Engine)
+}
+
+fn container(op: ContainerOp, targets: &[Target]) -> Command {
+    Command::Container {
+        targets: refs(targets),
+        op,
+    }
+}
+
+fn prune(what: PruneWhat) -> ContainerOp {
+    ContainerOp::Prune { what }
+}
+
+/// One container command of every kind, for the read-only lock test.
+fn every_container_command() -> Vec<(Command, Vec<Target>)> {
+    let one = containers(1, Environment::Lab);
+    let image = vec![image_target(Environment::Lab)];
+    let volume = vec![volume_target(Environment::Lab)];
+    let docker = vec![engine_target(Environment::Lab, EngineKind::Docker)];
+    let mut out: Vec<(Command, Vec<Target>)> = [
+        ContainerOp::Start,
+        ContainerOp::Unpause,
+        ContainerOp::Pause,
+        ContainerOp::Restart,
+        ContainerOp::Stop,
+        ContainerOp::Remove { force: false },
+    ]
+    .into_iter()
+    .map(|op| (container(op, &one), one.clone()))
+    .collect();
+    out.push((container(ContainerOp::RemoveImage, &image), image.clone()));
+    out.push((container(ContainerOp::RemoveVolume, &volume), volume.clone()));
+    out.push((
+        container(
+            ContainerOp::Pull {
+                reference: "nginx:1.27".into(),
+            },
+            &docker,
+        ),
+        docker.clone(),
+    ));
+    for what in [
+        PruneWhat::Containers,
+        PruneWhat::Images,
+        PruneWhat::BuildCache,
+        PruneWhat::Volumes,
+    ] {
+        out.push((container(prune(what), &docker), docker.clone()));
+    }
+    out
+}
+
+#[test]
+fn starting_or_unpausing_containers_is_low_at_any_count() {
+    for n in [1, 2, 20] {
+        let t = containers(n, Environment::Lab);
+        assert_eq!(tier(container(ContainerOp::Start, &t), &t), Tier::Low, "start {n}");
+        assert_eq!(tier(container(ContainerOp::Unpause, &t), &t), Tier::Low, "unpause {n}");
+    }
+}
+
+#[test]
+fn stopping_restarting_or_pausing_one_container_is_medium_and_two_or_more_high() {
+    for op in [ContainerOp::Stop, ContainerOp::Restart, ContainerOp::Pause] {
+        let one = containers(1, Environment::Lab);
+        assert_eq!(tier(container(op.clone(), &one), &one), Tier::Medium, "{op:?} on 1");
+        let d = engine().evaluate(&container(op.clone(), &one), &one);
+        assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+        for n in [2, 5] {
+            let many = containers(n, Environment::Lab);
+            assert_eq!(tier(container(op.clone(), &many), &many), Tier::High, "{op:?} on {n}");
+        }
+    }
+}
+
+#[test]
+fn removing_containers_or_images_is_high() {
+    for t in [containers(1, Environment::Lab), containers(3, Environment::Lab)] {
+        for force in [false, true] {
+            assert_eq!(tier(container(ContainerOp::Remove { force }, &t), &t), Tier::High);
+        }
+    }
+    let image = vec![image_target(Environment::None)];
+    let d = engine().evaluate(&container(ContainerOp::RemoveImage, &image), &image);
+    assert_eq!(d.tier, Tier::High);
+    assert_eq!(d.action, ActionKind::ImageRemove);
+    assert!(d.steps.contains(&ApprovalStep::TypeTargetCount { expected: 1 }));
+    assert!(d.steps.contains(&ApprovalStep::Reason));
+    assert!(!d.steps.contains(&ApprovalStep::VaultReauth));
+    assert!(
+        !d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })),
+        "no safety snapshot for containers"
+    );
+}
+
+#[test]
+fn a_forced_remove_says_running_containers_are_killed() {
+    let t = containers(1, Environment::Lab);
+    let d = engine().evaluate(&container(ContainerOp::Remove { force: true }, &t), &t);
+    assert!(d.reasons.iter().any(|r| r.contains("killed first")), "{:?}", d.reasons);
+}
+
+#[test]
+fn pruning_containers_images_or_the_build_cache_is_high() {
+    for what in [PruneWhat::Containers, PruneWhat::Images, PruneWhat::BuildCache] {
+        let t = vec![engine_target(Environment::Lab, EngineKind::Docker)];
+        assert_eq!(tier(container(prune(what), &t), &t), Tier::High, "{what:?}");
+    }
+}
+
+#[test]
+fn removing_volumes_or_pruning_them_deletes_data_so_it_is_critical() {
+    let volume = vec![volume_target(Environment::Lab)];
+    let d = engine().evaluate(&container(ContainerOp::RemoveVolume, &volume), &volume);
+    assert_eq!(d.tier, Tier::Critical);
+    assert_eq!(d.action, ActionKind::VolumeRemove);
+    assert!(d.steps.contains(&ApprovalStep::VaultReauth));
+    assert!(
+        d.reasons.iter().any(|r| r.contains("data is deleted")),
+        "{:?}",
+        d.reasons
+    );
+    let docker = vec![engine_target(Environment::Lab, EngineKind::Docker)];
+    let d = engine().evaluate(&container(prune(PruneWhat::Volumes), &docker), &docker);
+    assert_eq!(d.tier, Tier::Critical);
+    assert_eq!(d.action, ActionKind::PruneVolumes);
+    assert!(d.steps.contains(&ApprovalStep::VaultReauth));
+}
+
+#[test]
+fn pulling_an_image_is_low() {
+    let t = vec![engine_target(Environment::Lab, EngineKind::Podman)];
+    let pull = ContainerOp::Pull {
+        reference: "registry.example.com/team/app:2.1".into(),
+    };
+    assert_eq!(tier(container(pull, &t), &t), Tier::Low);
+}
+
+#[test]
+fn a_prod_container_host_raises_container_actions_one_tier() {
+    let one = containers(1, Environment::Prod);
+    assert_eq!(tier(container(ContainerOp::Start, &one), &one), Tier::Medium);
+    assert_eq!(tier(container(ContainerOp::Stop, &one), &one), Tier::High);
+    let two = containers(2, Environment::Prod);
+    assert_eq!(tier(container(ContainerOp::Restart, &two), &two), Tier::Critical);
+    assert_eq!(
+        tier(container(ContainerOp::Remove { force: false }, &one), &one),
+        Tier::Critical
+    );
+    let image = vec![image_target(Environment::Prod)];
+    assert_eq!(
+        tier(container(ContainerOp::RemoveImage, &image), &image),
+        Tier::Critical
+    );
+    let volume = vec![volume_target(Environment::Prod)];
+    assert_eq!(
+        tier(container(ContainerOp::RemoveVolume, &volume), &volume),
+        Tier::Critical,
+        "Critical stays Critical"
+    );
+    let docker = vec![engine_target(Environment::Prod, EngineKind::Docker)];
+    let pull = ContainerOp::Pull {
+        reference: "nginx".into(),
+    };
+    assert_eq!(tier(container(pull, &docker), &docker), Tier::Medium);
+    let d = engine().evaluate(&container(ContainerOp::Stop, &one), &one);
+    assert!(d.reasons.iter().any(|r| r.contains("Prod")), "{:?}", d.reasons);
+}
+
+#[test]
+fn containers_on_a_protected_host_are_skipped() {
+    let mut t = containers(3, Environment::Lab);
+    t[0].protected = true;
+    let d = engine().evaluate(&container(ContainerOp::Stop, &t), &t);
+    assert_eq!(d.targets.len(), 2);
+    assert_eq!(d.skipped.len(), 1);
+    assert_eq!(d.tier, Tier::High, "2 left: still bulk");
+    t[1].protected = true;
+    let d = engine().evaluate(&container(ContainerOp::Stop, &t), &t);
+    assert_eq!(d.targets.len(), 1);
+    assert_eq!(d.tier, Tier::Medium, "1 left");
+}
+
+#[test]
+fn container_commands_check_their_targets_and_references() {
+    let one = containers(1, Environment::Lab);
+    assert!(container(ContainerOp::Stop, &one).validate().is_ok());
+    // An op on the wrong kind of object.
+    let image = vec![image_target(Environment::Lab)];
+    assert!(container(ContainerOp::Stop, &image).validate().is_err());
+    assert!(container(ContainerOp::RemoveVolume, &one).validate().is_err());
+    let docker = vec![engine_target(Environment::Lab, EngineKind::Docker)];
+    assert!(container(ContainerOp::Start, &docker).validate().is_err());
+    // Not a container target at all.
+    let vms = vms(1);
+    assert!(container(ContainerOp::Start, &vms).validate().is_err());
+    // The same target twice.
+    let twice = vec![one[0].clone(), one[0].clone()];
+    assert!(container(ContainerOp::Start, &twice).validate().is_err());
+    // Image references follow the grammar.
+    for bad in ["", "Nginx", "nginx;reboot", "-q", "nginx latest", "$(id)"] {
+        let pull = ContainerOp::Pull { reference: bad.into() };
+        assert!(container(pull, &docker).validate().is_err(), "{bad:?}");
+    }
+    // Podman has no build cache; this PC runs Docker only.
+    let podman = vec![engine_target(Environment::Lab, EngineKind::Podman)];
+    assert!(container(prune(PruneWhat::BuildCache), &podman).validate().is_err());
+    assert!(container(prune(PruneWhat::Images), &podman).validate().is_ok());
+    let this_pc_podman = vec![object_target(
+        (ContainerHost::ThisPc, Environment::None),
+        EngineKind::Podman,
+        ContainerObject::Engine,
+    )];
+    assert!(container(prune(PruneWhat::Images), &this_pc_podman).validate().is_err());
+}
+
+#[test]
+fn container_ids_never_parse_from_hostile_text() {
+    let json = r#"{"kind":"container","host":{"kind":"thisPc"},"engine":"docker","object":{"kind":"container","id":"abc; reboot"}}"#;
+    assert!(serde_json::from_str::<TargetRef>(json).is_err());
+    let json = r#"{"kind":"container","host":{"kind":"thisPc"},"engine":"docker","object":{"kind":"volume","name":"$(reboot)"}}"#;
+    assert!(serde_json::from_str::<TargetRef>(json).is_err());
+    let good = format!(
+        r#"{{"kind":"container","host":{{"kind":"thisPc"}},"engine":"docker","object":{{"kind":"container","id":"{}"}}}}"#,
+        "a".repeat(64)
+    );
+    let target: TargetRef = serde_json::from_str(&good).expect("hex id");
+    assert_eq!(TargetRef::container_from_key(&target.key()), Some(target.clone()));
+}
+
+#[test]
+fn container_summaries_name_what_they_do() {
+    let one = containers(1, Environment::Lab);
+    assert_eq!(container(ContainerOp::Stop, &one).summary(1), "Stop 1 container");
+    assert_eq!(
+        container(ContainerOp::Remove { force: true }, &one).summary(3),
+        "Force-remove 3 containers"
+    );
+    assert_eq!(
+        container(ContainerOp::RemoveVolume, &one).summary(1),
+        "Remove 1 volume and its data"
+    );
+    let docker = vec![engine_target(Environment::Lab, EngineKind::Docker)];
+    assert_eq!(
+        container(prune(PruneWhat::Volumes), &docker).summary(2),
+        "Prune unused volumes on 2 hosts"
+    );
+    let pull = ContainerOp::Pull {
+        reference: " nginx:1.27 ".into(),
+    };
+    assert_eq!(container(pull, &docker).summary(1), "Pull nginx:1.27 on 1 host");
+}
+
+#[test]
+fn container_actions_never_offer_a_safety_snapshot() {
+    for (command, _) in every_container_command() {
+        assert!(!safety_snapshot_applies(&command), "{command:?}");
+    }
+}
+
+#[test]
+fn container_tiers_are_editable_like_any_other() {
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(ActionKind::ContainerStop, TierRule::same(Tier::Low));
+    let lenient = PolicyEngine::new(rules).expect("valid");
+    let two = containers(2, Environment::Lab);
+    assert_eq!(
+        lenient.evaluate(&container(ContainerOp::Stop, &two), &two).tier,
+        Tier::Low
+    );
+    // Saved rules from before 0.4.0 get the container defaults.
+    let mut old = PolicyRules::default();
+    for kind in [
+        ActionKind::ContainerStart,
+        ActionKind::VolumeRemove,
+        ActionKind::PruneVolumes,
+    ] {
+        old.tiers.remove(&kind);
+    }
+    old.fill_missing_tiers();
+    assert_eq!(old.tiers[&ActionKind::VolumeRemove], TierRule::same(Tier::Critical));
+    assert!(PolicyEngine::new(old).is_ok());
 }

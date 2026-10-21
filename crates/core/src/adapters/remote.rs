@@ -245,6 +245,10 @@ pub struct ConnectRequest<'a> {
 pub trait ExecSession: Send + Sync {
     /// Runs a command and collects its output, at most `max_output` bytes per stream.
     async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult>;
+    /// CT-01: runs a command under sudo with `password` on its stdin, as [`RemoteAdapter::exec`] does for bulk runs
+    /// (BX-07): never echoed, logged or returned, and scrubbed from the output. [`CoreError::SudoPasswordRefused`]
+    /// when sudo did not take it.
+    async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult>;
     /// The connection dropped (or was closed); connect again for the next command.
     fn is_closed(&self) -> bool;
     async fn close(&self);
@@ -572,6 +576,31 @@ impl ExecSession for RusshSession {
             script,
             None,
             &self.secrets,
+            max_output,
+        )
+        .await?;
+        Ok(ExecResult {
+            exit_code,
+            signal,
+            output,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+
+    async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult> {
+        if self.connected.handle.is_closed() {
+            let reason = self.connected.lost_reason().await;
+            return Err(CoreError::Ssh(format!("the connection was lost: {reason}")));
+        }
+        let started = std::time::Instant::now();
+        let mut secrets = self.secrets.clone();
+        secrets.push(password.clone());
+        let (exit_code, signal, output) = run_command(
+            &self.connected.handle,
+            &self.connected.shared,
+            script,
+            Some(password),
+            &secrets,
             max_output,
         )
         .await?;

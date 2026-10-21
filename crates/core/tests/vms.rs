@@ -551,6 +551,7 @@ async fn the_power_on_limit_is_a_saved_setting() {
             host_counters: Arc::new(FakeHostCounters::default()),
             updater: Arc::new(FakeUpdater::default()),
             network: Arc::new(FakeNetwork::default()),
+            containers: Arc::new(remotely_core::fakes::FakeContainers::default()),
         },
         JobLimits::default(),
     )

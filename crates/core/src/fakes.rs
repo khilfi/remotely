@@ -4,6 +4,7 @@
 //! Compiled for the crate's own unit tests and, through the `fakes` feature, for the integration
 //! tests in `tests/`. The app never enables that feature.
 
+pub mod containers;
 pub mod github_server;
 pub mod ssh_server;
 
@@ -447,6 +448,8 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
     found
 }
 
+pub use containers::FakeContainers;
+
 /// Remote hosts that answer every command with `ok from <host>` and exit code 0, unless a host is
 /// given another output, exit code, delay or failure. Records `<host>: <script>` (with ` [sudo]` for
 /// sudo runs); never records a password.
@@ -622,6 +625,19 @@ impl ExecSession for FakeSession {
             exit_code: Some(self.exit_code),
             signal: None,
             output: OutputCollector::collect(self.stdout.as_bytes(), b"", &[], max_output),
+            duration_ms: 1,
+        })
+    }
+
+    async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult> {
+        if self.is_closed() {
+            return Err(CoreError::Ssh("the connection was lost: the connection was cut".into()));
+        }
+        locks::lock(&self.calls).push(format!("{}: {script} [sudo]", self.host));
+        Ok(ExecResult {
+            exit_code: Some(self.exit_code),
+            signal: None,
+            output: OutputCollector::collect(self.stdout.as_bytes(), b"", &[password], max_output),
             duration_ms: 1,
         })
     }

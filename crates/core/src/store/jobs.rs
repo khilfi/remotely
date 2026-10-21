@@ -125,6 +125,7 @@ impl JobTargetRecord {
                     terminal_id,
                     session_id: None,
                 }),
+            "container" => TargetRef::container_from_key(&self.target_key),
             _ => None,
         }
     }

@@ -221,6 +221,41 @@ pub enum CoreError {
 
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
+
+    /// CT-01, CT-02: a container CLI could not do what was asked. The message says why in words and
+    /// never holds a secret, a log line or an environment value.
+    #[error("{message}")]
+    Container { problem: ContainerProblem, message: String },
+}
+
+/// CT-01, CT-02: why a container CLI failed, for the UI to offer what helps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerProblem {
+    /// No `docker` or `podman` on the host (or no docker.exe on this PC).
+    CliMissing,
+    /// The daemon refused the user: not in the `docker` group, so it needs sudo.
+    NeedsSudo,
+    /// The daemon is not running (or Docker Desktop is not started).
+    DaemonDown,
+    /// No such container, image or volume (any more).
+    NotFound,
+    /// The CLI printed something Remotely can't read.
+    Unreadable,
+    /// Anything else the CLI reported.
+    Failed,
+}
+
+impl ContainerProblem {
+    pub fn code(self) -> &'static str {
+        match self {
+            ContainerProblem::CliMissing => "container_cli_missing",
+            ContainerProblem::NeedsSudo => "container_needs_sudo",
+            ContainerProblem::DaemonDown => "container_daemon_down",
+            ContainerProblem::NotFound => "container_not_found",
+            ContainerProblem::Unreadable => "container_unreadable",
+            ContainerProblem::Failed => "container_failed",
+        }
+    }
 }
 
 impl CoreError {
@@ -276,6 +311,7 @@ impl CoreError {
             CoreError::Sftp(_) => "sftp",
             CoreError::ReadOnlyLock { .. } => "read_only_lock",
             CoreError::NotImplemented(_) => "not_implemented",
+            CoreError::Container { problem, .. } => problem.code(),
         }
     }
 }

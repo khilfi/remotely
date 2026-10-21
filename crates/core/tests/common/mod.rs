@@ -7,12 +7,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use remotely_core::adapters::containers::cli::CliEngines;
+use remotely_core::adapters::containers::ContainerEngines;
 use remotely_core::adapters::network::NetworkAdapter;
 use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
 use remotely_core::adapters::updater::UpdaterAdapter;
 use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{
-    FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault, FakeVmware,
+    FakeContainers, FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault, FakeVmware,
 };
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
 use remotely_core::policy::PolicyRules;
@@ -38,6 +40,9 @@ pub struct Setup {
     /// DNS (QL-01, QL-03) and QL-04 probes: a [`FakeNetwork`] that resolves no name and reaches no
     /// port unless a test adds them; no real lookups unless a test asks for them.
     pub network: Arc<dyn NetworkAdapter>,
+    /// CT-01, CT-02: [`FakeContainers`] with no host, or the real CLIs over SSH ([`Setup::with_ssh`]),
+    /// which never look for this PC's Docker.
+    pub containers: Arc<dyn ContainerEngines>,
 }
 
 impl Setup {
@@ -54,7 +59,14 @@ impl Setup {
             remote: Arc::new(FakeRemote::default()),
             updater: Arc::new(FakeUpdater::default()),
             network: Arc::new(FakeNetwork::default()),
+            containers: Arc::new(FakeContainers::default()),
         }
+    }
+
+    /// CT-01, CT-02: other container engines, e.g. [`FakeContainers`] with hosts.
+    pub fn with_containers(mut self, containers: Arc<dyn ContainerEngines>) -> Self {
+        self.containers = containers;
+        self
     }
 
     pub fn with_updater(mut self, updater: Arc<dyn UpdaterAdapter>) -> Self {
@@ -76,6 +88,7 @@ impl Setup {
     /// The real russh adapter, for tests against `fakes::ssh_server::TestSshServer` on 127.0.0.1.
     pub fn with_ssh(mut self) -> Self {
         self.remote = Arc::new(RusshAdapter::new());
+        self.containers = Arc::new(CliEngines::without_this_pc());
         self
     }
 
@@ -115,6 +128,7 @@ impl Setup {
             host_counters: Arc::new(self.host),
             updater: self.updater,
             network: self.network,
+            containers: self.containers,
         };
         Core::assemble(store, ctx, adapters, JobLimits::default())
             .await

@@ -12,9 +12,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::adapters::containers::{EngineKind, ImageRef, PruneWhat};
 use crate::adapters::remote::forward::ForwardKind;
 use crate::capacity::CapacityChecker;
-use crate::domain::{now_rfc3339, Context, Target, TargetRef};
+use crate::domain::{now_rfc3339, ContainerHost, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
 use crate::forwards::PortForward;
@@ -109,6 +110,109 @@ pub enum Command {
         /// The forward as saved when it was asked for: what is approved is what opens.
         forward: PortForward,
     },
+    /// CT-01, CT-02: start, stop, restart, pause, unpause or remove containers, remove images or volumes,
+    /// pull an image or prune, on container hosts ([`crate::containers`]). Every target is a
+    /// [`TargetRef::Container`] whose object fits the op: containers for the container ops, images,
+    /// volumes, or the engine itself for a pull or a prune (one per host).
+    Container { targets: Vec<TargetRef>, op: ContainerOp },
+}
+
+/// CT-01, CT-02: what a [`Command::Container`] does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ContainerOp {
+    Start,
+    Stop,
+    Restart,
+    Pause,
+    Unpause,
+    /// `force`: a running container is killed first (`rm -f`).
+    Remove {
+        #[serde(default)]
+        force: bool,
+    },
+    RemoveImage,
+    /// Deletes the volume and every file in it.
+    RemoveVolume,
+    /// Pulls an image reference, checked against the reference grammar.
+    Pull {
+        reference: String,
+    },
+    Prune {
+        what: PruneWhat,
+    },
+}
+
+impl ContainerOp {
+    /// "Start", "Remove the volume"... for messages.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ContainerOp::Start => "Start",
+            ContainerOp::Stop => "Stop",
+            ContainerOp::Restart => "Restart",
+            ContainerOp::Pause => "Pause",
+            ContainerOp::Unpause => "Unpause",
+            ContainerOp::Remove { force: false } => "Remove",
+            ContainerOp::Remove { force: true } => "Force-remove",
+            ContainerOp::RemoveImage => "Remove the image",
+            ContainerOp::RemoveVolume => "Remove the volume",
+            ContainerOp::Pull { .. } => "Pull",
+            ContainerOp::Prune { .. } => "Prune",
+        }
+    }
+
+    /// What its targets are: `container`, `image`, `volume` or `engine` ([`crate::domain::ContainerObject::kind`]).
+    pub fn object_kind(&self) -> &'static str {
+        match self {
+            ContainerOp::Start
+            | ContainerOp::Stop
+            | ContainerOp::Restart
+            | ContainerOp::Pause
+            | ContainerOp::Unpause
+            | ContainerOp::Remove { .. } => "container",
+            ContainerOp::RemoveImage => "image",
+            ContainerOp::RemoveVolume => "volume",
+            ContainerOp::Pull { .. } | ContainerOp::Prune { .. } => "engine",
+        }
+    }
+}
+
+/// CT-01, CT-02: every target a container object of the kind the op acts on, each once; this PC only
+/// with Docker; an image reference that passes the grammar.
+fn validate_container(targets: &[TargetRef], op: &ContainerOp) -> Result<()> {
+    let invalid = |message: String| Err(CoreError::InvalidInput(message));
+    let wanted = op.object_kind();
+    let mut keys = std::collections::HashSet::new();
+    for target in targets {
+        let TargetRef::Container { host, engine, object } = target else {
+            return invalid(
+                "Container actions go to containers, images, volumes or engines on container hosts.".into(),
+            );
+        };
+        if object.kind() != wanted {
+            return invalid(format!("{} acts on {wanted}s, not on a {}.", op.label(), object.kind()));
+        }
+        if *host == ContainerHost::ThisPc && *engine != EngineKind::Docker {
+            return invalid("Only Docker Desktop runs on this PC.".into());
+        }
+        if *engine == EngineKind::Podman
+            && *op
+                == (ContainerOp::Prune {
+                    what: PruneWhat::BuildCache,
+                })
+        {
+            return invalid(
+                "Podman keeps no build cache of its own: its build layers are images (prune those).".into(),
+            );
+        }
+        if !keys.insert(target.key()) {
+            return invalid("A target is listed twice.".into());
+        }
+    }
+    if let ContainerOp::Pull { reference } = op {
+        ImageRef::parse(reference)?;
+    }
+    Ok(())
 }
 
 /// SS-08: one file of a [`Command::FileUpload`].
@@ -363,6 +467,7 @@ impl Command {
             }
             Command::FileUpload { targets, folder, files } => validate_upload(targets, folder, files),
             Command::OpenTunnel { targets, .. } => validate_tunnel(targets),
+            Command::Container { targets, op } => validate_container(targets, op),
             _ => Ok(()),
         }
     }
@@ -376,7 +481,8 @@ impl Command {
             | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. }
             | Command::PushSshKey { targets, .. }
-            | Command::FileUpload { targets, .. } => *targets = new,
+            | Command::FileUpload { targets, .. }
+            | Command::Container { targets, .. } => *targets = new,
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal.
             Command::AppUpdate { .. } | Command::TerminalLine { .. } | Command::OpenTunnel { .. } => return None,
@@ -393,7 +499,8 @@ impl Command {
             | Command::PushSshKey { targets, .. }
             | Command::TerminalLine { targets, .. }
             | Command::FileUpload { targets, .. }
-            | Command::OpenTunnel { targets, .. } => targets,
+            | Command::OpenTunnel { targets, .. }
+            | Command::Container { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -471,6 +578,20 @@ impl Command {
                 format!("Upload {what} to {folder}{replacing}")
             }
             Command::OpenTunnel { forward, .. } => format!("Open a tunnel: {}", forward.describe()),
+            Command::Container { op, .. } => match op {
+                ContainerOp::Pull { reference } => {
+                    let reference =
+                        ImageRef::parse(reference).map_or_else(|_| "an image".to_owned(), |r| r.to_string());
+                    format!("Pull {reference} on {}", noun("host"))
+                }
+                ContainerOp::Prune { what } => format!("Prune {} on {}", what.label(), noun("host")),
+                ContainerOp::RemoveImage => format!("Remove {}", noun("image")),
+                ContainerOp::RemoveVolume => {
+                    let what = if target_count == 1 { "its" } else { "their" };
+                    format!("Remove {} and {what} data", noun("volume"))
+                }
+                other => format!("{} {}", other.label(), noun("container")),
+            },
         }
     }
 }
@@ -993,7 +1114,7 @@ impl CommandBus {
             skipped: decision.skipped.clone(),
             reasons: decision.reasons.clone(),
             warnings: decision.warnings.clone(),
-            impact: self.impact.preview(ctx, &decision.targets).await,
+            impact: self.impact.preview_for(ctx, &command, &decision.targets).await,
             exec: self.exec_details(ctx, &command, retry_of).await?,
             upload: UploadDetails::of(&command),
             tunnel: TunnelDetails::of(&command),

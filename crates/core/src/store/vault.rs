@@ -226,6 +226,17 @@ impl Store {
         row.as_ref().map(kind_of).transpose()
     }
 
+    /// CT-01: a secret's label (never its value), if there is one with that id.
+    pub(crate) async fn vault_item_label(&self, ctx: &Context, id: SecretId) -> Result<Option<String>> {
+        Ok(
+            sqlx::query_scalar("SELECT label FROM vault_items WHERE workspace_id = ? AND id = ?")
+                .bind(ctx.workspace_id.to_string())
+                .bind(id.0.to_string())
+                .fetch_optional(&self.pool)
+                .await?,
+        )
+    }
+
     /// A new value for a secret. The public half saved for a private key (SS-09) no longer matches,
     /// so it is dropped and read again from the new key when needed.
     pub(crate) async fn update_vault_item_cipher(

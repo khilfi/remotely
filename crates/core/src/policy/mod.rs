@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::adapters::containers::PruneWhat;
 use crate::adapters::remote::forward::ForwardKind;
-use crate::command_bus::{Command, PowerOp, SnapshotOp, StopMode};
+use crate::command_bus::{Command, ContainerOp, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::presentation::Change;
@@ -99,11 +100,37 @@ pub enum ActionKind {
     /// Open a tunnel that listens on a network address, so other computers can use it (SS-07). Never
     /// below Medium.
     TunnelShared,
+    // CT-01, CT-02: containers, images and volumes on container hosts. The PRD's VM rules applied to
+    // containers: starting is Low, stopping, restarting or pausing is Medium for one and High for more,
+    // removing and pruning are High, and removing volumes (their data with them) is Critical.
+    /// Start containers.
+    ContainerStart,
+    /// Unpause containers (like unpausing a VM).
+    ContainerUnpause,
+    /// Pause containers: their processes freeze.
+    ContainerPause,
+    ContainerRestart,
+    ContainerStop,
+    /// Remove containers (force: running ones are killed first).
+    ContainerRemove,
+    /// Pull an image: adds or updates a tag; running containers keep their image.
+    ImagePull,
+    ImageRemove,
+    /// Remove volumes, which deletes their data.
+    VolumeRemove,
+    /// Prune stopped containers.
+    PruneContainers,
+    /// Prune dangling images.
+    PruneImages,
+    /// Prune Docker's build cache.
+    PruneBuildCache,
+    /// Prune volumes no container uses, which deletes their data.
+    PruneVolumes,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 23] = [
+    pub const ALL: [ActionKind; 36] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -126,6 +153,19 @@ impl ActionKind {
         ActionKind::TunnelLocal,
         ActionKind::TunnelRemote,
         ActionKind::TunnelShared,
+        ActionKind::ContainerStart,
+        ActionKind::ContainerUnpause,
+        ActionKind::ContainerPause,
+        ActionKind::ContainerRestart,
+        ActionKind::ContainerStop,
+        ActionKind::ContainerRemove,
+        ActionKind::ImagePull,
+        ActionKind::ImageRemove,
+        ActionKind::VolumeRemove,
+        ActionKind::PruneContainers,
+        ActionKind::PruneImages,
+        ActionKind::PruneBuildCache,
+        ActionKind::PruneVolumes,
         ActionKind::AppUpdate,
     ];
 
@@ -155,6 +195,19 @@ impl ActionKind {
             ActionKind::TunnelLocal => "Open a tunnel for this PC only",
             ActionKind::TunnelRemote => "Open a remote tunnel (the host listens)",
             ActionKind::TunnelShared => "Open a tunnel other computers can use",
+            ActionKind::ContainerStart => "Start containers",
+            ActionKind::ContainerUnpause => "Unpause containers",
+            ActionKind::ContainerPause => "Pause containers",
+            ActionKind::ContainerRestart => "Restart containers",
+            ActionKind::ContainerStop => "Stop containers",
+            ActionKind::ContainerRemove => "Remove containers",
+            ActionKind::ImagePull => "Pull an image",
+            ActionKind::ImageRemove => "Remove images",
+            ActionKind::VolumeRemove => "Remove volumes (deletes their data)",
+            ActionKind::PruneContainers => "Prune stopped containers",
+            ActionKind::PruneImages => "Prune unused images",
+            ActionKind::PruneBuildCache => "Prune the build cache",
+            ActionKind::PruneVolumes => "Prune unused volumes (deletes their data)",
         }
     }
 }
@@ -470,6 +523,40 @@ impl Default for PolicyRules {
             (TunnelLocal, TierRule::same(Low)),
             (TunnelRemote, TierRule::same(Medium)),
             (TunnelShared, TierRule::same(Medium)),
+            // CT-01, CT-02 (docs/plan-0.4.md, Q6): the VM rules applied to containers.
+            (ContainerStart, TierRule::same(Low)),
+            (ContainerUnpause, TierRule::same(Low)),
+            (
+                ContainerPause,
+                TierRule {
+                    single: Medium,
+                    bulk: High,
+                },
+            ),
+            (
+                ContainerRestart,
+                TierRule {
+                    single: Medium,
+                    bulk: High,
+                },
+            ),
+            (
+                ContainerStop,
+                TierRule {
+                    single: Medium,
+                    bulk: High,
+                },
+            ),
+            (ContainerRemove, TierRule::same(High)),
+            // Adds or moves a tag; nothing running changes, like starting.
+            (ImagePull, TierRule::same(Low)),
+            (ImageRemove, TierRule::same(High)),
+            // The data goes with the volume.
+            (VolumeRemove, TierRule::same(Critical)),
+            (PruneContainers, TierRule::same(High)),
+            (PruneImages, TierRule::same(High)),
+            (PruneBuildCache, TierRule::same(High)),
+            (PruneVolumes, TierRule::same(Critical)),
         ]);
         Self {
             tiers,
@@ -621,6 +708,23 @@ impl PolicyEngine {
             Command::OpenTunnel { forward, .. } if !forward.spec.loopback_only() => ActionKind::TunnelShared,
             Command::OpenTunnel { forward, .. } if forward.spec.kind == ForwardKind::Remote => ActionKind::TunnelRemote,
             Command::OpenTunnel { .. } => ActionKind::TunnelLocal,
+            Command::Container { op, .. } => match op {
+                ContainerOp::Start => ActionKind::ContainerStart,
+                ContainerOp::Unpause => ActionKind::ContainerUnpause,
+                ContainerOp::Pause => ActionKind::ContainerPause,
+                ContainerOp::Restart => ActionKind::ContainerRestart,
+                ContainerOp::Stop => ActionKind::ContainerStop,
+                ContainerOp::Remove { .. } => ActionKind::ContainerRemove,
+                ContainerOp::Pull { .. } => ActionKind::ImagePull,
+                ContainerOp::RemoveImage => ActionKind::ImageRemove,
+                ContainerOp::RemoveVolume => ActionKind::VolumeRemove,
+                ContainerOp::Prune { what } => match what {
+                    PruneWhat::Containers => ActionKind::PruneContainers,
+                    PruneWhat::Images => ActionKind::PruneImages,
+                    PruneWhat::BuildCache => ActionKind::PruneBuildCache,
+                    PruneWhat::Volumes => ActionKind::PruneVolumes,
+                },
+            },
         }
     }
 
@@ -677,6 +781,20 @@ impl PolicyEngine {
                     "{side} on {}, which other computers can reach",
                     forward.spec.listen_address()
                 ));
+            }
+        }
+
+        // CT-01: say what is lost, for the dialog and the audit log.
+        if let Command::Container { op, .. } = command {
+            match op {
+                ContainerOp::RemoveVolume
+                | ContainerOp::Prune {
+                    what: PruneWhat::Volumes,
+                } => reasons.push("the volumes' data is deleted with them".into()),
+                ContainerOp::Remove { force: true } => {
+                    reasons.push("forced: running containers are killed first".into());
+                }
+                _ => {}
             }
         }
 
@@ -786,7 +904,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::PushSshKey { .. }
         | Command::TerminalLine { .. }
         | Command::FileUpload { .. }
-        | Command::OpenTunnel { .. } => false,
+        | Command::OpenTunnel { .. }
+        | Command::Container { .. } => false,
     };
     on_vms && can_lose_state
 }
