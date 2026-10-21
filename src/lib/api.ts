@@ -997,6 +997,8 @@ export interface LibraryEntry {
   description: string;
   variables: CommandVariable[];
   risk: CommandRisk;
+  /** QL-13: the address of the command's official manual page. */
+  manual: string;
 }
 
 /** BX-08: a command's variables and risk, while it is typed. */
@@ -1953,6 +1955,11 @@ export const api = {
   commandInspect: (command: string) => invoke<CommandInfo>("command_inspect", { command }),
   /** BX-08: the command with its variables filled in, ready to paste. */
   commandFill: (command: string, values: Record<string, string>) => invoke<string>("command_fill", { command, values }),
+  /**
+   * QL-13: opens a library entry's manual page in the default browser. Rust refuses an address that isn't https on
+   * one of its documentation sites.
+   */
+  openManual: (url: string) => invoke<void>("open_manual", { url }),
   /**
    * QL-06: types a vault password or passphrase, then Enter, into the terminal when it shows a password prompt (or
    * with `force`). The value never reaches the UI. Fails with `no_password_prompt` at a shell prompt.

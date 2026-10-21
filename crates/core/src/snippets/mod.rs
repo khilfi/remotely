@@ -13,8 +13,12 @@
 //!   flow). P6's MultiExec sends the same filled line to several terminals through its own check.
 //!
 //! Nothing here touches a host, so it skips the command bus, like the session library.
+//!
+//! QL-13: every library entry carries a link to its official manual page ([`manual`]); the desktop
+//! shell opens one only after [`manual::checked`] allows its address.
 
 pub mod library;
+pub mod manual;
 pub mod variables;
 
 use std::collections::HashMap;
@@ -102,6 +106,8 @@ pub struct LibraryEntry {
     pub description: &'static str,
     pub variables: Vec<Variable>,
     pub risk: CommandRisk,
+    /// QL-13: the address of the command's official manual page.
+    pub manual: String,
 }
 
 /// Checked fields of a favourite.
@@ -389,6 +395,7 @@ impl Snippets {
             description: b.description,
             variables: variables::variables(b.command),
             risk: self.classify(b.command),
+            manual: b.manual.url(),
         };
         let find = |id: &str| LIBRARY.iter().find(|b| b.id == id);
         let mut out = Vec::new();

@@ -321,6 +321,7 @@ pub fn run() {
             command_panel::command_fill,
             command_panel::terminal_type_secret,
             command_panel::notify_command_finished,
+            command_panel::open_manual,
             clipboard::clipboard_read_text,
             files::files_folder,
             files::files_list,

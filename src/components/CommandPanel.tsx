@@ -2,7 +2,9 @@
 // (add, edit, reorder, delete); the Library holds common Linux commands, grouped, each with a short description. Every
 // command shows what the policy engine makes of it with the current rules (read-only, changes, dangerous). Click
 // pastes into the current terminal without pressing Enter; Shift+click also presses Enter. A command with
-// {{variables}} asks for them first. Any library entry can be copied into the favourites.
+// {{variables}} asks for them first. Any library entry can be copied into the favourites. QL-13: each library entry
+// has a "Manual" link that opens its official manual page in the default browser (through Rust, which only opens
+// documentation sites).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -54,6 +56,13 @@ const SECTION_KEY = "remotely.terminal.commandsSection";
 const OPEN_KEY = "remotely.terminal.commandsOpen";
 
 type Section = "favourites" | "library";
+
+/**
+ * Rows take the panel's width and cut their text, rather than growing to the longest command and pushing their Manual
+ * link and menu out of sight: Radix's scroll area lays its content out as a table (made a block here), and the lists
+ * are single-column grids whose column may shrink (grid-cols-1).
+ */
+const FIT_WIDTH = "[&_[data-slot=scroll-area-viewport]>div]:block!";
 
 /** QL-08: why a favourite can't move while the list is searched. */
 const MOVE_SEARCHING = "Clear the search to reorder";
@@ -209,6 +218,10 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
     if (!onSend(command, enter)) toast.info(`${targetName ?? "The terminal"} is not connected, so nothing was pasted.`);
   }
 
+  function openManual(entry: LibraryEntry) {
+    api.openManual(entry.manual).catch((err) => toast.error(errorMessage(err)));
+  }
+
   async function move(group: Group, item: Favourite, by: -1 | 1) {
     const ids = group.items.map((i) => i.key);
     const at = ids.indexOf(item.id);
@@ -252,7 +265,7 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
           </button>
         )}
         {(expanded || topLevel) && (
-          <ul className={cn("grid gap-0.5", !topLevel && "pl-3")}>
+          <ul className={cn("grid grid-cols-1 gap-0.5", !topLevel && "pl-3")}>
             {group.items.map((item, i) => (
               <CommandRow
                 key={item.key}
@@ -264,6 +277,7 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
                 onEdit={() => item.favourite && setEditing({ existing: item.favourite })}
                 onDelete={() => item.favourite && setDeleting(item.favourite)}
                 onMove={(by) => item.favourite && void move(group, item.favourite, by)}
+                onManual={() => item.library && openManual(item.library)}
                 onCopy={() =>
                   item.library &&
                   setEditing({
@@ -287,7 +301,7 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
   const librarySection = (label: string, hint: string, groups: Group[]) => {
     if (groups.length === 0) return null;
     return (
-      <div key={label} role="group" aria-label={label} className="grid gap-1">
+      <div key={label} role="group" aria-label={label} className="grid grid-cols-1 gap-1">
         <div className="flex items-baseline gap-2 px-1 pt-1">
           <span className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">{label}</span>
           <span className="truncate text-[11px] text-muted-foreground/70">{hint}</span>
@@ -347,7 +361,7 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
           </TabsTrigger>
         </TabsList>
         <TabsContent value="favourites" className="min-h-0">
-          <ScrollArea className="h-full pr-2">
+          <ScrollArea className={cn("h-full pr-2", FIT_WIDTH)}>
             {favourites.length === 0 ? (
               <Empty className="border">
                 <EmptyHeader>
@@ -363,16 +377,16 @@ export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
             ) : shownFavourites.length === 0 ? (
               <p className="px-1 py-2 text-sm text-muted-foreground">No favourite matches.</p>
             ) : (
-              <div className="grid gap-1">{shownFavourites.map((g) => groupView(g, true))}</div>
+              <div className="grid grid-cols-1 gap-1">{shownFavourites.map((g) => groupView(g, true))}</div>
             )}
           </ScrollArea>
         </TabsContent>
         <TabsContent value="library" className="min-h-0">
-          <ScrollArea className="h-full pr-2">
+          <ScrollArea className={cn("h-full pr-2", FIT_WIDTH)}>
             {shownLibrary.length === 0 ? (
               <p className="px-1 py-2 text-sm text-muted-foreground">No command in the library matches.</p>
             ) : (
-              <div className="grid gap-2">
+              <div className="grid grid-cols-1 gap-2">
                 {librarySection("Troubleshoot", "Runbooks by symptom", troubleshootGroups)}
                 {librarySection("By area", "Commands by topic", areaGroups)}
               </div>
@@ -442,6 +456,7 @@ function CommandRow({
   onEdit,
   onDelete,
   onMove,
+  onManual,
   onCopy,
 }: {
   item: Item;
@@ -452,16 +467,17 @@ function CommandRow({
   onEdit: () => void;
   onDelete: () => void;
   onMove: (by: -1 | 1) => void;
+  onManual: () => void;
   onCopy: () => void;
 }) {
   const tooltip = [item.description, item.command, "Click pastes; Shift+click also presses Enter."]
     .filter(Boolean)
     .join("\n\n");
   return (
-    <li className="group/row flex min-w-0 items-start gap-1 rounded-md hover:bg-accent">
+    <li className="group/row relative flex min-w-0 items-start gap-1 rounded-md hover:bg-accent">
       <button
         type="button"
-        className="grid min-w-0 flex-1 gap-0.5 px-1.5 py-1 text-left"
+        className="grid min-w-0 flex-1 grid-cols-1 gap-0.5 px-1.5 py-1 text-left"
         title={tooltip}
         onClick={(e) => onPick(e.shiftKey)}
       >
@@ -469,8 +485,22 @@ function CommandRow({
           <span className="min-w-0 flex-1 truncate text-sm">{item.name}</span>
           {item.risk.action !== "execReadOnly" && <RiskBadge risk={item.risk} className="h-4 px-1.5 text-[10px]" />}
         </span>
-        <span className="truncate font-mono text-[11px] text-muted-foreground">{item.command}</span>
+        {/* QL-13: the end of the command line leaves room for the Manual link, so the name keeps its width. */}
+        <span className={cn("truncate font-mono text-[11px] text-muted-foreground", item.library && "pr-12")}>
+          {item.command}
+        </span>
       </button>
+      {item.library && (
+        <button
+          type="button"
+          className="absolute right-7 bottom-1 rounded-sm px-0.5 text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+          title={`Open the manual page in your browser:\n${item.library.manual}`}
+          aria-label={`Manual for ${item.name}`}
+          onClick={onManual}
+        >
+          Manual
+        </button>
+      )}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -513,10 +543,16 @@ function CommandRow({
               </DropdownMenuItem>
             </>
           ) : (
-            <DropdownMenuItem onSelect={onCopy}>
-              <StarIcon />
-              Copy to favourites…
-            </DropdownMenuItem>
+            <>
+              <DropdownMenuItem onSelect={onManual}>
+                <BookOpenIcon />
+                Open the manual page
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onCopy}>
+                <StarIcon />
+                Copy to favourites…
+              </DropdownMenuItem>
+            </>
           )}
         </DropdownMenuContent>
       </DropdownMenu>

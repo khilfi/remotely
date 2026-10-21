@@ -1,8 +1,9 @@
 //! Post-MVP P5, BX-08 the command panel, end to end: favourite commands (add, change, reorder,
 //! delete, folders, `{{variables}}`), the built-in library classified by the policy engine (and
-//! following the user's rules), and favourites in the encrypted export and import (FD-07).
+//! following the user's rules), each with a link to its manual page (QL-13), and favourites in the
+//! encrypted export and import (FD-07).
 //!
-//! No host is contacted: nothing here runs a command.
+//! No host is contacted: nothing here runs a command or opens a page.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -14,6 +15,7 @@ use common::Setup;
 use remotely_core::fakes::FakeVmware;
 use remotely_core::policy::{ActionKind, DangerousPattern};
 use remotely_core::snippets::library::{LibraryGroup, LibrarySection, LIBRARY, TROUBLESHOOT};
+use remotely_core::snippets::manual::{self, MANUAL_HOSTS};
 use remotely_core::snippets::{Favourite, FavouriteInput};
 use remotely_core::store::AuditEntry;
 use remotely_core::transfer::{ExportRequest, ItemAction, ItemChoice, ItemStatus, TransferCommit};
@@ -629,6 +631,55 @@ async fn library_entries_are_classified_by_the_policy_engine() {
     // Favourites too.
     let fav = add(&core, None, "Prune", "docker image prune -a").await;
     assert_eq!(fav.risk.action, ActionKind::ExecDangerous);
+}
+
+#[tokio::test]
+async fn every_library_entry_links_to_its_manual_on_an_allowed_site() {
+    // QL-13: each entry, in its area group and in any runbook, links to its official manual page:
+    // an https address on one of the documentation sites the app may open.
+    let core = core().await;
+    let library = core.snippets.library();
+    let mut used = HashSet::new();
+    for e in &library {
+        let url = manual::checked(&e.manual).unwrap_or_else(|_| panic!("{}: {} is refused", e.id, e.manual));
+        assert_eq!(url.scheme(), "https", "{}", e.id);
+        assert_eq!(url.as_str(), e.manual, "{} is written as the browser gets it", e.id);
+        used.insert(url.host_str().unwrap_or_default().to_owned());
+    }
+    // The allow-list holds only sites a link uses.
+    for host in MANUAL_HOSTS {
+        assert!(used.contains(*host), "no manual link uses {host}");
+    }
+    // The page is the command's own, or that of the file it reads.
+    let manual_of = |id: &str| library.iter().find(|e| e.id == id).unwrap().manual.clone();
+    assert_eq!(
+        manual_of("disk.free"),
+        "https://man7.org/linux/man-pages/man1/df.1.html"
+    );
+    assert_eq!(
+        manual_of("disk.fstab"),
+        "https://man7.org/linux/man-pages/man5/fstab.5.html"
+    );
+    assert_eq!(
+        manual_of("services.status"),
+        "https://www.freedesktop.org/software/systemd/man/latest/systemctl.html"
+    );
+    assert_eq!(
+        manual_of("san.iscsi-sessions"),
+        "https://manpages.debian.org/bookworm/open-iscsi/iscsiadm.8.en.html"
+    );
+    assert_eq!(
+        manual_of("docker.ps"),
+        "https://docs.docker.com/reference/cli/docker/container/ls/"
+    );
+    assert_eq!(
+        manual_of("copy.rsync-to"),
+        "https://download.samba.org/pub/rsync/rsync.1"
+    );
+    assert_eq!(
+        manual_of("time.chrony-check"),
+        "https://chrony-project.org/doc/4.6/chronyd.html"
+    );
 }
 
 #[tokio::test]
