@@ -207,6 +207,32 @@ impl Capture {
         self.tail.drain(..excess);
     }
 
+    /// The text kept so far (QL-12: a recorded line still running), with the cut marked like
+    /// [`Capture::finish`] does.
+    fn peek(&self) -> StreamText {
+        let after_head = self.total - self.head.len();
+        let text = if after_head <= self.half {
+            let mut bytes = self.head.clone();
+            bytes.extend(self.tail.range(self.tail.len() - after_head..));
+            String::from_utf8_lossy(&bytes).into_owned()
+        } else {
+            let cut = self.total - self.head.len() - self.tail.len();
+            let tail: Vec<u8> = self.tail.iter().copied().collect();
+            format!(
+                "{}\n… [Remotely cut {} from the middle: the output is {} so far] …\n{}",
+                String::from_utf8_lossy(&self.head),
+                human_bytes(cut),
+                human_bytes(self.total),
+                String::from_utf8_lossy(&tail)
+            )
+        };
+        StreamText {
+            text,
+            bytes: self.total as u64,
+            truncated: after_head > self.half,
+        }
+    }
+
     fn finish(self) -> (StreamText, [u8; 32], [u8; 32]) {
         let after_head = self.total - self.head.len();
         let (text, truncated) = if after_head <= self.half {
@@ -304,6 +330,20 @@ impl OutputCollector {
         self.buf.clear();
         self.scrub_err.push(data, &mut self.buf);
         self.stderr.push(&self.buf);
+    }
+
+    /// QL-06 in a QL-12 recording: a secret typed into the terminal while it records is scrubbed from
+    /// then on.
+    pub fn add_secret(&mut self, secret: &SecretString) {
+        self.scrub_out.add(secret);
+        self.scrub_err.add(secret);
+    }
+
+    /// QL-12: stdout as kept so far (scrubbed; a tail that may start a secret is held back), its size
+    /// and whether its middle was cut. For a recording still running.
+    pub fn peek_stdout(&self) -> (String, u64, bool) {
+        let text = self.stdout.peek();
+        (text.text, text.bytes, text.truncated)
     }
 
     pub fn finish(mut self) -> CollectedOutput {

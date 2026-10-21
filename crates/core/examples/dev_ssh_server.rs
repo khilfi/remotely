@@ -12,7 +12,8 @@
 //! terminal blocks it). For P5's helpers: `sudo <command>` asks for the password without echoing it
 //! (try "Type vault password"), `sleep <s>` brings the prompt back after that long and `work <s>`
 //! prints for that long, then goes quiet (QL-07 notifications). For MultiExec: `top` is a full-screen program
-//! (the alternate screen; `q` quits), Ctrl+C drops the line. Commands Compare output can try: `hostname`, `uptime`,
+//! (the alternate screen; `q` quits), Ctrl+C drops the line. Commands MultiExec (QL-12 records them for Compare) and
+//! Compare output can try: `hostname`, `uptime`,
 //! `cat /etc/os-release` (the
 //! last of 3 or more servers has another release, so the results show two groups), `seq <n>`,
 //! `sleep <s>`, `exit <code>`, and any of them with sudo. Each server also serves an Ubuntu guest's
@@ -144,7 +145,7 @@ async fn main() {
     println!("Shell commands: whoami, echo <text>, exit [code], drop-connection, change-host-key");
     println!("  and for P5: sudo <command> (no echo), sleep <s> (prompt back after), work <s> (output, then quiet)");
     println!("  and for MultiExec: top (full screen, q quits), Ctrl+C drops the line");
-    println!("Compare output commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>, exit <code>");
+    println!("MultiExec and Compare output commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>");
     println!("Files: cd <dir> and pwd move the shell (the drawer follows); /etc refuses uploads");
     println!("  and for QL-09: cd /home/bob/.app (alice can't open it over SFTP); su [-] [user] switches user");
     println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");

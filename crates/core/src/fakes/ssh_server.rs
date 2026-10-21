@@ -8,7 +8,9 @@
 //! commands (`exit [code]`, `whoami`, `split-utf8`, `echo <text>`, `sudo <command>` (asks for the
 //! password without echoing it, as set by [`TestSshServer::with_sudo`]), `sleep <seconds>` (the prompt
 //! comes back after that long), `work <seconds>` (prints a line every 100 ms that long, then stops
-//! without a prompt), and for trying the app by hand, `drop-connection` and `change-host-key`). The server logs what clients ask for
+//! without a prompt), and for trying the app by hand, `drop-connection` and `change-host-key`). QL-12: it also runs the
+//! exec shell's `hostname`, `uptime`, `cat`, `seq`, `printf`... and fake programs, slowed by
+//! [`TestSshServer::with_exec_delay`] like exec channels. The server logs what clients ask for
 //! (`pty xterm-256color 80x24`, `resize 120x40`, `shell`, `line whoami`, `exec uptime`) for tests to
 //! check; it never logs what arrives on stdin.
 //!
@@ -763,6 +765,27 @@ impl ServerHandler {
                 *locks::lock(&self.state.host_key) = Some(generate_key());
                 session.data(channel, b"new host key for the next connection\r\n".to_vec())?;
             }
+            // QL-12: the exec shell's commands that print and end (`hostname`, `uptime`, `cat`, `seq`...),
+            // so MultiExec has outputs to record and compare.
+            Some(word) if INTERACTIVE_TOY.contains(&word) || locks::lock(&self.state.programs).contains_key(word) => {
+                let mut shell = ToyShell::new(&self.state, &self.user, Vec::new());
+                shell.run(line);
+                let mut out = shell.stdout;
+                out.extend_from_slice(&shell.stderr);
+                let mut text = String::from_utf8_lossy(&out).replace('\n', "\r\n").into_bytes();
+                // `with_exec_delay` makes this host slow to answer here too.
+                let delay = *locks::lock(&self.state.exec_delay);
+                if let Some(delay) = delay {
+                    text.extend_from_slice(&self.prompt(channel));
+                    let handle = session.handle();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = handle.data(channel, text).await;
+                    });
+                    return Ok(());
+                }
+                session.data(channel, text)?;
+            }
             Some(other) => session.data(channel, format!("{other}: command not found\r\n").into_bytes())?,
             None => {}
         }
@@ -1350,6 +1373,12 @@ fn tokenize(script: &str) -> Vec<Token> {
 
 /// Folders every toy host has.
 const SYSTEM_DIRS: [&str; 6] = ["/", "/home", "/root", "/tmp", "/etc", "/proc"];
+
+/// The exec shell's commands the interactive shell runs too (QL-12); the rest are its own (`sleep`,
+/// `sudo`, `top`...) or not found.
+const INTERACTIVE_TOY: [&str; 10] = [
+    "hostname", "uptime", "cat", "head", "tail", "seq", "printf", "grep", "true", "false",
+];
 
 /// What `command -v` finds besides the fake programs.
 const BUILTINS: [&str; 25] = [

@@ -358,8 +358,8 @@ impl RunWatch {
 }
 
 /// The line now shows a prompt: the same one Enter was pressed after (the line then started with it),
-/// or one that looks like a shell prompt.
-fn prompt_came_back(line: &str, typed_on: &str) -> bool {
+/// or one that looks like a shell prompt. QL-12's recordings end on it too.
+pub(crate) fn prompt_came_back(line: &str, typed_on: &str) -> bool {
     let shown = line.trim_end();
     if shown.is_empty() {
         return false;

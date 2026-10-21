@@ -94,7 +94,12 @@ crates/core/          remotely-core: all app logic
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
                       detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
                       a line buffer, Enter held and the line rated on the bus (Command::TerminalLine), password prompts
-                      and full-screen programs passed straight through; folder.rs SS-08 the shell's folder (OSC 7) and
+                      and full-screen programs passed straight through, QL-07 one LineFinished per line (never one
+                      notification per terminal); record.rs QL-12 MultiExec recording: each sent line's output per
+                      terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
+                      redraws; RecordSlot handed to the pane through its input before the Enter; Recorder keeps the
+                      session's lines in memory with caps, grouped and diffed through bulk.rs); folder.rs SS-08 the
+                      shell's folder (OSC 7) and
                       the invisible prompt hook typed into bash and zsh on connect (hidden from the terminal, logs,
                       MultiExec and QL-07; the startup command waits for it), QL-09 its user report next to the folder
                       (private OSC 7777, hidden the same way); shell_user.rs QL-09 who transfers run as (the SSH login,
@@ -116,7 +121,9 @@ crates/core/          remotely-core: all app logic
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only); SS-07 the first jump
                       host's for a session behind one, never the session itself
     bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
-                      BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus)
+                      BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
+                      recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
+                      multiexec_exported) through the same code
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
                       authorized_keys push script (the push itself is Command::PushSshKey on the bus)
@@ -143,14 +150,17 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       SS-07 port forwards and tunnels (tunnels.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
-  components/         app components (approval dialog, badges, Compare panel, MultiExec bar, WhyDisabled for QL-08,
+  components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
+                      (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both), MultiExec
+                      bar, WhyDisabled for QL-08,
                       FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel)
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
-                      masker), theme.ts, utils.ts, multiexec.ts, transfers.ts, tunnels.ts (SS-07 chains and forwards),
+                      masker), theme.ts, utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
+                      and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id and Ctrl+3 open the VM page's snapshot
                       view until Containers takes slot 3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker),
@@ -184,12 +194,14 @@ src/                  React + TypeScript UI
 - Tests against real Workstation are opt-in: they run only when `REMOTELY_IT=1` is set, and only touch VMs whose display name starts with `it-`.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, and runs exec requests in a toy
-  shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C and a
-  full-screen `top`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
-  them (`tests/multiexec.rs`). SS-08: it serves SFTP from a temp folder deleted with it (`with_sftp_file`,
-  `with_protected`, `with_unreadable`, `without_sftp`), and with `with_login_shell("bash")` its shell answers the folder
-  hook (OSC 7 and the QL-09 user report) and knows `cd`, `pwd` and `su [-] [user]` (a shell without the hook, as a
-  real switch); `fakes::FakeFiles` is the in-memory version for the fake remote adapter (`tests/files.rs`). Uploads
+  shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C, a
+  full-screen `top`, and the exec shell's `hostname`, `uptime`, `cat`, `seq`... and fake programs, slowed by
+  `with_exec_delay`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
+  them (`tests/multiexec.rs`, QL-12 recording included). SS-08: it serves SFTP from a temp folder deleted with it
+  (`with_sftp_file`, `with_protected`, `with_unreadable`, `without_sftp`), and with `with_login_shell("bash")` its
+  shell answers the folder hook (OSC 7 and the QL-09 user report) and knows `cd`, `pwd` and `su [-] [user]` (a shell
+  without the hook, as a real switch); `fakes::FakeFiles` is the in-memory version for the fake remote adapter
+  (`tests/files.rs`). Uploads
   and downloads in tests use files made at run time in the system temp folder, never in the repo. SS-07: it forwards
   like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
   resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on

@@ -35,6 +35,9 @@
 //! * SS-10 ([`multiexec`]): what is typed into one terminal goes to several at once. Each pane shares
 //!   what its screen shows ([`PaneScreen`]: connected, the cursor's line, a full-screen program), and
 //!   whether text was typed on its line outside MultiExec, so MultiExec knows what each shell holds.
+//!   QL-12 ([`record`]): each pane records a MultiExec line's output from its Enter until the prompt
+//!   comes back, for the Compare panel. A command MultiExec sent doesn't notify per terminal (QL-07):
+//!   MultiExec notifies once per line.
 //! * SS-08 ([`files`]): SFTP on each pane's own connection: the "Files here" drawer, downloads and
 //!   uploads (a command on the bus). bash and zsh report their folder through a prompt hook typed
 //!   invisibly on connect ([`folder`]), so the drawer and uploads follow the shell's folder. QL-09: the
@@ -53,6 +56,7 @@ pub mod log;
 pub mod multiexec;
 pub mod output;
 pub mod quick;
+pub mod record;
 pub mod shell_user;
 pub mod tunnels;
 
@@ -77,6 +81,7 @@ use self::folder::{FolderInfo, FolderTracking, FolderWatch, PromptHook};
 use self::log::{LogMessage, SessionLog};
 use self::output::{SaveLayout, SavedOutput, TerminalText};
 use self::quick::{QuickConnect, QuickOpened};
+use self::record::RecordSlot;
 use self::shell_user::{UserInfo, UserWatch};
 use self::tunnels::{TunnelInfo, TunnelRun, TunnelTable};
 use crate::adapters::exec_output::Scrubber;
@@ -140,6 +145,17 @@ impl ReachabilityMode {
     }
 }
 
+/// QL-07: which finished commands notify (while the tab is not on screen or Remotely is not in front).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NotifyWhen {
+    /// Commands that ran at least `notify_after_secs`.
+    #[default]
+    Long,
+    /// Any command that finishes while the user is away, whatever its length.
+    Any,
+}
+
 /// SS-03 and QL-04/QL-05 settings, edited on the Settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -158,8 +174,10 @@ pub struct TerminalSettings {
     pub reachability: ReachabilityMode,
     /// QL-04: seconds between two checks of the same session.
     pub reachability_secs: u64,
-    /// QL-07: a Windows notification when a long command in a background tab finishes.
+    /// QL-07: a Windows notification when a command in a background tab finishes.
     pub notify_finished: bool,
+    /// QL-07: long commands only, or any command that finishes while the user is away.
+    pub notify_when: NotifyWhen,
     /// QL-07: seconds a command must run to count as long.
     pub notify_after_secs: u64,
     /// QL-07: seconds without output, after some came, that end a run whose prompt was not
@@ -178,6 +196,7 @@ impl Default for TerminalSettings {
             reachability: ReachabilityMode::Auto,
             reachability_secs: 60,
             notify_finished: true,
+            notify_when: NotifyWhen::Long,
             notify_after_secs: 30,
             notify_quiet_secs: 30,
         }
@@ -219,11 +238,15 @@ impl TerminalSettings {
         Ok(())
     }
 
-    /// QL-07: how each pane watches for long runs.
+    /// QL-07: how each pane watches for runs to report. "Any command" reports every run; the UI
+    /// notifies only while the user is away.
     pub fn watch(&self) -> WatchConfig {
         WatchConfig {
             enabled: self.notify_finished,
-            threshold: Duration::from_secs(self.notify_after_secs),
+            threshold: match self.notify_when {
+                NotifyWhen::Long => Duration::from_secs(self.notify_after_secs),
+                NotifyWhen::Any => Duration::ZERO,
+            },
             quiet: (self.notify_quiet_secs > 0).then(|| Duration::from_secs(self.notify_quiet_secs)),
         }
     }
@@ -235,13 +258,14 @@ impl TerminalSettings {
             secs => format!("keep-alive every {secs} s"),
         };
         let on = |b: bool| if b { "on" } else { "off" };
+        let which = match self.notify_when {
+            NotifyWhen::Long => format!("commands of {} s or more", self.notify_after_secs),
+            NotifyWhen::Any => "any command that finishes while away".to_owned(),
+        };
         let notify = match (self.notify_finished, self.notify_quiet_secs) {
             (false, _) => "notifications off".to_owned(),
-            (true, 0) => format!("notify after commands of {} s or more", self.notify_after_secs),
-            (true, quiet) => format!(
-                "notify after commands of {} s or more (or {quiet} s quiet)",
-                self.notify_after_secs
-            ),
+            (true, 0) => format!("notify after {which}"),
+            (true, quiet) => format!("notify after {which} (or {quiet} s quiet)"),
         };
         format!(
             "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}",
@@ -313,6 +337,8 @@ pub enum TerminalInput {
     /// SS-10: keys for the live shell only (MultiExec). Dropped while the pane is not connected, so
     /// Enter never means "reconnect", and never given to a login prompt.
     Keys(Vec<u8>),
+    /// QL-12: record the MultiExec line whose Enter comes next in `Keys`, until the prompt is back.
+    Record(Arc<RecordSlot>),
     /// QL-06: a vault secret to type, followed by Enter, if the terminal shows a password prompt (or
     /// `force`). The answer says whether a prompt was showing.
     TypeSecret {
@@ -980,6 +1006,22 @@ impl Terminals {
             .map_err(|_| CoreError::UnknownTarget(format!("terminal {id} has closed")))
     }
 
+    /// QL-12: the terminal records the MultiExec line whose Enter it gets next. Sent ahead of that
+    /// Enter on the same input, so it is there first. A closed terminal never gets the line.
+    pub(crate) async fn record(&self, slot: Arc<RecordSlot>) {
+        let sent = match self.control(slot.terminal_id()) {
+            Some(control) => control
+                .input
+                .send(TerminalInput::Record(Arc::clone(&slot)))
+                .await
+                .is_ok(),
+            None => false,
+        };
+        if !sent {
+            slot.not_sent("the terminal has closed");
+        }
+    }
+
     /// SS-10: a terminal as a command target, for the policy engine: its saved session's name, label
     /// and protection as they are now, or no label for a quick connection that was not saved.
     pub async fn target(&self, ctx: &Context, id: Uuid) -> Result<Target> {
@@ -1523,6 +1565,60 @@ struct Live {
     /// SS-01: the startup command's lines, until typed.
     startup: Vec<String>,
     startup_until: Instant,
+    /// QL-12: the MultiExec line whose Enter comes next, and the one being recorded now.
+    armed: Option<Arc<RecordSlot>>,
+    recording: Option<Arc<RecordSlot>>,
+    /// QL-07: the command running now was sent by MultiExec, which notifies once per line instead.
+    multiexec_run: bool,
+}
+
+impl Live {
+    /// QL-12: MultiExec keys reached the shell. Enter starts recording the line they were armed for
+    /// (ending one still running: the next line came first); Ctrl+C before it drops the arm.
+    fn record_keys(&mut self, bytes: &[u8], secrets: impl FnOnce() -> Vec<SecretString>, quiet: Option<Duration>) {
+        let enter = bytes.iter().position(|b| matches!(*b, b'\r' | b'\n'));
+        let interrupt = bytes.iter().position(|b| *b == 0x03);
+        let now = Instant::now();
+        match (enter, interrupt) {
+            (Some(enter), interrupt) if interrupt.is_none_or(|i| enter < i) => {
+                let Some(slot) = self.armed.take() else {
+                    return;
+                };
+                if let Some(running) = self.recording.take() {
+                    running.next_line(now);
+                }
+                if slot.start(self.watch.line(), secrets(), quiet, now) {
+                    self.recording = Some(slot);
+                }
+            }
+            (_, Some(_)) => {
+                if let Some(slot) = self.armed.take() {
+                    slot.not_sent("Ctrl+C came before Enter");
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// QL-12: the recording, while it still records.
+    fn recording(&mut self) -> Option<&Arc<RecordSlot>> {
+        if self.recording.as_ref().is_some_and(|s| !s.recording()) {
+            self.recording = None;
+        }
+        self.recording.as_ref()
+    }
+}
+
+impl Drop for Live {
+    /// QL-12: the shell is gone; so is what it was recording.
+    fn drop(&mut self) {
+        if let Some(slot) = self.recording.take() {
+            slot.lost("the connection ended before the prompt came back");
+        }
+        if let Some(slot) = self.armed.take() {
+            slot.lost("the connection ended before Enter was sent");
+        }
+    }
 }
 
 /// What ended a live connection.
@@ -1889,7 +1985,10 @@ impl Pane {
     fn watch_config(&self) -> WatchConfig {
         let mut config = *locks::lock(&self.inner.watch);
         if let Some((threshold, quiet)) = locks::lock(&self.inner.tuning).notify_timing {
-            config.threshold = threshold;
+            // "Any command" (no threshold) stays that way.
+            if !config.threshold.is_zero() {
+                config.threshold = threshold;
+            }
             config.quiet = quiet;
         }
         config
@@ -1903,8 +2002,11 @@ impl Pane {
         screen.alternate = watch.alternate();
     }
 
-    /// QL-07: tells the UI a long command ended.
-    async fn finished(&self, done: activity::Finished) {
+    /// QL-07: tells the UI a long command ended, unless MultiExec sent it (it notifies per line).
+    async fn finished(&self, done: activity::Finished, live: &Live) {
+        if live.multiexec_run {
+            return;
+        }
         let _ = self
             .events
             .send(TerminalEvent::CommandFinished {
@@ -1955,6 +2057,11 @@ impl Pane {
         let now = Instant::now();
         let done = live.watch.output(&bytes, now);
         self.show_screen(&live.watch);
+        // QL-12: after the screen line, which says whether the prompt is back.
+        let (line, alternate) = (live.watch.line().to_owned(), live.watch.alternate());
+        if let Some(slot) = live.recording() {
+            slot.output(&bytes, &line, alternate, now);
+        }
         live.users.output(now);
         let reports = live.folders.feed(&bytes);
         if let Some(path) = reports.folder {
@@ -1973,7 +2080,7 @@ impl Pane {
             return false;
         }
         if let Some(done) = done {
-            self.finished(done).await;
+            self.finished(done, live).await;
         }
         true
     }
@@ -2022,6 +2129,9 @@ impl Pane {
             users: UserWatch::new(&login),
             startup,
             startup_until: now + STARTUP_WAIT,
+            armed: None,
+            recording: None,
+            multiexec_run: false,
         };
         // SS-10: a new shell has nothing typed on its line yet.
         self.control.dirty.store(false, Ordering::SeqCst);
@@ -2089,11 +2199,18 @@ impl Pane {
             }
             live.watch.set_config(self.watch_config());
             let startup_due = (!live.startup.is_empty()).then_some(live.startup_until);
+            // QL-12: the screen line decides whether quiet counts (never at a password prompt).
+            let line = match live.recording() {
+                Some(_) => live.watch.line().to_owned(),
+                None => String::new(),
+            };
+            let recording_due = live.recording().and_then(|slot| slot.deadline(&line));
             let deadline = [
                 live.watch.deadline(),
                 live.hook.deadline(),
                 live.users.deadline(),
                 startup_due,
+                recording_due,
             ]
             .into_iter()
             .flatten()
@@ -2106,7 +2223,11 @@ impl Pane {
                 () = sleep_until(deadline), if deadline.is_some() => {
                     let now = Instant::now();
                     if let Some(done) = live.watch.tick(now) {
-                        self.finished(done).await;
+                        self.finished(done, &live).await;
+                    }
+                    // QL-12: a recording that went quiet or reached its time limit ends.
+                    if let Some(slot) = live.recording() {
+                        slot.tick(now, &line);
                     }
                     // SS-08: the hook goes out at the first quiet prompt; what it held is shown.
                     let tick = live.hook.tick(now, live.watch.line(), live.watch.alternate());
@@ -2153,12 +2274,35 @@ impl Pane {
                             let _ = live.input.send(ShellInput::Close).await;
                             return Pump::Closed;
                         }
-                        Some(TerminalInput::Data(bytes) | TerminalInput::Keys(bytes)) => {
+                        Some(TerminalInput::Data(bytes)) => {
                             // A settings change while waiting applies to this Enter already.
                             live.watch.set_config(self.watch_config());
+                            let was_running = live.watch.is_running();
                             live.watch.input(&bytes, Instant::now());
+                            if !was_running && live.watch.is_running() {
+                                live.multiexec_run = false;
+                            }
                             live.users.input(&bytes);
                             let _ = live.input.send(ShellInput::Data(bytes)).await;
+                        }
+                        Some(TerminalInput::Keys(bytes)) => {
+                            live.watch.set_config(self.watch_config());
+                            let was_running = live.watch.is_running();
+                            live.watch.input(&bytes, Instant::now());
+                            // QL-07: MultiExec notifies once for the line, not per terminal.
+                            if !was_running && live.watch.is_running() {
+                                live.multiexec_run = true;
+                            }
+                            live.users.input(&bytes);
+                            let control = &self.control;
+                            let quiet = self.watch_config().quiet;
+                            live.record_keys(&bytes, || control.known_secrets(), quiet);
+                            let _ = live.input.send(ShellInput::Data(bytes)).await;
+                        }
+                        Some(TerminalInput::Record(slot)) => {
+                            if let Some(old) = live.armed.replace(slot) {
+                                old.not_sent("another line came before its Enter");
+                            }
                         }
                         Some(TerminalInput::TypeSecret { secret, force, reply, until }) => {
                             if Instant::now() > until {
@@ -2169,6 +2313,10 @@ impl Pane {
                             if !prompt && !force {
                                 let _ = reply.send(Err(CoreError::NoPasswordPrompt));
                                 continue;
+                            }
+                            // QL-12: a line being recorded never keeps it either.
+                            if let Some(slot) = live.recording() {
+                                slot.add_secret(&secret);
                             }
                             let mut bytes = Zeroizing::new(secret.expose().as_bytes().to_vec());
                             bytes.push(b'\r');
@@ -2265,6 +2413,10 @@ impl Pane {
                 None
             }
             Some(TerminalInput::Data(_) | TerminalInput::Keys(_)) => None,
+            Some(TerminalInput::Record(slot)) => {
+                slot.not_sent("not connected");
+                None
+            }
             Some(TerminalInput::TypeSecret { reply, .. }) => {
                 let _ = reply.send(Err(CoreError::InvalidInput(
                     "This terminal is not connected, so nothing was typed. Reconnect it first.".into(),
@@ -2373,6 +2525,10 @@ impl Prompter for PanePrompter<'_> {
                 }
                 // SS-10: keys typed into several terminals are not answers to this login.
                 Some(TerminalInput::Reconnect | TerminalInput::Keys(_)) => continue,
+                Some(TerminalInput::Record(slot)) => {
+                    slot.not_sent("still logging in");
+                    continue;
+                }
                 Some(TerminalInput::Data(bytes)) => Zeroizing::new(bytes),
                 // QL-06 at a login prompt: the vault's password answers it.
                 Some(TerminalInput::TypeSecret {
@@ -2546,6 +2702,48 @@ mod tests {
         assert_eq!(old.reachability, ReachabilityMode::Auto);
         assert!(old.notify_finished, "QL-07 is on for settings saved before it");
         assert_eq!(old.notify_after_secs, 30);
+        assert_eq!(
+            old.notify_when,
+            NotifyWhen::Long,
+            "QL-07's choice: long commands, as before"
+        );
+    }
+
+    #[test]
+    fn any_command_while_away_reports_every_run_and_keeps_the_threshold_for_later() {
+        let any = TerminalSettings {
+            notify_when: NotifyWhen::Any,
+            notify_after_secs: 120,
+            ..Default::default()
+        };
+        assert!(any.validate().is_ok());
+        assert_eq!(any.watch().threshold, Duration::ZERO);
+        assert_eq!(any.watch().quiet, Some(Duration::from_secs(30)));
+        assert!(any
+            .describe()
+            .ends_with("notify after any command that finishes while away (or 30 s quiet)"));
+        // The threshold stays as it was, for switching back.
+        let json = serde_json::to_string(&any).unwrap();
+        assert!(
+            json.contains(r#""notifyWhen":"any""#) && json.contains(r#""notifyAfterSecs":120"#),
+            "{json}"
+        );
+        let back: TerminalSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, any);
+        let long = TerminalSettings {
+            notify_when: NotifyWhen::Long,
+            ..any
+        };
+        assert_eq!(long.watch().threshold, Duration::from_secs(120));
+
+        // A run of any length then reports when its prompt comes back.
+        let mut watch = RunWatch::new(any.watch());
+        let t0 = Instant::now();
+        watch.output(b"$ uptime", t0);
+        watch.input(b"\r", t0);
+        let done = watch.output(b"\r\n 10:00 up 3 days\r\n$ ", t0).unwrap();
+        assert_eq!(done.how, FinishedHow::Prompt);
+        assert_eq!(done.after, Duration::ZERO);
     }
 
     #[test]

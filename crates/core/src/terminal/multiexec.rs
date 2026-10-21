@@ -29,6 +29,11 @@
 //! * A target is left out of a line when it is not connected, its session is protected (AP-04), its
 //!   screen is in another state than the terminal typed into, or it was added while the line was
 //!   being typed (it joins at the next line).
+//! * QL-12: every line that is sent is recorded in each of its terminals, from Enter until the prompt
+//!   comes back ([`super::record`]), for the Compare panel's MultiExec view: grouped, diffed and
+//!   exported like a Compare run. Recordings last until MultiExec is turned off.
+//! * QL-07: a line's terminals don't notify one by one; [`MultiExecEvent::LineFinished`] comes once
+//!   all of them are done, and the UI notifies once for the line.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -37,7 +42,10 @@ use serde::Serialize;
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
+use super::activity::FinishedHow;
+use super::record::{RecordLimits, RecordedResults, Recorder, Recordings};
 use super::Terminals;
+use crate::bulk::{GroupOptions, HostOutput, OutputDiff, RecordedRun};
 use crate::command_bus::{ApprovalAnswers, ApprovalRequest, Command, CommandBus, SubmitOutcome};
 use crate::domain::{Context, TargetRef};
 use crate::error::{CoreError, Result};
@@ -272,6 +280,22 @@ pub enum MultiExecEvent {
     },
     /// Keys that waited for a line were sent, and held another line (which may need approval).
     Outcome { outcome: InputOutcome },
+    /// QL-12: the recorded lines changed: `line_id` was recorded or one of its terminals started or
+    /// finished; `None` when several went at once (a cap, MultiExec turned off, terminals closed).
+    Recorded { line_id: Option<Uuid> },
+    /// QL-12, QL-07: every terminal of a recorded line is done. Once per line, never per terminal.
+    /// `terminals`: the ones Enter reached; `unfinished`: those whose recording did not end well (time
+    /// limit, connection lost, never sent).
+    LineFinished {
+        line_id: Uuid,
+        line: String,
+        /// The terminals Enter reached, so the UI knows their tabs.
+        terminal_ids: Vec<Uuid>,
+        terminals: usize,
+        after_secs: u64,
+        how: FinishedHow,
+        unfinished: usize,
+    },
 }
 
 /// One target as MultiExec sees it now.
@@ -337,6 +361,8 @@ struct Shared {
     jobs: Arc<JobRunner>,
     state: Mutex<State>,
     events: broadcast::Sender<MultiExecEvent>,
+    /// QL-12.
+    recorder: Recorder,
 }
 
 /// SS-10 (see the module comment). One per app: the Terminal page is the only place to type.
@@ -359,7 +385,7 @@ struct Seen {
 
 impl MultiExec {
     pub fn new(ctx: Context, terminals: Terminals, bus: Arc<CommandBus>, jobs: Arc<JobRunner>) -> Self {
-        let (events, _) = broadcast::channel(64);
+        let (events, _) = broadcast::channel(256);
         Self {
             shared: Arc::new(Shared {
                 ctx,
@@ -367,6 +393,7 @@ impl MultiExec {
                 bus,
                 jobs,
                 state: Mutex::new(State::default()),
+                recorder: Recorder::new(events.clone()),
                 events,
             }),
         }
@@ -374,6 +401,42 @@ impl MultiExec {
 
     pub fn subscribe(&self) -> broadcast::Receiver<MultiExecEvent> {
         self.shared.events.subscribe()
+    }
+
+    // ---- QL-12: recordings ----------------------------------------------------------------------------
+
+    /// The caps and the per-line time limit (tests shorten them).
+    pub fn set_record_limits(&self, limits: RecordLimits) {
+        self.shared.recorder.set_limits(limits);
+    }
+
+    fn alive(&self) -> impl Fn(Uuid) -> bool + '_ {
+        |id| self.shared.terminals.pane_info(id).is_some()
+    }
+
+    /// The lines recorded in this MultiExec session, newest first.
+    pub fn recordings(&self) -> Recordings {
+        self.shared.recorder.list(&self.alive())
+    }
+
+    /// One recorded line, grouped by output like a Compare run (BX-03).
+    pub fn recorded(&self, line_id: Uuid, opts: GroupOptions) -> Result<RecordedResults> {
+        self.shared.recorder.results(line_id, opts, &self.alive())
+    }
+
+    /// One terminal's recorded output of a line (so far, while it runs).
+    pub fn recorded_output(&self, line_id: Uuid, terminal_id: Uuid) -> Result<HostOutput> {
+        self.shared.recorder.output(line_id, terminal_id)
+    }
+
+    /// BX-03's diff between two terminals' outputs of a line.
+    pub fn recorded_diff(&self, line_id: Uuid, left: Uuid, right: Uuid, opts: GroupOptions) -> Result<OutputDiff> {
+        self.shared.recorder.diff(line_id, left, right, opts)
+    }
+
+    /// A recorded line, or all of them (`None`), for `BulkRuns::export_recorded`.
+    pub fn recorded_runs(&self, line_id: Option<Uuid>) -> Result<Vec<RecordedRun>> {
+        self.shared.recorder.runs(line_id)
     }
 
     /// Turns MultiExec on for these terminals, or changes them. A line being typed keeps going to the
@@ -399,8 +462,9 @@ impl MultiExec {
     }
 
     /// Turns MultiExec off. A line waiting for approval is cancelled (Ctrl+C to its terminals); one
-    /// already approved goes ahead.
+    /// already approved goes ahead. QL-12: the session's recordings go.
     pub async fn stop(&self) -> Result<MultiExecStatus> {
+        self.shared.recorder.clear();
         let mut state = self.shared.state.lock().await;
         if let Some(held) = state.held.take() {
             match held.job {
@@ -500,6 +564,7 @@ impl MultiExec {
         };
         let job = self.shared.bus.approve(request, answers).await?;
         held.job = Some(job);
+        self.shared.recorder.approved(line_id, job);
         self.wait_for(line_id, job);
         Ok(job)
     }
@@ -523,6 +588,7 @@ impl MultiExec {
         if let Some(held) = state.held.take() {
             state.queued.clear();
             self.interrupt(&held.to).await;
+            self.shared.recorder.discard(held.id);
             self.done(held.id, false, held.to.len(), None);
         }
         Ok(())
@@ -566,6 +632,12 @@ impl MultiExec {
             return Ok(());
         };
         let queued = std::mem::take(&mut state.queued);
+        let terminals = &self.shared.terminals;
+        self.shared
+            .recorder
+            .job_ended(line_id, status == JobStatus::Cancelled, |id| {
+                terminals.pane_info(id).is_some_and(|i| i.screen.connected)
+            });
         if status == JobStatus::Cancelled {
             self.interrupt(&held.to).await;
             self.done(held.id, false, held.to.len(), Some(status));
@@ -848,6 +920,19 @@ impl MultiExec {
             return Box::pin(self.process(state, from, after)).await;
         }
 
+        let line_id = Uuid::new_v4();
+        // QL-12: each terminal gets its recording before anything can send the Enter (a Low line's
+        // job may run before `submit` returns), through its input, so it comes first.
+        let names: Vec<(Uuid, String)> = to
+            .iter()
+            .map(|id| {
+                let name = self.shared.terminals.pane_info(*id).map(|i| i.name);
+                (*id, name.unwrap_or_else(|| "a closed terminal".into()))
+            })
+            .collect();
+        for slot in self.shared.recorder.begin(line_id, &script, &names) {
+            self.shared.terminals.record(slot).await;
+        }
         let command = Command::TerminalLine {
             targets: to
                 .iter()
@@ -860,11 +945,11 @@ impl MultiExec {
             unreliable,
             keys: String::from_utf8_lossy(keys).into_owned(),
         };
-        let line_id = Uuid::new_v4();
         let outcome = match self.shared.bus.submit(&self.shared.ctx, command).await {
             Ok(outcome) => outcome,
             Err(err) => {
                 // Nothing will press Enter: clear the line the terminals hold, so it can't run later.
+                self.shared.recorder.discard(line_id);
                 self.interrupt(&to).await;
                 return Err(err);
             }
@@ -873,6 +958,7 @@ impl MultiExec {
             SubmitOutcome::Queued { job_id, tier, .. } => (tier, Some(job_id), None),
             SubmitOutcome::NeedsApproval { request } => (request.tier, None, Some(Box::new(request))),
         };
+        self.shared.recorder.taken(line_id, tier, job_id);
         state.held = Some(Held {
             id: line_id,
             from,

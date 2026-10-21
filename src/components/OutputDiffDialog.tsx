@@ -1,5 +1,6 @@
 // BX-03: the line diff between two output groups of a bulk run, computed in the core from each group's
-// sample host. Lines only on the left are red with "-", lines only on the right green with "+".
+// sample host. Lines only on the left are red with "-", lines only on the right green with "+". QL-12: the same for
+// a recorded MultiExec line, whose groups are terminals with no exit code.
 
 import { useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
@@ -7,13 +8,16 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, errorMessage, type DiffLine, type OutputDiff, type OutputGroup } from "@/lib/api";
+import { errorMessage, type DiffLine, type GroupOptions, type OutputDiff, type OutputGroup } from "@/lib/api";
 import { plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 interface Props {
-  jobId: string;
+  /** The diff between two samples (target keys). */
+  load: (left: string, right: string, options: GroupOptions) => Promise<OutputDiff>;
   groups: OutputGroup[];
+  /** QL-12: the groups are terminals of a MultiExec line (no exit codes). */
+  terminals?: boolean;
   ignoreTrailingWhitespace: boolean;
   /** The groups to compare first, by label. */
   left: string;
@@ -21,12 +25,25 @@ interface Props {
   onClose: () => void;
 }
 
-function groupText(g: OutputGroup) {
+function groupText(g: OutputGroup, terminals: boolean) {
+  if (terminals) {
+    const what = g.kind === "error" ? `, ${(g.errorCode ?? "error").replace(/_/g, " ")}` : "";
+    return `${g.label}: ${plural(g.hosts.length, "terminal")}${what}`;
+  }
   const what = g.kind === "error" ? (g.errorCode ?? "error") : `exit ${g.exitCode ?? "?"}`;
   return `${g.label}: ${plural(g.hosts.length, "host")}, ${what}`;
 }
 
-export function OutputDiffDialog({ jobId, groups, ignoreTrailingWhitespace, left, right, onClose }: Props) {
+export function OutputDiffDialog({
+  load,
+  groups,
+  terminals = false,
+  ignoreTrailingWhitespace,
+  left,
+  right,
+  onClose,
+}: Props) {
+  const [loadDiff] = useState(() => load);
   const [a, setA] = useState(left);
   const [b, setB] = useState(right);
   const [diff, setDiff] = useState<{ key: string; diff: OutputDiff } | null>(null);
@@ -38,7 +55,7 @@ export function OutputDiffDialog({ jobId, groups, ignoreTrailingWhitespace, left
   useEffect(() => {
     if (!leftSample || !rightSample) return;
     let stale = false;
-    api.bulkDiff(jobId, leftSample, rightSample, { ignoreTrailingWhitespace }).then(
+    loadDiff(leftSample, rightSample, { ignoreTrailingWhitespace }).then(
       (d) => {
         if (stale) return;
         setDiff({ key, diff: d });
@@ -51,7 +68,7 @@ export function OutputDiffDialog({ jobId, groups, ignoreTrailingWhitespace, left
     return () => {
       stale = true;
     };
-  }, [jobId, leftSample, rightSample, ignoreTrailingWhitespace, key]);
+  }, [loadDiff, leftSample, rightSample, ignoreTrailingWhitespace, key]);
 
   const shown = diff?.key === key ? diff.diff : null;
   const changed = shown ? [...shown.stdout, ...shown.stderr].filter((l) => l.kind !== "same").length : 0;
@@ -62,7 +79,7 @@ export function OutputDiffDialog({ jobId, groups, ignoreTrailingWhitespace, left
         <DialogHeader>
           <DialogTitle>Compare groups</DialogTitle>
           <DialogDescription>
-            Each group&apos;s output is shown by one of its hosts.
+            Each group&apos;s output is shown by one of its {terminals ? "terminals" : "hosts"}.
             {ignoreTrailingWhitespace && " Trailing whitespace is ignored."}
           </DialogDescription>
         </DialogHeader>
@@ -80,7 +97,7 @@ export function OutputDiffDialog({ jobId, groups, ignoreTrailingWhitespace, left
                 <SelectContent>
                   {groups.map((g) => (
                     <SelectItem key={g.label} value={g.label}>
-                      {groupText(g)}
+                      {groupText(g, terminals)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -98,8 +115,10 @@ export function OutputDiffDialog({ jobId, groups, ignoreTrailingWhitespace, left
           <div className="grid gap-3">
             <p className="text-sm text-muted-foreground">
               {changed === 0
-                ? "The outputs are the same; the groups differ in exit code or cause."
-                : `${plural(changed, "line")} differ between ${shown.left} (exit ${shown.leftExitCode ?? "–"}) and ${shown.right} (exit ${shown.rightExitCode ?? "–"}).`}
+                ? `The outputs are the same; the groups differ in ${terminals ? "how they ended" : "exit code or cause"}.`
+                : terminals
+                  ? `${plural(changed, "line")} differ between ${shown.left} and ${shown.right}.`
+                  : `${plural(changed, "line")} differ between ${shown.left} (exit ${shown.leftExitCode ?? "–"}) and ${shown.right} (exit ${shown.rightExitCode ?? "–"}).`}
             </p>
             <DiffBlock title="stdout" lines={shown.stdout} />
             {shown.stderr.length > 0 && <DiffBlock title="stderr" lines={shown.stderr} />}
