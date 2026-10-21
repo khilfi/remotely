@@ -2,7 +2,7 @@
 // power-on limit (VM-06), shutdown wait (VM-03), hosts Compare output reaches at once (BX-02), and update
 // checks with the GitHub update token (FD-14) under General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
-// Approval rules. The theme switch is in the top bar.
+// Approval rules. QL-11: "Follow Windows" for the theme is under General; the Dark mode switch is in the top bar.
 
 import { useEffect, useState } from "react";
 import { FolderIcon, XIcon } from "lucide-react";
@@ -17,6 +17,7 @@ import { PresentationCard } from "@/components/Presentation";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
 import { api, errorMessage, type Settings, type UpdateCheck, type VaultInfo } from "@/lib/api";
+import { useTheme } from "@/lib/theme";
 
 interface Props {
   /** Called after a setting changes, so the sidebar status and update banner refresh. */
@@ -172,6 +173,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
         <PolicyRulesEditor />
       </TabsContent>
       <TabsContent value="general" className="flex flex-col gap-6">
+        <AppearanceCard />
         <PresentationCard />
         <Card>
           <CardHeader>
@@ -371,5 +373,32 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
         </Card>
       </TabsContent>
     </Tabs>
+  );
+}
+
+/** QL-11: whether Windows decides the theme. The top bar's Dark mode switch picks one and turns this off. */
+function AppearanceCard() {
+  const { resolved, followWindows, setFollowWindows } = useTheme();
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Appearance</CardTitle>
+        <CardDescription>
+          Light or dark, as Windows is set, or as you pick with the Dark mode switch in the top bar. Using the switch
+          stops following Windows.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-1.5">
+        <div className="flex items-center gap-3">
+          <Switch id="follow-windows" checked={followWindows} onCheckedChange={setFollowWindows} />
+          <Label htmlFor="follow-windows">Follow Windows</Label>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          {followWindows
+            ? `Windows is set to ${resolved} now.`
+            : `Dark mode is ${resolved === "dark" ? "on" : "off"}. Turning this on lets Windows decide again.`}
+        </p>
+      </CardContent>
+    </Card>
   );
 }
