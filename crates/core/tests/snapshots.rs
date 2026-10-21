@@ -104,6 +104,39 @@ async fn the_snapshot_manager_lists_each_vms_tree_and_flags_old_snapshots() {
 }
 
 #[tokio::test]
+async fn opening_one_vms_details_reads_only_that_vms_snapshots() {
+    // QL-14: the Virtual machines page reads a VM's tree when its details open, so a library of many VMs costs one
+    // .vmsd read per VM opened, not one per VM listed. A broken .vmsd elsewhere doesn't get in the way.
+    let mut fake = lab().unreadable_snapshots(&vmx("db01"));
+    for n in 0..40 {
+        let name = format!("lab{n:02}");
+        fake = fake.in_library(&vmx(&name), Some(&name));
+    }
+    let (core, fake) = lab_core(fake).await;
+    let reads_before = fake.snapshot_reads().len();
+
+    let opened = core.snapshots.list(&core.ctx, Some(&[vmx("web01")])).await.unwrap();
+
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].display_name, "web01");
+    assert_eq!(opened[0].snapshots.len(), 2);
+    assert!(opened[0].error.is_none());
+    let reads = fake.snapshot_reads();
+    assert_eq!(reads.len() - reads_before, 1, "only the opened VM's .vmsd is read");
+    assert_eq!(
+        reads.last().map(String::as_str),
+        Some(vmx("web01").to_lowercase().as_str())
+    );
+
+    // The selection's Snapshots menu reads just the selected VMs, in one call.
+    let selection = [vmx("db01"), vmx("lab07")];
+    let picked = core.snapshots.list(&core.ctx, Some(&selection)).await.unwrap();
+    assert_eq!(picked.len(), 2);
+    assert!(picked.iter().any(|v| v.display_name == "db01" && v.error.is_some()));
+    assert_eq!(fake.snapshot_reads().len() - reads_before, 3);
+}
+
+#[tokio::test]
 async fn a_vm_whose_snapshots_cannot_be_read_shows_the_error_and_the_rest_still_list() {
     let (core, _) = lab_core(lab().unreadable_snapshots(&vmx("db01"))).await;
     let list = core.snapshots.list(&core.ctx, None).await.unwrap();

@@ -21,8 +21,11 @@
 //! moving charts. For file transfer (SS-08): SFTP serves a temp folder (printed at start, deleted when it
 //! stops), with a few files in /home/alice and /srv/www; /etc, /root and /usr refuse uploads like folders
 //! alice may not write to. The login shell counts as bash, so the terminal sets up its folder hook: `cd <dir>`
-//! and `pwd` move the shell, and the "Files here" drawer follows. Nothing it prints is a real credential;
-//! it all goes away when it stops.
+//! and `pwd` move the shell, and the "Files here" drawer follows. QL-09: /home/bob/.app is bob's alone, so
+//! SFTP (as alice) can't open it while the shell can `cd` there: the drawer says why and still goes Back,
+//! Up and Home. `su [-] [user]` starts a shell as that user (no password; root by default) without the
+//! hook, as a real switch would, and the drawer says the shell may have switched; `exit` goes back.
+//! Nothing it prints is a real credential; it all goes away when it stops.
 //!
 //! Jump hosts and tunnels (SS-07): every server reaches the others by the names `dev-host-01.test`,
 //! `dev-host-02.test` and so on (any port), which this PC can't resolve, so a session to
@@ -115,7 +118,11 @@ async fn main() {
             .with_login_shell("bash")
             .with_sftp_file("/home/alice/notes.txt", b"Remotely dev server: a file to download.\n")
             .with_sftp_file("/home/alice/logs/app.log", &dev_log())
-            .with_sftp_file("/srv/www/index.html", b"<h1>It works</h1>\n");
+            .with_sftp_file("/srv/www/index.html", b"<h1>It works</h1>\n")
+            // QL-09: another user's folder that alice can't open.
+            .with_sftp_file("/home/bob/notes.txt", b"bob's notes\n")
+            .with_unreadable("/home/bob/.app")
+            .with_sftp_file("/home/bob/.app/app.ini", b"[app]\n");
         // SS-07: the other servers and the web page, by names only they resolve.
         let mut server = server;
         for other in 0..count {
@@ -140,6 +147,7 @@ async fn main() {
     println!("  and for MultiExec: top (full screen, q quits), Ctrl+C drops the line");
     println!("MultiExec and Compare output commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>");
     println!("Files: cd <dir> and pwd move the shell (the drawer follows); /etc refuses uploads");
+    println!("  and for QL-09: cd /home/bob/.app (alice can't open it over SFTP); su [-] [user] switches user");
     println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");
     if count >= 2 {
         println!(

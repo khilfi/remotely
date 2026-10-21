@@ -25,8 +25,10 @@
 //!
 //! SS-08: an SFTP subsystem on a real temp folder ([`TestSshServer::sftp_root`], see [`sftp`]), and,
 //! with [`TestSshServer::with_login_shell`], a login shell the shell probe calls bash or zsh: its
-//! interactive shell then answers Remotely's prompt hook (prints the hook's marker, then OSC 7 before
-//! each prompt) and knows `cd` and `pwd`.
+//! interactive shell then answers Remotely's prompt hook (prints the hook's marker, then OSC 7 and the
+//! user report before each prompt) and knows `cd` and `pwd`. QL-09: `su [-] [user]` starts a shell as
+//! that user (no password asked, root by default) with a `user@host:~$` prompt and no hook, as a real
+//! switch would; `exit` goes back. [`TestSshServer::with_unreadable`] makes a folder SFTP can't open.
 //!
 //! SS-07: it forwards like OpenSSH with `AllowTcpForwarding yes`. A direct-tcpip channel (a jump
 //! host's hop, a local or SOCKS forward) connects from here to where it asks; names set with
@@ -129,6 +131,8 @@ struct State {
     sftp_root: Mutex<Option<PathBuf>>,
     /// SS-08: host folders SFTP refuses to write into.
     sftp_protected: Mutex<Vec<String>>,
+    /// QL-09: host folders SFTP refuses to open, with everything in them.
+    sftp_unreadable: Mutex<Vec<String>>,
     /// SS-08: each SFTP read and write waits this long.
     sftp_delay: Mutex<Option<Duration>>,
     /// SS-08: no SFTP subsystem, like a host without sftp-server.
@@ -232,6 +236,15 @@ impl TestSshServer {
     /// SS-08: SFTP refuses to write into this folder (and below), like one the user may not write to.
     pub fn with_protected(self, folder: &str) -> Self {
         locks::lock(&self.state.sftp_protected).push(folder.into());
+        self
+    }
+
+    /// QL-09: SFTP refuses to open this folder and anything in it, like a folder of another user's that
+    /// the login user may not read (`drwx------ bob`). The toy shell can still `cd` into it, the way a
+    /// shell switched to that user could.
+    pub fn with_unreadable(self, folder: &str) -> Self {
+        let _ = std::fs::create_dir_all(self.sftp_path(folder));
+        locks::lock(&self.state.sftp_unreadable).push(folder.into());
         self
     }
 
@@ -466,6 +479,7 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             forwarded: HashSet::new(),
             folders: HashMap::new(),
             hooked: HashSet::new(),
+            switched: HashMap::new(),
         };
         let session = {
             let state = Arc::clone(&state);
@@ -513,6 +527,15 @@ async fn relay(mut from: impl AsyncRead + Unpin, mut to: impl AsyncWrite + Unpin
     let _ = to.shutdown().await;
 }
 
+/// A user's home folder on the toy host.
+fn home_of(user: &str) -> String {
+    if user == "root" {
+        "/root".to_owned()
+    } else {
+        format!("/home/{user}")
+    }
+}
+
 struct ServerHandler {
     state: Arc<State>,
     /// SS-07: this connection's [`Link`], so what it forwards is cut with it.
@@ -539,6 +562,9 @@ struct ServerHandler {
     folders: HashMap<ChannelId, String>,
     /// SS-08: shells that ran Remotely's prompt hook, and so print OSC 7 before each prompt.
     hooked: HashSet<ChannelId>,
+    /// QL-09: shells started with `su` in each interactive shell, innermost last: the user and its
+    /// folder. They have no hook.
+    switched: HashMap<ChannelId, Vec<(String, String)>>,
 }
 
 impl ServerHandler {
@@ -560,28 +586,53 @@ impl ServerHandler {
     }
 
     fn home(&self) -> String {
-        if self.user == "root" {
-            "/root".to_owned()
-        } else {
-            format!("/home/{}", self.user)
-        }
+        home_of(&self.user)
     }
 
-    /// SS-08: the interactive shell's folder.
+    /// SS-08: the interactive shell's folder (QL-09: the switched shell's, after `su`).
     fn folder(&self, channel: ChannelId) -> String {
+        if let Some((_, folder)) = self.switched.get(&channel).and_then(|s| s.last()) {
+            return folder.clone();
+        }
         self.folders.get(&channel).cloned().unwrap_or_else(|| self.home())
     }
 
-    /// The prompt: `$ `, after OSC 7 with the folder once the prompt hook ran (SS-08).
+    /// QL-09: who the interactive shell runs as.
+    fn shell_user(&self, channel: ChannelId) -> String {
+        match self.switched.get(&channel).and_then(|s| s.last()) {
+            Some((user, _)) => user.clone(),
+            None => self.user.clone(),
+        }
+    }
+
+    fn host_name(&self) -> String {
+        locks::lock(&self.state.hostname)
+            .clone()
+            .unwrap_or_else(|| "test-host".into())
+    }
+
+    /// The prompt: `$ `, after OSC 7 with the folder and the user report once the prompt hook ran
+    /// (SS-08, QL-09). A shell started with `su` shows `bob@host:~$ ` (`#` for root) and no hook.
     fn prompt(&self, channel: ChannelId) -> Vec<u8> {
+        if let Some((user, folder)) = self.switched.get(&channel).and_then(|s| s.last()) {
+            let home = home_of(user);
+            let shown = match folder.strip_prefix(&home) {
+                Some(rest) if rest.is_empty() || rest.starts_with('/') => format!("~{rest}"),
+                _ => folder.clone(),
+            };
+            let sign = if user == "root" { '#' } else { '$' };
+            return format!("{user}@{}:{shown}{sign} ", self.host_name()).into_bytes();
+        }
         if !self.hooked.contains(&channel) {
             return b"$ ".to_vec();
         }
-        let host = locks::lock(&self.state.hostname)
-            .clone()
-            .unwrap_or_else(|| "test-host".into());
         let path = self.folder(channel).replace('%', "%25");
-        format!("\x1b]7;file://{host}{path}\x1b\\$ ").into_bytes()
+        let user = self.user.replace('%', "%25");
+        format!(
+            "\x1b]7;file://{}{path}\x1b\\\x1b]7777;remotely-user={user}\x07$ ",
+            self.host_name()
+        )
+        .into_bytes()
     }
 
     fn run_line(&mut self, channel: ChannelId, line: &str, session: &mut Session) -> Result<(), russh::Error> {
@@ -602,16 +653,40 @@ impl ServerHandler {
                 self.hooked.insert(channel);
             }
             Some("cd") => {
-                let home = self.home();
+                let home = home_of(&self.shell_user(channel));
                 let to = crate::terminal::files::resolve(&self.folder(channel), &home, words.next().unwrap_or("~"));
                 let root = locks::lock(&self.state.sftp_root).clone().unwrap_or_default();
                 if sftp::local(&root, &to).is_dir() {
-                    self.folders.insert(channel, to);
+                    match self.switched.get_mut(&channel).and_then(|s| s.last_mut()) {
+                        Some((_, folder)) => *folder = to,
+                        None => {
+                            self.folders.insert(channel, to);
+                        }
+                    }
                 } else {
                     session.data(channel, format!("cd: no such file or directory: {to}\r\n").into_bytes())?;
                 }
             }
             Some("pwd") => session.data(channel, format!("{}\r\n", self.folder(channel)).into_bytes())?,
+            // QL-09: a shell as another user, without the hook; `-` starts it in that user's home.
+            Some("su") => {
+                let mut login = false;
+                let mut user = "root".to_owned();
+                for word in words {
+                    match word {
+                        "-" | "-l" | "--login" => login = true,
+                        other => user = other.to_owned(),
+                    }
+                }
+                let folder = if login { home_of(&user) } else { self.folder(channel) };
+                self.switched.entry(channel).or_default().push((user, folder));
+            }
+            Some("exit") if self.switched.get(&channel).is_some_and(|s| !s.is_empty()) => {
+                if let Some(shells) = self.switched.get_mut(&channel) {
+                    shells.pop();
+                }
+                session.data(channel, b"logout\r\n".to_vec())?;
+            }
             Some("exit") => {
                 let code = words.next().and_then(|c| c.parse().ok()).unwrap_or(0);
                 session.data(channel, b"logout\r\n".to_vec())?;
@@ -620,7 +695,7 @@ impl ServerHandler {
                 session.close(channel)?;
                 return Ok(());
             }
-            Some("whoami") => session.data(channel, format!("{}\r\n", self.user).into_bytes())?,
+            Some("whoami") => session.data(channel, format!("{}\r\n", self.shell_user(channel)).into_bytes())?,
             // "é" sent as two packets, split inside the character.
             Some("split-utf8") => {
                 session.data(channel, vec![0xC3])?;
@@ -1045,6 +1120,7 @@ impl server::Handler for ServerHandler {
         self.forwarded.remove(&channel);
         self.folders.remove(&channel);
         self.hooked.remove(&channel);
+        self.switched.remove(&channel);
         Ok(())
     }
 
@@ -1381,11 +1457,7 @@ impl<'a> ToyShell<'a> {
     }
 
     fn home(&self) -> String {
-        if self.user == "root" {
-            "/root".to_owned()
-        } else {
-            format!("/home/{}", self.user)
-        }
+        home_of(&self.user)
     }
 
     /// An absolute path: relative ones start in the home folder, where SSH commands start.

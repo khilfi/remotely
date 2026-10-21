@@ -5,9 +5,13 @@
 //! Pasting a command is the terminal's own input path (`terminal_write`, as if typed), so nothing here
 //! sends a command anywhere. A vault password goes from the vault to the shell inside the core: the UI
 //! names the secret by id and never sees its value.
+//!
+//! QL-13: a library entry's "Manual" link opens in the default browser from here, and only when the
+//! core's allow-list of documentation sites takes its address (`snippets::manual::checked`).
 
 use std::collections::HashMap;
 
+use remotely_core::snippets::manual;
 use remotely_core::snippets::{CommandInfo, Favourite, FavouriteInput, LibraryEntry};
 use remotely_core::vault::SecretId;
 use remotely_core::CoreError;
@@ -75,6 +79,61 @@ pub fn command_inspect(state: State<'_, AppState>, command: String) -> CommandIn
     state.core.snippets.inspect(&command)
 }
 
+/// QL-13: opens a library entry's manual page in the default browser. An address that isn't https on
+/// one of the documentation sites is refused before Windows sees it. Opening a page changes nothing,
+/// so it is not audited and the read-only lock doesn't stop it.
+#[tauri::command]
+pub async fn open_manual(url: String) -> IpcResult<()> {
+    tokio::task::spawn_blocking(move || open_checked(&url, open_in_browser))
+        .await
+        .map_err(|err| IpcError::new("browser", format!("The browser did not open: {err}")))?
+}
+
+/// Hands `url` to `open` only when it is a manual page the app may open.
+fn open_checked(url: &str, open: impl FnOnce(&str) -> IpcResult<()>) -> IpcResult<()> {
+    let url = manual::checked(url)?;
+    open(url.as_str())
+}
+
+/// The default browser, through the shell's "open" verb, as Explorer opens a link.
+#[cfg(windows)]
+fn open_in_browser(url: &str) -> IpcResult<()> {
+    use windows::core::{w, HSTRING, PCWSTR};
+    use windows::Win32::System::Com::{
+        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
+    };
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let file = HSTRING::from(url);
+    // SAFETY: plain Win32 calls with valid, NUL-terminated strings that outlive them. ShellExecute
+    // wants COM on its thread (apartment-threaded, as Microsoft documents); this blocking-pool thread
+    // sets it up for the call and undoes it if it did.
+    let result = unsafe {
+        let com = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        let result = ShellExecuteW(None, w!("open"), &file, PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL);
+        if com.is_ok() {
+            CoUninitialize();
+        }
+        result
+    };
+    // ShellExecute returns a value above 32 when it worked, an error code otherwise.
+    if result.0 as usize > 32 {
+        tracing::info!("manual page opened in the browser");
+        Ok(())
+    } else {
+        Err(IpcError::new(
+            "browser",
+            format!("Windows could not open the page (error {}).", result.0 as usize),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn open_in_browser(_url: &str) -> IpcResult<()> {
+    Err(IpcError::new("unsupported", "Opening a manual page needs Windows."))
+}
+
 /// BX-08: the command with its `{{variables}}` filled in, ready to paste.
 #[tauri::command]
 pub fn command_fill(state: State<'_, AppState>, command: String, values: HashMap<String, String>) -> IpcResult<String> {
@@ -112,4 +171,46 @@ pub fn notify_command_finished(app: AppHandle, title: String, body: String) -> I
         .map_err(|err| IpcError::new("notification", format!("the notification could not be shown: {err}")))?;
     tracing::info!("long-command notification shown");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    // Only the check: a test never starts the real browser.
+
+    #[test]
+    fn a_manual_page_on_a_documentation_site_reaches_the_browser() {
+        let opened = RefCell::new(Vec::new());
+        let url = "https://man7.org/linux/man-pages/man1/df.1.html";
+        open_checked(url, |u| {
+            opened.borrow_mut().push(u.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(opened.into_inner(), [url]);
+    }
+
+    #[test]
+    fn any_other_address_is_refused_before_the_browser_sees_it() {
+        for url in [
+            "https://example.com/",
+            "http://man7.org/linux/man-pages/man1/df.1.html",
+            "file:///C:/Windows/System32/cmd.exe",
+            r"C:\Windows\System32\cmd.exe",
+            "calc.exe",
+            "https://man7.org@example.com/",
+            "https://man7.org:8443/",
+            "ms-settings:privacy",
+            "",
+        ] {
+            let Err(err) = open_checked(url, |u| panic!("{u} reached the browser")) else {
+                panic!("{url} was opened");
+            };
+            let json = serde_json::to_value(err).unwrap();
+            assert_eq!(json["code"], "invalid_input", "{url}");
+        }
+    }
 }

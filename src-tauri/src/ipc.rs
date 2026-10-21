@@ -793,6 +793,43 @@ pub async fn import_preview(
     Ok(Some(core.import.preview_file(&core.ctx, source, &path).await?))
 }
 
+/// QL-10: the format guide for a source, made from its parser's own tables.
+#[tauri::command]
+pub fn import_guide(source: ImportSource) -> import::guide::FormatGuide {
+    import::guide::guide(source)
+}
+
+/// QL-10: asks where to save the source's sample file (Documents by default, never the app's own
+/// folders), then writes it there. Returns the path saved to, or `None` when the dialog was closed.
+#[tauri::command]
+pub async fn import_save_sample(window: WebviewWindow, source: ImportSource) -> IpcResult<Option<String>> {
+    let sample = import::guide::sample(source);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Save a sample file")
+        .set_file_name(sample.file_name)
+        .add_filter(sample.filter, &[sample.extension]);
+    if let Some(folder) = documents(&window) {
+        dialog = dialog.set_directory(folder);
+    }
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't save there: {err}")))?;
+    tokio::fs::write(&path, sample.text.as_bytes())
+        .await
+        .map_err(|err| CoreError::InvalidInput(format!("can't save {}: {err}", path.display())))?;
+    Ok(Some(path.display().to_string()))
+}
+
 /// Saves the rows picked in a preview, with their key files added to the vault when asked.
 #[tauri::command]
 pub async fn import_commit(state: State<'_, AppState>, request: ImportRequest) -> IpcResult<ImportReport> {

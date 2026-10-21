@@ -326,8 +326,125 @@ pub(super) fn writes(words: &[String]) -> bool {
             expands || p.has_short("E")
         }
         "apt-cache" => expands || args.iter().any(|a| a == "gencaches"),
+        // BX-08 (0.4.0 additions).
+        "find" => {
+            // Lists files by name, size, age, owner. Some actions delete (-delete), run any command
+            // (-exec, -execdir, -ok, -okdir) or write a file (-fprint, -fprint0, -fprintf, -fls).
+            // find's primaries are whole words: no clusters, no abbreviations.
+            expands || args.iter().any(|a| FIND_WRITES.contains(&a.as_str()))
+        }
+        "locate" | "plocate" | "mlocate" => {
+            // Searches the file-name database; `updatedb` (another command) rebuilds it. The old
+            // slocate rebuilt it from locate itself with -u/-U.
+            let p = parse("", "", &[]);
+            expands || p.has_short("uU") || p.has_long(&["update"])
+        }
+        "iscsiadm" => iscsiadm_writes(args),
+        "chronyd" => {
+            // `chronyd -p` prints the configuration and exits right after reading it (chrony's
+            // main.c). Every other option runs or steps the clock, -l opens a log file before -p
+            // returns, and operands are configuration lines; so only -p and -f FILE read.
+            let p = parse("fFlLNPtu", "", &[]);
+            expands
+                || !p.has_short("p")
+                || !p.short.iter().all(|&c| matches!(c, 'p' | 'f'))
+                || !p.long.is_empty()
+                || !p.operands.is_empty()
+        }
         _ => false,
     }
+}
+
+/// Actions of `find` that delete, run a command or write a file.
+const FIND_WRITES: &[&str] = &[
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls",
+];
+
+/// `iscsiadm` reads when it only shows sessions, node or discovery records, or hosts. Any other
+/// option logs in or out (-l, -u, -L, -U), discovers targets and saves them as node records (-t, -D),
+/// rescans sessions (-R), changes a record (-o new/update/delete/…, -n, -v), kills iscsid (-k) or
+/// shows hidden CHAP passwords (-S). The iface mode is left out, since it can write default iface
+/// files, and so is fw, which can log in. Options as open-iscsi's iscsiadm.c reads them.
+fn iscsiadm_writes(args: &[String]) -> bool {
+    /// Long options that only pick or show something.
+    const SHOWS: &[&str] = &[
+        "mode",
+        "print",
+        "targetname",
+        "portal",
+        "interface",
+        "sid",
+        "host",
+        "stats",
+        "debug",
+        "version",
+        "help",
+        "op",
+    ];
+    /// Every other long option.
+    const OTHERS: &[&str] = &[
+        "type",
+        "name",
+        "value",
+        "rescan",
+        "discover",
+        "login",
+        "loginall",
+        "logout",
+        "logoutall",
+        "killiscsid",
+        "show",
+        "submode",
+        "ip",
+        "packetsize",
+        "count",
+        "interval",
+        "index",
+        "portal_type",
+        "no_wait",
+    ];
+    let p = Spec {
+        values: "mabcCpPTHiIUkLdrnvotxA",
+        optional: "",
+        long_values: &[
+            "mode",
+            "portal",
+            "targetname",
+            "interface",
+            "op",
+            "type",
+            "name",
+            "value",
+            "host",
+            "sid",
+            "print",
+            "loginall",
+            "logoutall",
+            "killiscsid",
+            "debug",
+            "submode",
+            "ip",
+            "packetsize",
+            "count",
+            "interval",
+            "index",
+        ],
+    }
+    .parse(args);
+    // getopt_long takes an exact name or an unambiguous abbreviation; anything that could be one of
+    // the other options counts as one.
+    let long_shows = p
+        .long
+        .iter()
+        .all(|n| SHOWS.contains(n) || (prefix_of(n, SHOWS) && !prefix_of(n, OTHERS)));
+    args.iter().any(|a| a.contains('$'))
+        || !p.short.iter().all(|&c| "mPTpIrHsdVho".contains(c))
+        || !long_shows
+        || !p.operands.is_empty()
+        || !p
+            .values_of('m', "mode")
+            .all(|m| matches!(m, "session" | "node" | "discovery" | "discoverydb" | "host"))
+        || !p.values_of('o', "op").all(|op| op == "show")
 }
 
 /// True when `word` is a `NAME=value` setting that leaves a read-only command read-only, whether it
@@ -561,6 +678,16 @@ struct Parsed<'a> {
     long: Vec<&'a str>,
     /// The other words, option values excluded. A word holding `$` is always here.
     operands: Vec<&'a str>,
+    /// The values options took, in order: attached (`-msession`, `--mode=session`) or the next word.
+    /// A value that holds `$` is not taken: it stays an operand.
+    values: Vec<(Opt<'a>, &'a str)>,
+}
+
+/// An option that took a value.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Opt<'a> {
+    Short(char),
+    Long(&'a str),
 }
 
 impl Spec {
@@ -575,21 +702,37 @@ impl Spec {
             if word.contains('$') {
                 out.operands.push(word);
             } else if let Some(long) = word.strip_prefix("--") {
-                let name = long.split_once('=').map_or(long, |(name, _)| name);
-                if name.len() == long.len() && prefix_of(name, self.long_values) {
-                    skip_value(&mut words);
+                match long.split_once('=') {
+                    Some((name, value)) => {
+                        out.values.push((Opt::Long(name), value));
+                        out.long.push(name);
+                    }
+                    None => {
+                        if prefix_of(long, self.long_values) {
+                            if let Some(value) = skip_value(&mut words) {
+                                out.values.push((Opt::Long(long), value));
+                            }
+                        }
+                        out.long.push(long);
+                    }
                 }
-                out.long.push(name);
             } else if let Some(cluster) = word.strip_prefix('-').filter(|c| !c.is_empty()) {
                 for (at, letter) in cluster.char_indices() {
                     out.short.push(letter);
+                    let rest = &cluster[at + letter.len_utf8()..];
                     if self.values.contains(letter) {
-                        if at + letter.len_utf8() == cluster.len() {
-                            skip_value(&mut words);
-                        }
+                        let value = if rest.is_empty() {
+                            skip_value(&mut words)
+                        } else {
+                            Some(rest)
+                        };
+                        out.values.extend(value.map(|v| (Opt::Short(letter), v)));
                         break;
                     }
                     if self.optional.contains(letter) {
+                        if !rest.is_empty() {
+                            out.values.push((Opt::Short(letter), rest));
+                        }
                         break;
                     }
                 }
@@ -601,20 +744,30 @@ impl Spec {
     }
 }
 
-/// Skips the next word as an option's value, unless it holds `$` and may expand to something else.
-fn skip_value<'a>(words: &mut Peekable<impl Iterator<Item = &'a str>>) {
-    if words.peek().is_some_and(|w| !w.contains('$')) {
-        words.next();
-    }
+/// Takes the next word as an option's value, unless it holds `$` and may expand to something else.
+fn skip_value<'a>(words: &mut Peekable<impl Iterator<Item = &'a str>>) -> Option<&'a str> {
+    words.next_if(|w| !w.contains('$'))
 }
 
-impl Parsed<'_> {
+impl<'a> Parsed<'a> {
     fn has_short(&self, letters: &str) -> bool {
         self.short.iter().any(|c| letters.contains(*c))
     }
 
     fn has_long(&self, options: &[&str]) -> bool {
         self.long.iter().any(|name| prefix_of(name, options))
+    }
+
+    /// The values given to the short option `letter` or to the long option `long` (or an
+    /// abbreviation of it), in order.
+    fn values_of<'s>(&'s self, letter: char, long: &'s str) -> impl Iterator<Item = &'a str> + 's {
+        self.values.iter().filter_map(move |(opt, value)| {
+            let named = match *opt {
+                Opt::Short(c) => c == letter,
+                Opt::Long(name) => prefix_of(name, &[long]),
+            };
+            named.then_some(*value)
+        })
     }
 }
 

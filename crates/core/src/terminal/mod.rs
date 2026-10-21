@@ -40,7 +40,9 @@
 //!   MultiExec notifies once per line.
 //! * SS-08 ([`files`]): SFTP on each pane's own connection: the "Files here" drawer, downloads and
 //!   uploads (a command on the bus). bash and zsh report their folder through a prompt hook typed
-//!   invisibly on connect ([`folder`]), so the drawer and uploads follow the shell's folder.
+//!   invisibly on connect ([`folder`]), so the drawer and uploads follow the shell's folder. QL-09: the
+//!   drawer says which user transfers run as (the login's), and which user the shell runs as when
+//!   that differs or may differ ([`shell_user`]).
 //! * SS-07: a session behind jump hosts connects through each of them in turn (the adapter's chain);
 //!   each hop's host key is checked and asked about like the session's own, naming the jump host, and
 //!   a password typed for a jump host is kept for reconnects like the session's. Port forwards
@@ -55,6 +57,7 @@ pub mod multiexec;
 pub mod output;
 pub mod quick;
 pub mod record;
+pub mod shell_user;
 pub mod tunnels;
 
 use std::collections::HashMap;
@@ -79,6 +82,7 @@ use self::log::{LogMessage, SessionLog};
 use self::output::{SaveLayout, SavedOutput, TerminalText};
 use self::quick::{QuickConnect, QuickOpened};
 use self::record::RecordSlot;
+use self::shell_user::{UserInfo, UserWatch};
 use self::tunnels::{TunnelInfo, TunnelRun, TunnelTable};
 use crate::adapters::exec_output::Scrubber;
 use crate::adapters::network::{ip_literal, NetworkAdapter};
@@ -569,6 +573,8 @@ struct Control {
     folder: Mutex<FolderInfo>,
     /// SS-08: the login's home folder on this connection, once asked.
     home: Mutex<Option<String>>,
+    /// QL-09: the folders the drawer opened, oldest first, for its Back button.
+    opened: Mutex<Vec<String>>,
     /// SS-07: the live connection's port forwards, while connected.
     forwards: Mutex<Option<Arc<dyn RemoteForwards>>>,
     /// SS-07: the tunnels and their state.
@@ -901,6 +907,7 @@ impl Terminals {
             files: Mutex::default(),
             folder: Mutex::default(),
             home: Mutex::default(),
+            opened: Mutex::default(),
             forwards: Mutex::default(),
             tunnels: Mutex::default(),
             tunnel_ops: tokio::sync::Mutex::default(),
@@ -1553,6 +1560,8 @@ struct Live {
     /// SS-08: the prompt hook, and the folders the shell reports.
     hook: PromptHook,
     folders: FolderWatch,
+    /// QL-09: who the shell runs as.
+    users: UserWatch,
     /// SS-01: the startup command's lines, until typed.
     startup: Vec<String>,
     startup_until: Instant,
@@ -2032,6 +2041,12 @@ impl Pane {
         .await;
     }
 
+    /// QL-09: who the shell runs as, as the drawer shows it.
+    async fn sync_user(&self, users: &UserWatch) {
+        let user = users.info().clone();
+        self.update_folder(|folder| folder.user = user).await;
+    }
+
     /// Output the user sees: the session log, QL-07's watch, MultiExec's screen, the folder the shell
     /// reports (SS-08), then the pane. False when the pane has gone away.
     async fn pass(&self, bytes: Vec<u8>, live: &mut Live) -> bool {
@@ -2047,12 +2062,19 @@ impl Pane {
         if let Some(slot) = live.recording() {
             slot.output(&bytes, &line, alternate, now);
         }
-        if let Some(path) = live.folders.feed(&bytes) {
+        live.users.output(now);
+        let reports = live.folders.feed(&bytes);
+        if let Some(path) = reports.folder {
             self.update_folder(|folder| {
                 folder.path = Some(path);
                 folder.tracking = FolderTracking::Following;
             })
             .await;
+        }
+        if let Some(user) = reports.user {
+            if live.users.report(&user) {
+                self.sync_user(&live.users).await;
+            }
         }
         if self.output.send(bytes).await.is_err() {
             return false;
@@ -2074,7 +2096,8 @@ impl Pane {
             files,
             forwards,
         } = shell;
-        // SS-08: this connection's files; the folder is learnt again.
+        // SS-08: this connection's files; the folder is learnt again. QL-09: transfers run as its login.
+        let login = files.user();
         *locks::lock(&self.control.files) = Some(files);
         // SS-07: tunnels approved for this terminal open again on the new connection, and its first
         // connection asks for the session's that start with it (through the bus, so beside the shell).
@@ -2089,7 +2112,13 @@ impl Pane {
             Arc::clone(&self.control),
         ));
         locks::lock(&self.control.home).take();
-        self.update_folder(|folder| *folder = FolderInfo::default()).await;
+        self.update_folder(|folder| {
+            *folder = FolderInfo {
+                user: UserInfo::connected(&login),
+                ..FolderInfo::default()
+            }
+        })
+        .await;
         let now = Instant::now();
         let live = Live {
             input: shell_input,
@@ -2097,6 +2126,7 @@ impl Pane {
             watch: RunWatch::new(self.watch_config()),
             hook: PromptHook::new(&Uuid::new_v4().simple().to_string(), now),
             folders: FolderWatch::new(),
+            users: UserWatch::new(&login),
             startup,
             startup_until: now + STARTUP_WAIT,
             armed: None,
@@ -2141,6 +2171,7 @@ impl Pane {
             return false;
         }
         for line in std::mem::take(&mut live.startup) {
+            live.users.input(b"\r");
             let _ = live
                 .input
                 .send(ShellInput::Data(format!("{line}\r").into_bytes()))
@@ -2174,10 +2205,16 @@ impl Pane {
                 None => String::new(),
             };
             let recording_due = live.recording().and_then(|slot| slot.deadline(&line));
-            let deadline = [live.watch.deadline(), live.hook.deadline(), startup_due, recording_due]
-                .into_iter()
-                .flatten()
-                .min();
+            let deadline = [
+                live.watch.deadline(),
+                live.hook.deadline(),
+                live.users.deadline(),
+                startup_due,
+                recording_due,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             tokio::select! {
                 () = cancel.cancelled() => {
                     let _ = live.input.send(ShellInput::Close).await;
@@ -2202,6 +2239,10 @@ impl Pane {
                         return Pump::Closed;
                     }
                     self.sync_folder(&live.hook).await;
+                    // QL-09: a prompt without the hook's report after Enter: the shell switched.
+                    if live.users.tick(now, live.watch.line(), live.watch.alternate()) {
+                        self.sync_user(&live.users).await;
+                    }
                 }
                 answer = &mut *hostname_answer, if hostname_pending => {
                     hostname_pending = false;
@@ -2241,6 +2282,7 @@ impl Pane {
                             if !was_running && live.watch.is_running() {
                                 live.multiexec_run = false;
                             }
+                            live.users.input(&bytes);
                             let _ = live.input.send(ShellInput::Data(bytes)).await;
                         }
                         Some(TerminalInput::Keys(bytes)) => {
@@ -2251,6 +2293,7 @@ impl Pane {
                             if !was_running && live.watch.is_running() {
                                 live.multiexec_run = true;
                             }
+                            live.users.input(&bytes);
                             let control = &self.control;
                             let quiet = self.watch_config().quiet;
                             live.record_keys(&bytes, || control.known_secrets(), quiet);
@@ -2279,6 +2322,7 @@ impl Pane {
                             bytes.push(b'\r');
                             let _ = live.input.send(ShellInput::Data(bytes.to_vec())).await;
                             live.watch.input(b"\r", Instant::now());
+                            live.users.input(b"\r");
                             let _ = reply.send(Ok(prompt));
                         }
                         Some(TerminalInput::Resize { cols, rows }) => {

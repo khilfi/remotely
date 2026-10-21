@@ -1,12 +1,16 @@
 // SS-02: import a session list from PuTTY, MobaXterm, an OpenSSH config or CSV. The core reads the source
 // (the file is chosen in a dialog it opens), then this shows a preview with duplicates and name conflicts
 // before anything is saved. Stored passwords are never imported; key files can go into the vault.
+// QL-10: each file format has a short guide (made in the core from its parser's tables) and a sample file, saved
+// through a Rust save dialog; samples hold made-up example sessions only.
 
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   AlertTriangleIcon,
   ArrowLeftIcon,
+  BookOpenIcon,
+  DownloadIcon,
   FileSpreadsheetIcon,
   FileTextIcon,
   InfoIcon,
@@ -35,6 +39,7 @@ import { VaultUnlock } from "@/components/VaultUnlock";
 import {
   api,
   errorMessage,
+  type FormatGuide,
   type ImportPreview,
   type ImportReport,
   type ImportRow,
@@ -63,6 +68,8 @@ const SOURCES: {
   detail: string;
   icon: typeof MonitorIcon;
   chooseFile?: boolean;
+  /** QL-10: a file format, with a guide and a sample file. */
+  format?: boolean;
 }[] = [
   {
     source: "putty",
@@ -75,24 +82,29 @@ const SOURCES: {
     title: "MobaXterm export",
     detail: "A .mxtsessions file (MobaXterm: Settings, Export all sessions). Folders are kept.",
     icon: TerminalSquareIcon,
+    format: true,
   },
   {
     source: "openssh",
     title: "OpenSSH config",
     detail: "~/.ssh/config: each Host becomes a session, with its user, port, key file and wildcard settings.",
     icon: FileTextIcon,
+    format: true,
   },
   {
     source: "puttyFile",
     title: "PuTTY export from another computer",
     detail: "A .reg file of PuTTY's sessions (regedit, export HKCU\\Software\\SimonTatham\\PuTTY\\Sessions).",
     icon: FileTextIcon,
+    format: true,
   },
   {
     source: "csv",
     title: "CSV file",
-    detail: "A header row with host (required) and any of name, port, user, folder, tags, environment, key_file.",
+    detail:
+      "A header row with host (required) and any of name, port, user, folder, tags, environment, key_file; the guide lists every column.",
     icon: FileSpreadsheetIcon,
+    format: true,
   },
 ];
 
@@ -171,6 +183,27 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
   const [busy, setBusy] = useState<ImportSource | "import" | null>(null);
   const [report, setReport] = useState<ImportReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** QL-10: the format guide open in the dialog. */
+  const [guide, setGuide] = useState<FormatGuide | null>(null);
+
+  async function openGuide(source: ImportSource) {
+    setError(null);
+    try {
+      setGuide(await api.importGuide(source));
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function saveSample(source: ImportSource) {
+    setError(null);
+    try {
+      const saved = await api.importSaveSample(source);
+      if (saved) toast.success(`Sample saved to ${saved}`);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
 
   async function read(source: ImportSource, chooseFile = false) {
     setBusy(source);
@@ -178,6 +211,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
     try {
       const found = await api.importPreview(source, chooseFile);
       if (found) {
+        setGuide(null);
         setPreview(found);
         setPicked(new Set(found.rows.filter((r) => r.selected).map((r) => r.index)));
       }
@@ -230,38 +264,68 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
 
   return (
     <Dialog open onOpenChange={(open) => !open && busy === null && onClose()}>
-      <DialogContent className={cn(preview && !report ? "sm:max-w-5xl" : "sm:max-w-xl")}>
+      <DialogContent className={cn(preview && !report ? "sm:max-w-5xl" : guide ? "sm:max-w-3xl" : "sm:max-w-xl")}>
         <DialogHeader>
           <DialogTitle>Import sessions</DialogTitle>
           <DialogDescription>
             {report
               ? "Done."
-              : preview
-                ? `${plural(preview.rows.length, "session")} found in ${preview.file ?? SOURCE_NAME[preview.source]}: ${counts.fresh} new, ${plural(counts.duplicates, "duplicate")}, ${plural(counts.conflicts, "name")} already taken. Nothing is saved until you import.`
-                : "Pick where your sessions are. You'll see what was found, with duplicates and name conflicts, before anything is saved. Saved passwords are never imported."}
+              : guide && !preview
+                ? "What Remotely reads from this format, and a sample file to start from. The sample holds made-up example sessions only."
+                : preview
+                  ? `${plural(preview.rows.length, "session")} found in ${preview.file ?? SOURCE_NAME[preview.source]}: ${counts.fresh} new, ${plural(counts.duplicates, "duplicate")}, ${plural(counts.conflicts, "name")} already taken. Nothing is saved until you import.`
+                  : "Pick where your sessions are. You'll see what was found, with duplicates and name conflicts, before anything is saved. Saved passwords are never imported."}
           </DialogDescription>
         </DialogHeader>
 
-        {!preview && !report && (
+        {!preview && !report && guide && <GuideView guide={guide} />}
+
+        {!preview && !report && !guide && (
           <div className="grid gap-2">
             {SOURCES.map((s) => (
-              <button
-                key={s.source}
-                type="button"
-                disabled={busy !== null}
-                onClick={() => void read(s.source)}
-                className="flex items-start gap-3 rounded-lg border p-3 text-left hover:bg-muted/60 disabled:opacity-60"
-              >
-                {busy === s.source ? (
-                  <LoaderCircleIcon className="mt-0.5 size-5 shrink-0 animate-spin text-muted-foreground" />
-                ) : (
-                  <s.icon className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+              <div key={s.source} className="flex items-stretch rounded-lg border">
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => void read(s.source)}
+                  className="flex min-w-0 flex-1 items-start gap-3 rounded-l-lg p-3 text-left hover:bg-muted/60 disabled:opacity-60"
+                >
+                  {busy === s.source ? (
+                    <LoaderCircleIcon className="mt-0.5 size-5 shrink-0 animate-spin text-muted-foreground" />
+                  ) : (
+                    <s.icon className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+                  )}
+                  <span className="grid gap-0.5">
+                    <span className="font-medium">{s.title}</span>
+                    <span className="text-sm text-muted-foreground">{s.detail}</span>
+                  </span>
+                </button>
+                {s.format && (
+                  <div className="flex shrink-0 flex-col justify-center gap-1 border-l px-1.5">
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="justify-start"
+                      disabled={busy !== null}
+                      onClick={() => void openGuide(s.source)}
+                    >
+                      <BookOpenIcon />
+                      Guide
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      className="justify-start"
+                      disabled={busy !== null}
+                      title="Save a sample file with made-up example sessions"
+                      onClick={() => void saveSample(s.source)}
+                    >
+                      <DownloadIcon />
+                      Sample…
+                    </Button>
+                  </div>
                 )}
-                <span className="grid gap-0.5">
-                  <span className="font-medium">{s.title}</span>
-                  <span className="text-sm text-muted-foreground">{s.detail}</span>
-                </span>
-              </button>
+              </div>
             ))}
             <Button
               variant="link"
@@ -495,6 +559,21 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                 Import {plural(picked.size, "session")}
               </Button>
             </>
+          ) : guide ? (
+            <>
+              <Button variant="outline" disabled={busy !== null} onClick={() => setGuide(null)}>
+                <ArrowLeftIcon data-icon="inline-start" />
+                Back
+              </Button>
+              <Button variant="outline" disabled={busy !== null} onClick={() => void saveSample(guide.source)}>
+                <DownloadIcon data-icon="inline-start" />
+                Save a sample file…
+              </Button>
+              <Button disabled={busy !== null} onClick={() => void read(guide.source, guide.source === "openssh")}>
+                {busy === guide.source && <LoaderCircleIcon className="animate-spin" data-icon="inline-start" />}
+                Choose a file to import…
+              </Button>
+            </>
           ) : (
             <Button variant="outline" onClick={onClose}>
               Cancel
@@ -503,5 +582,62 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** QL-10: a format guide: what the import reads, and how. */
+function GuideView({ guide }: { guide: FormatGuide }) {
+  return (
+    <div className="grid max-h-[60vh] min-w-0 gap-4 overflow-auto pr-1 text-sm">
+      <div className="grid gap-1.5">
+        <h3 className="font-medium">{guide.title}</h3>
+        {guide.intro.map((p) => (
+          <p key={p} className="text-muted-foreground">
+            {p}
+          </p>
+        ))}
+      </div>
+      {guide.sections.map((section) => (
+        <section key={section.heading} className="grid gap-1.5">
+          <h4 className="font-medium">{section.heading}</h4>
+          {section.text.map((p) => (
+            <p key={p} className="text-muted-foreground">
+              {p}
+            </p>
+          ))}
+          {section.table && (
+            <div className="rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    {section.table.headings.map((h) => (
+                      <TableHead key={h}>{h}</TableHead>
+                    ))}
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {section.table.rows.map((row) => (
+                    <TableRow key={row.join("|")}>
+                      {row.map((cell, i) => (
+                        <TableCell
+                          key={i}
+                          className={cn("align-top whitespace-normal", i === 0 && "font-mono text-xs")}
+                        >
+                          {cell}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </section>
+      ))}
+      <p className="text-xs text-muted-foreground">
+        The sample, {guide.sampleName}, uses made-up example names and addresses only. Import it to see what each line
+        becomes before you import your own sessions.
+      </p>
+    </div>
   );
 }

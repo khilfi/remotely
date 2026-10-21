@@ -1,8 +1,9 @@
 //! Post-MVP P5, BX-08 the command panel, end to end: favourite commands (add, change, reorder,
 //! delete, folders, `{{variables}}`), the built-in library classified by the policy engine (and
-//! following the user's rules), and favourites in the encrypted export and import (FD-07).
+//! following the user's rules), each with a link to its manual page (QL-13), and favourites in the
+//! encrypted export and import (FD-07).
 //!
-//! No host is contacted: nothing here runs a command.
+//! No host is contacted: nothing here runs a command or opens a page.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -14,6 +15,7 @@ use common::Setup;
 use remotely_core::fakes::FakeVmware;
 use remotely_core::policy::{ActionKind, DangerousPattern};
 use remotely_core::snippets::library::{LibraryGroup, LibrarySection, LIBRARY, TROUBLESHOOT};
+use remotely_core::snippets::manual::{self, MANUAL_HOSTS};
 use remotely_core::snippets::{Favourite, FavouriteInput};
 use remotely_core::store::AuditEntry;
 use remotely_core::transfer::{ExportRequest, ItemAction, ItemChoice, ItemStatus, TransferCommit};
@@ -398,8 +400,6 @@ const EXPECTED_NON_READ_ONLY: &[&str] = &[
     "lvm.mddetail",
     "lvm.mdexamine",
     "san.smart-test",
-    "san.iscsi-sessions",
-    "san.iscsi-nodes",
     "san.smb-shares",
     "san.fsck-check",
     "memory.dropcaches",
@@ -473,6 +473,57 @@ const EXPECTED_NON_READ_ONLY: &[&str] = &[
     "k8s.scale",
     "k8s.delete-pod",
     "helm.rollback",
+    // 0.4.0 additions. Disks: rescans, growing, partitioning, formatting (also Dangerous) and mounting.
+    "attach.rescan-hosts",
+    "attach.rescan-tool",
+    "attach.rescan-disk",
+    "attach.growpart-dry",
+    "attach.growpart",
+    "attach.pvresize",
+    "attach.lvextend-all",
+    "attach.vgextend",
+    "attach.partition",
+    "attach.format",
+    "attach.mount",
+    // fstab edits and mounts; mount --fake is not provably read-only.
+    "fstab.backup",
+    "fstab.add",
+    "fstab.mount-all",
+    "fstab.mount-preview",
+    "fstab.mount-one",
+    "fstab.unmount",
+    // iSCSI: discovery saves node records; logins, rescans and record changes; netcat.
+    "iscsi.portal-reach",
+    "iscsi.discover",
+    "iscsi.login",
+    "iscsi.startup",
+    "iscsi.logout",
+    "iscsi.rescan",
+    "iscsi.multipath-reload",
+    // locate's database rebuild.
+    "find.updatedb",
+    // Every scp and rsync, dry runs included, and find -exec.
+    "copy.scp-to",
+    "copy.scp-from",
+    "copy.scp-dir",
+    "copy.scp-limit",
+    "copy.rsync-to",
+    "copy.rsync-from",
+    "copy.rsync-preview",
+    "copy.rsync-mirror-preview",
+    "copy.rsync-mirror",
+    "copy.rsync-resume",
+    "copy.rsync-limit",
+    "copy.rsync-port",
+    "copy.rsync-verify",
+    "copy.checksum-folder",
+    // Time: time zone, NTP on/off, timesyncd and chrony changes.
+    "time.set-timezone",
+    "time.ntp-off",
+    "time.timesyncd-set",
+    "time.timesyncd-restart",
+    "time.chrony-reload",
+    "time.chrony-restart",
 ];
 
 #[tokio::test]
@@ -515,7 +566,13 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         .map(|e| (e.id, e.risk.dangerous.clone()))
         .collect();
     dangerous.dedup();
-    assert_eq!(dangerous, [("system.reboot", vec!["shutdown / reboot".to_owned()])]);
+    assert_eq!(
+        dangerous,
+        [
+            ("system.reboot", vec!["shutdown / reboot".to_owned()]),
+            ("attach.format", vec!["mkfs".to_owned()]),
+        ]
+    );
     // Spot checks on both sides of the line.
     for id in [
         "services.restart",
@@ -523,6 +580,11 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         "dnf.install",
         "users.add",
         "cpu.kill",
+        "copy.rsync-preview",
+        "iscsi.discover",
+        "iscsi.login",
+        "find.updatedb",
+        "fstab.mount-preview",
     ] {
         assert_eq!(by_id(id).risk.action, ActionKind::ExecOther, "{id}");
     }
@@ -537,6 +599,15 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         "sec.sshd-config",
         "cert.expiry",
         "lvm.pvs",
+        "find.files",
+        "find.big",
+        "find.grep-include",
+        "san.iscsi-sessions",
+        "iscsi.node-detail",
+        "fstab.verify",
+        "time.chrony-check",
+        "time.timesyncd-config",
+        "copy.checksum",
     ] {
         assert_eq!(by_id(id).risk.action, ActionKind::ExecReadOnly, "{id}");
     }
@@ -560,6 +631,55 @@ async fn library_entries_are_classified_by_the_policy_engine() {
     // Favourites too.
     let fav = add(&core, None, "Prune", "docker image prune -a").await;
     assert_eq!(fav.risk.action, ActionKind::ExecDangerous);
+}
+
+#[tokio::test]
+async fn every_library_entry_links_to_its_manual_on_an_allowed_site() {
+    // QL-13: each entry, in its area group and in any runbook, links to its official manual page:
+    // an https address on one of the documentation sites the app may open.
+    let core = core().await;
+    let library = core.snippets.library();
+    let mut used = HashSet::new();
+    for e in &library {
+        let url = manual::checked(&e.manual).unwrap_or_else(|_| panic!("{}: {} is refused", e.id, e.manual));
+        assert_eq!(url.scheme(), "https", "{}", e.id);
+        assert_eq!(url.as_str(), e.manual, "{} is written as the browser gets it", e.id);
+        used.insert(url.host_str().unwrap_or_default().to_owned());
+    }
+    // The allow-list holds only sites a link uses.
+    for host in MANUAL_HOSTS {
+        assert!(used.contains(*host), "no manual link uses {host}");
+    }
+    // The page is the command's own, or that of the file it reads.
+    let manual_of = |id: &str| library.iter().find(|e| e.id == id).unwrap().manual.clone();
+    assert_eq!(
+        manual_of("disk.free"),
+        "https://man7.org/linux/man-pages/man1/df.1.html"
+    );
+    assert_eq!(
+        manual_of("disk.fstab"),
+        "https://man7.org/linux/man-pages/man5/fstab.5.html"
+    );
+    assert_eq!(
+        manual_of("services.status"),
+        "https://www.freedesktop.org/software/systemd/man/latest/systemctl.html"
+    );
+    assert_eq!(
+        manual_of("san.iscsi-sessions"),
+        "https://manpages.debian.org/bookworm/open-iscsi/iscsiadm.8.en.html"
+    );
+    assert_eq!(
+        manual_of("docker.ps"),
+        "https://docs.docker.com/reference/cli/docker/container/ls/"
+    );
+    assert_eq!(
+        manual_of("copy.rsync-to"),
+        "https://download.samba.org/pub/rsync/rsync.1"
+    );
+    assert_eq!(
+        manual_of("time.chrony-check"),
+        "https://chrony-project.org/doc/4.6/chronyd.html"
+    );
 }
 
 #[tokio::test]

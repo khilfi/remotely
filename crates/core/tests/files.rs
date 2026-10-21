@@ -4,6 +4,8 @@
 //!   the overwrite question, Prod), protected folders, cancel, retry, downloads and their audit.
 //! * With the real russh adapter against `fakes::ssh_server` on 127.0.0.1: SFTP on the terminal's own
 //!   connection (no second login), a host without SFTP, and the invisible OSC 7 prompt hook for bash.
+//! * QL-09: the drawer after a folder it can't open (Up, typed paths, Home, Back), the user transfers
+//!   run as, the hook's user report staying invisible, and a shell that stops reporting after `su`.
 //!
 //! No real host is contacted; test data uses alice, example.com names and files made at run time in the
 //! system temp folder.
@@ -29,6 +31,7 @@ use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::AuditEntry;
 use remotely_core::terminal::files::{Existing, Retried, TransferInfo, TransferState, UploadStart};
 use remotely_core::terminal::folder::FolderTracking;
+use remotely_core::terminal::shell_user::{ShellUser, UserInfo, UserSource};
 use remotely_core::terminal::{TerminalEvent, TerminalHandle, TerminalStatus, TerminalTuning};
 use remotely_core::vault::{SecretKind, SecretString};
 use remotely_core::Core;
@@ -643,6 +646,50 @@ impl Pane {
             _ => None,
         })
     }
+
+    /// QL-09: who transfers and the shell run as, as last reported.
+    fn user(&self) -> Option<UserInfo> {
+        self.seen.iter().rev().find_map(|e| match e {
+            TerminalEvent::Folder { folder } => Some(folder.user.clone()),
+            _ => None,
+        })
+    }
+
+    /// What the terminal shows: the output without escape sequences (OSC strings included).
+    fn visible(&self) -> String {
+        visible_text(&self.printed)
+    }
+}
+
+/// Output as a terminal draws it, roughly: CSI and OSC/DCS sequences dropped.
+fn visible_text(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']' | 'P' | '_' | '^' | 'X') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 #[tokio::test]
@@ -796,10 +843,16 @@ async fn bash_reports_its_folder_through_a_hook_nobody_sees() {
     assert_eq!(path, "/srv/www/index.html");
     pane.settle(Duration::from_millis(200)).await;
 
-    // The hook never showed: not in the terminal, its log, or what MultiExec sees of the line.
+    // The hook never showed: not in the terminal, its log, or what MultiExec sees of the line. Its
+    // marker never reached the terminal; the user report (QL-09) does, as an OSC that draws nothing.
     let text = pane.text();
     assert!(!text.contains("__remotely"), "{text:?}");
-    assert!(!text.contains("remotely-"), "{text:?}");
+    assert_eq!(
+        text.matches("\x1b]7777;").count(),
+        text.matches("\x1b]7777;remotely-user=alice\x07").count(),
+        "only user reports, never the marker: {text:?}"
+    );
+    assert!(!pane.visible().contains("remotely"), "{:?}", pane.visible());
     let info = core.terminals.pane_info(pane.id).unwrap();
     assert_eq!(info.screen.line, "$ ");
     assert!(!info.dirty);
@@ -812,12 +865,15 @@ async fn bash_reports_its_folder_through_a_hook_nobody_sees() {
     );
     // The old prompt was erased before the new one was drawn over it.
     assert!(
-        text.contains("Welcome, alice\r\n$ \r\x1b[2K\x1b]7;file://test-host/home/alice\x1b\\$ "),
+        text.contains(
+            "Welcome, alice\r\n$ \r\x1b[2K\x1b]7;file://test-host/home/alice\x1b\\\x1b]7777;remotely-user=alice\x07$ "
+        ),
         "{text:?}"
     );
     core.terminals.stop_log(&core.ctx, pane.id).await.unwrap();
     let logged = std::fs::read_to_string(&log_file).unwrap();
     assert!(!logged.contains("__remotely"), "{logged}");
+    assert!(!logged.contains("remotely-user"), "{logged}");
     assert!(logged.contains("cd /srv/www"), "{logged}");
     let log = server.log();
     assert_eq!(log.iter().filter(|l| *l == "line [prompt hook]").count(), 1, "{log:?}");
@@ -864,4 +920,188 @@ async fn keys_typed_before_the_first_prompt_settles_mean_no_hook() {
     // The drawer starts at home then.
     let listing = core.terminals.list_folder(pane.id, None).await.unwrap();
     assert_eq!(listing.path, "/home/alice");
+}
+
+// ---- QL-09: the drawer after errors, and who transfers run as --------------------------------------
+
+/// A bash login on a host where /home/bob/.app is bob's alone, so alice (the login) can't open it.
+async fn bob_host() -> (TestSshServer, Core, Pane) {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_login_shell("bash")
+        .with_sftp_file("/home/alice/logs/app.log", b"started\n")
+        .with_sftp_file("/home/bob/notes.txt", b"bob's notes\n")
+        .with_unreadable("/home/bob/.app")
+        .with_sftp_file("/home/bob/.app/conf/app.ini", b"[app]\n");
+    let core = ssh_core().await;
+    trust(&core, &server).await;
+    let session = ssh_session(&core, &server, &password, None).await;
+    let mut pane = Pane::open(&core, session).await;
+    pane.until(|p| p.folder().is_some_and(|(_, t)| t == FolderTracking::Following))
+        .await;
+    (server, core, pane)
+}
+
+#[tokio::test]
+async fn a_folder_the_login_cant_open_leaves_the_drawer_working() {
+    let (_server, core, mut pane) = bob_host().await;
+    let terminals = &core.terminals;
+    let home = terminals.open_folder(pane.id, None, None).await.unwrap();
+    assert_eq!(home.path, "/home/alice");
+    assert_eq!(home.back, None, "nothing opened before");
+
+    // The shell goes where alice can't look, and the drawer follows it there.
+    terminals.write(pane.id, b"cd /home/bob/.app\r".to_vec()).await;
+    pane.until(|p| {
+        p.folder()
+            .is_some_and(|(path, _)| path.as_deref() == Some("/home/bob/.app"))
+    })
+    .await;
+    let denied = terminals.open_folder(pane.id, None, None).await.unwrap();
+    assert_eq!(
+        denied.path, "/home/bob/.app",
+        "the path box shows the folder that failed"
+    );
+    assert_eq!(denied.parent.as_deref(), Some("/home/bob"), "Up goes somewhere");
+    assert!(denied.entries.is_empty());
+    let error = denied.error.unwrap();
+    assert_eq!(error.code, "permission_denied");
+    assert!(
+        error.message.contains("alice can't open the folder /home/bob/.app"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        denied.back.as_deref(),
+        Some("/home/alice"),
+        "Back: the last folder that opened"
+    );
+    // Refresh: the same answer, still readable.
+    let again = terminals.open_folder(pane.id, None, None).await.unwrap();
+    assert_eq!(again.error.unwrap().code, "permission_denied");
+
+    // Up.
+    let up = terminals.open_folder(pane.id, Some("/home/bob"), None).await.unwrap();
+    assert!(up.error.is_none(), "{:?}", up.error);
+    let names: Vec<&str> = up.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, [".app", "notes.txt"]);
+    assert_eq!(up.back.as_deref(), Some("/home/alice"));
+
+    // Typed paths go on from the folder shown, even the one that failed.
+    let typed = terminals
+        .open_folder(pane.id, Some("../../alice/logs"), Some("/home/bob/.app"))
+        .await
+        .unwrap();
+    assert_eq!(typed.path, "/home/alice/logs");
+    assert_eq!(typed.entries[0].name, "app.log");
+    let parent = terminals
+        .open_folder(pane.id, Some(".."), Some("/home/bob/.app"))
+        .await
+        .unwrap();
+    assert_eq!(parent.path, "/home/bob");
+    // Home.
+    let home_again = terminals
+        .open_folder(pane.id, Some("~"), Some("/home/bob/.app"))
+        .await
+        .unwrap();
+    assert_eq!(home_again.path, "/home/alice");
+    // A folder inside the denied one fails the same way, with its own path.
+    let inside = terminals
+        .open_folder(pane.id, Some("conf"), Some("/home/bob/.app"))
+        .await
+        .unwrap();
+    assert_eq!(inside.path, "/home/bob/.app/conf");
+    assert_eq!(inside.error.unwrap().code, "permission_denied");
+    assert_eq!(inside.back.as_deref(), Some("/home/alice"));
+
+    // Back, through what opened: /home/alice, /home/bob, /home/alice/logs, /home/bob, /home/alice.
+    let back = terminals.folder_back(pane.id, "/home/bob/.app/conf").await.unwrap();
+    assert_eq!(back.path, "/home/alice", "from a failed folder: the last that opened");
+    assert_eq!(back.back.as_deref(), Some("/home/bob"));
+    let back = terminals.folder_back(pane.id, "/home/alice").await.unwrap();
+    assert_eq!(back.path, "/home/bob");
+    let back = terminals.folder_back(pane.id, "/home/bob").await.unwrap();
+    assert_eq!(back.path, "/home/alice/logs");
+    let back = terminals.folder_back(pane.id, "/home/alice/logs").await.unwrap();
+    assert_eq!(back.path, "/home/bob");
+    let back = terminals.folder_back(pane.id, "/home/bob").await.unwrap();
+    assert_eq!(back.path, "/home/alice");
+    assert_eq!(back.back, None);
+    let err = terminals.folder_back(pane.id, "/home/alice").await.unwrap_err();
+    assert!(err.to_string().contains("no folder to go back to"), "{err}");
+}
+
+#[tokio::test]
+async fn the_drawer_says_who_transfers_run_as_and_notices_a_switched_shell() {
+    let (_server, core, mut pane) = bob_host().await;
+    let log_file = temp_folder("user-log").join("web01.log");
+    core.terminals.start_log(&core.ctx, pane.id, &log_file).await.unwrap();
+    pane.settle(Duration::from_millis(1000)).await;
+    assert_eq!(pane.user(), Some(UserInfo::connected("alice")));
+
+    // `su bob`: a shell without the hook. Its prompt names bob, and no report comes.
+    core.terminals.write(pane.id, b"su bob\r".to_vec()).await;
+    pane.until(|p| p.user().is_some_and(|u| u.stopped)).await;
+    let user = pane.user().unwrap();
+    assert_eq!(user.username.as_deref(), Some("alice"), "transfers still run as alice");
+    assert_eq!(
+        user.shell,
+        Some(ShellUser {
+            username: "bob".into(),
+            seen_in: UserSource::Prompt
+        })
+    );
+    // The drawer keeps alice's view: the last folder the hook reported.
+    assert_eq!(pane.folder().unwrap().0.as_deref(), Some("/home/alice"));
+    assert_eq!(core.terminals.folder(pane.id).unwrap().user, user);
+
+    // Back to alice's shell: the hook reports again.
+    core.terminals.write(pane.id, b"exit\r".to_vec()).await;
+    pane.until(|p| p.user().is_some_and(|u| !u.stopped)).await;
+    assert_eq!(pane.user(), Some(UserInfo::connected("alice")));
+
+    // `su -`: root, in its own home.
+    core.terminals.write(pane.id, b"su -\r".to_vec()).await;
+    pane.until(|p| p.user().is_some_and(|u| u.stopped)).await;
+    assert_eq!(pane.user().unwrap().shell.unwrap().username, "root");
+
+    // The user report never showed: not on screen, in the log, or on MultiExec's line.
+    pane.settle(Duration::from_millis(200)).await;
+    let visible = pane.visible();
+    assert!(!visible.contains("remotely"), "{visible:?}");
+    assert!(visible.contains("bob@test-host:/home/alice$ "), "{visible:?}");
+    assert!(visible.contains("root@test-host:~# "), "{visible:?}");
+    assert_eq!(
+        core.terminals.pane_info(pane.id).unwrap().screen.line,
+        "root@test-host:~# "
+    );
+    core.terminals.stop_log(&core.ctx, pane.id).await.unwrap();
+    let logged = std::fs::read_to_string(&log_file).unwrap();
+    assert!(!logged.contains("remotely"), "{logged}");
+    assert!(logged.contains("su bob"), "{logged}");
+    std::fs::remove_dir_all(log_file.parent().unwrap()).unwrap();
+}
+
+/// Without the hook (a shell that is not bash or zsh), the prompt is all there is to go on.
+#[tokio::test]
+async fn without_the_hook_the_drawer_goes_by_the_prompt() {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let core = ssh_core().await;
+    trust(&core, &server).await;
+    let session = ssh_session(&core, &server, &password, None).await;
+    let mut pane = Pane::open(&core, session).await;
+    pane.until(|p| p.folder().is_some_and(|(_, t)| t == FolderTracking::Unsupported))
+        .await;
+    assert_eq!(pane.user(), Some(UserInfo::connected("alice")));
+    core.terminals.write(pane.id, b"su bob\r".to_vec()).await;
+    pane.until(|p| p.user().is_some_and(|u| u.shell.is_some())).await;
+    let user = pane.user().unwrap();
+    assert!(!user.stopped, "only a hook can stop reporting");
+    assert_eq!(user.shell.unwrap().username, "bob");
+    core.terminals.write(pane.id, b"exit\r".to_vec()).await;
+    // The toy's own prompt names nobody, so nothing says bob any more.
+    pane.until(|p| p.user().is_some_and(|u| u.shell.is_none())).await;
 }

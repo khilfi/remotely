@@ -181,6 +181,10 @@ fn file_name(path: &str) -> String {
 
 #[async_trait]
 impl RemoteFiles for SftpFiles {
+    fn user(&self) -> String {
+        self.user.clone()
+    }
+
     async fn home(&self) -> Result<String> {
         let session = self.sftp().await?;
         match session.canonicalize(".").await {
