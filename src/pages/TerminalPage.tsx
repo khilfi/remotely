@@ -75,7 +75,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { ColorDot } from "@/components/Badges";
 import { CommandPanel } from "@/components/CommandPanel";
-import { ComparePanel } from "@/components/ComparePanel";
+import { ComparePanel, type CompareView } from "@/components/ComparePanel";
 import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
@@ -92,6 +92,7 @@ import {
   type ApprovalRequest,
   type Environment,
   type LeftOut,
+  type MultiExecEvent,
   type MultiExecOutcome,
   type MultiExecStatus,
   type QuickConnectRequest,
@@ -109,6 +110,7 @@ import { sendCommand } from "@/lib/command-send";
 import { connectedReason, multiExecReason, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { MultiExecSender } from "@/lib/multiexec";
+import { lineNotification, shouldNotify, type NotifyChoice } from "@/lib/recordings";
 import type { PickableTab } from "@/lib/multiexec-picks";
 import { clickTab, isMulti, NO_SELECTION, pruneSelection, type TabSelection } from "@/lib/tab-selection";
 import { copyOutput, paneTitle, printOutput, saveOutput, type NamedPane } from "@/lib/terminal-output";
@@ -247,6 +249,9 @@ function readShown(key: string, byDefault: boolean) {
   }
 }
 
+/** QL-07, QL-12: every terminal of a recorded MultiExec line is done. */
+type LineFinished = Extract<MultiExecEvent, { event: "lineFinished" }>;
+
 /** QL-07: the window is not in front, or the tab or page is not the one on screen. */
 function inBackground(tabKey: string, activeTab: string | null, pageActive: boolean) {
   return tabKey !== activeTab || !pageActive || !document.hasFocus() || document.visibilityState !== "visible";
@@ -290,8 +295,9 @@ export function TerminalPage({
   const [commandsShown, setCommandsShown] = useState(() =>
     readShown(COMMANDS_KEY, window.innerWidth >= COMMANDS_SHOWN_FROM),
   );
-  /** QL-07: notifications are on in Settings. */
-  const [notifyOn, setNotifyOn] = useState(true);
+  /** QL-07: what Settings say about notifications (on, long commands or any while away, how long). */
+  const [notify, setNotify] = useState<NotifyChoice>({ on: true, when: "long", afterSecs: 30 });
+  const notifyOn = notify.on;
   /** QL-07: tabs where a long command finished while they were in the background. */
   const [attention, setAttention] = useState<string[]>([]);
   const [newOpen, setNewOpen] = useState(false);
@@ -310,6 +316,8 @@ export function TerminalPage({
   const [tile, setTile] = useState(true);
   /** BX-03: the Compare output panel, and the sessions Ctrl+clicked in the tree for it. */
   const [compareOpen, setCompareOpen] = useState(false);
+  /** QL-12: the panel's one-shot run, or the lines MultiExec recorded. */
+  const [compareView, setCompareView] = useState<CompareView>("run");
   const [treePicks, setTreePicks] = useState<string[]>([]);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   /** Bumped when a pane's state changes, so what depends on terminal ids and statuses is recomputed. */
@@ -344,7 +352,7 @@ export function TerminalPage({
     api.terminalSettings().then(
       (s) => {
         setOptions({ fontSize: s.fontSize, scrollback: s.scrollback, copyOnSelect: s.copyOnSelect });
-        setNotifyOn(s.notifyFinished);
+        setNotify({ on: s.notifyFinished, when: s.notifyWhen, afterSecs: s.notifyAfterSecs });
       },
       () => undefined,
     );
@@ -567,7 +575,8 @@ export function TerminalPage({
   useEffect(() => {
     finishedRef.current = (pane, finished) => {
       const tab = tabs.find((t) => allPanes(t.layout).includes(pane));
-      if (!tab || !notifyOn || !tab.notify || !inBackground(tab.key, activeTab, active)) return;
+      if (!tab || !tab.notify || !shouldNotify(notify, finished.afterSecs, inBackground(tab.key, activeTab, active)))
+        return;
       const { title, body } = finishedText(nameOf(pane), finished);
       // FD-03: Windows shows it outside the window, so it is masked here while presenting.
       api
@@ -581,6 +590,37 @@ export function TerminalPage({
   function setTabNotify(tabKey: string, notify: boolean) {
     setTabs((prev) => prev.map((t) => (t.key === tabKey ? { ...t, notify } : t)));
   }
+
+  // QL-07: a MultiExec line notifies once, when all its terminals are done; never one per terminal.
+  const lineFinishedRef = useRef<(event: LineFinished) => void>(() => undefined);
+  useEffect(() => {
+    lineFinishedRef.current = (event) => {
+      const ids = new Set(event.terminalIds);
+      const lineTabs = tabs.filter((t) =>
+        allPanes(t.layout).some((p) => p.terminalId !== null && ids.has(p.terminalId)),
+      );
+      // The bell turns a tab off; the line notifies unless every one of its tabs is off.
+      if (!lineTabs.some((t) => t.notify)) return;
+      const tiled = multiExec && tile && tabs.filter((t) => selection.keys.includes(t.key)).length > 1;
+      const away = tiled
+        ? inBackground(lineTabs[0].key, lineTabs[0].key, active)
+        : lineTabs.every((t) => inBackground(t.key, activeTab, active));
+      if (!shouldNotify(notify, event.afterSecs, away)) return;
+      const { title, body } = lineNotification(
+        event.line,
+        event.terminals,
+        event.afterSecs,
+        event.how,
+        event.unfinished,
+      );
+      // FD-03: Windows shows it outside the window, so it is masked here while presenting.
+      api
+        .notifyCommandFinished(maskedOutside(title), maskedOutside(body))
+        .catch((err) => console.warn("notification failed", err));
+      const behind = lineTabs.filter((t) => t.key !== activeTab || !active).map((t) => t.key);
+      if (behind.length > 0) setAttention((prev) => [...new Set([...prev, ...behind])]);
+    };
+  });
 
   // ---- SS-10 MultiExec --------------------------------------------------------------------------------
 
@@ -693,6 +733,8 @@ export function TerminalPage({
   useEffect(() => {
     const unlisten = api.onMultiExecEvent((event) => {
       if (event.event === "outcome") outcomeRef.current(event.outcome);
+      else if (event.event === "lineFinished") lineFinishedRef.current(event);
+      else if (event.event !== "lineDone") return;
       else if (event.sent) setMxNote({ tone: "info", text: `Enter sent to ${plural(event.terminals, "terminal")}` });
       else
         setMxNote({
@@ -1080,6 +1122,9 @@ export function TerminalPage({
             <ComparePanel
               active={active}
               vault={vault}
+              view={compareView}
+              onViewChange={setCompareView}
+              multiExecOn={multiExec}
               terminalIds={compareTerminals}
               sessionIds={treePicks}
               unsavedTabs={unsavedTabs}
@@ -1098,6 +1143,9 @@ export function TerminalPage({
       <ComparePanel
         active={active}
         vault={vault}
+        view={compareView}
+        onViewChange={setCompareView}
+        multiExecOn={multiExec}
         terminalIds={[]}
         sessionIds={treePicks}
         unsavedTabs={0}
@@ -1209,7 +1257,7 @@ export function TerminalPage({
                 !notifyOn
                   ? "Notifications are off in Settings (Terminal)"
                   : current.notify
-                    ? "Notify when a long command finishes in this tab (on; click to turn off)"
+                    ? "Notify when a command finishes in this tab while you're away (on; click to turn off)"
                     : "No notifications from this tab (click to turn on)"
               }
               onClick={() => setTabNotify(current.key, !current.notify)}
@@ -1294,7 +1342,10 @@ export function TerminalPage({
           tile={tile}
           onTile={setTile}
           onPick={(keys) => setSelection({ keys, anchor: activeTab })}
-          onCompare={() => setCompareOpen(true)}
+          onCompare={() => {
+            setCompareView("multiExec");
+            setCompareOpen(true);
+          }}
           onOff={stopMultiExec}
         />
       )}

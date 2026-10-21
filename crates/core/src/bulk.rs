@@ -13,6 +13,9 @@
 //!   failed before their command ran group by cause.
 //! * BX-05: CSV, JSON or HTML. The run's vault secrets were scrubbed from the output before it was
 //!   stored (BX-07), and every text an export writes goes through [`redact_secrets`] as well.
+//! * QL-12: a MultiExec line recorded in each terminal (`terminal::record`) groups and diffs with the
+//!   same code ([`group_with_output`], [`diff_lines`]) and exports the same way, with each group's
+//!   diff from group A ([`BulkRuns::export_recorded`]).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -29,6 +32,7 @@ use crate::domain::{Context, Environment};
 use crate::error::{CoreError, Result};
 use crate::export::{push_row, redact_secrets};
 use crate::jobs::TargetStatus;
+use crate::policy::Tier;
 use crate::sessions::SessionRecord;
 use crate::store::{JobSummary, JobTargetRecord, NewAuditEntry, Store, VmRecord};
 use crate::terminal::Terminals;
@@ -358,6 +362,57 @@ fn group_targets(targets: &[JobTargetRecord], opts: GroupOptions) -> (Vec<Output
         })
         .collect();
     (groups, of_target)
+}
+
+/// Each target's row in the results, with its group.
+fn host_rows(targets: impl IntoIterator<Item = JobTargetRecord>, of_target: Vec<Option<usize>>) -> Vec<HostResult> {
+    targets
+        .into_iter()
+        .zip(of_target)
+        .map(|(t, group)| HostResult {
+            target_key: t.target_key,
+            name: t.target_name,
+            status: t.status,
+            exit_code: t.exit_code,
+            duration_ms: t.duration_ms,
+            error: t.error,
+            error_code: t.error_code,
+            stdout_bytes: t.stdout_bytes,
+            stderr_bytes: t.stderr_bytes,
+            truncated: t.output_truncated,
+            group,
+            started_at: t.started_at,
+            finished_at: t.finished_at,
+        })
+        .collect()
+}
+
+/// BX-03 for targets that carry their whole output already (QL-12: a MultiExec line recorded in each
+/// terminal): the groups with their sample's output, the counts, each target's row and the headline.
+#[derive(Debug, Clone)]
+pub(crate) struct Grouped {
+    pub groups: Vec<OutputGroup>,
+    pub counts: Counts,
+    pub hosts: Vec<HostResult>,
+    pub headline: String,
+}
+
+pub(crate) fn group_with_output(targets: &[JobTargetRecord], opts: GroupOptions) -> Grouped {
+    let (mut groups, of_target) = group_targets(targets, opts);
+    let by_key: HashMap<&str, &JobTargetRecord> = targets.iter().map(|t| (t.target_key.as_str(), t)).collect();
+    for group in &mut groups {
+        if let Some(sample) = by_key.get(group.sample.as_str()) {
+            group.stdout = Some(sample.output.clone().unwrap_or_default());
+            group.stderr = Some(sample.stderr.clone().unwrap_or_default());
+        }
+    }
+    let counts = count(targets);
+    Grouped {
+        headline: headline(&groups, &counts),
+        hosts: host_rows(targets.iter().cloned(), of_target),
+        groups,
+        counts,
+    }
 }
 
 fn count(targets: &[JobTargetRecord]) -> Counts {
@@ -697,6 +752,19 @@ fn html_escape(text: &str) -> String {
     out
 }
 
+/// The exports' page style: light and dark, no outside resource.
+const HTML_STYLE: &str = "<style>\n\
+    :root{color-scheme:light dark;--fg:#1b1b1f;--muted:#5f6068;--bg:#fff;--line:#d9d9de;--ok:#1a7f37;--bad:#c62828;--code:#f4f4f6}\n\
+    @media (prefers-color-scheme:dark){:root{--fg:#e8e8ec;--muted:#a0a1a8;--bg:#161618;--line:#34343a;--ok:#4ac26b;--bad:#ff6b6b;--code:#202024}}\n\
+    body{font:14px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--fg);background:var(--bg);margin:0 auto;padding:24px 16px;max-width:1100px}\n\
+    h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 8px}.muted{color:var(--muted)}\n\
+    table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}\n\
+    pre{background:var(--code);padding:10px 12px;border-radius:6px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:6px 0}\n\
+    .group{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:12px 0}.ok{color:var(--ok)}.bad{color:var(--bad)}\n\
+    .label{display:inline-block;min-width:22px;text-align:center;font-weight:600;border:1px solid var(--line);border-radius:4px;margin-right:6px}\n\
+    .diff div{white-space:pre-wrap;word-break:break-word;padding:0 4px}.diff .removed{color:var(--bad)}.diff .added{color:var(--ok)}\n\
+    </style>\n";
+
 /// A self-contained page: no script, no outside resource, every text escaped.
 fn to_html(data: &ExportData) -> String {
     let e = html_escape;
@@ -705,18 +773,8 @@ fn to_html(data: &ExportData) -> String {
     out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
     out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     out.push_str(&format!("<title>Remotely run: {}</title>\n", e(&job.summary)));
-    out.push_str(
-        "<style>\n\
-         :root{color-scheme:light dark;--fg:#1b1b1f;--muted:#5f6068;--bg:#fff;--line:#d9d9de;--ok:#1a7f37;--bad:#c62828;--code:#f4f4f6}\n\
-         @media (prefers-color-scheme:dark){:root{--fg:#e8e8ec;--muted:#a0a1a8;--bg:#161618;--line:#34343a;--ok:#4ac26b;--bad:#ff6b6b;--code:#202024}}\n\
-         body{font:14px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--fg);background:var(--bg);margin:0 auto;padding:24px 16px;max-width:1100px}\n\
-         h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:28px 0 8px}.muted{color:var(--muted)}\n\
-         table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);vertical-align:top}\n\
-         pre{background:var(--code);padding:10px 12px;border-radius:6px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:6px 0}\n\
-         .group{border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin:12px 0}.ok{color:var(--ok)}.bad{color:var(--bad)}\n\
-         .label{display:inline-block;min-width:22px;text-align:center;font-weight:600;border:1px solid var(--line);border-radius:4px;margin-right:6px}\n\
-         </style>\n</head>\n<body>\n",
-    );
+    out.push_str(HTML_STYLE);
+    out.push_str("</head>\n<body>\n");
     out.push_str(&format!("<h1>{}</h1>\n", e(&job.summary)));
     out.push_str(&format!(
         "<p class=\"muted\">Exported from Remotely. Job {} &middot; {} &middot; tier {} &middot; started {} &middot; finished {}</p>\n",
@@ -796,6 +854,325 @@ fn to_html(data: &ExportData) -> String {
     }
     out.push_str("</tbody>\n</table>\n</body>\n</html>\n");
     out
+}
+
+// ---- QL-12: recorded MultiExec lines -----------------------------------------------------------
+
+/// A MultiExec line as it was recorded in each terminal (`terminal::record`), for an export. Each
+/// target is a terminal: its output from Enter until its prompt came back, already scrubbed of the
+/// terminal's secrets.
+#[derive(Debug, Clone)]
+pub struct RecordedRun {
+    pub line: String,
+    pub tier: Tier,
+    /// When the line was held (RFC 3339).
+    pub recorded_at: String,
+    pub job_id: Option<Uuid>,
+    pub targets: Vec<JobTargetRecord>,
+}
+
+/// What a recordings export wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedExport {
+    pub path: String,
+    pub format: ExportFormat,
+    pub lines: usize,
+    /// Terminal outputs written (one per terminal per line).
+    pub outputs: usize,
+    /// Texts where something that looked like a secret was replaced by `[redacted]`.
+    pub redacted: usize,
+}
+
+/// The file name the save dialog offers: `remotely-multiexec-2026-10-21.html` for every line,
+/// `remotely-multiexec-2026-10-21-1a2b3c4d.html` for one.
+pub fn recorded_export_file_name(line_id: Option<Uuid>, format: ExportFormat) -> String {
+    let today = time::OffsetDateTime::now_utc().date();
+    match line_id {
+        Some(id) => {
+            let short: String = id.simple().to_string().chars().take(8).collect();
+            format!("remotely-multiexec-{today}-{short}.{}", format.extension())
+        }
+        None => format!("remotely-multiexec-{today}.{}", format.extension()),
+    }
+}
+
+/// One recorded line, ready to write: grouped, diffed against group A, redacted.
+struct RecordedSection {
+    line: String,
+    tier: Tier,
+    recorded_at: String,
+    job_id: Option<Uuid>,
+    headline: String,
+    groups: Vec<ExportGroup>,
+    /// Each group after A: its diff from A's output.
+    diffs: Vec<Option<Vec<DiffLine>>>,
+    rows: Vec<ExportRow>,
+}
+
+fn recorded_sections(runs: &[RecordedRun], opts: GroupOptions, r: &mut Redactor) -> Vec<RecordedSection> {
+    runs.iter()
+        .map(|run| {
+            let grouped = group_with_output(&run.targets, opts);
+            let names: HashMap<&str, &str> = run
+                .targets
+                .iter()
+                .map(|t| (t.target_key.as_str(), t.target_name.as_str()))
+                .collect();
+            let outputs: Vec<String> = grouped.groups.iter().map(|g| r.opt(g.stdout.as_deref())).collect();
+            let diffs = (0..outputs.len())
+                .map(|i| (i > 0).then(|| diff_lines(&outputs[0], &outputs[i], opts)))
+                .collect();
+            let groups = grouped
+                .groups
+                .iter()
+                .zip(outputs)
+                .map(|(g, stdout)| ExportGroup {
+                    label: g.label.clone(),
+                    kind: g.kind,
+                    ok: g.ok,
+                    exit_code: g.exit_code,
+                    error: r.opt(g.error.as_deref()),
+                    hosts: g
+                        .hosts
+                        .iter()
+                        .map(|k| names.get(k.as_str()).copied().unwrap_or(k).to_owned())
+                        .collect(),
+                    stdout,
+                    stderr: String::new(),
+                })
+                .collect();
+            let rows = run
+                .targets
+                .iter()
+                .zip(&grouped.hosts)
+                .map(|(t, h)| ExportRow {
+                    name: t.target_name.clone(),
+                    group: h.group.map(group_label).unwrap_or_default(),
+                    status: t.status.clone(),
+                    exit_code: None,
+                    duration_ms: t.duration_ms,
+                    stdout: r.opt(t.output.as_deref()),
+                    stderr: String::new(),
+                    truncated: t.output_truncated,
+                    error: r.opt(t.error.as_deref()),
+                })
+                .collect();
+            RecordedSection {
+                line: r.clean(&run.line),
+                tier: run.tier,
+                recorded_at: run.recorded_at.clone(),
+                job_id: run.job_id,
+                headline: grouped.headline,
+                groups,
+                diffs,
+                rows,
+            }
+        })
+        .collect()
+}
+
+/// A diff as plain text: `- ` removed, `+ ` added, two spaces for the same.
+fn diff_text(lines: &[DiffLine]) -> String {
+    lines
+        .iter()
+        .map(|l| {
+            let mark = match l.kind {
+                DiffKind::Same => "  ",
+                DiffKind::Removed => "- ",
+                DiffKind::Added => "+ ",
+            };
+            format!("{mark}{}\n", l.text)
+        })
+        .collect()
+}
+
+fn recorded_csv(sections: &[RecordedSection]) -> String {
+    let mut out = String::from("\u{FEFF}");
+    let header = [
+        "line",
+        "recorded_at",
+        "tier",
+        "terminal",
+        "group",
+        "status",
+        "duration_ms",
+        "output",
+        "output_truncated",
+        "error",
+        "diff_from_group_a",
+    ];
+    push_row(&mut out, header.iter().map(|h| (*h).to_owned()));
+    for s in sections {
+        let diff_of = |group: &str| {
+            s.groups
+                .iter()
+                .position(|g| g.label == group)
+                .and_then(|i| s.diffs.get(i).cloned().flatten())
+                .map(|d| diff_text(&d))
+                .unwrap_or_default()
+        };
+        for r in &s.rows {
+            push_row(
+                &mut out,
+                [
+                    s.line.clone(),
+                    s.recorded_at.clone(),
+                    s.tier.as_str().to_owned(),
+                    r.name.clone(),
+                    r.group.clone(),
+                    r.status.clone(),
+                    opt_num(r.duration_ms),
+                    r.stdout.clone(),
+                    r.truncated.to_string(),
+                    r.error.clone(),
+                    diff_of(&r.group),
+                ]
+                .into_iter(),
+            );
+        }
+    }
+    out
+}
+
+fn recorded_json(sections: &[RecordedSection], grouped_by: &str) -> Result<String> {
+    let value = json!({
+        "exportedFrom": "Remotely MultiExec recording",
+        "groupedBy": grouped_by,
+        "lines": sections.iter().map(|s| json!({
+            "line": s.line,
+            "recordedAt": s.recorded_at,
+            "tier": s.tier,
+            "jobId": s.job_id,
+            "headline": s.headline,
+            "groups": s.groups.iter().zip(&s.diffs).map(|(g, diff)| json!({
+                "label": g.label,
+                "kind": g.kind,
+                "ok": g.ok,
+                "error": if g.error.is_empty() { None } else { Some(&g.error) },
+                "terminals": g.hosts,
+                "output": g.stdout,
+                "diffFromA": diff,
+            })).collect::<Vec<_>>(),
+            "terminals": s.rows.iter().map(|r| json!({
+                "name": r.name,
+                "group": if r.group.is_empty() { None } else { Some(&r.group) },
+                "status": r.status,
+                "durationMs": r.duration_ms,
+                "output": r.stdout,
+                "outputTruncated": r.truncated,
+                "error": if r.error.is_empty() { None } else { Some(&r.error) },
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    });
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
+fn recorded_html(sections: &[RecordedSection], grouped_by: &str) -> String {
+    let e = html_escape;
+    let mut out = String::new();
+    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+    out.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    out.push_str("<title>Remotely MultiExec recording</title>\n");
+    out.push_str(HTML_STYLE);
+    out.push_str("</head>\n<body>\n<h1>MultiExec recording</h1>\n");
+    out.push_str(&format!(
+        "<p class=\"muted\">Exported from Remotely: {} recorded in the terminals, grouped by {}. Each output runs from Enter until the terminal's prompt came back.</p>\n",
+        if sections.len() == 1 { "1 line".to_owned() } else { format!("{} lines", sections.len()) },
+        e(grouped_by)
+    ));
+    for s in sections {
+        out.push_str(&format!(
+            "<h2><code>{}</code></h2>\n<p class=\"muted\">Recorded {} &middot; tier {}</p>\n<p><strong>{}</strong></p>\n",
+            e(&s.line),
+            e(&s.recorded_at),
+            e(s.tier.as_str()),
+            e(&s.headline)
+        ));
+        for (g, diff) in s.groups.iter().zip(&s.diffs) {
+            let state = if g.ok {
+                "<span class=\"ok\">prompt back</span>"
+            } else {
+                "<span class=\"bad\">not finished</span>"
+            };
+            out.push_str(&format!(
+                "<div class=\"group\"><p><span class=\"label\">{}</span><strong>{}</strong> &middot; {}</p>\n<p class=\"muted\">{}</p>\n",
+                e(&g.label),
+                plural_terminals(g.hosts.len()),
+                state,
+                e(&g.hosts.join(", "))
+            ));
+            if !g.error.is_empty() {
+                out.push_str(&format!("<p class=\"bad\">{}</p>\n", e(&g.error)));
+            }
+            out.push_str(&format!("<pre>{}</pre>\n", e(&g.stdout)));
+            if let Some(diff) = diff {
+                out.push_str(&format!(
+                    "<p class=\"muted\">Diff from group A</p><pre class=\"diff\">{}</pre>\n",
+                    diff.iter()
+                        .map(|l| {
+                            let (class, mark) = match l.kind {
+                                DiffKind::Same => ("same", " "),
+                                DiffKind::Removed => ("removed", "-"),
+                                DiffKind::Added => ("added", "+"),
+                            };
+                            format!("<div class=\"{class}\">{mark} {}</div>", e(&l.text))
+                        })
+                        .collect::<String>()
+                ));
+            }
+            out.push_str("</div>\n");
+        }
+        out.push_str("<table>\n<thead><tr><th>Terminal</th><th>Group</th><th>Status</th><th>Duration</th><th>Note</th></tr></thead>\n<tbody>\n");
+        for r in &s.rows {
+            let duration = r
+                .duration_ms
+                .map(|ms| format!("{:.1} s", ms as f64 / 1000.0))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
+                e(&r.name),
+                e(&r.group),
+                e(&r.status),
+                duration,
+                e(&r.error)
+            ));
+        }
+        out.push_str("</tbody>\n</table>\n");
+    }
+    out.push_str("</body>\n</html>\n");
+    out
+}
+
+fn plural_terminals(n: usize) -> String {
+    if n == 1 {
+        "1 terminal".into()
+    } else {
+        format!("{n} terminals")
+    }
+}
+
+/// QL-12: recorded lines as a file's text. Returns it with how many texts were redacted and how many
+/// terminal outputs it holds.
+pub fn render_recorded(
+    runs: &[RecordedRun],
+    format: ExportFormat,
+    opts: GroupOptions,
+) -> Result<(String, usize, usize)> {
+    let mut r = Redactor::default();
+    let sections = recorded_sections(runs, opts, &mut r);
+    let grouped_by = if opts.ignore_trailing_whitespace {
+        "output, ignoring trailing whitespace"
+    } else {
+        "output"
+    };
+    let text = match format {
+        ExportFormat::Csv => recorded_csv(&sections),
+        ExportFormat::Json => recorded_json(&sections, grouped_by)?,
+        ExportFormat::Html => recorded_html(&sections, grouped_by),
+    };
+    let outputs = runs.iter().map(|run| run.targets.len()).sum();
+    Ok((text, r.changed, outputs))
 }
 
 // ---- The service -------------------------------------------------------------------------------
@@ -960,25 +1337,7 @@ impl BulkRuns {
             group.stderr = Some(sample.stderr.unwrap_or_default());
         }
         let counts = count(&targets);
-        let hosts = targets
-            .into_iter()
-            .zip(of_target)
-            .map(|(t, group)| HostResult {
-                target_key: t.target_key,
-                name: t.target_name,
-                status: t.status,
-                exit_code: t.exit_code,
-                duration_ms: t.duration_ms,
-                error: t.error,
-                error_code: t.error_code,
-                stdout_bytes: t.stdout_bytes,
-                stderr_bytes: t.stderr_bytes,
-                truncated: t.output_truncated,
-                group,
-                started_at: t.started_at,
-                finished_at: t.finished_at,
-            })
-            .collect();
+        let hosts = host_rows(targets, of_target);
         Ok(BulkResults {
             headline: headline(&groups, &counts),
             run: run_info(&command),
@@ -1139,6 +1498,60 @@ impl BulkRuns {
             path: path.display().to_string(),
             format,
             hosts: hosts_count,
+            redacted,
+        })
+    }
+
+    /// QL-12, BX-05: writes recorded MultiExec lines to `path` (chosen in a save dialog) and logs that
+    /// it did: how many lines and terminals, the format and the file. Never the output.
+    pub async fn export_recorded(
+        &self,
+        ctx: &Context,
+        runs: &[RecordedRun],
+        format: ExportFormat,
+        opts: GroupOptions,
+        path: &Path,
+    ) -> Result<RecordedExport> {
+        if runs.is_empty() {
+            return Err(CoreError::InvalidInput("There is no recorded line to export.".into()));
+        }
+        let (text, redacted, outputs) = render_recorded(runs, format, opts)?;
+        tokio::fs::write(path, text).await?;
+        let file = path
+            .file_name()
+            .map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
+        let lines = if runs.len() == 1 {
+            "1 line".to_owned()
+        } else {
+            format!("{} lines", runs.len())
+        };
+        let terminals: HashSet<&str> = runs
+            .iter()
+            .flat_map(|run| run.targets.iter().map(|t| t.target_key.as_str()))
+            .collect();
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "multiexec_exported",
+                    action: &format!("Exported recorded MultiExec lines to {}", format.label()),
+                    tier: None,
+                    job_id: match runs {
+                        [run] => run.job_id,
+                        _ => None,
+                    },
+                    targets: &[],
+                    approval: None,
+                    result: None,
+                    detail: Some(&format!("{lines} from {} to {file}", plural_terminals(terminals.len()))),
+                },
+            )
+            .await?;
+        Ok(RecordedExport {
+            path: path.display().to_string(),
+            format,
+            lines: runs.len(),
+            outputs,
             redacted,
         })
     }
@@ -1304,6 +1717,24 @@ mod tests {
     #[test]
     fn html_export_escapes_everything() {
         assert_eq!(html_escape("<script>&\"'"), "&lt;script&gt;&amp;&quot;&#39;");
+    }
+
+    #[test]
+    fn recorded_exports_are_named_for_one_line_or_all_and_diffs_read_as_text() {
+        let id = Uuid::parse_str("1a2b3c4d-0000-4000-8000-000000000000").unwrap();
+        let one = recorded_export_file_name(Some(id), ExportFormat::Csv);
+        assert!(
+            one.starts_with("remotely-multiexec-") && one.ends_with("-1a2b3c4d.csv"),
+            "{one}"
+        );
+        let all = recorded_export_file_name(None, ExportFormat::Json);
+        assert!(
+            all.starts_with("remotely-multiexec-") && all.ends_with(".json"),
+            "{all}"
+        );
+        assert_eq!(all.len(), "remotely-multiexec-2026-10-21.json".len());
+        let diff = diff_lines("a\nb\n", "a\nc\n", GroupOptions::default());
+        assert_eq!(diff_text(&diff), "  a\n- b\n+ c\n");
     }
 
     #[test]

@@ -1,9 +1,10 @@
 // A bulk run's results, live (BX-02 to BX-05): progress and counts, the one-line summary ("48 hosts same,
 // 2 differ"), output groups (largest first, each with one host's output standing for all), every host
 // with its status, exit code and duration, and the actions: cancel, retry the failed hosts, compare two
-// groups and export. Grouping happens in the core; this view reloads it as hosts finish.
+// groups and export. Grouping happens in the core; this view reloads it as hosts finish. QL-12: the group cards and
+// the output dialog serve the Compare panel's MultiExec view too (terminals instead of hosts).
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
   ChevronRightIcon,
@@ -263,10 +264,10 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
           {groups.map((g, i) => (
             <GroupCard
               key={`${g.label}-${g.sample}`}
-              jobId={jobId}
               group={g}
               names={g.hosts.map((k) => names.get(k) ?? k)}
               defaultOpen={i < 2 || groups.length <= 4}
+              load={() => api.bulkHostOutput(jobId, g.sample)}
             />
           ))}
         </div>
@@ -321,7 +322,7 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
 
       {comparing && (
         <OutputDiffDialog
-          jobId={jobId}
+          load={(left, right, options) => api.bulkDiff(jobId, left, right, options)}
           groups={groups}
           ignoreTrailingWhitespace={ignoreWs}
           left={comparing.left}
@@ -329,7 +330,13 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
           onClose={() => setComparing(null)}
         />
       )}
-      {viewing && <HostOutputDialog jobId={jobId} host={viewing} onClose={() => setViewing(null)} />}
+      {viewing && (
+        <HostOutputDialog
+          host={viewing}
+          load={() => api.bulkHostOutput(jobId, viewing.targetKey)}
+          onClose={() => setViewing(null)}
+        />
+      )}
     </div>
   );
 }
@@ -361,25 +368,37 @@ function HostStatus({ host, now }: { host: HostResult; now: number }) {
   return <span className={cn("text-sm", className)}>{label}</span>;
 }
 
-function GroupCard({
-  jobId,
+/**
+ * BX-03: one output group, with its sample's output. QL-12 `terminals`: a MultiExec line's group, whose members are
+ * terminals with no exit code, and whose error groups (time limit, lost) show what was recorded until then.
+ */
+export function GroupCard({
   group,
   names,
   defaultOpen,
+  load: loadOutput,
+  terminals = false,
+  badge,
 }: {
-  jobId: string;
   group: OutputGroup;
   names: string[];
   defaultOpen: boolean;
+  /** The sample's whole output, when it did not come with the results. */
+  load: () => Promise<HostOutput>;
+  terminals?: boolean;
+  /** Replaces the exit-code badge of an output group. */
+  badge?: ReactNode;
 }) {
   const [loaded, setLoaded] = useState<HostOutput | null>(null);
   const stdout = group.stdout ?? loaded?.stdout ?? null;
   const stderr = group.stderr ?? loaded?.stderr ?? null;
   const more = names.length - NAMES_SHOWN;
+  const unit = terminals ? "terminal" : "host";
+  const showsOutput = group.kind === "output" || (terminals && Boolean(stdout));
 
   async function load() {
     try {
-      setLoaded(await api.bulkHostOutput(jobId, group.sample));
+      setLoaded(await loadOutput());
     } catch (err) {
       toast.error(errorMessage(err));
     }
@@ -400,9 +419,9 @@ function GroupCard({
           </span>
           <span className="grid min-w-0 flex-1 gap-1">
             <span className="flex flex-wrap items-center gap-2">
-              <span className="font-medium">{plural(group.hosts.length, "host")}</span>
+              <span className="font-medium">{plural(group.hosts.length, unit)}</span>
               {group.kind === "output" ? (
-                <Badge variant={group.ok ? "outline" : "destructive"}>exit {group.exitCode ?? "?"}</Badge>
+                (badge ?? <Badge variant={group.ok ? "outline" : "destructive"}>exit {group.exitCode ?? "?"}</Badge>)
               ) : (
                 <Badge variant="destructive">{group.errorCode?.replace(/_/g, " ") ?? "failed"}</Badge>
               )}
@@ -420,13 +439,13 @@ function GroupCard({
             {group.error && (
               <span className="text-sm text-destructive">
                 {group.error}
-                {group.messagesDiffer && " (the message differs a little per host; see Every host)"}
+                {group.messagesDiffer && ` (the message differs a little per ${unit}; see Every ${unit})`}
               </span>
             )}
           </span>
         </button>
       </CollapsibleTrigger>
-      {group.kind === "output" && (
+      {showsOutput && (
         <CollapsibleContent className="grid gap-2 px-3 pb-3">
           {stdout === null ? (
             <Button variant="outline" size="sm" className="justify-self-start" onClick={() => void load()}>
@@ -437,8 +456,8 @@ function GroupCard({
           )}
           {group.truncated && (
             <p className="text-xs text-muted-foreground">
-              The output was long, so its middle was cut: the first and last 32 KB are kept. Hosts still group by their
-              whole output.
+              The output was long, so its middle was cut: the first and last 32 KB are kept.{" "}
+              {terminals ? "Terminals" : "Hosts"} still group by their whole output.
             </p>
           )}
         </CollapsibleContent>
@@ -447,7 +466,7 @@ function GroupCard({
   );
 }
 
-function OutputText({ stdout, stderr }: { stdout: string; stderr: string }) {
+export function OutputText({ stdout, stderr }: { stdout: string; stderr: string }) {
   return (
     <div className="grid gap-2">
       {stdout === "" && stderr === "" && <p className="text-xs text-muted-foreground">No output.</p>}
@@ -468,13 +487,26 @@ function OutputText({ stdout, stderr }: { stdout: string; stderr: string }) {
   );
 }
 
-function HostOutputDialog({ jobId, host, onClose }: { jobId: string; host: HostResult; onClose: () => void }) {
+/** One host's (or, QL-12, one terminal's) whole output. `load` is called once, when the dialog opens. */
+export function HostOutputDialog({
+  host,
+  load,
+  onClose,
+  description,
+}: {
+  host: HostResult;
+  load: () => Promise<HostOutput>;
+  onClose: () => void;
+  /** Replaces the status line under the title. */
+  description?: string;
+}) {
   const [output, setOutput] = useState<HostOutput | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadOnce] = useState(() => load);
 
   useEffect(() => {
     let stale = false;
-    api.bulkHostOutput(jobId, host.targetKey).then(
+    loadOnce().then(
       (o) => {
         if (!stale) setOutput(o);
       },
@@ -485,7 +517,7 @@ function HostOutputDialog({ jobId, host, onClose }: { jobId: string; host: HostR
     return () => {
       stale = true;
     };
-  }, [jobId, host.targetKey]);
+  }, [loadOnce]);
 
   const sizes = [host.stdoutBytes, host.stderrBytes].some((b) => b)
     ? ` · ${bytes(host.stdoutBytes ?? 0)} out, ${bytes(host.stderrBytes ?? 0)} err`
@@ -496,9 +528,13 @@ function HostOutputDialog({ jobId, host, onClose }: { jobId: string; host: HostR
         <DialogHeader>
           <DialogTitle>{host.name}</DialogTitle>
           <DialogDescription>
-            {host.status === "succeeded" ? "Succeeded" : host.status === "failed" ? "Failed" : "Cancelled"}
-            {host.exitCode !== null && ` · exit code ${host.exitCode}`} · {seconds(host.durationMs)}
-            {sizes}
+            {description ?? (
+              <>
+                {host.status === "succeeded" ? "Succeeded" : host.status === "failed" ? "Failed" : "Cancelled"}
+                {host.exitCode !== null && ` · exit code ${host.exitCode}`} · {seconds(host.durationMs)}
+                {sizes}
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         {host.error && <p className="text-sm text-destructive">{host.error}</p>}

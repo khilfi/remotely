@@ -395,7 +395,110 @@ export type MultiExecOutcome =
 
 export type MultiExecEvent =
   | { event: "lineDone"; lineId: string; sent: boolean; terminals: number; status: JobStatus | null }
-  | { event: "outcome"; outcome: MultiExecOutcome };
+  | { event: "outcome"; outcome: MultiExecOutcome }
+  /** QL-12: the recorded lines changed (that line, or several when null). */
+  | { event: "recorded"; lineId: string | null }
+  /**
+   * QL-12, QL-07: every terminal of a recorded line is done, once per line. `terminals`: the ones Enter reached;
+   * `unfinished`: those whose recording did not end at a prompt (time limit, connection lost, never sent).
+   */
+  | {
+      event: "lineFinished";
+      lineId: string;
+      line: string;
+      /** The terminals Enter reached. */
+      terminalIds: string[];
+      terminals: number;
+      afterSecs: number;
+      how: FinishedHow;
+      unfinished: number;
+    };
+
+/** QL-12: how a terminal's recording of a line ended well. */
+export type CaptureEnd = "prompt" | "quiet" | "nextLine";
+
+/** QL-12: where a terminal's recording of a line stands. */
+export type CaptureState =
+  /** Enter has not reached the shell yet (the approval, or the job). */
+  | { state: "waiting" }
+  | { state: "running" }
+  | { state: "done"; how: CaptureEnd }
+  /** Still running at the time limit: recording stopped, the command goes on. */
+  | { state: "timedOut" }
+  | { state: "lost"; reason: string }
+  | { state: "notSent"; reason: string };
+
+/** QL-12: a line MultiExec recorded, in the list. */
+export interface RecordedLine {
+  id: string;
+  line: string;
+  tier: Tier | null;
+  jobId: string | null;
+  recordedAt: string;
+  waitingApproval: boolean;
+  terminals: number;
+  /** Terminals done with it. */
+  finished: number;
+  /** Grouped by exact output. */
+  headline: string;
+  groups: number;
+  /** Some terminal's output was cut in the middle (the per-line cap). */
+  truncated: boolean;
+  /** A full-screen program ran: its screens are not recorded. */
+  fullScreen: boolean;
+  /** From the first Enter to the last prompt, once every terminal is done. */
+  durationMs: number | null;
+}
+
+export interface RecordLimits {
+  maxLines: number;
+  maxOutputBytes: number;
+  maxSessionBytes: number;
+  lineSecs: number;
+}
+
+/** QL-12: the MultiExec session's recorded lines. */
+export interface Recordings {
+  /** Newest first. */
+  lines: RecordedLine[];
+  /** Older lines the session caps dropped. */
+  dropped: number;
+  sessionBytes: number;
+  limits: RecordLimits;
+}
+
+/** QL-12: one terminal of a recorded line. */
+export type RecordedTerminal = CaptureState & {
+  terminalId: string;
+  name: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  durationMs: number | null;
+  outputBytes: number;
+  truncated: boolean;
+  fullScreen: boolean;
+};
+
+/** QL-12: a recorded line grouped like a Compare run (BX-03); host target keys are terminal ids. */
+export interface RecordedResults {
+  line: RecordedLine;
+  counts: BulkCounts;
+  hosts: HostResult[];
+  terminals: RecordedTerminal[];
+  groups: OutputGroup[];
+  headline: string;
+  ignoreTrailingWhitespace: boolean;
+}
+
+/** QL-12: what a recordings export wrote. */
+export interface RecordedExport {
+  path: string;
+  format: ExportFormat;
+  lines: number;
+  /** Terminal outputs written (one per terminal per line). */
+  outputs: number;
+  redacted: number;
+}
 
 export interface MultiExecTarget {
   terminalId: string;
@@ -877,6 +980,9 @@ export type FinishedHow = "prompt" | "quiet";
 /** QL-04: "auto" checks libraries of up to 200 sessions. */
 export type ReachabilityMode = "auto" | "on" | "off";
 
+/** QL-07: which finished commands notify while the tab is not on screen or Remotely is not in front. */
+export type NotifyWhen = "long" | "any";
+
 /** SS-03, QL-04, QL-05 settings. */
 export interface TerminalSettings {
   /** Seconds without traffic before a keep-alive; 0: off. */
@@ -890,8 +996,10 @@ export interface TerminalSettings {
   reachability: ReachabilityMode;
   /** QL-04: seconds between two checks of a session, 15 to 3600. */
   reachabilitySecs: number;
-  /** QL-07: a Windows notification when a long command in a background tab finishes. */
+  /** QL-07: a Windows notification when a command in a background tab finishes. */
   notifyFinished: boolean;
+  /** QL-07: long commands only, or any command that finishes while away. */
+  notifyWhen: NotifyWhen;
   /** QL-07: seconds a command must run to count as long, 5 to 3600. */
   notifyAfterSecs: number;
   /** QL-07: seconds without output that end a command whose prompt is not recognised; 0: wait for the prompt. */
@@ -1887,6 +1995,17 @@ export const api = {
     invoke<string>("multiexec_approve", { lineId, answers }),
   /** SS-10: cancels a held line: Ctrl+C instead of Enter on every terminal. */
   multiExecCancel: (lineId: string) => invoke<void>("multiexec_cancel", { lineId }),
+  /** QL-12: the lines this MultiExec session recorded, newest first. */
+  multiExecRecordings: () => invoke<Recordings>("multiexec_recordings"),
+  multiExecRecorded: (lineId: string, options: GroupOptions) =>
+    invoke<RecordedResults>("multiexec_recorded", { lineId, options }),
+  multiExecRecordedOutput: (lineId: string, terminalId: string) =>
+    invoke<HostOutput>("multiexec_recorded_output", { lineId, terminalId }),
+  multiExecRecordedDiff: (lineId: string, left: string, right: string, options: GroupOptions) =>
+    invoke<OutputDiff>("multiexec_recorded_diff", { lineId, left, right, options }),
+  /** QL-12: one line (`lineId`) or all of them (null); a save dialog in Rust; null when cancelled. */
+  multiExecExport: (lineId: string | null, format: ExportFormat, options: GroupOptions) =>
+    invoke<RecordedExport | null>("multiexec_export", { lineId, format, options }),
   onMultiExecEvent: (handler: (event: MultiExecEvent) => void): Promise<UnlistenFn> =>
     listen<MultiExecEvent>("multiexec://event", (e) => handler(e.payload)),
   terminalResize: (id: string, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),

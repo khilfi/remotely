@@ -1,16 +1,19 @@
 // SS-03, QL-04, QL-05 and QL-07 terminal settings: keep-alive, auto-reconnect, copy-on-select, font size,
-// scrollback, the session tree's reachability checks, and notifications when a long command finishes in a background
-// tab. Saved in the core and audited. Connection settings apply to terminals opened from then on; font size,
-// scrollback and notifications to open ones too.
+// scrollback, the session tree's reachability checks, and notifications when a command finishes while the user is
+// away (a background tab, another page, or Remotely not in front): commands longer than N seconds, or any command
+// whatever its length. A MultiExec line notifies once for all its terminals. Saved in the core and audited.
+// Connection settings apply to terminals opened from then on; font size, scrollback and notifications to open ones
+// too.
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { api, errorMessage, type ReachabilityMode, type TerminalSettings } from "@/lib/api";
+import { api, errorMessage, type NotifyWhen, type ReachabilityMode, type TerminalSettings } from "@/lib/api";
 
 const REACHABILITY: { value: ReachabilityMode; label: string }[] = [
   { value: "auto", label: "On, unless there are more than 200 sessions" },
@@ -154,16 +157,40 @@ export function TerminalSettingsCard() {
               onCheckedChange={(notifyFinished) => void save({ ...settings, notifyFinished })}
             />
             <Label htmlFor="notify-finished" className="font-normal">
-              Notify when a long command finishes in a tab in the background
+              Notify when a command finishes while I&apos;m away
             </Label>
           </div>
+          <RadioGroup
+            value={settings.notifyWhen}
+            onValueChange={(v) => void save({ ...settings, notifyWhen: v as NotifyWhen })}
+            disabled={!settings.notifyFinished}
+            className="gap-3 pl-12"
+            aria-label="Which commands notify"
+          >
+            <div className="flex flex-wrap items-center gap-3">
+              <RadioGroupItem id="notify-long" value="long" />
+              <Label htmlFor="notify-long" className="font-normal">
+                Commands longer than
+              </Label>
+              <Input
+                id="notify-after"
+                aria-label="Seconds, 5 to 3600"
+                className="w-24"
+                inputMode="numeric"
+                disabled={!settings.notifyFinished || settings.notifyWhen !== "long"}
+                value={draft.notifyAfter}
+                onChange={(e) => setDraft({ ...draft, notifyAfter: e.currentTarget.value })}
+              />
+              <span className="text-sm text-muted-foreground">seconds (5 to 3600), from Enter to the prompt</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <RadioGroupItem id="notify-any" value="any" />
+              <Label htmlFor="notify-any" className="font-normal">
+                Any command that finishes while I&apos;m away, whatever its length
+              </Label>
+            </div>
+          </RadioGroup>
           <div className="grid gap-4 sm:grid-cols-2">
-            {field(
-              "notifyAfter",
-              "notify-after",
-              "A command is long after (seconds, 5 to 3600)",
-              "Measured from Enter until its shell prompt comes back.",
-            )}
             {field(
               "notifyQuiet",
               "notify-quiet",
@@ -172,8 +199,9 @@ export function TerminalSettingsCard() {
             )}
           </div>
           <p className="text-xs text-muted-foreground">
-            In the background means another tab, another page, or Remotely not in front. The bell in the terminal
-            toolbar turns it off for one tab.
+            Away means the tab isn&apos;t on screen (another tab or page) or Remotely isn&apos;t the window in front. A
+            line sent with MultiExec notifies once, when all its terminals are done. The bell in the terminal toolbar
+            turns notifications off for one tab.
           </p>
         </div>
         {message && (
