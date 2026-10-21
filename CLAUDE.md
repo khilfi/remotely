@@ -1,19 +1,19 @@
 # Remotely
 
-A Windows desktop app for forward deployed engineers and IT admins: bulk control of VMware Workstation Pro VMs, a performance dashboard, a PuTTY/MobaXterm-style SSH session manager, and bulk command execution with grouped output, with multi-step approvals on every high-impact action.
+A Windows desktop app for forward deployed engineers and IT admins: bulk control of VMware Workstation Pro VMs (and, from 0.4.0, Oracle VirtualBox VMs), a performance dashboard, a PuTTY/MobaXterm-style SSH session manager, and bulk command execution with grouped output, with multi-step approvals on every high-impact action.
 
-The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work after the MVP (0.2.1 and 0.3.0), which moves some v2/v3 items into scope and replaces the Bulk run page with MultiExec and Compare in the Terminal page. Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx, and QL-xx for post-MVP quality-of-life items); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
+The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work after the MVP (0.2.1 and 0.3.0), which moves some v2/v3 items into scope and replaces the Bulk run page with MultiExec and Compare in the Terminal page, and `docs/plan-0.4.md` for 0.4.0 (VirtualBox, containers, host details, MultiExec recording and terminal fixes). Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx, QL-xx for post-MVP quality-of-life items, and CT-xx for containers); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
 
 ## Locked decisions
 
 - Stack: Tauri 2, Rust core (tokio), React + TypeScript + Vite UI, xterm.js, uPlot, SQLite via sqlx, russh for SSH.
 - UI components: shadcn/ui (Radix base, Nova preset, Lucide icons) on Tailwind CSS 4. Build screens from shadcn components first; write custom CSS only for what shadcn does not cover (e.g. the xterm.js host).
 - Single user only. No team mode, no server component.
-- Windows 10/11 x64 with VMware Workstation Pro 17 or later. No Linux host support.
+- Windows 10/11 x64 with VMware Workstation Pro 17 or later, and from 0.4.0 Oracle VirtualBox (`docs/plan-0.4.md`, VM-18). No Linux host support. macOS on Apple Silicon is a separate track after 0.4.0 with its own plan; until then nothing is built for it.
 - RDP means launching `mstsc.exe` with a generated .rdp file (v3).
 - Ansible: inventory export only (v2). The app never runs playbooks.
 - **The repository is private while the app is field-tested** (since 0.2.0), but follow the "Public repository rules" below anyway: it may go public later, and git history is forever. Code and releases live in one GitHub repo, and installed apps auto-update from its GitHub Releases (FD-14); with the repo private, that needs a read-only token in each app's vault (`docs/post-mvp-plan.md`, P1).
-- The MVP (32 requirements: VM-01 to VM-07, SS-01 to SS-06, BX-01 to BX-07, AP-01 to AP-06, MO-01 to MO-04, FD-01 and FD-14) shipped in 0.2.0. Post-MVP scope is exactly what `docs/post-mvp-plan.md` lists. Do not build other v2/v3 items unless asked; if a change would add or drop scope, stop and say so.
+- The MVP (32 requirements: VM-01 to VM-07, SS-01 to SS-06, BX-01 to BX-07, AP-01 to AP-06, MO-01 to MO-04, FD-01 and FD-14) shipped in 0.2.0. Post-MVP scope is exactly what `docs/post-mvp-plan.md` and `docs/plan-0.4.md` list. Do not build other v2/v3 items unless asked; if a change would add or drop scope, stop and say so.
 
 ## Public repository rules (no credentials, PII or secrets)
 
