@@ -465,9 +465,23 @@ pub fn containers(stdout: &str) -> Result<Vec<ContainerSummary>> {
             },
             None => state_from_status(&status),
         };
+        let started_at = time(&item, &["StartedAt"]);
         if status.is_empty() {
+            // Podman leaves it empty: say it as Docker does, from its start and exit times.
+            let since = |at: Option<String>| at.as_deref().and_then(seconds_since).map(human_span);
             status = match (state, integer(&item, &["ExitCode"])) {
-                (ContainerState::Exited, Some(code)) => format!("Exited ({code})"),
+                (ContainerState::Exited, Some(code)) => match since(time(&item, &["ExitedAt"])) {
+                    Some(ago) => format!("Exited ({code}) {ago} ago"),
+                    None => format!("Exited ({code})"),
+                },
+                (ContainerState::Running, _) => match since(started_at.clone()) {
+                    Some(up) => format!("Up {up}"),
+                    None => "Up".to_owned(),
+                },
+                (ContainerState::Paused, _) => match since(started_at.clone()) {
+                    Some(up) => format!("Up {up} (Paused)"),
+                    None => "Paused".to_owned(),
+                },
                 (state, _) => capitalized(state.as_str()),
             };
         }
@@ -478,7 +492,7 @@ pub fn containers(stdout: &str) -> Result<Vec<ContainerSummary>> {
             command: command(&item, &["Command"]),
             state,
             created_at: time(&item, &["CreatedAt", "Created"]).or_else(|| time(&item, &["Created"])),
-            started_at: time(&item, &["StartedAt"]),
+            started_at,
             ports: ports(&item, &["Ports"]),
             networks: texts(&item, &["Networks"]),
             mounts: texts(&item, &["Mounts"]),
@@ -490,6 +504,29 @@ pub fn containers(stdout: &str) -> Result<Vec<ContainerSummary>> {
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+/// Seconds from an RFC 3339 time until now; `None` for a time in the future or one that doesn't read.
+fn seconds_since(at: &str) -> Option<i64> {
+    let then = OffsetDateTime::parse(at, &Rfc3339).ok()?;
+    let secs = (OffsetDateTime::now_utc() - then).whole_seconds();
+    (secs >= 0).then_some(secs)
+}
+
+/// "45 seconds", "3 minutes", "About an hour", "26 hours", "3 days", as Docker's status says it.
+pub fn human_span(secs: i64) -> String {
+    match secs {
+        s if s < 60 => format!("{s} seconds"),
+        s if s < 3600 => match s / 60 {
+            1 => "About a minute".to_owned(),
+            m => format!("{m} minutes"),
+        },
+        s if s < 2 * 3600 => "About an hour".to_owned(),
+        s if s < 48 * 3600 => format!("{} hours", s / 3600),
+        s if s < 14 * 86400 => format!("{} days", s / 86400),
+        s if s < 60 * 86400 => format!("{} weeks", s / (7 * 86400)),
+        s => format!("{} months", s / (30 * 86400)),
+    }
 }
 
 fn capitalized(text: &str) -> String {
@@ -920,7 +957,7 @@ mod tests {
         assert_eq!(redis.name, "cache-redis-1");
         assert_eq!(redis.command.as_deref(), Some("redis-server"));
         assert_eq!(redis.state, ContainerState::Running);
-        assert_eq!(redis.status, "Running");
+        assert!(redis.status.starts_with("Up "), "{}", redis.status);
         assert_eq!(redis.created_at.as_deref(), Some("2026-10-20T00:00:00Z"));
         assert_eq!(redis.started_at.as_deref(), Some("2026-10-20T01:00:00Z"));
         assert_eq!(redis.ports[0].describe(), "6379->6379/tcp");
@@ -1139,6 +1176,17 @@ mod tests {
         assert_eq!(after[0].text, "GET /health");
         let plain = logs("no time here\n", "", None);
         assert_eq!(plain[0].at, None);
+    }
+
+    #[test]
+    fn spans_read_like_dockers_status() {
+        assert_eq!(human_span(5), "5 seconds");
+        assert_eq!(human_span(90), "About a minute");
+        assert_eq!(human_span(600), "10 minutes");
+        assert_eq!(human_span(4000), "About an hour");
+        assert_eq!(human_span(26 * 3600), "26 hours");
+        assert_eq!(human_span(3 * 86400), "3 days");
+        assert_eq!(human_span(20 * 86400), "2 weeks");
     }
 
     #[test]

@@ -1707,13 +1707,16 @@ function TabButton({
   const snapshot = usePane(pane);
   const session = snapshot.sessionId ? sessions.get(snapshot.sessionId) : undefined;
   const env = session?.environment ?? "none";
-  const name = session?.name ?? pane?.label ?? "Terminal";
+  // CT-01: a container's shell is named after the container.
+  const name = pane?.fixedTitle ? pane.label : (session?.name ?? pane?.label ?? "Terminal");
   const seen = factsTitle(snapshot.facts);
   // SS-07: the jump hosts on the way, as the core connected through them.
   const via = snapshot.facts?.via ?? [];
   const count = allPanes(tab.layout).length;
   const tooltip = [
-    session ? `${session.name} (${sessionAddress(session)})` : name,
+    session
+      ? `${pane?.fixedTitle ? `${name}: a shell in a container on ` : ""}${session.name} (${sessionAddress(session)})`
+      : name,
     seen && `Host: ${seen}`,
     via.length > 0 && `Through ${routeText(via)}`,
     session ? null : "Not saved as a session",

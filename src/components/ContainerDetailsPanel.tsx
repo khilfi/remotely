@@ -351,7 +351,7 @@ function LogsTab({ host, engine, container }: Props) {
           Last
         </Label>
         <Select value={String(tail)} onValueChange={(v) => setTail(Number(v))}>
-          <SelectTrigger id="log-tail" size="sm" className="w-24">
+          <SelectTrigger id="log-tail" size="sm" className="w-32">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

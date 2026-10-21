@@ -30,12 +30,11 @@ import {
   type SessionRecord,
   type SudoMode,
 } from "@/lib/api";
-import { ENGINE_LABEL } from "@/lib/containers";
+import { ENGINE_LABEL, sentence } from "@/lib/containers";
 
 interface Props {
   /** The session to edit; null: pick one. */
   sessionId: string | null;
-  sessions: SessionRecord[];
   /** FD-03: the read-only lock's reason, or null. */
   readOnly: string | null;
   onSaved: (sessionId: string, marks: ContainerMark[]) => void;
@@ -70,8 +69,9 @@ interface EngineChoice {
   sudo: SudoChoice;
 }
 
-export function ContainerHostDialog({ sessionId, sessions, readOnly, onSaved, onClose }: Props) {
+export function ContainerHostDialog({ sessionId, readOnly, onSaved, onClose }: Props) {
   const [picked, setPicked] = useState<string | null>(sessionId);
+  const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [choices, setChoices] = useState<Record<EngineKind, EngineChoice>>({
     docker: { on: true, sudo: "off" },
     podman: { on: false, sudo: "off" },
@@ -87,6 +87,7 @@ export function ContainerHostDialog({ sessionId, sessions, readOnly, onSaved, on
 
   useEffect(() => {
     api.secrets().then(setSecrets, () => setSecrets([]));
+    api.sessions().then(setSessions, () => setSessions([]));
   }, []);
 
   // An existing host: its marks.
@@ -219,7 +220,7 @@ export function ContainerHostDialog({ sessionId, sessions, readOnly, onSaved, on
                     ? "not installed"
                     : e.version
                       ? `version ${e.version.server ?? e.version.client ?? "?"}${e.suggested?.kind === "off" ? ", works as the login user" : ", works with sudo"}`
-                      : (e.problem ?? "installed, but not usable yet")}
+                      : sentence(e.problem ?? "installed, but not usable yet")}
                 </li>
               ))}
             </ul>
@@ -272,7 +273,7 @@ export function ContainerHostDialog({ sessionId, sessions, readOnly, onSaved, on
 
           {error && (
             <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
+              <AlertDescription>{sentence(error)}</AlertDescription>
             </Alert>
           )}
         </div>

@@ -169,6 +169,8 @@ struct Seen {
     containers: Option<Vec<ContainerSummary>>,
     images: Option<Vec<ImageSummary>>,
     volumes: Option<Vec<VolumeSummary>>,
+    /// Read for a volume prune's preview: Docker 23 and later prune anonymous volumes only.
+    version: Option<EngineVersion>,
 }
 
 struct Inner {
@@ -292,7 +294,7 @@ impl Containers {
                 engines: vec![HostEngine {
                     engine: EngineKind::Docker,
                     sudo: SudoMode::Off,
-                    runs: "Docker Desktop".to_owned(),
+                    runs: "through Docker Desktop".to_owned(),
                 }],
                 via: Vec::new(),
                 cli_path: Some(path.display().to_string()),
@@ -520,7 +522,7 @@ impl Containers {
                 continue;
             };
             let mut notes: Vec<String> = note.iter().cloned().collect();
-            let container = impact_of(object, seen, op, &mut notes);
+            let container = impact_of(object, *engine, seen, op, &mut notes);
             out.push(TargetImpact {
                 target: target.target.key(),
                 power_state: Default::default(),
@@ -865,6 +867,13 @@ impl Containers {
             if needs_volumes {
                 self.volumes(ctx, host, kind).await?;
             }
+            if let Some(ContainerOp::Prune {
+                what: PruneWhat::Volumes,
+            }) = op
+            {
+                let version = self.version(ctx, host, kind).await.ok();
+                self.remember(host, kind, |seen| seen.version = version);
+            }
             Ok::<(), CoreError>(())
         };
         let note = match read.await {
@@ -919,6 +928,7 @@ fn listed(names: impl Iterator<Item = String>) -> Vec<String> {
 /// One target's impact entry from the lists read for it.
 fn impact_of(
     object: &ContainerObject,
+    engine: EngineKind,
     seen: &Seen,
     op: Option<&ContainerOp>,
     notes: &mut Vec<String>,
@@ -1016,21 +1026,39 @@ fn impact_of(
                         .iter()
                         .flat_map(|c| c.mounts.iter().map(String::as_str))
                         .collect();
+                    // Docker 23 and later prune anonymous volumes only; older Docker and Podman every unused one.
+                    let major = seen
+                        .version
+                        .as_ref()
+                        .and_then(|v| v.server.as_deref().or(v.client.as_deref()))
+                        .and_then(|v| v.split('.').next()?.parse::<u32>().ok());
+                    let anonymous_only = match (engine, major) {
+                        (EngineKind::Docker, Some(major)) => major >= 23,
+                        (EngineKind::Docker, None) => {
+                            notes.push(
+                                "Docker's version is unknown: Docker 23 and later prune only the anonymous ones".into(),
+                            );
+                            false
+                        }
+                        (EngineKind::Podman, _) => false,
+                    };
                     impact.removes = listed(
                         seen.volumes
                             .as_deref()
                             .unwrap_or_default()
                             .iter()
-                            .filter(|v| !in_use.contains(&v.name.as_str()))
+                            .filter(|v| !in_use.contains(&v.name.as_str()) && (!anonymous_only || v.anonymous))
                             .map(|v| {
                                 let what = if v.anonymous { "anonymous volume" } else { "volume" };
                                 format!("{what} {} and its data", v.name)
                             }),
                     );
-                    notes.push(
-                        "Docker 23 and later prune only anonymous volumes; older Docker and Podman prune every volume no container uses"
-                            .into(),
-                    );
+                    if engine == EngineKind::Podman {
+                        notes.push(
+                            "Podman lists where volumes are mounted, not their names, so a volume in use may show here; Podman itself keeps volumes in use"
+                                .into(),
+                        );
+                    }
                 }
                 Some(ContainerOp::Prune {
                     what: PruneWhat::BuildCache,

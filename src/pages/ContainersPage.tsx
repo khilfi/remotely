@@ -72,7 +72,6 @@ import {
   type ImageSummary,
   type NetworkSummary,
   type PruneWhat,
-  type SessionRecord,
   type SubmitOutcome,
   type VolumeSummary,
 } from "@/lib/api";
@@ -92,6 +91,7 @@ import {
   PRUNE_LABEL,
   pruneReason,
   sameHost,
+  sentence,
   shellReason,
   statsFor,
   type ContainerAction,
@@ -144,7 +144,6 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
   const readOnly = readOnlyReason !== null;
   const [hosts, setHosts] = useState<ContainerHostInfo[] | null>(null);
   const [hostsError, setHostsError] = useState<string | null>(null);
-  const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [current, setCurrent] = useState<Current | null>(null);
   const [tab, setTab] = useState<Tab>("containers");
   const [reads, setReads] = useState(0);
@@ -167,11 +166,10 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
   useEffect(() => {
     if (!active) return;
     let stale = false;
-    Promise.all([api.containerHosts(), api.sessions()]).then(
-      ([found, all]) => {
+    api.containerHosts().then(
+      (found) => {
         if (stale) return;
         setHosts(found);
-        setSessions(all);
         setHostsError(null);
         setCurrent((cur) => {
           const still = cur && found.find((h) => sameHost(h.host, cur.host));
@@ -372,7 +370,7 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
         <Alert variant="destructive">
           <TriangleAlertIcon />
           <AlertTitle>Could not read the container hosts</AlertTitle>
-          <AlertDescription>{hostsError}</AlertDescription>
+          <AlertDescription>{sentence(hostsError)}</AlertDescription>
         </Alert>
       )}
 
@@ -606,7 +604,7 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
                   <Alert variant="destructive">
                     <TriangleAlertIcon />
                     <AlertTitle>Could not read {hostLabel(info)}</AlertTitle>
-                    <AlertDescription>{listError.message}</AlertDescription>
+                    <AlertDescription>{sentence(listError.message)}</AlertDescription>
                     {(listError.code === "container_needs_sudo" || listError.code === "no_sudo_password") &&
                       current.host.kind === "session" && (
                         <AlertAction>
@@ -760,10 +758,10 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
                                     <TableCell>
                                       <Checkbox aria-label={`Select ${c.name}`} checked={selected.has(c.id)} />
                                     </TableCell>
-                                    <TableCell className="max-w-64 whitespace-normal">
+                                    <TableCell className="whitespace-nowrap">
                                       <button
                                         type="button"
-                                        className="text-left font-medium break-all hover:underline"
+                                        className="text-left font-medium hover:underline"
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           setDetail((open) => (open === c.id ? null : c.id));
@@ -775,7 +773,9 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
                                       {c.project && <div className="text-xs text-muted-foreground">{c.project}</div>}
                                     </TableCell>
                                     {!detailOpen && (
-                                      <TableCell className="max-w-56 break-all whitespace-normal">{c.image}</TableCell>
+                                      <TableCell className="max-w-56 break-words whitespace-normal">
+                                        {c.image}
+                                      </TableCell>
                                     )}
                                     <TableCell>
                                       <ContainerStateBadge state={c.state} />
@@ -807,7 +807,7 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
                                   </TableRow>
                                 );
                               })}
-                              {shown.length === 0 && !loading && (
+                              {shown.length === 0 && !loading && !listError && (
                                 <TableRow>
                                   <TableCell colSpan={8} className="text-center text-muted-foreground">
                                     {containers.length === 0 ? "No containers on this host." : "No container matches."}
@@ -915,7 +915,6 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
       {dialog?.kind === "host" && (
         <ContainerHostDialog
           sessionId={dialog.sessionId}
-          sessions={sessions}
           readOnly={readOnlyReason}
           onSaved={(sessionId, marks) => {
             setHostsVersion((v) => v + 1);
@@ -973,7 +972,7 @@ function Resource<T>({
     return (
       <Alert variant="destructive">
         <TriangleAlertIcon />
-        <AlertDescription>{loaded.error.message}</AlertDescription>
+        <AlertDescription>{sentence(loaded.error.message)}</AlertDescription>
       </Alert>
     );
   }

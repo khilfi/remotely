@@ -621,13 +621,39 @@ async fn prunes_preview_what_they_remove_and_say_what_they_freed() {
     .await;
     assert_eq!(volumes.tier, Tier::Critical);
     let impact = volumes.impact[0].container.as_ref().unwrap();
+    // Docker 27 prunes anonymous volumes only: the unused named one stays, the one in use too.
+    assert_eq!(impact.removes.len(), 1, "{:?}", impact.removes);
     assert!(
-        impact.removes.iter().any(|r| r.contains("old_cache")),
+        impact.removes[0].starts_with("anonymous volume"),
         "{:?}",
         impact.removes
     );
-    assert!(!impact.removes.iter().any(|r| r.contains("pgdata")), "in use");
     core.bus.cancel_approval(volumes.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_older_docker_prunes_every_unused_volume_and_the_preview_says_so() {
+    let mut fixture = Fixture::sample();
+    fixture.version = "20.10.24".into();
+    let fake = FakeContainers::default().with_host("web01", DOCKER, fixture);
+    let core = core_with(fake).await;
+    let web = session(&core, "web01", Environment::Lab).await;
+    mark(&core, web, DOCKER, SudoMode::Off).await;
+    let request = needs_approval(
+        &core,
+        op(
+            vec![engine_of(web, DOCKER)],
+            ContainerOp::Prune {
+                what: PruneWhat::Volumes,
+            },
+        ),
+    )
+    .await;
+    let removes = &request.impact[0].container.as_ref().unwrap().removes;
+    assert_eq!(removes.len(), 2, "{removes:?}");
+    assert!(removes.iter().any(|r| r.contains("old_cache")));
+    assert!(!removes.iter().any(|r| r.contains("pgdata")), "in use");
+    core.bus.cancel_approval(request.id).await.unwrap();
 }
 
 #[tokio::test]

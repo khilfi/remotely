@@ -280,6 +280,12 @@ export function logTime(at: string | null): string {
   )}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`;
 }
 
+/** Core messages start in lower case and end without a full stop; shown on their own they read better as a sentence. */
+export function sentence(text: string): string {
+  const capital = text.charAt(0).toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
+}
+
 // ---- Pulling ---------------------------------------------------------------------------------------
 
 const DOMAIN =
