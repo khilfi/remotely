@@ -1378,6 +1378,22 @@ mod tests {
     }
 
     #[test]
+    fn prompt_hook_reports_never_reach_the_text() {
+        // SS-08's folder (OSC 7, ended by ST) and QL-09's user report (OSC 7777, ended by BEL), split
+        // across two reads in the middle of the report.
+        let mut r = TextRenderer::new();
+        let mut lines = r.feed(b"web01\r\n\x1b]7;file://web01/home/alice\x1b\\\x1b]7777;remotely-us");
+        lines.extend(r.feed(b"er=alice\x07$ "));
+        assert_eq!(lines, ["web01"]);
+        assert_eq!(r.current(), "$ ");
+        assert_eq!(
+            render_text(b"\x1b]7777;remotely-0123abcd\x07ok\r\n"),
+            "ok\n",
+            "the hook's set-up marker"
+        );
+    }
+
+    #[test]
     fn a_full_screen_program_is_not_recorded_and_the_main_line_comes_back() {
         let mut r = TextRenderer::new();
         let mut lines = r.feed(b"before\r\n$ top");

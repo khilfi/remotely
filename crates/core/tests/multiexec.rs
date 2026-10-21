@@ -28,8 +28,10 @@ use remotely_core::known_hosts::HostKey;
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::AuditEntry;
+use remotely_core::terminal::folder::{FolderInfo, FolderTracking};
 use remotely_core::terminal::multiexec::{InputOutcome, LineMode, MultiExecEvent};
 use remotely_core::terminal::record::{CaptureEnd, CaptureState, RecordLimits};
+use remotely_core::terminal::shell_user::UserInfo;
 use remotely_core::terminal::{NotifyWhen, TerminalEvent, TerminalSettings, TerminalStatus, TerminalTuning};
 use remotely_core::vault::{SecretKind, SecretString};
 use remotely_core::Core;
@@ -1281,4 +1283,100 @@ async fn a_multiexec_line_notifies_once_for_all_its_terminals_never_per_terminal
         .seen
         .iter()
         .any(|e| matches!(e, TerminalEvent::CommandFinished { .. })));
+}
+
+// ---- QL-12 with QL-09: shells with the prompt hook ------------------------------------------------
+
+/// Waits until `check` holds for terminal `i`'s folder info (the prompt hook's reports).
+async fn until_folder(fleet: &Fleet, i: usize, what: &str, check: impl Fn(&FolderInfo) -> bool) {
+    let ok = timeout(WAIT, async {
+        loop {
+            if fleet.core.terminals.folder(fleet.id(i)).is_some_and(|f| check(&f)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        ok.is_ok(),
+        "web{:02}: {what}; folder info {:?}",
+        i + 1,
+        fleet.core.terminals.folder(fleet.id(i))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hooked_shell_records_without_its_reports_and_still_notices_a_switched_user() {
+    let fleet = Fleet::build(
+        2,
+        |_, s| s.with_login_shell("bash").with_hostname("web.example.com"),
+        |_| Environment::Lab,
+    )
+    .await;
+    // Each shell's prompt hook is set up: OSC 7 and the user report come before every prompt.
+    for i in 0..2 {
+        until_folder(&fleet, i, "the hook reports", |f| {
+            f.tracking == FolderTracking::Following
+        })
+        .await;
+    }
+    fleet.pick(&[0, 1]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    let line = send_line(&fleet, 0, "hostname\r").await;
+    line_recorded(&mut events, line).await;
+    let results = fleet.core.multiexec.recorded(line, GroupOptions::default()).unwrap();
+    assert_eq!(results.groups.len(), 1);
+    assert_eq!(
+        results.groups[0].stdout.as_deref(),
+        Some("web.example.com\n"),
+        "no folder report, user report or hook marker"
+    );
+    // MultiExec's line is a command like any other to QL-09: alice's shell, still reporting.
+    for i in 0..2 {
+        until_folder(&fleet, i, "the login user, reporting", |f| {
+            f.user == UserInfo::connected("alice")
+        })
+        .await;
+    }
+
+    // `su bob` through MultiExec: its recording ends at bob's prompt, and QL-09 notices the switch.
+    let su = send_line(&fleet, 0, "su bob\r").await;
+    line_recorded(&mut events, su).await;
+    let results = fleet.core.multiexec.recorded(su, GroupOptions::default()).unwrap();
+    assert!(results.terminals.iter().all(|t| t.state
+        == CaptureState::Done {
+            how: CaptureEnd::Prompt
+        }));
+    assert_eq!(results.groups[0].stdout.as_deref(), Some(""));
+    for i in 0..2 {
+        until_folder(&fleet, i, "the switch noticed", |f| {
+            f.user.stopped && f.user.shell.as_ref().is_some_and(|s| s.username == "bob")
+        })
+        .await;
+        assert_eq!(
+            fleet
+                .core
+                .terminals
+                .folder(fleet.id(i))
+                .unwrap()
+                .user
+                .username
+                .as_deref(),
+            Some("alice"),
+            "transfers still run as alice"
+        );
+    }
+
+    // Back to alice's shell: the hook reports again, and the line was recorded like any other.
+    let exit = send_line(&fleet, 0, "exit\r").await;
+    line_recorded(&mut events, exit).await;
+    for i in 0..2 {
+        until_folder(&fleet, i, "reporting again", |f| !f.user.stopped).await;
+    }
+    let everything = format!("{:?}", fleet.core.multiexec.recorded_runs(None).unwrap());
+    for leak in ["7777", "remotely-", "file://", "\u{1b}"] {
+        assert!(!everything.contains(leak), "{leak:?} in {everything}");
+    }
 }
