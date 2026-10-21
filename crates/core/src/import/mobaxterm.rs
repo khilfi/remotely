@@ -20,7 +20,45 @@ use super::{finish, non_empty, parse_port, Candidate, CandidateAuth, Parsed, Ski
 
 /// MobaXterm's session type for SSH.
 const SSH: &str = "0";
-const KEY_PATH: usize = 14;
+
+/// QL-10: where each setting is among a session line's `%`-separated connection settings, and what
+/// the import makes of it (the format guide lists these).
+pub(crate) const TYPE: usize = 0;
+pub(crate) const HOST: usize = 1;
+pub(crate) const PORT: usize = 2;
+pub(crate) const USER: usize = 3;
+pub(crate) const COMMAND: usize = 7;
+pub(crate) const GATEWAY_HOST: usize = 8;
+pub(crate) const GATEWAY_PORT: usize = 9;
+pub(crate) const GATEWAY_USER: usize = 10;
+pub(crate) const KEY_PATH: usize = 14;
+pub(crate) const FIELDS: [(usize, &str); 9] = [
+    (
+        TYPE,
+        "The session type: 0 is SSH; other types (RDP, Telnet, ...) are left out",
+    ),
+    (HOST, "The host"),
+    (PORT, "The port (empty: 22)"),
+    (USER, "The user"),
+    (COMMAND, "The command run after login: the startup command"),
+    (GATEWAY_HOST, "The SSH gateway: the jump host"),
+    (GATEWAY_PORT, "The gateway's port"),
+    (GATEWAY_USER, "The gateway's user"),
+    (
+        KEY_PATH,
+        "The private key file: key login (_ProfileDir_, _CurrentDrive_ and _MyDocuments_ are filled in)",
+    ),
+];
+
+/// QL-10: MobaXterm's escapes for characters that would break its `#` and `%` format, and what they
+/// stand for.
+pub(crate) const ESCAPES: [(&str, &str); 5] = [
+    ("__DIEZE__", "#"),
+    ("__PERCENT__", "%"),
+    ("__PTVIRG__", ";"),
+    ("__DBLQUO__", "\""),
+    ("__PIPE__", "|"),
+];
 
 /// The sessions in a MobaXterm export. `home` is the Windows profile folder (`C:\Users\alice`), for
 /// key paths that start with `_ProfileDir_`.
@@ -109,26 +147,26 @@ fn session(name: &str, value: &str, folder: &[String], home: &Path) -> Result<Ca
     };
     let fields: Vec<String> = connection.split('%').map(unescape).collect();
     let field = |i: usize| fields.get(i).map_or("", |f| f.trim());
-    match field(0) {
+    match field(TYPE) {
         SSH => {}
         "" => return Err(skip("not a MobaXterm session line".into())),
         other => return Err(skip(format!("not an SSH session (MobaXterm type {other})"))),
     }
-    if field(1).is_empty() {
+    if field(HOST).is_empty() {
         return Err(skip("no host name".into()));
     }
-    let port = match field(2) {
+    let port = match field(PORT) {
         "" => DEFAULT_PORT,
         port => parse_port(port).map_err(skip)?,
     };
 
-    let mut c = Candidate::new(name, field(1));
+    let mut c = Candidate::new(name, field(HOST));
     c.port = port;
     c.folder = folder.to_vec();
-    c.username = non_empty(field(3));
-    c.startup_command = non_empty(field(7));
-    if !field(8).is_empty() {
-        c.jump = Some(gateway(field(10), field(8), field(9)));
+    c.username = non_empty(field(USER));
+    c.startup_command = non_empty(field(COMMAND));
+    if !field(GATEWAY_HOST).is_empty() {
+        c.jump = Some(gateway(field(GATEWAY_USER), field(GATEWAY_HOST), field(GATEWAY_PORT)));
     }
     c.auth = match field(KEY_PATH) {
         "" => CandidateAuth::Password,
@@ -157,12 +195,9 @@ fn gateway(user: &str, host: &str, port: &str) -> String {
 
 /// MobaXterm's escapes for characters that would break its `#` and `%` format.
 fn unescape(field: &str) -> String {
-    field
-        .replace("__DIEZE__", "#")
-        .replace("__PERCENT__", "%")
-        .replace("__PTVIRG__", ";")
-        .replace("__DBLQUO__", "\"")
-        .replace("__PIPE__", "|")
+    ESCAPES
+        .iter()
+        .fold(field.to_owned(), |text, (escape, means)| text.replace(escape, means))
 }
 
 /// Expands MobaXterm's path placeholders: `_ProfileDir_` (the profile folder), `_CurrentDrive_` (its

@@ -11,6 +11,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   GaugeIcon,
+  InfoIcon,
   MonitorIcon,
   PauseIcon,
   PlayIcon,
@@ -75,7 +76,8 @@ interface Props {
   onSubmit: (command: Command) => Promise<void>;
   onConnect: (sessionId: string) => void;
   onShowMetrics: (key: string) => void;
-  onOpenSnapshots: (vmxPaths: string[]) => void;
+  /** QL-14: the VM's details on the Virtual machines page, on its details or its snapshots. */
+  onOpenVm: (vmxPath: string, view: "details" | "snapshots") => void;
 }
 
 type View = { kind: "root" } | { kind: "vm"; vmxPath: string } | { kind: "session"; id: string };
@@ -130,7 +132,7 @@ export function CommandPalette({
   onSubmit,
   onConnect,
   onShowMetrics,
-  onOpenSnapshots,
+  onOpenVm,
 }: Props) {
   // The app mounts the palette afresh for each opening, so it starts here.
   const [view, setView] = useState<View>(vmFocus ? { kind: "vm", vmxPath: vmFocus } : { kind: "root" });
@@ -286,10 +288,19 @@ export function CommandPalette({
                   </CommandItem>
                 )}
                 <CommandItem
+                  value="details info guest os ip sessions"
+                  onSelect={() => {
+                    close();
+                    onOpenVm(vm.vmxPath, "details");
+                  }}
+                >
+                  <InfoIcon /> Show its details
+                </CommandItem>
+                <CommandItem
                   value="snapshots take revert delete"
                   onSelect={() => {
                     close();
-                    onOpenSnapshots([vm.vmxPath]);
+                    onOpenVm(vm.vmxPath, "snapshots");
                   }}
                 >
                   <CameraIcon /> Snapshots…

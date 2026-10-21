@@ -1,10 +1,14 @@
 // App shell (shadcn/ui): sidebar navigation with the vault status (SS-04), top bar with the command
-// palette and the theme switch (FD-01), pages, the approval dialog and job toasts. Pages stay mounted
+// palette and the Dark mode switch (FD-01, QL-11: "Follow Windows" is in Settings), pages, the approval dialog and job
+// toasts. Pages stay mounted
 // while hidden so terminal connections survive a page switch. Bulk execution lives in the Terminal page (post-MVP P6):
 // MultiExec (SS-10) and Compare output (BX-03) replace the MVP's Bulk run page.
 //
 // FD-01 keyboard: Ctrl+K opens the command palette (Ctrl+Shift+K inside a terminal, where Ctrl+K belongs
-// to the shell), Ctrl+1 to Ctrl+9 open the pages in sidebar order and Ctrl+, opens Settings.
+// to the shell), Ctrl+1 to Ctrl+9 open the pages by their own shortcut and Ctrl+, opens Settings.
+//
+// QL-14: snapshots are part of the Virtual machines page. The sidebar's third slot is left for Containers (Q6); until
+// then Ctrl+3, Snapshots' old shortcut, opens the snapshot view there (lib/navigation.ts).
 //
 // FD-03: the top bar's Present button (Presenting menu while on) and the palette start and stop presentation mode,
 // its read-only lock and "Hide terminal output" (Presentation.tsx).
@@ -54,7 +58,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Switch } from "@/components/ui/switch";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
@@ -84,28 +88,27 @@ import {
   type UpdateCheck,
   type VaultInfo,
 } from "@/lib/api";
-import { useTheme, type ThemePreference } from "@/lib/theme";
+import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
-import { SnapshotsPage } from "@/pages/SnapshotsPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
-import { VmsPage } from "@/pages/VmsPage";
+import { VmsPage, type VmPageRequest } from "@/pages/VmsPage";
+import { navTarget, shortcutTarget, type NavTarget } from "@/lib/navigation";
+import type { VmView } from "@/lib/vm-snapshots";
 
-type PageId =
-  "vms" | "dashboard" | "snapshots" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
+type PageId = "vms" | "dashboard" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
 
 const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
-/** In sidebar order; they open with Ctrl+1 to Ctrl+8, Settings with Ctrl+,. */
+/** In sidebar order, each with its own shortcut. Ctrl+3 is free for Containers (Q6). */
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
-  { id: "snapshots", label: "Snapshots", title: "Snapshots", icon: CameraIcon, shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
   { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon, shortcut: "Ctrl+5" },
   { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon, shortcut: "Ctrl+6" },
@@ -118,12 +121,6 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 function inTerminal(target: EventTarget | null) {
   return target instanceof Element && target.closest(".xterm") !== null;
 }
-
-const THEMES: { value: ThemePreference; label: string; icon: LucideIcon }[] = [
-  { value: "system", label: "Follow Windows", icon: MonitorIcon },
-  { value: "light", label: "Light", icon: SunIcon },
-  { value: "dark", label: "Dark", icon: MoonIcon },
-];
 
 export default function App() {
   const [page, setPage] = useState<PageId>("vms");
@@ -142,8 +139,8 @@ export default function App() {
   const [updateRun, setUpdateRun] = useState(0);
   const lastUpdateStatus = useRef<UpdateCheck["status"] | null>(null);
   const offered = updateCheck?.status === "available" ? updateCheck.update : null;
-  // VMs picked on the VMs page to open in the snapshot manager (VM-04).
-  const [snapshotPick, setSnapshotPick] = useState<{ paths: string[]; n: number } | null>(null);
+  // QL-14: a VM (or the snapshot view) to show on the Virtual machines page.
+  const [vmRequest, setVmRequest] = useState<VmPageRequest | null>(null);
   // SS-03: a session to open in a new terminal tab.
   const [terminalOpen, setTerminalOpen] = useState<{ sessionId: string; n: number } | null>(null);
   // QL-02: the New terminal form, opened from the palette.
@@ -167,12 +164,28 @@ export default function App() {
   const [dashboardFocus, setDashboardFocus] = useState<{ key: string; n: number } | null>(null);
   // Bumped when the palette refreshed the VM list.
   const [inventoryVersion, setInventoryVersion] = useState(0);
-  const { preference, setPreference, resolved } = useTheme();
+  const { resolved, followWindows, setDark, setFollowWindows } = useTheme();
   // FD-03: presenting, the read-only lock (QL-08: the update banner's Install says why it is off).
   const presentation = usePresentation();
   const readOnlyReason = useReadOnlyReason();
 
   const openPalette = useCallback((vm: string | null) => setPalette((p) => ({ open: true, vm, n: p.n + 1 })), []);
+
+  /** QL-14: the Virtual machines page with these VMs' details, or (none) the snapshot view of the open one. */
+  const openVms = useCallback((vmxPaths: string[], view: VmView) => {
+    setVmRequest((prev) => ({ vmxPaths, view, n: (prev?.n ?? 0) + 1 }));
+    setPage("vms");
+  }, []);
+
+  /** A page, or a page from before 0.4.0 that is now part of another (Snapshots). */
+  const go = useCallback(
+    (target: NavTarget) => {
+      if (!target) return;
+      if ("moved" in target) openVms([], "snapshots");
+      else setPage(target.page as PageId);
+    },
+    [openVms],
+  );
 
   useEffect(() => {
     paletteOpen.current = palette.open;
@@ -195,15 +208,15 @@ export default function App() {
         return;
       }
       if (terminal || e.shiftKey || paletteOpen.current) return;
-      const index = /^[1-9]$/.test(e.key) ? Number(e.key) - 1 : e.key === "," ? PAGES.length - 1 : -1;
-      if (index >= 0 && PAGES[index]) {
+      const target = /^[1-9,]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
+      if (target) {
         e.preventDefault();
-        setPage(PAGES[index].id);
+        go(target);
       }
     }
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
-  }, []);
+  }, [go]);
 
   const loadVault = useCallback(() => {
     api.vaultInfo().then(
@@ -360,11 +373,6 @@ export default function App() {
     setPage("terminal");
   }
 
-  function openSnapshots(paths: string[]) {
-    setSnapshotPick((prev) => ({ paths, n: (prev?.n ?? 0) + 1 }));
-    setPage("snapshots");
-  }
-
   // FD-01: the app's own actions in the palette. Changes to VMs and hosts are commands it submits.
   const paletteActions: PaletteAction[] = [
     {
@@ -377,6 +385,13 @@ export default function App() {
         setInventoryVersion((v) => v + 1);
         setPage("vms");
       },
+    },
+    {
+      id: "snapshots",
+      label: "Snapshots: take, revert or delete…",
+      icon: CameraIcon,
+      keywords: "snapshot safety restore vm virtual machines",
+      run: () => openVms([], "snapshots"),
     },
     {
       id: "watch",
@@ -429,13 +444,20 @@ export default function App() {
           },
         }
       : { id: "unlock", label: "Unlock the vault", icon: LockOpenIcon, run: () => setPage("vault") },
-    ...THEMES.map((t) => ({
-      id: `theme-${t.value}`,
-      label: `Theme: ${t.label}`,
-      icon: t.icon,
-      keywords: "appearance dark light colour",
-      run: () => setPreference(t.value),
-    })),
+    {
+      id: "theme-dark",
+      label: resolved === "dark" ? "Turn dark mode off" : "Turn dark mode on",
+      icon: resolved === "dark" ? SunIcon : MoonIcon,
+      keywords: "theme appearance dark light colour",
+      run: () => setDark(resolved !== "dark"),
+    },
+    {
+      id: "theme-system",
+      label: followWindows ? "Stop following the Windows theme" : "Follow the Windows theme",
+      icon: MonitorIcon,
+      keywords: "theme appearance dark light colour system",
+      run: () => setFollowWindows(!followWindows),
+    },
     presentation.presenting
       ? {
           id: "stop-presenting",
@@ -587,20 +609,17 @@ export default function App() {
               <Kbd className="ml-auto">Ctrl K</Kbd>
             </Button>
             <PresentationButton />
-            <ToggleGroup
-              type="single"
-              variant="outline"
-              size="sm"
-              aria-label="Theme"
-              value={preference}
-              onValueChange={(value) => value && setPreference(value as ThemePreference)}
+            <label
+              className="flex items-center gap-2 text-sm whitespace-nowrap text-muted-foreground"
+              title={
+                followWindows
+                  ? "Follows Windows now. Switching picks a theme and stops following Windows (Settings, General)."
+                  : undefined
+              }
             >
-              {THEMES.map((t) => (
-                <ToggleGroupItem key={t.value} value={t.value} aria-label={t.label} title={t.label}>
-                  <t.icon />
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
+              Dark mode
+              <Switch checked={resolved === "dark"} onCheckedChange={setDark} />
+            </label>
           </header>
           <div className="min-h-0 flex-1 overflow-auto p-6">
             {READ_ONLY_PAGES[page] && <ReadOnlyNotice {...READ_ONLY_PAGES[page]} />}
@@ -629,12 +648,13 @@ export default function App() {
                 onLater={() => setLaterFor("noToken")}
               />
             )}
-            <section hidden={page !== "vms"}>
+            <section hidden={page !== "vms"} className="h-full">
               <VmsPage
                 active={page === "vms"}
                 onSubmitted={submitted}
                 onOpenSettings={() => setPage("settings")}
-                onOpenSnapshots={openSnapshots}
+                onActions={openPalette}
+                request={vmRequest}
                 refreshKey={jobsFinished + settingsVersion + inventoryVersion}
               />
             </section>
@@ -647,14 +667,6 @@ export default function App() {
                 onActions={(vmxPath) => openPalette(vmxPath)}
                 onOpenVms={() => setPage("vms")}
                 onOpenSessions={() => setPage("sessions")}
-              />
-            </section>
-            <section hidden={page !== "snapshots"}>
-              <SnapshotsPage
-                active={page === "snapshots"}
-                onSubmitted={submitted}
-                refreshKey={jobsFinished + settingsVersion}
-                preselect={snapshotPick}
               />
             </section>
             <section hidden={page !== "sessions"}>
@@ -727,7 +739,7 @@ export default function App() {
         onOpenChange={(open) => setPalette((p) => ({ ...p, open }))}
         vmFocus={palette.vm}
         pages={PAGES}
-        onNavigate={(id) => setPage(id as PageId)}
+        onNavigate={(id) => go(navTarget(id, PAGES))}
         actions={paletteActions}
         onSubmit={submitCommand}
         onConnect={openTerminal}
@@ -735,7 +747,7 @@ export default function App() {
           setDashboardFocus((prev) => ({ key, n: (prev?.n ?? 0) + 1 }));
           setPage("dashboard");
         }}
-        onOpenSnapshots={openSnapshots}
+        onOpenVm={(vmxPath, view) => openVms([vmxPath], view)}
       />
       <Toaster theme={resolved} position="bottom-right" />
       <PresentationLayer />

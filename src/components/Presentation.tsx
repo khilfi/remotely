@@ -295,11 +295,10 @@ export function ReadOnlyNotice({ blocked, still }: { blocked: string; still?: st
 /** What the read-only lock blocks on each page, for its notice (the Terminal page says it in its toolbar). */
 export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }> = {
   vms: {
-    blocked: "Power actions, snapshots, protection, tags, labels and saved filters",
-    still: "Refreshing and reading the list still work.",
+    blocked: "Power actions, snapshots (taking, reverting and deleting), protection, tags, labels and saved filters",
+    still: "Refreshing, reading the list and each VM's details and snapshots still work.",
   },
   dashboard: { blocked: "Changes to VMs and hosts", still: "Watching hosts and reading metrics still work." },
-  snapshots: { blocked: "Taking, reverting and deleting snapshots" },
   sessions: {
     blocked: "New sessions, edits, folders, imports, links to VMs and port forwards",
     still: "Connecting and exporting still work.",
