@@ -12,9 +12,10 @@ history is forever, so it follows the "Public repository rules" in CLAUDE.md: re
 lists every Workstation VM (the library, chosen folders and running VMs) with its OS, CPU, RAM, IP and VMware Tools
 state; selects by click, shift-click, tag or saved filter; starts, shuts down (then forces off only after a separate
 Critical approval), suspends, pauses and resets them in bulk; checks host capacity before a power-on; skips protected
-VMs; and labels VMs Lab, Staging or Prod (Prod raises the approval tier). The snapshot manager shows each VM's snapshot
-tree with creation times (read from its `.vmsd`), flags snapshots
-older than 30 days, and takes, reverts and deletes snapshots in bulk; high-risk VM actions take a named safety snapshot
+VMs; and labels VMs Lab, Staging or Prod (Prod raises the approval tier). The same page shows a VM's details and its
+snapshot tree with creation times (read from its `.vmsd`) in a panel beside the list, flags snapshots older than 30
+days, and takes, reverts and deletes snapshots on one VM or in bulk on the selection (see
+[Virtual machines and snapshots](#virtual-machines-and-snapshots)); high-risk VM actions take a named safety snapshot
 first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
 and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
 Auto-update checks this repo's GitHub Releases, with a read-only GitHub token kept in the vault (see
@@ -28,6 +29,25 @@ encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a previe
 both of each conflicting item. The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
 the vault, copies their public keys, lets sessions log in with them and pushes a public key to many hosts'
 `authorized_keys` through the approval flow.
+
+### Virtual machines and snapshots
+
+QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page is gone.
+
+- **Select** VMs by clicking rows (Shift+click for a range), by tag, saved filter or **By snapshots**: with snapshots
+  older than 30 days, with safety snapshots, or with a snapshot whose name contains some text. Power, protection,
+  tags, labels and the **Snapshots** button (take, revert or delete a snapshot by name on every selected VM that has
+  it) work on the selection.
+- **Click a VM's name** for its details beside the list (drag the edge to resize it; the close button or dragging it
+  shut hides it). The Details tab has what the inventory knows (guest OS, CPUs, RAM, IP, Tools, share of this host,
+  label, protection, tags, linked sessions); **Actions…** opens the Ctrl+K palette on the VM. The Snapshots tab has
+  its tree: "You are here", creation times, descriptions, old and safety snapshots marked, and Take, Revert and Delete
+  with the tier each would get (Prod raises it), then the approval dialog with its impact preview and the safety
+  snapshot offer.
+- Snapshot trees are read for the VM you open, the selection when you open its Snapshots menu and the VMs shown when
+  you select by snapshots, so a long VM list stays quick.
+- Ctrl+3 and "Snapshots" in the Ctrl+K palette open the snapshot view of the open or first selected VM; in the palette
+  a VM's own entry has "Show its details" and "Snapshots…". The other pages keep their shortcuts.
 
 ### Command panel
 

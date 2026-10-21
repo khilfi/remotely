@@ -68,6 +68,7 @@ pub struct FakeVmware {
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
     calls: Mutex<Vec<String>>,
+    snapshot_reads: Mutex<Vec<String>>,
 }
 
 impl FakeVmware {
@@ -182,6 +183,11 @@ impl FakeVmware {
 
     pub fn calls(&self) -> Vec<String> {
         locks::lock(&self.calls).clone()
+    }
+
+    /// QL-14: the VMs whose .vmsd was read, in order (lower-case paths).
+    pub fn snapshot_reads(&self) -> Vec<String> {
+        locks::lock(&self.snapshot_reads).clone()
     }
 
     /// The VM's snapshot names, in the order they were taken.
@@ -383,6 +389,7 @@ impl VmwareAdapter for FakeVmware {
 
     async fn snapshots(&self, vmx: &Path) -> Result<SnapshotTree> {
         let key = path_key(vmx);
+        locks::lock(&self.snapshot_reads).push(key.clone());
         if self.unreadable_snapshots.contains(&key) {
             return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into());
         }

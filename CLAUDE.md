@@ -142,10 +142,14 @@ src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel, MultiExec bar, WhyDisabled for QL-08,
                       FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
-                      for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card)
-  pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output)
+                      for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
+                      VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list)
+  pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
+                      is VMs and snapshots, with the selection's bulk snapshot actions and the details panel)
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), theme.ts, utils.ts, multiexec.ts, transfers.ts, tunnels.ts (SS-07 chains and forwards),
+                      navigation.ts (page shortcuts by page; the old Snapshots id and Ctrl+3 open the VM page's snapshot
+                      view until Containers takes slot 3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals), presentation-state.ts; pure helpers with
