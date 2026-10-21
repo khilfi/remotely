@@ -644,8 +644,7 @@ fn details(c: &FakeContainer) -> Option<ContainerDetails> {
         command: Some(c.command.join(" ")),
         entrypoint: None,
         working_dir: None,
-        user: None,
-        hostname: Some(c.short_id().to_owned()),
+        runs_as: None,
         // Names only, as the parser gives them.
         env_names: c
             .env

@@ -90,6 +90,7 @@ import {
   api,
   errorMessage,
   type ApprovalRequest,
+  type EngineKind,
   type Environment,
   type LeftOut,
   type MultiExecEvent,
@@ -153,12 +154,25 @@ const FILES_KEY = "remotely.terminal.filesShown";
 /** BX-08: below this width the command panel starts hidden, so the tabs keep their room (the toolbar shows it). */
 const COMMANDS_SHOWN_FROM = 1440;
 
+/** CT-01 "Open a shell" in a container on a session's host. */
+interface ContainerShellOpen {
+  sessionId: string;
+  engine: EngineKind;
+  containerId: string;
+  title: string;
+}
+
 interface Props {
   /** The page stays mounted while hidden so its connections survive. */
   active: boolean;
   theme: ResolvedTheme;
   /** A session to open in a new tab; `n` changes for each request. */
-  openRequest: { sessionId: string; n: number } | null;
+  openRequest: {
+    sessionId: string;
+    n: number;
+    /** CT-01: a shell in one of the session's containers. */
+    container?: ContainerShellOpen;
+  } | null;
   /** QL-02: opens the New terminal form when it changes (the command palette). */
   newRequest: number;
   /** BX-03: opens Compare output when it changes (the command palette). */
@@ -405,8 +419,8 @@ export function TerminalPage({
   // SS-08: a file name right-clicked in a pane, too.
   const fileWordRef = useRef<(pane: PaneSession, word: string, x: number, y: number) => void>(() => undefined);
   const createPane = useCallback(
-    (opener: PaneOpener, label: string) => {
-      const pane = new PaneSession(newKey(), opener, label, theme, options);
+    (opener: PaneOpener, label: string, fixedTitle = false) => {
+      const pane = new PaneSession(newKey(), opener, label, theme, options, fixedTitle);
       pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
       pane.onFileWord = (word, x, y) => fileWordRef.current(pane, word, x, y);
       // SS-07: a tunnel that starts with the terminal may ask first (a Prod host): show its approval.
@@ -436,8 +450,19 @@ export function TerminalPage({
   }, []);
 
   const openSession = useCallback(
-    (session: Pick<SessionRecord, "id" | "name">) => {
-      addTab(createPane({ kind: "session", sessionId: session.id }, session.name));
+    (session: Pick<SessionRecord, "id" | "name">, container?: ContainerShellOpen) => {
+      if (container) {
+        // CT-01 "Open a shell": a tab inside a container, named after it.
+        const opener: PaneOpener = {
+          kind: "container",
+          sessionId: container.sessionId,
+          engine: container.engine,
+          containerId: container.containerId,
+        };
+        addTab(createPane(opener, container.title, true));
+      } else {
+        addTab(createPane({ kind: "session", sessionId: session.id }, session.name));
+      }
       // Recent sessions moved.
       window.setTimeout(() => setVersion((v) => v + 1), 500);
     },
@@ -468,7 +493,10 @@ export function TerminalPage({
     if (!openRequest || openRequest.n === handled.current) return;
     handled.current = openRequest.n;
     loadSessions();
-    openSession({ id: openRequest.sessionId, name: sessionById.get(openRequest.sessionId)?.name ?? "Session" });
+    openSession(
+      { id: openRequest.sessionId, name: sessionById.get(openRequest.sessionId)?.name ?? "Session" },
+      openRequest.container,
+    );
   }, [openRequest, openSession, loadSessions, sessionById]);
 
   function closePane(tabKey: string, paneKey: string) {
@@ -552,7 +580,7 @@ export function TerminalPage({
       toast.info("This terminal never connected, so there is nothing to split. Try New terminal again.");
       return;
     }
-    const pane = createPane(opener, currentPane.label);
+    const pane = createPane(opener, currentPane.label, currentPane.fixedTitle);
     setTabs((prev) =>
       prev.map((t) =>
         t.key === current.key
@@ -565,6 +593,8 @@ export function TerminalPage({
   /** How a pane is named in titles and saved output. */
   const nameOf = useCallback(
     (pane: PaneSession) => {
+      // CT-01: a container's shell keeps the container's name.
+      if (pane.fixedTitle) return pane.label;
       const snap = pane.getSnapshot();
       const session = snap.sessionId ? sessionById.get(snap.sessionId) : undefined;
       return paneTitle(session?.name ?? pane.label, snap.facts);

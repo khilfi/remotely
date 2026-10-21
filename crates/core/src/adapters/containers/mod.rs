@@ -241,8 +241,8 @@ pub struct ContainerDetails {
     pub command: Option<String>,
     pub entrypoint: Option<String>,
     pub working_dir: Option<String>,
-    pub user: Option<String>,
-    pub hostname: Option<String>,
+    /// The user its processes run as (`Config.User`), when set.
+    pub runs_as: Option<String>,
     pub env_names: Vec<String>,
     pub mounts: Vec<MountInfo>,
     pub networks: Vec<NetworkAttachment>,

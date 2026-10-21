@@ -37,7 +37,7 @@ const TERMINAL_HEADER: &str = "x-terminal-id";
 const BATCH_BYTES: usize = 64 * 1024;
 
 /// Forwards a pane's output and events to its channels until either side goes away.
-fn forward(
+pub(crate) fn forward(
     core: Arc<Core>,
     handle: TerminalHandle,
     on_output: Channel<InvokeResponseBody>,

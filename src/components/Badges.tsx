@@ -4,6 +4,8 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import type {
   CommandRisk,
+  ContainerState,
+  EngineKind,
   Environment,
   JobStatus,
   PowerState,
@@ -58,6 +60,38 @@ export function StateBadge({ state }: { state: PowerState }) {
     <Badge variant="outline" className={className}>
       {state === "running" && <span className="size-1.5 rounded-full bg-current" aria-hidden />}
       {label}
+    </Badge>
+  );
+}
+
+const CONTAINER_STATE: Record<ContainerState, { label: string; className: string }> = {
+  running: { label: "Running", className: "border-success/40 text-success" },
+  paused: { label: "Paused", className: "border-tier-medium/40 text-tier-medium" },
+  restarting: { label: "Restarting", className: "border-tier-medium/40 text-tier-medium" },
+  removing: { label: "Removing", className: "border-tier-medium/40 text-tier-medium" },
+  created: { label: "Created", className: "text-muted-foreground" },
+  exited: { label: "Stopped", className: "text-muted-foreground" },
+  dead: { label: "Dead", className: "border-destructive/40 text-destructive" },
+  unknown: { label: "Unknown", className: "text-muted-foreground" },
+};
+
+/** CT-01, CT-02: a container's state. */
+export function ContainerStateBadge({ state }: { state: ContainerState }) {
+  const { label, className } = CONTAINER_STATE[state];
+  return (
+    <Badge variant="outline" className={className}>
+      {state === "running" && <span className="size-1.5 rounded-full bg-current" aria-hidden />}
+      {label}
+    </Badge>
+  );
+}
+
+/** CT-01, CT-02: which engine, and whether its CLI runs under sudo. */
+export function EngineBadge({ engine, sudo = false }: { engine: EngineKind; sudo?: boolean }) {
+  return (
+    <Badge variant="secondary" className="gap-1 font-normal">
+      {engine === "docker" ? "Docker" : "Podman"}
+      {sudo && <span className="text-[0.65rem] text-muted-foreground uppercase">sudo</span>}
     </Badge>
   );
 }

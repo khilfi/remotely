@@ -299,6 +299,10 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     still: "Refreshing, reading the list and each VM's details and snapshots still work.",
   },
   dashboard: { blocked: "Changes to VMs and hosts", still: "Watching hosts and reading metrics still work." },
+  containers: {
+    blocked: "Starting, stopping and removing containers, pulling and pruning, and marking container hosts",
+    still: "Reading containers, logs, stats, images, volumes and networks, and opening a shell still work.",
+  },
   sessions: {
     blocked: "New sessions, edits, folders, imports, links to VMs and port forwards",
     still: "Connecting and exporting still work.",
