@@ -29,7 +29,13 @@ export function SnapshotTree({ tree, oldAfterDays, readOnly, busy, hints, onReve
   return (
     <ol aria-label={`Snapshots of ${tree.displayName}`} className="flex flex-col gap-0.5">
       {tree.snapshots.map((node) => {
-        const reason = snapshotActionReason({ node, readOnly, protected: tree.protected, busy });
+        const reason = snapshotActionReason({
+          node,
+          hypervisor: tree.hypervisor,
+          readOnly,
+          protected: tree.protected,
+          busy,
+        });
         const label = node.name || "(no name)";
         return (
           <li
@@ -77,7 +83,7 @@ export function SnapshotTree({ tree, oldAfterDays, readOnly, busy, hints, onReve
               {node.description && (
                 <div className="text-xs break-words whitespace-pre-line text-muted-foreground">{node.description}</div>
               )}
-              {unreachableByName(node) && (
+              {unreachableByName(node, tree.hypervisor) && (
                 <div className="text-xs text-muted-foreground">
                   vmrun reads &apos;/&apos; as a path, so manage this one in Workstation
                 </div>

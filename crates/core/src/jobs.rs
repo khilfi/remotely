@@ -7,6 +7,10 @@
 //! * Graceful power operations (soft stop, restart, suspend) go through VMware Tools, and vmrun waits
 //!   for Tools rather than failing when they are not running. So Tools are checked first, and a VM
 //!   without them fails at once with the reason (VM-02, VM-03).
+//! * VM-18 VirtualBox VMs: a soft stop presses the ACPI power button (the guest OS must handle it; no
+//!   Guest Additions needed) and waits for the VM to be off, up to the shutdown wait as above. A
+//!   graceful restart (`controlvm reboot`) needs the Guest Additions, so they are checked first, like
+//!   VMware Tools. Suspend saves the VM's state without the guest's help.
 //! * Countdown with cancel after approval (AP-03); cancel stops targets that have not started (BX-04)
 //!   and stops waiting for a power call in flight, e.g. on a VM that waits for an answer in
 //!   Workstation. vmrun is killed, but Workstation may still finish the action, so that target is
@@ -40,11 +44,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::adapters::exec_output::{CollectedOutput, MAX_OUTPUT_PER_STREAM};
+use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::remote::{
     AgentSource, AuthMethod, ConnectOptions, ExecRequest, HostKeyVerifier, RemoteAdapter, SessionSpec,
 };
 use crate::adapters::updater::UpdaterAdapter;
-use crate::adapters::vmware::{path_key, ToolsState, VmwareAdapter};
+use crate::adapters::vmware::{path_key, ToolsState};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -343,7 +348,8 @@ impl HostKeyVerifier for BulkVerifier {
 
 pub struct JobRunner {
     store: Store,
-    vmware: Arc<dyn VmwareAdapter>,
+    /// VM-18: VMware and VirtualBox, each VM reached by its key.
+    hypervisors: Hypervisors,
     remote: Arc<dyn RemoteAdapter>,
     updater: Arc<dyn UpdaterAdapter>,
     /// BX-02, BX-07: login and sudo secrets, read per host just before it connects.
@@ -366,7 +372,7 @@ impl JobRunner {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Store,
-        vmware: Arc<dyn VmwareAdapter>,
+        hypervisors: Hypervisors,
         remote: Arc<dyn RemoteAdapter>,
         updater: Arc<dyn UpdaterAdapter>,
         vault: Arc<dyn Vault>,
@@ -378,7 +384,7 @@ impl JobRunner {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
             store,
-            vmware,
+            hypervisors,
             remote,
             updater,
             vault,
@@ -609,7 +615,7 @@ impl JobRunner {
                 let started = Instant::now();
                 let mut safety_taken = None;
                 if let (Some(name), TargetRef::Vm { vmx_path }) = (&safety_name, &target.target) {
-                    if let Err(err) = this.take_safety_snapshot(Path::new(vmx_path), name).await {
+                    if let Err(err) = this.take_safety_snapshot(vmx_path, name).await {
                         return (target, Err(Some(err)), started.elapsed().as_millis() as u64, None, None);
                     }
                     safety_taken = Some(name.to_string());
@@ -657,8 +663,11 @@ impl JobRunner {
                     error_code: None,
                 },
                 Err(Some(CoreError::Cancelled)) | Err(None) => Finished::cancelled(None),
-                Err(Some(err @ (CoreError::CancelledInFlight | CoreError::CancelledRemote))) => {
-                    cancelled_in_flight.push(target.name.clone());
+                Err(Some(
+                    err
+                    @ (CoreError::CancelledInFlight | CoreError::VboxCancelledInFlight | CoreError::CancelledRemote),
+                )) => {
+                    cancelled_in_flight.push(target.clone());
                     Finished::cancelled(Some(&err))
                 }
                 Err(Some(err @ CoreError::StillRunning { .. })) => {
@@ -729,12 +738,23 @@ impl JobRunner {
             detail.push_str(&format!("; {note}"));
         }
         if !cancelled_in_flight.is_empty() {
+            let virtualbox = cancelled_in_flight.iter().any(|t| {
+                matches!(&t.target, TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::VirtualBox)
+            });
+            let vmware = cancelled_in_flight.iter().any(|t| {
+                matches!(&t.target, TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::Vmware)
+            });
             let what = if matches!(spec.command, Command::RemoteExec { .. } | Command::PushSshKey { .. }) {
                 "cancelled while the command was running, so the host may still finish it"
+            } else if virtualbox && vmware {
+                "cancelled while vmrun or VBoxManage was running, so Workstation or VirtualBox may still finish it"
+            } else if virtualbox {
+                "cancelled while VBoxManage was running, so VirtualBox may still finish it"
             } else {
                 "cancelled while vmrun was running, so Workstation may still finish it"
             };
-            detail.push_str(&format!("; {what}: {}", cancelled_in_flight.join(", ")));
+            let names: Vec<&str> = cancelled_in_flight.iter().map(|t| t.name.as_str()).collect();
+            detail.push_str(&format!("; {what}: {}", names.join(", ")));
         }
         if !still_running.is_empty() {
             let names: Vec<&str> = still_running.iter().map(|t: &Target| t.name.as_str()).collect();
@@ -770,15 +790,18 @@ impl JobRunner {
     ) -> Result<TargetOutcome> {
         match (&spec.command, &target.target) {
             (Command::VmPower { op, .. }, TargetRef::Vm { vmx_path }) => {
-                let vmx = Path::new(vmx_path);
                 if token.is_cancelled() {
                     return Err(CoreError::Cancelled);
                 }
-                // BX-04: cancel stops waiting. Dropping the call kills vmrun (kill_on_drop).
+                let in_flight = match Hypervisor::of_key(vmx_path) {
+                    Hypervisor::Vmware => CoreError::CancelledInFlight,
+                    Hypervisor::VirtualBox => CoreError::VboxCancelledInFlight,
+                };
+                // BX-04: cancel stops waiting. Dropping the call kills vmrun or VBoxManage (kill_on_drop).
                 tokio::select! {
                     biased;
-                    result = self.power(vmx, *op) => result?,
-                    _ = token.cancelled() => return Err(CoreError::CancelledInFlight),
+                    result = self.power(vmx_path, *op) => result?,
+                    _ = token.cancelled() => return Err(in_flight),
                 }
                 // The VM list shows the new state before the next refresh asks vmrun.
                 self.store
@@ -787,7 +810,7 @@ impl JobRunner {
                 Ok(TargetOutcome::done())
             }
             (Command::VmSnapshot { op, .. }, TargetRef::Vm { vmx_path }) => {
-                self.vmware.snapshot(Path::new(vmx_path), op).await?;
+                self.hypervisors.snapshot(vmx_path, op).await?;
                 Ok(TargetOutcome::done())
             }
             (Command::VmProtect { protected, .. }, TargetRef::Vm { vmx_path }) => {
@@ -1005,10 +1028,18 @@ impl JobRunner {
         self.vault.get(ctx, id).await
     }
 
-    /// VM-02, VM-03: one power operation on one VM. A graceful one that needs VMware Tools fails at
-    /// once when they are not running; it never falls back to the hard variant, which the policy
-    /// engine rates on its own (a hard stop or reset is Critical).
-    async fn power(&self, vmx: &Path, op: PowerOp) -> Result<()> {
+    /// VM-02, VM-03: one power operation on one VM, by its hypervisor.
+    async fn power(&self, key: &str, op: PowerOp) -> Result<()> {
+        match Hypervisor::of_key(key) {
+            Hypervisor::Vmware => self.vmware_power(Path::new(key), op).await,
+            Hypervisor::VirtualBox => self.virtualbox_power(key, op).await,
+        }
+    }
+
+    /// VM-02, VM-03 on Workstation. A graceful operation that needs VMware Tools fails at once when
+    /// they are not running; it never falls back to the hard variant, which the policy engine rates
+    /// on its own (a hard stop or reset is Critical).
+    async fn vmware_power(&self, vmx: &Path, op: PowerOp) -> Result<()> {
         let needs_tools = match op {
             PowerOp::Stop { mode: StopMode::Soft } => return self.soft_stop(vmx).await,
             PowerOp::Reset { mode: StopMode::Soft } => {
@@ -1026,7 +1057,61 @@ impl JobRunner {
                 });
             }
         }
-        self.vmware.power(vmx, op).await
+        self.hypervisors.vmware().power(vmx, op).await
+    }
+
+    /// VM-18: VM-02 and VM-03 on VirtualBox. A soft stop needs no Guest Additions (the ACPI power
+    /// button), so it is tried and waited for; a graceful restart needs them, so a guest without them
+    /// fails at once, as VMware's does. Nothing falls back to the hard variant.
+    async fn virtualbox_power(&self, uuid: &str, op: PowerOp) -> Result<()> {
+        let vbox = self.hypervisors.virtualbox();
+        match op {
+            PowerOp::Stop { mode: StopMode::Soft } => return self.virtualbox_soft_stop(uuid).await,
+            PowerOp::Reset { mode: StopMode::Soft } => {
+                let info = vbox.vm_info(uuid).await?;
+                if info.power_state().is_on() && info.tools_state() != Some(ToolsState::Running) {
+                    return Err(CoreError::ToolsNotRunning {
+                        tools: "Guest Additions are not running in the guest".to_owned(),
+                        action: "restart",
+                        advice: "Reset (hard) forces it; that needs its own approval.",
+                    });
+                }
+            }
+            _ => {}
+        }
+        vbox.power(uuid, op).await
+    }
+
+    /// VM-03 on VirtualBox: presses the ACPI power button and waits up to the shutdown wait. A VM
+    /// still running then (the guest ignored the button) is [`CoreError::StillRunning`] and left
+    /// running.
+    async fn virtualbox_soft_stop(&self, uuid: &str) -> Result<()> {
+        let vbox = self.hypervisors.virtualbox();
+        let wait = self.limits().shutdown_wait;
+        let op = PowerOp::Stop { mode: StopMode::Soft };
+        let failure = match tokio::time::timeout(wait, vbox.power(uuid, op)).await {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(err)) => err,
+            // The guest may still be shutting down; VBoxManage is stopped, the guest is not.
+            Err(_) => CoreError::Timeout {
+                command: "VBoxManage controlvm acpipowerbutton".into(),
+                seconds: wait.as_secs(),
+            },
+        };
+        match vbox.vm_info(uuid).await {
+            Ok(info) if info.power_state().is_on() => {
+                let reason = match failure {
+                    CoreError::Timeout { seconds, .. } => {
+                        format!("the guest did not shut down within {seconds} s (its OS may not handle the ACPI power button)")
+                    }
+                    other => format!("the soft stop failed ({other})"),
+                };
+                Err(CoreError::StillRunning { reason })
+            }
+            // It stopped after all, just as the wait ran out.
+            Ok(_) if matches!(failure, CoreError::Timeout { .. }) => Ok(()),
+            _ => Err(failure),
+        }
     }
 
     /// VM-02, VM-03: the VMware Tools state of a running VM whose Tools are not running, or `None`
@@ -1034,12 +1119,13 @@ impl JobRunner {
     /// instead of failing (on Workstation 26, `suspend soft` waited until the VM was powered off from
     /// outside). A VM that is not running has no Tools to wait for, so vmrun answers for it at once.
     async fn tools_missing(&self, vmx: &Path) -> Result<Option<ToolsState>> {
-        let state = match self.vmware.tools_state(vmx).await {
+        let vmware = self.hypervisors.vmware();
+        let state = match vmware.tools_state(vmx).await {
             Ok(ToolsState::Running) => return Ok(None),
             other => other,
         };
         let key = path_key(vmx);
-        if !self.vmware.list_running().await?.iter().any(|p| path_key(p) == key) {
+        if !vmware.list_running().await?.iter().any(|p| path_key(p) == key) {
             return Ok(None);
         }
         state.map(Some)
@@ -1057,7 +1143,7 @@ impl JobRunner {
         }
         let wait = self.limits().shutdown_wait;
         let op = PowerOp::Stop { mode: StopMode::Soft };
-        let failure = match tokio::time::timeout(wait, self.vmware.power(vmx, op)).await {
+        let failure = match tokio::time::timeout(wait, self.hypervisors.vmware().power(vmx, op)).await {
             Ok(Ok(())) => return Ok(()),
             Ok(Err(err)) => err,
             // The guest may still be shutting down; vmrun is stopped, the guest is not.
@@ -1067,7 +1153,7 @@ impl JobRunner {
             },
         };
         let key = path_key(vmx);
-        match self.vmware.list_running().await {
+        match self.hypervisors.vmware().list_running().await {
             Ok(running) if running.iter().any(|p| path_key(p) == key) => {
                 let reason = match failure {
                     CoreError::Timeout { seconds, .. } => {
@@ -1085,10 +1171,10 @@ impl JobRunner {
 
     /// VM-05: a named snapshot before the action, so it can be undone. When it fails the action does
     /// not run on that VM: no safety net, no change.
-    async fn take_safety_snapshot(&self, vmx: &Path, name: &str) -> Result<()> {
+    async fn take_safety_snapshot(&self, key: &str, name: &str) -> Result<()> {
         let op = SnapshotOp::Take { name: name.to_owned() };
-        self.vmware
-            .snapshot(vmx, &op)
+        self.hypervisors
+            .snapshot(key, &op)
             .await
             .map_err(|err| CoreError::SafetySnapshotFailed(err.to_string()))
     }

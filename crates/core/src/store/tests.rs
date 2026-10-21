@@ -163,6 +163,8 @@ fn found(path: &str, name: &str, state: PowerState) -> DiscoveredVm {
         power_state: state,
         tools_state: state.is_on().then(|| "running".to_owned()),
         ip_address: state.is_on().then(|| "192.0.2.20".to_owned()),
+        hypervisor: crate::adapters::hypervisor::Hypervisor::of_key(path),
+        config_path: None,
     }
 }
 
@@ -232,6 +234,85 @@ async fn a_paused_vm_stays_paused_while_vmrun_lists_it_as_running() {
     assert_eq!(vm.power_state, PowerState::NotRunning);
     assert_eq!(vm.ip_address, None, "an off VM has no IP");
     assert_eq!(vm.tools_state, None);
+}
+
+/// VM-18: a VirtualBox VM's key, `3f0c1a2b-...`.
+const VBOX_WEB: &str = "3f0c1a2b-1111-4222-8333-444455556666";
+
+#[tokio::test]
+async fn a_virtualbox_vm_reports_its_own_pause() {
+    use crate::adapters::hypervisor::Hypervisor;
+    let (store, ctx) = store_with_identity().await;
+    let mut web = found(VBOX_WEB, "web", PowerState::Running);
+    web.config_path = Some(r"C:\Users\alice\VirtualBox VMs\web\web.vbox".into());
+    store.record_inventory(&ctx, &[web.clone()]).await.unwrap();
+    let vm = store.find_vm(&ctx, &VBOX_WEB.to_uppercase()).await.unwrap().unwrap();
+    assert_eq!(vm.hypervisor, Hypervisor::VirtualBox);
+    assert_eq!(
+        vm.folder(),
+        Some(std::path::Path::new(r"C:\Users\alice\VirtualBox VMs\web"))
+    );
+
+    // Paused (VirtualBox says so): keeps the last IP and Guest Additions state.
+    let mut paused = found(VBOX_WEB, "web", PowerState::Paused);
+    paused.ip_address = None;
+    paused.tools_state = None;
+    store.record_inventory(&ctx, &[paused]).await.unwrap();
+    let vm = store.find_vm(&ctx, VBOX_WEB).await.unwrap().unwrap();
+    assert_eq!(vm.power_state, PowerState::Paused);
+    assert_eq!(vm.ip_address.as_deref(), Some("192.0.2.20"));
+
+    // Resumed outside the app: VirtualBox says running, so it is running (unlike vmrun, which can't
+    // see a pause).
+    store.record_inventory(&ctx, &[web]).await.unwrap();
+    let vm = store.find_vm(&ctx, VBOX_WEB).await.unwrap().unwrap();
+    assert_eq!(vm.power_state, PowerState::Running);
+}
+
+#[tokio::test]
+async fn a_refresh_that_could_not_ask_virtualbox_keeps_its_vms() {
+    use crate::adapters::hypervisor::Hypervisor;
+    let (store, ctx) = store_with_identity().await;
+    store
+        .record_inventory(
+            &ctx,
+            &[
+                found(r"C:\VMs\web\web.vmx", "web", PowerState::Running),
+                found(VBOX_WEB, "vbox-web", PowerState::Running),
+            ],
+        )
+        .await
+        .unwrap();
+    // Only Workstation was read: the VirtualBox VM stays listed as it was.
+    store
+        .record_inventory_for(&ctx, &[], &[Hypervisor::Vmware])
+        .await
+        .unwrap();
+    let names: Vec<String> = store
+        .list_vms(&ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|v| v.display_name)
+        .collect();
+    assert_eq!(names, ["vbox-web"]);
+    // Both read, neither found: both drop out.
+    store.record_inventory(&ctx, &[]).await.unwrap();
+    assert!(store.list_vms(&ctx).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn vms_found_before_virtualbox_support_are_vmware_vms() {
+    use crate::adapters::hypervisor::Hypervisor;
+    let (store, ctx) = store_with_identity().await;
+    store
+        .record_inventory(&ctx, &[found(r"C:\VMs\web\web.vmx", "web", PowerState::NotRunning)])
+        .await
+        .unwrap();
+    let vm = &store.list_vms(&ctx).await.unwrap()[0];
+    assert_eq!(vm.hypervisor, Hypervisor::Vmware);
+    assert_eq!(vm.config_path, None);
+    assert_eq!(vm.folder(), Some(std::path::Path::new(r"C:\VMs\web")));
 }
 
 #[tokio::test]
@@ -363,6 +444,8 @@ async fn auto_linking_never_overwrites_the_users_choice() {
         power_state: PowerState::Running,
         tools_state: None,
         ip_address: None,
+        hypervisor: Default::default(),
+        config_path: None,
     };
     store.record_inventory(&ctx, &[vm("web"), vm("db")]).await.unwrap();
     let id_of = |vms: &[VmRecord], name: &str| vms.iter().find(|v| v.display_name == name).unwrap().id.clone();

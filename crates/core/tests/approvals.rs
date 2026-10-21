@@ -37,6 +37,7 @@ async fn core_on(store: Store, vmware: Arc<FakeVmware>) -> Core {
     let ctx = store.ensure_identity(r"LAB\alice", "Alice").await.unwrap();
     let adapters = Adapters {
         vmware,
+        virtualbox: Arc::new(remotely_core::fakes::FakeVirtualBox::new()),
         remote: Arc::new(FakeRemote::default()),
         vault: Arc::new(FakeVault::with_password(VAULT_PASSWORD)),
         host_counters: Arc::new(FakeHostCounters::default()),

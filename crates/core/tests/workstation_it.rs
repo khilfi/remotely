@@ -11,6 +11,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::adapters::updater::DisabledUpdater;
 use remotely_core::adapters::vmware;
 use remotely_core::domain::PowerState;
@@ -30,6 +31,7 @@ async fn real_core() -> (Core, std::path::PathBuf) {
     let core = Core::init(CoreConfig {
         db_path: dir.join("it.db"),
         vmrun_path: None,
+        vboxmanage_path: None,
         account: r"IT\tester".into(),
         display_name: "IT".into(),
         updater: Arc::new(DisabledUpdater),
@@ -49,7 +51,9 @@ async fn the_vmsd_lists_the_same_snapshots_as_vmrun() {
     let report = core.inventory.refresh(&core.ctx).await.unwrap();
     let vmrun = vmware::connect(None);
     let mut snapshots = 0;
-    for vm in &report.vms {
+    // VM-18: VirtualBox VMs (when it is installed too) are not vmrun's.
+    let vmware_vms = report.vms.iter().filter(|vm| vm.hypervisor == Hypervisor::Vmware);
+    for vm in vmware_vms.clone() {
         let vmx = Path::new(&vm.vmx_path);
         let mut from_vmrun = vmrun.list_snapshots(vmx).await.unwrap();
         let mut from_vmsd: Vec<String> = vmrun
@@ -77,10 +81,11 @@ async fn the_vmsd_lists_the_same_snapshots_as_vmrun() {
         .await
         .unwrap()
         .iter()
+        .filter(|v| v.hypervisor == Hypervisor::Vmware)
         .map(|v| v.snapshots.len())
         .sum();
     assert_eq!(listed, snapshots);
-    eprintln!("snapshots: {snapshots} across {} VM(s)", report.vms.len());
+    eprintln!("snapshots: {snapshots} across {} VM(s)", vmware_vms.count());
 
     drop(core);
     let _ = std::fs::remove_dir_all(&dir);

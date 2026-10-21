@@ -46,7 +46,8 @@ pub struct LibraryVm {
     pub display_name: Option<String>,
 }
 
-/// VMware Tools state from `vmrun checkToolsState` (VM-01).
+/// The guest tools' state (VM-01): VMware Tools from `vmrun checkToolsState`, or VirtualBox's Guest
+/// Additions from their run level in `showvminfo` (VM-18).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ToolsState {
@@ -54,6 +55,9 @@ pub enum ToolsState {
     /// Installed but not running.
     Installed,
     NotInstalled,
+    /// VM-18: VirtualBox's Guest Additions report no run level: not started (yet), or not installed;
+    /// VirtualBox can't tell which. vmrun never reports this.
+    NotRunning,
     Unknown,
 }
 
@@ -63,6 +67,7 @@ impl ToolsState {
             ToolsState::Running => "running",
             ToolsState::Installed => "installed",
             ToolsState::NotInstalled => "notInstalled",
+            ToolsState::NotRunning => "notRunning",
             ToolsState::Unknown => "unknown",
         }
     }
@@ -82,6 +87,7 @@ impl ToolsState {
             ToolsState::Running => "VMware Tools is running in the guest",
             ToolsState::Installed => "VMware Tools is installed in the guest but not running",
             ToolsState::NotInstalled => "VMware Tools is not installed in the guest",
+            ToolsState::NotRunning => "VMware Tools is not running in the guest",
             ToolsState::Unknown => {
                 "Workstation can't tell whether VMware Tools is running in the guest (it may still be starting)"
             }
@@ -100,6 +106,9 @@ pub struct SnapshotInfo {
     pub description: Option<String>,
     /// When it was taken. vmrun cannot tell; the .vmsd can.
     pub created_at: Option<OffsetDateTime>,
+    /// VM-18: VirtualBox's own id for the snapshot (its UUID), which VBoxManage takes in place of a
+    /// name that two snapshots share. `None` for VMware.
+    pub id: Option<String>,
 }
 
 /// A VM's snapshots (VM-04).
@@ -619,6 +628,7 @@ pub fn parse_vmsd(text: &str) -> SnapshotTree {
                     .time_high
                     .zip(e.time_low)
                     .and_then(|(high, low)| snapshot_time(high, low)),
+                id: None,
             })
         })
         .collect();
