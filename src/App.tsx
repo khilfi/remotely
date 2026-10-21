@@ -1,5 +1,6 @@
 // App shell (shadcn/ui): sidebar navigation with the vault status (SS-04), top bar with the command
-// palette and the theme switch (FD-01), pages, the approval dialog and job toasts. Pages stay mounted
+// palette and the Dark mode switch (FD-01, QL-11: "Follow Windows" is in Settings), pages, the approval dialog and job
+// toasts. Pages stay mounted
 // while hidden so terminal connections survive a page switch. Bulk execution lives in the Terminal page (post-MVP P6):
 // MultiExec (SS-10) and Compare output (BX-03) replace the MVP's Bulk run page.
 //
@@ -57,7 +58,7 @@ import {
   SidebarTrigger,
 } from "@/components/ui/sidebar";
 import { Toaster } from "@/components/ui/sonner";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Switch } from "@/components/ui/switch";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
@@ -87,7 +88,7 @@ import {
   type UpdateCheck,
   type VaultInfo,
 } from "@/lib/api";
-import { useTheme, type ThemePreference } from "@/lib/theme";
+import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { DashboardPage } from "@/pages/DashboardPage";
@@ -120,12 +121,6 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 function inTerminal(target: EventTarget | null) {
   return target instanceof Element && target.closest(".xterm") !== null;
 }
-
-const THEMES: { value: ThemePreference; label: string; icon: LucideIcon }[] = [
-  { value: "system", label: "Follow Windows", icon: MonitorIcon },
-  { value: "light", label: "Light", icon: SunIcon },
-  { value: "dark", label: "Dark", icon: MoonIcon },
-];
 
 export default function App() {
   const [page, setPage] = useState<PageId>("vms");
@@ -169,7 +164,7 @@ export default function App() {
   const [dashboardFocus, setDashboardFocus] = useState<{ key: string; n: number } | null>(null);
   // Bumped when the palette refreshed the VM list.
   const [inventoryVersion, setInventoryVersion] = useState(0);
-  const { preference, setPreference, resolved } = useTheme();
+  const { resolved, followWindows, setDark, setFollowWindows } = useTheme();
   // FD-03: presenting, the read-only lock (QL-08: the update banner's Install says why it is off).
   const presentation = usePresentation();
   const readOnlyReason = useReadOnlyReason();
@@ -449,13 +444,20 @@ export default function App() {
           },
         }
       : { id: "unlock", label: "Unlock the vault", icon: LockOpenIcon, run: () => setPage("vault") },
-    ...THEMES.map((t) => ({
-      id: `theme-${t.value}`,
-      label: `Theme: ${t.label}`,
-      icon: t.icon,
-      keywords: "appearance dark light colour",
-      run: () => setPreference(t.value),
-    })),
+    {
+      id: "theme-dark",
+      label: resolved === "dark" ? "Turn dark mode off" : "Turn dark mode on",
+      icon: resolved === "dark" ? SunIcon : MoonIcon,
+      keywords: "theme appearance dark light colour",
+      run: () => setDark(resolved !== "dark"),
+    },
+    {
+      id: "theme-system",
+      label: followWindows ? "Stop following the Windows theme" : "Follow the Windows theme",
+      icon: MonitorIcon,
+      keywords: "theme appearance dark light colour system",
+      run: () => setFollowWindows(!followWindows),
+    },
     presentation.presenting
       ? {
           id: "stop-presenting",
@@ -607,20 +609,17 @@ export default function App() {
               <Kbd className="ml-auto">Ctrl K</Kbd>
             </Button>
             <PresentationButton />
-            <ToggleGroup
-              type="single"
-              variant="outline"
-              size="sm"
-              aria-label="Theme"
-              value={preference}
-              onValueChange={(value) => value && setPreference(value as ThemePreference)}
+            <label
+              className="flex items-center gap-2 text-sm whitespace-nowrap text-muted-foreground"
+              title={
+                followWindows
+                  ? "Follows Windows now. Switching picks a theme and stops following Windows (Settings, General)."
+                  : undefined
+              }
             >
-              {THEMES.map((t) => (
-                <ToggleGroupItem key={t.value} value={t.value} aria-label={t.label} title={t.label}>
-                  <t.icon />
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
+              Dark mode
+              <Switch checked={resolved === "dark"} onCheckedChange={setDark} />
+            </label>
           </header>
           <div className="min-h-0 flex-1 overflow-auto p-6">
             {READ_ONLY_PAGES[page] && <ReadOnlyNotice {...READ_ONLY_PAGES[page]} />}

@@ -840,6 +840,10 @@ impl FakeFiles {
 
 #[async_trait]
 impl RemoteFiles for FakeFiles {
+    fn user(&self) -> String {
+        locks::lock(&self.inner).user.clone()
+    }
+
     async fn home(&self) -> Result<String> {
         Ok(locks::lock(&self.inner).home.clone())
     }

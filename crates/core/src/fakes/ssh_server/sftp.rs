@@ -2,8 +2,9 @@
 //! folder made for each server (`/home/alice` is `<root>/home/alice`), deleted when the server is
 //! dropped. Writes into protected folders (`/etc`, `/root`, `/usr` and any a test adds) are refused
 //! with "permission denied", like folders the user may not write to; an exclusive create that finds a
-//! file answers "failure", as OpenSSH does. A delay per read or write makes transfers slow enough to
-//! cancel. The log says what was opened and removed, never what was in a file.
+//! file answers "failure", as OpenSSH does. Unreadable folders (QL-09) can't be opened at all, nor
+//! anything in them looked at, like another user's private folder. A delay per read or write makes
+//! transfers slow enough to cancel. The log says what was opened and removed, never what was in a file.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -71,6 +72,14 @@ impl SftpServer {
             || locks::lock(&self.state.sftp_protected)
                 .iter()
                 .any(|p| folder == *p || folder.starts_with(&format!("{p}/")))
+    }
+
+    /// QL-09: `path` is an unreadable folder or in one; `inside` only counts what is in one.
+    fn unreadable(&self, path: &str, inside: bool) -> bool {
+        let path = self.path(path);
+        locks::lock(&self.state.sftp_unreadable)
+            .iter()
+            .any(|u| (!inside && path == *u) || path.starts_with(&format!("{u}/")))
     }
 
     fn handle(&mut self, open: Open) -> String {
@@ -153,6 +162,9 @@ impl russh_sftp::server::Handler for SftpServer {
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        if self.unreadable(&path, true) {
+            return Err(StatusCode::PermissionDenied);
+        }
         let meta = std::fs::metadata(self.local(&path)).map_err(|e| io_status(&e))?;
         Ok(Attrs {
             id,
@@ -161,6 +173,9 @@ impl russh_sftp::server::Handler for SftpServer {
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        if self.unreadable(&path, true) {
+            return Err(StatusCode::PermissionDenied);
+        }
         let meta = std::fs::symlink_metadata(self.local(&path)).map_err(|e| io_status(&e))?;
         Ok(Attrs {
             id,
@@ -169,6 +184,10 @@ impl russh_sftp::server::Handler for SftpServer {
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
+        if self.unreadable(&path, false) {
+            self.state.note(format!("sftp refused {}", self.path(&path)));
+            return Err(StatusCode::PermissionDenied);
+        }
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(self.local(&path)).map_err(|e| io_status(&e))? {
             let entry = entry.map_err(|e| io_status(&e))?;
@@ -198,7 +217,7 @@ impl russh_sftp::server::Handler for SftpServer {
     ) -> Result<Handle, Self::Error> {
         let path = self.path(&filename);
         let writes = pflags.intersects(OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE | OpenFlags::APPEND);
-        if writes && self.protected(&path) {
+        if (writes && self.protected(&path)) || self.unreadable(&path, true) {
             self.state.note(format!("sftp refused {path}"));
             return Err(StatusCode::PermissionDenied);
         }

@@ -96,9 +96,14 @@ crates/core/          remotely-core: all app logic
                       a line buffer, Enter held and the line rated on the bus (Command::TerminalLine), password prompts
                       and full-screen programs passed straight through; folder.rs SS-08 the shell's folder (OSC 7) and
                       the invisible prompt hook typed into bash and zsh on connect (hidden from the terminal, logs,
-                      MultiExec and QL-07; the startup command waits for it); files.rs SS-08 the "Files here" listing,
-                      downloads (audited reads), the upload job's work (Command::FileUpload on the bus), the transfers
-                      list with cancel and retry, and FileTransfers (Core.files: staged files, uploads, retries);
+                      MultiExec and QL-07; the startup command waits for it), QL-09 its user report next to the folder
+                      (private OSC 7777, hidden the same way); shell_user.rs QL-09 who transfers run as (the SSH login,
+                      RemoteFiles::user) and who the shell may run as (the hook's report, a prompt that stopped
+                      reporting after su or sudo -i, a prompt naming a user); files.rs SS-08 the "Files here" listing
+                      (QL-09: a folder that can't be opened comes back with its path and the reason; typed paths go on
+                      from the folder shown; Back through the folders that opened), downloads (audited reads), the
+                      upload job's work (Command::FileUpload on the bus), the transfers list with cancel and retry, and
+                      FileTransfers (Core.files: staged files, uploads, retries);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
                       closed with the terminal, audited tunnel_opened and tunnel_closed
@@ -115,13 +120,16 @@ crates/core/          remotely-core: all app logic
                       authorized_keys push script (the push itself is Command::PushSshKey on the bus)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
                       format version), preview with conflicts (skip, replace, keep both), commit; audited
-    import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit
+    import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
+                      format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
+                      ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample)
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
-                      subsystem on a temp folder (SS-08); SS-07 direct-tcpip (with_route names reach another port on
-                      127.0.0.1, so a server is reachable only through another) and tcpip-forward
+                      subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
+                      direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
+                      through another) and tcpip-forward; QL-09 `su [-] [user]` in its shell, a shell without the hook
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains and tunnels by hand
@@ -176,8 +184,9 @@ src/                  React + TypeScript UI
   shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C and a
   full-screen `top`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
   them (`tests/multiexec.rs`). SS-08: it serves SFTP from a temp folder deleted with it (`with_sftp_file`,
-  `with_protected`, `without_sftp`), and with `with_login_shell("bash")` its shell answers the folder hook and knows
-  `cd` and `pwd`; `fakes::FakeFiles` is the in-memory version for the fake remote adapter (`tests/files.rs`). Uploads
+  `with_protected`, `with_unreadable`, `without_sftp`), and with `with_login_shell("bash")` its shell answers the folder
+  hook (OSC 7 and the QL-09 user report) and knows `cd`, `pwd` and `su [-] [user]` (a shell without the hook, as a
+  real switch); `fakes::FakeFiles` is the in-memory version for the fake remote adapter (`tests/files.rs`). Uploads
   and downloads in tests use files made at run time in the system temp folder, never in the repo. SS-07: it forwards
   like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
   resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on
@@ -192,7 +201,8 @@ src/                  React + TypeScript UI
   `cargo run -p remotely-core --example dev_ssh_server --features fakes [port] [count]` (default 2222 and 1 server;
   prints the user, one fresh password for all of them, which sudo takes too, and each host key fingerprint). Each also
   serves moving /proc counters, so watching it on the dashboard shows live guest metrics, and SFTP from a temp folder
-  (SS-08) with a bash login, so the "Files here" drawer follows `cd`. SS-07: the servers reach each other as
+  (SS-08) with a bash login, so the "Files here" drawer follows `cd` (QL-09: `cd /home/bob/.app`, a folder alice
+  can't open over SFTP, and `su bob` to switch user). SS-07: the servers reach each other as
   `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
   `web.test:80`, for trying chains and tunnels.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
@@ -207,7 +217,9 @@ src/                  React + TypeScript UI
 - Rust stable, edition 2021. Errors with `thiserror`. No `unwrap()`/`expect()` outside tests.
 - TypeScript in strict mode. ESLint and Prettier.
 - shadcn/ui: add components with `npx shadcn@latest add <name>`. They land in `src/components/ui/` and stay as generated (that folder and `src/hooks/use-mobile.ts` are excluded from ESLint and Prettier so updates diff cleanly). The shadcn base styles are inlined in `src/styles.css` (`shadcn eject`), so the `shadcn` package is not an app dependency; don't add it back. App colour tokens (risk tiers, environment labels) live at the end of `src/styles.css`. Import from `@/…` (alias for `src/`).
-- Dark mode is the `dark` class on `<html>`, set by `src/lib/theme.ts` ("system" follows Windows).
+- Dark mode is the `dark` class on `<html>`, set only by `src/lib/theme.ts`. QL-11: the top bar's Dark mode switch picks
+  dark or light; "Follow Windows" (Settings, General; the default, "system") lets Windows decide, and using the switch
+  turns it off.
 - App icon: the master is `src-tauri/app-icon.png` (1024×1024, transparent). After changing it, run `npx tauri icon src-tauri/app-icon.png`, delete the generated `src-tauri/icons/android` and `src-tauri/icons/ios` folders (desktop only), and copy `src-tauri/icons/128x128.png` to `src/assets/remotely-logo.png` and `src-tauri/icons/64x64.png` to `public/favicon.png`.
 - Every policy-engine rule has a unit test.
 - FD-03 presentation mode masks what is on screen at the DOM (`src/lib/presentation-dom.ts`), so new UI needs nothing
