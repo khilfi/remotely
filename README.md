@@ -28,7 +28,8 @@ Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault 
 encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item. The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
 the vault, copies their public keys, lets sessions log in with them and pushes a public key to many hosts'
-`authorized_keys` through the approval flow.
+`authorized_keys` through the approval flow. The Containers page (0.4.0) lists and controls Docker and Podman
+containers on the sessions you mark as container hosts, and Docker Desktop's on this PC (see [Containers](#containers)).
 
 ### Virtual machines and snapshots
 
@@ -192,6 +193,41 @@ on its jump host.
 
 Not done here: importing port forwards from PuTTY, MobaXterm or OpenSSH config files (the jump host link is imported),
 and a jump host in quick connect.
+
+### Containers
+
+CT-01 and CT-02 (0.4.0), Ctrl+3: Docker and Podman on SSH hosts, and Docker Desktop on this PC.
+
+- **Hosts**: mark a saved session as a container host with **Add a host…** (Docker, Podman or both), or press **Detect**
+  in that dialog: Remotely logs in, looks for `docker` and `podman`, and says whether docker works for the login user,
+  needs sudo with a password, or works with NOPASSWD sudo. For each engine choose how its CLI runs: as the login user
+  (the `docker` group, or rootless Podman), with sudo and the session's login password, a vault password, or none.
+  Marks are audited like session edits and move to another laptop with the export. Docker Desktop on this PC shows as
+  "This PC" when its `docker.exe` is found (the path in Settings, General, then `REMOTELY_DOCKER`, then Docker
+  Desktop's folder).
+- **Reads, never in the background**: a host is read when you open it, press Refresh or a job ends; the open host's
+  stats are read every 10 s while the page shows. Remotely runs the host's own CLI with JSON output over the session's
+  SSH connection (through its jump hosts, with the usual host key checks; saved logins only) and keeps that connection
+  for a few minutes for the next read. The list has name, image, state, ports, uptime, CPU and memory, with a filter
+  and state buttons; a click on a name opens its details beside the list: **Overview** (image, times, restart policy,
+  health, ports, networks, mounts, and environment variables by name only: their values often hold passwords, so they
+  are never read out), **Logs** (the last 100 to 5000 lines, follow, search, timestamps; stderr lines tinted) and
+  **Stats**. The Images, Volumes and Networks tabs list those, with what uses each image and volume.
+- **Changes go through the approval flow**: start and unpause are Low; stop, restart and pause are Medium for one
+  container and High for two or more; removing containers or images and pruning (stopped containers, unused images,
+  the build cache) are High; removing volumes or pruning them deletes data, so it is Critical (the vault password
+  again); pulling an image is Low. A Prod host raises each one tier, and a protected host (one that reaches a protected
+  VM) is skipped. The approval dialog lists each container with its state, image and uptime, what uses an image or
+  volume, and what a prune would remove. Jobs keep the CLI's output; the audit log names the host, engine and
+  container (name and id), never logs or output. Only containers, images and volumes the engine itself listed can be
+  acted on, and every id and name is checked and shell-quoted before it reaches the host.
+- **Open a shell**: on a running container of an SSH host, a terminal tab named after the container runs
+  `docker exec -it <id>` (or podman) with bash, or sh when the image has no bash, on the session's connection, with
+  sudo when the host's engine uses it (type the password, or use "Type vault password"). Leaving the container's shell
+  ends the tab. Audited like opening a terminal, naming the container.
+
+Not done here: a shell in Docker Desktop's containers (it needs a terminal on this PC, which Remotely doesn't have),
+compose stacks as a whole (the Compose project shows on each container), creating containers, and image builds.
 
 ### Presentation mode
 
@@ -410,6 +446,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Module            | Path                                                              | PRD requirements                                                                                                                    | State                                                                                                                                                                                                    |
 | ----------------- | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Command bus       | `crates/core/src/command_bus.rs`                                  | AP-01 (saves rules), AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, SS-07, SS-08, SS-10, FD-14                                    | Working: the only way to enqueue a job (MultiExec lines, uploads and tunnels too); checks snapshot names; audits rule changes                                                                            |
+| Containers        | `crates/core/src/containers/`, `adapters/containers/`             | CT-01, CT-02, AP-02, FD-07                                                                                                          | Working: marked hosts and Docker Desktop, reads on kept connections, both CLIs' JSON parsed, changes on the bus with tiers, impact preview, shells in containers                                         |
 | Policy engine     | `crates/core/src/policy/`                                         | AP-01, AP-04, SS-06 (Prod raises the tier), SS-07, SS-08, SS-10, BX-06, VM-05, VM-07 (warnings add a confirm)                       | Working; every tier rule has a unit test; a MultiExec line it could not follow, replacing a file or a tunnel other computers can use is at least a confirm                                               |
 | Impact preview    | `crates/core/src/impact.rs`                                       | AP-02                                                                                                                               | Working: state, uptime (from `vmware.log`) and snapshot count per VM; logged-in users and dependent VMs later                                                                                            |
 | Snapshot reads    | `crates/core/src/snapshots.rs`                                    | VM-04, VM-05                                                                                                                        | Working: tree order, 30-day flag, safety snapshot names                                                                                                                                                  |
