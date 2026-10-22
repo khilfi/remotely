@@ -1,7 +1,8 @@
 // Editable approval rules (AP-01): the tier of every action for one target and in bulk, the bulk
-// threshold, the Prod bump, the countdown, the safety snapshot default, dangerous-command patterns
-// (BX-06) and read-only commands. Saved through the command bus, which checks the rules (an invalid
-// one is refused with the reason) and writes what changed to the audit log.
+// thresholds (one for commands on hosts, BX-06, one for the rest), the Prod bump, the countdown, the
+// safety snapshot default, dangerous-command patterns (BX-06) and read-only commands. Saved through
+// the command bus, which checks the rules (an invalid one is refused with the reason) and writes what
+// changed to the audit log.
 
 import { useEffect, useState, type ReactNode } from "react";
 import { PlusIcon, RotateCcwIcon, XIcon } from "lucide-react";
@@ -27,14 +28,16 @@ import {
 
 const TIERS: Tier[] = ["low", "medium", "high", "critical"];
 
-const GROUPS: { title: string; kinds: ActionKind[] }[] = [
+// `exec`: the bulk tier applies from the threshold for commands on hosts (Compare and MultiExec, BX-06).
+const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean }[] = [
   {
     title: "VM power",
     kinds: ["vmStart", "vmUnpause", "vmPause", "vmSuspend", "vmResetSoft", "vmStopSoft", "vmResetHard", "vmStopHard"],
   },
   { title: "Snapshots", kinds: ["snapshotTake", "snapshotRevert", "snapshotDelete"] },
   { title: "Do not touch", kinds: ["vmProtect", "vmUnprotect"] },
-  { title: "Commands on hosts", kinds: ["execReadOnly", "execOther", "execDangerous", "sshKeyPush"] },
+  { title: "Commands on hosts", kinds: ["execReadOnly", "execOther", "execDangerous"], exec: true },
+  { title: "SSH keys", kinds: ["sshKeyPush"] },
   { title: "Files", kinds: ["fileUpload", "fileReplace"] },
   { title: "Tunnels", kinds: ["tunnelLocal", "tunnelRemote", "tunnelShared"] },
   {
@@ -169,37 +172,42 @@ export function PolicyRulesEditor() {
               <TableRow>
                 <TableHead>Action</TableHead>
                 <TableHead className="w-40">One target</TableHead>
-                <TableHead className="w-40">{draft.bulkThreshold} or more targets</TableHead>
+                <TableHead className="w-40">In bulk</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {GROUPS.map((group) => (
-                <GroupRows key={group.title} title={group.title}>
-                  {group.kinds.map((kind) => {
-                    const rule = draft.tiers[kind];
-                    const label = labels.get(kind) ?? kind;
-                    return (
-                      <TableRow key={kind}>
-                        <TableCell className="pl-6">{label}</TableCell>
-                        <TableCell>
-                          <TierSelect
-                            label={`${label}, one target`}
-                            value={rule.single}
-                            onChange={(t) => setTier(kind, "single", t)}
-                          />
-                        </TableCell>
-                        <TableCell>
-                          <TierSelect
-                            label={`${label}, ${draft.bulkThreshold} or more targets`}
-                            value={rule.bulk}
-                            onChange={(t) => setTier(kind, "bulk", t)}
-                          />
-                        </TableCell>
-                      </TableRow>
-                    );
-                  })}
-                </GroupRows>
-              ))}
+              {GROUPS.map((group) => {
+                const bulkFrom = group.exec
+                  ? `${draft.execBulkThreshold} or more hosts`
+                  : `${draft.bulkThreshold} or more targets`;
+                return (
+                  <GroupRows key={group.title} title={group.title} bulkFrom={bulkFrom}>
+                    {group.kinds.map((kind) => {
+                      const rule = draft.tiers[kind];
+                      const label = labels.get(kind) ?? kind;
+                      return (
+                        <TableRow key={kind}>
+                          <TableCell className="pl-6">{label}</TableCell>
+                          <TableCell>
+                            <TierSelect
+                              label={`${label}, one target`}
+                              value={rule.single}
+                              onChange={(t) => setTier(kind, "single", t)}
+                            />
+                          </TableCell>
+                          <TableCell>
+                            <TierSelect
+                              label={`${label}, ${bulkFrom}`}
+                              value={rule.bulk}
+                              onChange={(t) => setTier(kind, "bulk", t)}
+                            />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </GroupRows>
+                );
+              })}
             </TableBody>
           </Table>
         </div>
@@ -217,7 +225,22 @@ export function PolicyRulesEditor() {
                 value={draft.bulkThreshold}
                 onChange={(e) => update({ bulkThreshold: Number(e.currentTarget.value) })}
               />
-              <span className="text-sm text-muted-foreground">targets</span>
+              <span className="text-sm text-muted-foreground">targets (VMs, containers, files, tunnels, keys)</span>
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="exec-bulk-threshold">Bulk tier for commands on hosts applies from</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="exec-bulk-threshold"
+                type="number"
+                min={2}
+                max={catalog.maxBulkThreshold}
+                className="w-24"
+                value={draft.execBulkThreshold}
+                onChange={(e) => update({ execBulkThreshold: Number(e.currentTarget.value) })}
+              />
+              <span className="text-sm text-muted-foreground">hosts (Compare and MultiExec)</span>
             </div>
           </div>
           <div className="grid gap-2">
@@ -259,8 +282,10 @@ export function PolicyRulesEditor() {
           <div>
             <h3 className="text-sm font-medium">Dangerous commands</h3>
             <p className="text-sm text-muted-foreground">
-              A command that matches any of these regular expressions is High. A pattern that matches every command is
-              refused.
+              A command that matches any of these regular expressions is High. Each is tested against the command as
+              typed and against each of its commands as the shell reads them (quotes and backslashes removed, sudo and
+              env dropped, sh -c scripts read too). A pattern that matches every command is refused. New patterns in an
+              update reach saved rules only by adding them or by Reset to defaults.
             </p>
           </div>
           <div className="grid gap-2">
@@ -379,16 +404,17 @@ export function PolicyRulesEditor() {
   );
 }
 
-function GroupRows({ title, children }: { title: string; children: ReactNode }) {
+function GroupRows({ title, bulkFrom, children }: { title: string; bulkFrom: string; children: ReactNode }) {
   return (
     <>
       <TableRow className="hover:bg-transparent">
         <TableCell
-          colSpan={3}
+          colSpan={2}
           className="bg-muted/40 text-xs font-medium tracking-wide text-muted-foreground uppercase"
         >
           {title}
         </TableCell>
+        <TableCell className="bg-muted/40 text-xs text-muted-foreground">{bulkFrom}</TableCell>
       </TableRow>
       {children}
     </>

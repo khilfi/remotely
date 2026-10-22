@@ -388,7 +388,9 @@ async fn the_library_covers_every_group_with_described_entries() {
 /// exception list of checks that change something (or that Remotely cannot prove only read, like curl
 /// or an interactive tool) and so ask before a bulk run or MultiExec sends them.
 const EXPECTED_NON_READ_ONLY: &[&str] = &[
-    // Dangerous (a default dangerous-command rule matches).
+    // Dangerous (a default dangerous-command rule matches). From 0.4.1 also attach.partition (parted
+    // mklabel), docker.prune and podman.prune (prunes) and k8s.delete-pod (kubectl delete), listed below
+    // with the other entries of their groups; the `dangerous` list in the test pins them all.
     "system.reboot",
     // Changes, or not provably read-only (ExecOther).
     "disk.ncdu",
@@ -559,7 +561,8 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         "{read_only} of {} are read-only",
         library.len()
     );
-    // Exactly the entries a default dangerous-command rule matches are marked dangerous.
+    // Exactly the entries a default dangerous-command rule matches are marked dangerous. BX-06 (0.4.1)
+    // added the partition step, the Docker and Podman prunes and deleting a pod.
     let mut dangerous: Vec<(&str, Vec<String>)> = library
         .iter()
         .filter(|e| e.section == LibrarySection::Area && e.risk.action == ActionKind::ExecDangerous)
@@ -570,7 +573,11 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         dangerous,
         [
             ("system.reboot", vec!["shutdown / reboot".to_owned()]),
+            ("attach.partition", vec!["parted mklabel / mkpart / rm".to_owned()]),
             ("attach.format", vec!["mkfs".to_owned()]),
+            ("docker.prune", vec!["docker / podman prune".to_owned()]),
+            ("podman.prune", vec!["docker / podman prune".to_owned()]),
+            ("k8s.delete-pod", vec!["kubectl delete".to_owned()]),
         ]
     );
     // Spot checks on both sides of the line.
@@ -612,25 +619,30 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         assert_eq!(by_id(id).risk.action, ActionKind::ExecReadOnly, "{id}");
     }
 
-    // The marks follow the user's rules: a new rule flags prune, and without the reboot rule the
-    // reboot entry is merely "other".
+    // The marks follow the user's rules: a new rule flags restarts, and without the reboot and prune
+    // rules those entries are merely "other".
     let mut rules = core.bus.rules();
-    rules.dangerous_commands.retain(|p| p.name != "shutdown / reboot");
+    rules
+        .dangerous_commands
+        .retain(|p| p.name != "shutdown / reboot" && p.name != "docker / podman prune");
     rules.dangerous_commands.push(DangerousPattern {
-        name: "docker prune".into(),
-        pattern: r"docker\s+(?:system|image|volume)\s+prune".into(),
+        name: "service restart".into(),
+        pattern: r"systemctl\s+restart".into(),
     });
     core.bus.set_rules(&core.ctx, rules).await.unwrap();
     let library = core.snippets.library();
     let by_id = |id: &str| library.iter().find(|e| e.id == id).unwrap().clone();
-    assert_eq!(by_id("docker.prune").risk.action, ActionKind::ExecDangerous);
-    assert_eq!(by_id("docker.prune").risk.dangerous, ["docker prune"]);
+    assert_eq!(by_id("services.restart").risk.action, ActionKind::ExecDangerous);
+    assert_eq!(by_id("services.restart").risk.dangerous, ["service restart"]);
     assert_eq!(by_id("system.reboot").risk.action, ActionKind::ExecOther);
     assert!(by_id("system.reboot").risk.dangerous.is_empty());
+    assert_eq!(by_id("docker.prune").risk.action, ActionKind::ExecOther);
 
     // Favourites too.
-    let fav = add(&core, None, "Prune", "docker image prune -a").await;
+    let fav = add(&core, None, "Restart", "sudo systemctl restart nginx").await;
     assert_eq!(fav.risk.action, ActionKind::ExecDangerous);
+    let fav = add(&core, None, "Prune", "docker image prune -a").await;
+    assert_eq!(fav.risk.action, ActionKind::ExecOther);
 }
 
 #[tokio::test]
