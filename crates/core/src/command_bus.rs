@@ -928,8 +928,8 @@ impl CommandBus {
 
     async fn audit_expired(&self, p: &Pending, ttl: Duration) {
         let detail = format!(
-            "not answered within {} minutes; nothing ran",
-            ttl.as_secs().div_ceil(60)
+            "not answered within {}; nothing ran",
+            crate::error::in_minutes(ttl.as_secs().div_ceil(60))
         );
         let written = self
             .store

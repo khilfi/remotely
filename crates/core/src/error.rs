@@ -91,7 +91,8 @@ pub enum CoreError {
     /// AP-01: the approval waited longer than [`crate::command_bus::APPROVAL_TTL`], so what it showed may be
     /// out of date. Nothing ran; start the action again.
     #[error(
-        "this approval waited more than {minutes} minutes, so it expired and nothing ran. Start the action again to see what it would do now"
+        "this approval waited more than {}, so it expired and nothing ran. Start the action again to see what it would do now",
+        in_minutes(*.minutes)
     )]
     ApprovalExpired { minutes: u64 },
 
@@ -367,6 +368,15 @@ impl CoreError {
             CoreError::NotImplemented(_) => "not_implemented",
             CoreError::Container { problem, .. } => problem.code(),
         }
+    }
+}
+
+/// AP-01: `1 minute`, `15 minutes`.
+pub(crate) fn in_minutes(n: u64) -> String {
+    if n == 1 {
+        "1 minute".to_owned()
+    } else {
+        format!("{n} minutes")
     }
 }
 

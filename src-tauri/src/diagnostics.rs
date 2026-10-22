@@ -374,9 +374,18 @@ fn open_folder(_dir: &Path) -> Result<(), IpcError> {
 /// log says what broke; nothing else happens here.
 #[tauri::command]
 pub fn ui_error(page: String, message: String, stack: Option<String>) {
-    let page = clean_text(&page.chars().take(64).collect::<String>());
-    let stack = stack.map(|s| clean_text(&s)).unwrap_or_default();
-    tracing::error!(%page, stack = %stack, "the UI crashed: {}", clean_text(&message));
+    let page = clean_text(&one_line(&page.chars().take(64).collect::<String>()));
+    let stack = stack.map(|s| clean_text(&one_line(&s))).unwrap_or_default();
+    tracing::error!(%page, stack = %stack, "the UI crashed: {}", clean_text(&one_line(&message)));
+}
+
+/// A component stack (or any text) on one log line: its lines trimmed and joined with ` < `, the innermost first.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" < ")
 }
 
 #[cfg(test)]
@@ -433,6 +442,18 @@ mod tests {
         assert!(
             !left.contains(&"crash-20261001-000000.txt".to_owned()),
             "the oldest went: {left:?}"
+        );
+    }
+
+    #[test]
+    fn a_component_stack_goes_on_one_line() {
+        let stack = "
+    at KnownHostsPage (http://localhost:1420/src/pages/KnownHostsPage.tsx:23:34)
+    at ErrorBoundary (x.tsx:19:8)
+";
+        assert_eq!(
+            one_line(stack),
+            "at KnownHostsPage (http://localhost:1420/src/pages/KnownHostsPage.tsx:23:34) < at ErrorBoundary (x.tsx:19:8)"
         );
     }
 
