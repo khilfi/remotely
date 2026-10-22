@@ -441,9 +441,8 @@ it, add its ID to `ignore` in `deny.toml` with the reason, as the existing entri
 ### Release settings on GitHub
 
 Set these once, in this order, as the repository owner. They keep the update-signing key away from every job but the
-publish job, and away from any workflow pushed to a branch. They need the repository to be public, or a paid plan: on
-GitHub Free a private repository has no Environments or rulesets, and required reviewers on a private repository need
-GitHub Enterprise.
+publish job, and away from any workflow pushed to a branch. They rely on the repository being public: on GitHub Free a
+private repository has no Environments, required reviewers or rulesets.
 
 1. **Create the Environment.** **Settings → Environments → New environment**, name it `release`, then **Configure
    environment**:
@@ -529,15 +528,14 @@ The repository is public, so GitHub Actions runs on standard GitHub-hosted runne
 Runs still take time, so keep them lean. If the repository ever goes private again, they bill against the monthly
 allowance (2,000 minutes on GitHub Free), Windows jobs count double and each job is rounded up to whole minutes:
 
-| Workflow      | Runs on                                           | Runner time per run                                 | Billed if private |
-| ------------- | ------------------------------------------------- | --------------------------------------------------- | ----------------- |
-| `ci.yml`      | every pull request push and every merge to `main` | about 7 to 9 minutes (the Windows Rust job)         | about 14 to 19    |
-| `secrets.yml` | every push to any branch, every pull request push | about 1 minute (Linux)                              | about 1           |
-| `release.yml` | every `v*` tag                                    | about 16 minutes (an uncached Windows build, Linux) | about 30 to 35    |
+| Workflow      | Runs on                                           | Runner time per run                         | Billed if private |
+| ------------- | ------------------------------------------------- | ------------------------------------------- | ----------------- |
+| `ci.yml`      | every pull request push and every merge to `main` | about 6 to 8 minutes (the Windows Rust job) | about 12 to 16    |
+| `secrets.yml` | every pull request push and every merge to `main` | about 1 minute (Linux)                      | about 1           |
+| `release.yml` | every `v*` tag                                    | about 14 minutes (Windows)                  | about 28          |
 
-Dependabot's weekly pull requests (up to three, one per ecosystem) each run `ci.yml`. To keep runs quick:
-documentation-only changes skip `ci.yml`; a new push to a branch cancels the run it supersedes, so push when a change is
-ready rather than after every small commit; and group documentation edits.
+To keep runs quick: documentation-only changes skip `ci.yml`; a new push to a branch cancels the run it supersedes, so
+push when a change is ready rather than after every small commit; and group documentation edits.
 
 ### Update signing
 
