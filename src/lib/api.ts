@@ -892,7 +892,9 @@ export type TerminalEvent =
   /** QL-07: a command that ran at least the threshold ended (its prompt came back, or its output stopped). */
   | { event: "commandFinished"; afterSecs: number; how: FinishedHow }
   /** SS-08: the shell's folder, or how far it is known (each connection starts over). */
-  | { event: "folder"; folder: FolderInfo };
+  | { event: "folder"; folder: FolderInfo }
+  /** SS-11: the session log could not be written (a full disk, say), so it stopped. */
+  | { event: "logStopped"; path: string; reason: string };
 
 // ---- SS-07 port forwards and tunnels ----
 

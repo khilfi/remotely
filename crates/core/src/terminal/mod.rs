@@ -478,6 +478,11 @@ pub enum TerminalEvent {
     Tunnels {
         tunnels: Vec<TunnelInfo>,
     },
+    /// SS-11: the session log could not be written (a full disk, a removed drive), so it stopped. Audited.
+    LogStopped {
+        path: String,
+        reason: String,
+    },
 }
 
 /// SS-10: what a pane's screen shows now, as far as its output tells.
@@ -1332,7 +1337,8 @@ impl Terminals {
             log::clock(now),
             log::offset_label(now)
         );
-        let session_log = log::start(path, heading, control.known_secrets()).await?;
+        let on_failure = log_failed(self.inner.store.clone(), *ctx, Arc::downgrade(&control));
+        let session_log = log::start(path, heading, control.known_secrets(), on_failure).await?;
         *locks::lock(&control.log) = Some(session_log);
         audit(
             &self.inner.store,
@@ -1562,17 +1568,58 @@ async fn stop_log(store: &Store, ctx: &Context, control: &Control) -> Result<boo
     let Some(session_log) = locks::lock(&control.log).take() else {
         return Ok(false);
     };
-    let _ = session_log.sender.send(LogMessage::Stop).await;
+    let path = session_log.path.display().to_string();
+    // Waits for the last lines to reach the disk (the app may be about to exit).
+    session_log.stop().await;
     audit(
         store,
         ctx,
         "terminal_log_stopped",
         &format!("Stopped logging the terminal to {}", quoted_name(control)),
         control.targets(),
-        &session_log.path.display().to_string(),
+        &path,
     )
     .await?;
     Ok(true)
+}
+
+/// SS-11: what a terminal does when its log can't be written: the log is dropped (so it can be started
+/// again), the audit log says why, and the pane shows it. A pane that has closed since needs nothing.
+fn log_failed(store: Store, ctx: Context, control: std::sync::Weak<Control>) -> log::OnFailure {
+    Box::new(move |log_id, reason| {
+        Box::pin(async move {
+            let Some(control) = control.upgrade() else {
+                return;
+            };
+            let ended = {
+                let mut log = locks::lock(&control.log);
+                match log.as_ref() {
+                    Some(running) if running.id == log_id => log.take(),
+                    // Stopped (and audited) meanwhile, or another log started.
+                    _ => None,
+                }
+            };
+            let Some(ended) = ended else {
+                return;
+            };
+            let path = ended.path.display().to_string();
+            drop(ended);
+            let detail = format!("{path}: stopped because it could not be written ({reason})");
+            if let Err(err) = audit(
+                &store,
+                &ctx,
+                "terminal_log_stopped",
+                &format!("The log of the terminal to {} stopped", quoted_name(&control)),
+                control.targets(),
+                &detail,
+            )
+            .await
+            {
+                tracing::error!(error = %err, "could not audit a session log stopping");
+            }
+            let _ = control.events.send(TerminalEvent::LogStopped { path, reason }).await;
+        })
+    })
 }
 
 /// For the audit log: how the session logs in, never a secret.

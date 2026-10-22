@@ -100,6 +100,8 @@ export interface PaneSnapshot {
   sessionId: string | null;
   /** SS-11: the file this pane logs to. */
   logPath: string | null;
+  /** SS-11: why the session log stopped by itself (it could not be written), until dismissed. */
+  logError: string | null;
   /** QL-05: the search bar is open. */
   searching: boolean;
   /** QL-05: the last search's matches; index -1 when there are too many to number. */
@@ -229,6 +231,7 @@ export class PaneSession {
       facts: null,
       sessionId: opener.kind === "session" || opener.kind === "container" ? opener.sessionId : null,
       logPath: null,
+      logError: null,
       searching: false,
       searchResults: null,
       folder: null,
@@ -494,6 +497,12 @@ export class PaneSession {
         break;
       case "folder":
         this.update({ folder: event.folder });
+        break;
+      case "logStopped":
+        this.update({
+          logPath: null,
+          logError: `The session log stopped: it could not be written to ${event.path} (${event.reason}).`,
+        });
         break;
     }
   };
@@ -797,7 +806,7 @@ export class PaneSession {
   async startLog(title: string) {
     if (!this.coreId) throw new Error("This terminal has not connected yet.");
     const path = await api.terminalLogStart(this.coreId, title);
-    if (path) this.update({ logPath: path });
+    if (path) this.update({ logPath: path, logError: null });
     return path;
   }
 
@@ -805,6 +814,11 @@ export class PaneSession {
     if (!this.coreId) return;
     await api.terminalLogStop(this.coreId);
     this.update({ logPath: null });
+  }
+
+  /** SS-11: the notice that the log stopped by itself goes. */
+  dismissLogError() {
+    this.update({ logError: null });
   }
 
   // ---- view ----
