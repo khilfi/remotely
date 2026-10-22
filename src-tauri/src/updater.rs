@@ -26,12 +26,22 @@ use remotely_core::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, Up
 use remotely_core::locks;
 use remotely_core::vault::SecretString;
 use remotely_core::{CoreError, Result};
-use tauri::{AppHandle, Runtime, Wry};
+use tauri::{AppHandle, Manager, Runtime, Wry};
 use tauri_plugin_updater::{Update, UpdaterExt};
 use url::Url;
 
 /// How long the installer waits after the job finishes, so its result and audit entry are written.
 const INSTALL_DELAY: Duration = Duration::from_secs(2);
+
+/// QL-15: the longest a check (latest.json) may take, from connecting to its last byte.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(60);
+/// QL-15: the longest the installer's download may take in all. A slow link that keeps moving gets this long;
+/// one that stalls fails after [`STALL_TIMEOUT`].
+pub const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// QL-15: no byte for this long ends a check or a download.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(60);
+/// QL-15: reaching GitHub at all.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The name tauri-action gives the update manifest in each release.
 const MANIFEST: &str = "latest.json";
@@ -82,12 +92,19 @@ impl<R: Runtime> TauriUpdater<R> {
                 release.tag_name
             ))
         })?;
+        let app = self.app.clone();
         let updater = self
             .app
             .updater_builder()
             .endpoints(vec![manifest.url.clone()])
             .map_err(|err| update_error(err, token))?
             .headers(self.github.download_headers(token)?)
+            // QL-15: neither a check nor a download can hang; the download gets its own total below.
+            .timeout(CHECK_TIMEOUT)
+            .configure_client(|client| client.connect_timeout(CONNECT_TIMEOUT).read_timeout(STALL_TIMEOUT))
+            // QL-15: the installer ends the app with `process::exit`, which skips the normal exit, so terminals
+            // close here first, each audited, and their session logs are written out.
+            .on_before_exit(move || before_installer_exits(&app))
             .build()
             .map_err(|err| update_error(err, token))?;
         let Some(mut update) = updater.check().await.map_err(|err| update_error(err, token))? else {
@@ -111,6 +128,7 @@ impl<R: Runtime> TauriUpdater<R> {
                 .ok_or_else(|| CoreError::Update(format!("version {version} is no longer offered")))?,
         };
         update.headers = self.github.download_headers(token)?;
+        update.timeout = Some(DOWNLOAD_TIMEOUT);
         // Downloads and verifies the signature; a tampered or unsigned package fails here.
         let bytes = update
             .download(|_, _| {}, || {})
@@ -143,10 +161,13 @@ impl<R: Runtime> UpdaterAdapter for TauriUpdater<R> {
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(INSTALL_DELAY).await;
-            // On Windows this launches the installer and exits the app.
-            match update.install(bytes) {
-                Ok(()) => app.restart(),
-                Err(err) => tracing::error!(error = %err, "update install failed"),
+            // On Windows this launches the installer and exits the app (after `before_installer_exits`). On a
+            // blocking thread, so that hook can wait for the core to shut down.
+            let installed = tauri::async_runtime::spawn_blocking(move || update.install(bytes)).await;
+            match installed {
+                Ok(Ok(())) => app.restart(),
+                Ok(Err(err)) => tracing::error!(error = %err, "update install failed"),
+                Err(err) => tracing::error!(error = %err, "update install stopped"),
             }
         });
         Ok(())
@@ -160,6 +181,15 @@ impl<R: Runtime> UpdaterAdapter for TauriUpdater<R> {
             expires_on: lookup.token_expires_on,
         })
     }
+}
+
+/// FD-14, QL-15: runs on the install's blocking thread, right before the installer starts and the app exits.
+fn before_installer_exits<R: Runtime>(app: &AppHandle<R>) {
+    tracing::info!("closing terminals before the update's installer starts");
+    if let Some(state) = app.try_state::<crate::AppState>() {
+        tauri::async_runtime::block_on(state.core.shutdown());
+    }
+    tracing::info!("Remotely stopped for the update");
 }
 
 /// From `plugins.updater.endpoints` in tauri.conf.json:

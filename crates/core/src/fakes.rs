@@ -1733,6 +1733,8 @@ pub struct FakeUpdater {
     revoked: AtomicBool,
     installed: Mutex<Vec<String>>,
     calls: AtomicUsize,
+    /// QL-15: the download never ends (a connection that stalls).
+    stalls: bool,
 }
 
 impl FakeUpdater {
@@ -1752,6 +1754,12 @@ impl FakeUpdater {
     pub fn accepting(mut self, token: &str, expires_on: Option<&str>) -> Self {
         self.token = Some(token.to_owned());
         self.expires_on = expires_on.map(str::to_owned);
+        self
+    }
+
+    /// QL-15: installing never gets past the download, like a connection that stalls.
+    pub fn stalling(mut self) -> Self {
+        self.stalls = true;
         self
     }
 
@@ -1792,6 +1800,9 @@ impl UpdaterAdapter for FakeUpdater {
 
     async fn install(&self, token: &SecretString, version: &str) -> Result<()> {
         self.authorize(token)?;
+        if self.stalls {
+            std::future::pending::<()>().await;
+        }
         locks::lock(&self.installed).push(version.to_owned());
         Ok(())
     }

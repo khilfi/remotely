@@ -350,6 +350,35 @@ async fn a_wrong_token_is_refused() {
     assert_eq!(err.code(), "update_token_refused");
 }
 
+/// QL-15: a download that stalls no longer holds the update job forever: cancelling it ends the job, and
+/// nothing is installed.
+#[tokio::test]
+async fn cancelling_a_stalled_update_ends_the_job_and_installs_nothing() {
+    let token = new_token();
+    let updater = Arc::new(
+        FakeUpdater::offering("0.2.1", "0.3.0")
+            .accepting(&token, None)
+            .stalling(),
+    );
+    let core = core_with(Arc::clone(&updater)).await;
+    core.set_update_token(secret(&token)).await.unwrap();
+    let mut events = core.jobs.subscribe();
+    let job = install(&core, "0.3.0").await;
+    // The download has started (the fake was reached) and hangs.
+    for _ in 0..100 {
+        if updater.calls() > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(updater.calls() > 0, "the install started");
+    assert!(core.jobs.cancel(job));
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Cancelled);
+    assert!(updater.installed().is_empty());
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    assert_eq!(targets[0].status, "cancelled");
+}
+
 #[tokio::test]
 async fn an_expired_token_says_when_it_expired() {
     let token = new_token();

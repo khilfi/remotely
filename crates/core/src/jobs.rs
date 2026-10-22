@@ -924,7 +924,13 @@ impl JobRunner {
                 let github_token = crate::updates::stored_token(&self.store, self.vault.as_ref(), &spec.ctx)
                     .await?
                     .require()?;
-                self.updater.install(&github_token, version).await?;
+                // Cancel stops the download (dropping it ends the request). The installer only starts after the
+                // job has ended, so nothing is half installed.
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(CoreError::Cancelled),
+                    installed = self.updater.install(&github_token, version) => installed?,
+                }
                 Ok(TargetOutcome::done())
             }
             (Command::TerminalLine { keys, .. }, TargetRef::Terminal { terminal_id, .. }) => {
