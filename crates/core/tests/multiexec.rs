@@ -934,18 +934,21 @@ async fn a_slow_terminal_fills_in_when_its_prompt_comes_back() {
             .expect(&format!("web{:02}.example.com\r\n$ ", i + 1))
             .await;
     }
-    // Two are done, the slow one still runs.
+    // Two are done, the slow one still runs. The job presses Enter in each terminal on its own, so the
+    // fast two can finish before the slow one's Enter has even reached it (Waiting, "pending"): wait
+    // for that Enter too. Its host then holds the answer for 1.5 s; had the test missed that, the
+    // assertions below would say so.
     let results = timeout(WAIT, async {
         loop {
             let r = fleet.core.multiexec.recorded(line, GroupOptions::default()).unwrap();
-            if r.line.finished == 2 {
+            if r.line.finished >= 2 && r.counts.pending == 0 {
                 return r;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("two terminals finished");
+    .expect("two terminals finished and the slow one got its Enter");
     assert_eq!((results.counts.succeeded, results.counts.running), (2, 1));
     assert_eq!(results.terminals[2].state, CaptureState::Running);
     assert_eq!(results.hosts[2].status, "running");
@@ -1375,8 +1378,22 @@ async fn a_hooked_shell_records_without_its_reports_and_still_notices_a_switched
     for i in 0..2 {
         until_folder(&fleet, i, "reporting again", |f| !f.user.stopped).await;
     }
-    let everything = format!("{:?}", fleet.core.multiexec.recorded_runs(None).unwrap());
-    for leak in ["7777", "remotely-", "file://", "\u{1b}"] {
-        assert!(!everything.contains(leak), "{leak:?} in {everything}");
+    // What was recorded (each line, and each terminal's output) holds no hook report: not its marker
+    // in any form (the escape sequence, the text of one, the hook's own printf), no folder report and
+    // no escape. Only those texts: the runs' timestamps and ids can read "7777" by chance.
+    let runs = fleet.core.multiexec.recorded_runs(None).unwrap();
+    assert_eq!(runs.len(), 3);
+    let recorded: Vec<&str> = runs
+        .iter()
+        .flat_map(|run| {
+            let outputs = run.targets.iter().flat_map(|t| [&t.output, &t.stderr, &t.error]);
+            std::iter::once(run.line.as_str()).chain(outputs.filter_map(|text| text.as_deref()))
+        })
+        .collect();
+    for leak in ["7777;", "remotely-", "file://", "\u{1b}"] {
+        assert!(
+            !recorded.iter().any(|text| text.contains(leak)),
+            "{leak:?} in {recorded:?}"
+        );
     }
 }
