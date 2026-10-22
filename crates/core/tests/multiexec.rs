@@ -1378,8 +1378,22 @@ async fn a_hooked_shell_records_without_its_reports_and_still_notices_a_switched
     for i in 0..2 {
         until_folder(&fleet, i, "reporting again", |f| !f.user.stopped).await;
     }
-    let everything = format!("{:?}", fleet.core.multiexec.recorded_runs(None).unwrap());
-    for leak in ["7777", "remotely-", "file://", "\u{1b}"] {
-        assert!(!everything.contains(leak), "{leak:?} in {everything}");
+    // What was recorded (each line, and each terminal's output) holds no hook report: not its marker
+    // in any form (the escape sequence, the text of one, the hook's own printf), no folder report and
+    // no escape. Only those texts: the runs' timestamps and ids can read "7777" by chance.
+    let runs = fleet.core.multiexec.recorded_runs(None).unwrap();
+    assert_eq!(runs.len(), 3);
+    let recorded: Vec<&str> = runs
+        .iter()
+        .flat_map(|run| {
+            let outputs = run.targets.iter().flat_map(|t| [&t.output, &t.stderr, &t.error]);
+            std::iter::once(run.line.as_str()).chain(outputs.filter_map(|text| text.as_deref()))
+        })
+        .collect();
+    for leak in ["7777;", "remotely-", "file://", "\u{1b}"] {
+        assert!(
+            !recorded.iter().any(|text| text.contains(leak)),
+            "{leak:?} in {recorded:?}"
+        );
     }
 }
