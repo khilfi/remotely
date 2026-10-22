@@ -6,6 +6,7 @@ mod clipboard;
 mod command_panel;
 mod containers;
 mod files;
+mod host_details;
 mod ipc;
 mod multiexec;
 mod terminal;
@@ -278,6 +279,13 @@ pub fn run() {
             ipc::metrics_host_usage,
             ipc::metrics_capacity,
             ipc::metrics_watch,
+            host_details::metrics_this_pc,
+            host_details::host_specs,
+            host_details::host_specs_refresh,
+            host_details::host_admin,
+            host_details::host_updates,
+            host_details::host_details_release,
+            host_details::vm_specs,
             terminal::terminal_open,
             terminal::terminal_quick_connect,
             terminal::terminal_open_like,

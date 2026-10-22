@@ -1,6 +1,6 @@
 // MO-04: the host capacity panel. RAM and vCPUs assigned to the running VMs against what this machine
 // has, its CPU right now, and free space on each drive that holds a VM folder (the VM-07 check's
-// reads, shown before anything is started).
+// reads, shown before anything is started). MO-15: the paging files and the commit charge under RAM.
 
 import { CpuIcon, HardDriveIcon, MemoryStickIcon } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -51,6 +51,22 @@ export function CapacityPanel({ capacity }: { capacity: HostCapacity | null }) {
             {inUse !== null && <> · Windows has {gb(inUse)} in use</>}
             {capacity.unsizedVms > 0 && <> · {capacity.unsizedVms} of unknown size left out</>}
           </p>
+          {capacity.paging && (
+            <p
+              className="text-xs text-muted-foreground"
+              title="Committed: memory Windows has promised to programs, out of RAM plus the paging files"
+            >
+              {capacity.paging.totalBytes > 0 ? (
+                <>
+                  Paging file {formatBytes(capacity.paging.usedBytes)} used of {formatBytes(capacity.paging.totalBytes)}
+                </>
+              ) : (
+                <>No paging file</>
+              )}{" "}
+              · committed {formatBytes(capacity.paging.commitUsedBytes)} of{" "}
+              {formatBytes(capacity.paging.commitLimitBytes)}
+            </p>
+          )}
         </CardContent>
       </Card>
 

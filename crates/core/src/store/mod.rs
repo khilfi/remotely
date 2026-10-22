@@ -7,6 +7,7 @@ mod audit;
 mod containers;
 mod favourites;
 mod forwards;
+mod host_specs;
 mod inventory;
 mod jobs;
 mod known_hosts;
@@ -35,6 +36,7 @@ use crate::presentation::ReadOnlyLock;
 
 pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
 pub(crate) use favourites::{FavouriteFields, FavouriteRow};
+pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, JobTargetRecord, TargetResult};

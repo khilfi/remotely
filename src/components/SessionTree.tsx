@@ -90,6 +90,8 @@ interface Props {
   onPicksChange: (ids: string[]) => void;
   /** Opens Compare output with the picks. */
   onCompare: () => void;
+  /** MO-13, MO-14: the session's host details. */
+  onHostDetails?: (session: SessionRecord) => void;
 }
 
 /** Every session in a group and the groups under it. */
@@ -97,7 +99,16 @@ function sessionsUnder(node: TreeNode): string[] {
   return [...node.sessions, ...node.children.flatMap(sessionsUnder)];
 }
 
-export function SessionTree({ active, version, openSessions, onOpen, picks, onPicksChange, onCompare }: Props) {
+export function SessionTree({
+  active,
+  version,
+  openSessions,
+  onOpen,
+  picks,
+  onPicksChange,
+  onCompare,
+  onHostDetails,
+}: Props) {
   const [grouping, setGrouping] = useState<TreeGrouping>(() => readJson(GROUPING_KEY, "folder"));
   const [text, setText] = useState("");
   const [tree, setTree] = useState<Tree | null>(null);
@@ -212,6 +223,7 @@ export function SessionTree({ active, version, openSessions, onOpen, picks, onPi
         onPick={() => setPicked(`${from}:${id}`)}
         onToggleCheck={() => togglePicks([id])}
         onOpen={() => onOpen(s)}
+        onHostDetails={onHostDetails && (() => onHostDetails(s))}
       />
     );
   };
@@ -315,6 +327,7 @@ export function SessionTree({ active, version, openSessions, onOpen, picks, onPi
                     onPick={() => setPicked(`recent:${s.id}`)}
                     onToggleCheck={() => togglePicks([s.id])}
                     onOpen={() => onOpen(s)}
+                    onHostDetails={onHostDetails && (() => onHostDetails(s))}
                   />
                 ))}
             </div>
@@ -402,6 +415,7 @@ function SessionRow({
   onPick,
   onToggleCheck,
   onOpen,
+  onHostDetails,
 }: {
   session: SessionRecord;
   /** SS-07: the jump hosts on the way, first one first. */
@@ -416,6 +430,7 @@ function SessionRow({
   onPick: () => void;
   onToggleCheck: () => void;
   onOpen: () => void;
+  onHostDetails?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const seen =
@@ -486,6 +501,7 @@ function SessionRow({
           >
             Copy the address
           </DropdownMenuItem>
+          {onHostDetails && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
         </DropdownMenuContent>
       </DropdownMenu>
     </div>

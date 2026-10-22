@@ -42,6 +42,12 @@
 //! and later servers alice is not in the `docker` group, so Docker needs sudo there (the password above);
 //! Podman runs rootless everywhere. Mark a session as a container host on the Containers page (or let it
 //! detect the CLIs), and "Open a shell" enters a running container (`exit` ends that terminal).
+//!
+//! Host details (MO-13, MO-14): each server describes itself like a real host (`fakes::ssh_server::host`):
+//! an Ubuntu VM on VMware with apt updates pending, and with 3 or more servers, the last one a RHEL host on
+//! KVM without lscpu and with an lsblk too old for JSON, and dnf updates. Opening a terminal reads its OS
+//! and specs; the session's Host details panel shows them, and its Admin tab lists services (one failed),
+//! listening ports, logged-in users, boots and top processes, and pending updates.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -53,6 +59,7 @@ use tokio::net::TcpListener;
 
 use remotely_core::adapters::containers::EngineKind;
 use remotely_core::fakes::containers::Fixture;
+use remotely_core::fakes::ssh_server::host::HostFixture;
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::metrics::procfs::samples;
 
@@ -112,16 +119,19 @@ async fn main() {
     let web = serve_web(port + count).await;
     let mut servers = Vec::new();
     for i in 0..count {
-        let release = if count >= 3 && i == count - 1 { "24.04" } else { "22.04" };
+        // The last of 3 or more is another release, so Compare shows two groups; MO-13 shows a RHEL host.
+        let other = count >= 3 && i == count - 1;
+        let host = if other {
+            HostFixture::rhel()
+        } else {
+            HostFixture::ubuntu()
+        };
         let server = TestSshServer::start_on(port + i)
             .await
             .with_password("alice", &password)
             .with_sudo(SudoMode::Password(password.clone()))
             .with_hostname(&format!("dev-host-{:02}", i + 1))
-            .with_file(
-                "/etc/os-release",
-                &format!("NAME=\"Ubuntu\"\nVERSION_ID=\"{release}\"\n"),
-            )
+            .with_host_facts(host)
             .with_program("df", &samples::ubuntu(0).df)
             .with_banner("Remotely dev SSH server: a toy shell, not a real host.\n")
             // SS-08: a bash login (the folder hook), and files to download.
@@ -164,6 +174,7 @@ async fn main() {
     println!("  and for QL-09: cd /home/bob/.app (alice can't open it over SFTP); su [-] [user] switches user");
     println!("Containers: docker and podman on every server; from the second on, docker needs sudo");
     println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");
+    println!("Host details: open a terminal (or Refresh in Host details) to read OS and specs; Admin lists services, ports, users");
     if count >= 2 {
         println!(
             "Jump hosts: a session to dev-host-02.test (port 22) with 127.0.0.1:{port} as its jump host{}",

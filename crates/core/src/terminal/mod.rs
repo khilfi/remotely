@@ -88,13 +88,15 @@ use crate::adapters::exec_output::Scrubber;
 use crate::adapters::network::{ip_literal, NetworkAdapter};
 use crate::adapters::remote::forward::RemoteForwards;
 use crate::adapters::remote::{
-    AgentSource, AuthMethod, ConnectOptions, Credentials, HostKeyVerifier, PromptShell, Prompter, PtySize,
-    RemoteAdapter, RemoteFiles, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
+    AgentSource, AuthMethod, ConnectOptions, Credentials, ExecResult, ExecSession, HostKeyVerifier, PromptShell,
+    Prompter, PtySize, RemoteAdapter, RemoteFiles, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput,
+    ShellRequest,
 };
 use crate::command_bus::CommandBus;
 use crate::containers::ContainerShell;
 use crate::domain::{Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::host_details::SpecsCollector;
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
 use crate::locks;
 use crate::policy::Tier;
@@ -586,6 +588,8 @@ struct Control {
     events: mpsc::Sender<TerminalEvent>,
     /// CT-01: a shell in a container: typed instead of the session's startup command at each connection.
     container: Option<ContainerShell>,
+    /// MO-13, MO-14: exec channels on the live connection, while connected.
+    commands: Mutex<Option<Arc<dyn ExecSession>>>,
 }
 
 impl Control {
@@ -641,6 +645,8 @@ struct Inner {
     transfers: Transfers,
     /// SS-07: the command bus tunnels go through (set once the core is put together).
     bus: OnceLock<Weak<CommandBus>>,
+    /// MO-13: reads a saved session's facts when one of its terminals connects.
+    specs: OnceLock<SpecsCollector>,
 }
 
 /// A pane about to open.
@@ -687,8 +693,22 @@ impl Terminals {
                 watch: Mutex::new(TerminalSettings::default().watch()),
                 transfers: Transfers::default(),
                 bus: OnceLock::new(),
+                specs: OnceLock::new(),
             }),
         }
+    }
+
+    /// MO-13: terminals to saved sessions read the host's facts when they connect.
+    pub fn set_specs(&self, collector: SpecsCollector) {
+        let _ = self.inner.specs.set(collector);
+    }
+
+    /// MO-13, MO-14: exec channels on an open terminal's live connection to the session, if any.
+    pub fn commands_for(&self, session_id: Uuid) -> Option<Arc<dyn ExecSession>> {
+        locks::lock(&self.inner.open)
+            .values()
+            .filter(|control| control.session_id() == Some(session_id))
+            .find_map(|control| locks::lock(&control.commands).clone().filter(|c| !c.is_closed()))
     }
 
     /// Settings that open panes follow at once (QL-07's notifications).
@@ -962,6 +982,7 @@ impl Terminals {
             tunnel_ops: tokio::sync::Mutex::default(),
             events: events_tx.clone(),
             container: pane.container,
+            commands: Mutex::default(),
         });
         audit(
             &self.inner.store,
@@ -1477,6 +1498,36 @@ fn list(names: &[String]) -> String {
         return names.join(", ");
     }
     format!("{} and {} more", names[..SHOWN].join(", "), names.len() - SHOWN)
+}
+
+/// MO-13, MO-14: a terminal's exec channels, with what the terminal knows of its secrets scrubbed from
+/// what they print.
+struct ScrubbedCommands {
+    inner: Arc<dyn ExecSession>,
+    control: Arc<Control>,
+}
+
+#[async_trait]
+impl ExecSession for ScrubbedCommands {
+    async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult> {
+        let mut result = self.inner.run(script, max_output).await?;
+        let secrets = self.control.known_secrets();
+        if !secrets.is_empty() {
+            result.output.stdout = scrub(&result.output.stdout, &secrets);
+            result.output.stderr = scrub(&result.output.stderr, &secrets);
+        }
+        Ok(result)
+    }
+
+    async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult> {
+        self.inner.run_sudo(script, password, max_output).await
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    async fn close(&self) {}
 }
 
 fn scrub(text: &str, secrets: &[SecretString]) -> String {
@@ -2149,6 +2200,7 @@ impl Pane {
             shell: shell_answer,
             files,
             forwards,
+            commands,
         } = shell;
         // SS-08: this connection's files; the folder is learnt again. QL-09: transfers run as its login.
         let login = files.user();
@@ -2165,6 +2217,19 @@ impl Pane {
             self.id,
             Arc::clone(&self.control),
         ));
+        // MO-13: the host's facts on an exec channel of this connection, beside the shell (never in it).
+        let commands = commands.map(|inner| -> Arc<dyn ExecSession> {
+            Arc::new(ScrubbedCommands {
+                inner,
+                control: Arc::clone(&self.control),
+            })
+        });
+        if let (Some(exec), Some(session_id), Some(collector)) =
+            (&commands, self.control.session_id(), self.inner.specs.get())
+        {
+            collector.on_terminal(self.ctx, session_id, Arc::clone(exec));
+        }
+        *locks::lock(&self.control.commands) = commands;
         locks::lock(&self.control.home).take();
         self.update_folder(|folder| {
             *folder = FolderInfo {
@@ -2196,6 +2261,7 @@ impl Pane {
         *locks::lock(&self.control.screen) = PaneScreen::default();
         locks::lock(&self.control.files).take();
         locks::lock(&self.control.forwards).take();
+        locks::lock(&self.control.commands).take();
         // SS-07: open tunnels close with the connection and wait for the next one; closing the
         // terminal closes them for good (see `finish`).
         let reason = match &end {

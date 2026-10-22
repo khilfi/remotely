@@ -306,6 +306,10 @@ pub struct ShellHandle {
     pub files: Arc<dyn RemoteFiles>,
     /// SS-07: port forwards on this same connection.
     pub forwards: Arc<dyn forward::RemoteForwards>,
+    /// MO-13, MO-14: read-only commands on exec channels of this same connection, never in the shell, so
+    /// nothing shows in the terminal. Closing it leaves the connection to the shell. `None` where a
+    /// fake has no connection.
+    pub commands: Option<Arc<dyn ExecSession>>,
 }
 
 /// How long the `hostname` beside a new shell may take.
@@ -1579,6 +1583,10 @@ fn pump_pty(
     let files: Arc<dyn RemoteFiles> = Arc::new(sftp::SftpFiles::new(Arc::clone(&handle), Arc::clone(&shared), user));
     let forwards: Arc<dyn forward::RemoteForwards> =
         Arc::new(forward::RusshForwards::new(Arc::clone(&handle), Arc::clone(&shared)));
+    let commands: Arc<dyn ExecSession> = Arc::new(ShellCommands {
+        handle: Arc::clone(&handle),
+        shared: Arc::clone(&shared),
+    });
     tokio::spawn(async move {
         let end = async {
             for data in early {
@@ -1667,7 +1675,45 @@ fn pump_pty(
         shell: shell_rx,
         files,
         forwards,
+        commands: Some(commands),
     }
+}
+
+/// MO-13, MO-14: commands on a terminal's connection, each on an exec channel of its own beside the
+/// shell (like QL-03's `hostname`). The shell owns the connection: closing this closes nothing.
+struct ShellCommands {
+    handle: Arc<client::Handle<Handler>>,
+    shared: Arc<Mutex<Shared>>,
+}
+
+#[async_trait]
+impl ExecSession for ShellCommands {
+    async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult> {
+        if self.handle.is_closed() {
+            return Err(CoreError::Ssh("the terminal's connection is closed".into()));
+        }
+        let started = std::time::Instant::now();
+        let (exit_code, signal, output) =
+            run_command(&self.handle, &self.shared, script, None, &[], max_output).await?;
+        Ok(ExecResult {
+            exit_code,
+            signal,
+            output,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        })
+    }
+
+    async fn run_sudo(&self, _: &str, _: &SecretString, _: usize) -> Result<ExecResult> {
+        Err(CoreError::InvalidInput(
+            "a terminal's connection runs no sudo commands for Remotely".into(),
+        ))
+    }
+
+    fn is_closed(&self) -> bool {
+        self.handle.is_closed()
+    }
+
+    async fn close(&self) {}
 }
 
 /// Why a connection ended. SS-07: a jump host that dropped takes the connections behind it along,

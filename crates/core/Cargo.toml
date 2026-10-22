@@ -61,9 +61,11 @@ ed25519-dalek = { version = "3", optional = true }
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
 # Host RAM, CPUs and free disk (VM-07, MO-04), each VM process's counters and command line (MO-01),
+# this PC's paging files (MO-15),
 # DPAPI for the vault key (SS-04) and reverse DNS for a session's host name (QL-03). 0.62 is the version
 # Tauri already pulls in.
 windows = { version = "0.62", features = [
+    "Wdk_System_SystemInformation",
     "Wdk_System_Threading",
     "Win32_Foundation",
     "Win32_Networking_WinSock",

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::virtualbox::VirtualBoxAdapter;
+use super::vm_hardware::VmHardware;
 use super::vmware::{path_key, SnapshotTree, VmwareAdapter};
 use crate::command_bus::SnapshotOp;
 use crate::error::{CoreError, Result};
@@ -144,6 +145,14 @@ impl Hypervisors {
         match Hypervisor::of_key(key) {
             Hypervisor::Vmware => self.vmware.snapshots(Path::new(key)).await,
             Hypervisor::VirtualBox => self.virtualbox.snapshots(key).await,
+        }
+    }
+
+    /// MO-13: the VM's virtual hardware (VMware's .vmx, VirtualBox's `showvminfo`) and each disk's sizes.
+    pub async fn hardware(&self, key: &str) -> Result<VmHardware> {
+        match Hypervisor::of_key(key) {
+            Hypervisor::Vmware => self.vmware.hardware(Path::new(key)).await,
+            Hypervisor::VirtualBox => self.virtualbox.hardware(key).await,
         }
     }
 

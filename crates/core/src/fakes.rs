@@ -32,8 +32,9 @@ use crate::adapters::remote::{
 };
 use crate::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
 use crate::adapters::virtualbox::{
-    self as vbox, VboxListedVm, VboxNic, VboxVmInfo, VirtualBoxAdapter, GUEST_NET_COUNT, GUEST_OS_PRODUCT,
+    self as vbox, VboxDisk, VboxListedVm, VboxNic, VboxVmInfo, VirtualBoxAdapter, GUEST_NET_COUNT, GUEST_OS_PRODUCT,
 };
+use crate::adapters::vm_hardware::VmHardware;
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Context, PowerState};
@@ -68,6 +69,10 @@ pub struct FakeVmware {
     failing_snapshots: HashSet<String>,
     unreadable_snapshots: HashSet<String>,
     snapshots: Mutex<HashMap<String, SnapshotTree>>,
+    /// MO-13: what each VM's files say about its hardware.
+    hardware: HashMap<String, VmHardware>,
+    /// MO-13: the VMs' files can't be read right now (a drive that went away).
+    hardware_fails: AtomicBool,
     running: Mutex<Vec<PathBuf>>,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
@@ -105,6 +110,18 @@ impl FakeVmware {
     pub fn with_vmx(mut self, vmx: &str, info: VmxInfo) -> Self {
         self.vmx.insert(path_key(Path::new(vmx)), info);
         self
+    }
+
+    /// MO-13: the VM's hardware as its .vmx and disk files describe it. Without this, a VM's hardware is
+    /// what its [`VmxInfo`] says (vCPUs, memory, guest OS), with no disks or adapters.
+    pub fn with_hardware(mut self, vmx: &str, hardware: VmHardware) -> Self {
+        self.hardware.insert(path_key(Path::new(vmx)), hardware);
+        self
+    }
+
+    /// MO-13: from now on reading any VM's hardware fails (or works again).
+    pub fn set_hardware_failing(&self, failing: bool) {
+        self.hardware_fails.store(failing, Ordering::SeqCst);
     }
 
     /// The .vmx file no longer exists (still listed in the library, say).
@@ -403,6 +420,24 @@ impl VmwareAdapter for FakeVmware {
     async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
         Ok(self.started_at.get(&path_key(vmx)).copied())
     }
+
+    async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
+        if self.hardware_fails.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("the drive holding the VM is not there").into());
+        }
+        let key = path_key(vmx);
+        if let Some(hardware) = self.hardware.get(&key) {
+            return Ok(hardware.clone());
+        }
+        let info = self.read_vmx(vmx).await?;
+        Ok(VmHardware {
+            guest_os: info.guest_os,
+            guest_os_name: info.guest_os_name,
+            vcpus: info.num_vcpus,
+            memory_mb: info.memsize_mb,
+            ..VmHardware::default()
+        })
+    }
 }
 
 /// Counts a power call as finished when it returns or is dropped.
@@ -517,15 +552,19 @@ impl FakeVirtualBox {
             config_file: Some(PathBuf::from(format!(
                 r"C:\Users\alice\VirtualBox VMs\{name}\{name}.vbox"
             ))),
-            disks: vec![PathBuf::from(format!(
-                r"C:\Users\alice\VirtualBox VMs\{name}\{name}.vdi"
-            ))],
+            disks: vec![VboxDisk {
+                slot: "SATA-0-0".into(),
+                path: PathBuf::from(format!(r"C:\Users\alice\VirtualBox VMs\{name}\{name}.vdi")),
+            }],
+            firmware: Some("BIOS".into()),
             additions_run_level: state.is_on().then_some(2),
             additions_version: state.is_on().then(|| "7.2.22 r175245".to_owned()),
             nics: vec![VboxNic {
                 slot: 1,
                 attachment: "nat".into(),
                 mac: Some("080027000001".into()),
+                model: Some("82540EM".into()),
+                cable_connected: Some(true),
             }],
             snapshots: SnapshotTree::default(),
         };
@@ -1125,6 +1164,7 @@ pub fn loopback_shell_with(files: FakeFiles, shell: Option<PromptShell>) -> Shel
         shell: shell_rx,
         files: std::sync::Arc::new(files),
         forwards: std::sync::Arc::new(DirectForwards),
+        commands: None,
     }
 }
 
@@ -1583,6 +1623,8 @@ impl KeyProtector for FakeKeyProtector {
 pub struct FakeHostCounters {
     pub processes: std::sync::Arc<Mutex<Vec<VmProcess>>>,
     pub totals: HostTotals,
+    /// MO-15: this PC's paging files; `None` reads as not available.
+    pub paging: Option<crate::adapters::paging::PagingInfo>,
     pub free_disk_pct: f64,
     pub unavailable: bool,
     readings: AtomicUsize,
@@ -1597,6 +1639,16 @@ impl Default for FakeHostCounters {
                 available_ram_mb: 24 * 1024,
                 logical_cpus: 16,
             },
+            paging: Some(crate::adapters::paging::PagingInfo::new(
+                vec![crate::adapters::paging::PagingFile {
+                    path: r"C:\pagefile.sys".into(),
+                    total_bytes: 4 << 30,
+                    used_bytes: 1 << 30,
+                    peak_bytes: 2 << 30,
+                }],
+                12 << 30,
+                36 << 30,
+            )),
             free_disk_pct: 50.0,
             unavailable: false,
             readings: AtomicUsize::new(0),
@@ -1661,6 +1713,11 @@ impl HostCounters for FakeHostCounters {
     async fn free_disk_pct(&self, _path: &Path) -> Result<f64> {
         self.available()?;
         Ok(self.free_disk_pct)
+    }
+
+    async fn paging(&self) -> Result<crate::adapters::paging::PagingInfo> {
+        self.available()?;
+        self.paging.clone().ok_or(CoreError::NotImplemented("paging files"))
     }
 }
 

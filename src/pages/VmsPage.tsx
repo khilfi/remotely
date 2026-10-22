@@ -66,6 +66,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EnvBadge, HypervisorLabel, StateBadge, ToolsLabel } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { MetricCell } from "@/components/MetricBits";
 import { NameDialog } from "@/components/NameDialog";
 import { SnapshotActionDialog, type SnapshotAction } from "@/components/SnapshotActionDialog";
@@ -264,6 +265,8 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [linksVersion, setLinksVersion] = useState(0);
   const [thresholds] = useThresholds();
+  /** MO-13, MO-14: a linked session's host details, opened from a VM's System tab. */
+  const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
   const [total, setTotal] = useState({ vms: 0, running: 0 });
   const [warnings, setWarnings] = useState<InventoryWarning[]>([]);
   const [error, setError] = useState<LoadError | null>(null);
@@ -1232,6 +1235,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
                 readOnly={readOnly}
                 busy={submitting}
                 onActions={() => onActions(detailVm.vmxPath)}
+                onHostDetails={setHostDetails}
                 usage={usageOf(detailVm)}
                 thresholds={thresholds}
                 sessions={sessions}
@@ -1255,6 +1259,8 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
           the Snapshots button works on the selection.
         </p>
       )}
+
+      <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
 
       {snapshotDialog && limits && (
         <SnapshotActionDialog

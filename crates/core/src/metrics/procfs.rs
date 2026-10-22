@@ -46,6 +46,9 @@ pub struct GuestReading {
     pub cpu: Option<CpuJiffies>,
     pub mem_total_bytes: Option<u64>,
     pub mem_available_bytes: Option<u64>,
+    /// MO-15: SwapTotal and SwapFree.
+    pub swap_total_bytes: Option<u64>,
+    pub swap_free_bytes: Option<u64>,
     pub load: Option<[f64; 3]>,
     pub uptime_secs: Option<f64>,
     /// Sectors (512 bytes each, whatever the disk's own sector size) read and written by whole disks.
@@ -63,6 +66,11 @@ impl GuestReading {
 
     pub fn mem_used_bytes(&self) -> Option<u64> {
         Some(self.mem_total_bytes?.saturating_sub(self.mem_available_bytes?))
+    }
+
+    /// MO-15: swap in use.
+    pub fn swap_used_bytes(&self) -> Option<u64> {
+        Some(self.swap_total_bytes?.saturating_sub(self.swap_free_bytes?))
     }
 }
 
@@ -88,6 +96,8 @@ pub fn parse(output: &str) -> GuestReading {
             let (total, available) = parse_meminfo(lines);
             reading.mem_total_bytes = total;
             reading.mem_available_bytes = available;
+            reading.swap_total_bytes = meminfo_bytes(lines, "SwapTotal");
+            reading.swap_free_bytes = meminfo_bytes(lines, "SwapFree");
         }
         "loadavg" => reading.load = lines.first().and_then(|l| parse_loadavg(l)),
         "uptime" => reading.uptime_secs = lines.first().and_then(|l| first_number(l)),
@@ -145,6 +155,15 @@ fn parse_meminfo(lines: &[&str]) -> (Option<u64>, Option<u64>) {
     let available =
         kb("MemAvailable").or_else(|| Some(kb("MemFree")? + kb("Buffers").unwrap_or(0) + kb("Cached").unwrap_or(0)));
     (total, available)
+}
+
+/// One /proc/meminfo value (kB), in bytes.
+fn meminfo_bytes(lines: &[&str], key: &str) -> Option<u64> {
+    lines.iter().find_map(|line| {
+        let rest = line.strip_prefix(key)?.strip_prefix(':')?;
+        let value: u64 = rest.split_whitespace().next()?.parse().ok()?;
+        Some(value.saturating_mul(1024))
+    })
 }
 
 fn parse_loadavg(line: &str) -> Option<[f64; 3]> {
@@ -323,7 +342,7 @@ pub mod samples {
         let tx = 4_000_000 + round * 524_288;
         Sample {
             stat: format!("cpu  {user} 20 {system} {idle} 300 0 50 0 0 0\ncpu0 1 2 3 4 5 6 7 8 0 0\nintr 12345 0 0\n"),
-            meminfo: "MemTotal:        4028180 kB\nMemFree:          512000 kB\nMemAvailable:    1007045 kB\nBuffers:           10000 kB\nCached:           400000 kB\n".into(),
+            meminfo: "MemTotal:        4028180 kB\nMemFree:          512000 kB\nMemAvailable:    1007045 kB\nBuffers:           10000 kB\nCached:           400000 kB\nSwapTotal:       2097148 kB\nSwapFree:        1572860 kB\n".into(),
             loadavg: "0.52 0.48 0.40 2/310 12345\n".into(),
             uptime: format!("{}.25 {}.10\n", 3600 + round * 5, 10_000 + round * 15),
             diskstats: format!(
@@ -372,6 +391,8 @@ mod tests {
         assert_eq!(reading.mem_total_bytes, Some(4_028_180 * 1024));
         assert_eq!(reading.mem_available_bytes, Some(1_007_045 * 1024));
         assert_eq!(reading.mem_used_bytes(), Some((4_028_180 - 1_007_045) * 1024));
+        assert_eq!(reading.swap_total_bytes, Some(2_097_148 * 1024));
+        assert_eq!(reading.swap_used_bytes(), Some((2_097_148 - 1_572_860) * 1024));
         assert_eq!(reading.load, Some([0.52, 0.48, 0.40]));
         assert_eq!(reading.uptime_secs, Some(3600.25));
         assert_eq!(

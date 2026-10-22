@@ -44,8 +44,14 @@
 //! [`TestSshServer::without_docker_group`] was not called. The interactive shell enters a running
 //! container on `exec [sudo [-n]] docker exec -it <id> sh -c ...` (prompt `root@<id>:/# `; `exit` ends
 //! the shell, since `exec` replaced it).
+//!
+//! MO-13, MO-14: with [`TestSshServer::with_host_facts`], the exec shell describes a Linux host from a
+//! [`HostFixture`] ([`host`]): `uname`, `lscpu`, `lsblk`, `df -PT`, `systemd-detect-virt`, `systemctl
+//! list-units`, `ss`, `who`, `last`, `ps`, `stat`, `apt` or `dnf`, and `/etc/os-release`. Its toy shell
+//! also knows `type`, `$?` and `NAME=value` before a command.
 
 pub mod docker;
+pub mod host;
 mod sftp;
 
 use std::collections::{HashMap, HashSet};
@@ -68,6 +74,7 @@ use crate::adapters::containers::{ContainerState, EngineKind};
 use crate::fakes::containers::Fixture;
 use crate::locks;
 use crate::vault::SecretString;
+use host::HostFixture;
 
 /// A new Ed25519 key from the system's random source.
 pub fn generate_key() -> PrivateKey {
@@ -159,6 +166,8 @@ struct State {
     engines: Mutex<HashMap<String, Fixture>>,
     /// CT-01: the login user is not in the `docker` group, so Docker refuses it without sudo.
     no_docker_group: AtomicBool,
+    /// MO-13, MO-14: what the host's own programs say about it.
+    host: Mutex<Option<HostFixture>>,
 }
 
 struct Link {
@@ -388,6 +397,25 @@ impl TestSshServer {
     /// CT-01: a `docker` or `podman` program holding `fixture` (see [`docker`]).
     pub fn with_containers(self, engine: EngineKind, fixture: Fixture) -> Self {
         locks::lock(&self.state.engines).insert(engine.program().to_owned(), fixture);
+        self
+    }
+
+    /// MO-13, MO-14: the exec shell describes a Linux host (see [`host`]). /proc/meminfo and /proc/uptime
+    /// are added when the test has not set them.
+    pub fn with_host_facts(self, fixture: HostFixture) -> Self {
+        for (path, text) in fixture.files() {
+            self.set_file(path, &text);
+        }
+        {
+            let mut files = locks::lock(&self.state.files);
+            files
+                .entry("/proc/meminfo".into())
+                .or_insert_with(|| crate::host_details::linux::samples::MEMINFO.into());
+            files
+                .entry("/proc/uptime".into())
+                .or_insert_with(|| "273600.52 1000000.10\n".into());
+        }
+        *locks::lock(&self.state.host) = Some(fixture);
         self
     }
 
@@ -1327,6 +1355,8 @@ enum Part {
     Home,
     /// `$(...)`: replaced by what the inner script prints, without its trailing line breaks.
     Output(String),
+    /// `$?`: the last command's exit status.
+    Status,
 }
 
 /// A word or an operator of a toy shell command line.
@@ -1442,6 +1472,10 @@ fn tokenize(script: &str) -> Vec<Token> {
                 let inner = read_substitution(&mut chars);
                 word.part(Part::Output(inner));
             }
+            '$' if chars.peek() == Some(&'?') => {
+                chars.next();
+                word.part(Part::Status);
+            }
             '#' if !word.started => {
                 while chars.peek().is_some_and(|&n| n != '\n') {
                     chars.next();
@@ -1482,9 +1516,9 @@ const INTERACTIVE_TOY: [&str; 10] = [
 ];
 
 /// What `command -v` finds besides the fake programs.
-const BUILTINS: [&str; 25] = [
+const BUILTINS: [&str; 26] = [
     "echo", "hostname", "whoami", "uptime", "cat", "head", "seq", "sleep", "exit", "true", "false", "exec", "sh",
-    "sudo", "umask", "cd", "mkdir", "chmod", "touch", "grep", "tail", "[", "test", "printf", "command",
+    "sudo", "umask", "cd", "mkdir", "chmod", "touch", "grep", "tail", "[", "test", "printf", "command", "type",
 ];
 
 /// Where a command's output goes (`>`, `>>`, `2>&1`, `>/dev/null`, ...).
@@ -1516,6 +1550,8 @@ struct ToyShell<'a> {
     sleep: Duration,
     exited: bool,
     umask: u32,
+    /// `$?`.
+    last_status: u32,
 }
 
 impl<'a> ToyShell<'a> {
@@ -1529,6 +1565,7 @@ impl<'a> ToyShell<'a> {
             sleep: Duration::ZERO,
             exited: false,
             umask: 0o022,
+            last_status: 0,
         }
     }
 
@@ -1624,6 +1661,7 @@ impl<'a> ToyShell<'a> {
             match part {
                 Part::Text(text) => word.push_str(text),
                 Part::Home => word.push_str(&self.home()),
+                Part::Status => word.push_str(&self.last_status.to_string()),
                 Part::Output(script) => {
                     let saved = std::mem::take(&mut self.stdout);
                     let exited = self.exited;
@@ -1658,6 +1696,7 @@ impl<'a> ToyShell<'a> {
             if !words.is_empty() && !skip {
                 let expanded: Vec<String> = std::mem::take(&mut words).iter().map(|w| self.expand(w)).collect();
                 status = self.command(&expanded);
+                self.last_status = status;
                 if self.exited {
                     return status;
                 }
@@ -1752,6 +1791,16 @@ impl<'a> ToyShell<'a> {
     }
 
     fn builtin(&mut self, words: &[String]) -> u32 {
+        // `LC_ALL=C lscpu`: an assignment before the command only sets its environment.
+        let first = &words[0];
+        if first.contains('=')
+            && first
+                .split('=')
+                .next()
+                .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        {
+            return if words.len() > 1 { self.builtin(&words[1..]) } else { 0 };
+        }
         let args = &words[1..];
         match words[0].as_str() {
             "echo" => {
@@ -2072,11 +2121,24 @@ impl<'a> ToyShell<'a> {
                 }
                 0
             }
+            "type" => match args {
+                [name] => {
+                    if self.knows(name) {
+                        self.print(&format!("{name} is /usr/bin/{name}\n"));
+                        0
+                    } else {
+                        self.err(&format!("sh: 1: type: {name}: not found\n"));
+                        1
+                    }
+                }
+                _ => {
+                    self.err("sh: 1: type: only one name is supported here\n");
+                    2
+                }
+            },
             "command" => match args {
                 [flag, name] if flag == "-v" => {
-                    let known = BUILTINS.contains(&name.as_str())
-                        || locks::lock(&self.state.programs).contains_key(name.as_str())
-                        || locks::lock(&self.state.engines).contains_key(name.as_str());
+                    let known = self.knows(name);
                     if known {
                         self.print(&format!("{name}\n"));
                     }
@@ -2103,19 +2165,37 @@ impl<'a> ToyShell<'a> {
                 self.err(&ran.stderr);
                 ran.status
             }
-            other if locks::lock(&self.state.programs).contains_key(other) => {
-                let text = locks::lock(&self.state.programs)
-                    .get(other)
-                    .cloned()
-                    .unwrap_or_default();
-                self.print(&text);
-                0
-            }
             other => {
-                self.err(&format!("sh: 1: {other}: not found\n"));
-                127
+                // MO-13, MO-14: the host's own programs, then the fixed-output ones.
+                let ran = locks::lock(&self.state.host)
+                    .as_ref()
+                    .and_then(|host| host::run(host, other, args));
+                if let Some(ran) = ran {
+                    self.print(&ran.stdout);
+                    self.err(&ran.stderr);
+                    return ran.status;
+                }
+                let program = locks::lock(&self.state.programs).get(other).cloned();
+                match program {
+                    Some(text) => {
+                        self.print(&text);
+                        0
+                    }
+                    None => {
+                        self.err(&format!("sh: 1: {other}: not found\n"));
+                        127
+                    }
+                }
             }
         }
+    }
+
+    /// What `command -v` and `type` find.
+    fn knows(&self, name: &str) -> bool {
+        BUILTINS.contains(&name)
+            || locks::lock(&self.state.programs).contains_key(name)
+            || locks::lock(&self.state.engines).contains_key(name)
+            || locks::lock(&self.state.host).as_ref().is_some_and(|h| h.has(name))
     }
 
     /// Like sudo: `-S` reads the password from stdin, `-p` sets the prompt (printed on stderr, with no

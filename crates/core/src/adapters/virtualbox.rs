@@ -31,6 +31,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
 use super::hypervisor::virtualbox_key;
+use super::vm_hardware::VmHardware;
 use super::vmware::{power_timeout, SnapshotInfo, SnapshotTree, ToolsState};
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
 use crate::domain::PowerState;
@@ -48,8 +49,8 @@ pub struct VboxListedVm {
     pub uuid: String,
 }
 
-/// One network adapter slot from `showvminfo` (`nicN`, `macaddressN`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One network adapter slot from `showvminfo` (`nicN`, `macaddressN`, `nictypeN`, `cableconnectedN`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct VboxNic {
     /// 1 to 8, as VirtualBox numbers them.
     pub slot: u32,
@@ -57,6 +58,17 @@ pub struct VboxNic {
     pub attachment: String,
     /// 12 hex digits, upper case, as VirtualBox prints them.
     pub mac: Option<String>,
+    /// MO-13: the emulated card, e.g. `82540EM` or `virtio`.
+    pub model: Option<String>,
+    /// MO-13: the virtual cable is plugged in.
+    pub cable_connected: Option<bool>,
+}
+
+/// MO-13: a hard disk image attached to a VM, and where (`SATA-0-0`: controller, port, device).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VboxDisk {
+    pub slot: String,
+    pub path: PathBuf,
 }
 
 impl VboxNic {
@@ -89,7 +101,9 @@ pub struct VboxVmInfo {
     /// The `.vbox` settings file (`CfgFile`).
     pub config_file: Option<PathBuf>,
     /// Hard disk images attached to the VM (DVD images and empty drives left out).
-    pub disks: Vec<PathBuf>,
+    pub disks: Vec<VboxDisk>,
+    /// MO-13: `BIOS`, `EFI`, `EFI32` or `EFI64`.
+    pub firmware: Option<String>,
     /// 0 none, 1 system (VBoxService), 2 user, 3 desktop. Missing while the Guest Additions don't run.
     pub additions_run_level: Option<u32>,
     pub additions_version: Option<String>,
@@ -160,6 +174,27 @@ pub trait VirtualBoxAdapter: Send + Sync {
     async fn snapshot(&self, uuid: &str, op: &SnapshotOp) -> Result<()>;
     /// VM-04: the tree from `showvminfo`, with each snapshot's time from the VM's .vbox file.
     async fn snapshots(&self, uuid: &str) -> Result<SnapshotTree>;
+    /// MO-13: the VM's virtual hardware: `showvminfo`, each disk image's header, and while the VM runs,
+    /// the OS its Guest Additions report. Linux guests report only "Linux" and the kernel: the kernel is
+    /// kept, and the OS type chosen for the VM ("Ubuntu (64-bit)") says more than "Linux".
+    async fn hardware(&self, uuid: &str) -> Result<VmHardware> {
+        let info = self.vm_info(uuid).await?;
+        let (mut os_name, mut kernel) = (None, None);
+        if info.power_state().is_on() {
+            let product = self.guest_property(uuid, GUEST_OS_PRODUCT).await.ok().flatten();
+            let release = self.guest_property(uuid, GUEST_OS_RELEASE).await.ok().flatten();
+            let product = product.map(|p| p.trim().to_owned()).filter(|p| !p.is_empty());
+            let release = release.map(|r| r.trim().to_owned()).filter(|r| !r.is_empty());
+            match (product, release) {
+                (Some(p), Some(r)) if p.eq_ignore_ascii_case("linux") => kernel = Some(r),
+                (Some(p), None) if p.eq_ignore_ascii_case("linux") => {}
+                (Some(p), Some(r)) => os_name = Some(format!("{p} {r}")),
+                (Some(p), None) => os_name = Some(p),
+                _ => {}
+            }
+        }
+        Ok(super::vm_hardware::read_virtualbox(&info, os_name, kernel).await)
+    }
 }
 
 /// Builds the adapter for this machine. Without VirtualBox the app still starts, with no VirtualBox
@@ -550,6 +585,9 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     async fn snapshots(&self, uuid: &str) -> Result<SnapshotTree> {
         self.current().snapshots(uuid).await
     }
+    async fn hardware(&self, uuid: &str) -> Result<VmHardware> {
+        self.current().hardware(uuid).await
+    }
 }
 
 /// The Guest Additions' count of network adapters, and each one's address and MAC.
@@ -766,13 +804,21 @@ pub fn parse_showvminfo(text: &str) -> VboxVmInfo {
             "accessible" => info.accessible = !value.eq_ignore_ascii_case("off"),
             "GuestAdditionsRunLevel" => info.additions_run_level = value.trim().parse().ok(),
             "GuestAdditionsVersion" => info.additions_version = present(),
+            "firmware" => info.firmware = present(),
             _ => {
                 if let Some(slot) = key.strip_prefix("nic").and_then(|n| n.parse::<u32>().ok()) {
                     nic_slot(&mut nics, slot).attachment = value.to_ascii_lowercase();
                 } else if let Some(slot) = key.strip_prefix("macaddress").and_then(|n| n.parse::<u32>().ok()) {
                     nic_slot(&mut nics, slot).mac = present();
+                } else if let Some(slot) = key.strip_prefix("nictype").and_then(|n| n.parse::<u32>().ok()) {
+                    nic_slot(&mut nics, slot).model = present();
+                } else if let Some(slot) = key.strip_prefix("cableconnected").and_then(|n| n.parse::<u32>().ok()) {
+                    nic_slot(&mut nics, slot).cable_connected = Some(value.eq_ignore_ascii_case("on"));
                 } else if is_disk_attachment(key, value) {
-                    info.disks.push(PathBuf::from(value));
+                    info.disks.push(VboxDisk {
+                        slot: key.clone(),
+                        path: PathBuf::from(value),
+                    });
                 }
             }
         }
@@ -787,8 +833,7 @@ pub fn parse_showvminfo(text: &str) -> VboxVmInfo {
 fn nic_slot(nics: &mut HashMap<u32, VboxNic>, slot: u32) -> &mut VboxNic {
     nics.entry(slot).or_insert_with(|| VboxNic {
         slot,
-        attachment: String::new(),
-        mac: None,
+        ..VboxNic::default()
     })
 }
 
@@ -953,6 +998,7 @@ CfgFile="C:\\Users\\alice\\VirtualBox VMs\\web01\\web01.vbox"
 SnapFldr="C:\\Users\\alice\\VirtualBox VMs\\web01\\Snapshots"
 hardwareuuid="3f0c1a2b-1111-4222-8333-444455556666"
 memory=4096
+firmware="EFI"
 pagefusion="off"
 vram=16
 cpus=2
@@ -966,6 +1012,7 @@ storagecontrollername0="SATA"
 "SATA-3-0"="none"
 nic1="nat"
 nictype1="82540EM"
+cableconnected1="on"
 nicspeed1="0"
 macaddress1="080027AABB01"
 nic2="hostonly"
@@ -1006,9 +1053,13 @@ CurrentSnapshotNode="SnapshotName-1"
         );
         assert_eq!(
             info.disks,
-            [PathBuf::from(r"C:\Users\alice\VirtualBox VMs\web01\web01.vdi")],
+            [VboxDisk {
+                slot: "SATA-0-0".into(),
+                path: PathBuf::from(r"C:\Users\alice\VirtualBox VMs\web01\web01.vdi")
+            }],
             "the DVD image and empty drives are not disks"
         );
+        assert_eq!(info.firmware.as_deref(), Some("EFI"));
         assert_eq!(info.additions_run_level, Some(2));
         assert_eq!(info.tools_state(), Some(ToolsState::Running));
         assert_eq!(
@@ -1021,17 +1072,20 @@ CurrentSnapshotNode="SnapshotName-1"
                 VboxNic {
                     slot: 1,
                     attachment: "nat".into(),
-                    mac: Some("080027AABB01".into())
+                    mac: Some("080027AABB01".into()),
+                    model: Some("82540EM".into()),
+                    cable_connected: Some(true),
                 },
                 VboxNic {
                     slot: 2,
                     attachment: "hostonly".into(),
-                    mac: Some("080027AABB02".into())
+                    mac: Some("080027AABB02".into()),
+                    ..VboxNic::default()
                 },
                 VboxNic {
                     slot: 3,
                     attachment: "none".into(),
-                    mac: None
+                    ..VboxNic::default()
                 },
             ]
         );

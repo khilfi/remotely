@@ -9,6 +9,7 @@
 //   Elements and inputs marked `data-mask` hold one such value, masked whatever it looks like.
 // - By pattern in free text: IPv4, IPv6 (compressed forms too), FQDN-like names (a known top-level domain, or three
 //   labels or more, and not a file name), user@host, Windows profile paths (C:\Users\<name>) and /home/<name>.
+//   MO-13: MAC addresses (`00:0c:29:ab:cd:ef` or with hyphens) too: a VM's adapters name them.
 //
 // Each value gets a stand-in for the app's run: `host-3`, `user-2`, `ip-5`, numbered in the order they are first
 // masked. Stand-ins say nothing about the value they replace (no hashing), and the mapping lives in this module's
@@ -19,7 +20,7 @@
 // The terminal needs the masked text to take exactly as many cells as the real text (`TerminalMasker`), so its
 // stand-ins keep the value's width: `ip-5······` for 192.0.2.10, `u2···` for alice.
 
-export type MaskKind = "host" | "ip" | "user";
+export type MaskKind = "host" | "ip" | "user" | "mac";
 
 /** A part of a text to show differently: [start, end) in the original string, and the stand-in for it. */
 export interface Replacement {
@@ -101,7 +102,9 @@ const PROFILE_RE =
   /(?:\b[A-Za-z]:|(?<![\w.]))[\\/]+(?:Users|Documents and Settings)[\\/]+([^\\/:*?"<>|\r\n\t]{1,64}?(?=[\\/])|[^\s\\/:*?"<>|,;)'`]{1,64})/gi;
 /** /home/<name> on a Linux host. */
 const HOME_RE = /(?<![\w.~-])\/home\/([A-Za-z0-9_][A-Za-z0-9._-]{0,63})(?![\w-])/g;
-const STAND_IN_RE = /^(?:host|ip|user)-\d+$/;
+const STAND_IN_RE = /^(?:host|ip|user|mac)-\d+$/;
+/** MO-13: six hex pairs split by colons or by hyphens (not mixed). */
+const MAC_RE = /(?<![\w:.-])[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}(?![\w:.-])/g;
 
 function escapeRegExp(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -175,6 +178,8 @@ export function isLocalAddress(value: string): boolean {
     .toLowerCase()
     .replace(/\.$/, "");
   if (v === "localhost" || v === "localhost.localdomain" || v === "ip6-localhost" || v === "ip6-loopback") return true;
+  // MO-14: `*` and `::` are ss's "any address" (`*:80`, `[::]:22`).
+  if (v === "*" || v === "::") return true;
   if (IPV4_EXACT.test(v)) return v.startsWith("127.") || v === "0.0.0.0";
   const groups = parseIpv6(v);
   if (!groups) return false;
@@ -205,7 +210,7 @@ type Candidate = { start: number; end: number; parts: Part[] };
 export class Masker {
   private readonly standIns = new Map<string, string>();
   private readonly issued = new Set<string>();
-  private readonly counts: Record<MaskKind, number> = { host: 0, ip: 0, user: 0 };
+  private readonly counts: Record<MaskKind, number> = { host: 0, ip: 0, user: 0, mac: 0 };
   /** Known values masked as bare words, by kind. */
   private readonly known: Record<"host" | "user", Set<string>> = { host: new Set(), user: new Set() };
   private matchers: { re: RegExp; kind: "host" | "user" }[] | null = null;
@@ -241,6 +246,8 @@ export class Masker {
    * rest are masked from now on wherever they appear as a whole word. Returns whether it was new.
    */
   learn(kind: MaskKind, raw: string | null | undefined): boolean {
+    // MAC addresses need no learning either: the pattern finds them all.
+    if (kind === "mac") return false;
     const value = raw?.trim().replace(/\.$/, "");
     if (!value || value.length > 253 || /\s/.test(value) || this.issued.has(value)) return false;
     if (STAND_IN_RE.test(value)) return false;
@@ -266,7 +273,7 @@ export class Masker {
     if (/\s/.test(trimmed)) return this.text(value);
     const lead = value.slice(0, value.indexOf(trimmed));
     const trail = value.slice(lead.length + trimmed.length);
-    if (kind === "user") return `${lead}${this.standIn("user", trimmed)}${trail}`;
+    if (kind === "user" || kind === "mac") return `${lead}${this.standIn(kind, trimmed)}${trail}`;
     let rest = trimmed;
     let user = "";
     const at = rest.lastIndexOf("@");
@@ -308,6 +315,7 @@ export class Masker {
     this.profiles(text, found);
     this.homes(text, found);
     this.userAtHost(text, found);
+    this.macs(text, found);
     this.ipv6(text, found);
     this.ipv4(text, found);
     this.names(text, found);
@@ -359,6 +367,9 @@ export class Masker {
       const at = m.index ?? 0;
       // pkg@1.2.3 is a version, not a host.
       if (/^[\d.]+$/.test(host) && !IPV4_EXACT.test(host)) continue;
+      // MO-14: a systemd template unit (postgresql@16-main.service, getty@tty1.service) names a file, not a host.
+      const last = host.includes(".") ? (host.split(".").pop() ?? "").toLowerCase() : "";
+      if (FILE_EXTENSIONS.has(last) && !TLDS.has(last)) continue;
       const parts: Part[] = [];
       if (!this.issued.has(user)) {
         parts.push({ start: at, end: at + user.length, kind: "user", value: user });
@@ -380,6 +391,17 @@ export class Masker {
         }
       }
       found.push({ start: at, end: at + m[0].length, parts });
+    }
+  }
+
+  private macs(text: string, found: Candidate[]) {
+    for (const m of text.matchAll(MAC_RE)) {
+      const start = m.index ?? 0;
+      found.push({
+        start,
+        end: start + m[0].length,
+        parts: [{ start, end: start + m[0].length, kind: "mac", value: m[0] }],
+      });
     }
   }
 
@@ -471,6 +493,7 @@ function ipKey(value: string): string {
 function normalize(kind: MaskKind, value: string): string {
   if (kind === "user") return value;
   if (kind === "ip") return ipKey(value.replace(/^\[|\]$/g, ""));
+  if (kind === "mac") return value.toLowerCase().replace(/-/g, ":");
   return value.toLowerCase().replace(/\.$/, "");
 }
 
@@ -499,6 +522,8 @@ const FIELD_KINDS: Record<string, MaskKind | "address"> = {
   jumpHost: "host",
   ip: "ip",
   ipAddress: "ip",
+  mac: "mac",
+  macAddress: "mac",
   lastIp: "ip",
   peerIp: "ip",
   username: "user",
@@ -548,7 +573,7 @@ export function learnAddress(masker: Masker, address: string) {
 export function fitWidth(standIn: string, kind: MaskKind, width: number): string {
   if (width <= 0) return "";
   const n = /-(\d+)$/.exec(standIn)?.[1] ?? "";
-  const short = kind === "host" ? "h" : kind === "user" ? "u" : "i";
+  const short = kind === "host" ? "h" : kind === "user" ? "u" : kind === "mac" ? "m" : "i";
   for (const candidate of [standIn, `${short}-${n}`, `${short}${n}`]) {
     if (candidate.length <= width) return candidate + PAD.repeat(width - candidate.length);
   }

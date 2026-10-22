@@ -51,6 +51,7 @@ pub mod export;
 #[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
 pub mod forwards;
+pub mod host_details;
 pub mod impact;
 pub mod import;
 pub mod inventory;
@@ -91,6 +92,7 @@ use command_bus::CommandBus;
 use containers::Containers;
 use domain::Context;
 use forwards::Forwards;
+use host_details::{HostDetails, HostDetailsParts, SpecsCollector};
 use impact::ImpactPreviewer;
 use import::Importer;
 use inventory::{Inventory, StoreDirectory};
@@ -201,6 +203,8 @@ pub struct Core {
     /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
     /// The shell starts its polling with [`Metrics::run`].
     pub metrics: Arc<Metrics>,
+    /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
+    pub host_details: HostDetails,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
     pub presentation: PresentationMode,
     pub host_counters: Arc<dyn HostCounters>,
@@ -271,25 +275,40 @@ impl Core {
             Arc::clone(&known_hosts),
             Arc::clone(&links),
         );
+        // MO-13: terminals and the dashboard's kept connections read a session's facts as they go.
+        let specs = SpecsCollector::new(store.clone());
+        terminals.set_specs(specs.clone());
         let reachability = Arc::new(ReachabilityChecker::new(
             store.clone(),
             ctx,
             Arc::clone(&adapters.network),
         ));
         // MO-01 to MO-04: reads only, so the collector holds adapters directly, not the job runner.
+        let guest = GuestSource::new(
+            store.clone(),
+            ctx,
+            Arc::clone(&adapters.remote),
+            Arc::clone(&adapters.vault),
+            Arc::clone(&known_hosts),
+        );
+        guest.set_specs(specs.clone());
         let metrics = Arc::new(Metrics::new(MetricsParts {
             store: store.clone(),
             ctx,
             counters: Arc::clone(&adapters.host_counters),
-            guest: GuestSource::new(
-                store.clone(),
-                ctx,
-                Arc::clone(&adapters.remote),
-                Arc::clone(&adapters.vault),
-                Arc::clone(&known_hosts),
-            ),
+            guest,
             capacity: CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
         }));
+        let host_details = HostDetails::new(HostDetailsParts {
+            store: store.clone(),
+            collector: specs,
+            terminals: terminals.clone(),
+            metrics: Arc::clone(&metrics),
+            hypervisors: hypervisors.clone(),
+            vault: Arc::clone(&adapters.vault),
+            remote: Arc::clone(&adapters.remote),
+            known_hosts: Arc::clone(&known_hosts),
+        });
         let jobs = JobRunner::new(
             store.clone(),
             hypervisors.clone(),
@@ -350,6 +369,7 @@ impl Core {
             snippets,
             reachability,
             metrics,
+            host_details,
             presentation,
             store,
             bus,

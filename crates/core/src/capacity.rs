@@ -71,6 +71,8 @@ pub struct HostCapacity {
     pub unsized_vms: usize,
     /// One entry per drive that holds a known VM's folder.
     pub drives: Vec<DriveCapacity>,
+    /// MO-15: this PC's paging files and commit charge, from the last metrics round.
+    pub paging: Option<crate::adapters::paging::PagingInfo>,
     /// RAM over-committed, drives under [`MIN_FREE_DISK_PCT`], and reads that failed.
     pub warnings: Vec<CapacityWarning>,
 }

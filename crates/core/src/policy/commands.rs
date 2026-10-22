@@ -356,6 +356,10 @@ pub fn default_read_only_commands() -> Vec<String> {
         "iscsiadm",
         "chronyd -p",
         "systemd-analyze cat-config",
+        // MO-14 (0.4.0): services on hosts without systemd. Both only show each service's state:
+        // SysV and Upstart's `service --status-all`, OpenRC's `rc-status`.
+        "service --status-all",
+        "rc-status",
     ]
     .into_iter()
     .map(String::from)
