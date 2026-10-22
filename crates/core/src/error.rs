@@ -88,6 +88,21 @@ pub enum CoreError {
     #[error("approval rejected: {0}")]
     ApprovalRejected(String),
 
+    /// AP-01: the approval waited longer than [`crate::command_bus::APPROVAL_TTL`], so what it showed may be
+    /// out of date. Nothing ran; start the action again.
+    #[error(
+        "this approval waited more than {minutes} minutes, so it expired and nothing ran. Start the action again to see what it would do now"
+    )]
+    ApprovalExpired { minutes: u64 },
+
+    /// AP-01: a target became Prod or protected after the approval was asked, so it is asked again. `request`
+    /// is the new approval (same id); nothing ran.
+    #[error("{changes} since this approval was asked, so it needs approving again. Check the updated approval")]
+    ApprovalChanged {
+        changes: String,
+        request: Box<crate::command_bus::ApprovalRequest>,
+    },
+
     #[error("the vault is locked. Unlock it on the Vault page")]
     VaultLocked,
 
@@ -303,6 +318,8 @@ impl CoreError {
             CoreError::WrongTargetKind { .. } => "wrong_target_kind",
             CoreError::UnknownApproval(_) => "unknown_approval",
             CoreError::ApprovalRejected(_) => "approval_rejected",
+            CoreError::ApprovalExpired { .. } => "approval_expired",
+            CoreError::ApprovalChanged { .. } => "approval_changed",
             CoreError::VaultLocked => "vault_locked",
             CoreError::VaultNotSetUp => "vault_not_set_up",
             CoreError::WrongVaultPassword => "wrong_vault_password",

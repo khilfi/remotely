@@ -2309,9 +2309,17 @@ export interface Detection {
 }
 
 /** Error shape from src-tauri/src/ipc.rs. */
+/** QL-15: the app's log folder; null when the data folder is not known. */
+export interface LogsInfo {
+  folder: string | null;
+  keepDays: number;
+}
+
 export interface IpcError {
   code: string;
   message: string;
+  /** AP-01: with code "approval_changed", the approval asked again (same id), to show instead. */
+  request?: ApprovalRequest;
 }
 
 export function errorMessage(err: unknown): string {
@@ -2324,8 +2332,20 @@ export function errorCode(err: unknown): string | undefined {
   return err && typeof err === "object" && "code" in err ? String((err as IpcError).code) : undefined;
 }
 
+/** AP-01: the approval asked again, when a target became Prod or protected after it was asked. */
+export function changedRequest(err: unknown): ApprovalRequest | null {
+  if (errorCode(err) !== "approval_changed" || !err || typeof err !== "object" || !("request" in err)) return null;
+  return (err as IpcError).request ?? null;
+}
+
 export const api = {
   appInfo: () => invoke<AppInfo>("app_info"),
+  /** QL-15: where the app's logs and crash reports are (Settings, About). */
+  logsInfo: () => invoke<LogsInfo>("logs_info"),
+  /** QL-15: opens the logs folder in Explorer. */
+  openLogs: () => invoke<void>("logs_open"),
+  /** QL-15: a page crashed; the app's log keeps what broke (shortened, secrets redacted). */
+  uiError: (page: string, message: string, stack: string | null) => invoke<void>("ui_error", { page, message, stack }),
 
   /** VM-01: finds every VM (Workstation's library, chosen folders, vmrun list; VM-18 VirtualBox's VMs) via the core. */
   vmRefresh: () => invoke<RefreshReport>("vm_refresh"),
