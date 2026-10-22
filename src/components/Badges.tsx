@@ -191,7 +191,7 @@ const RISK: Record<CommandRisk["action"], { label: string; className: string; hi
   execOther: {
     label: "Changes",
     className: "border-tier-medium/40 text-tier-medium",
-    hint: "Not on the read-only list, so it may change the host. MultiExec and Compare ask for a confirm first.",
+    hint: "Not on the read-only list, so it may change the host. MultiExec and Compare ask for a confirm first, and for the full approval on many hosts at once (5 or more by default).",
   },
   execDangerous: {
     label: "Dangerous",

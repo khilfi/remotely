@@ -148,8 +148,9 @@ approval rules make of it (read-only, changes, dangerous), so you see before you
     Most entries are read-only checks; the fixes (restart or reload a service, vacuum the journal, extend an LV and grow
     its filesystem, resync the clock, clear a failed unit, open a firewall port, mount, log in to an iSCSI target) are
     marked as changes and ask before they run. Every `scp` and `rsync` is a change, dry runs included: rsync's options
-    can run programs or write files. The one format step is for a new, empty disk; the mkfs rule marks it dangerous. A
-    command can appear both in a symptom runbook and in its area group.
+    can run programs or write files. The partition and format steps are for a new, empty disk; the parted and mkfs
+    rules mark them dangerous, as the kubectl delete and Docker or Podman prune rules mark deleting a pod and pruning.
+    A command can appear both in a symptom runbook and in its area group.
   - **Manual** (QL-13): each library command has a link to its official manual page (the man-pages project at
     man7.org, freedesktop.org for systemd's tools, a project's own documentation for Docker, Podman, kubectl, Helm,
     nginx, Apache, MySQL, PostgreSQL, chrony, firewalld, OpenSSL and rsync, and Debian's or Ubuntu's manual pages
@@ -163,7 +164,8 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   MobaXterm, and can show them side by side; each terminal shows its own output. Pick tabs with Ctrl+click and
   Shift+click, or all of them, a folder's or a label's from the MultiExec bar. The command panel's paste and Shift+click
   go to them too. Safety: Remotely follows the line as it is typed, holds Enter and rates the line like any remote
-  command (read-only, other, dangerous; a Prod tab raises the tier). A read-only line goes at once; anything higher
+  command (read-only, other, dangerous; a Prod tab raises the tier; see "How commands are rated" below, where the
+  picked terminals are the hosts). A read-only line goes at once; anything higher
   opens the approval dialog with the line and the terminals, and Cancel sends Ctrl+C to each. A line edited with keys
   Remotely can't follow (Tab completion, arrow keys, history search), or a tab that already had text on its line, is at
   least a confirm. Every line sent is in the audit log with the command, the sessions and the tier, never the output.
@@ -187,6 +189,33 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   approval tiers, sudo from the vault, a time limit and the parallel limit from Settings. The results are grouped by
   output ("48 hosts same, 2 differ"), with a diff between groups, retry of the failed hosts and CSV, JSON or HTML
   export. Quick connections that were not saved as sessions can't be compared.
+- **How commands are rated** (BX-06, AP-01), for Compare and MultiExec alike: a command whose every part starts with
+  a command on the read-only list, and that writes no file, is Low. Any other command is one confirm (Medium) on up to
+  4 hosts, and the full approval (High: type the number of hosts, a reason, the countdown) on 5 or more; Settings,
+  Approval rules sets that number ("Bulk tier for commands on hosts", apart from the bulk threshold of VM and other
+  actions). A command that matches a dangerous-command rule is High on any number of hosts. The rules are regular
+  expressions, tested against the command as typed and against each of its commands as the shell reads them: quotes
+  and backslashes removed (`\rm -rf /` and `"rm" -rf /` read as `rm -rf /`), `sudo`, `env` and `NAME=value` in front
+  dropped, and a script given to `sh -c`, `su -c`, `ssh` or `eval` read as a script. The default rules: `rm -r`,
+  `mkfs`, `dd`, shutdown and reboot, `iptables -F`, `DROP DATABASE`, and from 0.4.1 wiping or repartitioning disks
+  (`wipefs -a`, `sgdisk` zap, new or delete, `parted` mklabel, mkpart or rm, `sfdisk` unless it only lists, dumps,
+  shows or verifies, `blkdiscard`, `pvremove`, `vgremove`, `lvremove`, `mdadm --create` and `--zero-superblock`, and
+  writing to a disk device such as `> /dev/sdb`, `tee`, `cp` or `shred` onto one), locking everyone out
+  (`iptables -P <chain> DROP`, `nft flush ruleset`, `ufw enable`, `ufw default deny [incoming]`,
+  `firewall-cmd --panic-on`, stopping, disabling or masking `sshd`/`ssh`, taking a network interface down with
+  `ip link set … down`, `ifdown` or `ifconfig … down`, since Remotely can't tell which one its connection uses),
+  `kill -9 -1` (any signal to every process), a recursive `chmod`, `chown` or `chgrp` on `/`, `/*` or a system folder
+  (`/etc`, `/usr`, `/var`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/home`, `/dev`), the fork bomb, `DROP TABLE` and
+  `TRUNCATE`, `kubectl delete` (and `oc delete`), and Docker or Podman prunes (system, container, image, volume,
+  builder) and volume removals. Restarting or reloading sshd is not dangerous: it comes back, and open sessions stay
+  up. A prune or volume removal is also rated at least like the same action on the Containers page, so
+  `docker volume prune`, `docker system prune --volumes` and `docker volume rm` are Critical (the vault password
+  again), as a volume prune is there, and editing that rule in Settings changes both; other prunes are High like
+  there. **Saved approval rules keep their own lists**: the new patterns and the 5-host step for "Run any other
+  command" apply to new and default rules. Rules you saved before 0.4.1 keep their dangerous-command list and their
+  tiers ("other" commands stay one confirm on any number of hosts) until you add the patterns and set "Run any other
+  command" to High in bulk yourself, or press Reset to defaults, in Settings, Approval rules. The Containers-page rating of prunes is built in, so it applies to
+  saved rules too.
 - **Notifications** (QL-07): Settings, Terminal, chooses between commands longer than N seconds (5 to 3600) and any
   command that finishes while you're away (the tab isn't on screen or Remotely isn't the window in front), whatever its
   length. A line sent with MultiExec gives one notification once all its terminals are done, never one per terminal.

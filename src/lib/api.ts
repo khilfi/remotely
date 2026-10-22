@@ -673,8 +673,10 @@ export interface DangerousPattern {
 /** AP-01: the editable approval rules (crates/core/src/policy). */
 export interface PolicyRules {
   tiers: Record<ActionKind, TierRule>;
-  /** Targets from which the bulk tier applies. */
+  /** Targets from which the bulk tier applies, for every action but commands on hosts. */
   bulkThreshold: number;
+  /** BX-06: hosts from which the bulk tier of commands on hosts (Compare, MultiExec) applies. */
+  execBulkThreshold: number;
   /** A Prod-labelled target raises the tier by one. */
   prodBump: boolean;
   dangerousCommands: DangerousPattern[];
