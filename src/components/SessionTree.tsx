@@ -4,6 +4,8 @@
 //
 // Reachability dots (MO-08 lite): the core checks the port of each session the tree shows, in the
 // background; collapsed groups are not checked, which keeps large libraries light. A setting turns it off.
+// Hosts with an open connection (a terminal, the dashboard, the Containers page) are not probed and say "connected";
+// a host that is down is checked less often.
 // SS-07: a session behind jump hosts says which one it goes through ("via inner"); its dot is a ring showing the
 // first jump host's check (the one this PC dials), since the session itself is not reachable from here.
 //
@@ -376,7 +378,7 @@ function ReachDot({ reach }: { reach: Reachability | null | undefined }) {
     return reach.state === "up" ? (
       <span
         className="size-2 shrink-0 rounded-full border-[1.5px] border-success"
-        aria-label={`Through ${reach.via}, which is reachable`}
+        aria-label={reach.connected ? `Connected through ${reach.via}` : `Through ${reach.via}, which is reachable`}
       />
     ) : (
       <span
@@ -385,7 +387,10 @@ function ReachDot({ reach }: { reach: Reachability | null | undefined }) {
       />
     );
   return reach.state === "up" ? (
-    <span className="size-1.5 shrink-0 rounded-full bg-success" aria-label="Port open" />
+    <span
+      className="size-1.5 shrink-0 rounded-full bg-success"
+      aria-label={reach.connected ? "Connected" : "Port open"}
+    />
   ) : (
     <span className="size-1.5 shrink-0 rounded-full bg-destructive" aria-label="Not reachable" />
   );
@@ -394,14 +399,21 @@ function ReachDot({ reach }: { reach: Reachability | null | undefined }) {
 function reachText(reach: Reachability | null | undefined) {
   if (!reach) return null;
   const when = formatWhen(reach.checkedAt);
+  if (reach.connected) {
+    return reach.via
+      ? `Connected through ${reach.via} (a terminal, the dashboard or the Containers page), so it is not probed.`
+      : "Connected (a terminal, the dashboard or the Containers page), so it is not probed.";
+  }
+  // Up without a latency: no probe since a connection closed.
+  const up =
+    reach.latencyMs === null ? `connected until ${when}` : `port open (${reach.latencyMs} ms), checked ${when}`;
+  const down = `${reach.reason ?? "no answer"}, checked ${when}. Checked less often while it stays down.`;
   if (reach.via) {
     return reach.state === "up"
-      ? `Reached through ${reach.via}, whose port is open (${reach.latencyMs ?? 0} ms), checked ${when}. The session itself is not checked from this PC.`
-      : `Reached through ${reach.via}, which is not reachable: ${reach.reason ?? "no answer"}, checked ${when}`;
+      ? `Reached through ${reach.via}: ${up}. The session itself is not checked from this PC.`
+      : `Reached through ${reach.via}, which is not reachable: ${down}`;
   }
-  return reach.state === "up"
-    ? `Port open (${reach.latencyMs ?? 0} ms), checked ${when}`
-    : `Not reachable: ${reach.reason ?? "no answer"}, checked ${when}`;
+  return reach.state === "up" ? `${up.charAt(0).toUpperCase()}${up.slice(1)}` : `Not reachable: ${down}`;
 }
 
 function SessionRow({

@@ -1074,7 +1074,7 @@ export interface TerminalSettings {
   /** QL-05: lines, 1000 to 100000. */
   scrollback: number;
   reachability: ReachabilityMode;
-  /** QL-04: seconds between two checks of a session, 15 to 3600. */
+  /** QL-04: seconds between two checks of a host that is up, 15 to 3600 (300 unless chosen); a host down waits longer. */
   reachabilitySecs: number;
   /** QL-07: a Windows notification when a command in a background tab finishes. */
   notifyFinished: boolean;
@@ -1252,6 +1252,11 @@ export interface Reachability {
    * session itself is not checked from here.
    */
   via: string | null;
+  /**
+   * Not probed: this PC holds an SSH connection to the host (or to the first jump host) now, from a terminal, the
+   * dashboard or the Containers page. `checkedAt` is when it was last seen open.
+   */
+  connected: boolean;
 }
 
 export interface ReachabilityUpdate {

@@ -4,9 +4,11 @@
 // details beside the list (ContainerDetailsPanel: overview, logs, stats).
 //
 // Reads go to the core, which runs the host's CLI over the session's SSH connection (kept a few minutes between reads)
-// or docker.exe on this PC. Nothing is read in the background except, while this page shows, the open host's stats
-// every 10 s. Every change (start, stop, restart, pause, remove, pull, prune) is a command for the bus: the policy
-// engine rates it and the approval dialog previews it (AP-02). Marking a host is the app's own data, audited.
+// or docker.exe on this PC. Nothing is read in the background except the open host's stats every 10 s (one read for
+// the list and the details panel's Stats tab) and a followed log, and those only while this page shows and the window
+// is visible, each read timed from when the last one finished (src/hooks/use-poll.ts). Every change (start, stop,
+// restart, pause, remove, pull, prune) is a command for the bus: the policy engine rates it and the approval dialog
+// previews it (AP-02). Marking a host is the app's own data, audited.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
@@ -66,7 +68,6 @@ import {
   type ContainerHostInfo,
   type ContainerList,
   type ContainerOp,
-  type ContainerStats,
   type ContainerSummary,
   type EngineKind,
   type ImageSummary,
@@ -93,11 +94,15 @@ import {
   sameHost,
   sentence,
   shellReason,
+  STATS_POLL_MS,
   statsFor,
   type ContainerAction,
   type StateFilter,
+  type StatsRead,
 } from "@/lib/containers";
 import { plural } from "@/lib/format";
+import { shouldPoll } from "@/lib/polling";
+import { usePoll, useVisibility } from "@/hooks/use-poll";
 import { cn } from "@/lib/utils";
 
 /** "Open a shell": the terminal tab to open for a container. */
@@ -110,7 +115,7 @@ export interface ContainerShellRequest {
 }
 
 interface Props {
-  /** True while the page is shown: the open host's stats are read only then. */
+  /** True while the page is shown: the open host's stats and a followed log are read only then. */
   active: boolean;
   /** Shows the approval dialog for commands the policy engine says need one. */
   onSubmitted: (outcome: SubmitOutcome) => void;
@@ -124,7 +129,6 @@ type Tab = "containers" | "images" | "volumes" | "networks";
 type Current = { host: ContainerHost; engine: EngineKind };
 type Loaded<T> = { key: string; value: T } | { key: string; error: { code?: string; message: string } };
 
-const STATS_MS = 10_000;
 const DETAILS_WIDTH = 40;
 const DIVIDER_ID = "containers-details-divider";
 const BUTTONS: { action: ContainerAction; icon: typeof PlayIcon }[] = [
@@ -149,7 +153,7 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
   const [reads, setReads] = useState(0);
   const [hostsVersion, setHostsVersion] = useState(0);
   const [list, setList] = useState<Loaded<ContainerList> | null>(null);
-  const [stats, setStats] = useState<{ key: string; list: ContainerStats[] } | null>(null);
+  const [stats, setStats] = useState<StatsRead | null>(null);
   const [images, setImages] = useState<Loaded<ImageSummary[]> | null>(null);
   const [volumes, setVolumes] = useState<Loaded<VolumeSummary[]> | null>(null);
   const [networks, setNetworks] = useState<Loaded<NetworkSummary[]> | null>(null);
@@ -212,26 +216,29 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
     };
   }, [current, key, active]);
 
-  // Their resource use, now and every 10 s while the page shows the containers.
-  useEffect(() => {
-    if (!current || !active || tab !== "containers") return;
-    let stale = false;
-    const read = () =>
-      api.containerStats(current.host, current.engine).then(
-        (value) => {
-          if (!stale) setStats({ key: engineKey(current.host, current.engine), list: value });
-        },
-        () => {
-          if (!stale) setStats({ key: engineKey(current.host, current.engine), list: [] });
-        },
-      );
-    void read();
-    const timer = window.setInterval(() => void read(), STATS_MS);
-    return () => {
-      stale = true;
-      window.clearInterval(timer);
-    };
-  }, [current, active, tab, key]);
+  // Their resource use, now and every 10 s while the page shows the containers and the window is visible: one read at a
+  // time, for the list and the details panel's Stats tab alike. Refresh (or another host) reads at once.
+  const visibility = useVisibility();
+  const polling = shouldPoll(active, visibility);
+  const readStats = useCallback(
+    async (live: () => boolean) => {
+      if (!current) return;
+      const statsKey = engineKey(current.host, current.engine);
+      try {
+        const list = await api.containerStats(current.host, current.engine);
+        if (live()) setStats({ key: statsKey, list, error: null, readAt: Date.now() });
+      } catch (err) {
+        if (live()) setStats({ key: statsKey, list: [], error: errorMessage(err), readAt: Date.now() });
+        throw err;
+      }
+    },
+    [current],
+  );
+  usePoll(readStats, {
+    enabled: polling && current !== null && tab === "containers",
+    intervalMs: STATS_POLL_MS,
+    resetKey: key,
+  });
 
   // Images, volumes and networks: when their tab opens (volumes also for the images tab's "used by").
   useEffect(() => {
@@ -265,7 +272,8 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
   const loading = current !== null && (!list || list.key !== key);
   const shown = useMemo(() => filterContainers(containers, text, state), [containers, text, state]);
   const picked = useMemo(() => containers.filter((c) => selected.has(c.id)), [containers, selected]);
-  const currentStats = stats && current && stats.key === engineKey(current.host, current.engine) ? stats.list : [];
+  const statsRead = stats && current && stats.key === engineKey(current.host, current.engine) ? stats : null;
+  const currentStats = statsRead?.list ?? [];
   const detailContainer = detail ? containers.find((c) => c.id === detail) : undefined;
   const detailOpen = detailContainer !== undefined;
   const context = { readOnly, protectedHost: info?.protected ?? false, submitting };
@@ -850,6 +858,8 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
                           onViewChange={setView}
                           onClose={() => setDetail(null)}
                           refreshKey={reads + refreshKey}
+                          stats={statsRead}
+                          polling={polling}
                           onOpenShell={() => openShell(detailContainer)}
                         />
                       )}

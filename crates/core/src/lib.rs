@@ -29,7 +29,8 @@
 //!     tunnels (SS-07): saved port forwards (forwards) open on a terminal's connection; opening one is
 //!     a command on the bus, which the job runner carries out in the terminal; closing is audited
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
-//!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
+//!   reachability (QL-04): background TCP checks of the sessions the tree shows, skipping hosts with an
+//!     open connection and backing off from hosts that are down ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //!     (the Terminal page's Compare output)
 //!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
@@ -103,7 +104,7 @@ use login_guard::LoginGuard;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
-use reachability::ReachabilityChecker;
+use reachability::{ReachabilityChecker, TrackedRemote};
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
@@ -257,6 +258,13 @@ impl Core {
         let policy = load_policy(&store, &ctx).await?;
         // FD-03: the lock applies before anything else can run.
         let presentation = PresentationMode::load(store.clone(), ctx).await;
+        // QL-04: every service reaches SSH through this, which notes the kept connections (the
+        // dashboard's, the Containers page's, host details') so the reachability checks skip their hosts.
+        let tracked = Arc::new(TrackedRemote::new(adapters.remote));
+        let adapters = Adapters {
+            remote: tracked.clone(),
+            ..adapters
+        };
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
         let virtualbox = Arc::new(SwitchableVirtualBox::new(adapters.virtualbox));
@@ -291,6 +299,9 @@ impl Core {
             ctx,
             Arc::clone(&adapters.network),
         ));
+        // QL-04: a host with a connected terminal or a kept connection is not probed.
+        reachability.add_connections(Arc::new(terminals.clone()));
+        reachability.add_connections(tracked);
         // MO-01 to MO-04: reads only, so the collector holds adapters directly, not the job runner.
         let guest = GuestSource::new(
             store.clone(),
