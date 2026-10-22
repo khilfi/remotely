@@ -5,7 +5,7 @@
 // chart of its own. MO-13: "Host details…" opens the session's host details.
 
 import { useEffect, useState } from "react";
-import { EyeIcon, HardDriveIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
+import { EyeIcon, HardDriveIcon, RotateCwIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -27,6 +27,8 @@ interface Props {
   theme: ResolvedTheme;
   onClose: () => void;
   onWatch: (sessionId: string, watch: boolean) => void;
+  /** MO-02: logs in to a parked or waiting host again. */
+  onRetry: (sessionId: string) => void;
   onConnect: (sessionId: string) => void;
   /** Opens the command palette on this VM's actions. */
   onActions: (vmxPath: string) => void;
@@ -61,6 +63,7 @@ export function MetricsDetail({
   theme,
   onClose,
   onWatch,
+  onRetry,
   onConnect,
   onActions,
   onHostDetails,
@@ -187,6 +190,13 @@ export function MetricsDetail({
                 {row.guestStatus.message}
                 {row.guestStatus.retryInSecs != null && ` Next try in ${row.guestStatus.retryInSecs} s.`}
               </p>
+            )}
+            {row.guestStatus && (row.guestStatus.parked || row.guestStatus.state === "paused") && (
+              <div>
+                <Button size="sm" variant="outline" onClick={() => onRetry(row.guestStatus!.sessionId)}>
+                  <RotateCwIcon /> Retry
+                </Button>
+              </div>
             )}
           </SheetHeader>
 

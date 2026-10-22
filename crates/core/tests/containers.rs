@@ -880,7 +880,9 @@ async fn a_host_outside_the_docker_group_runs_docker_with_sudo_and_its_password_
     )
     .await;
     let err = core.containers.containers(ctx, host(web), DOCKER).await.unwrap_err();
-    assert_eq!(err.code(), "sudo_password_refused");
+    // MO-02, CT-01: parked, so the next polls do not try it again.
+    assert_eq!(err.code(), "login_parked");
+    assert!(err.to_string().contains("refused the password"), "{err}");
     for entry in core.store.recent_audit(ctx, 100).await.unwrap() {
         let all = format!("{:?}", entry);
         assert!(!all.contains("login-pw-example") && !all.contains("stale"), "{all}");

@@ -531,6 +531,7 @@ async fn untrusted_and_changed_host_keys_stop_guest_polling() {
     }
     let status = core.metrics.guest().statuses()[&id].clone();
     assert_eq!(status.state, GuestState::HostKey);
+    assert!(status.parked, "a blocked key parks the host");
     assert!(status.message.unwrap().contains("has changed"));
     let blocked = core
         .store
@@ -568,6 +569,107 @@ async fn logins_that_need_something_typed_say_what_to_save() {
         .as_deref()
         .unwrap()
         .contains("not-the-password"));
+    assert!(statuses[&no_password].parked && statuses[&wrong].parked);
+}
+
+/// A login the host refused is not tried again on its own: a rotated password must not lock the
+/// account (pam_faillock, AD) or get this PC banned (fail2ban). Retry, a new password in the vault or
+/// an edited session give it one more try.
+#[tokio::test]
+async fn a_refused_login_parks_until_retry_or_a_new_password() {
+    let password = new_password();
+    let server = linux_server(&password).await;
+    let core = ssh_core().await;
+    trust(&core, &server, None).await;
+    let id = session(&core, "web01", server.port(), Some("the-old-password")).await;
+    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    let refused = |server: &TestSshServer| {
+        server
+            .log()
+            .iter()
+            .filter(|l| l.starts_with("password") && l.ends_with("refused"))
+            .count()
+    };
+
+    // Backoff is zero in these tests, so without parking every round would log in again.
+    for _ in 0..4 {
+        core.metrics.collect_once().await;
+    }
+    let status = core.metrics.guest().statuses()[&id].clone();
+    assert_eq!(status.state, GuestState::LoginFailed);
+    assert!(status.parked, "{status:?}");
+    assert_eq!(status.retry_in_secs, None, "no automatic retry");
+    assert!(status.message.as_deref().unwrap().contains("press Retry"), "{status:?}");
+    let tried = refused(&server);
+    assert!(tried >= 1);
+    assert_eq!(server.connections(), 1, "one login, then parked");
+
+    // Retry: one more try (still wrong), then parked again.
+    core.retry_background_logins(id);
+    for _ in 0..3 {
+        core.metrics.collect_once().await;
+    }
+    assert_eq!(server.connections(), 2);
+    assert!(core.metrics.guest().statuses()[&id].parked);
+
+    // The password is replaced in the vault: tried again, and it works.
+    let secret = core
+        .vault
+        .list(&core.ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.label == "web01 login")
+        .unwrap()
+        .id;
+    core.vault
+        .replace(&core.ctx, secret, SecretString::new(&password))
+        .await
+        .unwrap();
+    core.metrics.collect_once().await;
+    let status = core.metrics.guest().statuses()[&id].clone();
+    assert_eq!(status.state, GuestState::Ok, "{status:?}");
+    assert!(!status.parked);
+    assert_eq!(refused(&server), tried * 2, "no refused login after the new password");
+}
+
+/// Every background login counts against a cap per host per hour, whatever its outcome.
+#[tokio::test]
+async fn background_logins_are_capped_per_host_per_hour() {
+    let password = new_password();
+    let server = linux_server(&password).await;
+    let core = ssh_core().await;
+    core.login_guard.set_limits(remotely_core::login_guard::LoginLimits {
+        per_hour: 2,
+        window: Duration::from_secs(3600),
+    });
+    trust(&core, &server, None).await;
+    let id = session(&core, "web01", server.port(), Some(&password)).await;
+    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    for _ in 0..2 {
+        core.metrics.collect_once().await;
+        assert_eq!(core.metrics.guest().statuses()[&id].state, GuestState::Ok);
+        server.drop_connections();
+        // The next round notices the dropped connection.
+        core.metrics.collect_once().await;
+    }
+    for _ in 0..3 {
+        core.metrics.collect_once().await;
+    }
+    let status = core.metrics.guest().statuses()[&id].clone();
+    assert_eq!(status.state, GuestState::Paused, "{status:?}");
+    assert!(
+        status.message.as_deref().unwrap().contains("2 background logins"),
+        "{status:?}"
+    );
+    assert!(status.retry_in_secs.unwrap() > 3000, "{status:?}");
+    assert_eq!(server.connections(), 2);
+
+    // Retry gets one login past the cap.
+    core.retry_background_logins(id);
+    core.metrics.collect_once().await;
+    assert_eq!(core.metrics.guest().statuses()[&id].state, GuestState::Ok);
+    assert_eq!(server.connections(), 3);
 }
 
 #[tokio::test]

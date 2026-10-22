@@ -1674,7 +1674,7 @@ export interface MetricPoint {
 }
 
 export type GuestState =
-  "connecting" | "ok" | "vaultLocked" | "unreachable" | "loginFailed" | "hostKey" | "noData" | "error";
+  "connecting" | "ok" | "vaultLocked" | "unreachable" | "loginFailed" | "hostKey" | "paused" | "noData" | "error";
 
 /** MO-02: where guest polling stands for one watched session. */
 export interface GuestStatus {
@@ -1685,6 +1685,8 @@ export interface GuestStatus {
   /** Seconds until the next try, while backing off. */
   retryInSecs: number | null;
   lastOk: string | null;
+  /** No new login until the session or its credentials change, or the user presses Retry. */
+  parked: boolean;
 }
 
 /** MO-01 NFR: what collecting costs. */
@@ -2414,6 +2416,11 @@ export const api = {
   metricsHostUsage: () => invoke<VmHostUsage[]>("metrics_host_usage"),
   /** MO-02: watching a session logs in to it over SSH every round. Audited; returns the watched ids. */
   metricsWatch: (sessionId: string, watch: boolean) => invoke<string[]>("metrics_watch", { sessionId, watch }),
+  /**
+   * MO-02, CT-01: Retry on a host whose background logins are parked (refused login or sudo, changed
+   * host key, no saved password) or capped for the hour. The dashboard and Containers page log in again.
+   */
+  backgroundLoginRetry: (sessionId: string) => invoke<void>("background_login_retry", { sessionId }),
   /** MO-15: this PC's RAM and paging files, from the metrics rounds. */
   metricsThisPc: () => invoke<ThisPcSeries>("metrics_this_pc"),
   /** MO-13: what was last read about the session (null before the first read). Makes no connection. */

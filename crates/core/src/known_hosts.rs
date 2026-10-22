@@ -6,11 +6,14 @@
 //! Trusting, replacing and removing keys change the app's own data, so they skip the command bus and
 //! have no approval tier; each is audited, and so is every blocked connection.
 
+use std::sync::OnceLock;
+
 use serde::Serialize;
 use uuid::Uuid;
 
 use crate::domain::{Context, Target};
 use crate::error::{CoreError, Result};
+use crate::login_guard::LoginGuard;
 use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
 
@@ -74,11 +77,26 @@ pub(crate) fn address(host: &str, port: u16) -> String {
 
 pub struct KnownHosts {
     store: Store,
+    /// MO-02, CT-01: trusting or removing a key gives parked background logins one more try.
+    guard: OnceLock<LoginGuard>,
 }
 
 impl KnownHosts {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            guard: OnceLock::new(),
+        }
+    }
+
+    pub fn set_login_guard(&self, guard: LoginGuard) {
+        let _ = self.guard.set(guard);
+    }
+
+    fn changed(&self) {
+        if let Some(guard) = self.guard.get() {
+            guard.credentials_changed();
+        }
     }
 
     pub async fn list(&self, ctx: &Context) -> Result<Vec<KnownHost>> {
@@ -115,6 +133,7 @@ impl KnownHosts {
         self.store
             .put_known_host(ctx, &key.host, key.port, &key.key_type, &key.fingerprint)
             .await?;
+        self.changed();
         let (event, action, detail) = match previous {
             None => (
                 "host_key_trusted",
@@ -158,6 +177,7 @@ impl KnownHosts {
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(format!("known host {id}")))?;
         self.store.delete_known_host(ctx, id).await?;
+        self.changed();
         let action = format!("Removed the trusted host key of {}", address(&known.host, known.port));
         let detail = format!(
             "{} {} (trusted since {})",

@@ -1196,3 +1196,11 @@ pub async fn metrics_watch(state: State<'_, AppState>, session_id: Uuid, watch: 
     let core = &state.core;
     Ok(core.metrics.set_watched(&core.ctx, session_id, watch).await?)
 }
+
+/// MO-02, CT-01: Retry on a host whose background logins are parked (a refused login or sudo, a
+/// changed host key, no saved password) or waiting for the hourly cap. The dashboard and the
+/// Containers page log in again on their next read.
+#[tauri::command]
+pub fn background_login_retry(state: State<'_, AppState>, session_id: Uuid) {
+    state.core.retry_background_logins(session_id);
+}

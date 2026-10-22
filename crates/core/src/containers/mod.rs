@@ -16,6 +16,11 @@
 //!
 //! Secrets (the login, the sudo password) come from the vault for each new connection and go only to
 //! the adapter. Logs and command output are shown, never audited.
+//!
+//! A login the host refused, a sudo password it refused, a changed host key or a password that isn't
+//! saved parks the host ([`crate::login_guard`], shared with the dashboard): reads fail at once with
+//! `login_parked`, without logging in, until the session or its credentials change or the user presses
+//! Retry ([`Containers::retry`]). Every new login counts against the hourly cap per host.
 
 pub mod marks;
 
@@ -43,6 +48,7 @@ use crate::error::{ContainerProblem, CoreError, Result};
 use crate::impact::{ContainerImpact, TargetImpact};
 use crate::known_hosts::KnownHosts;
 use crate::locks;
+use crate::login_guard::{self, LoginGuard, ParkReason, ParkScope, Parked};
 use crate::metrics::guest::{spec_key, GuestVerifier};
 use crate::store::Store;
 use crate::vault::{Vault, VaultStatus};
@@ -180,6 +186,8 @@ struct Inner {
     known_hosts: Arc<KnownHosts>,
     engines: Arc<dyn ContainerEngines>,
     marks: ContainerMarks,
+    /// Parks refused logins and sudo, and caps logins per host (shared with the dashboard).
+    guard: LoginGuard,
     kept: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<Kept>>>>,
     seen: Mutex<HashMap<(ContainerHost, EngineKind), Seen>>,
     tuning: RwLock<ContainerTuning>,
@@ -198,9 +206,11 @@ impl Containers {
         remote: Arc<dyn RemoteAdapter>,
         known_hosts: Arc<KnownHosts>,
         engines: Arc<dyn ContainerEngines>,
+        guard: LoginGuard,
     ) -> Self {
         let inner = Arc::new(Inner {
             marks: ContainerMarks::new(store.clone()),
+            guard,
             store,
             vault,
             remote,
@@ -232,6 +242,12 @@ impl Containers {
 
     pub fn marks(&self) -> &ContainerMarks {
         &self.inner.marks
+    }
+
+    /// The user pressed Retry: a parked host logs in (and runs sudo) again on the next read, once past
+    /// the hourly cap if it was reached.
+    pub fn retry(&self, session_id: Uuid) {
+        self.inner.guard.retry(session_id);
     }
 
     /// CT-02: the docker.exe in use, if any.
@@ -313,6 +329,8 @@ impl Containers {
         sudo_password: Option<crate::vault::SecretId>,
     ) -> Result<Detection> {
         let spec = self.spec(ctx, session_id).await?;
+        // The user's own click, like Retry.
+        self.inner.guard.retry(session_id);
         let connection = self.connection(ctx, &spec).await?;
         let mut engines = Vec::new();
         for kind in EngineKind::ALL {
@@ -665,9 +683,24 @@ impl Containers {
             ContainerHost::Session { session_id } => {
                 let mark = self.mark(ctx, session_id, kind).await?;
                 let spec = self.spec(ctx, session_id).await?;
+                // sudo refused the saved password before: not again until something changes.
+                let sudo_key = format!("{} # {:?}", login_guard::login_key(&spec), mark.sudo);
+                if let Some(parked) = self.inner.guard.parked(session_id, ParkScope::Sudo, &sudo_key) {
+                    return Err(parked.error());
+                }
                 let connection = self.connection(ctx, &spec).await?;
                 let sudo = self.sudo_run(ctx, &spec, mark.sudo).await?;
                 let engine = self.inner.engines.over_ssh(kind, &spec.name, connection, sudo);
+                let engine: Arc<dyn ContainerEngine> = match mark.sudo {
+                    SudoMode::Password { .. } => Arc::new(SudoWatch {
+                        inner: engine,
+                        guard: self.inner.guard.clone(),
+                        session_id,
+                        key: sudo_key,
+                        host: spec.name.clone(),
+                    }),
+                    SudoMode::Off | SudoMode::NoPassword => engine,
+                };
                 Ok((engine, mark.sudo.uses_sudo()))
             }
         }
@@ -716,28 +749,60 @@ impl Containers {
     }
 
     async fn connect(&self, ctx: &Context, spec: &SessionSpec) -> Result<Arc<dyn ExecSession>> {
+        let guard = &self.inner.guard;
+        let key = login_guard::login_key(spec);
+        let park = |reason: ParkReason, what: &str| {
+            let parked = Parked {
+                reason,
+                message: login_guard::parked_message(what),
+            };
+            guard.park(spec.id, ParkScope::Login, &key, parked.clone());
+            parked.error()
+        };
+        if let Some(parked) = guard.parked(spec.id, ParkScope::Login, &key) {
+            return Err(parked.error());
+        }
+        if let Some(what) = login_guard::missing_password(spec) {
+            return Err(park(
+                ParkReason::SecretMissing,
+                &format!(
+                    "no password is saved for {what}. Save it in the vault and choose it in that session, so the Containers page can log in"
+                ),
+            ));
+        }
         let mut hops = spec.jumps();
         hops.push(spec);
         for hop in &hops {
-            let what = if hop.id == spec.id {
-                format!("'{}'", hop.name)
-            } else {
-                format!("the jump host '{}'", hop.name)
-            };
-            if hop.auth == AuthMethod::Password(None) {
-                return Err(CoreError::AuthFailed(format!(
-                    "no password is saved for {what}. Save it in the vault and choose it in that session, so the Containers page can log in"
-                )));
-            }
             let needs_vault = matches!(hop.auth, AuthMethod::Password(Some(_)) | AuthMethod::PrivateKey { .. });
             if needs_vault && self.inner.vault.status() != VaultStatus::Unlocked {
                 return Err(CoreError::VaultLocked);
             }
         }
         let tuning = locks::read(&self.inner.tuning).clone();
-        let credentials = crate::sessions::credentials(self.inner.vault.as_ref(), ctx, spec, None).await?;
-        let jump_credentials =
-            crate::sessions::jump_credentials(self.inner.vault.as_ref(), ctx, spec, &HashMap::new()).await?;
+        // A secret that was deleted from the vault can't come back on its own.
+        let missing = |err: CoreError| match err {
+            CoreError::UnknownTarget(_) => park(
+                ParkReason::SecretMissing,
+                &format!(
+                    "a secret the login to '{}' needs is no longer in the vault. Choose another one in the session",
+                    spec.name
+                ),
+            ),
+            other => other,
+        };
+        let credentials = crate::sessions::credentials(self.inner.vault.as_ref(), ctx, spec, None)
+            .await
+            .map_err(missing)?;
+        let jump_credentials = crate::sessions::jump_credentials(self.inner.vault.as_ref(), ctx, spec, &HashMap::new())
+            .await
+            .map_err(missing)?;
+        if let Err(wait) = guard.admit(spec.id, &login_guard::login_hosts(spec)) {
+            let host = crate::known_hosts::address(&spec.host, spec.port);
+            return Err(CoreError::LoginsCapped {
+                message: login_guard::capped_message(&host, guard.per_hour(), wait),
+                wait_secs: wait.as_secs(),
+            });
+        }
         let options = ConnectOptions {
             connect_timeout: tuning.connect_timeout,
             agent: tuning.agent.clone(),
@@ -752,6 +817,7 @@ impl Containers {
                 environment: spec.environment,
                 protected: false,
             },
+            // Once per park: a blocked key parks the host until something changes or Retry.
             record_blocked: true,
         });
         let limit = tuning.connect_timeout.saturating_mul(2);
@@ -782,7 +848,10 @@ impl Containers {
                     "the host key of {place} is not trusted yet. Connect to it once in a terminal to check and trust it"
                 )))
             }
-            Err(err) => Err(err),
+            Err(err) => match ParkReason::of(&err) {
+                Some(reason) => Err(park(reason, &err.to_string())),
+                None => Err(err),
+            },
         }
     }
 
@@ -886,6 +955,71 @@ impl Containers {
     /// After a change the lists are out of date: names are read again next time.
     fn forget(&self, host: ContainerHost, kind: EngineKind) {
         locks::lock(&self.inner.seen).remove(&(host, kind));
+    }
+}
+
+/// An engine that runs under sudo with a saved password: a refusal parks sudo on the host, so the next
+/// polls don't try the same password again (each try is a failed sudo in the host's logs, and
+/// pam_faillock may count it).
+struct SudoWatch {
+    inner: Arc<dyn ContainerEngine>,
+    guard: LoginGuard,
+    session_id: Uuid,
+    key: String,
+    host: String,
+}
+
+impl SudoWatch {
+    fn watch<T>(&self, result: Result<T>) -> Result<T> {
+        match result {
+            Err(CoreError::SudoPasswordRefused) => {
+                let parked = Parked {
+                    reason: ParkReason::SudoRefused,
+                    message: login_guard::parked_message(&format!(
+                        "sudo on '{}' refused the password from the vault",
+                        self.host
+                    )),
+                };
+                self.guard
+                    .park(self.session_id, ParkScope::Sudo, &self.key, parked.clone());
+                Err(parked.error())
+            }
+            other => other,
+        }
+    }
+}
+
+#[async_trait]
+impl ContainerEngine for SudoWatch {
+    fn kind(&self) -> EngineKind {
+        self.inner.kind()
+    }
+    async fn version(&self) -> Result<EngineVersion> {
+        self.watch(self.inner.version().await)
+    }
+    async fn containers(&self) -> Result<Vec<ContainerSummary>> {
+        self.watch(self.inner.containers().await)
+    }
+    async fn stats(&self) -> Result<Vec<ContainerStats>> {
+        self.watch(self.inner.stats().await)
+    }
+    async fn inspect(&self, id: &ContainerId) -> Result<ContainerDetails> {
+        self.watch(self.inner.inspect(id).await)
+    }
+    async fn logs(&self, id: &ContainerId, query: &LogQuery) -> Result<Logs> {
+        self.watch(self.inner.logs(id, query).await)
+    }
+    async fn images(&self) -> Result<Vec<ImageSummary>> {
+        self.watch(self.inner.images().await)
+    }
+    async fn volumes(&self) -> Result<Vec<VolumeSummary>> {
+        self.watch(self.inner.volumes().await)
+    }
+    async fn networks(&self) -> Result<Vec<NetworkSummary>> {
+        self.watch(self.inner.networks().await)
+    }
+    async fn change(&self, change: &EngineChange) -> Result<ChangeOutput> {
+        self.watch(self.inner.change(change).await)
     }
 }
 

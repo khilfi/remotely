@@ -9,17 +9,35 @@ use tokio::sync::watch;
 use super::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultStatus};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
+use crate::login_guard::LoginGuard;
 use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
 
 pub struct VaultService {
     vault: Arc<dyn Vault>,
     store: Store,
+    /// MO-02, CT-01: unlocking and changing secrets give parked background logins one more try.
+    guard: Option<LoginGuard>,
 }
 
 impl VaultService {
     pub fn new(vault: Arc<dyn Vault>, store: Store) -> Self {
-        Self { vault, store }
+        Self {
+            vault,
+            store,
+            guard: None,
+        }
+    }
+
+    pub fn with_login_guard(mut self, guard: LoginGuard) -> Self {
+        self.guard = Some(guard);
+        self
+    }
+
+    fn credentials_changed(&self) {
+        if let Some(guard) = &self.guard {
+            guard.credentials_changed();
+        }
     }
 
     /// For the command bus (AP-06) and, from SS-03, the adapters.
@@ -55,6 +73,7 @@ impl VaultService {
         };
         match self.vault.unlock(method).await {
             Ok(()) => {
+                self.credentials_changed();
                 self.audit(ctx, "vault_unlocked", "Unlocked the vault", Some(how))
                     .await?;
                 Ok(self.info())
@@ -109,6 +128,7 @@ impl VaultService {
     pub async fn add(&self, ctx: &Context, kind: SecretKind, label: &str, secret: SecretString) -> Result<SecretMeta> {
         self.store.read_only().check(Change::Vault)?;
         let id = self.vault.put(ctx, kind, label, secret).await?;
+        self.credentials_changed();
         let meta = self.meta(ctx, id).await?;
         let action = format!("Added the {} '{}' to the vault", kind.label(), meta.label);
         self.audit(ctx, "vault_changed", &action, None).await?;
@@ -118,6 +138,7 @@ impl VaultService {
     pub async fn replace(&self, ctx: &Context, id: SecretId, secret: SecretString) -> Result<SecretMeta> {
         self.store.read_only().check(Change::Vault)?;
         self.vault.replace(ctx, id, secret).await?;
+        self.credentials_changed();
         let meta = self.meta(ctx, id).await?;
         let action = format!("Replaced the {} '{}'", meta.kind.label(), meta.label);
         let detail = uses(meta.used_by, "now use the new value");
@@ -147,6 +168,7 @@ impl VaultService {
         self.store.read_only().check(Change::Vault)?;
         let meta = self.meta(ctx, id).await?;
         self.vault.delete(ctx, id).await?;
+        self.credentials_changed();
         let action = format!("Deleted the {} '{}' from the vault", meta.kind.label(), meta.label);
         let detail = uses(meta.used_by, "no longer have it");
         self.audit(ctx, "vault_changed", &action, detail.as_deref()).await

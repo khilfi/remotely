@@ -58,6 +58,7 @@ pub mod inventory;
 pub mod jobs;
 pub mod known_hosts;
 pub mod locks;
+pub mod login_guard;
 pub mod metrics;
 pub mod policy;
 pub mod presentation;
@@ -98,6 +99,7 @@ use import::Importer;
 use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
+use login_guard::LoginGuard;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
@@ -205,6 +207,8 @@ pub struct Core {
     pub metrics: Arc<Metrics>,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
+    /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
+    pub login_guard: LoginGuard,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
     pub presentation: PresentationMode,
     pub host_counters: Arc<dyn HostCounters>,
@@ -259,6 +263,9 @@ impl Core {
         // VM-18: every module that reads or changes VMs reaches both hypervisors through this.
         let hypervisors = Hypervisors::new(vmware_dyn, virtualbox.clone());
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
+        // MO-02, CT-01: one guard for every background login (dashboard and Containers page).
+        let login_guard = LoginGuard::new();
+        known_hosts.set_login_guard(login_guard.clone());
         let links = Arc::new(VmLinks::new(store.clone(), Arc::clone(&adapters.network)));
         let containers = Containers::new(
             store.clone(),
@@ -266,6 +273,7 @@ impl Core {
             Arc::clone(&adapters.remote),
             Arc::clone(&known_hosts),
             Arc::clone(&adapters.containers),
+            login_guard.clone(),
         );
         let terminals = Terminals::new(
             store.clone(),
@@ -290,6 +298,7 @@ impl Core {
             Arc::clone(&adapters.remote),
             Arc::clone(&adapters.vault),
             Arc::clone(&known_hosts),
+            login_guard.clone(),
         );
         guest.set_specs(specs.clone());
         let metrics = Arc::new(Metrics::new(MetricsParts {
@@ -353,7 +362,7 @@ impl Core {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
-            vault: VaultService::new(adapters.vault, store.clone()),
+            vault: VaultService::new(adapters.vault, store.clone()).with_login_guard(login_guard.clone()),
             sessions: SessionLibrary::new(store.clone(), Arc::clone(&links)),
             forwards: Forwards::new(store.clone()),
             links,
@@ -370,6 +379,7 @@ impl Core {
             reachability,
             metrics,
             host_details,
+            login_guard,
             presentation,
             store,
             bus,
@@ -379,6 +389,14 @@ impl Core {
             vmware,
             virtualbox,
         })
+    }
+
+    /// MO-02, CT-01: the user pressed Retry on a parked or waiting host: the dashboard and the
+    /// Containers page log in to it again on their next read. Changes nothing on the host or in the
+    /// app's data, so it is not audited and the read-only lock allows it.
+    pub fn retry_background_logins(&self, session_id: uuid::Uuid) {
+        self.metrics.guest().retry(session_id);
+        self.containers.retry(session_id);
     }
 
     /// Path of the vmrun.exe in use, or `None` when Workstation was not found.

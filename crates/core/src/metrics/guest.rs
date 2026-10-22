@@ -5,11 +5,14 @@
 //! [`procfs::GUEST_SCRIPT`] on a new channel of it. A read, so it skips the command bus and the
 //! approval flow (CLAUDE.md, architecture rule 3), and it changes nothing on the host.
 //!
-//! A host that can't be reached, refuses the login, or presents an untrusted key is retried after a
-//! wait that doubles each time (5 s up to 5 minutes), and its state says why. A login that needs a
-//! secret waits while the vault is locked, without trying. Host keys are checked like a bulk run
-//! checks them: trusted passes, unknown fails (trust it in a terminal first), changed blocks and is
-//! audited. Secrets come from the vault for each new login and go only to the adapter.
+//! A host that can't be reached or presents an untrusted key is retried after a wait that doubles
+//! each time (5 s up to 5 minutes), and its state says why. A login the host refused, a changed host
+//! key or a password that isn't saved parks the host instead ([`crate::login_guard`]): no new login
+//! until the session or its credentials change or the user presses Retry, so a rotated password never
+//! locks the account. Every login counts against the hourly cap per host. A login that needs a secret
+//! waits while the vault is locked, without trying. Host keys are checked like a bulk run checks them:
+//! trusted passes, unknown fails (trust it in a terminal first), changed blocks and is audited once
+//! per park. Secrets come from the vault for each new login and go only to the adapter.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -29,6 +32,7 @@ use crate::error::{CoreError, Result};
 use crate::host_details::{CollectedBy, SpecsCollector};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
 use crate::locks;
+use crate::login_guard::{self, LoginGuard, ParkReason, ParkScope, Parked};
 use crate::sessions;
 use crate::store::Store;
 use crate::vault::{Vault, VaultStatus};
@@ -80,8 +84,6 @@ struct Host {
     previous: Option<(GuestReading, Instant)>,
     failures: u32,
     next_try: Option<Instant>,
-    /// A changed host key was audited for this host already; not again every retry.
-    blocked_recorded: bool,
     /// MO-13: when this connection last looked at the age of the host's stored facts.
     specs_checked: Option<Instant>,
 }
@@ -94,7 +96,6 @@ impl Host {
             previous: None,
             failures: 0,
             next_try: None,
-            blocked_recorded: false,
             specs_checked: None,
         }
     }
@@ -118,6 +119,8 @@ struct Shared {
     remote: Arc<dyn RemoteAdapter>,
     vault: Arc<dyn Vault>,
     known_hosts: Arc<KnownHosts>,
+    /// Parks refused logins and caps logins per host (shared with the Containers page).
+    guard: LoginGuard,
     tuning: RwLock<GuestTuning>,
     statuses: Mutex<HashMap<Uuid, StatusEntry>>,
     /// Good readings not yet handed to a round.
@@ -137,8 +140,10 @@ struct Failure {
     message: String,
     /// Retry next round without waiting (nothing was sent over the network).
     retry_now: bool,
-    /// The host key changed: the block is audited once, not at every retry.
-    key_changed: bool,
+    /// Parked: no new login until something changes or the user presses Retry.
+    parked: bool,
+    /// The hourly cap on logins was reached: the next try waits this long.
+    wait: Option<Duration>,
 }
 
 impl Failure {
@@ -147,7 +152,19 @@ impl Failure {
             state,
             message: message.into(),
             retry_now: false,
-            key_changed: false,
+            parked: false,
+            wait: None,
+        }
+    }
+
+    fn parked(parked: &Parked) -> Self {
+        let state = match parked.reason {
+            ParkReason::HostKeyChanged => GuestState::HostKey,
+            ParkReason::LoginRefused | ParkReason::SecretMissing | ParkReason::SudoRefused => GuestState::LoginFailed,
+        };
+        Self {
+            parked: true,
+            ..Self::new(state, parked.message.clone())
         }
     }
 
@@ -176,7 +193,6 @@ impl Failure {
         };
         Self {
             retry_now: state == GuestState::VaultLocked,
-            key_changed: matches!(err, CoreError::HostKeyChanged { .. }),
             ..Self::new(state, message)
         }
     }
@@ -219,10 +235,7 @@ impl HostKeyVerifier for GuestVerifier {
 /// What a connection depends on: host, port, user, login method and its vault ids, for the session
 /// and each jump host on the way (SS-07).
 pub(crate) fn spec_key(spec: &SessionSpec) -> String {
-    let hop = |s: &SessionSpec| format!("{}|{}|{}|{:?}", s.host, s.port, s.username, s.auth);
-    let mut key: Vec<String> = spec.jumps().into_iter().map(hop).collect();
-    key.push(hop(spec));
-    key.join(" > ")
+    login_guard::login_key(spec)
 }
 
 fn needs_vault(auth: &AuthMethod) -> bool {
@@ -236,6 +249,7 @@ impl GuestSource {
         remote: Arc<dyn RemoteAdapter>,
         vault: Arc<dyn Vault>,
         known_hosts: Arc<KnownHosts>,
+        guard: LoginGuard,
     ) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -244,6 +258,7 @@ impl GuestSource {
                 remote,
                 vault,
                 known_hosts,
+                guard,
                 tuning: RwLock::new(GuestTuning::default()),
                 statuses: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(HashMap::new()),
@@ -274,6 +289,24 @@ impl GuestSource {
     /// Tests shorten the timeouts and waits.
     pub fn set_tuning(&self, tuning: GuestTuning) {
         *locks::write(&self.shared.tuning) = tuning;
+    }
+
+    /// The user pressed Retry: a parked host logs in again next round, and a waiting one stops waiting.
+    pub fn retry(&self, session_id: Uuid) {
+        self.shared.guard.retry(session_id);
+        let host = locks::lock(&self.hosts).get(&session_id).cloned();
+        if let Some(host) = host {
+            if let Ok(mut host) = host.try_lock() {
+                host.failures = 0;
+                host.next_try = None;
+            }
+        }
+        if let Some(entry) = locks::lock(&self.shared.statuses).get_mut(&session_id) {
+            let last_ok = entry.status.last_ok.take();
+            entry.status = GuestStatus::new(session_id, GuestState::Connecting, None);
+            entry.status.last_ok = last_ok;
+            entry.retry_at = None;
+        }
     }
 
     /// The sessions watched for guest metrics.
@@ -399,8 +432,11 @@ async fn poll(shared: &Shared, id: Uuid, host: &mut Host) {
             read_specs_when_old(shared, id, host).await;
         }
         Err(failure) => {
-            let retry_at = if failure.retry_now {
+            // Parked: the guard keeps it from logging in, at no cost each round. Retry clears it.
+            let retry_at = if failure.retry_now || failure.parked {
                 None
+            } else if let Some(wait) = failure.wait {
+                Some(Instant::now() + wait)
             } else {
                 host.failures = host.failures.saturating_add(1);
                 Some(Instant::now() + backoff(host.failures, tuning.backoff_min, tuning.backoff_max))
@@ -410,6 +446,7 @@ async fn poll(shared: &Shared, id: Uuid, host: &mut Host) {
             let last_ok = statuses.get(&id).and_then(|e| e.status.last_ok.clone());
             let mut status = GuestStatus::new(id, failure.state, Some(failure.message));
             status.last_ok = last_ok;
+            status.parked = failure.parked;
             statuses.insert(id, StatusEntry { status, retry_at });
         }
     }
@@ -437,16 +474,7 @@ async fn read_once(
         host.conn = None;
     }
     if host.conn.is_none() {
-        match connect(shared, tuning, &spec, host.blocked_recorded).await {
-            Ok(conn) => {
-                host.conn = Some(conn);
-                host.blocked_recorded = false;
-            }
-            Err(failure) => {
-                host.blocked_recorded |= failure.key_changed;
-                return Err(failure);
-            }
-        }
+        host.conn = Some(connect(shared, tuning, &spec).await?);
     }
     let Some(conn) = host.conn.as_ref() else {
         return Err(Failure::new(GuestState::Error, "no connection"));
@@ -546,8 +574,27 @@ async fn connect(
     shared: &Shared,
     tuning: &GuestTuning,
     spec: &SessionSpec,
-    blocked_recorded: bool,
 ) -> std::result::Result<Arc<dyn ExecSession>, Failure> {
+    let key = login_guard::login_key(spec);
+    let park = |reason: ParkReason, what: &str| {
+        let parked = Parked {
+            reason,
+            message: login_guard::parked_message(what),
+        };
+        shared.guard.park(spec.id, ParkScope::Login, &key, parked.clone());
+        Failure::parked(&parked)
+    };
+    if let Some(parked) = shared.guard.parked(spec.id, ParkScope::Login, &key) {
+        return Err(Failure::parked(&parked));
+    }
+    if let Some(what) = login_guard::missing_password(spec) {
+        return Err(park(
+            ParkReason::SecretMissing,
+            &format!(
+                "no password is saved for {what}. Save it in the vault and choose it in that session, so the dashboard can log in"
+            ),
+        ));
+    }
     // SS-07: every jump host on the way logs in too, with its own saved login.
     let mut hops = spec.jumps();
     hops.push(spec);
@@ -557,14 +604,6 @@ async fn connect(
         } else {
             format!("the jump host '{}'", hop.name)
         };
-        if hop.auth == AuthMethod::Password(None) {
-            return Err(Failure::new(
-                GuestState::LoginFailed,
-                format!(
-                    "no password is saved for {what}. Save it in the vault and choose it in that session, so the dashboard can log in"
-                ),
-            ));
-        }
         if needs_vault(&hop.auth) && shared.vault.status() != VaultStatus::Unlocked {
             return Err(Failure {
                 retry_now: true,
@@ -575,12 +614,30 @@ async fn connect(
             });
         }
     }
+    // A secret that was deleted from the vault can't come back on its own.
+    let missing = |err: CoreError| match err {
+        CoreError::UnknownTarget(_) => park(
+            ParkReason::SecretMissing,
+            "a secret this login needs is no longer in the vault. Choose another one in the session",
+        ),
+        other => Failure::from_error(&other),
+    };
     let credentials = sessions::credentials(shared.vault.as_ref(), &shared.ctx, spec, None)
         .await
-        .map_err(|err| Failure::from_error(&err))?;
+        .map_err(missing)?;
     let jump_credentials = sessions::jump_credentials(shared.vault.as_ref(), &shared.ctx, spec, &HashMap::new())
         .await
-        .map_err(|err| Failure::from_error(&err))?;
+        .map_err(missing)?;
+    if let Err(wait) = shared.guard.admit(spec.id, &login_guard::login_hosts(spec)) {
+        let host = crate::known_hosts::address(&spec.host, spec.port);
+        return Err(Failure {
+            wait: Some(wait),
+            ..Failure::new(
+                GuestState::Paused,
+                login_guard::capped_message(&host, shared.guard.per_hour(), wait),
+            )
+        });
+    }
     let options = ConnectOptions {
         connect_timeout: tuning.connect_timeout,
         agent: tuning.agent.clone(),
@@ -595,7 +652,8 @@ async fn connect(
             environment: spec.environment,
             protected: false,
         },
-        record_blocked: !blocked_recorded,
+        // Once per park: a blocked key parks the host, so the next try comes after a change or Retry.
+        record_blocked: true,
     });
     // The handshake has its own timeout; this one also covers a login that hangs.
     let limit = tuning.connect_timeout.saturating_mul(2);
@@ -612,7 +670,10 @@ async fn connect(
     .await;
     match connected {
         Ok(Ok(conn)) => Ok(Arc::from(conn)),
-        Ok(Err(err)) => Err(Failure::from_error(&err)),
+        Ok(Err(err)) => match ParkReason::of(&err) {
+            Some(reason) => Err(park(reason, &Failure::from_error(&err).message)),
+            None => Err(Failure::from_error(&err)),
+        },
         Err(_) => Err(Failure::new(
             GuestState::Unreachable,
             format!("logging in to '{}' took longer than {} s", spec.name, limit.as_secs()),
