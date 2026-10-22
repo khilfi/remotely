@@ -2609,6 +2609,13 @@ impl HostKeyVerifier for PaneVerifier {
             }
         }
     }
+
+    async fn known_key_types(&self, host: &str, port: u16) -> Vec<String> {
+        self.known_hosts
+            .key_types(&self.ctx, host, port)
+            .await
+            .unwrap_or_default()
+    }
 }
 
 /// Reads answers typed in the pane while a login needs them. Nothing typed here is logged.

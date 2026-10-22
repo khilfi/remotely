@@ -57,7 +57,9 @@ pub struct KnownHost {
 pub enum HostKeyCheck {
     Trusted,
     /// Not seen before. `other_key_types` lists the types saved for this host and port, if any: the
-    /// server may have changed its keys, so the prompt says so.
+    /// server may have changed its keys, so the prompt says so. With other types saved, nothing that
+    /// can't ask the user trusts it (a man in the middle can present a type the host never had):
+    /// bulk runs and FD-07 imports treat it like a changed key.
     Unknown {
         other_key_types: Vec<String>,
     },
@@ -101,6 +103,18 @@ impl KnownHosts {
 
     pub async fn list(&self, ctx: &Context) -> Result<Vec<KnownHost>> {
         self.store.list_known_hosts(ctx).await
+    }
+
+    /// SS-05: the key types trusted for a host and port, so the handshake can ask the server for one of
+    /// them first (`ssh-ed25519`, `ecdsa-sha2-nistp256`, `ssh-rsa`...).
+    pub async fn key_types(&self, ctx: &Context, host: &str, port: u16) -> Result<Vec<String>> {
+        Ok(self
+            .store
+            .known_host_keys(ctx, host, port)
+            .await?
+            .into_iter()
+            .map(|k| k.key_type)
+            .collect())
     }
 
     /// Compares the key with the saved ones. A trusted key's last-seen time moves on.
@@ -164,6 +178,28 @@ impl KnownHosts {
         let detail = format!(
             "{}: trusted {}, presented {}",
             key.key_type, previous.fingerprint, key.fingerprint
+        );
+        self.audit(ctx, "host_key_changed", &action, via, &detail).await
+    }
+
+    /// SS-05: audits a connection that was blocked because the host presented a key of a type not
+    /// trusted for it while another type is (a bulk run can't ask the user, and won't trust it).
+    pub async fn record_new_type_blocked(
+        &self,
+        ctx: &Context,
+        key: &HostKey,
+        trusted_types: &[String],
+        via: Option<&Target>,
+    ) -> Result<()> {
+        let action = format!(
+            "Blocked the connection to {}: it presented a new kind of host key",
+            key.address()
+        );
+        let detail = format!(
+            "presented {} {}; trusted: {}",
+            key.key_type,
+            key.fingerprint,
+            trusted_types.join(", ")
         );
         self.audit(ctx, "host_key_changed", &action, via, &detail).await
     }

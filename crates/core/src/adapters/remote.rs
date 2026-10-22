@@ -172,6 +172,32 @@ pub trait HostKeyVerifier: Send + Sync {
     /// `jump`: SS-07, the name of the jump host that presented the key, or `None` for the session's
     /// own host. Every hop of a chain is checked.
     async fn verify(&self, key: &HostKey, jump: Option<&str>) -> Result<()>;
+
+    /// SS-05: the key types already trusted for `host` and `port` (`ssh-ed25519`, `ssh-rsa`...). The
+    /// handshake asks the server for these first, so a host with several keys presents the trusted one.
+    async fn known_key_types(&self, _host: &str, _port: u16) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// SS-05: russh's host key algorithms with the ones already trusted for the host first. A server picks
+/// the first one in this list it has, so it presents the key that was trusted, and a key of another
+/// type means the host changed or someone is in between. Every RSA variant counts as `ssh-rsa`.
+fn preferred_for(known: &[String]) -> russh::Preferred {
+    let mut preferred = russh::Preferred::default();
+    let known: Vec<Algorithm> = known.iter().filter_map(|t| t.parse::<Algorithm>().ok()).collect();
+    if known.is_empty() {
+        return preferred;
+    }
+    let trusted = |a: &Algorithm| {
+        known.iter().any(|k| match (k, a) {
+            (Algorithm::Rsa { .. }, Algorithm::Rsa { .. }) => true,
+            (k, a) => k == a,
+        })
+    };
+    let (first, rest): (Vec<Algorithm>, Vec<Algorithm>) = preferred.key.iter().cloned().partition(trusted);
+    preferred.key = std::borrow::Cow::Owned(first.into_iter().chain(rest).collect());
+    preferred
 }
 
 /// Asks the user for what a login needs, in the terminal.
@@ -1040,11 +1066,13 @@ where
 {
     let target = address(&session.host, session.port);
     let seconds = options.connect_timeout.as_secs().max(1);
+    let known = verifier.known_key_types(&session.host, session.port).await;
     let config = Arc::new(client::Config {
         keepalive_interval: options.keepalive_interval,
         keepalive_max: options.keepalive_max,
         inactivity_timeout: None,
         nodelay: true,
+        preferred: preferred_for(&known),
         ..Default::default()
     });
     let shared = Arc::new(Mutex::new(Shared::default()));
@@ -1915,6 +1943,28 @@ async fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_key_types_already_trusted_are_asked_for_first() {
+        let default = russh::Preferred::default();
+        assert_eq!(preferred_for(&[]).key, default.key);
+        assert_eq!(preferred_for(&["no-such-type".into()]).key, default.key);
+
+        let rsa = preferred_for(&["ssh-rsa".into()]);
+        assert!(matches!(rsa.key[0], Algorithm::Rsa { .. }), "{:?}", rsa.key);
+        assert_eq!(rsa.key.len(), default.key.len(), "nothing dropped, only reordered");
+        let first_other = rsa
+            .key
+            .iter()
+            .position(|a| !matches!(a, Algorithm::Rsa { .. }))
+            .unwrap();
+        assert!(rsa.key[first_other..]
+            .iter()
+            .all(|a| !matches!(a, Algorithm::Rsa { .. })));
+
+        let ecdsa = preferred_for(&["ecdsa-sha2-nistp256".into()]);
+        assert_eq!(ecdsa.key[0].as_str(), "ecdsa-sha2-nistp256");
+    }
 
     #[test]
     fn ipv6_hosts_are_dialled_without_brackets() {

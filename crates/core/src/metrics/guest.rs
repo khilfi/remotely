@@ -230,6 +230,13 @@ impl HostKeyVerifier for GuestVerifier {
             }),
         }
     }
+
+    async fn known_key_types(&self, host: &str, port: u16) -> Vec<String> {
+        self.known_hosts
+            .key_types(&self.ctx, host, port)
+            .await
+            .unwrap_or_default()
+    }
 }
 
 /// What a connection depends on: host, port, user, login method and its vault ids, for the session

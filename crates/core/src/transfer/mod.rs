@@ -659,8 +659,31 @@ fn plan_known_hosts(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
                 .known_hosts
                 .iter()
                 .find(|l| l.host.eq_ignore_ascii_case(&k.host) && l.port == k.port && l.key_type == k.key_type);
+            // SS-05: a new key type for a host that has a trusted key here is what a man in the middle
+            // would present, so it is a conflict, skipped unless the user picks it.
+            let other_types: Vec<&KnownHost> = local
+                .known_hosts
+                .iter()
+                .filter(|l| l.host.eq_ignore_ascii_case(&k.host) && l.port == k.port)
+                .collect();
             match here {
-                None => RowPlan::new(index),
+                None => match other_types.first() {
+                    None => RowPlan::new(index),
+                    Some(first) => RowPlan::conflict(
+                        index,
+                        first.id,
+                        format!(
+                            "This is a {} key, and this host has another kind trusted here ({}). A host that presents a new kind of key may be someone intercepting the connection: import it only if you know the host's keys changed.",
+                            k.key_type,
+                            other_types
+                                .iter()
+                                .map(|l| format!("{} {}", l.key_type, l.fingerprint))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        vec![ItemAction::Skip, ItemAction::Import],
+                    ),
+                },
                 Some(l) if l.fingerprint == k.fingerprint => {
                     RowPlan::same(index, l.id, "Already trusted here.".to_owned())
                 }

@@ -1021,3 +1021,54 @@ async fn port_forwards_and_jump_host_chains_move_with_their_sessions() {
         .contains("2 port forwards saved with them"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// SS-05: a key of a new type for a host that has a trusted key here is what a man in the middle
+/// would present, so an import shows it as a conflict and skips it unless the user picks it.
+#[tokio::test]
+async fn a_new_key_type_for_a_host_trusted_here_is_a_conflict_skipped_by_default() {
+    let dir = temp_folder("transfer");
+    let a = laptop().await;
+    fill(&a).await;
+    let path = export(&a, &dir, false).await;
+
+    let b = laptop().await;
+    let rsa = HostKey {
+        key_type: "ssh-rsa".into(),
+        ..host_key("web01.example.com", "SHA256:rsarsarsarsarsa")
+    };
+    b.known_hosts.trust(&b.ctx, &rsa, None).await.unwrap();
+    let preview = open(&b, &path).await;
+    let row = preview
+        .known_hosts
+        .iter()
+        .find(|k| k.name == "web01.example.com:22")
+        .unwrap();
+    assert_eq!(row.status, ItemStatus::Conflict, "{row:?}");
+    assert_eq!(row.default_action, ItemAction::Skip);
+    assert_eq!(row.choices, [ItemAction::Skip, ItemAction::Import]);
+    let why = row.conflict.as_deref().unwrap();
+    assert!(
+        why.contains("another kind trusted here") && why.contains("ssh-rsa"),
+        "{why}"
+    );
+    let other = preview.known_hosts.iter().find(|k| k.name == "192.0.2.10:22").unwrap();
+    assert_eq!(
+        other.status,
+        ItemStatus::New,
+        "a host with no key here is new as before"
+    );
+
+    // Imported with the defaults: the new type stays out.
+    let report = commit(&b, &preview, &[]).await;
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    let web: Vec<String> = b
+        .known_hosts
+        .list(&b.ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|k| k.host == "web01.example.com")
+        .map(|k| k.key_type)
+        .collect();
+    assert_eq!(web, ["ssh-rsa"]);
+}
