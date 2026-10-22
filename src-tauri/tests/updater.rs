@@ -1,6 +1,7 @@
 //! FD-14: the updater adapter end to end on Tauri's mock runtime: GitHub API -> latest.json and the
 //! installer through their API asset URLs -> signature check, against a local fake GitHub
 //! (`remotely_core::fakes::github_server`) and a signing key made at run time. Never installs.
+//! C3: an installer signed for another version is refused before it is offered.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -24,11 +25,13 @@ fn new_token() -> String {
 /// trusting `signer`'s throwaway key. The mock app is version 0.1.0.
 fn mock_app(fake: &FakeGithub, signer: &UpdateSigner) -> tauri::App<MockRuntime> {
     let mut context = mock_context(noop_assets());
+    context.config_mut().product_name = Some("Remotely".into());
     context.config_mut().plugins.0.insert(
         "updater".into(),
         json!({
             "pubkey": signer.public_key(),
             "endpoints": [format!("https://github.com/{}/releases/latest/download/latest.json", fake.repo())],
+            "requireSignedVersion": true,
             // The fake GitHub speaks plain HTTP on 127.0.0.1.
             "dangerousInsecureTransportProtocol": true,
         }),
@@ -66,20 +69,32 @@ impl World {
     }
 
     /// Publishes `version`: a signed installer, its .sig, and latest.json pointing at
-    /// `url(installer)` (tauri-action writes the API asset URL). Returns the installer.
+    /// `url(installer)` (the release workflow writes the API asset URL). Returns the installer.
     fn publish_version(&self, version: &str, url: impl Fn(&FakeGithub, &FakeAsset) -> Url) -> Vec<u8> {
-        let installer = format!("MZ fake NSIS installer for {version}").into_bytes();
-        let signature = self.signer.sign(&installer, INSTALLER, version);
+        self.publish_signed_as(version, version, url)
+    }
+
+    /// Publishes a release whose latest.json announces `announced`, with the installer the release
+    /// workflow signed for `signed` (the same, unless a release was tampered with).
+    fn publish_signed_as(
+        &self,
+        announced: &str,
+        signed: &str,
+        url: impl Fn(&FakeGithub, &FakeAsset) -> Url,
+    ) -> Vec<u8> {
+        let name = format!("Remotely_{signed}_x64-setup.exe");
+        let installer = format!("MZ fake NSIS installer for {signed}").into_bytes();
+        let signature = self.signer.sign(&installer, &name, signed);
         let assets = self.fake.publish(
-            &format!("v{version}"),
-            &format!("Remotely {version}"),
+            &format!("v{announced}"),
+            &format!("Remotely {announced}"),
             vec![
-                (INSTALLER, installer.clone()),
-                ("Remotely_0.9.0_x64-setup.exe.sig", signature.clone().into_bytes()),
+                (name.as_str(), installer.clone()),
+                (format!("{name}.sig").as_str(), signature.clone().into_bytes()),
             ],
         );
-        let notes = format!("Remotely {version} notes");
-        let manifest = latest_json(version, &notes, &url(&self.fake, &assets[0]), &signature);
+        let notes = format!("Remotely {announced} notes");
+        let manifest = latest_json(announced, &notes, &url(&self.fake, &assets[0]), &signature);
         self.fake.add_file(MANIFEST, manifest);
         installer
     }
@@ -172,13 +187,59 @@ fn an_update_signed_with_another_key_is_refused() {
         let manifest = latest_json("0.9.0", "notes", &world.fake.asset_api_url(assets[0].id), &signature);
         world.fake.add_file(MANIFEST, manifest);
 
-        let updater = world.updater();
-        updater.check(&world.secret()).await.unwrap().update.unwrap();
-        let Err(err) = updater.download(&world.secret(), "0.9.0").await else {
-            panic!("the download must fail its signature check");
-        };
+        // Refused before it is offered, so nothing is downloaded.
+        let err = world.updater().check(&world.secret()).await.unwrap_err();
         assert_eq!(err.code(), "update_failed");
         assert!(err.to_string().contains("different key"), "{err}");
+        assert_eq!(
+            world.fake.requests().iter().filter(|r| r.server == "storage").count(),
+            1
+        );
+    });
+}
+
+#[test]
+fn an_old_signed_installer_offered_as_a_newer_version_is_refused() {
+    tauri::async_runtime::block_on(async {
+        let world = World::new().await;
+        // A release that says 0.9.0 but carries 0.5.0's installer and signature, both genuine: what
+        // someone who can edit releases, but has no signing key, could publish to roll installs back.
+        world.publish_signed_as("0.9.0", "0.5.0", api_url);
+        let updater = world.updater();
+        let err = updater.check(&world.secret()).await.unwrap_err();
+        assert_eq!(err.code(), "update_failed");
+        assert!(
+            err.to_string()
+                .contains("signed as Remotely_0.5.0_x64-setup.exe, not Remotely_0.9.0_x64-setup.exe"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains(&world.token));
+        // Only latest.json came from the storage: the old installer was never downloaded.
+        let storage: Vec<_> = world
+            .fake
+            .requests()
+            .into_iter()
+            .filter(|r| r.server == "storage")
+            .collect();
+        assert_eq!(storage.len(), 1, "{storage:?}");
+        let Err(err) = updater.download(&world.secret(), "0.9.0").await else {
+            panic!("the old installer must not be downloaded as 0.9.0");
+        };
+        assert_eq!(err.code(), "update_failed");
+    });
+}
+
+#[test]
+fn the_plugin_checks_the_signed_version_too() {
+    tauri::async_runtime::block_on(async {
+        let world = World::new().await;
+        world.publish(api_url);
+        let updater = world.updater();
+        let (mut update, bytes) = updater.download(&world.secret(), "0.9.0").await.unwrap();
+        // requireSignedVersion: the same bytes and signature, announced as another version.
+        update.version = "0.9.1".into();
+        let err = update.verify(&bytes).unwrap_err();
+        assert!(err.to_string().contains("0.9.1"), "{err}");
     });
 }
 

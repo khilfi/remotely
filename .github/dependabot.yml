@@ -1,0 +1,37 @@
+# Dependabot version updates (C4): one grouped pull request per ecosystem per week, so updates arrive
+# together and CI runs once for each. Security updates come on their own as soon as an advisory is
+# published (Settings > Advanced Security > Dependabot security updates). Each pull request runs ci.yml,
+# whose dependency scan checks the new versions.
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      cargo:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      npm:
+        patterns: ["*"]
+
+  # Workflows pin actions to full commit SHAs; Dependabot updates the SHA and the version comment.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]

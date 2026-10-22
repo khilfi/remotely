@@ -1,10 +1,11 @@
 # CI for every push to main and every pull request (CLAUDE.md "Releases and auto-update").
 # Third-party actions are pinned to full commit SHAs; the comment names the release.
 #
-# The repository is private, so Actions minutes come out of the owner's monthly allowance, and the
-# Rust job's Windows minutes count double. Changes to documentation only (Markdown anywhere, docs/)
-# skip this workflow, and a newer push cancels the run it supersedes. The secret scan is in
-# secrets.yml, which runs on every change, documentation included.
+# The repository is public, so runs on standard runners use no Actions minutes; keep them lean anyway
+# (README "CI minutes"). Changes to documentation only (Markdown anywhere, docs/) skip this workflow, and a
+# newer push cancels the run it supersedes. The secret scan is in secrets.yml, which runs on every push to any
+# branch, documentation included. Node comes from .node-version and Rust from rust-toolchain.toml, the
+# same versions release.yml builds with.
 
 name: CI
 
@@ -36,12 +37,44 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: lts/*
+          node-version-file: .node-version
           cache: npm
       - run: npm ci
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  # C4: known vulnerabilities, crate sources and the npm packages' registry signatures, on Linux (a
+  # minute or so; nothing here needs Windows). deny.toml says what fails and lists each accepted
+  # advisory with its reason.
+  deps:
+    name: Dependency scan
+    runs-on: ubuntu-latest
+    env:
+      # cargo-deny only reads Cargo.lock through `cargo metadata`, which the runner's own stable cargo
+      # does, so this job skips installing the toolchain rust-toolchain.toml pins.
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install cargo-deny 0.20.2 (checksum-verified)
+        run: |
+          curl -sSfL -o cargo-deny.tar.gz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  cargo-deny.tar.gz" | sha256sum --check -
+          tar -xzf cargo-deny.tar.gz --strip-components=1 cargo-deny-0.20.2-x86_64-unknown-linux-musl/cargo-deny
+      - name: Rust advisories, bans and sources
+        run: ./cargo-deny --locked check advisories bans sources
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: npm advisories for what the app ships
+        run: npm audit --omit=dev
+      # No install scripts: this job only needs the packages on disk to check their signatures.
+      - run: npm ci --ignore-scripts
+      - name: npm registry signatures and provenance
+        run: npm audit signatures
 
   rust:
     name: Rust fmt, clippy and tests
@@ -50,10 +83,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install Rust stable
+      # The version, profile and components in rust-toolchain.toml.
+      - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt,clippy
-          rustup default stable
+          rustup toolchain install
+          rustc --version
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
