@@ -203,12 +203,16 @@ src/                  React + TypeScript UI
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3)
+  hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
+                      each timed from when the last one finished; useVisibility); use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), theme.ts, utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
                       and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
-                      (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow), host-details.ts
+                      (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
+                      and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
+                      delay, longer after failures), host-details.ts
                       (MO-13, MO-14 summaries, wording and the commands offered to copy),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
                       addresses as `mac-N`),

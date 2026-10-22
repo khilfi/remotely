@@ -244,8 +244,11 @@ CT-01 and CT-02 (0.4.0), Ctrl+3: Docker and Podman on SSH hosts, and Docker Desk
   Marks are audited like session edits and move to another laptop with the export. Docker Desktop on this PC shows as
   "This PC" when its `docker.exe` is found (the path in Settings, General, then `REMOTELY_DOCKER`, then Docker
   Desktop's folder).
-- **Reads, never in the background**: a host is read when you open it, press Refresh or a job ends; the open host's
-  stats are read every 10 s while the page shows. Remotely runs the host's own CLI with JSON output over the session's
+- **Reads, never in the background**: a host is read when you open it, press Refresh or a job ends. The open host's
+  stats are read every 10 s, and a followed log asks for new lines every 2 s, only while the page shows and the window
+  is visible (not minimised). Each read waits until the last one came back, so a slow host never has two at once; one
+  stats read serves the list and the details panel's Stats tab; a read that fails waits longer each time (up to a
+  minute, 30 s for a log). Remotely runs the host's own CLI with JSON output over the session's
   SSH connection (through its jump hosts, with the usual host key checks; saved logins only) and keeps that connection
   for a few minutes for the next read. The list has name, image, state, ports, uptime, CPU and memory, with a filter
   and state buttons; a click on a name opens its details beside the list: **Overview** (image, times, restart policy,
