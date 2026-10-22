@@ -60,7 +60,7 @@ pub mod record;
 pub mod shell_user;
 pub mod tunnels;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -118,9 +118,11 @@ pub const MAX_FONT_SIZE: u16 = 32;
 /// QL-05: lines each terminal keeps to scroll back through.
 pub const MIN_SCROLLBACK: u32 = 1_000;
 pub const MAX_SCROLLBACK: u32 = 100_000;
-/// QL-04: how often reachability is checked, in seconds.
+/// QL-04: how often reachability is checked, in seconds (each check shows in the host's sshd log).
 pub const MIN_REACHABILITY_SECS: u64 = 15;
 pub const MAX_REACHABILITY_SECS: u64 = 3600;
+/// QL-04: 5 minutes since 0.4.1 (60 s before), to stay out of strict fail2ban rules' way.
+pub const DEFAULT_REACHABILITY_SECS: u64 = 300;
 /// QL-07: the shortest and longest run that counts as long, and quiet spell that ends one, in seconds.
 pub const MIN_NOTIFY_SECS: u64 = 5;
 pub const MAX_NOTIFY_SECS: u64 = 3600;
@@ -175,7 +177,9 @@ pub struct TerminalSettings {
     pub scrollback: u32,
     /// QL-04: background TCP checks of each session's port (the dots in the session tree).
     pub reachability: ReachabilityMode,
-    /// QL-04: seconds between two checks of the same session.
+    /// QL-04: seconds between two checks of the same host and port while it is up (a host that is
+    /// down waits longer: [`crate::reachability::next_check_after`]). 5 minutes by default since
+    /// 0.4.1; a value saved before is kept.
     pub reachability_secs: u64,
     /// QL-07: a Windows notification when a command in a background tab finishes.
     pub notify_finished: bool,
@@ -197,7 +201,7 @@ impl Default for TerminalSettings {
             font_size: 13,
             scrollback: 10_000,
             reachability: ReachabilityMode::Auto,
-            reachability_secs: 60,
+            reachability_secs: DEFAULT_REACHABILITY_SECS,
             notify_finished: true,
             notify_when: NotifyWhen::Long,
             notify_after_secs: 30,
@@ -1153,6 +1157,16 @@ impl Terminals {
     /// Panes open now.
     pub fn open_count(&self) -> usize {
         locks::lock(&self.inner.open).len()
+    }
+
+    /// QL-04: the saved sessions with a terminal whose shell is up now (not connecting, or waiting to
+    /// reconnect). The reachability checks leave their hosts alone.
+    pub fn connected_sessions(&self) -> HashSet<Uuid> {
+        locks::lock(&self.inner.open)
+            .values()
+            .filter(|control| control.screen().connected)
+            .filter_map(|control| control.session_id())
+            .collect()
     }
 
     /// QL-03: what is known about a pane's host so far.
@@ -2795,7 +2809,7 @@ mod tests {
         assert_eq!(
             TerminalSettings::default().describe(),
             "keep-alive every 30 s, auto-reconnect on, copy on select on, font 13 pt, 10000 lines of scrollback, \
-             reachability checks auto (every 60 s), notify after commands of 30 s or more (or 30 s quiet)"
+             reachability checks auto (every 300 s), notify after commands of 30 s or more (or 30 s quiet)"
         );
         let quiet_off = TerminalSettings {
             notify_quiet_secs: 0,
@@ -2820,6 +2834,7 @@ mod tests {
         assert_eq!(old.font_size, 13);
         assert_eq!(old.scrollback, 10_000);
         assert_eq!(old.reachability, ReachabilityMode::Auto);
+        assert_eq!(old.reachability_secs, 300, "QL-04: every 5 minutes unless chosen");
         assert!(old.notify_finished, "QL-07 is on for settings saved before it");
         assert_eq!(old.notify_after_secs, 30);
         assert_eq!(
@@ -2827,6 +2842,14 @@ mod tests {
             NotifyWhen::Long,
             "QL-07's choice: long commands, as before"
         );
+    }
+
+    #[test]
+    fn a_reachability_interval_saved_before_0_4_1_is_kept() {
+        let saved: TerminalSettings = serde_json::from_str(r#"{"reachability":"on","reachabilitySecs":60}"#).unwrap();
+        assert_eq!(saved.reachability_secs, 60);
+        assert!(saved.validate().is_ok());
+        assert_eq!(TerminalSettings::default().reachability_secs, DEFAULT_REACHABILITY_SECS);
     }
 
     #[test]

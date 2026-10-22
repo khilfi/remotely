@@ -148,8 +148,12 @@ crates/core/          remotely-core: all app logic
                       policy engine (read-only additions in policy/commands.rs, writing forms in commands/writes.rs);
                       QL-13 each entry's manual page (manual.rs: Manual, MANUAL_HOSTS, `checked` refuses any other
                       address; opening one is not audited and the read-only lock allows it)
-    reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only); SS-07 the first jump
-                      host's for a session behind one, never the session itself
+    reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only; each shows in the host's
+                      sshd log): every 5 minutes by default, a host that is down less often (next_check_after: doubling
+                      up to 30 minutes), none for a host with an open connection (OpenConnections: connected terminals,
+                      and TrackedRemote, the remote adapter every service uses, noting kept connections: dashboard,
+                      Containers page, host details); SS-07 the first jump host's for a session behind one, never the
+                      session itself
     bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited

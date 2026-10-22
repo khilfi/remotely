@@ -14,11 +14,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::Setup;
+use remotely_core::adapters::containers::EngineKind;
 use remotely_core::adapters::network::SystemNetwork;
 use remotely_core::adapters::remote::{AgentSource, PtySize};
-use remotely_core::domain::Environment;
+use remotely_core::containers::{MarkInput, SudoMode};
+use remotely_core::domain::{ContainerHost, Environment};
+use remotely_core::fakes::containers::Fixture;
 use remotely_core::fakes::ssh_server::TestSshServer;
-use remotely_core::fakes::{FakeNetwork, FakeVmware};
+use remotely_core::fakes::{FakeContainers, FakeNetwork, FakeVmware};
 use remotely_core::known_hosts::HostKey;
 use remotely_core::reachability::{ReachState, ReachabilityTuning};
 use remotely_core::sessions::tree::TreeGrouping;
@@ -892,6 +895,224 @@ async fn reachability_follows_the_setting_and_skips_large_libraries_on_auto() {
     let off = core.reachability.snapshot();
     assert!(!off.enabled);
     assert!(off.states.is_empty());
+}
+
+/// QL-04: a host this PC already holds an SSH connection to (a terminal, the dashboard's kept
+/// connection) is not probed: the connection says it answers, and a probe would only add a line to its
+/// sshd log. Once the connection closes, the host is checked again when it is due.
+#[tokio::test]
+async fn hosts_with_an_open_connection_are_not_probed() {
+    let network = Arc::new(
+        FakeNetwork::default()
+            .with_open_port("web01.example.com", 22)
+            .with_open_port("bastion.example.com", 22)
+            .with_open_port("other.example.com", 22),
+    );
+    let core = Setup::new(FakeVmware::default())
+        .with_network(network.clone())
+        .build()
+        .await;
+    core.terminals.set_tuning(tuning());
+    let create = |name: &str, host: &str| {
+        core.sessions
+            .create(&core.ctx, session_input(name, host, 22, SessionAuth::Agent))
+    };
+    let web = create("web01", "web01.example.com").await.unwrap();
+    let again = create("web01 again", "WEB01.example.com").await.unwrap();
+    let bastion = create("bastion", "bastion.example.com").await.unwrap();
+    let mut inner = session_input("inner", "inner.test", 22, SessionAuth::Agent);
+    inner.jump_session_id = Some(bastion.id);
+    let inner = core.sessions.create(&core.ctx, inner).await.unwrap();
+    let other = create("other", "other.example.com").await.unwrap();
+
+    // A terminal to web01, and the dashboard watching inner (its kept connection goes through bastion).
+    let mut pane = Pane::new(core.terminals.open(&core.ctx, web.id, SIZE).await.unwrap());
+    pane.connected().await;
+    core.metrics.set_watched(&core.ctx, inner.id, true).await.unwrap();
+    core.metrics.collect_once().await;
+    timeout(WAIT, async {
+        while !core.terminals.connected_sessions().contains(&web.id) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the terminal's shell is up");
+
+    core.reachability
+        .set_watched([web.id, again.id, bastion.id, inner.id, other.id]);
+    // The terminal's own DNS lookups (QL-03) are not probes.
+    let probes = || -> Vec<String> {
+        let mut probes: Vec<String> = network
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("probe "))
+            .collect();
+        probes.sort();
+        probes
+    };
+    let changed = core.reachability.check_once().await.unwrap();
+    assert_eq!(
+        probes(),
+        ["probe other.example.com:22"],
+        "only the host nobody is connected to"
+    );
+    let state = |id: Uuid| {
+        core.reachability
+            .snapshot()
+            .states
+            .into_iter()
+            .find(|s| s.session_id == id)
+            .unwrap()
+    };
+    for id in [web.id, again.id, bastion.id, inner.id] {
+        let state = state(id);
+        assert_eq!(state.state, ReachState::Up, "{state:?}");
+        assert!(state.connected, "{state:?}");
+        assert_eq!(state.latency_ms, None);
+    }
+    assert_eq!(state(inner.id).via.as_deref(), Some("bastion"));
+    assert!(!state(other.id).connected);
+    assert!(state(other.id).latency_ms.is_some());
+    assert_eq!(changed.len(), 5);
+
+    // Nothing new: nothing probed, nothing changed.
+    assert!(core.reachability.check_once().await.unwrap().is_empty());
+    assert_eq!(probes().len(), 1);
+
+    // The terminal closes: web01 was up a moment ago, and is checked again one interval later.
+    core.terminals.close(pane.id).await;
+    pane.closed().await;
+    timeout(WAIT, async {
+        while core.terminals.connected_sessions().contains(&web.id) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the terminal closed");
+    let changed = core.reachability.check_once().await.unwrap();
+    assert_eq!(probes().len(), 1, "no probe right after the connection closed");
+    for id in [web.id, again.id] {
+        let found = changed.iter().find(|s| s.session_id == id).unwrap();
+        assert_eq!((found.state, found.connected), (ReachState::Up, false), "{found:?}");
+    }
+    core.reachability.poke();
+    core.reachability.check_once().await.unwrap();
+    assert_eq!(
+        probes(),
+        [
+            "probe other.example.com:22",
+            "probe other.example.com:22",
+            "probe web01.example.com:22"
+        ],
+        "bastion is still held by the dashboard's connection"
+    );
+    assert!(state(inner.id).connected);
+    core.terminals.close_all().await;
+}
+
+/// QL-04 and CT-01: the Containers page's kept connection counts too, until it is closed.
+#[tokio::test]
+async fn a_kept_containers_connection_counts_as_open_until_released() {
+    let network = Arc::new(FakeNetwork::default().with_open_port("web.example.com", 22));
+    let engines = FakeContainers::default().with_host("web", EngineKind::Docker, Fixture::sample());
+    let core = Setup::new(FakeVmware::default())
+        .with_network(network.clone())
+        .with_containers(Arc::new(engines))
+        .build()
+        .await;
+    let web = core
+        .sessions
+        .create(
+            &core.ctx,
+            session_input("web", "web.example.com", 22, SessionAuth::Agent),
+        )
+        .await
+        .unwrap();
+    core.containers
+        .marks()
+        .set(
+            &core.ctx,
+            web.id,
+            &[MarkInput {
+                engine: EngineKind::Docker,
+                sudo: SudoMode::Off,
+            }],
+        )
+        .await
+        .unwrap();
+    let host = ContainerHost::Session { session_id: web.id };
+    core.containers
+        .containers(&core.ctx, host, EngineKind::Docker)
+        .await
+        .unwrap();
+
+    core.reachability.set_watched([web.id]);
+    let changed = core.reachability.check_once().await.unwrap();
+    assert!(network.calls().is_empty(), "{:?}", network.calls());
+    assert!(changed[0].connected, "{changed:?}");
+
+    core.containers.release(web.id).await;
+    core.reachability.poke();
+    let changed = core.reachability.check_once().await.unwrap();
+    assert_eq!(network.calls(), ["probe web.example.com:22"]);
+    assert!(!changed[0].connected);
+    assert!(changed[0].latency_ms.is_some());
+}
+
+/// QL-04: a host found down waits twice the interval before its next check (and longer each time it
+/// is still down), while a host that is up is checked every interval.
+#[tokio::test]
+async fn a_host_that_is_down_is_checked_less_often() {
+    let network = Arc::new(FakeNetwork::default().with_open_port("web01.example.com", 22));
+    let core = Setup::new(FakeVmware::default())
+        .with_network(network.clone())
+        .build()
+        .await;
+    let interval = Duration::from_millis(1500);
+    core.reachability.set_tuning(ReachabilityTuning {
+        interval: Some(interval),
+        ..Default::default()
+    });
+    let web = core
+        .sessions
+        .create(
+            &core.ctx,
+            session_input("web01", "web01.example.com", 22, SessionAuth::Agent),
+        )
+        .await
+        .unwrap();
+    let db = core
+        .sessions
+        .create(
+            &core.ctx,
+            session_input("db01", "db01.example.com", 22, SessionAuth::Agent),
+        )
+        .await
+        .unwrap();
+    core.reachability.set_watched([web.id, db.id]);
+    let started = std::time::Instant::now();
+    core.reachability.check_once().await.unwrap();
+    assert_eq!(network.calls().len(), 2);
+    let probes_of = |host: &str| network.calls().iter().filter(|c| c.contains(host)).count();
+
+    // One interval on: web01 is due again, db01 (down) is not.
+    tokio::time::sleep(interval + Duration::from_millis(700)).await;
+    core.reachability.check_once().await.unwrap();
+    assert_eq!(probes_of("web01"), 2);
+    // (A machine too busy to get here within twice the interval can't tell; the unit tests can.)
+    if started.elapsed() < 2 * interval {
+        assert_eq!(probes_of("db01"), 1, "a host that is down waits twice the interval");
+    }
+
+    // Twice the interval on: db01 is checked again.
+    tokio::time::sleep((2 * interval + Duration::from_millis(700)).saturating_sub(started.elapsed())).await;
+    core.reachability.check_once().await.unwrap();
+    assert_eq!(probes_of("db01"), 2);
+
+    // A change of settings checks everything at once, down or not.
+    core.reachability.poke();
+    core.reachability.check_once().await.unwrap();
+    assert_eq!(probes_of("db01"), 3);
 }
 
 #[tokio::test]

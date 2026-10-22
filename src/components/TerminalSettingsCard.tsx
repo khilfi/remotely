@@ -1,7 +1,7 @@
 // SS-03, QL-04, QL-05 and QL-07 terminal settings: keep-alive, auto-reconnect, copy-on-select, font size,
-// scrollback, the session tree's reachability checks, and notifications when a command finishes while the user is
-// away (a background tab, another page, or Remotely not in front): commands longer than N seconds, or any command
-// whatever its length. A MultiExec line notifies once for all its terminals. Saved in the core and audited.
+// scrollback, the session tree's reachability checks (each shows in the host's sshd log, which the card says), and
+// notifications when a command finishes while the user is away (a background tab, another page, or Remotely not in
+// front): commands longer than N seconds, or any command whatever its length. A MultiExec line notifies once for all its terminals. Saved in the core and audited.
 // Connection settings apply to terminals opened from then on; font size, scrollback and notifications to open ones
 // too.
 
@@ -143,11 +143,22 @@ export function TerminalSettingsCard() {
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">
-              A TCP connection to each shown session's port, opened and closed at once: no login. Sessions in closed
-              groups are not checked.
+              A TCP connection to each shown session&apos;s SSH port (or its first jump host), opened and closed at
+              once: no login. Sessions in closed groups, and hosts you are already connected to (a terminal, the
+              dashboard, the Containers page), are not checked. A host that is down is checked less often, up to every
+              30 minutes.
             </p>
           </div>
-          {field("reachabilitySecs", "reachability-secs", "Check every (seconds, 15 to 3600)")}
+          {field(
+            "reachabilitySecs",
+            "reachability-secs",
+            "Check every (seconds, 15 to 3600)",
+            "300 (5 minutes) by default.",
+          )}
+          <p className="text-xs text-muted-foreground sm:col-span-2">
+            Each check shows in the host&apos;s sshd log as a connection that closed before logging in, and strict
+            fail2ban rules may count it. On such sites, turn the dots off or check less often.
+          </p>
         </div>
         <div className="grid gap-4 border-t pt-4">
           <div className="flex items-center gap-3">

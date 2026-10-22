@@ -70,6 +70,24 @@ VirtualBox VMs; the sidebar shows whether it was found.
 - **Host usage** on the dashboard and the VM list comes from each VM's `VirtualBoxVM.exe` or `VBoxHeadless.exe` process,
   and the capacity check before a power-on counts Workstation and VirtualBox VMs together.
 
+### Reachability dots
+
+QL-04: the dots in the Terminal page's session tree. A check opens a TCP connection to the session's SSH port and
+closes it at once: no SSH handshake, no login, nothing audited.
+
+- **What is checked**: only the sessions the tree shows (not those in closed groups), each host and port once however
+  many sessions share it, while the Terminal page is open. Settings, Terminal, turns the dots on, off, or on unless
+  there are more than 200 sessions (the default).
+- **How often**: every 5 minutes by default (15 seconds to an hour in Settings, Terminal; a value saved before 0.4.1 is
+  kept). A host that is down waits twice as long before each next check, up to 30 minutes, and goes back to the
+  interval once it answers.
+- **Hosts you are connected to are not checked**: a terminal, the dashboard's guest metrics or the Containers page
+  already holds a connection to them, so their dot says "connected". The next check comes one interval after that
+  connection closes.
+- **In the host's logs**: sshd logs each check as a connection that closed before logging in, and strict fail2ban
+  rules may count it. On sites like that, turn the dots off or check less often.
+- A session behind jump hosts shows its first jump host's state (see [Jump hosts and tunnels](#jump-hosts-and-tunnels)).
+
 ### Command panel
 
 BX-08, on the right of the Terminal page: a click pastes a command into the current terminal, Shift+click also presses
@@ -195,7 +213,8 @@ on its jump host.
   key pushes and the dashboard's guest metrics. The tab and the session tree say "via <jump host>", and the tooltip
   shows the whole route.
 - **Reachability**: a session behind jump hosts is not probed from this PC. Its dot is a ring with the first jump host's
-  state (the one this PC dials), never red because the session itself can't be reached from here.
+  state (the one this PC dials), never red because the session itself can't be reached from here. A connection open
+  through that jump host counts as one to it, so it is not probed either.
 - **Port forwards**: each session keeps local (`ssh -L`), remote (`ssh -R`) and SOCKS (`ssh -D`, SOCKS 4, 4a and 5)
   forwards, edited with the session. They listen on 127.0.0.1 unless you type another address (the host side of a
   remote forward defaults to localhost); port 0 takes any free port. Those marked "starts with the terminal" open when
@@ -542,7 +561,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | File transfer      | `crates/core/src/terminal/files.rs`, `folder.rs`, `shell_user.rs` | SS-08, QL-09                                                                                                                                        | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, transfers with cancel and retry                                            |
 | Compare output     | `crates/core/src/bulk.rs`                                         | BX-01, BX-03, BX-05                                                                                                                                 | Working: hosts from picked tabs and tree sessions, results grouped by output, diff, CSV, JSON and HTML export                                                                                            |
 | Command panel      | `crates/core/src/snippets/`                                       | BX-08, QL-13                                                                                                                                        | Working: favourite commands in folders (audited), a built-in Linux library (Troubleshoot runbooks, 30 area groups, manual links), variables, marks from the policy engine                                |
-| Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                           | Working: TCP checks of the sessions the tree shows, once per host and port, a few at a time; the first jump host's for sessions behind one                                                               |
+| Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                           | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one        |
 | VM links           | `crates/core/src/vm_links.rs`                                     | QL-01, BX-01                                                                                                                                        | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept                                                                                                    |
 | Network adapter    | `crates/core/src/adapters/network.rs`                             | QL-01, QL-03, QL-04                                                                                                                                 | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                                          |
 | Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                  | Working: hash-chained audit log, job journal, inventory, sessions, vault ciphertext, tags, saved filters                                                                                                 |
