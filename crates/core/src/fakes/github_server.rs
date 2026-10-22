@@ -64,10 +64,14 @@ impl UpdateSigner {
     }
 
     /// The signature as latest.json holds it: base64 of the `.sig` file, prehashed (BLAKE2b) like the
-    /// Tauri CLI signs, with the version in the trusted comment.
+    /// Tauri CLI signs, with the trusted comment `tauri signer sign --app-version` writes.
     pub fn sign(&self, data: &[u8], file: &str, version: &str) -> String {
+        self.sign_with_comment(data, &format!("timestamp:1700000000\tfile:{file}\tversion:{version}"))
+    }
+
+    /// Like [`Self::sign`], with any trusted comment (older Tauri CLIs wrote no version).
+    pub fn sign_with_comment(&self, data: &[u8], trusted: &str) -> String {
         let signature = self.key.sign(&Blake2b512::digest(data)).to_bytes();
-        let trusted = format!("timestamp:1700000000\tfile:{file}\tversion:{version}");
         let mut global = signature.to_vec();
         global.extend_from_slice(trusted.as_bytes());
         let global = self.key.sign(&global).to_bytes();

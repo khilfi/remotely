@@ -436,8 +436,9 @@ Disabled buttons say why they are disabled (QL-08), in a tooltip or under the me
 ## Prerequisites
 
 - Windows 10 or 11 (x64) with VMware Workstation Pro 17 or later, Oracle VirtualBox 7.0 or later, or both
-- Node.js LTS and npm
-- Rust (stable, `x86_64-pc-windows-msvc`) via rustup, plus the Microsoft C++ Build Tools ("Desktop development with C++")
+- Node.js 24 and npm (`.node-version` has the exact version CI and releases use)
+- Rust (`x86_64-pc-windows-msvc`) via rustup, plus the Microsoft C++ Build Tools ("Desktop development with C++").
+  `rust-toolchain.toml` pins the version; rustup installs it on the first build.
 - The WebView2 runtime (included in Windows 11)
 - Git, the GitHub CLI (`gh`) and [gitleaks](https://github.com/gitleaks/gitleaks) for the pre-commit secret scan
 
@@ -476,7 +477,8 @@ SOCKS forward on 1080 serves it to `curl --socks5-hostname 127.0.0.1:1080 http:/
 | Rust tests (core and shell)          | `cargo test --workspace`                                                              |
 | Rust lint                            | `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` |
 | UI lint (types, ESLint, Prettier)    | `npm run lint`                                                                        |
-| UI tests (pure helpers)              | `npm test`                                                                            |
+| UI and release-script tests          | `npm test`                                                                            |
+| Dependency scan (as CI runs it)      | `cargo deny --locked check advisories bans sources`, `npm audit --omit=dev`           |
 | Format the UI                        | `npm run format`                                                                      |
 | Opt-in test against real Workstation | `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`                     |
 | Opt-in test against real VirtualBox  | `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`                      |
@@ -490,20 +492,74 @@ list`), the Guest Additions' IP and OS name, and each running one's process.
 ## Release
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` (they must match).
-2. Commit, then `git tag -a vX.Y.Z -m "<release notes>"` and `git push origin vX.Y.Z`. The tag message becomes the
-   release notes, which installed apps show in their update banner.
-3. `.github/workflows/release.yml` builds the NSIS installer on Windows (per-user, so installing and updating need no
-   admin rights), signs the update artifacts and creates a **draft** release
-   with the installer, its `.sig` file and `latest.json`. It stops if the tag and the three versions differ, or if the
-   updater public key in `tauri.conf.json` is still the placeholder. Afterwards it checks the update signatures against
-   that public key (`scripts/verify-update-signature.mjs`); if this step fails, the signing secret and the public key
-   don't pair, so don't publish the draft.
+2. Commit and push `main`, then `git tag -a vX.Y.Z -m "<release notes>"` and `git push origin vX.Y.Z`. The tag must be
+   on a commit `main` contains. Its message becomes the release notes, which installed apps show in their update
+   banner.
+3. `.github/workflows/release.yml` runs two jobs:
+   - **Build** (Windows, no secrets): stops if the tagged commit isn't on `main`, if the tag and the three versions
+     differ, or if the updater public key in `tauri.conf.json` is still the placeholder. Then it builds the NSIS
+     installer (per-user, so installing and updating need no admin rights) with `--locked`, the Node version in
+     `.node-version`, the Rust version in `rust-toolchain.toml` and no cache, and keeps it as a workflow artifact. The
+     build needs no signing key: `bundle.createUpdaterArtifacts` is off.
+   - **Publish** (Linux, in the protected `release` Environment): waits for your approval. Open the run under
+     **Actions**, check that it is the tag you pushed, then **Review deployments → release → Approve and deploy**. It
+     signs the installer with the key from the Environment (`tauri signer sign --app-version`), checks the signature
+     against `plugins.updater.pubkey` and that it names this installer and version
+     (`scripts/verify-update-signature.mjs`), and only then creates a **draft** release with the installer, its `.sig`
+     file and `latest.json` (`scripts/publish-release.mjs`). Before it uploads `latest.json`, it checks it the way
+     installed apps read it and fetches the installer back through its URL. If any check fails, the draft is deleted.
+     A signature check failure means the key in the Environment doesn't pair with the public key.
 4. Smoke-test the installer from the draft, then publish it. Installed apps only see published releases; they check at
    start and every 24 hours (FD-14), and installing asks first.
 
+Installed apps (0.4.1 and later) refuse an update whose signature names another installer or version than
+`latest.json` announces, so an old signed installer can't be offered as a newer version (`requireSignedVersion` in
+`tauri.conf.json`, and `check_signed_release` before an update is offered).
+
 `.github/workflows/ci.yml` runs on every push to `main` and every pull request, except changes to documentation only
-(Markdown files anywhere, `docs/`): UI lint and build, and Rust fmt, clippy and tests. `.github/workflows/secrets.yml`
-runs a gitleaks scan of the full history on every push to `main` and every pull request, documentation included.
+(Markdown files anywhere, `docs/`): UI lint, tests and build; a dependency scan on Linux (`cargo deny` with `deny.toml`
+for advisories, banned crates and sources, `npm audit --omit=dev`, and `npm audit signatures`); and Rust fmt, clippy and
+tests. `.github/workflows/secrets.yml` runs a gitleaks scan of the full history on every push to any branch and every
+pull request, documentation included. Dependabot (`.github/dependabot.yml`) opens one grouped pull request a week each
+for Cargo, npm and GitHub Actions.
+
+When the dependency scan fails on a new advisory: update the crate or package if a fixed version exists
+(`cargo update -p <crate>`, `npm update <package>`). If none does and the advisory doesn't apply to how Remotely uses
+it, add its ID to `ignore` in `deny.toml` with the reason, as the existing entries do.
+
+### Release settings on GitHub
+
+Set these once, in this order, as the repository owner. They keep the update-signing key away from every job but the
+publish job, and away from any workflow pushed to a branch. They rely on the repository being public: on GitHub Free a
+private repository has no Environments, required reviewers or rulesets.
+
+1. **Create the Environment.** **Settings → Environments → New environment**, name it `release`, then **Configure
+   environment**:
+   - **Deployment protection rules:** tick **Required reviewers** and add yourself. Leave **Prevent self-review** off
+     (you approve your own releases), and untick **Allow administrators to bypass configured protection rules**.
+     **Save protection rules.**
+   - **Deployment branches and tags:** choose **Selected branches and tags**, then **Add deployment branch or tag
+     rule**, **Ref type: Tag**, **Name pattern:** `v*`. Add no branch rule.
+2. **Move the signing secrets into it.** Under **Environment secrets**, **Add environment secret**
+   `TAURI_SIGNING_PRIVATE_KEY` (the private key file's content, as before) and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Or
+   from a terminal, with the key file outside the repository:
+   `gh secret set TAURI_SIGNING_PRIVATE_KEY --env release < <path-to-key>`, then
+   `gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --env release` (it asks for the value).
+3. **Delete the repository-level copies**, which a workflow on any branch can read: **Settings → Secrets and variables
+   → Actions → Repository secrets**, delete both (or `gh secret delete TAURI_SIGNING_PRIVATE_KEY` and
+   `gh secret delete TAURI_SIGNING_PRIVATE_KEY_PASSWORD`). `gh secret list` should then show neither, and
+   `gh secret list --env release` both.
+4. **Restrict who can create release tags.** **Settings → Rules → Rulesets → New ruleset → New tag ruleset**: name
+   "Release tags", **Enforcement status: Active**; **Bypass list → Add bypass → Repository admin** (that is you);
+   **Target tags → Add target → Include by pattern** `v*`; tick **Restrict creations**, **Restrict updates** and
+   **Restrict deletions**; **Create**. Nobody else, and no workflow token, can then push, move or delete a `v*` tag.
+5. Optional: **Settings → Actions → General → Require actions to be pinned to a full-length commit SHA** (every
+   workflow here already is), and **Settings → Advanced Security →** turn on **Dependabot alerts** and **Dependabot
+   security updates**.
+
+The first tag after these settings is the real test of the release workflow: check that the build job's log shows no
+signing key, that the publish job waits for your approval, and that the draft holds the installer, its `.sig` and
+`latest.json`.
 
 ### GitHub update token
 
@@ -573,11 +629,59 @@ push when a change is ready rather than after every small commit; and group docu
 ### Update signing
 
 Updates are signed with a key pair. Only the public key is in the repo (`plugins.updater.pubkey` in
-`src-tauri/tauri.conf.json`). The private key and its password live outside the repo, in a password manager and in the
-GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Losing them means installed
-apps can no longer verify updates, so each machine would need a manual reinstall.
+`src-tauri/tauri.conf.json`). The private key and its password live outside the repo: in a password manager, and in the
+`release` Environment's secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, which only the
+release workflow's publish job reads.
 
-A local `npm run tauri build` needs the same two values as environment variables, because `createUpdaterArtifacts` is on.
+A local `npm run tauri build` needs neither: `bundle.createUpdaterArtifacts` is off, so it builds an unsigned installer.
+Don't put the key in your environment or shell profile. If you ever have to sign by hand (the key rotation below), sign
+the built installer with the key file, which asks for the password, then check the result:
+
+```bash
+npx tauri signer sign -f <path-to-key-outside-the-repo> --app-version X.Y.Z target/release/bundle/nsis/Remotely_X.Y.Z_x64-setup.exe
+```
+
+```bash
+node scripts/verify-update-signature.mjs --version X.Y.Z target/release/bundle/nsis/Remotely_X.Y.Z_x64-setup.exe.sig
+```
+
+`--app-version` is required: installed apps refuse a signature that doesn't name its version.
+
+### Signing key compromise or loss
+
+Installed apps trust exactly one public key: the one in the version they run. Moving them to a new key takes one
+release signed with the **old** key whose `tauri.conf.json` holds the **new** public key.
+
+**If the key may have leaked** (with or without its password):
+
+1. Delete the `release` Environment's two secrets at once. Check **Releases** for drafts or releases you didn't make,
+   and the Environment's deployment history for runs you didn't approve; delete anything unknown.
+2. A malicious update also needs the right to publish a release here: installed apps read only this repository's
+   latest published release. Change the GitHub password, and review sessions, personal access tokens, collaborators,
+   deploy keys and the tag ruleset.
+3. Rotate the key as below, quickly: until an install takes the rotation release, it still trusts the old key.
+4. If an unknown release was ever published, reinstall Remotely by hand on every machine that may have taken it.
+
+**To rotate the key** (after a leak, or as planned):
+
+1. Generate a new pair outside the repository, with a strong password:
+   `npx tauri signer generate -w <path-outside-the-repo>`. Save the key file and the password in the password manager.
+2. Put the new public key (the `.pub` file's content) in `plugins.updater.pubkey`, bump the version, commit, push
+   `main`, then tag and push. The build job builds the installer; reject the publish job's deployment (the Environment
+   still holds the old key, which no longer matches `tauri.conf.json`). Download the installer:
+   `gh run download <run-id> -n installer`.
+3. Sign it with the **old** key file as above, and check it against the old public key: add
+   `--pubkey <the old public key, as tauri.conf.json had it>` to the `verify-update-signature.mjs` command.
+4. Create the draft from your machine, checked against the old key:
+   `GITHUB_REPOSITORY=<owner>/<repo> GITHUB_TOKEN=$(gh auth token) node scripts/publish-release.mjs --tag vX.Y.Z --installer Remotely_X.Y.Z_x64-setup.exe --notes <notes file> --pubkey <the old public key>`.
+5. Check that an installed copy updates to it, then publish it.
+6. Replace the Environment's secrets with the new key and password: releases from now on are signed with it. Destroy
+   the old key, or keep it offline if it didn't leak.
+
+**If the key or its password is lost**, installed apps can't verify anything new, and no rotation release is possible.
+Generate a new pair (step 1 above), put its public key in `tauri.conf.json`, set the Environment's secrets and release
+as usual. Then install that release by hand once on every machine (download the installer from the release page and
+run it); the data, the vault and the update token stay. Auto-update works again from there.
 
 ## Layout
 

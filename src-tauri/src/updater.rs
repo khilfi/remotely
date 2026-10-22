@@ -11,6 +11,11 @@
 //! 4. The plugin verifies the download against `plugins.updater.pubkey` in tauri.conf.json, exactly
 //!    as before: a tampered or unsigned package fails.
 //!
+//! Before an update is offered, its signature must name the installer for the version latest.json
+//! announces (`check_signed_release`, C3), so an old signed installer can't come back as a newer
+//! version. `plugins.updater.requireSignedVersion` has the plugin check the signed version again
+//! when it downloads.
+//!
 //! The repository is the one `plugins.updater.endpoints` in tauri.conf.json names.
 //!
 //! The core calls `install` from an `AppUpdate` job, after the Medium-tier confirm and once no other
@@ -22,7 +27,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use remotely_core::adapters::github::{scrub, GithubReleases, GithubRepo, Release, GITHUB_API};
-use remotely_core::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
+use remotely_core::adapters::updater::{check_signed_release, ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
 use remotely_core::locks;
 use remotely_core::vault::SecretString;
 use remotely_core::{CoreError, Result};
@@ -93,6 +98,13 @@ impl<R: Runtime> TauriUpdater<R> {
         let Some(mut update) = updater.check().await.map_err(|err| update_error(err, token))? else {
             return Ok(None);
         };
+        // C3: refused unless the signature names this version's installer.
+        check_signed_release(
+            &updater_setting(&self.app, "pubkey")?,
+            &update.signature,
+            &product_name(&self.app)?,
+            &update.version,
+        )?;
         // The token goes with the download, so only to an API asset URL of this release.
         update.download_url = self.github.asset_url(release, &update.download_url)?;
         Ok(Some(update))
@@ -176,6 +188,26 @@ fn configured_repo<R: Runtime>(app: &AppHandle<R>) -> Result<GithubRepo> {
         .ok_or_else(|| CoreError::Update("tauri.conf.json has no plugins.updater.endpoints".into()))?;
     let url = Url::parse(endpoint).map_err(|err| CoreError::Update(format!("{endpoint}: {err}")))?;
     GithubRepo::from_release_url(&url)
+}
+
+/// A text setting of `plugins.updater` in tauri.conf.json, such as `pubkey`.
+fn updater_setting<R: Runtime>(app: &AppHandle<R>, name: &str) -> Result<String> {
+    app.config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|updater| updater.get(name))
+        .and_then(|value| value.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| CoreError::Update(format!("tauri.conf.json has no plugins.updater.{name}")))
+}
+
+/// `productName` in tauri.conf.json, which the installer's file name starts with.
+fn product_name<R: Runtime>(app: &AppHandle<R>) -> Result<String> {
+    app.config()
+        .product_name
+        .clone()
+        .ok_or_else(|| CoreError::Update("tauri.conf.json has no productName".into()))
 }
 
 /// The plugin's errors name URLs and statuses, never headers; scrubbed all the same.

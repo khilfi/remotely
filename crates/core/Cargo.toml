@@ -12,7 +12,7 @@ workspace = true
 [features]
 # Fake adapters (VMware, remote, vault, host counters, updater) and a local SSH server for tests.
 # Never enabled in the app.
-fakes = ["getrandom/sys_rng", "dep:futures", "dep:blake2", "dep:ed25519-dalek"]
+fakes = ["getrandom/sys_rng", "dep:futures", "dep:blake2"]
 
 [dependencies]
 async-trait.workspace = true
@@ -56,7 +56,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 url = { version = "2", features = ["serde"] }
 # FD-14 tests (fakes only): minisign signatures from a throwaway key, made at run time (base64, above, too).
 blake2 = { version = "0.11", optional = true }
-ed25519-dalek = { version = "3", optional = true }
+# FD-14 (C3): checks an update signature's trusted comment against the app's public key before the
+# version it names is believed; the fakes sign with it. The version russh already pulls in.
+ed25519-dalek = "3"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

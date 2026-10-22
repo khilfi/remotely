@@ -1,0 +1,7 @@
+# The Rust toolchain for local builds, CI and releases (C5): one pinned stable, so a release builds with
+# the compiler CI tested. rustup installs it on first use. Bump it on purpose, in its own commit, and let
+# CI (clippy, tests) pass on it before the next release tag.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
