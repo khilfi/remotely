@@ -492,6 +492,19 @@ mod win {
         Ok(duration(cpu))
     }
 
+    /// The calling thread's kernel plus user time: MO-01's budget test measures the sampling alone,
+    /// without the other tests that run in the same process beside it.
+    #[cfg(test)]
+    pub fn thread_cpu_time() -> Result<Duration> {
+        use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+        let mut times = [FILETIME::default(); 4];
+        let [created, exited, kernel, user] = &mut times;
+        // SAFETY: the pseudo handle needs no closing; the four out pointers point at live FILETIMEs.
+        unsafe { GetThreadTimes(GetCurrentThread(), created, exited, kernel, user) }
+            .map_err(|e| os_error("GetThreadTimes", e))?;
+        Ok(duration(ticks(times[2]).saturating_add(ticks(times[3]))))
+    }
+
     /// Creation time and kernel plus user time, in 100 ns units.
     fn process_times(process: HANDLE) -> windows::core::Result<(u64, u64)> {
         let mut times = [FILETIME::default(); 4];
@@ -859,7 +872,8 @@ mod tests {
 
         /// MO-01 NFR (a 50-VM dashboard at a 5 s refresh under 5% host CPU): reads 50 processes the
         /// way a round reads 50 VMs, with the command lines already known as after the first round, and
-        /// measures this process's CPU time for it. Prints the cost per round (`--nocapture`).
+        /// measures the CPU time of this thread, which does all of that work (not the process's: in a
+        /// full run the other tests use it too). Prints the cost per round (`--nocapture`).
         #[test]
         fn fifty_processes_cost_well_under_the_cpu_budget() {
             let pids: Vec<u32> = {
@@ -879,7 +893,7 @@ mod tests {
 
             let mut tracker = ProcessTracker::default();
             let rounds = 40u32;
-            let before = win::own_cpu_time().unwrap();
+            let before = win::thread_cpu_time().unwrap();
             let wall = Instant::now();
             for _ in 0..rounds {
                 // A round: one process list, then each VM process's counters.
@@ -896,7 +910,9 @@ mod tests {
                     .collect();
                 tracker.update(Instant::now(), raw, 8);
             }
-            let cpu = win::own_cpu_time().unwrap() - before;
+            let cpu = win::thread_cpu_time().unwrap() - before;
+            // 40 rounds take many scheduler ticks (about 15.6 ms each), so the thread's clock moved.
+            assert!(cpu > Duration::ZERO, "the thread's CPU time never moved");
             let per_round = cpu / rounds;
             let cpus = win::host_totals().unwrap().logical_cpus;
             // At one round per 5 s, as a share of the whole host.
