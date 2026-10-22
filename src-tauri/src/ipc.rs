@@ -19,7 +19,7 @@ use remotely_core::jobs::JobLimits;
 use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHostUsage};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::presentation::Presentation;
-use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
+use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord, StartupRating};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
@@ -1203,4 +1203,15 @@ pub async fn metrics_watch(state: State<'_, AppState>, session_id: Uuid, watch: 
 #[tauri::command]
 pub fn background_login_retry(state: State<'_, AppState>, session_id: Uuid) {
     state.core.retry_background_logins(session_id);
+}
+
+/// SS-01: what the policy engine makes of a startup command on a session with this label, with the
+/// current rules (the editor shows it while it is typed). A read: nothing is saved or audited.
+#[tauri::command]
+pub fn session_startup_rating(
+    state: State<'_, AppState>,
+    command: String,
+    environment: Environment,
+) -> Option<StartupRating> {
+    state.core.sessions.rate_startup(&command, environment)
 }

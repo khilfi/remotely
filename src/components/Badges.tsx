@@ -13,6 +13,7 @@ import type {
   PowerState,
   SecretKind,
   SessionColor,
+  StartupRating,
   Tier,
   ToolsState,
 } from "@/lib/api";
@@ -198,6 +199,16 @@ const RISK: Record<CommandRisk["action"], { label: string; className: string; hi
     hint: "Matches a dangerous-command rule. MultiExec and Compare need the full approval.",
   },
 };
+
+/** SS-01: a startup command's rating: the tier a command like it gets on its session, and its kind. */
+export function StartupRatingBadges({ rating }: { rating: StartupRating }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <TierBadge tier={rating.tier} />
+      <RiskBadge risk={rating} />
+    </span>
+  );
+}
 
 /** BX-08: what the policy engine makes of a command (BX-06), with the rules it matches in the tooltip. */
 export function RiskBadge({ risk, className }: { risk: CommandRisk; className?: string }) {

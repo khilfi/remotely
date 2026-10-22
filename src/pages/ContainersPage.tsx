@@ -636,6 +636,25 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
                         </Button>
                       </AlertAction>
                     )}
+                    {/* MO-02, CT-01: a refused login or sudo is not tried again until the user asks. */}
+                    {(listError.code === "login_parked" || listError.code === "logins_capped") &&
+                      current.host.kind === "session" && (
+                        <AlertAction>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              if (current.host.kind !== "session") return;
+                              api.backgroundLoginRetry(current.host.sessionId).then(
+                                () => setReads((r) => r + 1),
+                                (err) => toast.error(errorMessage(err)),
+                              );
+                            }}
+                          >
+                            Retry
+                          </Button>
+                        </AlertAction>
+                      )}
                   </Alert>
                 )}
 
