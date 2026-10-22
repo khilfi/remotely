@@ -147,6 +147,8 @@ async fn the_log_file_never_holds_a_secret() {
             },
             jump_session_id: None,
             startup_command: None,
+            startup_on_reconnect: false,
+            prompt_hook: None,
             environment: Environment::Lab,
             color: None,
             tags: vec![],

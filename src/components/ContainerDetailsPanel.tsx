@@ -1,10 +1,11 @@
 // CT-01, CT-02: one container's panel beside the list on the Containers page. Overview: what `inspect` says (the
 // environment by variable name only: values often hold passwords, so the core never sends them), mounts, networks,
 // restart policy and health. Logs: the last lines, followed by asking for the lines after the newest one every few
-// seconds, searchable, with or without timestamps. Stats: its resource use, read every few seconds while the tab shows.
-// All reads; "Open a shell" opens a terminal tab (audited like any terminal).
+// seconds (paused while the page is hidden or the window minimised), searchable, with or without timestamps. Stats: its
+// resource use, from the page's own stats read (one read for the list and this tab). All reads; "Open a shell" opens a
+// terminal tab (audited like any terminal).
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { RefreshCwIcon, SquareTerminalIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -22,7 +23,6 @@ import {
   errorMessage,
   type ContainerDetails,
   type ContainerHost,
-  type ContainerStats,
   type ContainerSummary,
   type EngineKind,
   type LogLine,
@@ -31,14 +31,19 @@ import {
   appendLogs,
   formatBytes,
   lastLogTime,
+  LOG_FOLLOW_MAX_MS,
+  LOG_FOLLOW_MS,
   logTime,
   portTexts,
   searchLogs,
   shellReason,
+  STATS_POLL_MS,
   statsFor,
+  type StatsRead,
 } from "@/lib/containers";
 import { formatWhen } from "@/lib/format";
 import { cn } from "@/lib/utils";
+import { usePoll } from "@/hooks/use-poll";
 
 export type ContainerView = "overview" | "logs" | "stats";
 
@@ -52,13 +57,14 @@ interface Props {
   onClose: () => void;
   /** Changes when the list was read again: the overview is read again too. */
   refreshKey: number;
+  /** The page's last stats read of this host's engine (null: none yet), for the Stats tab. */
+  stats: StatsRead | null;
+  /** The page shows and the window is visible: a followed log asks for new lines only then. */
+  polling: boolean;
   onOpenShell: () => void;
 }
 
 const TAILS = [100, 500, 1000, 5000];
-/** How often a followed log, and the Stats tab, ask again. */
-const FOLLOW_MS = 2000;
-const STATS_MS = 5000;
 
 const dash = <span className="text-muted-foreground">—</span>;
 
@@ -284,7 +290,7 @@ function Overview({ host, engine, container, refreshKey }: Props) {
   );
 }
 
-function LogsTab({ host, engine, container }: Props) {
+function LogsTab({ host, engine, container, polling }: Props) {
   const [tail, setTail] = useState(500);
   const [follow, setFollow] = useState(false);
   const [timestamps, setTimestamps] = useState(true);
@@ -316,28 +322,33 @@ function LogsTab({ host, engine, container }: Props) {
     };
   }, [host, engine, container.id, tail, key]);
 
-  // Following: the lines after the newest one, every few seconds.
-  useEffect(() => {
-    if (!follow || !shown) return;
-    let stale = false;
-    const timer = window.setInterval(() => {
+  // Following: the lines after the newest one, a few seconds after the last ask came back, while the page shows and
+  // the window is visible. Back on screen, it asks for what was written meanwhile.
+  const readNew = useCallback(
+    async (live: () => boolean) => {
       const since = lastLogTime(latest.current);
-      api.containerLogs(host, engine, container.id, { tail: 1000, since }).then(
-        (logs) => {
-          if (stale || logs.lines.length === 0) return;
-          latest.current = appendLogs(latest.current, logs.lines);
-          setLines((prev) => (prev && prev.key === key ? { ...prev, list: latest.current } : prev));
-        },
-        (err) => {
-          if (!stale) setError(errorMessage(err));
-        },
-      );
-    }, FOLLOW_MS);
-    return () => {
-      stale = true;
-      window.clearInterval(timer);
-    };
-  }, [follow, shown, host, engine, container.id, key]);
+      try {
+        const logs = await api.containerLogs(host, engine, container.id, { tail: 1000, since });
+        if (!live()) return;
+        setError(null);
+        if (logs.lines.length === 0) return;
+        latest.current = appendLogs(latest.current, logs.lines);
+        setLines((prev) => (prev && prev.key === key ? { ...prev, list: latest.current } : prev));
+      } catch (err) {
+        if (live()) setError(errorMessage(err));
+        throw err;
+      }
+    },
+    [host, engine, container.id, key],
+  );
+  usePoll(readNew, {
+    enabled: follow && shown !== null && polling,
+    intervalMs: LOG_FOLLOW_MS,
+    maxMs: LOG_FOLLOW_MAX_MS,
+    resetKey: key,
+    // The last lines were just read.
+    immediate: false,
+  });
 
   const matches = useMemo(() => searchLogs(shown?.list ?? [], search), [shown, search]);
   useEffect(() => {
@@ -418,48 +429,25 @@ function LogsTab({ host, engine, container }: Props) {
         <div ref={bottom} />
       </div>
       <p className="text-xs text-muted-foreground">
-        Lines the container wrote to stderr are tinted. Following asks for new lines every {FOLLOW_MS / 1000} s on the
-        host&apos;s kept connection.
+        Lines the container wrote to stderr are tinted. Following asks for new lines every {LOG_FOLLOW_MS / 1000} s on
+        the host&apos;s kept connection, while this page shows.
       </p>
     </div>
   );
 }
 
-function StatsTab({ host, engine, container }: Props) {
-  const [stats, setStats] = useState<ContainerStats | null | undefined>(undefined);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let stale = false;
-    const read = () =>
-      api.containerStats(host, engine).then(
-        (list) => {
-          if (stale) return;
-          setStats(statsFor(list, container.id) ?? null);
-          setError(null);
-        },
-        (err) => {
-          if (!stale) setError(errorMessage(err));
-        },
-      );
-    void read();
-    const timer = window.setInterval(() => void read(), STATS_MS);
-    return () => {
-      stale = true;
-      window.clearInterval(timer);
-    };
-  }, [host, engine, container.id]);
-
-  if (error) {
+function StatsTab({ container, stats: read }: Props) {
+  if (read?.error) {
     return (
       <Alert variant="destructive">
         <TriangleAlertIcon />
-        <AlertDescription>{error}</AlertDescription>
+        <AlertDescription>{read.error}</AlertDescription>
       </Alert>
     );
   }
-  if (stats === undefined) return <Skeleton className="h-24" />;
-  if (stats === null) {
+  if (!read) return <Skeleton className="h-24" />;
+  const stats = statsFor(read.list, container.id);
+  if (!stats) {
     return <p className="text-sm text-muted-foreground">No stats: the container is not running.</p>;
   }
   const pct = (v: number | null) => (v == null ? "—" : `${v.toFixed(1)} %`);
@@ -480,8 +468,8 @@ function StatsTab({ host, engine, container }: Props) {
         <Row label="Processes">{stats.pids ?? "—"}</Row>
       </dl>
       <p className="text-xs text-muted-foreground">
-        One sample every {STATS_MS / 1000} s while this tab shows (stats --no-stream). Network and disk are totals since
-        the container started.
+        Read with the list every {STATS_POLL_MS / 1000} s while this page shows (stats --no-stream), last at{" "}
+        {new Date(read.readAt).toLocaleTimeString()}. Network and disk are totals since the container started.
       </p>
     </div>
   );

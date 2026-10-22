@@ -141,6 +141,8 @@ pub enum GuestState {
     LoginFailed,
     /// The host key is not trusted yet, or it changed (blocked).
     HostKey,
+    /// The hourly cap on background logins to the host was reached: waiting.
+    Paused,
     /// The host answered, but not like Linux (no /proc).
     NoData,
     Error,
@@ -157,6 +159,8 @@ pub struct GuestStatus {
     pub retry_in_secs: Option<u64>,
     /// When the last good reading arrived.
     pub last_ok: Option<String>,
+    /// No new login until the session or its credentials change or the user presses Retry.
+    pub parked: bool,
 }
 
 impl GuestStatus {
@@ -167,6 +171,7 @@ impl GuestStatus {
             message,
             retry_in_secs: None,
             last_ok: None,
+            parked: false,
         }
     }
 }

@@ -709,6 +709,15 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
         theme={theme}
         onClose={() => setSelected(null)}
         onWatch={(id, on) => void watch(id, on)}
+        onRetry={(id) => {
+          api.backgroundLoginRetry(id).then(
+            () => {
+              toast.success("Logging in again on the next round");
+              load();
+            },
+            (err) => toast.error(errorMessage(err)),
+          );
+        }}
         onConnect={onConnect}
         onActions={onActions}
         onHostDetails={(session) => {

@@ -25,17 +25,18 @@ Everything committed here is public, and git history is forever.
 - The app keeps its data (database, vault, logs, recordings) under `%APPDATA%` / `%LOCALAPPDATA%`, never in the working directory, so nothing private can land in the repo.
 - A gitleaks scan runs as a pre-commit hook and in CI, and a finding fails the build. Never bypass it (`--no-verify`). If a secret was ever committed, stop and tell the user: it has to be revoked and replaced, because deleting it doesn't remove it from public history.
 - Commits use the user's GitHub noreply email, never a personal email.
-- Only the update-signing **public** key goes in `tauri.conf.json`. The private key and its password live only outside the repo on the user's machine and in the GitHub Actions secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Claude never reads, prints or handles the private key or its password; the user sets those secrets.
+- Only the update-signing **public** key goes in `tauri.conf.json`. The private key and its password live only outside the repo on the user's machine and in the secrets `TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` of the GitHub Environment `release` (never repository-level secrets, which any workflow on any branch can read). Claude never reads, prints or handles the private key or its password; the user sets those secrets. No build step may need the key: `bundle.createUpdaterArtifacts` stays off, and only release.yml's publish job signs.
 - Pin third-party GitHub Actions to a full commit SHA.
 
 ## Releases and auto-update
 
 - The version in `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` must match. Release by pushing a tag `vX.Y.Z`.
-- `.github/workflows/ci.yml` runs on every push to main and every pull request, except documentation-only changes (`paths-ignore`: `**/*.md`, `docs/**`): `cargo fmt --all --check`, clippy, `cargo test --workspace`, `npm run lint`, `npm test`. `.github/workflows/secrets.yml` runs gitleaks over the full history on every push to main and every pull request, documentation included. Both cancel a run a newer push supersedes.
+- `.github/workflows/ci.yml` runs on every push to main and every pull request, except documentation-only changes (`paths-ignore`: `**/*.md`, `docs/**`): `cargo fmt --all --check`, clippy, `cargo test --workspace`, `npm run lint`, `npm test`, and a Linux dependency scan (C4): `cargo deny --locked check advisories bans sources` with `deny.toml` (crates.io only, no git sources; each accepted advisory is listed there with its reason), `npm audit --omit=dev` and `npm audit signatures`. `.github/workflows/secrets.yml` runs gitleaks over the full history on every push to any branch and every pull request, documentation included. Both cancel a run a newer push supersedes. `.github/dependabot.yml` opens one grouped pull request a week each for Cargo, npm and GitHub Actions.
+- Toolchains are pinned (C5): Rust in `rust-toolchain.toml`, Node in `.node-version`; CI and releases use them. Bump them on purpose, in their own commit.
 - CI minutes: the repo is public, so Actions runs on standard GitHub-hosted runners don't use the owner's minutes. Still keep CI lean: a `ci.yml` run takes about 6 to 8 minutes of runner time and a release about 14, so push when a change is ready rather than after every small commit, and keep `paths-ignore` working (README "CI minutes"). If the repo ever goes private again, runs bill against the 2,000-minute GitHub Free allowance and Windows minutes count double.
-- `.github/workflows/release.yml` runs on `v*` tags on `windows-latest`. It uses `tauri-apps/tauri-action` to build, sign the update artifacts and create a **draft** GitHub Release with the installer, its `.sig` file and `latest.json`, then checks the signatures against `plugins.updater.pubkey` with `scripts/verify-update-signature.mjs` (a failure means the signing secret and the public key don't pair: don't publish). The user publishes the draft after a smoke test; installed apps only see published releases.
-- `tauri.conf.json`: `bundle.createUpdaterArtifacts: true`; `plugins.updater.pubkey` holds the public key; `plugins.updater.endpoints` is `["https://github.com/khilfi/remotely/releases/latest/download/latest.json"]`, which names the repository the app updates from (the app doesn't fetch that URL, see the next point); `plugins.updater.windows.installMode: "passive"`.
-- Update token (FD-14, `docs/post-mvp-plan.md` P1, built while the repo was private; the releases are public now, but the updater still requires it): update checks need the **GitHub update token**, a fine-grained token for this repository only with Contents: Read-only and an expiry, which the owner enters in Settings → Updates on each machine (README "GitHub update token" says how to create, enter and replace it). It is a vault secret (`password` kind, label "GitHub update token"; its id is the setting `updates.tokenId`, the expiry GitHub reports is `updates.tokenExpiresOn`), write-only in the UI with Test, Replace and Remove. The updater (`src-tauri/src/updater.rs`) finds the latest release through the GitHub API with it (`crates/core/src/adapters/github.rs`), then has `tauri-plugin-updater` fetch `latest.json` and the installer from their API asset URLs with `Authorization` and `Accept: application/octet-stream`; GitHub redirects to its storage, and reqwest drops the token on that redirect. tauri-action writes API asset URLs into `latest.json`; any other URL is mapped to the release's file of the same name, or refused, so the token only goes to the API. Signatures are verified against the public key exactly as before. Without a token, or with the vault locked, a check makes no network call and says why (`updates::UpdateCheck`). The token never reaches logs, errors, the UI state, the audit log or exports. Tests use `fakes::github_server::FakeGithub` (API and storage on 127.0.0.1) and `UpdateSigner` (a throwaway minisign key); never a real token. Copies on 0.2.0 or older can't update this way and need one manual install of 0.2.1 or later.
+- `.github/workflows/release.yml` runs on `v*` tags in two jobs (C1). **build** (`windows-latest`, no secrets, read-only token): the tagged commit must be on main and match the three version files; it builds the NSIS installer with `--locked`, the pinned toolchains and no cache, and uploads it as a workflow artifact. **publish** (`ubuntu-latest`, Environment `release`: the owner approves each run, `v*` tags only): signs the installer with `tauri signer sign --app-version`, checks the signature with `scripts/verify-update-signature.mjs --version`, then `scripts/publish-release.mjs` creates the **draft** release with the installer, its `.sig` and `latest.json` (tauri-action's format, API asset URLs), checking `latest.json` and fetching the installer back before it uploads it, and deleting the draft if anything fails (C6). The tag message is the release notes (written to a file, never `$GITHUB_OUTPUT`). README "Release settings on GitHub" has the owner's settings (Environment, secrets, tag ruleset) and "Signing key compromise or loss" the runbook. The user publishes the draft after a smoke test; installed apps only see published releases.
+- `tauri.conf.json`: `bundle.createUpdaterArtifacts: false` (the publish job signs, so no build needs the key); `plugins.updater.pubkey` holds the public key; `plugins.updater.requireSignedVersion: true` (C3: the plugin refuses a signature whose trusted comment names another version than `latest.json`); `plugins.updater.endpoints` is `["https://github.com/khilfi/remotely/releases/latest/download/latest.json"]`, which names the repository the app updates from (the app doesn't fetch that URL, see the next point); `plugins.updater.windows.installMode: "passive"`.
+- Update token (FD-14, `docs/post-mvp-plan.md` P1, built while the repo was private; the releases are public now, but the updater still requires it): update checks need the **GitHub update token**, a fine-grained token for this repository only with Contents: Read-only and an expiry, which the owner enters in Settings → Updates on each machine (README "GitHub update token" says how to create, enter and replace it). It is a vault secret (`password` kind, label "GitHub update token"; its id is the setting `updates.tokenId`, the expiry GitHub reports is `updates.tokenExpiresOn`), write-only in the UI with Test, Replace and Remove. The updater (`src-tauri/src/updater.rs`) finds the latest release through the GitHub API with it (`crates/core/src/adapters/github.rs`), then has `tauri-plugin-updater` fetch `latest.json` and the installer from their API asset URLs with `Authorization` and `Accept: application/octet-stream`; GitHub redirects to its storage, and reqwest drops the token on that redirect. The release workflow writes API asset URLs into `latest.json`; any other URL is mapped to the release's file of the same name, or refused, so the token only goes to the API. Signatures are verified against the public key exactly as before. Before an update is offered, `adapters::updater::check_signed_release` (C3) checks the signature's trusted comment against the public key and requires `file:<productName>_<version>_x64-setup.exe` and `version:<version>` for the version `latest.json` announces, so an old signed installer can't come back as a newer version. Without a token, or with the vault locked, a check makes no network call and says why (`updates::UpdateCheck`). The token never reaches logs, errors, the UI state, the audit log or exports. Tests use `fakes::github_server::FakeGithub` (API and storage on 127.0.0.1) and `UpdateSigner` (a throwaway minisign key); never a real token. Copies on 0.2.0 or older can't update this way and need one manual install of 0.2.1 or later.
 - Windows installer: NSIS only (`bundle.targets: ["nsis"]`), installed per user (`bundle.windows.nsis.installMode: "currentUser"`), so installing and auto-updating never need admin rights. Decided before v0.1.0; switching installer type after release would strand existing installs.
 - In the app (FD-14): check at start and every 24 hours, and show the new version and its release notes. Installing is a Medium-tier command through the command bus, and it waits until no job is running. A setting turns update checks off for air-gapped sites.
 
@@ -56,7 +57,10 @@ A Cargo workspace: the core is its own crate with no Tauri types, so its tests b
 ```text
 CLAUDE.md
 Cargo.toml            workspace: crates/core + src-tauri; shared lints (no unwrap/expect)
-.github/workflows/    ci.yml, secrets.yml, release.yml
+.github/workflows/    ci.yml, secrets.yml, release.yml; .github/dependabot.yml
+deny.toml             cargo-deny: advisories, bans, sources (C4)
+rust-toolchain.toml   pinned Rust; .node-version pinned Node (C5)
+scripts/              verify-update-signature.mjs, publish-release.mjs (release.yml's publish job) and their tests
 .githooks/            pre-commit (gitleaks)
 docs/                 PRD.md, architecture.png, roadmap.png
 crates/core/          remotely-core: all app logic
@@ -96,7 +100,12 @@ crates/core/          remotely-core: all app logic
                       mod.rs the Containers service: detection, reads on kept connections (closed when idle), target
                       names from the engines' own lists (StoreDirectory), the AP-02 impact preview, ContainerActions
                       for the job runner (Command::Container), and "Open a shell" (Terminals::open_container_shell
-                      types docker/podman exec -it instead of the startup command)
+                      types docker/podman exec -it instead of the startup command); logins and sudo go through
+                      login_guard (SudoWatch parks a refused sudo password; Containers::retry)
+    login_guard.rs    MO-02, CT-01 background logins (dashboard guest polling, Containers reads): a refused login or
+                      agent, refused sudo, changed host key or missing secret parks the session until its login key
+                      changes, credentials_changed (vault unlock, secret add/replace/delete, host key trust/remove) or
+                      Retry (Core::retry_background_logins); at most 10 logins per host per hour, jump hosts included
     updates.rs        FD-14 update checks and the GitHub update token in the vault
     inventory.rs      VM-01 Workstation's and (VM-18) VirtualBox's VMs; a VirtualBox VM is kept when VirtualBox can't
                       be asked
@@ -107,8 +116,9 @@ crates/core/          remotely-core: all app logic
     export.rs         AP-05 audit log CSV export and secret redaction
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
                       and this PC's RAM and paging files per round), guest.rs (MO-02 SSH polling, kept connections,
-                      backoff; MO-13 reads a host's facts on its kept connection when they are old), procfs.rs (/proc
-                      and df parsers)
+                      backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
+                      GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old),
+                      procfs.rs (/proc and df parsers)
     host_details/     MO-13, MO-14 (reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
                       (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
                       channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the
@@ -117,26 +127,36 @@ crates/core/          remotely-core: all app logic
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests)
-    sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); sessions/tree.rs the QL-04
-                      tree (by folder, tag or label) for the Terminal page
+    sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
+                      command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
+                      and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
+                      or label) for the Terminal page
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
-                      QL-03 host name and IP, QL-06 a vault password typed at a prompt); quick.rs QL-02 quick connect;
+                      QL-03 host name and IP, QL-06 a vault password typed at a prompt; SS-01 the startup command typed
+                      at the first shell prompt, or not at all within STARTUP_WAIT, and after an automatic reconnect
+                      only with startup_on_reconnect); quick.rs QL-02 quick connect;
                       log.rs and output.rs SS-11 session logs (one that can't be written stops: LogStopped, audited;
                       stopping waits for the last lines) and saved, printed or copied output (secrets scrubbed);
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
                       detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
-                      a line buffer, Enter held and the line rated on the bus (Command::TerminalLine), password prompts
-                      and full-screen programs passed straight through, QL-07 one LineFinished per line (never one
-                      notification per terminal); record.rs QL-12 MultiExec recording: each sent line's output per
-                      terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
+                      a line buffer, Enter and every other key that runs a line in bash or zsh held (RunKey: Ctrl+O,
+                      Esc then Enter...; a lone Esc waits for its next key; the table of bindings is in the file) and
+                      the line rated on the bus (Command::TerminalLine; the bus and the job runner send only the held
+                      keys of the rated line, check_keys), edit-and-execute keys refused (Ctrl+X Ctrl+E, v after Esc),
+                      password prompts and full-screen programs passed straight through, QL-07 one LineFinished per
+                      line (never one notification per terminal); record.rs QL-12 MultiExec recording: each sent line's
+                      output per terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
                       redraws; RecordSlot handed to the pane through its input before the Enter; Recorder keeps the
                       session's lines in memory with caps, grouped and diffed through bulk.rs); folder.rs SS-08 the
                       shell's folder (OSC 7) and
                       the invisible prompt hook typed into bash and zsh on connect (hidden from the terminal, logs,
-                      MultiExec and QL-07; the startup command waits for it), QL-09 its user report next to the folder
+                      MultiExec and QL-07; the startup command waits for it; typed only at a line that looks like a
+                      shell prompt; never edits the history; audited once per connection, folder_hook_installed;
+                      PromptHook::off for Settings' prompt_hook, a session's prompt_hook, or Prod by default, with
+                      FolderTracking::Off), QL-09 its user report next to the folder
                       (private OSC 7777, hidden the same way); shell_user.rs QL-09 who transfers run as (the SSH login,
                       RemoteFiles::user) and who the shell may run as (the hook's report, a prompt that stopped
                       reporting after su or sudo -i, a prompt naming a user); files.rs SS-08 the "Files here" listing
@@ -153,13 +173,19 @@ crates/core/          remotely-core: all app logic
                       policy engine (read-only additions in policy/commands.rs, writing forms in commands/writes.rs);
                       QL-13 each entry's manual page (manual.rs: Manual, MANUAL_HOSTS, `checked` refuses any other
                       address; opening one is not audited and the read-only lock allows it)
-    reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only); SS-07 the first jump
-                      host's for a session behind one, never the session itself
+    reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only; each shows in the host's
+                      sshd log): every 5 minutes by default, a host that is down less often (next_check_after: doubling
+                      up to 30 minutes), none for a host with an open connection (OpenConnections: connected terminals,
+                      and TrackedRemote, the remote adapter every service uses, noting kept connections: dashboard,
+                      Containers page, host details); SS-07 the first jump host's for a session behind one, never the
+                      session itself
     bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
-    known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited)
+    known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited; a new key type for a host
+                      with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
+                      preferred host key algorithms)
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
                       authorized_keys push script (the push itself is Command::PushSshKey on the bus)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
@@ -209,12 +235,16 @@ src/                  React + TypeScript UI
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3)
+  hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
+                      each timed from when the last one finished; useVisibility); use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), theme.ts, utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
                       and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
-                      (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow), host-details.ts
+                      (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
+                      and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
+                      delay, longer after failures), host-details.ts
                       (MO-13, MO-14 summaries, wording and the commands offered to copy),
                       ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
@@ -363,14 +393,15 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Opt-in test against real VirtualBox (reads only: `list vms`, then for `it-` VMs only `showvminfo`, snapshots, guest properties and their processes): `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
-- UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM)
+- UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM; and the release scripts' tests, `scripts/*.test.mjs`, against a fake GitHub on 127.0.0.1)
+- Dependency scan, as CI runs it: `cargo deny --locked check advisories bans sources` (cargo-deny is not a project dependency), `npm audit --omit=dev`
 - Format: `cargo fmt --all`, `npm run format`
 - Build the installer: `npm run tauri build`
 - Release: bump the version in all three files, commit, then `git tag -a vX.Y.Z -m "<release notes>"` and `git push origin vX.Y.Z`; publish the draft release on GitHub after a smoke test. The tag message is the release notes users see in the update banner, so write it for them.
 
 ## Conventions
 
-- Rust stable, edition 2021. Errors with `thiserror`. No `unwrap()`/`expect()` outside tests.
+- Rust stable (the version in `rust-toolchain.toml`), edition 2021. Errors with `thiserror`. No `unwrap()`/`expect()` outside tests.
 - TypeScript in strict mode. ESLint and Prettier.
 - shadcn/ui: add components with `npx shadcn@latest add <name>`. They land in `src/components/ui/` and stay as generated (that folder and `src/hooks/use-mobile.ts` are excluded from ESLint and Prettier so updates diff cleanly). The shadcn base styles are inlined in `src/styles.css` (`shadcn eject`), so the `shadcn` package is not an app dependency; don't add it back. App colour tokens (risk tiers, environment labels) live at the end of `src/styles.css`. Import from `@/…` (alias for `src/`).
 - Dark mode is the `dark` class on `<html>`, set only by `src/lib/theme.ts`. QL-11: the top bar's Dark mode switch picks

@@ -10,7 +10,7 @@
     "lint": "tsc --noEmit && eslint . && prettier --check .",
     "format": "prettier --write .",
     "preview": "vite preview",
-    "test": "node --test \"src/**/*.test.ts\"",
+    "test": "node --test \"src/**/*.test.ts\" \"scripts/*.test.mjs\"",
     "tauri": "tauri",
     "test:rust": "cargo test --workspace"
   },

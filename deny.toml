@@ -1,0 +1,60 @@
+# cargo-deny: ci.yml's dependency scan runs `cargo deny --locked check advisories bans sources` on every
+# pull request and every merge to main (C4). Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# Run it locally with the same command (cargo-deny is not a project dependency: `cargo install
+# --locked cargo-deny`, or the release binary from github.com/EmbarkStudios/cargo-deny).
+
+[graph]
+# Only the platform Remotely ships for: crates only Linux or macOS builds use (GTK, WebKitGTK,
+# Cocoa...) are never compiled into the app, so their advisories don't apply.
+targets = ["x86_64-pc-windows-msvc"]
+# The `fakes` feature too: its crates build into every test run.
+all-features = true
+
+[advisories]
+# A security advisory for any crate in Cargo.lock fails the scan, unless it is listed below with a
+# reason. Unmaintained crates fail it only when the workspace depends on them directly; Tauri's own
+# dependencies are Tauri's to replace, and a Tauri update brings the fix.
+unmaintained = "workspace"
+yanked = "warn"
+ignore = [
+  # rsa (Marvin attack: RSA decryption timing). Remotely only signs with RSA (SSH user keys, SS-09)
+  # and never decrypts with it, and no rsa release fixes it yet. Revisit when one does.
+  { id = "RUSTSEC-2023-0071", reason = "rsa timing side channel affects decryption; Remotely only signs" },
+  # zip 4 (symlinks and Unix permissions when extracting an archive), through tauri-plugin-updater.
+  # The plugin unpacks an update only if it is a zip, and only after its signature checked out
+  # against the app's key; Remotely's updates are the NSIS installer itself, never a zip. No
+  # tauri-plugin-updater 2.x release uses zip 9 yet. Drop these when one does, or when the app turns
+  # off the plugin's `zip` feature.
+  { id = "RUSTSEC-2026-0367", reason = "zip extraction; updates are signed .exe files, never zips" },
+  { id = "RUSTSEC-2026-0368", reason = "zip extraction; updates are signed .exe files, never zips" },
+  { id = "RUSTSEC-2026-0369", reason = "zip extraction; updates are signed .exe files, never zips" },
+]
+
+[bans]
+# Several versions of one crate only warn. The crypto ones below are known: russh, ssh-key and rsa
+# (SSH, SS-03 and SS-09) and the vault's aes-gcm and argon2 (SS-04) are on RustCrypto's new
+# releases (digest 0.11, sha2 0.11, rand_core 0.10), while Tauri, its plugins and rustls still use
+# the previous ones. Each side gets the version it was built and tested with; they never mix
+# types. They go away as Tauri moves up.
+multiple-versions = "warn"
+wildcards = "allow"
+skip = [
+  { crate = "block-buffer", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
+  { crate = "cpufeatures", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
+  { crate = "crypto-common", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
+  { crate = "digest", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
+  { crate = "generic-array", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
+  { crate = "getrandom", reason = "rand_core 0.6 to 0.10 across Tauri, rustls and russh" },
+  { crate = "rand", reason = "rand 0.9 (Tauri, rustls) and 0.10 (russh, ssh-key)" },
+  { crate = "rand_core", reason = "rand 0.9 (Tauri, rustls) and 0.10 (russh, ssh-key)" },
+  { crate = "sha2", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
+  { crate = "sha3", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
+]
+
+[sources]
+# Crates come from crates.io only: no git dependencies, no other registries.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

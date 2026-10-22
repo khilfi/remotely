@@ -20,7 +20,7 @@ use remotely_core::jobs::JobLimits;
 use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHostUsage};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::presentation::Presentation;
-use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord};
+use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord, StartupRating};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
@@ -181,20 +181,10 @@ pub async fn filter_delete(state: State<'_, AppState>, id: String) -> IpcResult<
 #[tauri::command]
 pub async fn command_submit(state: State<'_, AppState>, command: Command) -> IpcResult<SubmitOutcome> {
     // SS-08: an upload names files on this PC, so only `files_upload` builds one, from files picked in a
-    // dialog or dropped on the window; never from paths the UI sends.
-    if matches!(command, Command::FileUpload { .. }) {
-        return Err(IpcError::new(
-            "invalid_input",
-            "Uploads start from a terminal: its upload button, or files dropped on it.",
-        ));
-    }
-    // SS-07: a tunnel opens a saved forward on an open terminal; `terminal_tunnel_start` builds it.
-    if matches!(command, Command::OpenTunnel { .. }) {
-        return Err(IpcError::new(
-            "invalid_input",
-            "Tunnels start from a terminal's Tunnels panel, from the session's saved port forwards.",
-        ));
-    }
+    // dialog or dropped on the window; never from paths the UI sends. SS-07: a tunnel opens a saved
+    // forward on an open terminal; `terminal_tunnel_start` builds it. SS-10: a MultiExec line sends the
+    // keys MultiExec held and rated; `multiexec_input` is the way in.
+    command.check_from_ui()?;
     let core = &state.core;
     Ok(core.bus.submit(&core.ctx, command).await?)
 }
@@ -1203,4 +1193,23 @@ pub async fn metrics_capacity(state: State<'_, AppState>) -> IpcResult<HostCapac
 pub async fn metrics_watch(state: State<'_, AppState>, session_id: Uuid, watch: bool) -> IpcResult<Vec<Uuid>> {
     let core = &state.core;
     Ok(core.metrics.set_watched(&core.ctx, session_id, watch).await?)
+}
+
+/// MO-02, CT-01: Retry on a host whose background logins are parked (a refused login or sudo, a
+/// changed host key, no saved password) or waiting for the hourly cap. The dashboard and the
+/// Containers page log in again on their next read.
+#[tauri::command]
+pub fn background_login_retry(state: State<'_, AppState>, session_id: Uuid) {
+    state.core.retry_background_logins(session_id);
+}
+
+/// SS-01: what the policy engine makes of a startup command on a session with this label, with the
+/// current rules (the editor shows it while it is typed). A read: nothing is saved or audited.
+#[tauri::command]
+pub fn session_startup_rating(
+    state: State<'_, AppState>,
+    command: String,
+    environment: Environment,
+) -> Option<StartupRating> {
+    state.core.sessions.rate_startup(&command, environment)
 }

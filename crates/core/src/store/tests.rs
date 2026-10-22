@@ -461,6 +461,8 @@ async fn auto_linking_never_overwrites_the_users_choice() {
         auth: SessionAuth::Agent,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::None,
         color: None,
         tags: vec![],
