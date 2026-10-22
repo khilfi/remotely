@@ -94,7 +94,7 @@ use crate::adapters::remote::{
 };
 use crate::command_bus::CommandBus;
 use crate::containers::ContainerShell;
-use crate::domain::{Context, Target, TargetRef};
+use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::host_details::SpecsCollector;
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
@@ -186,6 +186,9 @@ pub struct TerminalSettings {
     /// QL-07: seconds without output, after some came, that end a run whose prompt was not
     /// recognized; 0 waits for the prompt only.
     pub notify_quiet_secs: u64,
+    /// SS-08: type the folder prompt hook into bash and zsh. A session can say otherwise, and a
+    /// Prod-labelled session has it off unless it says so.
+    pub prompt_hook: bool,
 }
 
 impl Default for TerminalSettings {
@@ -202,6 +205,7 @@ impl Default for TerminalSettings {
             notify_when: NotifyWhen::Long,
             notify_after_secs: 30,
             notify_quiet_secs: 30,
+            prompt_hook: true,
         }
     }
 }
@@ -270,8 +274,13 @@ impl TerminalSettings {
             (true, 0) => format!("notify after {which}"),
             (true, quiet) => format!("notify after {which} (or {quiet} s quiet)"),
         };
+        let hook = if self.prompt_hook {
+            ""
+        } else {
+            ", folder prompt hook off"
+        };
         format!(
-            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}",
+            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}",
             on(self.auto_reconnect),
             on(self.copy_on_select),
             self.font_size,
@@ -1005,6 +1014,7 @@ impl Terminals {
             size,
             settings,
             asked_dns: false,
+            automatic: false,
         };
         let task = tokio::spawn(pane.run());
         locks::lock(&self.inner.tasks).insert(id, task);
@@ -1650,8 +1660,17 @@ const DIM: &str = "2";
 const YELLOW: &str = "33";
 const RED: &str = "31";
 
-/// SS-01: how long a session's startup command waits for the SS-08 prompt hook at most.
-const STARTUP_WAIT: Duration = Duration::from_secs(3);
+/// SS-01: how long a session's startup command waits for a shell prompt at most. Without one it is not
+/// typed: at a menu or a question it would be read as an answer.
+const STARTUP_WAIT: Duration = Duration::from_secs(15);
+
+/// What a new connection types by itself (SS-01, SS-08).
+struct Typed {
+    /// The startup command's lines (or a container shell's command), typed at the first prompt.
+    startup: Vec<String>,
+    /// SS-08: whether the folder prompt hook may be typed.
+    hook: bool,
+}
 
 /// A live shell, as the pump keeps it.
 struct Live {
@@ -1761,6 +1780,8 @@ struct Pane {
     settings: TerminalSettings,
     /// QL-03: DNS is asked once, before the first connection.
     asked_dns: bool,
+    /// SS-01: the next connection is an automatic reconnect (the pane's own retry, not the user's).
+    automatic: bool,
 }
 
 impl Pane {
@@ -1801,12 +1822,12 @@ impl Pane {
             };
             let Some(connected) = connected else { break };
             let wait = match connected {
-                Ok((shell, startup)) => {
+                Ok((shell, typed)) => {
                     connections += 1;
                     attempt = 0;
                     last_error = None;
                     self.status(TerminalStatus::Connected).await;
-                    match self.pump(shell, startup).await {
+                    match self.pump(shell, typed).await {
                         Pump::Closed => break,
                         Pump::Reconnect => continue,
                         Pump::Ended(ShellEnd::Exited { status }) => {
@@ -1932,9 +1953,11 @@ impl Pane {
     }
 
     /// One connection: the session as saved now, its secrets from the vault, then the adapter. Also
-    /// returns the session's startup command (SS-01), which the pump types once the SS-08 prompt hook
-    /// is out of the way.
-    async fn connect(&mut self) -> Result<(ShellHandle, Vec<String>)> {
+    /// returns what the pump types by itself: the session's startup command (SS-01), at the first
+    /// shell prompt once the SS-08 prompt hook is out of the way, and whether the hook may go.
+    async fn connect(&mut self) -> Result<(ShellHandle, Typed)> {
+        // SS-01: the pane's own retry after a lost connection, not a connection the user asked for.
+        let automatic = std::mem::take(&mut self.automatic);
         let spec = self.spec().await?;
         // SS-07: the chain, as the tab and the session details show it.
         let via: Vec<String> = spec.jumps().iter().map(|j| j.name.clone()).collect();
@@ -2016,20 +2039,33 @@ impl Pane {
                 })
                 .await;
         }
-        // SS-01: the session's startup command, typed into each new shell by the pump. CT-01: a container's
-        // shell instead, in a pane opened for one.
+        // SS-01: the session's startup command, typed into each new shell by the pump: on the connections
+        // the user opens, and after an automatic reconnect only when the session asks for it. CT-01: a
+        // container's shell instead, in a pane opened for one (what the pane is for).
         let startup = match &self.control.container {
             Some(shell) => vec![shell.command.clone()],
+            None if automatic && !spec.startup_on_reconnect && spec.startup_command.is_some() => {
+                self.say(notice(
+                    DIM,
+                    "Reconnected by itself, so the startup command was not typed again (the session can ask for it)",
+                ))
+                .await;
+                Vec::new()
+            }
             None => spec
                 .startup_command
                 .as_deref()
                 .map(|command| command.lines().map(str::to_owned).collect())
                 .unwrap_or_default(),
         };
+        // SS-08: the session's choice, else Settings, and off for Prod unless the session turns it on.
+        let hook = spec
+            .prompt_hook
+            .unwrap_or(self.settings.prompt_hook && spec.environment != Environment::Prod);
         if let Some(ip) = shell.peer_ip {
             self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
         }
-        Ok((shell, startup))
+        Ok((shell, Typed { startup, hook }))
     }
 
     /// QL-03: fills in what the session lacks, beside the connection so a slow DNS server never
@@ -2191,7 +2227,7 @@ impl Pane {
     }
 
     /// Moves bytes between the pane and the shell until one side ends.
-    async fn pump(&mut self, shell: ShellHandle, startup: Vec<String>) -> Pump {
+    async fn pump(&mut self, shell: ShellHandle, typed: Typed) -> Pump {
         let ShellHandle {
             input: shell_input,
             output: mut shell_output,
@@ -2243,10 +2279,14 @@ impl Pane {
             input: shell_input,
             // QL-06, QL-07: a new shell, watched from its first output.
             watch: RunWatch::new(self.watch_config()),
-            hook: PromptHook::new(&Uuid::new_v4().simple().to_string(), now),
+            hook: if typed.hook {
+                PromptHook::new(&Uuid::new_v4().simple().to_string(), now)
+            } else {
+                PromptHook::off(&Uuid::new_v4().simple().to_string(), now)
+            },
             folders: FolderWatch::new(),
             users: UserWatch::new(&login),
-            startup,
+            startup: typed.startup,
             startup_until: now + STARTUP_WAIT,
             armed: None,
             recording: None,
@@ -2276,13 +2316,23 @@ impl Pane {
         end
     }
 
-    /// SS-01: types the session's startup command once the SS-08 hook is set up or given up (or after
-    /// [`STARTUP_WAIT`]), never while the hook is out and unanswered.
+    /// SS-01: types the session's startup command at the first line that looks like a shell prompt,
+    /// once the SS-08 hook is set up, given up or off, never while the hook is out and unanswered.
+    /// Without a prompt by [`STARTUP_WAIT`] it is not typed at all, and the terminal says so.
     async fn type_startup(&self, live: &mut Live) -> bool {
         if live.startup.is_empty() || live.hook.typing() {
             return true;
         }
-        if !live.hook.settled() && Instant::now() < live.startup_until {
+        let at_prompt = !live.watch.alternate() && shell_user::looks_like_prompt(live.watch.line());
+        if !(live.hook.settled() && at_prompt) {
+            if Instant::now() >= live.startup_until {
+                live.startup.clear();
+                self.say(notice(
+                    YELLOW,
+                    "The startup command was not typed: no shell prompt showed. Type it yourself if it is still wanted",
+                ))
+                .await;
+            }
             return true;
         }
         // Like typing: the hook gives up or shows the prompt it held.
@@ -2353,6 +2403,7 @@ impl Pane {
                     let tick = live.hook.tick(now, live.watch.line(), live.watch.alternate());
                     if let Some(hook) = tick.type_now {
                         let _ = live.input.send(ShellInput::Data(hook)).await;
+                        self.audit_hook().await;
                     }
                     if !self.pass(tick.show, &mut live).await {
                         let _ = live.input.send(ShellInput::Close).await;
@@ -2499,12 +2550,38 @@ impl Pane {
         loop {
             tokio::select! {
                 () = cancel.cancelled() => return Wait::Close,
-                () = &mut sleep => return Wait::Connect,
+                () = &mut sleep => {
+                    // SS-01: the pane's own retry; Enter or Reconnect during the wait is the user's.
+                    self.automatic = true;
+                    return Wait::Connect;
+                }
                 msg = self.input.recv() => match self.waiting_input(msg) {
                     Some(wait) => return wait,
                     None => continue,
                 },
             }
+        }
+    }
+
+    /// SS-08: the prompt hook was typed into the shell: audited once per connection, since it changes
+    /// the shell's prompt hook (`PROMPT_COMMAND` or zsh's `precmd`) and runs `id -un` on the host.
+    async fn audit_hook(&self) {
+        let action = format!(
+            "Typed the folder prompt hook into the shell of {}",
+            quoted_name(&self.control)
+        );
+        let detail = "bash: PROMPT_COMMAND, zsh: a precmd hook; reports the folder (OSC 7) and the user (id -un) at each prompt; leading space, so ignorespace keeps it out of the history";
+        if let Err(err) = audit(
+            &self.inner.store,
+            &self.ctx,
+            "folder_hook_installed",
+            &action,
+            self.control.targets(),
+            detail,
+        )
+        .await
+        {
+            tracing::error!(error = %err, "could not audit the folder prompt hook");
         }
     }
 

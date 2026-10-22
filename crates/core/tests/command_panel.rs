@@ -778,6 +778,8 @@ async fn favourites_travel_in_the_encrypted_export() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
@@ -827,6 +829,8 @@ async fn favourites_travel_in_the_encrypted_export() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],

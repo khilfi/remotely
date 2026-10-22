@@ -103,6 +103,8 @@ async fn fake(files: FakeFiles, environment: Environment) -> (Fake, Uuid) {
                 auth: SessionAuth::Agent,
                 jump_session_id: None,
                 startup_command: None,
+                startup_on_reconnect: false,
+                prompt_hook: None,
                 environment,
                 color: None,
                 tags: vec![],
@@ -565,6 +567,8 @@ async fn ssh_session(core: &Core, server: &TestSshServer, password: &str, startu
                 },
                 jump_session_id: None,
                 startup_command: startup.map(str::to_owned),
+                startup_on_reconnect: false,
+                prompt_hook: None,
                 environment: Environment::Lab,
                 color: None,
                 tags: vec![],
@@ -1104,4 +1108,120 @@ async fn without_the_hook_the_drawer_goes_by_the_prompt() {
     core.terminals.write(pane.id, b"exit\r".to_vec()).await;
     // The toy's own prompt names nobody, so nothing says bob any more.
     pane.until(|p| p.user().is_some_and(|u| u.shell.is_none())).await;
+}
+
+/// A bash session on `server` with its environment and its own prompt hook choice (SS-08).
+async fn hook_session(
+    core: &Core,
+    server: &TestSshServer,
+    password: &str,
+    name: &str,
+    environment: Environment,
+    prompt_hook: Option<bool>,
+) -> Uuid {
+    let login = core
+        .vault
+        .add(
+            &core.ctx,
+            SecretKind::Password,
+            &format!("{name} login"),
+            SecretString::new(password),
+        )
+        .await
+        .unwrap()
+        .id;
+    core.sessions
+        .create(
+            &core.ctx,
+            SessionInput {
+                name: name.into(),
+                folder_id: None,
+                host: "127.0.0.1".into(),
+                port: server.port(),
+                username: Some("alice".into()),
+                auth: SessionAuth::Password {
+                    password_id: Some(login),
+                },
+                jump_session_id: None,
+                startup_command: None,
+                startup_on_reconnect: false,
+                prompt_hook,
+                environment,
+                color: None,
+                tags: vec![],
+                vm_id: None,
+            },
+        )
+        .await
+        .unwrap()
+        .id
+}
+
+async fn hook_audits(core: &Core) -> usize {
+    core.store
+        .recent_audit(&core.ctx, 200)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.event == "folder_hook_installed")
+        .count()
+}
+
+/// SS-08: the hook is off for a Prod session unless the session turns it on, and Settings can turn it
+/// off everywhere. Off, nothing is typed and the drawer starts in the home folder. On, it is audited
+/// once per connection.
+#[tokio::test]
+async fn the_prompt_hook_is_off_for_prod_unless_the_session_says_and_audited_once_when_typed() {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_login_shell("bash");
+    let core = ssh_core().await;
+    trust(&core, &server).await;
+    let typed = |server: &TestSshServer| server.log().iter().filter(|l| *l == "line [prompt hook]").count();
+
+    // Prod, following Settings: off.
+    let prod = hook_session(&core, &server, &password, "prod01", Environment::Prod, None).await;
+    let mut pane = Pane::open(&core, prod).await;
+    pane.until(|p| p.folder().is_some_and(|(_, t)| t != FolderTracking::Waiting))
+        .await;
+    assert_eq!(pane.folder().unwrap().1, FolderTracking::Off);
+    pane.settle(Duration::from_millis(600)).await;
+    assert_eq!(typed(&server), 0);
+    assert_eq!(hook_audits(&core).await, 0);
+    let listing = core.terminals.list_folder(pane.id, None).await.unwrap();
+    assert_eq!(listing.path, "/home/alice", "the drawer starts at home");
+    core.terminals.close(pane.id).await;
+
+    // Prod, but the session turns it on: typed once, audited once.
+    let opted = hook_session(&core, &server, &password, "prod02", Environment::Prod, Some(true)).await;
+    let mut pane = Pane::open(&core, opted).await;
+    pane.until(|p| p.folder().is_some_and(|(_, t)| t == FolderTracking::Following))
+        .await;
+    assert_eq!(typed(&server), 1);
+    assert_eq!(hook_audits(&core).await, 1);
+    let entry = core
+        .store
+        .recent_audit(&core.ctx, 50)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.event == "folder_hook_installed")
+        .unwrap();
+    assert!(entry.action.contains("'prod02'"), "{entry:?}");
+    core.terminals.close(pane.id).await;
+
+    // Settings turn it off everywhere; a lab session that follows Settings gets none.
+    let mut settings = core.terminal_settings().await.unwrap();
+    settings.prompt_hook = false;
+    core.set_terminal_settings(settings).await.unwrap();
+    let lab = hook_session(&core, &server, &password, "lab01", Environment::Lab, None).await;
+    let mut pane = Pane::open(&core, lab).await;
+    pane.until(|p| p.folder().is_some_and(|(_, t)| t != FolderTracking::Waiting))
+        .await;
+    assert_eq!(pane.folder().unwrap().1, FolderTracking::Off);
+    pane.settle(Duration::from_millis(600)).await;
+    assert_eq!(typed(&server), 1, "no new hook");
+    assert_eq!(hook_audits(&core).await, 1);
 }

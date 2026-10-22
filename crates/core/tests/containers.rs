@@ -46,6 +46,8 @@ fn input(name: &str, env: Environment, auth: SessionAuth) -> SessionInput {
         auth,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: env,
         color: None,
         tags: vec![],
@@ -1063,6 +1065,8 @@ async fn an_export_carries_container_marks_to_another_laptop() {
             &other.ctx,
             remotely_core::transfer::TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],

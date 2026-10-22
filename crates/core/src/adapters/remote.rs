@@ -62,6 +62,10 @@ pub struct SessionSpec {
     pub jump: Option<Box<SessionSpec>>,
     pub environment: Environment,
     pub startup_command: Option<String>,
+    /// SS-01: type the startup command again after an automatic reconnect.
+    pub startup_on_reconnect: bool,
+    /// SS-08: the folder prompt hook; `None` follows Settings (off for Prod).
+    pub prompt_hook: Option<bool>,
 }
 
 impl SessionSpec {
@@ -1985,6 +1989,8 @@ mod tests {
             jump: None,
             environment: Environment::None,
             startup_command: None,
+            startup_on_reconnect: false,
+            prompt_hook: None,
         };
         assert_eq!(spec.address(), "alice@web01.example.com:22");
         spec.username.clear();

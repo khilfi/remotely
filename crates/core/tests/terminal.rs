@@ -64,6 +64,8 @@ fn session(server: &TestSshServer, auth: SessionAuth) -> SessionInput {
         auth,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::Lab,
         color: None,
         tags: vec![],
@@ -703,6 +705,8 @@ async fn jump_hosts_that_go_round_in_a_loop_are_refused() {
         auth: SessionAuth::Agent,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::None,
         color: None,
         tags: vec![],
@@ -830,4 +834,40 @@ async fn known_hosts_can_be_listed_and_removed_and_removal_is_audited() {
     assert_eq!(removed.action, "Removed the trusted host key of web01.example.com:22");
     assert!(removed.detail.unwrap().contains(&host_key.fingerprint));
     assert!(core.known_hosts.remove(&core.ctx, saved[0].id).await.is_err());
+}
+
+/// SS-01: the startup command is typed on the connections the user opens. After the pane reconnects by
+/// itself it is not typed again, unless the session asks for that.
+#[tokio::test]
+async fn the_startup_command_is_not_typed_again_after_an_automatic_reconnect_unless_asked() {
+    let password = new_password();
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let core = core().await;
+    trust_server(&core, &server).await;
+    let id = secret(&core, SecretKind::Password, "lab alice", &SecretString::new(&password)).await;
+    let mut input = session(&server, SessionAuth::Password { password_id: Some(id) });
+    input.startup_command = Some("echo started".into());
+    let session_id = create(&core, input.clone()).await;
+    let starts = |server: &TestSshServer| server.log().iter().filter(|l| *l == "line echo started").count();
+    let mut pane = Pane::open(&core, session_id).await;
+    pane.connected().await;
+    pane.expect_output("started\r\n").await;
+
+    server.drop_connections();
+    pane.expect_status(|s| matches!(s, TerminalStatus::Reconnecting { .. }))
+        .await;
+    pane.connected().await;
+    pane.expect_output("startup command was not typed again").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(starts(&server), 1);
+
+    // The session asks for it: typed after the next automatic reconnect.
+    input.startup_on_reconnect = true;
+    core.sessions.update(&core.ctx, session_id, input).await.unwrap();
+    server.drop_connections();
+    pane.expect_status(|s| matches!(s, TerminalStatus::Reconnecting { .. }))
+        .await;
+    pane.connected().await;
+    pane.expect_output("started\r\n").await;
+    assert_eq!(starts(&server), 2);
 }

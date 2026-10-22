@@ -97,6 +97,8 @@ fn session_input(name: &str, host: &str, port: u16, auth: SessionAuth) -> Sessio
         auth,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::Lab,
         color: None,
         tags: vec![],

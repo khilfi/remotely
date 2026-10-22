@@ -187,6 +187,8 @@ impl Fleet {
                         },
                         jump_session_id: None,
                         startup_command: None,
+                        startup_on_reconnect: false,
+                        prompt_hook: None,
                         environment: environment(i),
                         color: None,
                         tags: vec![],

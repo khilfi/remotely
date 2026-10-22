@@ -304,6 +304,8 @@ async fn linked_session(core: &Core, name: &str, port: u16, password: Option<&st
                 auth: SessionAuth::Password { password_id },
                 jump_session_id: None,
                 startup_command: None,
+                startup_on_reconnect: false,
+                prompt_hook: None,
                 environment: Environment::Lab,
                 color: None,
                 tags: vec![],

@@ -94,6 +94,8 @@ fn input(name: &str, host: &str, port: u16, user: &str, password: SecretId, jump
         },
         jump_session_id: jump,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::Lab,
         color: None,
         tags: vec![],

