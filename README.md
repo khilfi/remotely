@@ -5,8 +5,8 @@ VirtualBox VMs, a performance dashboard, a PuTTY/MobaXterm-style SSH session man
 and Compare output (one command on many hosts, answers grouped), with multi-step approvals on every high-impact action.
 
 The requirements are in [docs/PRD.md](docs/PRD.md); project rules for contributors (and Claude Code) are in
-[CLAUDE.md](CLAUDE.md). This repository is private while the app is field-tested, but it may go public later and git
-history is forever, so it follows the "Public repository rules" in CLAUDE.md: read them before committing.
+[CLAUDE.md](CLAUDE.md). This repository is public, and git history is forever, so it follows the "Public repository
+rules" in CLAUDE.md: read them before committing.
 
 **Status:** MVP milestones 1 (VMs and power), 2 (snapshots and approvals) and 3 (vault and session library). The app
 lists every Workstation VM (the library, chosen folders and running VMs) and every VM registered in VirtualBox (see
@@ -436,10 +436,11 @@ runs a gitleaks scan of the full history on every push to `main` and every pull 
 
 ### GitHub update token
 
-The repository is private, so an installed app can't see its releases without a token. Each machine keeps a read-only
-GitHub token in its vault, and update checks and installs use it. Copies on 0.2.0 or older don't know about the token:
-install 0.2.1 by hand once on each machine (download the installer from the release page while signed in to GitHub),
-then add the token.
+The updater was built while the repository was private, so it still reads releases with a read-only GitHub token,
+although the repository and its releases are public now. Each machine keeps the token in its vault, and update checks
+and installs use it; without one, the app doesn't check for updates. Copies on 0.2.0 or older don't know about the
+token: install 0.2.1 or later by hand once on each machine (download the installer from the release page), then add
+the token.
 
 **Create the token** (on GitHub, signed in as the repository owner):
 
@@ -485,17 +486,17 @@ it installs. The token never appears in logs, error messages, the audit log, exp
 
 ### CI minutes
 
-With the repository private, GitHub Actions minutes come out of the account's monthly allowance (2,000 minutes on GitHub
-Free; Settings → Billing and plans shows what is left). Jobs on Windows runners count double, and each job is rounded up
-to whole minutes:
+The repository is public, so GitHub Actions runs on standard GitHub-hosted runners don't use the account's minutes.
+Runs still take time, so keep them lean. If the repository ever goes private again, they bill against the monthly
+allowance (2,000 minutes on GitHub Free), Windows jobs count double and each job is rounded up to whole minutes:
 
-| Workflow      | Runs on                                           | Billed minutes per run                                           |
-| ------------- | ------------------------------------------------- | ---------------------------------------------------------------- |
-| `ci.yml`      | every pull request push and every merge to `main` | about 12 to 16 (the Windows Rust job is 5 to 7 minutes, doubled) |
-| `secrets.yml` | every pull request push and every merge to `main` | about 1 (Linux)                                                  |
-| `release.yml` | every `v*` tag                                    | about 28 (14 minutes on Windows, doubled)                        |
+| Workflow      | Runs on                                           | Runner time per run                         | Billed if private |
+| ------------- | ------------------------------------------------- | ------------------------------------------- | ----------------- |
+| `ci.yml`      | every pull request push and every merge to `main` | about 6 to 8 minutes (the Windows Rust job) | about 12 to 16    |
+| `secrets.yml` | every pull request push and every merge to `main` | about 1 minute (Linux)                      | about 1           |
+| `release.yml` | every `v*` tag                                    | about 14 minutes (Windows)                  | about 28          |
 
-To make them last: documentation-only changes skip `ci.yml`; a new push to a branch cancels the run it supersedes, so
+To keep runs quick: documentation-only changes skip `ci.yml`; a new push to a branch cancels the run it supersedes, so
 push when a change is ready rather than after every small commit; and group documentation edits.
 
 ### Update signing
@@ -545,7 +546,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Remote adapter     | `crates/core/src/adapters/remote.rs`, `remote/`                   | SS-03, SS-05, SS-07, SS-08, BX-02, BX-07, MO-02                                                                                                     | Working: jump host chains, terminal shells, SFTP and port forwards (local, remote, SOCKS) on a terminal's connection, bulk exec with sudo, kept connections for guest metrics                                               |
 | Host counters      | `crates/core/src/adapters/host_counters.rs`, `paging.rs`          | MO-01, MO-04, MO-15, VM-07                                                                                                                          | Working: host RAM, CPUs, CPU times, free disk, paging files and commit charge, and each VM process's (`vmware-vmx.exe`, `VirtualBoxVM.exe`, `VBoxHeadless.exe`) CPU, working set and I/O                                    |
 | Host details       | `crates/core/src/host_details/`, `adapters/vm_hardware.rs`        | MO-13, MO-14                                                                                                                                        | Working: SSH hosts' OS and specs (terminal, dashboard, Refresh; stored), admin reads on demand, VMs' virtual hardware from their files (stored)                                                                             |
-| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: GitHub Releases of the private repo with the token from the vault; install is a Medium-tier job that runs alone                                                                                                      |
+| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's GitHub Releases, read with the token from the vault; install is a Medium-tier job that runs alone                                                                                                  |
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; filters; audited environment labels                                                                                            |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                   |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side and SSH guest sources every 5 s, 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                                                        |
