@@ -76,7 +76,11 @@ crates/core/          remotely-core: all app logic
                       it, local, remote and SOCKS, behind RemoteForwards; remote/socks.rs SOCKS 4/4a/5),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
-                      VBoxHeadless.exe), updater.rs, github.rs (FD-14 GitHub Releases API with the
+                      VBoxHeadless.exe; MO-15 `paging()`), paging.rs (MO-15 this PC's paging files and commit charge:
+                      GlobalMemoryStatusEx and NtQuerySystemInformation's page file list), vm_hardware.rs (MO-13 a VM's
+                      hardware from its .vmx or showvminfo; VMDK descriptor and sparse header, VDI, VHD and qcow2
+                      headers for provisioned sizes; size on disk down a snapshot chain), updater.rs, github.rs (FD-14
+                      GitHub Releases API with the
                       update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
                       the docker and podman CLIs over a kept SSH connection's exec channels, with sudo from the vault
@@ -97,8 +101,18 @@ crates/core/          remotely-core: all app logic
                       names
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction
-    metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows), guest.rs (MO-02 SSH
-                      polling, kept connections, backoff), procfs.rs (/proc and df parsers)
+    metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
+                      and this PC's RAM and paging files per round), guest.rs (MO-02 SSH polling, kept connections,
+                      backoff; MO-13 reads a host's facts on its kept connection when they are old), procfs.rs (/proc
+                      and df parsers)
+    host_details/     MO-13, MO-14 (reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
+                      (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
+                      channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the
+                      dashboard's or its own kept connection; VM specs from the hypervisor's files; facts stored per
+                      session and VM, migration 0014), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
+                      lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
+                      (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
+                      apt or dnf; every command checked read-only by `classify_script` in tests)
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); sessions/tree.rs the QL-04
                       tree (by folder, tag or label) for the Terminal page
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
@@ -155,11 +169,12 @@ crates/core/          remotely-core: all app logic
                       subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
                       through another) and tcpip-forward; QL-09 `su [-] [user]` in its shell, a shell without the hook;
-                      ssh_server/docker.rs CT-01 its `docker` and `podman` programs (each CLI's JSON from a fixture)
+                      ssh_server/docker.rs CT-01 its `docker` and `podman` programs (each CLI's JSON from a fixture);
+                      ssh_server/host.rs MO-13, MO-14 a HostFixture (ubuntu, rhel) its exec shell describes itself with
     fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
     fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
-                      chains, tunnels and the Containers page by hand
+                      chains, tunnels, the Containers page and host details by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation); opt-in
                       workstation_it.rs and virtualbox_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
@@ -167,7 +182,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       (command_panel.rs), clipboard read for right-click paste, SS-08 file
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
                       SS-07 port forwards and tunnels (tunnels.rs), CT-01 the Containers page's reads, marks and
-                      container shells (containers.rs)
+                      container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
+                      (host_details.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -177,7 +193,9 @@ src/                  React + TypeScript UI
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
-                      volumes, networks) for CT-01)
+                      volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
+                      VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
+                      and dashed limit lines)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3)
@@ -186,8 +204,10 @@ src/                  React + TypeScript UI
                       and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
-                      (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow),
-                      presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker),
+                      (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow), host-details.ts
+                      (MO-13, MO-14 summaries, wording and the commands offered to copy),
+                      presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
+                      addresses as `mac-N`),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals), presentation-state.ts; pure helpers with
                       *.test.ts
@@ -211,6 +231,15 @@ src/                  React + TypeScript UI
 - Guest operations (`runProgramInGuest`, file copy) need `-gu`/`-gp` guest credentials on the command line, so other processes on the host can see them. Use guest operations only on demand, and never log the command line.
 - `vmrest.exe` (same folder) is a local REST API, by default on 127.0.0.1:8697. It needs a one-time credential setup (`vmrest -C`, which is interactive). Treat it as optional and fall back to `vmrun`.
 - Each running VM is a `vmware-vmx.exe` process whose command line contains the `.vmx` path. Use that to map Windows performance counters (CPU, memory, I/O) to a VM.
+- MO-13 hardware keys in the .vmx: `numvcpus` (absent means 1), `cpuid.coresPerSocket`, `memsize`, `firmware = "efi"`
+  (absent is BIOS), `virtualHW.version`; disks are `<scsi|sata|nvme|ide>X:Y.fileName` (relative to the .vmx's folder)
+  with `.present` and `.deviceType` (`cdrom-image` and the like are not disks); adapters are `ethernetN.present`,
+  `.connectionType` (absent is bridged; `custom` names `.vnet`), `.virtualDev`, `.addressType` (`static` uses
+  `.address`, else `.generatedAddress`) and `.startConnected`. `guestInfo.detailed.data` also has `kernelVersion`.
+- A VMDK is a text descriptor (`createType`, extent lines `RW <sectors> SPARSE|FLAT "<file>"`, a snapshot's delta has
+  `parentFileNameHint`) or a sparse file starting with `KDMV` (capacity in sectors at byte 12, the embedded
+  descriptor's offset and size in sectors at 28 and 36). A snapshot's delta disk names its parent; the chain's files
+  together are what the disk takes on this PC.
 
 ## VirtualBox facts
 
@@ -266,6 +295,10 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 - VBoxManage writes errors to stderr as `VBoxManage.exe: error: <message>` lines, then `Details:` and `Context:` lines;
   the app keeps the first kind. Guest control (`guestcontrol`) would put guest credentials on the command line: the app
   never uses it.
+- MO-13: `showvminfo` also gives `firmware` (`BIOS`, `EFI`...), `nictypeN` (the card, e.g. `82540EM`, `virtio`) and
+  `cableconnectedN` (`on`/`off`); the storage key (`"SATA-0-0"`) is the disk's slot. A VDI's header has the signature
+  0xbeda107f at 0x40, its type at 0x4c (4 is a snapshot's differencing image) and the disk size at 0x170; a VHD's
+  footer (`conectix`, big-endian) has the size at 48, at the start of a dynamic one and the end of a fixed one.
 
 ## Development safety
 
@@ -289,6 +322,12 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).
   `Setup::with_ssh()` uses `CliEngines::without_this_pc()`, so no test ever finds or runs this PC's Docker Desktop.
+- Host details (MO-13, MO-14): never read a real host. The test server's `with_host_facts(HostFixture::ubuntu())` (or
+  `rhel()`: no lscpu, an lsblk without JSON, dnf) answers the specs, admin and updates scripts from real hosts'
+  samples, and its toy shell knows `type`, `$?` and `NAME=value` before a command (`tests/host_details.rs`). VM
+  hardware tests use `FakeVmware::with_hardware` or disk files made at run time in the system temp folder. Every
+  command the scripts use must classify as read-only under the default rules (the tests check each one): naming
+  `reboot` or `shutdown` as a word, even as `last reboot`, trips the dangerous-command rule.
 
 ## Commands
 
