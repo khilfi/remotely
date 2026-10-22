@@ -173,20 +173,10 @@ pub async fn filter_delete(state: State<'_, AppState>, id: String) -> IpcResult<
 #[tauri::command]
 pub async fn command_submit(state: State<'_, AppState>, command: Command) -> IpcResult<SubmitOutcome> {
     // SS-08: an upload names files on this PC, so only `files_upload` builds one, from files picked in a
-    // dialog or dropped on the window; never from paths the UI sends.
-    if matches!(command, Command::FileUpload { .. }) {
-        return Err(IpcError::new(
-            "invalid_input",
-            "Uploads start from a terminal: its upload button, or files dropped on it.",
-        ));
-    }
-    // SS-07: a tunnel opens a saved forward on an open terminal; `terminal_tunnel_start` builds it.
-    if matches!(command, Command::OpenTunnel { .. }) {
-        return Err(IpcError::new(
-            "invalid_input",
-            "Tunnels start from a terminal's Tunnels panel, from the session's saved port forwards.",
-        ));
-    }
+    // dialog or dropped on the window; never from paths the UI sends. SS-07: a tunnel opens a saved
+    // forward on an open terminal; `terminal_tunnel_start` builds it. SS-10: a MultiExec line sends the
+    // keys MultiExec held and rated; `multiexec_input` is the way in.
+    command.check_from_ui()?;
     let core = &state.core;
     Ok(core.bus.submit(&core.ctx, command).await?)
 }

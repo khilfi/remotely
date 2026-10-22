@@ -244,7 +244,10 @@ export type Command =
       trustNewHostKeys?: boolean;
       timeoutSecs?: number | null;
     }
-  /** SS-10: the held Enter of a MultiExec line. The UI never submits it itself: MultiExec does. */
+  /**
+   * SS-10: the held Enter (or other key that runs the line) of a MultiExec line. The UI can't submit it: only
+   * MultiExec builds it, and `commandSubmit` refuses it.
+   */
   | { type: "terminalLine"; targets: TargetRef[]; line: string; unreliable: boolean; keys: string }
   /** SS-08: an upload. Never submitted by the UI: `filesUpload` builds it in Rust from picked or dropped files. */
   | { type: "fileUpload"; targets: TargetRef[]; folder: string; files: UploadFile[] }
@@ -330,6 +333,8 @@ export interface ExecDetails {
   multiExec: boolean;
   /** SS-10: edited with keys Remotely can't follow, so the terminals may run something else. */
   unreliable: boolean;
+  /** SS-10: the key that runs the line when it is not Enter ("Ctrl+O", "Esc then A"...). */
+  runKey: string | null;
 }
 
 export interface ApprovalRequest {
@@ -431,7 +436,12 @@ export type MultiExecOutcome =
       request: ApprovalRequest | null;
     }
   /** A line waits for its Enter; these keys follow it. */
-  | { status: "queued"; lineId: string; dropped: boolean };
+  | { status: "queued"; lineId: string; dropped: boolean }
+  /**
+   * Keys that would run what MultiExec can't rate (Ctrl+X Ctrl+E, v after Esc...) were not sent, nor anything
+   * typed after them; `reason` says why. The keys before them went to `reached`.
+   */
+  | { status: "refused"; reason: string; reached: string[]; leftOut: LeftOut[] };
 
 export type MultiExecEvent =
   | { event: "lineDone"; lineId: string; sent: boolean; terminals: number; status: JobStatus | null }

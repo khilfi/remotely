@@ -1,8 +1,10 @@
 //! Post-MVP P6, SS-10 MultiExec end to end: keys typed into one terminal go to the picked ones only,
 //! Enter is held and the line rated by the policy engine (Low sent at once, a confirm, the full
-//! approval for a dangerous line, Prod raising the tier, keys Remotely can't follow), cancelling clears
-//! the line with Ctrl+C, a password prompt and a full-screen program pass keys straight through with
-//! nothing rated, journaled or audited, and what the audit log keeps of a line.
+//! approval for a dangerous line, Prod raising the tier, keys Remotely can't follow), a line run with
+//! Ctrl+O is held and rated like one run with Enter, keys that open the line in an editor are refused, a
+//! pager is not read-only, the bus sends only the held keys of a rated line, cancelling clears the line
+//! with Ctrl+C, a password prompt and a full-screen program pass keys straight through with nothing
+//! rated, journaled or audited, and what the audit log keeps of a line.
 //!
 //! QL-12: each line sent is recorded in each terminal until its prompt comes back, grouped and diffed
 //! like a Compare run, with password prompts, full-screen keys and cancelled lines left out, secrets
@@ -20,8 +22,8 @@ use std::time::Duration;
 use common::{Setup, VAULT_PASSWORD};
 use remotely_core::adapters::remote::{AgentSource, PtySize};
 use remotely_core::bulk::{render_recorded, DiffKind, ExportFormat, GroupOptions};
-use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest};
-use remotely_core::domain::Environment;
+use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, Command};
+use remotely_core::domain::{Environment, TargetRef};
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::fakes::FakeVmware;
 use remotely_core::known_hosts::HostKey;
@@ -34,7 +36,7 @@ use remotely_core::terminal::record::{CaptureEnd, CaptureState, RecordLimits};
 use remotely_core::terminal::shell_user::UserInfo;
 use remotely_core::terminal::{NotifyWhen, TerminalEvent, TerminalSettings, TerminalStatus, TerminalTuning};
 use remotely_core::vault::{SecretKind, SecretString};
-use remotely_core::Core;
+use remotely_core::{Core, CoreError};
 use tokio::sync::broadcast::Receiver;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -522,6 +524,187 @@ async fn keys_remotely_cannot_follow_make_the_line_at_least_a_confirm() {
     fleet.core.multiexec.cancel(line).await.unwrap();
     fleet.panes[1].expect("^C\r\n$ ").await;
     assert!(fleet.ran(1).is_empty(), "{:?}", fleet.log(1));
+}
+
+// ---- Keys that run the line another way, and keys refused ------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_line_run_with_ctrl_o_is_held_rated_and_audited_before_it_reaches_the_hosts() {
+    let mut fleet = Fleet::new(2).await;
+    fleet.pick(&[0, 1]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    // The toy shell runs a line on Ctrl+O, as bash and zsh do.
+    let (line, tier, request, job) = held(fleet.type_in(0, "touch /tmp/ctrl-o\x0f").await);
+    assert!(tier >= Tier::Medium, "{tier:?}");
+    assert!(job.is_none());
+    let request = request.expect("an approval");
+    assert_eq!(request.action, ActionKind::ExecOther);
+    let summary = "MultiExec: run `touch /tmp/ctrl-o` with Ctrl+O in 2 terminals";
+    assert_eq!(request.summary, summary);
+    assert!(
+        request.warnings.iter().any(|w| w.starts_with("Ctrl+O runs the line")),
+        "{:?}",
+        request.warnings
+    );
+    let exec = request.exec.as_deref().expect("the line, for the dialog");
+    assert_eq!(exec.run_key.as_deref(), Some("Ctrl+O"), "the dialog presses Ctrl+O");
+    // Held: the terminals show the line, but have not run it.
+    for pane in &mut fleet.panes {
+        pane.expect("touch /tmp/ctrl-o").await;
+        pane.settle().await;
+    }
+    assert!(fleet.ran(0).is_empty() && fleet.ran(1).is_empty(), "{:?}", fleet.log(0));
+
+    fleet.core.multiexec.approve(line, answers(&request)).await.unwrap();
+    assert!(line_done(&mut events, line).await);
+    for i in [0, 1] {
+        fleet.panes[i].expect("\r\n$ ").await;
+        assert_eq!(fleet.ran(i), ["touch /tmp/ctrl-o"]);
+    }
+    let audit = fleet.audit().await;
+    assert!(
+        audit.iter().any(|e| e.event == "job_started" && e.action == summary),
+        "{audit:?}"
+    );
+
+    // bash brings the next history line up after Ctrl+O: the next line is one Remotely can't follow.
+    let (next, tier, request, _) = held(fleet.type_in(0, "uptime\r").await);
+    assert!(tier >= Tier::Medium, "read-only as typed, but not as run");
+    assert!(request.unwrap().exec.as_deref().unwrap().unreliable);
+    fleet.core.multiexec.cancel(next).await.unwrap();
+    for pane in &mut fleet.panes {
+        pane.expect("^C\r\n$ ").await;
+    }
+    assert_eq!(fleet.ran(0), ["touch /tmp/ctrl-o"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keys_that_open_the_line_in_an_editor_are_refused_and_never_reach_the_hosts() {
+    let mut fleet = Fleet::new(2).await;
+    fleet.pick(&[0, 1]).await;
+
+    let InputOutcome::Refused { reason, reached, .. } = fleet.type_in(0, "ls -l\x18\x05").await else {
+        panic!("Ctrl+X Ctrl+E is refused");
+    };
+    assert!(reason.starts_with("Ctrl+X Ctrl+E was not sent"), "{reason}");
+    assert_eq!(reached, [fleet.id(0), fleet.id(1)], "the keys before it went");
+    // Ctrl+X waits for the key after it, typed apart as well.
+    assert!(matches!(fleet.type_in(0, "\x18").await, InputOutcome::Typed { .. }));
+    assert!(matches!(fleet.type_in(0, "\x05").await, InputOutcome::Refused { .. }));
+    // v after Esc: vi mode's edit-and-execute.
+    let InputOutcome::Refused { reason, .. } = fleet.type_in(0, "\x1bv").await else {
+        panic!("Esc then v is refused");
+    };
+    assert!(reason.starts_with("v was not sent"), "{reason}");
+
+    // None of those keys reached a shell: Ctrl+C drops just what was typed before them.
+    fleet.type_in(0, "\x03").await;
+    for i in [0, 1] {
+        fleet.panes[i].expect("^C\r\n$ ").await;
+        assert!(
+            fleet.log(i).contains(&"interrupt ls -l".to_owned()),
+            "{:?}",
+            fleet.log(i)
+        );
+        assert!(fleet.ran(i).is_empty());
+    }
+    assert!(fleet
+        .core
+        .store
+        .recent_jobs(&fleet.core.ctx, 50)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pager_is_not_read_only_in_multiexec_but_is_in_compare() {
+    let mut fleet = Fleet::new(2).await;
+    fleet.pick(&[0, 1]).await;
+
+    let (line, tier, request, _) = held(fleet.type_in(0, "less /etc/os-release\r").await);
+    assert!(tier >= Tier::Medium, "{tier:?}");
+    let request = request.expect("an approval");
+    assert_eq!(request.action, ActionKind::ExecOther);
+    assert!(
+        request.reasons.iter().any(|r| r.contains("less stays open")),
+        "{:?}",
+        request.reasons
+    );
+    fleet.core.multiexec.cancel(line).await.unwrap();
+    for pane in &mut fleet.panes {
+        pane.expect("^C\r\n$ ").await;
+    }
+    assert!(fleet.ran(0).is_empty() && fleet.ran(1).is_empty());
+
+    // Compare runs it without a terminal, so nothing waits for keys.
+    let compare = Command::RemoteExec {
+        targets: fleet
+            .sessions
+            .iter()
+            .map(|id| TargetRef::Session { session_id: *id })
+            .collect(),
+        script: "less /etc/os-release".into(),
+        sudo: false,
+        sudo_password_id: None,
+        trust_new_host_keys: false,
+        timeout_secs: None,
+    };
+    let preview = fleet.core.bus.preview(&fleet.core.ctx, &compare).await.unwrap();
+    assert_eq!(preview.action, ActionKind::ExecReadOnly);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_bus_refuses_a_line_whose_keys_are_not_what_was_rated() {
+    let mut fleet = Fleet::new(2).await;
+    let targets: Vec<TargetRef> = (0..2)
+        .map(|i| TargetRef::Terminal {
+            terminal_id: fleet.id(i),
+            session_id: None,
+        })
+        .collect();
+    let crafted = |keys: &str| Command::TerminalLine {
+        targets: targets.clone(),
+        line: "uptime".into(),
+        unreliable: false,
+        keys: keys.into(),
+    };
+    for keys in [
+        "\rrm -rf /tmp/x\r",
+        "\r\x18\x05",
+        "x",
+        "\x0frm -rf /tmp/x\r",
+        "\x1b\r\r",
+    ] {
+        let err = fleet.core.bus.submit(&fleet.core.ctx, crafted(keys)).await.unwrap_err();
+        assert!(matches!(err, CoreError::InvalidInput(_)), "{keys:?}: {err:?}");
+    }
+    // Nor can the UI send one: only MultiExec builds them, from what it held and rated.
+    assert!(crafted("\r").check_from_ui().is_err());
+    let compare = Command::RemoteExec {
+        targets: vec![TargetRef::Session {
+            session_id: fleet.sessions[0],
+        }],
+        script: "uptime".into(),
+        sudo: false,
+        sudo_password_id: None,
+        trust_new_host_keys: false,
+        timeout_secs: None,
+    };
+    assert!(compare.check_from_ui().is_ok());
+
+    for pane in &mut fleet.panes {
+        pane.settle().await;
+    }
+    assert!(fleet.ran(0).is_empty() && fleet.ran(1).is_empty());
+    assert!(fleet
+        .core
+        .store
+        .recent_jobs(&fleet.core.ctx, 50)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 // ---- Pass-through: password prompts and full-screen programs --------------------------------------

@@ -445,6 +445,27 @@ fn is_assignment(word: &str) -> bool {
     ENV_ASSIGN.is_match(word)
 }
 
+/// SS-10: programs that stay open and read keys in the terminal: pagers, whose `!command` runs a
+/// command (less, more, pg; less's `v` and most's `E` open an editor), man (it shows its page in one),
+/// editors (`:!command`) and fc (it runs what is saved in its editor). In MultiExec they open in every
+/// terminal, where keys pass straight through unrated, so a line that starts one is never read-only.
+/// A Compare run has no terminal to type into, so there they stay as the read-only list says.
+const INTERACTIVE: &[&str] = &[
+    "less", "more", "most", "pg", "man", "vi", "vim", "view", "nvim", "vimdiff", "ex", "nano", "emacs", "ed", "fc",
+];
+
+/// SS-10: the first program in the script that stays open and reads keys ([`INTERACTIVE`]), as the
+/// command of any part of it (after `sudo`, `env` and assignments; `/usr/bin/less` is less).
+pub(crate) fn interactive_program(script: &str) -> Option<&'static str> {
+    let without_redirects = REDIRECT.replace_all(script, " ");
+    SEPARATOR.split(&without_redirects).find_map(|segment| {
+        let words = command_words(segment).unwrap_or_else(|| shell_words(segment));
+        let first = words.first()?;
+        let name = first.rsplit('/').next().unwrap_or(first);
+        INTERACTIVE.iter().find(|program| **program == name).copied()
+    })
+}
+
 /// The words of one command as the shell splits them: quotes (`'…'`, `"…"`, `$'…'`) and backslashes
 /// removed, a `#` comment dropped. Expansions stay as written: `$HOME` is still `$HOME`.
 fn shell_words(segment: &str) -> Vec<String> {

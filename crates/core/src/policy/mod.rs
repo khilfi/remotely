@@ -696,9 +696,12 @@ impl PolicyEngine {
             Command::AppUpdate { .. } => ActionKind::AppUpdate,
             Command::PushSshKey { .. } => ActionKind::SshKeyPush,
             // SS-10: a MultiExec line is rated like a bulk run's command. When Remotely could not follow
-            // what was typed, the shells may run something else, so it is never read-only.
+            // what was typed, the shells may run something else, so it is never read-only; nor is a
+            // pager or editor, which stays open in every terminal and runs `!command` typed into it.
             Command::TerminalLine { line, unreliable, .. } => match self.classify_script(line) {
-                ActionKind::ExecReadOnly if *unreliable => ActionKind::ExecOther,
+                ActionKind::ExecReadOnly if *unreliable || commands::interactive_program(line).is_some() => {
+                    ActionKind::ExecOther
+                }
                 kind => kind,
             },
             // SS-08: replacing a file loses what was there; adding one does not.
@@ -795,6 +798,16 @@ impl PolicyEngine {
                     reasons.push("forced: running containers are killed first".into());
                 }
                 _ => {}
+            }
+        }
+
+        // SS-10: say why a pager or editor in a MultiExec line is not read-only.
+        if let Command::TerminalLine { line, .. } = command {
+            if let Some(program) = commands::interactive_program(line) {
+                reasons.push(format!(
+                    "{program} stays open in each terminal, and what is typed into it there passes straight through \
+                     unrated (a pager's or editor's !command runs commands)"
+                ));
             }
         }
 
