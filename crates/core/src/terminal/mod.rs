@@ -1710,7 +1710,14 @@ impl Live {
     /// QL-12: MultiExec keys reached the shell. Enter starts recording the line they were armed for
     /// (ending one still running: the next line came first); Ctrl+C before it drops the arm.
     fn record_keys(&mut self, bytes: &[u8], secrets: impl FnOnce() -> Vec<SecretString>, quiet: Option<Duration>) {
-        let enter = bytes.iter().position(|b| matches!(*b, b'\r' | b'\n'));
+        // SS-10: a line held for another run key (Ctrl+O, Esc then #...) gets just that key. While a
+        // line is armed MultiExec sends this terminal nothing else, so typed text can't look like one.
+        let run_key =
+            self.armed.is_some() && multiexec::RunKey::parse(bytes).is_some_and(|(_, len)| len == bytes.len());
+        let enter = bytes
+            .iter()
+            .position(|b| matches!(*b, b'\r' | b'\n'))
+            .or(run_key.then_some(0));
         let interrupt = bytes.iter().position(|b| *b == 0x03);
         let now = Instant::now();
         match (enter, interrupt) {

@@ -163,15 +163,20 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **MultiExec** (SS-10): the toolbar switch makes the picked tabs receive what you type into any of them, as in
   MobaXterm, and can show them side by side; each terminal shows its own output. Pick tabs with Ctrl+click and
   Shift+click, or all of them, a folder's or a label's from the MultiExec bar. The command panel's paste and Shift+click
-  go to them too. Safety: Remotely follows the line as it is typed, holds Enter and rates the line like any remote
+  go to them too. Safety: Remotely follows the line as it is typed, holds Enter (and every other key that runs a line
+  in bash or zsh: Ctrl+O, Esc then Enter, Esc then A, Esc then #, # in vi mode...) and rates the line like any remote
   command (read-only, other, dangerous; a Prod tab raises the tier; see "How commands are rated" below, where the
   picked terminals are the hosts). A read-only line goes at once; anything higher
   opens the approval dialog with the line and the terminals, and Cancel sends Ctrl+C to each. A line edited with keys
   Remotely can't follow (Tab completion, arrow keys, history search), or a tab that already had text on its line, is at
-  least a confirm. Every line sent is in the audit log with the command, the sessions and the tier, never the output.
-  Two exceptions pass keys straight through, unrated: at a password prompt (the keys go only to the tabs showing one,
-  and are never kept or logged) and to a full-screen program such as vim, less or top (only to the tabs that have one
-  open; what is typed there, like vim's `:!command`, is not rated). Protected sessions are left out.
+  least a confirm, and so is the line after one run with another key than Enter. A pager or editor (less, more, man,
+  vim) is never read-only here: it stays open in each tab. Keys that open the line in an editor and run what is saved
+  there (Ctrl+X Ctrl+E, v after Esc in vi mode), replay a keyboard macro (Ctrl+X E) or run an editing command by name
+  (Esc then x) are not sent, and the MultiExec bar says why. A lone Esc waits for the key after it. Every line sent is
+  in the audit log with the command, the sessions and the tier, never the output. Two exceptions pass keys straight
+  through, unrated: at a password prompt (the keys go only to the tabs showing one, and are never kept or logged) and
+  to a full-screen program such as vim, less or top (only to the tabs that have one open; what is typed there, like
+  vim's `:!command`, is not rated). Protected sessions are left out.
 - **MultiExec recording** (QL-12): every line MultiExec sends is recorded in each of its terminals, from Enter until
   that terminal's prompt comes back (or its output stops for the quiet spell set in Settings, or 10 minutes pass), so
   you can compare it at any time without typing it again: open Compare from the MultiExec bar, or pick the MultiExec

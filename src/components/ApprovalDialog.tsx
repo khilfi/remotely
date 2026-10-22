@@ -6,8 +6,9 @@
 // the countdown, which can be cancelled until it ends. The core checks every answer again; these
 // fields only help the user get them right first time.
 //
-// SS-10: a MultiExec line comes here too, held at Enter: it shows the line and the terminals it is typed into, and
-// the caller answers it through MultiExec (`approve`, `cancel`), which sends Enter, or Ctrl+C to clear the line.
+// SS-10: a MultiExec line comes here too, held at Enter (or another key that runs it, `exec.runKey`): it shows the
+// line and the terminals it is typed into, and the caller answers it through MultiExec (`approve`, `cancel`), which
+// sends that key, or Ctrl+C to clear the line.
 // SS-08: an upload shows the host folder and its files, marking the ones that replace a file there.
 // SS-07: a tunnel shows where it listens, where it leads and who can use it (a network address is called out).
 // QL-08: a disabled button says why.
@@ -463,8 +464,8 @@ export function ApprovalDialog({
             >
               {request.exec?.multiExec
                 ? risky
-                  ? "Approve and press Enter"
-                  : "Press Enter"
+                  ? `Approve and press ${request.exec.runKey ?? "Enter"}`
+                  : `Press ${request.exec.runKey ?? "Enter"}`
                 : risky
                   ? "Approve"
                   : "Confirm"}
@@ -491,8 +492,8 @@ function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exe
     <div className="grid gap-2">
       {exec.multiExec && (
         <p className="text-sm text-muted-foreground">
-          MultiExec: this line is typed into {plural(targets, "terminal")} and waits there. Approving presses Enter in
-          each; cancelling sends Ctrl+C, which clears it.
+          MultiExec: this line is typed into {plural(targets, "terminal")} and waits there. Approving presses{" "}
+          {exec.runKey ?? "Enter"} in each; cancelling sends Ctrl+C, which clears it.
         </p>
       )}
       <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">

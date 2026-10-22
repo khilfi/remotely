@@ -904,11 +904,19 @@ impl JobRunner {
                 self.updater.install(&github_token, version).await?;
                 Ok(TargetOutcome::done())
             }
-            (Command::TerminalLine { keys, .. }, TargetRef::Terminal { terminal_id, .. }) => {
+            (
+                Command::TerminalLine {
+                    line, keys, unreliable, ..
+                },
+                TargetRef::Terminal { terminal_id, .. },
+            ) => {
                 if token.is_cancelled() {
                     return Err(CoreError::Cancelled);
                 }
-                // SS-10: the held Enter (and the rest of a paste of several lines).
+                // SS-10: the held key that runs the line (and the rest of a paste of several lines), only
+                // as the bus checked them against the rated line.
+                crate::terminal::multiexec::check_keys(line, keys.as_bytes(), *unreliable)
+                    .map_err(CoreError::InvalidInput)?;
                 self.terminals.send(*terminal_id, keys.as_bytes()).await?;
                 Ok(TargetOutcome::done())
             }

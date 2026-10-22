@@ -133,10 +133,13 @@ crates/core/          remotely-core: all app logic
                       log.rs and output.rs SS-11 session logs and saved, printed or copied output (secrets scrubbed);
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
                       detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
-                      a line buffer, Enter held and the line rated on the bus (Command::TerminalLine), password prompts
-                      and full-screen programs passed straight through, QL-07 one LineFinished per line (never one
-                      notification per terminal); record.rs QL-12 MultiExec recording: each sent line's output per
-                      terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
+                      a line buffer, Enter and every other key that runs a line in bash or zsh held (RunKey: Ctrl+O,
+                      Esc then Enter...; a lone Esc waits for its next key; the table of bindings is in the file) and
+                      the line rated on the bus (Command::TerminalLine; the bus and the job runner send only the held
+                      keys of the rated line, check_keys), edit-and-execute keys refused (Ctrl+X Ctrl+E, v after Esc),
+                      password prompts and full-screen programs passed straight through, QL-07 one LineFinished per
+                      line (never one notification per terminal); record.rs QL-12 MultiExec recording: each sent line's
+                      output per terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
                       redraws; RecordSlot handed to the pane through its input before the Enter; Recorder keeps the
                       session's lines in memory with caps, grouped and diffed through bulk.rs); folder.rs SS-08 the
                       shell's folder (OSC 7) and

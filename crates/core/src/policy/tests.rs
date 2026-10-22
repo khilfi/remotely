@@ -3105,6 +3105,56 @@ fn multiexec_summaries_name_the_line_without_secrets() {
     assert!(!summary.contains("hunter2-secret"), "{summary}");
 }
 
+#[test]
+fn a_pager_or_editor_in_a_multiexec_line_is_never_read_only() {
+    let t = terminals(1);
+    for text in [
+        "less /var/log/syslog",
+        "more /etc/hosts",
+        "tail -n 200 /var/log/syslog | less",
+        "sudo less /var/log/secure",
+        "ls /var/log && less -R /var/log/syslog",
+    ] {
+        let d = engine().evaluate(&line(text, false, &t), &t);
+        assert_eq!(d.action, ActionKind::ExecOther, "{text}");
+        assert_eq!(d.tier, Tier::Medium, "{text}");
+        assert!(
+            d.reasons.iter().any(|r| r.contains("stays open")),
+            "{text}: {:?}",
+            d.reasons
+        );
+        // Compare runs it without a terminal: it stays read-only there.
+        assert_eq!(engine().classify(&exec(text, &[])), ActionKind::ExecReadOnly, "{text}");
+    }
+    assert_eq!(commands::interactive_program("/usr/bin/less /etc/passwd"), Some("less"));
+    // Even when the read-only list names man, vim or view.
+    let mut rules = PolicyRules::default();
+    rules
+        .read_only_commands
+        .extend(["man".to_owned(), "vim".to_owned(), "view".to_owned()]);
+    let e = PolicyEngine::new(rules).unwrap();
+    for text in ["man ls", "vim -R /etc/hosts", "view /etc/hosts"] {
+        assert_eq!(e.classify(&line(text, false, &t)), ActionKind::ExecOther, "{text}");
+    }
+    // man, vi, fc... are not read-only anyway; a dangerous line stays dangerous.
+    for text in ["man systemctl", "vi /etc/hosts", "fc -l -5"] {
+        assert_eq!(
+            engine().classify(&line(text, false, &t)),
+            ActionKind::ExecOther,
+            "{text}"
+        );
+    }
+    assert_eq!(
+        engine().classify(&line("less /etc/hosts; reboot", false, &t)),
+        ActionKind::ExecDangerous
+    );
+    // Words that only name them are not them.
+    for text in ["grep less /etc/hosts", "echo more", "cat /usr/share/doc/less/README"] {
+        let d = engine().evaluate(&line(text, false, &t), &t);
+        assert_eq!((d.action, d.tier), (ActionKind::ExecReadOnly, Tier::Low), "{text}");
+    }
+}
+
 // ---- SS-08: uploads ------------------------------------------------------------------------------
 
 fn upload(files: &[(&str, bool)], targets: &[Target]) -> Command {

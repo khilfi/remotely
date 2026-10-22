@@ -717,6 +717,10 @@ export function TerminalPage({
         case "queued":
           if (outcome.dropped) toast.warning("Too much was typed while a line waited: the rest was dropped");
           break;
+        case "refused":
+          setMxNote({ tone: "warn", text: outcome.reason });
+          toast.warning(outcome.reason);
+          break;
       }
     },
     [terminalName],
