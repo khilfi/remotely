@@ -28,6 +28,7 @@ use crate::presentation::Change;
 use crate::snapshots::{is_safety_name, SAFETY_PREFIX};
 use crate::ssh_keys;
 use crate::store::{NewAuditEntry, Store};
+use crate::terminal::multiexec::{self, RunKey};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
 
 /// A state-changing request. Reads (inventory, metrics) do not go through the bus.
@@ -86,8 +87,9 @@ pub enum Command {
         /// as at least "other", never Low.
         #[serde(default)]
         unreliable: bool,
-        /// What each terminal gets: Enter, and for a paste of several lines the lines after the first,
-        /// each with its Enter.
+        /// What each terminal gets: the held key that runs the line (Enter, Ctrl+O, Esc then Enter...:
+        /// [`RunKey`]), and after an Enter, for a paste of several lines, the lines after the first,
+        /// each with its Enter. The bus takes nothing else ([`crate::terminal::multiexec::check_keys`]).
         keys: String,
     },
     /// SS-08 upload files into a folder on the host of one open terminal, over SFTP on that terminal's
@@ -334,7 +336,8 @@ impl SnapshotOp {
 }
 
 /// SS-10: a MultiExec line: something to run (an empty line only when the shell may hold more than
-/// Remotely saw, e.g. a command recalled from its history), and Enter first in what is sent.
+/// Remotely saw, e.g. a command recalled from its history), and keys that send exactly that: the key
+/// that runs it, and after Enter only the later lines of a paste, which `line` holds.
 fn validate_line(line: &str, keys: &str, unreliable: bool) -> Result<()> {
     let invalid = |message: String| Err(CoreError::InvalidInput(message));
     if !unreliable && line.trim().is_empty() {
@@ -343,10 +346,14 @@ fn validate_line(line: &str, keys: &str, unreliable: bool) -> Result<()> {
     if line.len() > MAX_SCRIPT_BYTES || keys.len() > MAX_SCRIPT_BYTES {
         return invalid(format!("A line can be at most {} KB.", MAX_SCRIPT_BYTES / 1024));
     }
-    if !keys.starts_with(['\r', '\n']) {
-        return invalid("A MultiExec line is sent with Enter.".into());
-    }
-    Ok(())
+    multiexec::check_keys(line, keys.as_bytes(), unreliable).map_err(CoreError::InvalidInput)
+}
+
+/// SS-10: the key a MultiExec line runs with, when it is not Enter.
+fn run_key(keys: &str) -> Option<RunKey> {
+    RunKey::parse(keys.as_bytes())
+        .map(|(key, _)| key)
+        .filter(|key| !key.is_enter())
 }
 
 /// SS-08: an upload Remotely can carry out: one open terminal, an absolute host folder, plain file
@@ -469,6 +476,24 @@ fn validate_timeout(timeout_secs: Option<u64>) -> Result<()> {
 }
 
 impl Command {
+    /// Refuses the commands only Remotely itself builds, never the UI (or anything else that can call
+    /// IPC): an upload names files on this PC (SS-08: `files_upload` builds it from a dialog or a drop),
+    /// a tunnel opens a saved forward (SS-07: the terminal builds it), and a MultiExec line sends keys
+    /// that only MultiExec held and rated (SS-10).
+    pub fn check_from_ui(&self) -> Result<()> {
+        let refused = match self {
+            Command::FileUpload { .. } => "Uploads start from a terminal: its upload button, or files dropped on it.",
+            Command::OpenTunnel { .. } => {
+                "Tunnels start from a terminal's Tunnels panel, from the session's saved port forwards."
+            }
+            Command::TerminalLine { .. } => {
+                "MultiExec lines start from what is typed into a terminal with MultiExec on, which holds and rates them."
+            }
+            _ => return Ok(()),
+        };
+        Err(CoreError::InvalidInput(refused.into()))
+    }
+
     /// Checks what the caller typed, before any target is looked up.
     pub fn validate(&self) -> Result<()> {
         match self {
@@ -578,7 +603,7 @@ impl Command {
                 Ok(key) => format!("Add the SSH key {} to {}", key.describe(), noun("host")),
                 Err(_) => format!("Add an SSH key to {}", noun("host")),
             },
-            Command::TerminalLine { line, .. } => {
+            Command::TerminalLine { line, keys, .. } => {
                 // Kept in the audit log for good, like a bulk run's summary: no secret typed into it.
                 let mut lines = line.lines().filter(|l| !l.trim().is_empty());
                 let (first, _) = redact_secrets(lines.next().unwrap_or_default().trim());
@@ -587,11 +612,15 @@ impl Command {
                     1 => " (and 1 more line)".to_owned(),
                     n => format!(" (and {n} more lines)"),
                 };
+                // SS-10: a line run with another key than Enter says which.
+                let key = run_key(keys);
                 if first.is_empty() {
                     // A line recalled from the shell's history: Remotely saw only Enter.
-                    format!("MultiExec: press Enter in {}", noun("terminal"))
+                    let key = key.map_or("Enter", RunKey::label);
+                    format!("MultiExec: press {key} in {}", noun("terminal"))
                 } else {
-                    format!("MultiExec: run `{first}`{more} in {}", noun("terminal"))
+                    let with = key.map_or_else(String::new, |key| format!(" with {}", key.label()));
+                    format!("MultiExec: run `{first}`{more}{with} in {}", noun("terminal"))
                 }
             }
             Command::FileUpload { folder, files, .. } => {
@@ -792,6 +821,8 @@ pub struct ExecDetails {
     /// SS-10: the line was edited with keys Remotely can't follow, so the terminals may run something
     /// other than `script`.
     pub unreliable: bool,
+    /// SS-10: the key that runs the line when it is not Enter ("Ctrl+O", "Esc then A"...: [`RunKey::label`]).
+    pub run_key: Option<String>,
 }
 
 /// What a command would need, without submitting it (BX-06: the bulk run editor shows the tier and
@@ -1014,9 +1045,13 @@ impl CommandBus {
                 retry_of,
                 multi_exec: false,
                 unreliable: false,
+                run_key: None,
             })));
         }
-        if let Command::TerminalLine { line, unreliable, .. } = command {
+        if let Command::TerminalLine {
+            line, unreliable, keys, ..
+        } = command
+        {
             return Ok(Some(Box::new(ExecDetails {
                 script: line.clone(),
                 sudo: false,
@@ -1027,6 +1062,7 @@ impl CommandBus {
                 retry_of: None,
                 multi_exec: true,
                 unreliable: *unreliable,
+                run_key: run_key(keys).map(|key| key.label().to_owned()),
             })));
         }
         let Command::RemoteExec {
@@ -1060,6 +1096,7 @@ impl CommandBus {
             retry_of,
             multi_exec: false,
             unreliable: false,
+            run_key: None,
         })))
     }
 
@@ -1101,6 +1138,10 @@ impl CommandBus {
         let mut decision = locks::read(&self.policy).evaluate(&command, &targets);
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
+        }
+        // SS-10: what a key other than Enter does in the shells, for the dialog. A Low line runs as is.
+        if let Command::TerminalLine { keys, .. } = &command {
+            decision.warnings.extend(run_key(keys).and_then(RunKey::note));
         }
         if let Command::VmPower {
             op: PowerOp::Start { .. },

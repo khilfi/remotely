@@ -28,7 +28,7 @@ pub mod file;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize, Serializer};
 use uuid::Uuid;
@@ -42,8 +42,11 @@ use crate::error::{CoreError, Result};
 use crate::forwards::{ForwardInput, Forwards};
 use crate::known_hosts::{address, HostKey, KnownHost, KnownHosts};
 use crate::locks;
+use crate::policy::PolicyEngine;
 use crate::presentation::Change;
-use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord};
+use crate::sessions::{
+    rate_startup, SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord, StartupRating,
+};
 use crate::snippets::{FavouriteInput, Snippets};
 use crate::ssh_keys::PublicKeyInfo;
 use crate::store::{FavouriteRow, NewAuditEntry, Store};
@@ -194,6 +197,22 @@ struct ForwardEntry {
 }
 
 impl ForwardEntry {
+    /// "local 127.0.0.1:8080 -> db01.example.com:5432, starts with the terminal", for the preview.
+    fn describe(&self) -> String {
+        let bind = address(&self.bind_address, self.bind_port);
+        let dest = address(&self.dest_host, self.dest_port);
+        let what = match self.kind {
+            ForwardKind::Local => format!("local {bind} -> {dest}"),
+            ForwardKind::Remote => format!("remote {bind} on the host -> {dest}"),
+            ForwardKind::Dynamic => format!("SOCKS proxy on {bind}"),
+        };
+        if self.auto_start {
+            format!("{what}, starts with the terminal")
+        } else {
+            what
+        }
+    }
+
     fn input(&self) -> ForwardInput {
         ForwardInput {
             id: None,
@@ -342,6 +361,16 @@ pub struct PreviewItem {
     pub default_action: ItemAction,
     /// What importing it means, e.g. which saved password a session would log in with.
     pub notes: Vec<String>,
+    /// SS-01: a session's startup command, typed into its shell at every connection. Left out unless
+    /// the user ticks it ([`TransferCommit::keep_startup`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub startup_rating: Option<StartupRating>,
+    /// SS-07: a session's saved port forwards, described. Left out unless the user ticks them
+    /// ([`TransferCommit::keep_forwards`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub forwards: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -386,6 +415,14 @@ pub struct TransferCommit {
     pub secrets: Vec<ItemChoice>,
     #[serde(default)]
     pub favourites: Vec<ItemChoice>,
+    /// SS-01: sessions (by index) whose startup command comes along. The others come without it (a
+    /// replaced session keeps the one it has here).
+    #[serde(default)]
+    pub keep_startup: Vec<usize>,
+    /// SS-07: sessions (by index) whose port forwards come along. The others come without them (a
+    /// replaced session keeps the ones it has here).
+    #[serde(default)]
+    pub keep_forwards: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -436,6 +473,10 @@ pub struct TransferReport {
     pub favourites: Counts,
     /// SS-07: port forwards saved with the imported sessions.
     pub forwards: usize,
+    /// SS-01: startup commands in the file that were not ticked, so left out.
+    pub startup_left_out: usize,
+    /// SS-07: port forwards in the file that were not ticked, so left out.
+    pub forwards_left_out: usize,
     /// CT-01: imported sessions marked as container hosts.
     pub container_hosts: usize,
     pub folders_added: usize,
@@ -659,8 +700,31 @@ fn plan_known_hosts(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
                 .known_hosts
                 .iter()
                 .find(|l| l.host.eq_ignore_ascii_case(&k.host) && l.port == k.port && l.key_type == k.key_type);
+            // SS-05: a new key type for a host that has a trusted key here is what a man in the middle
+            // would present, so it is a conflict, skipped unless the user picks it.
+            let other_types: Vec<&KnownHost> = local
+                .known_hosts
+                .iter()
+                .filter(|l| l.host.eq_ignore_ascii_case(&k.host) && l.port == k.port)
+                .collect();
             match here {
-                None => RowPlan::new(index),
+                None => match other_types.first() {
+                    None => RowPlan::new(index),
+                    Some(first) => RowPlan::conflict(
+                        index,
+                        first.id,
+                        format!(
+                            "This is a {} key, and this host has another kind trusted here ({}). A host that presents a new kind of key may be someone intercepting the connection: import it only if you know the host's keys changed.",
+                            k.key_type,
+                            other_types
+                                .iter()
+                                .map(|l| format!("{} {}", l.key_type, l.fingerprint))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        vec![ItemAction::Skip, ItemAction::Import],
+                    ),
+                },
                 Some(l) if l.fingerprint == k.fingerprint => {
                     RowPlan::same(index, l.id, "Already trusted here.".to_owned())
                 }
@@ -900,6 +964,8 @@ struct Opened {
 
 pub struct Transfer {
     store: Store,
+    /// SS-01: the bus's engine, to rate startup commands in the preview.
+    policy: Option<Arc<RwLock<PolicyEngine>>>,
     kdf: Mutex<KdfParams>,
     /// The file the user picked to import, until its passphrase opens it.
     chosen: Mutex<Option<PathBuf>>,
@@ -910,10 +976,17 @@ impl Transfer {
     pub fn new(store: Store) -> Self {
         Self {
             store,
+            policy: None,
             kdf: Mutex::new(KdfParams::DEFAULT),
             chosen: Mutex::new(None),
             opened: Mutex::new(None),
         }
+    }
+
+    /// The command bus's policy engine, so the preview rates startup commands with the current rules.
+    pub fn with_policy(mut self, policy: Arc<RwLock<PolicyEngine>>) -> Self {
+        self.policy = Some(policy);
+        self
     }
 
     /// Remembers the file the user picked in the shell's dialog, so the passphrase can be typed (and
@@ -1251,7 +1324,14 @@ impl Transfer {
                 if s.jump_session_id.is_some() {
                     notes.push("Connects through a jump host.".into());
                 }
-                item(row, s.name.clone(), detail, notes)
+                let mut shown = item(row, s.name.clone(), detail, notes);
+                shown.startup_command.clone_from(&s.startup_command);
+                shown.startup_rating = match (&self.policy, &s.startup_command) {
+                    (Some(policy), Some(command)) => Some(rate_startup(&locks::read(policy), command, s.environment)),
+                    _ => None,
+                };
+                shown.forwards = s.forwards.iter().map(ForwardEntry::describe).collect();
+                shown
             })
             .collect();
         let known_hosts = plan_known_hosts(payload, &local)
@@ -1451,6 +1531,26 @@ impl Transfer {
             let (mut input, missing) = self
                 .session_input(ctx, entry, &folder_map, &secret_map, &session_map, &local)
                 .await?;
+            // SS-01: the file's startup command only when ticked; a replaced session keeps its own,
+            // and its own terminal choices.
+            let keep_startup = request.keep_startup.contains(&index);
+            if !keep_startup {
+                if input.startup_command.is_some() {
+                    report.startup_left_out += 1;
+                }
+                input.startup_command = None;
+            }
+            if let (ItemAction::Replace, Some(here)) = (action, here) {
+                if !keep_startup {
+                    input.startup_command.clone_from(&here.startup_command);
+                }
+                input.startup_on_reconnect = here.startup_on_reconnect;
+                input.prompt_hook = here.prompt_hook;
+            }
+            let keep_forwards = request.keep_forwards.contains(&index);
+            if !keep_forwards {
+                report.forwards_left_out += entry.forwards.len();
+            }
             let link = match &entry.vm {
                 Some(vm) if vm.auto => VmLink::Auto,
                 _ => VmLink::Manual,
@@ -1497,8 +1597,9 @@ impl Transfer {
                         report.without_credentials += 1;
                     }
                     report.sessions.count(action);
-                    // SS-07: a file without forwards (or from before 0.3.0) leaves this laptop's alone.
-                    if !entry.forwards.is_empty() {
+                    // SS-07: a file without forwards (or from before 0.3.0), or forwards not ticked, leave
+                    // this laptop's alone.
+                    if keep_forwards && !entry.forwards.is_empty() {
                         let inputs: Vec<ForwardInput> = entry.forwards.iter().map(ForwardEntry::input).collect();
                         match forwards.restore(ctx, saved.id, &inputs).await {
                             Ok(saved_forwards) => report.forwards += saved_forwards.len(),
@@ -1610,6 +1711,18 @@ impl Transfer {
             detail.push_str(&format!(
                 "; {} saved with them",
                 plural(report.forwards, "port forward")
+            ));
+        }
+        if report.startup_left_out > 0 {
+            detail.push_str(&format!(
+                "; {} left out",
+                plural(report.startup_left_out, "startup command")
+            ));
+        }
+        if report.forwards_left_out > 0 {
+            detail.push_str(&format!(
+                "; {} left out",
+                plural(report.forwards_left_out, "port forward")
             ));
         }
         if report.container_hosts > 0 {
@@ -1833,6 +1946,8 @@ impl Transfer {
                 auth,
                 jump_session_id: jump,
                 startup_command: entry.startup_command.clone(),
+                startup_on_reconnect: false,
+                prompt_hook: None,
                 environment: entry.environment,
                 color: entry.color,
                 tags: entry.tags.clone(),
@@ -1882,6 +1997,9 @@ fn item<T>(row: RowPlan<T>, name: String, detail: String, notes: Vec<String>) ->
         choices: row.choices,
         default_action: row.default_action,
         notes,
+        startup_command: None,
+        startup_rating: None,
+        forwards: Vec::new(),
     }
 }
 

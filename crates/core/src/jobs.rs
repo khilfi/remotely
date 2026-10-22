@@ -316,7 +316,9 @@ struct RemoteRun<'a> {
 }
 
 /// SS-05 for bulk runs: a trusted key passes; a changed key blocks, and that is audited; a key never
-/// seen before is trusted (and audited) only when the run says so, since nobody can be asked.
+/// seen before is trusted (and audited) only when the run says so, since nobody can be asked. A key of
+/// a new type for a host that has a trusted key of another type blocks like a changed key, ticked or
+/// not: a man in the middle can present any type, and the run would hand it the passwords.
 struct BulkVerifier {
     known_hosts: Arc<KnownHosts>,
     ctx: Context,
@@ -339,6 +341,15 @@ impl HostKeyVerifier for BulkVerifier {
                     jump,
                 })
             }
+            HostKeyCheck::Unknown { other_key_types } if !other_key_types.is_empty() => {
+                self.known_hosts
+                    .record_new_type_blocked(&self.ctx, key, &other_key_types, Some(&self.target))
+                    .await?;
+                Err(CoreError::HostKeyChanged {
+                    address: key.address(),
+                    jump,
+                })
+            }
             HostKeyCheck::Unknown { .. } if self.trust_new => {
                 self.known_hosts.trust(&self.ctx, key, Some(&self.target)).await
             }
@@ -347,6 +358,13 @@ impl HostKeyVerifier for BulkVerifier {
                 jump,
             }),
         }
+    }
+
+    async fn known_key_types(&self, host: &str, port: u16) -> Vec<String> {
+        self.known_hosts
+            .key_types(&self.ctx, host, port)
+            .await
+            .unwrap_or_default()
     }
 }
 
@@ -886,11 +904,19 @@ impl JobRunner {
                 self.updater.install(&github_token, version).await?;
                 Ok(TargetOutcome::done())
             }
-            (Command::TerminalLine { keys, .. }, TargetRef::Terminal { terminal_id, .. }) => {
+            (
+                Command::TerminalLine {
+                    line, keys, unreliable, ..
+                },
+                TargetRef::Terminal { terminal_id, .. },
+            ) => {
                 if token.is_cancelled() {
                     return Err(CoreError::Cancelled);
                 }
-                // SS-10: the held Enter (and the rest of a paste of several lines).
+                // SS-10: the held key that runs the line (and the rest of a paste of several lines), only
+                // as the bus checked them against the rated line.
+                crate::terminal::multiexec::check_keys(line, keys.as_bytes(), *unreliable)
+                    .map_err(CoreError::InvalidInput)?;
                 self.terminals.send(*terminal_id, keys.as_bytes()).await?;
                 Ok(TargetOutcome::done())
             }

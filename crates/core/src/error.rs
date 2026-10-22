@@ -185,6 +185,16 @@ pub enum CoreError {
     #[error("{0}")]
     NoSudoPassword(String),
 
+    /// MO-02, CT-01: a background login (or sudo) failed in a way retrying can't fix, so it is not
+    /// tried again until something changes or the user presses Retry ([`crate::login_guard`]). The
+    /// message ends by saying so. Never holds a secret.
+    #[error("{message}")]
+    LoginParked { message: String },
+
+    /// MO-02, CT-01: the hourly cap on background logins to one host was reached.
+    #[error("{message}")]
+    LoginsCapped { message: String, wait_secs: u64 },
+
     /// BX-04: cancelled while the command was running on the host. The connection is closed, but the
     /// host may still finish the command.
     #[error("cancelled while the command was running; it may still finish on the host")]
@@ -326,6 +336,8 @@ impl CoreError {
             CoreError::HostKeyUnknown { .. } => "host_key_unknown",
             CoreError::SudoPasswordRefused => "sudo_password_refused",
             CoreError::NoSudoPassword(_) => "no_sudo_password",
+            CoreError::LoginParked { .. } => "login_parked",
+            CoreError::LoginsCapped { .. } => "logins_capped",
             CoreError::CancelledRemote => "cancelled_remote",
             CoreError::JumpChain(_) => "jump_chain",
             CoreError::Tunnel(_) => "tunnel",

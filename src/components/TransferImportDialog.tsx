@@ -2,6 +2,7 @@
 // opens) with the passphrase typed here and compares it with this library; this shows each session,
 // trusted host key, vault secret and favourite command (BX-08) as new, already here or in conflict, and lets the
 // user choose per item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
+// Startup commands (SS-01) and saved port forwards (SS-07) are shown with a warning and left out unless ticked.
 
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -9,6 +10,7 @@ import { AlertTriangleIcon, ArrowLeftIcon, FileLockIcon, FolderOpenIcon } from "
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -28,6 +30,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { StartupRatingBadges } from "@/components/Badges";
 import { VaultUnlock } from "@/components/VaultUnlock";
 import {
   api,
@@ -99,6 +102,8 @@ function counts(report: TransferReport) {
     part("Secrets", report.secrets),
     part("Favourite commands", report.favourites),
     report.forwards ? `Port forwards: ${report.forwards} saved with their sessions` : null,
+    report.startupLeftOut ? `Startup commands: ${report.startupLeftOut} left out` : null,
+    report.forwardsLeftOut ? `Port forwards: ${report.forwardsLeftOut} left out` : null,
     report.foldersAdded ? `Folders: ${report.foldersAdded} added` : null,
   ].filter(Boolean) as string[];
 }
@@ -108,6 +113,9 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
   const [passphrase, setPassphrase] = useState("");
   const [preview, setPreview] = useState<TransferPreview | null>(null);
   const [choices, setChoices] = useState<Choices>({ sessions: {}, knownHosts: {}, secrets: {}, favourites: {} });
+  /** SS-01, SS-07: sessions whose startup command, and whose port forwards, come along; none by default. */
+  const [keepStartup, setKeepStartup] = useState<Set<number>>(new Set());
+  const [keepForwards, setKeepForwards] = useState<Set<number>>(new Set());
   const [report, setReport] = useState<TransferReport | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -139,6 +147,8 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
       setPassphrase("");
       setPreview(opened);
       setChoices(defaults(opened));
+      setKeepStartup(new Set());
+      setKeepForwards(new Set());
     } catch (err) {
       setError(
         errorCode(err) === "wrong_passphrase"
@@ -176,6 +186,8 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         knownHosts: list("knownHosts"),
         secrets: list("secrets"),
         favourites: list("favourites"),
+        keepStartup: [...keepStartup].sort((a, b) => a - b),
+        keepForwards: [...keepForwards].sort((a, b) => a - b),
       });
       setReport(done);
       onImported();
@@ -206,6 +218,18 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
     return t;
   }, [choices]);
   const changes = totals.import + totals.replace + totals.keepBoth;
+  /** SS-01, SS-07: sessions to import that bring a startup command or port forwards. */
+  const extras = (preview?.sessions ?? []).filter(
+    (s) =>
+      (choices.sessions[s.index] ?? s.defaultAction) !== "skip" && (s.startupCommand || (s.forwards?.length ?? 0) > 0),
+  );
+  const toggle = (set: (f: (prev: Set<number>) => Set<number>) => void, index: number, on: boolean) =>
+    set((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(index);
+      else next.delete(index);
+      return next;
+    });
   const secretsChosen = Object.values(choices.secrets).some((a) => a !== "skip");
 
   function close() {
@@ -343,6 +367,65 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
                 onAll={(status, action) => setAll(section.key, status, action)}
               />
             ))}
+            {extras.length > 0 && (
+              <Alert>
+                <AlertTriangleIcon />
+                <AlertTitle>Startup commands and port forwards</AlertTitle>
+                <AlertDescription className="grid gap-3">
+                  <p>
+                    A startup command is typed into the shell at every connection without asking, and a port forward
+                    opens a way into a network. They are left out unless you tick them; a replaced session keeps its
+                    own.
+                  </p>
+                  <ul className="grid gap-3">
+                    {extras.map((s) => (
+                      <li key={s.index} className="grid min-w-0 gap-1.5">
+                        <span className="font-medium text-foreground">{s.name}</span>
+                        {s.startupCommand && (
+                          <div className="flex min-w-0 items-start gap-2">
+                            <Checkbox
+                              id={`transfer-startup-${s.index}`}
+                              className="mt-0.5"
+                              checked={keepStartup.has(s.index)}
+                              onCheckedChange={(v) => toggle(setKeepStartup, s.index, v === true)}
+                            />
+                            <Label htmlFor={`transfer-startup-${s.index}`} className="grid min-w-0 gap-1 font-normal">
+                              <span className="flex flex-wrap items-center gap-2">
+                                Startup command
+                                {s.startupRating && <StartupRatingBadges rating={s.startupRating} />}
+                              </span>
+                              <code className="font-mono text-xs break-all whitespace-pre-wrap">
+                                {s.startupCommand}
+                              </code>
+                            </Label>
+                          </div>
+                        )}
+                        {(s.forwards?.length ?? 0) > 0 && (
+                          <div className="flex min-w-0 items-start gap-2">
+                            <Checkbox
+                              id={`transfer-forwards-${s.index}`}
+                              className="mt-0.5"
+                              checked={keepForwards.has(s.index)}
+                              onCheckedChange={(v) => toggle(setKeepForwards, s.index, v === true)}
+                            />
+                            <Label htmlFor={`transfer-forwards-${s.index}`} className="grid min-w-0 gap-1 font-normal">
+                              {plural(s.forwards?.length ?? 0, "port forward")}
+                              <ul className="font-mono text-xs">
+                                {s.forwards?.map((f) => (
+                                  <li key={f} className="break-all">
+                                    {f}
+                                  </li>
+                                ))}
+                              </ul>
+                            </Label>
+                          </div>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
           </div>
         )}
 

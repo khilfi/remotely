@@ -30,6 +30,8 @@ fn session(name: &str, host: &str) -> SessionInput {
         auth: SessionAuth::Agent,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::None,
         color: None,
         tags: vec![],
@@ -69,6 +71,8 @@ async fn a_session_stores_where_and_how_to_connect() {
         },
         jump_session_id: Some(bastion.id),
         startup_command: Some("cd /srv/app\nexport TOKEN=abc123".into()),
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::Staging,
         color: Some(SessionColor::Teal),
         tags: vec!["web".into(), "Customer-A".into()],
@@ -207,6 +211,8 @@ async fn edits_are_audited_field_by_field_and_an_edit_that_changes_nothing_write
         username: None,
         environment: Environment::Prod,
         startup_command: Some("export TOKEN=abc123".into()),
+        startup_on_reconnect: false,
+        prompt_hook: None,
         tags: vec!["web".into()],
         ..session("web01", "web01.example.com")
     };
@@ -217,7 +223,7 @@ async fn edits_are_audited_field_by_field_and_an_edit_that_changes_nothing_write
     assert_eq!(audit.action, "Changed session 'web01'");
     assert_eq!(
         audit.detail.as_deref(),
-        Some("port: 22 -> 2200; user: alice -> none; environment: none -> prod; tags: none -> web; startup command added")
+        Some("port: 22 -> 2200; user: alice -> none; environment: none -> prod; tags: none -> web; startup command added (rated High: other)")
     );
     assert!(core.store.verify_audit_chain().await.unwrap().ok);
 }

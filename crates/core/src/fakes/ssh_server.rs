@@ -1275,7 +1275,9 @@ impl server::Handler for ServerHandler {
                 } else {
                     keys.push(byte);
                 }
-            } else if byte == b'\r' || byte == b'\n' {
+            } else if byte == b'\r' || byte == b'\n' || byte == 0x0f {
+                // SS-10: Ctrl+O runs the line too, as bash's operate-and-get-next does (with no history
+                // here to bring back).
                 session.data(channel, b"\r\n".to_vec())?;
                 let line = self.lines.get_mut(&channel).map(std::mem::take).unwrap_or_default();
                 self.run_line(channel, &String::from_utf8_lossy(&line), session)?;

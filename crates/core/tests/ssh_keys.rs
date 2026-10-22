@@ -72,6 +72,8 @@ fn input(name: &str, port: u16, auth: SessionAuth, environment: Environment) -> 
         auth,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment,
         color: None,
         tags: vec![],

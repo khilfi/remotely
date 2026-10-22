@@ -46,6 +46,8 @@ fn input(name: &str, env: Environment, auth: SessionAuth) -> SessionInput {
         auth,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: env,
         color: None,
         tags: vec![],
@@ -880,7 +882,9 @@ async fn a_host_outside_the_docker_group_runs_docker_with_sudo_and_its_password_
     )
     .await;
     let err = core.containers.containers(ctx, host(web), DOCKER).await.unwrap_err();
-    assert_eq!(err.code(), "sudo_password_refused");
+    // MO-02, CT-01: parked, so the next polls do not try it again.
+    assert_eq!(err.code(), "login_parked");
+    assert!(err.to_string().contains("refused the password"), "{err}");
     for entry in core.store.recent_audit(ctx, 100).await.unwrap() {
         let all = format!("{:?}", entry);
         assert!(!all.contains("login-pw-example") && !all.contains("stale"), "{all}");
@@ -1061,6 +1065,8 @@ async fn an_export_carries_container_marks_to_another_laptop() {
             &other.ctx,
             remotely_core::transfer::TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],

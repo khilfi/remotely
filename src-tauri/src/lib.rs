@@ -279,6 +279,8 @@ pub fn run() {
             ipc::metrics_host_usage,
             ipc::metrics_capacity,
             ipc::metrics_watch,
+            ipc::background_login_retry,
+            ipc::session_startup_rating,
             host_details::metrics_this_pc,
             host_details::host_specs,
             host_details::host_specs_refresh,

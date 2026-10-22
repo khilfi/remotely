@@ -202,9 +202,8 @@ fn the_command_panels_read_only_commands_are_low_and_their_writing_cousins_are_n
         "sudo ufw allow 22/tcp",
         "sudo firewall-cmd --add-port=80/tcp",
         "sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT",
-        "sudo nft flush ruleset",
+        "sudo nft add rule inet filter input tcp dport 22 accept",
         "docker logs web > /tmp/web.log",
-        "docker system prune",
         "docker network rm shop",
         "docker compose down",
         "kubectl config use-context prod",
@@ -366,6 +365,8 @@ fn dangerous_commands_are_high() {
         "mysql -e 'DROP DATABASE prod'",
         "psql -c \"drop database app\"",
         "uptime; rm -rf /tmp/x",
+        "sudo nft flush ruleset",
+        "docker system prune",
     ] {
         assert_eq!(tier(exec(script, &t), &t), Tier::High, "{script}");
     }
@@ -383,6 +384,730 @@ fn harmless_lookalikes_are_not_flagged_dangerous() {
     ] {
         assert!(e.dangerous_matches(script).is_empty(), "{script}");
     }
+}
+
+// ---- BX-06: the dangerous-command rules read commands as the shell does ---------------------------
+
+#[test]
+fn dangerous_rules_match_commands_as_the_shell_reads_them() {
+    let e = engine();
+    for (script, rule) in [
+        (r"\rm -rf /", "rm -r / rm -rf"),
+        (r#""rm" -rf /"#, "rm -r / rm -rf"),
+        ("'rm' -rf /", "rm -r / rm -rf"),
+        (r#"r""m -rf /"#, "rm -r / rm -rf"),
+        ("$'rm' -rf /srv", "rm -r / rm -rf"),
+        ("/usr/bin/rm -rf /", "rm -r / rm -rf"),
+        (r"sudo -u root \rm -rf /srv", "rm -r / rm -rf"),
+        (r"LD_PRELOAD= \rm -rf /srv", "rm -r / rm -rf"),
+        ("env -i 'rm' -rf /srv", "rm -r / rm -rf"),
+        (r"echo `\rm -rf /tmp/x`", "rm -r / rm -rf"),
+        (r"echo $(\rm -rf /tmp/x)", "rm -r / rm -rf"),
+        (r"\reboot", "shutdown / reboot"),
+        ("'mkfs.ext4' /dev/sdb1", "mkfs"),
+        // A script given to a shell, su, ssh or eval as one argument is read as a script.
+        ("sh -c 'rm -rf /srv/app'", "rm -r / rm -rf"),
+        (r#"sudo bash -c "mkfs.ext4 /dev/sdb""#, "mkfs"),
+        ("ssh alice@db01.example.com 'rm -rf /var/lib/app'", "rm -r / rm -rf"),
+        (r#"su - root -c "\rm -rf /srv""#, "rm -r / rm -rf"),
+        (r#"docker exec web sh -c "rm -rf /data""#, "rm -r / rm -rf"),
+        (r#"eval "rm -rf /srv""#, "rm -r / rm -rf"),
+        (r#"bash -c 'sh -c "reboot"'"#, "shutdown / reboot"),
+        (r#"sudo sh -c "sync; \reboot""#, "shutdown / reboot"),
+    ] {
+        let hits = e.dangerous_matches(script);
+        assert!(hits.iter().any(|h| h == rule), "{script}: {hits:?}");
+        assert_eq!(e.classify_script(script), ActionKind::ExecDangerous, "{script}");
+    }
+    // What is only text stays text: a quoted argument with spaces is one word.
+    for script in [
+        r#"echo "rm -rf /""#,
+        r#"grep -r "rm -rf" /var/log/app"#,
+        "echo 'mkfs.ext4 /dev/sdb'",
+        r#"printf '%s\n' "shutdown -h now""#,
+        r#"logger "kubectl delete ran""#,
+    ] {
+        assert!(e.dangerous_matches(script).is_empty(), "{script}");
+    }
+}
+
+#[test]
+fn dangerous_details_give_the_line_of_a_command_the_shell_reads() {
+    let e = engine();
+    assert_eq!(
+        e.dangerous_details("cd /srv\n\\rm -rf /srv/app"),
+        vec![DangerousMatch {
+            rule: "rm -r / rm -rf".into(),
+            text: r"\rm -rf /srv/app".into(),
+            line: 2,
+        }]
+    );
+    // The first match wins, as typed or as read.
+    let found = e.dangerous_details("\"rm\" -rf /a\nrm -rf /b");
+    assert_eq!((found[0].line, found[0].text.as_str()), (1, "\"rm\" -rf /a"));
+    let found = e.dangerous_details("uptime; 'reboot'");
+    assert_eq!((found[0].line, found[0].text.as_str()), (1, "uptime; 'reboot'"));
+}
+
+/// BX-06: each of `dangerous` matches the default rule `name`, so it is High; each of `harmless`
+/// matches no rule at all.
+fn flags(name: &str, dangerous: &[&str], harmless: &[&str]) {
+    let e = engine();
+    assert!(
+        PolicyRules::default().dangerous_commands.iter().any(|p| p.name == name),
+        "no default rule named {name}"
+    );
+    for script in dangerous {
+        let hits = e.dangerous_matches(script);
+        assert!(
+            hits.iter().any(|h| h == name),
+            "{name} should flag {script:?}: {hits:?}"
+        );
+        assert_eq!(e.classify_script(script), ActionKind::ExecDangerous, "{script}");
+    }
+    for script in harmless {
+        assert_eq!(
+            e.dangerous_matches(script),
+            Vec::<String>::new(),
+            "{name}: {script:?} is flagged"
+        );
+    }
+}
+
+#[test]
+fn wipefs_is_dangerous_when_it_erases_and_not_when_it_lists() {
+    flags(
+        "wipefs -a",
+        &[
+            "wipefs -a /dev/sdb",
+            "sudo wipefs --all /dev/sdb1",
+            "wipefs -af /dev/sdc",
+            "wipefs -fa /dev/sdc",
+            "wipefs -o 0x438 /dev/sdb",
+            "wipefs --offset=0x438 /dev/sdb",
+            r"sudo \wipefs -a /dev/sdb",
+        ],
+        &[
+            "wipefs /dev/sdb",
+            "sudo wipefs --no-act /dev/sdb",
+            "wipefs -O DEVICE,TYPE /dev/sda",
+        ],
+    );
+}
+
+#[test]
+fn sgdisk_is_dangerous_when_it_zaps_creates_or_deletes() {
+    flags(
+        "sgdisk zap / new / delete",
+        &[
+            "sgdisk -Z /dev/sdb",
+            "sgdisk --zap-all /dev/sdb",
+            "sgdisk -o /dev/sdb",
+            "sgdisk --clear /dev/sdb",
+            "sgdisk -n 1:0:0 /dev/sdb",
+            "sgdisk --new=1:0:0 /dev/sdb",
+            "sgdisk -d 2 /dev/sdb",
+            "sgdisk --delete=2 /dev/sdb",
+            "sudo sgdisk -Zo /dev/nvme1n1",
+        ],
+        &[
+            "sgdisk -p /dev/sda",
+            "sgdisk --print /dev/sda",
+            "sgdisk -i 1 /dev/sda",
+            "sgdisk --verify /dev/sda",
+            "sgdisk -b /root/sda.gpt /dev/sda",
+        ],
+    );
+}
+
+#[test]
+fn parted_is_dangerous_when_it_writes_a_label_or_partitions() {
+    flags(
+        "parted mklabel / mkpart / rm",
+        &[
+            "parted -s /dev/sdb mklabel gpt",
+            "sudo parted /dev/sdb --script mkpart primary ext4 0% 100%",
+            "parted /dev/sdb rm 2",
+            "parted -s /dev/sdb mktable msdos",
+            "parted /dev/sdb resizepart 1 100%",
+        ],
+        &[
+            "parted -l",
+            "sudo parted /dev/sda print",
+            "parted -s /dev/sda unit GB print free",
+            "parted -l; rm -f /tmp/x",
+        ],
+    );
+}
+
+#[test]
+fn sfdisk_is_dangerous_unless_it_only_lists_dumps_shows_or_verifies() {
+    flags(
+        "sfdisk (writes)",
+        &[
+            "sfdisk /dev/sdb < layout.txt",
+            "sudo sfdisk --delete /dev/sdb 2",
+            "sfdisk -d /dev/sda | sfdisk /dev/sdb",
+            "sfdisk --part-type /dev/sdb 1 8e",
+            "echo ',,L' | sudo sfdisk /dev/sdb",
+            "sfdisk -f /dev/sdb < layout.txt\nlsblk",
+            "sfdisk --wipe always /dev/sdb < layout.txt",
+        ],
+        &[
+            "sfdisk -l",
+            "sudo sfdisk -l /dev/sda",
+            "sfdisk --list /dev/sda",
+            "sfdisk -d /dev/sda > sda.dump",
+            "sfdisk --dump /dev/sda",
+            "sfdisk -s /dev/sda",
+            "sfdisk --show-size /dev/sda",
+            "sfdisk -V /dev/sda",
+            "sfdisk --verify /dev/sda",
+            "sfdisk -J /dev/sda",
+            "sfdisk --json /dev/sda | jq .",
+            "sudo sfdisk -l /dev/sda 2>/dev/null | head",
+        ],
+    );
+}
+
+#[test]
+fn discards_and_lvm_and_raid_metadata_removal_are_dangerous() {
+    flags(
+        "blkdiscard",
+        &["blkdiscard /dev/nvme0n1", "sudo blkdiscard -f /dev/sdb"],
+        &["lsblk --discard", "fstrim -av"],
+    );
+    flags(
+        "pvremove / vgremove / lvremove",
+        &[
+            "lvremove -y vg0/data",
+            "sudo vgremove vg0",
+            "pvremove /dev/sdb",
+            "lvm lvremove vg0/old",
+        ],
+        &[
+            "lvs",
+            "vgs -o +devices",
+            "pvdisplay /dev/sdb",
+            "lvextend -r -L +10G vg0/data",
+        ],
+    );
+    flags(
+        "mdadm --create / --zero-superblock",
+        &[
+            "mdadm --zero-superblock /dev/sdb1",
+            "mdadm --zero /dev/sdb1",
+            "sudo mdadm --create /dev/md0 --level=1 --raid-devices=2 /dev/sdb1 /dev/sdc1",
+            "mdadm -C /dev/md0 -l1 -n2 /dev/sdb1 /dev/sdc1",
+        ],
+        &[
+            "sudo mdadm --detail /dev/md0",
+            "mdadm --examine /dev/sda1",
+            "mdadm -D --scan",
+            "mdadm --detail --scan --config=/etc/mdadm.conf",
+            "cat /proc/mdstat",
+        ],
+    );
+}
+
+#[test]
+fn firewall_lockouts_are_dangerous_and_listing_or_opening_is_not() {
+    flags(
+        "iptables -P … DROP",
+        &[
+            "iptables -P INPUT DROP",
+            "sudo ip6tables -P FORWARD DROP",
+            "iptables -t filter --policy INPUT DROP",
+            "iptables-nft -P OUTPUT DROP",
+        ],
+        &[
+            "iptables -P INPUT ACCEPT",
+            "iptables -L -n",
+            "iptables -S INPUT",
+            "iptables -A INPUT -s 192.0.2.10 -j DROP",
+        ],
+    );
+    flags(
+        "nft flush ruleset",
+        &[
+            "nft flush ruleset",
+            "sudo nft 'flush ruleset'",
+            "nft -f - <<< 'flush ruleset'",
+        ],
+        &["nft list ruleset", "sudo nft list tables"],
+    );
+    flags(
+        "ufw enable / default deny",
+        &[
+            "ufw enable",
+            "sudo ufw --force enable",
+            "ufw default deny incoming",
+            "ufw default deny",
+            "ufw default reject incoming",
+            "ufw default deny && ufw allow 22/tcp",
+        ],
+        &[
+            "ufw status verbose",
+            "sudo ufw allow 22/tcp",
+            "ufw default allow outgoing",
+            "ufw default deny outgoing",
+            "ufw app list",
+            "ufw disable",
+        ],
+    );
+    flags(
+        "firewall-cmd --panic-on",
+        &["firewall-cmd --panic-on", "sudo firewall-cmd --panic-on"],
+        &[
+            "firewall-cmd --query-panic",
+            "firewall-cmd --panic-off",
+            "firewall-cmd --list-all",
+        ],
+    );
+}
+
+#[test]
+fn stopping_sshd_is_dangerous_and_restarting_it_is_not() {
+    // A restart or reload brings sshd back (sessions open now stay up), so it is a change like
+    // restarting any service: one confirm, or the full approval on 5 hosts or more.
+    flags(
+        "stop sshd",
+        &[
+            "systemctl stop sshd",
+            "sudo systemctl stop ssh",
+            "systemctl disable --now sshd.service",
+            "systemctl mask ssh.socket",
+            "systemctl kill sshd",
+            "systemctl stop nginx sshd",
+            "service sshd stop",
+            "sudo service ssh stop",
+            "/etc/init.d/ssh stop",
+            "rc-service sshd stop",
+        ],
+        &[
+            "systemctl status sshd",
+            "systemctl restart sshd",
+            "systemctl reload ssh",
+            "sudo systemctl enable --now sshd",
+            "systemctl stop nginx",
+            "systemctl stop sshd-keygen@rsa",
+            "systemctl status sshd; systemctl stop nginx",
+            "service sshd status",
+            "journalctl -u sshd -n 50",
+        ],
+    );
+    let e = engine();
+    assert_eq!(e.classify_script("systemctl restart sshd"), ActionKind::ExecOther);
+}
+
+#[test]
+fn taking_a_network_interface_down_is_dangerous() {
+    // Remotely can't tell which interface its own connection uses, so every one counts.
+    flags(
+        "network interface down",
+        &[
+            "ip link set eth0 down",
+            "sudo ip link set dev ens192 down",
+            "ip l s eth0 down",
+            "ip -6 link set eth0 down",
+            "ifdown eth0",
+            "sudo ifconfig eth0 down",
+        ],
+        &[
+            "ip link show",
+            "ip -br link",
+            "ip link set eth0 up",
+            "ip link set eth0 mtu 9000",
+            "ip addr show dev eth0",
+            "ifup eth0",
+        ],
+    );
+}
+
+#[test]
+fn killing_every_process_is_dangerous_and_killing_one_is_not() {
+    flags(
+        "kill -1 (every process)",
+        &[
+            "kill -9 -1",
+            "kill -KILL -1",
+            "kill -s KILL -1",
+            "sudo kill -- -1",
+            "kill -TERM -1",
+        ],
+        &[
+            "kill -9 1234",
+            "kill -1 1234",
+            "kill -l",
+            "pkill -9 nginx",
+            "kill -9 -1234",
+            "kill 1234",
+        ],
+    );
+}
+
+#[test]
+fn recursive_mode_or_owner_changes_on_system_folders_are_dangerous() {
+    flags(
+        "chmod / chown -R on a system folder",
+        &[
+            "chmod -R 777 /",
+            "sudo chown -R alice:alice /etc",
+            "chmod -R 755 /usr/",
+            "chmod 777 -R /var",
+            "chgrp -R users /home",
+            "chmod --recursive 777 /*",
+            "chown root:root / -R",
+            "sudo chmod -Rv 700 /boot",
+        ],
+        &[
+            "chmod -R 755 /srv/app",
+            "chown -R alice:alice /home/alice",
+            "chmod 644 /etc/passwd",
+            "chmod -R g+w /var/www",
+            "chown alice /etc/app.conf",
+            "chmod -R 700 /root",
+        ],
+    );
+}
+
+#[test]
+fn writing_to_a_disk_device_is_dangerous_and_reading_one_is_not() {
+    flags(
+        "write to a disk device",
+        &[
+            "cat image.raw > /dev/sdb",
+            "echo 0 >/dev/nvme0n1",
+            "pv disk.img >> /dev/vdb",
+            "sudo tee /dev/sdb < image.raw",
+            "sudo shred -n 1 /dev/sdc",
+            "cp debian.iso /dev/sdb",
+            "cat x > '/dev/mapper/vg0-data'",
+            "head -c 1M /dev/zero > /dev/disk/by-id/ata-disk1",
+            "echo x > /dev/xvdf",
+            "echo x > /dev/md0",
+        ],
+        &[
+            "cat /dev/sda1 > /dev/null",
+            "smartctl -a /dev/sda",
+            "blkid /dev/sda1",
+            "echo 1 | sudo tee /sys/block/sda/device/rescan",
+            "lsblk /dev/sdb 2>/dev/null",
+            "shred -u /tmp/secret.txt",
+            "cp /etc/fstab /tmp/fstab.bak",
+            "echo hi >&2",
+        ],
+    );
+}
+
+#[test]
+fn a_fork_bomb_is_dangerous() {
+    flags(
+        "fork bomb",
+        &[":(){ :|:& };:", ":() { : | : & }; :", "bomb(){ bomb|bomb& };bomb"],
+        &["echo ':)'", "f() { echo hi; }; f", "ls | grep x &"],
+    );
+}
+
+#[test]
+fn dropping_or_truncating_tables_is_dangerous_and_the_truncate_program_is_not() {
+    flags(
+        "DROP TABLE / TRUNCATE",
+        &[
+            "mysql -e 'DROP TABLE orders'",
+            "psql -c \"drop table if exists sessions\"",
+            "mysql shop -e 'TRUNCATE TABLE carts'",
+            "psql -c 'truncate audit_log'",
+        ],
+        &[
+            "truncate -s 0 /var/log/app.log",
+            "sudo truncate --size 0 /var/log/app.log",
+            "echo \"drop table\"",
+            "grep -i 'drop table' /var/log/mysql/general.log",
+        ],
+    );
+}
+
+#[test]
+fn kubectl_delete_is_dangerous_and_reading_is_not() {
+    flags(
+        "kubectl delete",
+        &[
+            "kubectl delete pod web-1 -n shop",
+            "kubectl -n shop delete deployment web",
+            "oc delete project staging",
+            "k3s kubectl delete ns test",
+        ],
+        &[
+            "kubectl get pods -A",
+            "kubectl describe pod web-1",
+            "kubectl logs web-1 | grep delete",
+        ],
+    );
+}
+
+#[test]
+fn container_prunes_and_volume_removals_are_dangerous() {
+    flags(
+        "docker / podman prune",
+        &[
+            "docker system prune",
+            "docker system prune -af",
+            "docker image prune -a",
+            "docker container prune -f",
+            "docker builder prune",
+            "sudo podman system prune",
+            "docker volume prune -f",
+            "podman volume prune --force",
+            "docker --context prod volume prune",
+        ],
+        &[
+            "docker system df",
+            "docker volume ls",
+            "docker image ls",
+            "docker ps -a",
+        ],
+    );
+    flags(
+        "docker / podman volume rm",
+        &["docker volume rm shop_db", "podman volume remove data"],
+        &["docker volume inspect shop_db", "docker volume ls -q"],
+    );
+}
+
+// ---- CT-01, BX-06: prunes in Compare and MultiExec are rated like on the Containers page ----------
+
+#[test]
+fn compare_rates_volume_prunes_like_the_containers_page() {
+    let t = vec![host(Environment::Lab)];
+    for script in [
+        "docker volume prune",
+        "docker volume prune -f",
+        "sudo podman volume prune --force",
+        "docker system prune --volumes",
+        "docker system prune -af --volumes",
+        "podman system prune --volumes -f",
+        r#""docker" volume prune -f"#,
+        "sudo -u alice docker volume prune -f",
+        "cd /srv && docker volume prune -f",
+        "docker volume rm shop_db",
+    ] {
+        let d = engine().evaluate(&exec(script, &t), &t);
+        assert_eq!(d.tier, Tier::Critical, "{script}");
+        assert!(d.steps.contains(&ApprovalStep::VaultReauth), "{script}");
+        assert!(
+            d.reasons.iter().any(|r| r.contains("on the Containers page")),
+            "{script}: {:?}",
+            d.reasons
+        );
+    }
+    // The reason says what was found and which rule rates it.
+    let d = engine().evaluate(&exec("docker volume prune -f", &t), &t);
+    assert!(
+        d.reasons.contains(
+            &"`docker volume prune` is rated like \"Prune unused volumes (deletes their data)\" on the Containers \
+              page: high -> critical"
+                .to_owned()
+        ),
+        "{:?}",
+        d.reasons
+    );
+    // The Containers page's own volume prune, for comparison.
+    let docker = vec![engine_target(Environment::Lab, EngineKind::Docker)];
+    assert_eq!(
+        engine()
+            .evaluate(&container(prune(PruneWhat::Volumes), &docker), &docker)
+            .tier,
+        Tier::Critical
+    );
+    // A MultiExec line too.
+    let terms = terminals(1);
+    assert_eq!(
+        engine()
+            .evaluate(&line("docker volume prune -f", false, &terms), &terms)
+            .tier,
+        Tier::Critical
+    );
+    // Other prunes are High, like pruning containers, images or the build cache there.
+    for script in [
+        "docker system prune",
+        "docker system prune -af",
+        "docker image prune -a",
+        "docker container prune -f",
+        "docker builder prune -f",
+        "podman system prune",
+    ] {
+        assert_eq!(tier(exec(script, &t), &t), Tier::High, "{script}");
+    }
+    for script in ["docker volume ls", "docker system df", "podman volume ls"] {
+        assert_eq!(tier(exec(script, &t), &t), Tier::Low, "{script}");
+    }
+}
+
+#[test]
+fn editing_a_containers_page_rule_changes_compare_too() {
+    let t = vec![host(Environment::Lab)];
+    let with = |kind: ActionKind, rule: TierRule| {
+        let mut rules = PolicyRules::default();
+        rules.tiers.insert(kind, rule);
+        PolicyEngine::new(rules).unwrap()
+    };
+    let e = with(ActionKind::PruneVolumes, TierRule::same(Tier::High));
+    assert_eq!(e.evaluate(&exec("docker volume prune -f", &t), &t).tier, Tier::High);
+    let e = with(ActionKind::PruneImages, TierRule::same(Tier::Critical));
+    assert_eq!(e.evaluate(&exec("docker image prune -a", &t), &t).tier, Tier::Critical);
+    assert_eq!(
+        e.evaluate(&exec("docker system prune -f", &t), &t).tier,
+        Tier::Critical,
+        "a system prune prunes images too"
+    );
+    // The Containers page's bulk tier applies from its own threshold (2 hosts).
+    let e = with(
+        ActionKind::PruneVolumes,
+        TierRule {
+            single: Tier::High,
+            bulk: Tier::Critical,
+        },
+    );
+    let one = vec![host(Environment::Lab)];
+    let two = vec![host(Environment::Lab), host(Environment::Lab)];
+    assert_eq!(e.evaluate(&exec("docker volume prune -f", &one), &one).tier, Tier::High);
+    assert_eq!(
+        e.evaluate(&exec("docker volume prune -f", &two), &two).tier,
+        Tier::Critical
+    );
+
+    // Rules saved before the container patterns existed still rate a volume prune Critical: the
+    // check is code, not one of the editable patterns.
+    let mut rules = PolicyRules::default();
+    rules.dangerous_commands.retain(|p| !p.name.starts_with("docker"));
+    let e = PolicyEngine::new(rules).unwrap();
+    let d = e.evaluate(&exec("docker volume prune -f", &t), &t);
+    assert_eq!((d.action, d.tier), (ActionKind::ExecOther, Tier::Critical));
+    assert!(
+        d.reasons
+            .iter()
+            .any(|r| r.ends_with("on the Containers page: medium -> critical")),
+        "{:?}",
+        d.reasons
+    );
+    // Prod raises from there, as on the Containers page.
+    let prod = vec![host(Environment::Prod)];
+    let e = with(ActionKind::PruneImages, TierRule::same(Tier::High));
+    assert_eq!(
+        e.evaluate(&exec("docker image prune -a", &prod), &prod).tier,
+        Tier::Critical
+    );
+}
+
+// ---- BX-06: "other" commands on many hosts --------------------------------------------------------
+
+fn hosts(n: usize) -> Vec<Target> {
+    (0..n).map(|_| host(Environment::Lab)).collect()
+}
+
+#[test]
+fn other_commands_are_one_confirm_on_up_to_four_hosts_and_high_on_five_or_more() {
+    for n in [1, 2, 4] {
+        let t = hosts(n);
+        let d = engine().evaluate(&exec("systemctl restart nginx", &t), &t);
+        assert_eq!(d.tier, Tier::Medium, "{n} hosts");
+        assert_eq!(d.steps, vec![ApprovalStep::Confirm], "{n} hosts");
+    }
+    for n in [5, 50] {
+        let t = hosts(n);
+        let d = engine().evaluate(&exec("systemctl restart nginx", &t), &t);
+        assert_eq!(d.tier, Tier::High, "{n} hosts");
+        assert!(d.steps.contains(&ApprovalStep::TypeTargetCount { expected: n }));
+        assert!(d.steps.contains(&ApprovalStep::Reason));
+        assert!(d.steps.contains(&ApprovalStep::Countdown { seconds: 10 }));
+        assert!(!d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })));
+        assert_eq!(d.reasons[0], format!("Run any other command on {n} targets: high"));
+        assert!(
+            d.reasons
+                .iter()
+                .any(|r| r == "5 or more hosts: the bulk tier for commands on hosts applies"),
+            "{:?}",
+            d.reasons
+        );
+    }
+    // Reading stays Low on any number of hosts; a dangerous command is High on one.
+    let many = hosts(50);
+    assert_eq!(tier(exec("uptime", &many), &many), Tier::Low);
+    let one = hosts(1);
+    assert_eq!(tier(exec("rm -rf /var/tmp/x", &one), &one), Tier::High);
+    // Prod raises from there.
+    let mut t = hosts(2);
+    t[0].environment = Environment::Prod;
+    assert_eq!(tier(exec("systemctl restart nginx", &t), &t), Tier::High);
+    let mut t = hosts(5);
+    t[4].environment = Environment::Prod;
+    assert_eq!(tier(exec("systemctl restart nginx", &t), &t), Tier::Critical);
+    // Protected hosts are left out and do not count.
+    let mut t = hosts(5);
+    t[0].protected = true;
+    assert_eq!(tier(exec("systemctl restart nginx", &t), &t), Tier::Medium);
+}
+
+#[test]
+fn multiexec_lines_to_five_or_more_terminals_are_high() {
+    let four = terminals(4);
+    let five = terminals(5);
+    assert_eq!(
+        engine()
+            .evaluate(&line("systemctl restart nginx", false, &four), &four)
+            .tier,
+        Tier::Medium
+    );
+    assert_eq!(
+        engine()
+            .evaluate(&line("systemctl restart nginx", false, &five), &five)
+            .tier,
+        Tier::High
+    );
+    // A line Remotely could not follow is "other", so it is High on five terminals too.
+    assert_eq!(engine().evaluate(&line("uptime", true, &five), &five).tier, Tier::High);
+    assert_eq!(engine().evaluate(&line("uptime", false, &five), &five).tier, Tier::Low);
+}
+
+#[test]
+fn the_bulk_threshold_for_commands_on_hosts_is_its_own_rule() {
+    let rules = PolicyRules {
+        exec_bulk_threshold: 3,
+        ..Default::default()
+    };
+    let e = PolicyEngine::new(rules).unwrap();
+    let (two, three) = (hosts(2), hosts(3));
+    assert_eq!(e.evaluate(&exec("apt-get upgrade -y", &two), &two).tier, Tier::Medium);
+    assert_eq!(e.evaluate(&exec("apt-get upgrade -y", &three), &three).tier, Tier::High);
+    // VM actions keep the other threshold, and the other way round.
+    let t = vms(2);
+    assert_eq!(e.evaluate(&power(PowerOp::Suspend, &t), &t).tier, Tier::High);
+    let rules = PolicyRules {
+        bulk_threshold: 10,
+        ..Default::default()
+    };
+    let e = PolicyEngine::new(rules).unwrap();
+    let (five, vms5) = (hosts(5), vms(5));
+    assert_eq!(e.evaluate(&exec("apt-get upgrade -y", &five), &five).tier, Tier::High);
+    assert_eq!(e.evaluate(&power(PowerOp::Suspend, &vms5), &vms5).tier, Tier::Medium);
+    assert_eq!(PolicyRules::default().threshold(ActionKind::ExecOther), 5);
+    assert_eq!(PolicyRules::default().threshold(ActionKind::VmSuspend), 2);
+    assert_eq!(PolicyRules::default().threshold(ActionKind::PruneVolumes), 2);
+}
+
+#[test]
+fn rules_saved_before_the_bulk_threshold_for_commands_still_load() {
+    // 0.4.0 saved no threshold for commands, and "other" commands as Medium at any count.
+    let mut json = serde_json::to_value(PolicyRules::default()).unwrap();
+    json.as_object_mut().unwrap().remove("execBulkThreshold");
+    json["tiers"]["execOther"] = serde_json::json!({ "single": "medium", "bulk": "medium" });
+    let saved: PolicyRules = serde_json::from_value(json).unwrap();
+    assert_eq!(saved.exec_bulk_threshold, DEFAULT_EXEC_BULK_THRESHOLD);
+    // The user's own tiers are kept until they edit them or reset to the defaults.
+    let e = PolicyEngine::new(saved).unwrap();
+    let t = hosts(5);
+    assert_eq!(e.evaluate(&exec("systemctl restart nginx", &t), &t).tier, Tier::Medium);
 }
 
 #[test]
@@ -586,12 +1311,17 @@ fn edited_rules_change_the_tier() {
 fn custom_dangerous_pattern_is_applied() {
     let mut rules = PolicyRules::default();
     rules.dangerous_commands.push(DangerousPattern {
-        name: "kubectl delete".into(),
-        pattern: r"\bkubectl\s+delete\b".into(),
+        name: "helm uninstall".into(),
+        pattern: r"\bhelm\s+uninstall\b".into(),
     });
     let e = PolicyEngine::new(rules).unwrap();
     let t = vec![host(Environment::Lab)];
-    assert_eq!(e.evaluate(&exec("kubectl delete ns staging", &t), &t).tier, Tier::High);
+    assert_eq!(
+        e.evaluate(&exec("helm uninstall shop -n staging", &t), &t).tier,
+        Tier::High
+    );
+    // A user's pattern is matched against the commands as the shell reads them too.
+    assert_eq!(e.evaluate(&exec(r#""helm" uninstall shop"#, &t), &t).tier, Tier::High);
 }
 
 #[test]
@@ -778,6 +1508,21 @@ fn the_bulk_tier_cannot_be_lower_than_the_single_target_tier() {
     let message = rule_error(rules);
     assert!(message.starts_with("Shut down VMs: "), "{message}");
     assert!(message.contains("can't be lower"), "{message}");
+
+    // Commands on hosts say their own threshold.
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(
+        ActionKind::ExecOther,
+        TierRule {
+            single: Tier::High,
+            bulk: Tier::Medium,
+        },
+    );
+    let message = rule_error(rules);
+    assert!(
+        message.starts_with("Run any other command: the tier for 5 or more targets"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -788,6 +1533,16 @@ fn the_bulk_threshold_and_countdown_have_bounds() {
             ..Default::default()
         };
         assert!(rule_error(rules).starts_with("Bulk threshold"), "{threshold}");
+    }
+    for threshold in [0, 1, MAX_BULK_THRESHOLD + 1] {
+        let rules = PolicyRules {
+            exec_bulk_threshold: threshold,
+            ..Default::default()
+        };
+        assert!(
+            rule_error(rules).starts_with("Bulk threshold for commands on hosts: must be 2 to 1000 hosts"),
+            "{threshold}"
+        );
     }
     let rules = PolicyRules {
         countdown_seconds: MAX_COUNTDOWN_SECONDS + 1,
@@ -818,7 +1573,9 @@ fn dangerous_patterns_need_a_unique_name_and_a_pattern_that_does_not_match_every
     assert!(rule_error(with("kubectl", "(")).contains("not a valid regular expression"));
     assert!(rule_error(with("everything", ".*")).contains("matches every command"));
     assert!(rule_error(with("MKFS", r"\bmkfs2\b")).contains("another dangerous-command rule has this name"));
-    with("kubectl delete", r"\bkubectl\s+delete\b").validate().unwrap();
+    assert!(rule_error(with("Kubectl Delete", r"\bkubectl\s+delete\b"))
+        .contains("another dangerous-command rule has this name"));
+    with("helm uninstall", r"\bhelm\s+uninstall\b").validate().unwrap();
 }
 
 #[test]
@@ -876,10 +1633,11 @@ fn changes_say_what_differs_for_the_audit_log() {
     new.prod_bump = false;
     new.safety_snapshot_default = false;
     new.bulk_threshold = 3;
+    new.exec_bulk_threshold = 10;
     new.dangerous_commands.retain(|p| p.name != "dd");
     new.dangerous_commands.push(DangerousPattern {
-        name: "kubectl delete".into(),
-        pattern: r"\bkubectl\s+delete\b".into(),
+        name: "helm uninstall".into(),
+        pattern: r"\bhelm\s+uninstall\b".into(),
     });
     new.read_only_commands.retain(|c| c != "w");
     new.read_only_commands.push("zfs list".into());
@@ -888,10 +1646,11 @@ fn changes_say_what_differs_for_the_audit_log() {
         [
             "Pause VMs: medium for one, medium in bulk -> medium for one, high in bulk",
             "Bulk threshold: 2 -> 3 targets",
+            "Bulk threshold for commands on hosts: 5 -> 10 hosts",
             "Prod raises the tier: on -> off",
             "Countdown: 10 -> 5 s",
             "Safety snapshot by default: on -> off",
-            r"Dangerous command added: kubectl delete = \bkubectl\s+delete\b",
+            r"Dangerous command added: helm uninstall = \bhelm\s+uninstall\b",
             "Dangerous command removed: dd",
             "Read-only command added: zfs list",
             "Read-only command removed: w",
@@ -956,7 +1715,9 @@ fn dangerous_details_name_each_rule_with_the_line_it_matched() {
 // ---- BX-06: forms of read-only commands that write ----------------------------------------------
 
 /// With `read_only` as the read-only list (the defaults when `None`), each of `reads` is read-only
-/// and each of `writes` is "other": a bulk run or MultiExec asks before it sends one.
+/// and each of `writes` is not: a bulk run or MultiExec asks before it sends one. A write is "other",
+/// or dangerous when a dangerous-command rule matches it too (`ip link set eth0 down`), and the
+/// read-only check says it writes either way.
 fn reads_and_writes(read_only: Option<&[&str]>, reads: &[&str], writes: &[&str]) {
     let mut rules = PolicyRules::default();
     if let Some(list) = read_only {
@@ -967,7 +1728,17 @@ fn reads_and_writes(read_only: Option<&[&str]>, reads: &[&str], writes: &[&str])
         assert_eq!(e.classify_script(script), ActionKind::ExecReadOnly, "reads: {script}");
     }
     for script in writes {
-        assert_eq!(e.classify_script(script), ActionKind::ExecOther, "writes: {script}");
+        assert!(
+            !super::commands::is_read_only(script, &e.rules().read_only_commands),
+            "writes: {script}"
+        );
+        let kind = e.classify_script(script);
+        let expected = if e.dangerous_matches(script).is_empty() {
+            ActionKind::ExecOther
+        } else {
+            ActionKind::ExecDangerous
+        };
+        assert_eq!(kind, expected, "writes: {script}");
     }
 }
 
@@ -2332,6 +3103,56 @@ fn multiexec_summaries_name_the_line_without_secrets() {
     assert_eq!(line("", true, &t).summary(2), "MultiExec: press Enter in 2 terminals");
     let summary = line("mysql --password=hunter2-secret", false, &t).summary(3);
     assert!(!summary.contains("hunter2-secret"), "{summary}");
+}
+
+#[test]
+fn a_pager_or_editor_in_a_multiexec_line_is_never_read_only() {
+    let t = terminals(1);
+    for text in [
+        "less /var/log/syslog",
+        "more /etc/hosts",
+        "tail -n 200 /var/log/syslog | less",
+        "sudo less /var/log/secure",
+        "ls /var/log && less -R /var/log/syslog",
+    ] {
+        let d = engine().evaluate(&line(text, false, &t), &t);
+        assert_eq!(d.action, ActionKind::ExecOther, "{text}");
+        assert_eq!(d.tier, Tier::Medium, "{text}");
+        assert!(
+            d.reasons.iter().any(|r| r.contains("stays open")),
+            "{text}: {:?}",
+            d.reasons
+        );
+        // Compare runs it without a terminal: it stays read-only there.
+        assert_eq!(engine().classify(&exec(text, &[])), ActionKind::ExecReadOnly, "{text}");
+    }
+    assert_eq!(commands::interactive_program("/usr/bin/less /etc/passwd"), Some("less"));
+    // Even when the read-only list names man, vim or view.
+    let mut rules = PolicyRules::default();
+    rules
+        .read_only_commands
+        .extend(["man".to_owned(), "vim".to_owned(), "view".to_owned()]);
+    let e = PolicyEngine::new(rules).unwrap();
+    for text in ["man ls", "vim -R /etc/hosts", "view /etc/hosts"] {
+        assert_eq!(e.classify(&line(text, false, &t)), ActionKind::ExecOther, "{text}");
+    }
+    // man, vi, fc... are not read-only anyway; a dangerous line stays dangerous.
+    for text in ["man systemctl", "vi /etc/hosts", "fc -l -5"] {
+        assert_eq!(
+            engine().classify(&line(text, false, &t)),
+            ActionKind::ExecOther,
+            "{text}"
+        );
+    }
+    assert_eq!(
+        engine().classify(&line("less /etc/hosts; reboot", false, &t)),
+        ActionKind::ExecDangerous
+    );
+    // Words that only name them are not them.
+    for text in ["grep less /etc/hosts", "echo more", "cat /usr/share/doc/less/README"] {
+        let d = engine().evaluate(&line(text, false, &t), &t);
+        assert_eq!((d.action, d.tier), (ActionKind::ExecReadOnly, Tier::Low), "{text}");
+    }
 }
 
 // ---- SS-08: uploads ------------------------------------------------------------------------------

@@ -289,6 +289,8 @@ async fn every_high_and_critical_action_is_logged_from_approval_to_finish() {
                     auth: SessionAuth::Agent,
                     jump_session_id: None,
                     startup_command: None,
+                    startup_on_reconnect: false,
+                    prompt_hook: None,
                     environment: Environment::Lab,
                     color: None,
                     tags: vec![],

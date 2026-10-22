@@ -210,9 +210,18 @@ impl ActionKind {
             ActionKind::PruneVolumes => "Prune unused volumes (deletes their data)",
         }
     }
+
+    /// BX-06: a command run on hosts (Compare and MultiExec). Its bulk tier applies from
+    /// [`PolicyRules::exec_bulk_threshold`] hosts, not [`PolicyRules::bulk_threshold`].
+    pub fn is_exec(self) -> bool {
+        matches!(
+            self,
+            ActionKind::ExecReadOnly | ActionKind::ExecOther | ActionKind::ExecDangerous
+        )
+    }
 }
 
-/// Tier for one target and for a bulk action (`bulk_threshold` targets or more).
+/// Tier for one target and for a bulk action (from [`PolicyRules::threshold`] targets on).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TierRule {
@@ -253,8 +262,14 @@ pub enum ApprovalStep {
 #[serde(rename_all = "camelCase")]
 pub struct PolicyRules {
     pub tiers: BTreeMap<ActionKind, TierRule>,
-    /// Target count from which `TierRule::bulk` applies (the PRD says "2 or more VMs").
+    /// Target count from which `TierRule::bulk` applies (the PRD says "2 or more VMs"), for every
+    /// action but commands on hosts.
     pub bulk_threshold: usize,
+    /// BX-06: host count from which `TierRule::bulk` applies to commands on hosts (Compare and
+    /// MultiExec), so a command that changes something asks for the full approval on many hosts at
+    /// once. Rules saved before it existed get the default.
+    #[serde(default = "default_exec_bulk_threshold")]
+    pub exec_bulk_threshold: usize,
     /// A target labelled Prod moves the action up one tier.
     pub prod_bump: bool,
     /// BX-06: editable list of dangerous-command patterns.
@@ -270,15 +285,43 @@ pub const MIN_REPLACE_TIER: Tier = Tier::Medium;
 /// SS-07: a tunnel other computers can use always asks at least for a confirm, which says so.
 pub const MIN_SHARED_TUNNEL_TIER: Tier = Tier::Medium;
 
-/// AP-01: the editable numbers stay within these bounds.
+/// AP-01: the editable numbers stay within these bounds (both bulk thresholds: 2 to the maximum).
 pub const MAX_BULK_THRESHOLD: usize = 1000;
 pub const MAX_COUNTDOWN_SECONDS: u32 = 300;
+
+/// BX-06: the default [`PolicyRules::exec_bulk_threshold`]. From 5 hosts on, a command that changes
+/// something is High: one confirm is too little for a mistake made on that many hosts at once.
+pub const DEFAULT_EXEC_BULK_THRESHOLD: usize = 5;
+
+fn default_exec_bulk_threshold() -> usize {
+    DEFAULT_EXEC_BULK_THRESHOLD
+}
 
 /// Characters that join or redirect shell commands. A read-only entry holding one would let a
 /// writing command ride along on a read-only one.
 const SHELL_SPECIAL: &[char] = &[';', '&', '|', '>', '<', '`', '$', '(', ')', '\n', '\r'];
 
 impl PolicyRules {
+    /// Target count from which an action's bulk tier applies: [`Self::exec_bulk_threshold`] hosts for
+    /// commands on hosts, [`Self::bulk_threshold`] targets for the rest.
+    pub fn threshold(&self, kind: ActionKind) -> usize {
+        if kind.is_exec() {
+            self.exec_bulk_threshold
+        } else {
+            self.bulk_threshold
+        }
+    }
+
+    /// The tier `kind` gets on `targets` targets, before the Prod rule.
+    fn tier_for(&self, kind: ActionKind, targets: usize) -> Tier {
+        let rule = self.tiers[&kind];
+        if targets >= self.threshold(kind) {
+            rule.bulk
+        } else {
+            rule.single
+        }
+    }
+
     /// Trims names and patterns and collapses the spaces in read-only entries, so the same rule
     /// typed twice compares equal. Changes nothing else.
     pub fn normalized(mut self) -> Self {
@@ -328,7 +371,7 @@ impl PolicyRules {
                     kind.label(),
                     format!(
                         "the tier for {} or more targets ({}) can't be lower than for one target ({})",
-                        self.bulk_threshold,
+                        self.threshold(kind),
                         rule.bulk.as_str(),
                         rule.single.as_str()
                     ),
@@ -337,6 +380,12 @@ impl PolicyRules {
         }
         if !(2..=MAX_BULK_THRESHOLD).contains(&self.bulk_threshold) {
             return invalid("Bulk threshold", format!("must be 2 to {MAX_BULK_THRESHOLD} targets"));
+        }
+        if !(2..=MAX_BULK_THRESHOLD).contains(&self.exec_bulk_threshold) {
+            return invalid(
+                "Bulk threshold for commands on hosts",
+                format!("must be 2 to {MAX_BULK_THRESHOLD} hosts"),
+            );
         }
         if self.countdown_seconds > MAX_COUNTDOWN_SECONDS {
             return invalid("Countdown", format!("must be 0 to {MAX_COUNTDOWN_SECONDS} seconds"));
@@ -405,6 +454,12 @@ impl PolicyRules {
             out.push(format!(
                 "Bulk threshold: {} -> {} targets",
                 self.bulk_threshold, new.bulk_threshold
+            ));
+        }
+        if self.exec_bulk_threshold != new.exec_bulk_threshold {
+            out.push(format!(
+                "Bulk threshold for commands on hosts: {} -> {} hosts",
+                self.exec_bulk_threshold, new.exec_bulk_threshold
             ));
         }
         if self.prod_bump != new.prod_bump {
@@ -509,7 +564,15 @@ impl Default for PolicyRules {
             (VmProtect, TierRule::same(Low)),
             (VmUnprotect, TierRule::same(Medium)),
             (ExecReadOnly, TierRule::same(Low)),
-            (ExecOther, TierRule::same(Medium)),
+            // BX-06: a change on one host or a few is one confirm; on `exec_bulk_threshold` hosts or
+            // more it is the full approval (type the count, a reason, the countdown).
+            (
+                ExecOther,
+                TierRule {
+                    single: Medium,
+                    bulk: High,
+                },
+            ),
             (ExecDangerous, TierRule::same(High)),
             (AppUpdate, TierRule::same(Medium)),
             // A key in authorized_keys lets its holder log in: a change like any other command.
@@ -561,6 +624,7 @@ impl Default for PolicyRules {
         Self {
             tiers,
             bulk_threshold: 2,
+            exec_bulk_threshold: DEFAULT_EXEC_BULK_THRESHOLD,
             prod_bump: true,
             dangerous_commands: default_dangerous_patterns(),
             read_only_commands: default_read_only_commands(),
@@ -642,25 +706,49 @@ impl PolicyEngine {
         &self.rules
     }
 
-    /// Names of the dangerous-command rules the script matches (BX-06).
+    /// Names of the dangerous-command rules the script matches (BX-06): as typed, or in one of its
+    /// commands as the shell reads them (`\rm -rf /`, `"rm" -rf /`, `sh -c 'rm -rf /'`).
     pub fn dangerous_matches(&self, script: &str) -> Vec<String> {
+        let lines = Self::command_lines(script);
         self.dangerous
             .iter()
-            .filter(|(_, re)| re.is_match(script))
+            .filter(|(_, re)| Self::first_match(re, script, &lines).is_some())
             .map(|(name, _)| name.clone())
             .collect()
+    }
+
+    /// Each command of the script as the shell reads it, one per line, with where it starts.
+    fn command_lines(script: &str) -> Vec<(usize, String)> {
+        commands::shell_commands(script)
+            .into_iter()
+            .map(|c| (c.at, c.line()))
+            .collect()
+    }
+
+    /// Where in the script `re` first matches: the start of its text as typed, or the start of the
+    /// command it matches as the shell reads it, whichever comes first.
+    fn first_match(re: &Regex, script: &str, lines: &[(usize, String)]) -> Option<usize> {
+        // A match may start on the separator before the command (`\n`, `;`), so it starts where
+        // its text begins.
+        let typed = re
+            .find(script)
+            .map(|found| found.start() + (found.as_str().len() - found.as_str().trim_start().len()));
+        let read = lines
+            .iter()
+            .filter(|(_, line)| re.is_match(line))
+            .map(|(at, _)| *at)
+            .min();
+        typed.into_iter().chain(read).min()
     }
 
     /// BX-06: each rule the script matches, with the line of its first match, so the editor and the
     /// approval dialog can show why the command needs approval.
     pub fn dangerous_details(&self, script: &str) -> Vec<DangerousMatch> {
+        let lines = Self::command_lines(script);
         self.dangerous
             .iter()
             .filter_map(|(name, re)| {
-                let found = re.find(script)?;
-                // A match may start on the separator before the command (`\n`, `;`), so the line
-                // is the one where its text begins.
-                let start = found.start() + (found.as_str().len() - found.as_str().trim_start().len());
+                let start = Self::first_match(re, script, &lines)?;
                 let line_start = script[..start].rfind('\n').map_or(0, |i| i + 1);
                 let line_end = script[start..].find('\n').map_or(script.len(), |i| start + i);
                 let text: String = script[line_start..line_end].trim().chars().take(200).collect();
@@ -696,9 +784,12 @@ impl PolicyEngine {
             Command::AppUpdate { .. } => ActionKind::AppUpdate,
             Command::PushSshKey { .. } => ActionKind::SshKeyPush,
             // SS-10: a MultiExec line is rated like a bulk run's command. When Remotely could not follow
-            // what was typed, the shells may run something else, so it is never read-only.
+            // what was typed, the shells may run something else, so it is never read-only; nor is a
+            // pager or editor, which stays open in every terminal and runs `!command` typed into it.
             Command::TerminalLine { line, unreliable, .. } => match self.classify_script(line) {
-                ActionKind::ExecReadOnly if *unreliable => ActionKind::ExecOther,
+                ActionKind::ExecReadOnly if *unreliable || commands::interactive_program(line).is_some() => {
+                    ActionKind::ExecOther
+                }
                 kind => kind,
             },
             // SS-08: replacing a file loses what was there; adding one does not.
@@ -754,19 +845,50 @@ impl PolicyEngine {
             targets.iter().cloned().partition(|t| skips_protected && t.protected);
         let mut reasons = Vec::new();
 
-        let rule = self.rules.tiers[&action];
-        let bulk = active.len() >= self.rules.bulk_threshold;
-        let mut tier = if bulk { rule.bulk } else { rule.single };
+        let mut tier = self.rules.tier_for(action, active.len());
         let count = match active.len() {
             1 => "1 target".to_owned(),
             n => format!("{n} targets"),
         };
         reasons.push(format!("{} on {count}: {}", action.label(), tier.as_str()));
+        // BX-06: say when the bulk tier for commands on hosts applies, since it differs from the rest.
+        if action.is_exec() && active.len() >= self.rules.exec_bulk_threshold {
+            let rule = self.rules.tiers[&action];
+            if rule.bulk != rule.single {
+                reasons.push(format!(
+                    "{} or more hosts: the bulk tier for commands on hosts applies",
+                    self.rules.exec_bulk_threshold
+                ));
+            }
+        }
 
         if let Command::RemoteExec { script, .. } | Command::TerminalLine { line: script, .. } = command {
             let hits = self.dangerous_matches(script);
             if !hits.is_empty() {
                 reasons.push(format!("flagged dangerous: {}", hits.join(", ")));
+            }
+            // CT-01, BX-06: a prune or a volume removal is rated at least like the same action on the
+            // Containers page, so editing that rule changes both.
+            for found in commands::container_actions(&commands::shell_commands(script)) {
+                let Some((kind, floor)) = found
+                    .kinds
+                    .iter()
+                    .map(|&kind| (kind, self.rules.tier_for(kind, active.len())))
+                    .max_by_key(|(_, t)| *t)
+                else {
+                    continue;
+                };
+                let like = format!(
+                    "`{}` is rated like \"{}\" on the Containers page",
+                    found.what,
+                    kind.label()
+                );
+                if floor > tier {
+                    reasons.push(format!("{like}: {} -> {}", tier.as_str(), floor.as_str()));
+                    tier = floor;
+                } else {
+                    reasons.push(format!("{like} ({})", floor.as_str()));
+                }
             }
         }
 
@@ -795,6 +917,16 @@ impl PolicyEngine {
                     reasons.push("forced: running containers are killed first".into());
                 }
                 _ => {}
+            }
+        }
+
+        // SS-10: say why a pager or editor in a MultiExec line is not read-only.
+        if let Command::TerminalLine { line, .. } = command {
+            if let Some(program) = commands::interactive_program(line) {
+                reasons.push(format!(
+                    "{program} stays open in each terminal, and what is typed into it there passes straight through \
+                     unrated (a pager's or editor's !command runs commands)"
+                ));
             }
         }
 

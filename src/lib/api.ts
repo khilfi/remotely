@@ -244,7 +244,10 @@ export type Command =
       trustNewHostKeys?: boolean;
       timeoutSecs?: number | null;
     }
-  /** SS-10: the held Enter of a MultiExec line. The UI never submits it itself: MultiExec does. */
+  /**
+   * SS-10: the held Enter (or other key that runs the line) of a MultiExec line. The UI can't submit it: only
+   * MultiExec builds it, and `commandSubmit` refuses it.
+   */
   | { type: "terminalLine"; targets: TargetRef[]; line: string; unreliable: boolean; keys: string }
   /** SS-08: an upload. Never submitted by the UI: `filesUpload` builds it in Rust from picked or dropped files. */
   | { type: "fileUpload"; targets: TargetRef[]; folder: string; files: UploadFile[] }
@@ -330,6 +333,8 @@ export interface ExecDetails {
   multiExec: boolean;
   /** SS-10: edited with keys Remotely can't follow, so the terminals may run something else. */
   unreliable: boolean;
+  /** SS-10: the key that runs the line when it is not Enter ("Ctrl+O", "Esc then A"...). */
+  runKey: string | null;
 }
 
 export interface ApprovalRequest {
@@ -429,12 +434,27 @@ export type MultiExecOutcome =
       leftOut: LeftOut[];
       jobId: string | null;
       request: ApprovalRequest | null;
+      /** The key that runs the line: "Enter", "Ctrl+O", "Esc then Enter"... */
+      runKey: string;
     }
   /** A line waits for its Enter; these keys follow it. */
-  | { status: "queued"; lineId: string; dropped: boolean };
+  | { status: "queued"; lineId: string; dropped: boolean }
+  /**
+   * Keys that would run what MultiExec can't rate (Ctrl+X Ctrl+E, v after Esc...) were not sent, nor anything
+   * typed after them; `reason` says why. The keys before them went to `reached`.
+   */
+  | { status: "refused"; reason: string; reached: string[]; leftOut: LeftOut[] };
 
 export type MultiExecEvent =
-  | { event: "lineDone"; lineId: string; sent: boolean; terminals: number; status: JobStatus | null }
+  | {
+      event: "lineDone";
+      lineId: string;
+      sent: boolean;
+      terminals: number;
+      status: JobStatus | null;
+      /** The key that ran it: "Enter", "Ctrl+O"... */
+      runKey: string;
+    }
   | { event: "outcome"; outcome: MultiExecOutcome }
   /** QL-12: the recorded lines changed (that line, or several when null). */
   | { event: "recorded"; lineId: string | null }
@@ -673,8 +693,10 @@ export interface DangerousPattern {
 /** AP-01: the editable approval rules (crates/core/src/policy). */
 export interface PolicyRules {
   tiers: Record<ActionKind, TierRule>;
-  /** Targets from which the bulk tier applies. */
+  /** Targets from which the bulk tier applies, for every action but commands on hosts. */
   bulkThreshold: number;
+  /** BX-06: hosts from which the bulk tier of commands on hosts (Compare, MultiExec) applies. */
+  execBulkThreshold: number;
   /** A Prod-labelled target raises the tier by one. */
   prodBump: boolean;
   dangerousCommands: DangerousPattern[];
@@ -785,6 +807,10 @@ export interface SessionInput {
   auth: SessionAuth;
   jumpSessionId: string | null;
   startupCommand: string | null;
+  /** SS-01: type the startup command again after an automatic reconnect (off: only on connections the user opens). */
+  startupOnReconnect: boolean;
+  /** SS-08: the folder prompt hook. null follows Settings (off for a Prod session). */
+  promptHook: boolean | null;
   /** SS-06: Prod raises the approval tier by one. */
   environment: Environment;
   color: SessionColor | null;
@@ -961,9 +987,9 @@ export type TunnelStart = { status: "opening"; jobId: string } | { status: "need
 /**
  * SS-08: how the terminal knows its shell's folder. "following": the shell reports it (bash and zsh, through Remotely's
  * hook); "unsupported": another shell; "missed": bash or zsh, but something was typed before the hook could be set up
- * (a reconnect tries again).
+ * (a reconnect tries again); "off": the hook is turned off (Settings, the session, or a Prod session).
  */
-export type FolderTracking = "waiting" | "following" | "unsupported" | "missed";
+export type FolderTracking = "waiting" | "following" | "unsupported" | "missed" | "off";
 
 export interface FolderInfo {
   path: string | null;
@@ -1074,7 +1100,7 @@ export interface TerminalSettings {
   /** QL-05: lines, 1000 to 100000. */
   scrollback: number;
   reachability: ReachabilityMode;
-  /** QL-04: seconds between two checks of a session, 15 to 3600. */
+  /** QL-04: seconds between two checks of a host that is up, 15 to 3600 (300 unless chosen); a host down waits longer. */
   reachabilitySecs: number;
   /** QL-07: a Windows notification when a command in a background tab finishes. */
   notifyFinished: boolean;
@@ -1084,6 +1110,8 @@ export interface TerminalSettings {
   notifyAfterSecs: number;
   /** QL-07: seconds without output that end a command whose prompt is not recognised; 0: wait for the prompt. */
   notifyQuietSecs: number;
+  /** SS-08: type the folder prompt hook into bash and zsh (a session can say otherwise; Prod: off unless it does). */
+  promptHook: boolean;
 }
 
 // ---- BX-08 command panel ----
@@ -1099,6 +1127,11 @@ export interface CommandRisk {
   action: Extract<ActionKind, "execReadOnly" | "execOther" | "execDangerous">;
   /** The dangerous-command rules it matches, by name. */
   dangerous: string[];
+}
+
+/** SS-01: a startup command rated like a run on its session (a Prod session raises the tier). */
+export interface StartupRating extends CommandRisk {
+  tier: Tier;
 }
 
 /** BX-08: a saved command. */
@@ -1252,6 +1285,11 @@ export interface Reachability {
    * session itself is not checked from here.
    */
   via: string | null;
+  /**
+   * Not probed: this PC holds an SSH connection to the host (or to the first jump host) now, from a terminal, the
+   * dashboard or the Containers page. `checkedAt` is when it was last seen open.
+   */
+  connected: boolean;
 }
 
 export interface ReachabilityUpdate {
@@ -1320,6 +1358,8 @@ export interface ImportRow {
   /** Ticked by default. */
   selected: boolean;
   keyFile: { path: string; label: string; exists: boolean } | null;
+  /** SS-01: the startup command's rating; it is imported only when its row is ticked for it. */
+  startupRating: StartupRating | null;
 }
 
 export interface ImportSkipped {
@@ -1340,6 +1380,8 @@ export interface ImportReport {
   created: number;
   keysAdded: number;
   foldersCreated: number;
+  /** SS-01: startup commands left out (their rows were not ticked for them). */
+  startupLeftOut: number;
   problems: ImportSkipped[];
 }
 
@@ -1401,6 +1443,11 @@ export interface TransferItem {
   choices: TransferAction[];
   defaultAction: TransferAction;
   notes: string[];
+  /** SS-01: a session's startup command and its rating; imported only when ticked. */
+  startupCommand?: string;
+  startupRating?: StartupRating;
+  /** SS-07: a session's saved port forwards, described; imported only when ticked. */
+  forwards?: string[];
 }
 
 export interface TransferPreview {
@@ -1438,6 +1485,9 @@ export interface TransferReport {
   favourites: TransferCounts;
   /** SS-07: port forwards saved with the imported sessions. */
   forwards: number;
+  /** SS-01, SS-07: startup commands and port forwards in the file that were not ticked. */
+  startupLeftOut: number;
+  forwardsLeftOut: number;
   foldersAdded: number;
   /** Sessions imported without the password or key they used. */
   withoutCredentials: number;
@@ -1674,7 +1724,7 @@ export interface MetricPoint {
 }
 
 export type GuestState =
-  "connecting" | "ok" | "vaultLocked" | "unreachable" | "loginFailed" | "hostKey" | "noData" | "error";
+  "connecting" | "ok" | "vaultLocked" | "unreachable" | "loginFailed" | "hostKey" | "paused" | "noData" | "error";
 
 /** MO-02: where guest polling stands for one watched session. */
 export interface GuestStatus {
@@ -1685,6 +1735,8 @@ export interface GuestStatus {
   /** Seconds until the next try, while backing off. */
   retryInSecs: number | null;
   lastOk: string | null;
+  /** No new login until the session or its credentials change, or the user presses Retry. */
+  parked: boolean;
 }
 
 /** MO-01 NFR: what collecting costs. */
@@ -2414,6 +2466,14 @@ export const api = {
   metricsHostUsage: () => invoke<VmHostUsage[]>("metrics_host_usage"),
   /** MO-02: watching a session logs in to it over SSH every round. Audited; returns the watched ids. */
   metricsWatch: (sessionId: string, watch: boolean) => invoke<string[]>("metrics_watch", { sessionId, watch }),
+  /**
+   * MO-02, CT-01: Retry on a host whose background logins are parked (refused login or sudo, changed
+   * host key, no saved password) or capped for the hour. The dashboard and Containers page log in again.
+   */
+  backgroundLoginRetry: (sessionId: string) => invoke<void>("background_login_retry", { sessionId }),
+  /** SS-01: a startup command rated as on a session with this label (null before the rules are loaded). */
+  sessionStartupRating: (command: string, environment: Environment) =>
+    invoke<StartupRating | null>("session_startup_rating", { command, environment }),
   /** MO-15: this PC's RAM and paging files, from the metrics rounds. */
   metricsThisPc: () => invoke<ThisPcSeries>("metrics_this_pc"),
   /** MO-13: what was last read about the session (null before the first read). Makes no connection. */
@@ -2500,8 +2560,14 @@ export const api = {
   importPreview: (source: ImportSource, chooseFile = false) =>
     invoke<ImportPreview | null>("import_preview", { source, chooseFile }),
   /** Saves the picked rows of a preview; key files go into the vault when addKeys. */
-  importCommit: (request: { previewId: string; rows: number[]; folderId: string | null; addKeys: boolean }) =>
-    invoke<ImportReport>("import_commit", { request }),
+  importCommit: (request: {
+    previewId: string;
+    rows: number[];
+    folderId: string | null;
+    addKeys: boolean;
+    /** SS-01: rows whose startup command is imported too. */
+    keepStartup: number[];
+  }) => invoke<ImportReport>("import_commit", { request }),
   /** QL-10: the format guide for a source. */
   importGuide: (source: ImportSource) => invoke<FormatGuide>("import_guide", { source }),
   /** QL-10: saves the source's sample file where the user picks (a Rust save dialog). null when cancelled. */
@@ -2532,6 +2598,9 @@ export const api = {
     knownHosts: TransferChoice[];
     secrets: TransferChoice[];
     favourites: TransferChoice[];
+    /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
+    keepStartup: number[];
+    keepForwards: number[];
   }) => invoke<TransferReport>("transfer_commit", { request }),
 
   /** SS-09 SSH keys in the vault. Pushing one is `submit` with a pushSshKey command. */

@@ -26,7 +26,8 @@ library stores SSH sessions in folders with tags, colours, search and an environ
 tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs work in Compare runs and guest metrics without linking by hand. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
 encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
-both of each conflicting item. The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
+both of each conflicting item (startup commands and port forwards come along only when ticked, see
+[What Remotely does by itself](#what-remotely-does-by-itself)). The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
 the vault, copies their public keys, lets sessions log in with them and pushes a public key to many hosts'
 `authorized_keys` through the approval flow. The Containers page (0.4.0) lists and controls Docker and Podman
 containers on the sessions you mark as container hosts, and Docker Desktop's on this PC (see [Containers](#containers)).
@@ -70,6 +71,54 @@ VirtualBox VMs; the sidebar shows whether it was found.
 - **Host usage** on the dashboard and the VM list comes from each VM's `VirtualBoxVM.exe` or `VBoxHeadless.exe` process,
   and the capacity check before a power-on counts Workstation and VirtualBox VMs together.
 
+### Reachability dots
+
+QL-04: the dots in the Terminal page's session tree. A check opens a TCP connection to the session's SSH port and
+closes it at once: no SSH handshake, no login, nothing audited.
+
+- **What is checked**: only the sessions the tree shows (not those in closed groups), each host and port once however
+  many sessions share it, while the Terminal page is open. Settings, Terminal, turns the dots on, off, or on unless
+  there are more than 200 sessions (the default).
+- **How often**: every 5 minutes by default (15 seconds to an hour in Settings, Terminal; a value saved before 0.4.1 is
+  kept). A host that is down waits twice as long before each next check, up to 30 minutes, and goes back to the
+  interval once it answers.
+- **Hosts you are connected to are not checked**: a terminal, the dashboard's guest metrics or the Containers page
+  already holds a connection to them, so their dot says "connected". The next check comes one interval after that
+  connection closes.
+- **In the host's logs**: sshd logs each check as a connection that closed before logging in, and strict fail2ban
+  rules may count it. On sites like that, turn the dots off or check less often.
+- A session behind jump hosts shows its first jump host's state (see [Jump hosts and tunnels](#jump-hosts-and-tunnels)).
+
+### What Remotely does by itself
+
+0.4.1: what Remotely does on customers' hosts without you typing it, and how it stays gentle.
+
+- **Background logins** (MO-02, CT-01): the dashboard's guest metrics and the Containers page log in with the saved
+  login and keep the connection. A login the host refuses, a sudo password it refuses, a host key that changed or a
+  password that isn't saved **parks** the host: no new login (or sudo) until you change the session or its sudo
+  choice, add, replace or delete a vault secret, unlock the vault, trust or remove a host key, or press **Retry** (in the
+  dashboard's details, or on the Containers page). So a rotated password costs one failed login, not a locked account
+  or a fail2ban ban. A changed host key is audited once per park. Every background login also counts against a cap of
+  10 per host per hour (each jump host on the way counts too): past it the host shows "Paused" until the hour has room,
+  and Retry gets one login past it. Terminals never retry a refused login on their own.
+- **Startup commands** (SS-01): a session's startup command is typed into its shell without asking, so the session
+  editor rates it as you type (the tier a command like it gets on this session; Prod raises it), and its audit entry
+  says so. Imports (PuTTY, MobaXterm, OpenSSH, CSV) and imports from another laptop list each startup command with its
+  rating and a warning, and leave it out unless you tick it; port forwards in an export file likewise. A startup command
+  is typed at the first line that looks like a shell prompt (`alice@web01:~$ `), never at a menu or a question; with no
+  prompt within 15 s it isn't typed and the terminal says so. It is typed on the connections you open; after the
+  terminal reconnects by itself, only if the session asks ("Type it again when the terminal reconnects by itself").
+- **The folder prompt hook** (SS-08): see [File transfer in the terminal](#file-transfer-in-the-terminal). Settings,
+  Terminal turns it off everywhere; a session can say on or off; a Prod session has it off unless the session turns
+  it on. It is typed only at a line that looks like a shell prompt, starts with a space so `ignorespace` keeps it out
+  of the history (nothing edits the history), and each one is in the audit log (`folder_hook_installed`, once per
+  connection). Off, Files here starts in the home folder.
+- **Host keys** (SS-05): a bulk run with "Trust new host keys" never trusts a key of a new type for a host that already
+  has a trusted key of another type: someone in between can offer any type, and the run would give them the passwords.
+  It blocks like a changed key and is audited. An import from another laptop shows such a key as a conflict, skipped
+  unless you pick it. Connections ask the host for the key types already trusted for it first, so a host with several
+  keys presents the one you trusted. A terminal still asks you, and says another kind of key is trusted.
+
 ### Command panel
 
 BX-08, on the right of the Terminal page: a click pastes a command into the current terminal, Shift+click also presses
@@ -99,8 +148,9 @@ approval rules make of it (read-only, changes, dangerous), so you see before you
     Most entries are read-only checks; the fixes (restart or reload a service, vacuum the journal, extend an LV and grow
     its filesystem, resync the clock, clear a failed unit, open a firewall port, mount, log in to an iSCSI target) are
     marked as changes and ask before they run. Every `scp` and `rsync` is a change, dry runs included: rsync's options
-    can run programs or write files. The one format step is for a new, empty disk; the mkfs rule marks it dangerous. A
-    command can appear both in a symptom runbook and in its area group.
+    can run programs or write files. The partition and format steps are for a new, empty disk; the parted and mkfs
+    rules mark them dangerous, as the kubectl delete and Docker or Podman prune rules mark deleting a pod and pruning.
+    A command can appear both in a symptom runbook and in its area group.
   - **Manual** (QL-13): each library command has a link to its official manual page (the man-pages project at
     man7.org, freedesktop.org for systemd's tools, a project's own documentation for Docker, Podman, kubectl, Helm,
     nginx, Apache, MySQL, PostgreSQL, chrony, firewalld, OpenSSL and rsync, and Debian's or Ubuntu's manual pages
@@ -113,14 +163,20 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **MultiExec** (SS-10): the toolbar switch makes the picked tabs receive what you type into any of them, as in
   MobaXterm, and can show them side by side; each terminal shows its own output. Pick tabs with Ctrl+click and
   Shift+click, or all of them, a folder's or a label's from the MultiExec bar. The command panel's paste and Shift+click
-  go to them too. Safety: Remotely follows the line as it is typed, holds Enter and rates the line like any remote
-  command (read-only, other, dangerous; a Prod tab raises the tier). A read-only line goes at once; anything higher
+  go to them too. Safety: Remotely follows the line as it is typed, holds Enter (and every other key that runs a line
+  in bash or zsh: Ctrl+O, Esc then Enter, Esc then A, Esc then #, # in vi mode...) and rates the line like any remote
+  command (read-only, other, dangerous; a Prod tab raises the tier; see "How commands are rated" below, where the
+  picked terminals are the hosts). A read-only line goes at once; anything higher
   opens the approval dialog with the line and the terminals, and Cancel sends Ctrl+C to each. A line edited with keys
   Remotely can't follow (Tab completion, arrow keys, history search), or a tab that already had text on its line, is at
-  least a confirm. Every line sent is in the audit log with the command, the sessions and the tier, never the output.
-  Two exceptions pass keys straight through, unrated: at a password prompt (the keys go only to the tabs showing one,
-  and are never kept or logged) and to a full-screen program such as vim, less or top (only to the tabs that have one
-  open; what is typed there, like vim's `:!command`, is not rated). Protected sessions are left out.
+  least a confirm, and so is the line after one run with another key than Enter. A pager or editor (less, more, man,
+  vim) is never read-only here: it stays open in each tab. Keys that open the line in an editor and run what is saved
+  there (Ctrl+X Ctrl+E, v after Esc in vi mode), replay a keyboard macro (Ctrl+X E) or run an editing command by name
+  (Esc then x) are not sent, and the MultiExec bar says why. A lone Esc waits for the key after it. Every line sent is
+  in the audit log with the command, the sessions and the tier, never the output. Two exceptions pass keys straight
+  through, unrated: at a password prompt (the keys go only to the tabs showing one, and are never kept or logged) and
+  to a full-screen program such as vim, less or top (only to the tabs that have one open; what is typed there, like
+  vim's `:!command`, is not rated). Protected sessions are left out.
 - **MultiExec recording** (QL-12): every line MultiExec sends is recorded in each of its terminals, from Enter until
   that terminal's prompt comes back (or its output stops for the quiet spell set in Settings, or 10 minutes pass), so
   you can compare it at any time without typing it again: open Compare from the MultiExec bar, or pick the MultiExec
@@ -138,6 +194,33 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   approval tiers, sudo from the vault, a time limit and the parallel limit from Settings. The results are grouped by
   output ("48 hosts same, 2 differ"), with a diff between groups, retry of the failed hosts and CSV, JSON or HTML
   export. Quick connections that were not saved as sessions can't be compared.
+- **How commands are rated** (BX-06, AP-01), for Compare and MultiExec alike: a command whose every part starts with
+  a command on the read-only list, and that writes no file, is Low. Any other command is one confirm (Medium) on up to
+  4 hosts, and the full approval (High: type the number of hosts, a reason, the countdown) on 5 or more; Settings,
+  Approval rules sets that number ("Bulk tier for commands on hosts", apart from the bulk threshold of VM and other
+  actions). A command that matches a dangerous-command rule is High on any number of hosts. The rules are regular
+  expressions, tested against the command as typed and against each of its commands as the shell reads them: quotes
+  and backslashes removed (`\rm -rf /` and `"rm" -rf /` read as `rm -rf /`), `sudo`, `env` and `NAME=value` in front
+  dropped, and a script given to `sh -c`, `su -c`, `ssh` or `eval` read as a script. The default rules: `rm -r`,
+  `mkfs`, `dd`, shutdown and reboot, `iptables -F`, `DROP DATABASE`, and from 0.4.1 wiping or repartitioning disks
+  (`wipefs -a`, `sgdisk` zap, new or delete, `parted` mklabel, mkpart or rm, `sfdisk` unless it only lists, dumps,
+  shows or verifies, `blkdiscard`, `pvremove`, `vgremove`, `lvremove`, `mdadm --create` and `--zero-superblock`, and
+  writing to a disk device such as `> /dev/sdb`, `tee`, `cp` or `shred` onto one), locking everyone out
+  (`iptables -P <chain> DROP`, `nft flush ruleset`, `ufw enable`, `ufw default deny [incoming]`,
+  `firewall-cmd --panic-on`, stopping, disabling or masking `sshd`/`ssh`, taking a network interface down with
+  `ip link set … down`, `ifdown` or `ifconfig … down`, since Remotely can't tell which one its connection uses),
+  `kill -9 -1` (any signal to every process), a recursive `chmod`, `chown` or `chgrp` on `/`, `/*` or a system folder
+  (`/etc`, `/usr`, `/var`, `/bin`, `/sbin`, `/lib*`, `/boot`, `/home`, `/dev`), the fork bomb, `DROP TABLE` and
+  `TRUNCATE`, `kubectl delete` (and `oc delete`), and Docker or Podman prunes (system, container, image, volume,
+  builder) and volume removals. Restarting or reloading sshd is not dangerous: it comes back, and open sessions stay
+  up. A prune or volume removal is also rated at least like the same action on the Containers page, so
+  `docker volume prune`, `docker system prune --volumes` and `docker volume rm` are Critical (the vault password
+  again), as a volume prune is there, and editing that rule in Settings changes both; other prunes are High like
+  there. **Saved approval rules keep their own lists**: the new patterns and the 5-host step for "Run any other
+  command" apply to new and default rules. Rules you saved before 0.4.1 keep their dangerous-command list and their
+  tiers ("other" commands stay one confirm on any number of hosts) until you add the patterns and set "Run any other
+  command" to High in bulk yourself, or press Reset to defaults, in Settings, Approval rules. The Containers-page rating of prunes is built in, so it applies to
+  saved rules too.
 - **Notifications** (QL-07): Settings, Terminal, chooses between commands longer than N seconds (5 to 3600) and any
   command that finishes while you're away (the tab isn't on screen or Remotely isn't the window in front), whatever its
   length. A line sent with MultiExec gives one notification once all its terminals are done, never one per terminal.
@@ -148,8 +231,10 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
 
 - **Files here**: the drawer (the folder button in the Terminal toolbar) lists the current terminal's folder. For bash
   and zsh it follows the shell as you `cd`: on connect Remotely types a small prompt hook that reports the folder (OSC 7) before each prompt, and hides it completely: it never shows in the terminal, its scrollback, saved output, session
-  logs or MultiExec, and it starts with a space and removes itself from bash's history. It is only typed while nothing
-  has been typed in the new shell yet, after its first prompt; a session's startup command waits for it. Other shells
+  logs or MultiExec, and it starts with a space so `ignorespace` keeps it out of the history. It is only typed while
+  nothing has been typed in the new shell yet, at its first prompt (a line that looks like `alice@web01:~$ `, never a
+  menu); a session's startup command waits for it. Each one is audited, and it can be turned off (see
+  [What Remotely does by itself](#what-remotely-does-by-itself)): then the drawer starts in the home folder. Other shells
   (sh, fish, network gear) get nothing typed: the drawer starts in the home folder, and you open folders by
   double-clicking, the breadcrumb, Up, Home, Back or a typed path. Sort by name, size or date; tick files to download
   them.
@@ -195,7 +280,8 @@ on its jump host.
   key pushes and the dashboard's guest metrics. The tab and the session tree say "via <jump host>", and the tooltip
   shows the whole route.
 - **Reachability**: a session behind jump hosts is not probed from this PC. Its dot is a ring with the first jump host's
-  state (the one this PC dials), never red because the session itself can't be reached from here.
+  state (the one this PC dials), never red because the session itself can't be reached from here. A connection open
+  through that jump host counts as one to it, so it is not probed either.
 - **Port forwards**: each session keeps local (`ssh -L`), remote (`ssh -R`) and SOCKS (`ssh -D`, SOCKS 4, 4a and 5)
   forwards, edited with the session. They listen on 127.0.0.1 unless you type another address (the host side of a
   remote forward defaults to localhost); port 0 takes any free port. Those marked "starts with the terminal" open when
@@ -225,8 +311,11 @@ CT-01 and CT-02 (0.4.0), Ctrl+3: Docker and Podman on SSH hosts, and Docker Desk
   Marks are audited like session edits and move to another laptop with the export. Docker Desktop on this PC shows as
   "This PC" when its `docker.exe` is found (the path in Settings, General, then `REMOTELY_DOCKER`, then Docker
   Desktop's folder).
-- **Reads, never in the background**: a host is read when you open it, press Refresh or a job ends; the open host's
-  stats are read every 10 s while the page shows. Remotely runs the host's own CLI with JSON output over the session's
+- **Reads, never in the background**: a host is read when you open it, press Refresh or a job ends. The open host's
+  stats are read every 10 s, and a followed log asks for new lines every 2 s, only while the page shows and the window
+  is visible (not minimised). Each read waits until the last one came back, so a slow host never has two at once; one
+  stats read serves the list and the details panel's Stats tab; a read that fails waits longer each time (up to a
+  minute, 30 s for a log). Remotely runs the host's own CLI with JSON output over the session's
   SSH connection (through its jump hosts, with the usual host key checks; saved logins only) and keeps that connection
   for a few minutes for the next read. The list has name, image, state, ports, uptime, CPU and memory, with a filter
   and state buttons; a click on a name opens its details beside the list: **Overview** (image, times, restart policy,
@@ -636,6 +725,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; filters; audited environment labels                                                                         |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side and SSH guest sources every 5 s, 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                                     |
+| Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                           |
 | Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; DPAPI and Argon2id key wrapping; 15-minute idle lock; values never leave it except to adapters                                                                            |
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                             |
 | Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                        | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each |
@@ -647,7 +737,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | File transfer      | `crates/core/src/terminal/files.rs`, `folder.rs`, `shell_user.rs` | SS-08, QL-09                                                                                                                                        | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, transfers with cancel and retry                                            |
 | Compare output     | `crates/core/src/bulk.rs`                                         | BX-01, BX-03, BX-05                                                                                                                                 | Working: hosts from picked tabs and tree sessions, results grouped by output, diff, CSV, JSON and HTML export                                                                                            |
 | Command panel      | `crates/core/src/snippets/`                                       | BX-08, QL-13                                                                                                                                        | Working: favourite commands in folders (audited), a built-in Linux library (Troubleshoot runbooks, 30 area groups, manual links), variables, marks from the policy engine                                |
-| Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                           | Working: TCP checks of the sessions the tree shows, once per host and port, a few at a time; the first jump host's for sessions behind one                                                               |
+| Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                           | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one        |
 | VM links           | `crates/core/src/vm_links.rs`                                     | QL-01, BX-01                                                                                                                                        | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept                                                                                                    |
 | Network adapter    | `crates/core/src/adapters/network.rs`                             | QL-01, QL-03, QL-04                                                                                                                                 | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                                          |
 | Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                  | Working: hash-chained audit log, job journal, inventory, sessions, vault ciphertext, tags, saved filters                                                                                                 |

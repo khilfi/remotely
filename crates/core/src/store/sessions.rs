@@ -20,8 +20,8 @@ const TAG_SEPARATOR: char = '\u{1f}';
 macro_rules! session_columns {
     () => {
         "id, folder_id, name, protocol, host, port, username, auth_method, credential_id, key_passphrase_id,
-         jump_session_id, startup_command, environment, color, protected, vm_id, vm_link, imported_from, created_at,
-         updated_at, last_ip, last_hostname, last_seen_at, last_opened_at,
+         jump_session_id, startup_command, startup_on_reconnect, prompt_hook, environment, color, protected, vm_id,
+         vm_link, imported_from, created_at, updated_at, last_ip, last_hostname, last_seen_at, last_opened_at,
          (SELECT group_concat(t.name, char(31)) FROM target_tags tt JOIN tags t ON t.id = tt.tag_id
           WHERE tt.target_kind = 'session' AND tt.target_id = sessions.id) AS tags"
     };
@@ -51,6 +51,8 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
     let env: String = row.try_get("environment")?;
     let color: Option<String> = row.try_get("color")?;
     let protected: i64 = row.try_get("protected")?;
+    let startup_on_reconnect: i64 = row.try_get("startup_on_reconnect")?;
+    let prompt_hook: Option<i64> = row.try_get("prompt_hook")?;
     let vm_link: Option<String> = row.try_get("vm_link")?;
     let tags: Option<String> = row.try_get("tags")?;
     let mut tags: Vec<String> = tags
@@ -71,6 +73,8 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         auth,
         jump_session_id: optional_uuid(row, "jump_session_id")?,
         startup_command: row.try_get("startup_command")?,
+        startup_on_reconnect: startup_on_reconnect != 0,
+        prompt_hook: prompt_hook.map(|h| h != 0),
         environment: Environment::parse(&env),
         color: color.as_deref().and_then(SessionColor::parse),
         protected: protected != 0,
@@ -191,8 +195,9 @@ impl Store {
         sqlx::query(
             "INSERT INTO sessions (id, workspace_id, user_id, folder_id, name, protocol, host, port, username,
                                    auth_method, credential_id, key_passphrase_id, jump_session_id, startup_command,
-                                   environment, color, vm_id, imported_from, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   startup_on_reconnect, prompt_hook, environment, color, vm_id, imported_from,
+                                   created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(ctx.workspace_id.to_string())
@@ -207,6 +212,8 @@ impl Store {
         .bind(input.auth.passphrase_id().map(|s| s.0.to_string()))
         .bind(input.jump_session_id.map(|j| j.to_string()))
         .bind(&input.startup_command)
+        .bind(i64::from(input.startup_on_reconnect))
+        .bind(input.prompt_hook.map(i64::from))
         .bind(input.environment.as_str())
         .bind(input.color.map(SessionColor::as_str))
         .bind(&input.vm_id)
@@ -225,8 +232,9 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let done = sqlx::query(
             "UPDATE sessions SET folder_id = ?, name = ?, host = ?, port = ?, username = ?, auth_method = ?,
-                 credential_id = ?, key_passphrase_id = ?, jump_session_id = ?, startup_command = ?, environment = ?,
-                 color = ?, vm_id = ?, user_id = ?, updated_at = ?
+                 credential_id = ?, key_passphrase_id = ?, jump_session_id = ?, startup_command = ?,
+                 startup_on_reconnect = ?, prompt_hook = ?, environment = ?, color = ?, vm_id = ?, user_id = ?,
+                 updated_at = ?
              WHERE workspace_id = ? AND id = ?",
         )
         .bind(input.folder_id.map(|f| f.to_string()))
@@ -239,6 +247,8 @@ impl Store {
         .bind(input.auth.passphrase_id().map(|s| s.0.to_string()))
         .bind(input.jump_session_id.map(|j| j.to_string()))
         .bind(&input.startup_command)
+        .bind(i64::from(input.startup_on_reconnect))
+        .bind(input.prompt_hook.map(i64::from))
         .bind(input.environment.as_str())
         .bind(input.color.map(SessionColor::as_str))
         .bind(&input.vm_id)
@@ -632,6 +642,8 @@ pub(crate) fn unsaved_spec(input: &SessionInput) -> Result<SessionSpec> {
         jump: None,
         environment: input.environment,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: input.prompt_hook,
     })
 }
 
@@ -661,5 +673,7 @@ fn spec_of(session: SessionRecord, auth: AuthMethod, jump: Option<Box<SessionSpe
         jump,
         environment: session.environment,
         startup_command: session.startup_command,
+        startup_on_reconnect: session.startup_on_reconnect,
+        prompt_hook: session.prompt_hook,
     }
 }
