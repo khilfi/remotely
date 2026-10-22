@@ -769,6 +769,8 @@ pub enum InputOutcome {
         left_out: Vec<LeftOut>,
         job_id: Option<Uuid>,
         request: Option<Box<ApprovalRequest>>,
+        /// The key that runs the line once it may ([`RunKey::label`]): "Enter", "Ctrl+O"...
+        run_key: String,
     },
     /// A line waits for its Enter; these keys follow it once it is sent.
     Queued { line_id: Uuid, dropped: bool },
@@ -786,12 +788,14 @@ pub enum InputOutcome {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum MultiExecEvent {
-    /// A held line ended: Enter went out (`sent`), or the line was cancelled and Ctrl+C went out.
+    /// A held line ended: its run key went out (`sent`), or the line was cancelled and Ctrl+C went out.
     LineDone {
         line_id: Uuid,
         sent: bool,
         terminals: usize,
         status: Option<JobStatus>,
+        /// The key that ran it ([`RunKey::label`]): "Enter", "Ctrl+O"...
+        run_key: String,
     },
     /// Keys that waited for a line were sent, and held another line (which may need approval), or
     /// some of them were refused.
@@ -861,6 +865,8 @@ struct Held {
     /// Once its keys went, the shells may still hold text on their line ([`LineBuffer::leaves_text`],
     /// or a [`RunKey`] other than Enter): the next line there is unreliable.
     leaves_text: bool,
+    /// [`RunKey::label`], for the UI's note once it is sent.
+    run_key: &'static str,
 }
 
 #[derive(Default)]
@@ -1005,7 +1011,7 @@ impl MultiExec {
                     self.interrupt(&held.to).await;
                 }
             }
-            self.done(held.id, false, held.to.len(), None);
+            self.done(&held, false, None);
         }
         if let Some(current) = state.current.take() {
             if current.mode == LineMode::Command && !state.buffer.is_empty() {
@@ -1113,17 +1119,18 @@ impl MultiExec {
             state.queued.clear();
             self.interrupt(&held.to).await;
             self.shared.recorder.discard(held.id);
-            self.done(held.id, false, held.to.len(), None);
+            self.done(&held, false, None);
         }
         Ok(())
     }
 
-    fn done(&self, line_id: Uuid, sent: bool, terminals: usize, status: Option<JobStatus>) {
+    fn done(&self, held: &Held, sent: bool, status: Option<JobStatus>) {
         let _ = self.shared.events.send(MultiExecEvent::LineDone {
-            line_id,
+            line_id: held.id,
             sent,
-            terminals,
+            terminals: held.to.len(),
             status,
+            run_key: held.run_key.to_owned(),
         });
     }
 
@@ -1164,13 +1171,13 @@ impl MultiExec {
             });
         if status == JobStatus::Cancelled {
             self.interrupt(&held.to).await;
-            self.done(held.id, false, held.to.len(), Some(status));
+            self.done(&held, false, Some(status));
             return Ok(());
         }
         for id in &held.to {
             self.shared.terminals.set_dirty(*id, held.leaves_text);
         }
-        self.done(held.id, true, held.to.len(), Some(status));
+        self.done(&held, true, Some(status));
         let mut rest = held.after;
         rest.extend_from_slice(&queued);
         if !rest.is_empty() && state.on {
@@ -1494,6 +1501,7 @@ impl MultiExec {
             request: request.as_ref().map(|r| r.id),
             job: job_id,
             leaves_text,
+            run_key: run.label(),
         });
         if let Some(job) = job_id {
             self.wait_for(line_id, job);
@@ -1505,6 +1513,7 @@ impl MultiExec {
             left_out,
             job_id,
             request,
+            run_key: run.label().to_owned(),
         })
     }
 }

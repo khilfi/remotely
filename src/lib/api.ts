@@ -434,6 +434,8 @@ export type MultiExecOutcome =
       leftOut: LeftOut[];
       jobId: string | null;
       request: ApprovalRequest | null;
+      /** The key that runs the line: "Enter", "Ctrl+O", "Esc then Enter"... */
+      runKey: string;
     }
   /** A line waits for its Enter; these keys follow it. */
   | { status: "queued"; lineId: string; dropped: boolean }
@@ -444,7 +446,15 @@ export type MultiExecOutcome =
   | { status: "refused"; reason: string; reached: string[]; leftOut: LeftOut[] };
 
 export type MultiExecEvent =
-  | { event: "lineDone"; lineId: string; sent: boolean; terminals: number; status: JobStatus | null }
+  | {
+      event: "lineDone";
+      lineId: string;
+      sent: boolean;
+      terminals: number;
+      status: JobStatus | null;
+      /** The key that ran it: "Enter", "Ctrl+O"... */
+      runKey: string;
+    }
   | { event: "outcome"; outcome: MultiExecOutcome }
   /** QL-12: the recorded lines changed (that line, or several when null). */
   | { event: "recorded"; lineId: string | null }

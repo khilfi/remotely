@@ -709,9 +709,15 @@ export function TerminalPage({
         case "held":
           if (outcome.request) {
             setMxApproval({ lineId: outcome.lineId, request: outcome.request });
-            setMxNote({ tone: "wait", text: "The line waits for your approval; Enter is held in every terminal" });
+            setMxNote({
+              tone: "wait",
+              text: `The line waits for your approval; ${outcome.runKey} is held in every terminal`,
+            });
           } else {
-            setMxNote({ tone: "info", text: `Read-only: Enter sent to ${plural(outcome.reached.length, "terminal")}` });
+            setMxNote({
+              tone: "info",
+              text: `Read-only: ${outcome.runKey} sent to ${plural(outcome.reached.length, "terminal")}`,
+            });
           }
           break;
         case "queued":
@@ -774,7 +780,8 @@ export function TerminalPage({
       if (event.event === "outcome") outcomeRef.current(event.outcome);
       else if (event.event === "lineFinished") lineFinishedRef.current(event);
       else if (event.event !== "lineDone") return;
-      else if (event.sent) setMxNote({ tone: "info", text: `Enter sent to ${plural(event.terminals, "terminal")}` });
+      else if (event.sent)
+        setMxNote({ tone: "info", text: `${event.runKey} sent to ${plural(event.terminals, "terminal")}` });
       else
         setMxNote({
           tone: "warn",

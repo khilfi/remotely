@@ -537,7 +537,12 @@ async fn a_line_run_with_ctrl_o_is_held_rated_and_audited_before_it_reaches_the_
     let mut events = fleet.core.multiexec.subscribe();
 
     // The toy shell runs a line on Ctrl+O, as bash and zsh do.
-    let (line, tier, request, job) = held(fleet.type_in(0, "touch /tmp/ctrl-o\x0f").await);
+    let outcome = fleet.type_in(0, "touch /tmp/ctrl-o\x0f").await;
+    assert!(
+        matches!(&outcome, InputOutcome::Held { run_key, .. } if run_key == "Ctrl+O"),
+        "the MultiExec bar names the key: {outcome:?}"
+    );
+    let (line, tier, request, job) = held(outcome);
     assert!(tier >= Tier::Medium, "{tier:?}");
     assert!(job.is_none());
     let request = request.expect("an approval");
@@ -559,7 +564,18 @@ async fn a_line_run_with_ctrl_o_is_held_rated_and_audited_before_it_reaches_the_
     assert!(fleet.ran(0).is_empty() && fleet.ran(1).is_empty(), "{:?}", fleet.log(0));
 
     fleet.core.multiexec.approve(line, answers(&request)).await.unwrap();
-    assert!(line_done(&mut events, line).await);
+    loop {
+        if let MultiExecEvent::LineDone {
+            line_id, sent, run_key, ..
+        } = events.recv().await.unwrap()
+        {
+            if line_id == line {
+                assert!(sent);
+                assert_eq!(run_key, "Ctrl+O", "the MultiExec bar says Ctrl+O went, not Enter");
+                break;
+            }
+        }
+    }
     for i in [0, 1] {
         fleet.panes[i].expect("\r\n$ ").await;
         assert_eq!(fleet.ran(i), ["touch /tmp/ctrl-o"]);
