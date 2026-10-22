@@ -63,6 +63,7 @@ pub mod policy;
 pub mod presentation;
 pub mod reachability;
 pub mod sessions;
+pub mod settings;
 pub mod snapshots;
 pub mod snippets;
 pub mod ssh_keys;
@@ -158,6 +159,26 @@ pub struct AuditExport {
     pub redacted: usize,
 }
 
+/// QL-15: the terminals and approvals a window had open, from [`Core::ui_snapshot`].
+#[derive(Debug, Clone, Default)]
+pub struct UiSnapshot {
+    pub terminals: Vec<uuid::Uuid>,
+    pub approvals: Vec<uuid::Uuid>,
+}
+
+/// QL-15: what [`Core::release_ui`] closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiReleased {
+    pub terminals: usize,
+    pub approvals: usize,
+}
+
+impl UiSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.terminals.is_empty() && self.approvals.is_empty()
+    }
+}
+
 pub struct Core {
     pub ctx: Context,
     pub store: Store,
@@ -217,11 +238,24 @@ pub struct Core {
 impl Core {
     pub async fn init(config: CoreConfig) -> Result<Self> {
         let store = Store::open(&config.db_path).await?;
+        match Self::init_on(store.clone(), config).await {
+            Ok(core) => Ok(core),
+            Err(err) => {
+                // QL-15: the database file is closed before the error is reported.
+                store.close().await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn init_on(store: Store, config: CoreConfig) -> Result<Self> {
         let interrupted = store.mark_interrupted_jobs().await?;
         if interrupted > 0 {
             tracing::warn!(interrupted, "jobs were open when the app last stopped");
         }
         let ctx = store.ensure_identity(&config.account, &config.display_name).await?;
+        // QL-15: before the saved paths are read below; `assemble` checks again, which then finds nothing.
+        settings::repair(&store, &ctx).await?;
         let saved = saved_vmrun_path(&store, &ctx).await?;
         let vmware: Arc<dyn VmwareAdapter> = Arc::from(adapters::vmware::connect(config.vmrun_path.or(saved)));
         let docker = saved_docker_path(&store, &ctx).await?;
@@ -250,6 +284,8 @@ impl Core {
 
     /// Wires the modules together. Tests pass fake adapters here.
     pub async fn assemble(store: Store, ctx: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
+        // QL-15: a setting that can't be read gets its default (audited) rather than stopping the start.
+        settings::repair(&store, &ctx).await?;
         let policy = load_policy(&store, &ctx).await?;
         // FD-03: the lock applies before anything else can run.
         let presentation = PresentationMode::load(store.clone(), ctx).await;
@@ -379,6 +415,39 @@ impl Core {
             vmware,
             virtualbox,
         })
+    }
+
+    /// QL-15: what the window shows now, taken when its page starts loading again (a reload, or a crash
+    /// the user reloaded from), so [`Core::release_ui`] closes only what the old page had.
+    pub fn ui_snapshot(&self) -> UiSnapshot {
+        UiSnapshot {
+            terminals: self.terminals.open_ids(),
+            approvals: self.bus.pending_approvals(),
+        }
+    }
+
+    /// QL-15: the page that showed `shown` is gone, so nothing it started may go on without anyone seeing it:
+    /// MultiExec stops (a held line is cancelled), its terminals close with their tunnels (each audited), and the
+    /// approvals it would have answered are cancelled (audited). Running jobs go on; Activity shows them.
+    pub async fn release_ui(&self, shown: UiSnapshot) -> UiReleased {
+        if let Err(err) = self.multiexec.stop().await {
+            tracing::warn!(error = %err, "MultiExec did not stop cleanly after the window reloaded");
+        }
+        self.terminals.close_these(&shown.terminals).await;
+        let approvals = self
+            .bus
+            .cancel_approvals(&shown.approvals, "the window reloaded, so nobody could answer it")
+            .await;
+        UiReleased {
+            terminals: shown.terminals.len(),
+            approvals,
+        }
+    }
+
+    /// Before the app exits, also when an update's installer is about to end it (FD-14, QL-15): every terminal
+    /// closes, audited, with its tunnels, and session logs are written out to the end.
+    pub async fn shutdown(&self) {
+        self.terminals.close_all().await;
     }
 
     /// Path of the vmrun.exe in use, or `None` when Workstation was not found.

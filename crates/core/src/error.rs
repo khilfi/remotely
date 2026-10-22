@@ -296,6 +296,17 @@ impl ContainerProblem {
 }
 
 impl CoreError {
+    /// QL-15: the database could not be opened, read or migrated (at start, the shell offers to set it aside).
+    pub fn is_database(&self) -> bool {
+        matches!(self, CoreError::Db(_) | CoreError::Migrate(_))
+    }
+
+    /// QL-15: the database was last opened by a newer version of Remotely, which added migrations this one
+    /// doesn't have (a downgrade).
+    pub fn is_newer_database(&self) -> bool {
+        matches!(self, CoreError::Migrate(sqlx::migrate::MigrateError::VersionMissing(_)))
+    }
+
     /// Stable machine-readable code for the UI.
     pub fn code(&self) -> &'static str {
         match self {

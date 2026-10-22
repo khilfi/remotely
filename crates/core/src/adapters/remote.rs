@@ -1319,8 +1319,19 @@ async fn keyboard_interactive(
 }
 
 /// Opens the key with its saved passphrase, or one typed in the terminal when it has none.
-fn decode_key(key: &SecretString, passphrase: Option<&str>) -> std::result::Result<PrivateKey, russh::keys::Error> {
-    russh::keys::decode_secret_key(key.expose(), passphrase)
+/// Opens a private key. A passphrase-protected key runs bcrypt-pbkdf, slow by design (about a second), so it runs on
+/// a blocking thread rather than holding up the async runtime (QL-15), as `ssh_keys` does.
+async fn decode_key(
+    key: &SecretString,
+    passphrase: Option<&SecretString>,
+) -> Result<std::result::Result<PrivateKey, russh::keys::Error>> {
+    let key = key.clone();
+    let passphrase = passphrase.cloned();
+    tokio::task::spawn_blocking(move || {
+        russh::keys::decode_secret_key(key.expose(), passphrase.as_ref().map(SecretString::expose))
+    })
+    .await
+    .map_err(|err| CoreError::Ssh(format!("opening the key stopped: {err}")))
 }
 
 fn needs_passphrase(err: &russh::keys::Error) -> bool {
@@ -1346,10 +1357,7 @@ async fn key_login(
             method_names(methods)
         )));
     }
-    let private = match (
-        decode_key(key, passphrase.as_ref().map(SecretString::expose)),
-        passphrase,
-    ) {
+    let private = match (decode_key(key, passphrase.as_ref()).await?, passphrase) {
         (Ok(private), _) => private,
         (Err(_), Some(_)) => {
             return Err(CoreError::AuthFailed(format!(
@@ -1363,7 +1371,7 @@ async fn key_login(
                     prompter.show("Wrong passphrase\r\n").await;
                 }
                 let typed = prompter.ask(&format!("Passphrase for key '{label}': "), false).await?;
-                if let Ok(private) = decode_key(key, Some(typed.expose())) {
+                if let Ok(private) = decode_key(key, Some(&typed)).await? {
                     opened = Some(private);
                     break;
                 }

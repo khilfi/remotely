@@ -18,6 +18,8 @@ mod ssh_keys;
 mod tags;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod upgrade_tests;
 mod vault;
 
 use std::path::Path;
@@ -103,12 +105,21 @@ impl Store {
     }
 
     async fn from_pool(pool: SqlitePool) -> Result<Self> {
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        if let Err(err) = sqlx::migrate!("./migrations").run(&pool).await {
+            // QL-15: the file is closed before the error is reported, so it can be set aside at once.
+            pool.close().await;
+            return Err(err.into());
+        }
         Ok(Self {
             pool,
             audit_lock: Arc::new(tokio::sync::Mutex::new(())),
             read_only: ReadOnlyLock::default(),
         })
+    }
+
+    /// Closes the database's connections (QL-15: after a failed start, so the file can be set aside).
+    pub async fn close(&self) {
+        self.pool.close().await;
     }
 
     /// FD-03: whether presentation mode's read-only lock applies now.
@@ -186,6 +197,20 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// QL-15: moves a setting this version can't read to `<key>.unreadable` (replacing an older one there),
+    /// so its default applies and the value is kept, not deleted. False when there was none.
+    pub async fn set_setting_aside(&self, ctx: &Context, key: &str) -> Result<bool> {
+        let moved =
+            sqlx::query("UPDATE OR REPLACE settings SET key = ?, updated_at = ? WHERE workspace_id = ? AND key = ?")
+                .bind(format!("{key}.unreadable"))
+                .bind(now_rfc3339())
+                .bind(ctx.workspace_id.to_string())
+                .bind(key)
+                .execute(&self.pool)
+                .await?;
+        Ok(moved.rows_affected() > 0)
     }
 }
 

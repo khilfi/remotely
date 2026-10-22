@@ -108,6 +108,8 @@ use crate::vm_links::VmLinks;
 
 /// The terminal settings (JSON) in the settings table.
 pub const TERMINAL_SETTINGS_KEY: &str = "terminal.settings";
+/// How long [`Terminals::close_all`] waits for every pane to audit its close and finish its log.
+pub const CLOSE_ALL_WAIT: Duration = Duration::from_secs(3);
 /// Longest keep-alive interval the settings take.
 pub const MAX_KEEPALIVE_SECS: u64 = 3600;
 /// Shortest keep-alive interval, so a typo can't flood a server.
@@ -1143,16 +1145,41 @@ impl Terminals {
         }
     }
 
-    /// Closes every pane and waits (briefly) for each to log its close, e.g. when the app exits.
+    /// Closes every pane (their tunnels close with them) and waits for them to audit their close and finish their
+    /// session logs, e.g. when the app exits or installs an update. The panes close side by side, so it takes as
+    /// long as the slowest, and never longer than [`CLOSE_ALL_WAIT`] (QL-15).
     pub async fn close_all(&self) {
-        let controls: Vec<Arc<Control>> = locks::lock(&self.inner.open).values().cloned().collect();
-        for control in controls {
+        let ids: Vec<Uuid> = locks::lock(&self.inner.open).keys().copied().collect();
+        self.close_these(&ids).await;
+    }
+
+    /// QL-15: closes these panes, as [`Terminals::close_all`] does. Panes opened since are left alone.
+    pub async fn close_these(&self, ids: &[Uuid]) {
+        let controls: Vec<Arc<Control>> = {
+            let open = locks::lock(&self.inner.open);
+            ids.iter().filter_map(|id| open.get(id).cloned()).collect()
+        };
+        for control in &controls {
             control.cancel.cancel();
         }
-        let tasks: Vec<JoinHandle<()>> = locks::lock(&self.inner.tasks).drain().map(|(_, t)| t).collect();
-        for task in tasks {
-            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        let tasks: Vec<JoinHandle<()>> = {
+            let mut tasks = locks::lock(&self.inner.tasks);
+            ids.iter().filter_map(|id| tasks.remove(id)).collect()
+        };
+        // Each pane runs in its own task already, so waiting on them in turn takes as long as the slowest one.
+        let all = async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        };
+        if tokio::time::timeout(CLOSE_ALL_WAIT, all).await.is_err() {
+            tracing::warn!("some terminals did not finish closing in time");
         }
+    }
+
+    /// Ids of the panes open now (QL-15: the window that showed them reloaded).
+    pub fn open_ids(&self) -> Vec<Uuid> {
+        locks::lock(&self.inner.open).keys().copied().collect()
     }
 
     /// Panes open now.
