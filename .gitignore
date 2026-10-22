@@ -1,4 +1,5 @@
-# This repository is public. See "Public repository rules" in CLAUDE.md.
+# Treat everything committed here as public: git history is forever. See "Public repository rules" in
+# CLAUDE.md.
 
 # ---- Build output ----
 node_modules/
@@ -34,12 +35,21 @@ logs/
 *.cast
 exports/
 support-bundles/
+# FD-07 encrypted export between laptops (remotely-export-<date>.remotely)
+*.remotely
+# AP-05 audit export, BX-05 Compare and QL-12 MultiExec exports (CSV, JSON, HTML)
+remotely-audit-*.csv
+remotely-run-*
+remotely-multiexec-*
+# RDP connection files (v3: mstsc.exe with a generated .rdp)
+*.rdp
 
 # ---- Local setup files (kept out of git) ----
 START_HERE.md
 STARTER_PROMPT.md
 CLAUDE.local.md
 .claude/worktrees/
+.claude/settings.local.json
 vm-ssh-manager-starter/
 vm-ssh-manager-starter.zip
 
