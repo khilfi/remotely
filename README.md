@@ -26,7 +26,8 @@ library stores SSH sessions in folders with tags, colours, search and an environ
 tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs work in Compare runs and guest metrics without linking by hand. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
 encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
-both of each conflicting item. The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
+both of each conflicting item (startup commands and port forwards come along only when ticked, see
+[What Remotely does by itself](#what-remotely-does-by-itself)). The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
 the vault, copies their public keys, lets sessions log in with them and pushes a public key to many hosts'
 `authorized_keys` through the approval flow. The Containers page (0.4.0) lists and controls Docker and Podman
 containers on the sessions you mark as container hosts, and Docker Desktop's on this PC (see [Containers](#containers)).
@@ -87,6 +88,36 @@ closes it at once: no SSH handshake, no login, nothing audited.
 - **In the host's logs**: sshd logs each check as a connection that closed before logging in, and strict fail2ban
   rules may count it. On sites like that, turn the dots off or check less often.
 - A session behind jump hosts shows its first jump host's state (see [Jump hosts and tunnels](#jump-hosts-and-tunnels)).
+
+### What Remotely does by itself
+
+0.4.1: what Remotely does on customers' hosts without you typing it, and how it stays gentle.
+
+- **Background logins** (MO-02, CT-01): the dashboard's guest metrics and the Containers page log in with the saved
+  login and keep the connection. A login the host refuses, a sudo password it refuses, a host key that changed or a
+  password that isn't saved **parks** the host: no new login (or sudo) until you change the session or its sudo
+  choice, add, replace or delete a vault secret, unlock the vault, trust or remove a host key, or press **Retry** (in the
+  dashboard's details, or on the Containers page). So a rotated password costs one failed login, not a locked account
+  or a fail2ban ban. A changed host key is audited once per park. Every background login also counts against a cap of
+  10 per host per hour (each jump host on the way counts too): past it the host shows "Paused" until the hour has room,
+  and Retry gets one login past it. Terminals never retry a refused login on their own.
+- **Startup commands** (SS-01): a session's startup command is typed into its shell without asking, so the session
+  editor rates it as you type (the tier a command like it gets on this session; Prod raises it), and its audit entry
+  says so. Imports (PuTTY, MobaXterm, OpenSSH, CSV) and imports from another laptop list each startup command with its
+  rating and a warning, and leave it out unless you tick it; port forwards in an export file likewise. A startup command
+  is typed at the first line that looks like a shell prompt (`alice@web01:~$ `), never at a menu or a question; with no
+  prompt within 15 s it isn't typed and the terminal says so. It is typed on the connections you open; after the
+  terminal reconnects by itself, only if the session asks ("Type it again when the terminal reconnects by itself").
+- **The folder prompt hook** (SS-08): see [File transfer in the terminal](#file-transfer-in-the-terminal). Settings,
+  Terminal turns it off everywhere; a session can say on or off; a Prod session has it off unless the session turns
+  it on. It is typed only at a line that looks like a shell prompt, starts with a space so `ignorespace` keeps it out
+  of the history (nothing edits the history), and each one is in the audit log (`folder_hook_installed`, once per
+  connection). Off, Files here starts in the home folder.
+- **Host keys** (SS-05): a bulk run with "Trust new host keys" never trusts a key of a new type for a host that already
+  has a trusted key of another type: someone in between can offer any type, and the run would give them the passwords.
+  It blocks like a changed key and is audited. An import from another laptop shows such a key as a conflict, skipped
+  unless you pick it. Connections ask the host for the key types already trusted for it first, so a host with several
+  keys presents the one you trusted. A terminal still asks you, and says another kind of key is trusted.
 
 ### Command panel
 
@@ -166,8 +197,10 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
 
 - **Files here**: the drawer (the folder button in the Terminal toolbar) lists the current terminal's folder. For bash
   and zsh it follows the shell as you `cd`: on connect Remotely types a small prompt hook that reports the folder (OSC 7) before each prompt, and hides it completely: it never shows in the terminal, its scrollback, saved output, session
-  logs or MultiExec, and it starts with a space and removes itself from bash's history. It is only typed while nothing
-  has been typed in the new shell yet, after its first prompt; a session's startup command waits for it. Other shells
+  logs or MultiExec, and it starts with a space so `ignorespace` keeps it out of the history. It is only typed while
+  nothing has been typed in the new shell yet, at its first prompt (a line that looks like `alice@web01:~$ `, never a
+  menu); a session's startup command waits for it. Each one is audited, and it can be turned off (see
+  [What Remotely does by itself](#what-remotely-does-by-itself)): then the drawer starts in the home folder. Other shells
   (sh, fish, network gear) get nothing typed: the drawer starts in the home folder, and you open folders by
   double-clicking, the breadcrumb, Up, Home, Back or a typed path. Sort by name, size or date; tick files to download
   them.
@@ -553,6 +586,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; filters; audited environment labels                                                                         |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side and SSH guest sources every 5 s, 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                                     |
+| Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                           |
 | Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; DPAPI and Argon2id key wrapping; 15-minute idle lock; values never leave it except to adapters                                                                            |
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                             |
 | Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                        | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each |
