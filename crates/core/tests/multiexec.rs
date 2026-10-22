@@ -934,18 +934,21 @@ async fn a_slow_terminal_fills_in_when_its_prompt_comes_back() {
             .expect(&format!("web{:02}.example.com\r\n$ ", i + 1))
             .await;
     }
-    // Two are done, the slow one still runs.
+    // Two are done, the slow one still runs. The job presses Enter in each terminal on its own, so the
+    // fast two can finish before the slow one's Enter has even reached it (Waiting, "pending"): wait
+    // for that Enter too. Its host then holds the answer for 1.5 s; had the test missed that, the
+    // assertions below would say so.
     let results = timeout(WAIT, async {
         loop {
             let r = fleet.core.multiexec.recorded(line, GroupOptions::default()).unwrap();
-            if r.line.finished == 2 {
+            if r.line.finished >= 2 && r.counts.pending == 0 {
                 return r;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("two terminals finished");
+    .expect("two terminals finished and the slow one got its Enter");
     assert_eq!((results.counts.succeeded, results.counts.running), (2, 1));
     assert_eq!(results.terminals[2].state, CaptureState::Running);
     assert_eq!(results.hosts[2].status, "running");
