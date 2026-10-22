@@ -1,9 +1,9 @@
 # CI for every push to main and every pull request (CLAUDE.md "Releases and auto-update").
 # Third-party actions are pinned to full commit SHAs; the comment names the release.
 #
-# Actions minutes may come out of the owner's monthly allowance, and the Rust job's Windows minutes
-# count double. Changes to documentation only (Markdown anywhere, docs/) skip this workflow, and a newer
-# push cancels the run it supersedes. The secret scan is in secrets.yml, which runs on every push to any
+# The repository is public, so runs on standard runners use no Actions minutes; keep them lean anyway
+# (README "CI minutes"). Changes to documentation only (Markdown anywhere, docs/) skip this workflow, and a
+# newer push cancels the run it supersedes. The secret scan is in secrets.yml, which runs on every push to any
 # branch, documentation included. Node comes from .node-version and Rust from rust-toolchain.toml, the
 # same versions release.yml builds with.
 
