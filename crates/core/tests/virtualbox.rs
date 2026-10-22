@@ -241,6 +241,7 @@ async fn the_guest_ip_is_the_one_the_host_can_reach_not_the_nat_one() {
                 slot: 2,
                 attachment: "hostonly".into(),
                 mac: Some("080027000002".into()),
+                ..Default::default()
             });
         })
         .with_guest_property(WEB, "/VirtualBox/GuestInfo/Net/Count", "2")

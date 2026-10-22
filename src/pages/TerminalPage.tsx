@@ -77,6 +77,7 @@ import { ColorDot } from "@/components/Badges";
 import { CommandPanel } from "@/components/CommandPanel";
 import { ComparePanel, type CompareView } from "@/components/ComparePanel";
 import { FilesDrawer } from "@/components/FilesDrawer";
+import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
@@ -110,6 +111,7 @@ import {
 import { sendCommand } from "@/lib/command-send";
 import { connectedReason, multiExecReason, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
+import { useThresholds } from "@/lib/metrics";
 import { MultiExecSender } from "@/lib/multiexec";
 import { lineNotification, shouldNotify, type NotifyChoice } from "@/lib/recordings";
 import type { PickableTab } from "@/lib/multiexec-picks";
@@ -330,6 +332,9 @@ export function TerminalPage({
   const [tile, setTile] = useState(true);
   /** BX-03: the Compare output panel, and the sessions Ctrl+clicked in the tree for it. */
   const [compareOpen, setCompareOpen] = useState(false);
+  /** MO-13, MO-14: a session's host details, from the session tree. */
+  const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
+  const [thresholds] = useThresholds();
   /** QL-12: the panel's one-shot run, or the lines MultiExec recorded. */
   const [compareView, setCompareView] = useState<CompareView>("run");
   const [treePicks, setTreePicks] = useState<string[]>([]);
@@ -1473,6 +1478,7 @@ export function TerminalPage({
                     picks={treePicks}
                     onPicksChange={setTreePicks}
                     onCompare={() => setCompareOpen(true)}
+                    onHostDetails={(s) => setHostDetails({ id: s.id, name: s.name })}
                   />
                 </div>
               </ResizablePanel>
@@ -1513,6 +1519,7 @@ export function TerminalPage({
         onConnect={openQuick}
         onOpenSession={(s) => openSession(s)}
       />
+      <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
       {conflict && (
         <UploadConflictDialog
           folder={conflict.folder}

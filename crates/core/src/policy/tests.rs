@@ -216,6 +216,27 @@ fn the_command_panels_read_only_commands_are_low_and_their_writing_cousins_are_n
 }
 
 #[test]
+fn service_states_on_hosts_without_systemd_are_low_and_service_changes_are_not() {
+    let t = vec![host(Environment::Lab)];
+    for script in [
+        "service --status-all",
+        "service --status-all 2>&1",
+        "rc-status",
+        "rc-status --all",
+    ] {
+        assert_eq!(tier(exec(script, &t), &t), Tier::Low, "{script}");
+    }
+    for script in [
+        "service nginx restart",
+        "service --status-all; service nginx stop",
+        "rc-service nginx restart",
+        "rc-update add nginx",
+    ] {
+        assert_eq!(tier(exec(script, &t), &t), Tier::Medium, "{script}");
+    }
+}
+
+#[test]
 fn a_script_on_its_own_is_classified_like_a_remote_command() {
     let e = engine();
     let t = vec![host(Environment::Lab)];

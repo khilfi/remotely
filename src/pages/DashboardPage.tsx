@@ -43,9 +43,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { EnvBadge, StateBadge } from "@/components/Badges";
 import { CapacityPanel } from "@/components/CapacityPanel";
 import { GuestStatusBadge } from "@/components/GuestStatusBadge";
+import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { MetricCell } from "@/components/MetricBits";
 import { MetricsDetail } from "@/components/MetricsDetail";
 import { SortableHead } from "@/components/SortableHead";
+import { ThisPcMemoryChart } from "@/components/ThisPcMemoryChart";
 import { AutoBadge } from "@/components/VmLinkControls";
 import {
   api,
@@ -57,7 +59,8 @@ import {
   type HostCapacity,
   type SessionRecord,
 } from "@/lib/api";
-import { plural } from "@/lib/format";
+import { formatWhen, plural } from "@/lib/format";
+import { specsSummary } from "@/lib/host-details";
 import { hypervisorName } from "@/lib/hypervisors";
 import {
   compareNullsLast as compare,
@@ -307,6 +310,8 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   const [alertsOnly, setAlertsOnly] = useState(false);
   const [thresholds, setThresholds] = useThresholds();
   const [selected, setSelected] = useState<string | null>(null);
+  /** MO-13, MO-14: a session's host details, opened from the drill-down. */
+  const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
 
   // Each round the core finishes -> read what it collected (only while this page shows).
   useEffect(() => {
@@ -405,6 +410,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   return (
     <div className="flex flex-col gap-4">
       <CapacityPanel capacity={capacity} />
+      <ThisPcMemoryChart round={round} theme={theme} />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-56">
@@ -535,8 +541,18 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
                             <span className="truncate font-medium">{row.name}</span>
                             <EnvBadge env={row.environment} />
                           </div>
-                          <div className="truncate text-xs text-muted-foreground">
-                            {row.address ?? row.guestOs ?? ""}
+                          <div className="truncate text-xs text-muted-foreground">{row.address ?? ""}</div>
+                          {/* MO-13: "4 vCPU · 8 GB · Ubuntu 24.04" */}
+                          <div
+                            className="truncate text-xs text-muted-foreground"
+                            title={row.specsAt ? `The host's facts as of ${formatWhen(row.specsAt)}` : undefined}
+                          >
+                            {specsSummary(
+                              row.kind === "vm" ? "vm" : "host",
+                              row.vcpus,
+                              row.memsizeMb ? row.memsizeMb * 1024 * 1024 : null,
+                              row.guestOs,
+                            )}
                           </div>
                         </div>
                       </div>
@@ -695,7 +711,12 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
         onWatch={(id, on) => void watch(id, on)}
         onConnect={onConnect}
         onActions={onActions}
+        onHostDetails={(session) => {
+          setSelected(null);
+          setHostDetails(session);
+        }}
       />
+      <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
     </div>
   );
 }

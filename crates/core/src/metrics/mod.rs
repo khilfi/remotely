@@ -25,8 +25,9 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::adapters::host_counters::{HostCounters, SystemCpuTimes};
+use crate::adapters::host_counters::{HostCounters, HostTotals, SystemCpuTimes};
 use crate::adapters::hypervisor::Hypervisor;
+use crate::adapters::paging::PagingInfo;
 use crate::adapters::vmware::path_key;
 use crate::capacity::{CapacityChecker, HostCapacity};
 use crate::domain::{now_rfc3339, Context, Environment, PowerState, TargetRef};
@@ -69,6 +70,9 @@ pub struct MetricSample {
     pub mem_bytes: Option<u64>,
     /// Host side: RAM assigned to the VM. Guest side: the guest's total memory.
     pub mem_total_bytes: Option<u64>,
+    /// MO-15, guest side: swap in use and its size.
+    pub swap_used_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
     pub disk_read_bps: Option<f64>,
     pub disk_write_bps: Option<f64>,
     pub net_rx_bps: Option<f64>,
@@ -108,6 +112,11 @@ pub struct MetricPoint {
     pub t: i64,
     pub cpu_pct: Option<f64>,
     pub mem_bytes: Option<u64>,
+    /// MO-15: the memory there is: a VM's configured RAM, a guest's or this PC's total.
+    pub mem_total_bytes: Option<u64>,
+    /// MO-15: swap (Linux) or the paging files (this PC) in use, and their size.
+    pub swap_used_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
     pub disk_read_bps: Option<f64>,
     pub disk_write_bps: Option<f64>,
     pub net_rx_bps: Option<f64>,
@@ -270,6 +279,8 @@ impl MetricsSource for HostProcessSource {
                         .and_then(|(bytes, mb)| host_ram_share(bytes, mb)),
                     mem_bytes: p.working_set_bytes,
                     mem_total_bytes: vm.and_then(|v| v.memsize_mb).map(|mb| u64::from(mb) * 1024 * 1024),
+                    swap_used_bytes: None,
+                    swap_total_bytes: None,
                     disk_read_bps: p.read_bps,
                     disk_write_bps: p.write_bps,
                     net_rx_bps: None,
@@ -318,6 +329,18 @@ struct HubState {
     running: Option<Vec<String>>,
     host_cpu_pct: Option<f64>,
     cost: CollectorCost,
+    /// MO-15: this PC's RAM and paging files, round by round.
+    this_pc: VecDeque<MetricPoint>,
+    this_pc_latest: Option<ThisPcMemory>,
+}
+
+/// MO-15: this PC's memory now: RAM, the commit charge and the paging files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThisPcMemory {
+    pub ram_total_bytes: u64,
+    pub ram_used_bytes: u64,
+    pub paging: Option<PagingInfo>,
 }
 
 /// The latest samples and an in-memory history per series, newest last.
@@ -342,6 +365,9 @@ impl MetricsHub {
             t,
             cpu_pct: s.cpu_pct,
             mem_bytes: s.mem_bytes,
+            mem_total_bytes: s.mem_total_bytes,
+            swap_used_bytes: s.swap_used_bytes,
+            swap_total_bytes: s.swap_total_bytes,
             disk_read_bps: s.disk_read_bps,
             disk_write_bps: s.disk_write_bps,
             net_rx_bps: s.net_rx_bps,
@@ -440,6 +466,41 @@ impl MetricsHub {
     pub fn cost(&self) -> CollectorCost {
         locks::lock(&self.state).cost.clone()
     }
+
+    /// MO-15: records this PC's memory at `t`, keeping the history window.
+    fn record_this_pc(&self, t: i64, memory: ThisPcMemory) {
+        let mut state = locks::lock(&self.state);
+        let oldest = t - i64::try_from(self.window.as_millis()).unwrap_or(i64::MAX);
+        let paging = memory.paging.as_ref();
+        state.this_pc.push_back(MetricPoint {
+            t,
+            cpu_pct: None,
+            mem_bytes: Some(memory.ram_used_bytes),
+            mem_total_bytes: Some(memory.ram_total_bytes),
+            swap_used_bytes: paging.map(|p| p.used_bytes),
+            swap_total_bytes: paging.map(|p| p.total_bytes),
+            disk_read_bps: None,
+            disk_write_bps: None,
+            net_rx_bps: None,
+            net_tx_bps: None,
+            load1: None,
+            disk_used_pct: None,
+        });
+        while state.this_pc.front().is_some_and(|p| p.t < oldest) {
+            state.this_pc.pop_front();
+        }
+        state.this_pc_latest = Some(memory);
+    }
+
+    /// MO-15: this PC's RAM in use and total (`mem_bytes`, `mem_total_bytes`) and its paging files in use
+    /// and size (`swap_used_bytes`, `swap_total_bytes`), oldest first.
+    pub fn this_pc_series(&self) -> Vec<MetricPoint> {
+        locks::lock(&self.state).this_pc.iter().copied().collect()
+    }
+
+    pub fn this_pc(&self) -> Option<ThisPcMemory> {
+        locks::lock(&self.state).this_pc_latest.clone()
+    }
 }
 
 /// A session linked to a VM row, or the session of a session row.
@@ -475,11 +536,15 @@ pub struct DashboardRow {
     pub tags: Vec<String>,
     /// VMs: running whenever its process was seen in the last round, else the inventory's state.
     pub power_state: Option<PowerState>,
+    /// A VM's vCPUs; MO-13: a host's CPUs, from its stored facts.
     pub vcpus: Option<u32>,
+    /// A VM's configured RAM; MO-13: a host's RAM, from its stored facts.
     pub memsize_mb: Option<u32>,
     /// A VM's IP, or a session's `user@host:port`.
     pub address: Option<String>,
     pub guest_os: Option<String>,
+    /// MO-13: when the host's (or the VM's linked session's) facts were read.
+    pub specs_at: Option<String>,
     pub host: Option<MetricSample>,
     pub guest: Option<MetricSample>,
     /// Sessions that reach this VM, or the session itself.
@@ -578,7 +643,23 @@ impl Metrics {
         let guest = guest
             .inspect_err(|err| tracing::warn!(source = self.guest.name(), error = %err, "metrics source failed"))
             .ok();
-        let (app_cpu_pct, host_cpu_pct) = self.cpu_shares().await;
+        let (app_cpu_pct, host_cpu_pct, totals) = self.cpu_shares().await;
+        // MO-15: this PC's memory, from the totals just read and two cheap calls for the paging files.
+        let this_pc = totals.map(|t| ThisPcMemory {
+            ram_total_bytes: t.physical_ram_mb.saturating_mul(1024 * 1024),
+            ram_used_bytes: t
+                .physical_ram_mb
+                .saturating_sub(t.available_ram_mb)
+                .saturating_mul(1024 * 1024),
+            paging: None,
+        });
+        let this_pc = match this_pc {
+            Some(mut memory) => {
+                memory.paging = self.counters.paging().await.ok();
+                Some(memory)
+            }
+            None => None,
+        };
         let rounds = {
             let mut rounds = locks::lock(&self.rounds);
             *rounds += 1;
@@ -603,6 +684,9 @@ impl Metrics {
         )
         .unwrap_or(i64::MAX);
         self.hub.record(now_ms, host.map(|r| r.samples), guest);
+        if let Some(memory) = this_pc {
+            self.hub.record_this_pc(now_ms, memory);
+        }
         {
             let mut state = locks::lock(&self.hub.state);
             state.cost = cost.clone();
@@ -615,12 +699,14 @@ impl Metrics {
         cost
     }
 
-    /// This app's CPU share and the host's busy share since the previous round.
-    async fn cpu_shares(&self) -> (Option<f64>, Option<f64>) {
+    /// This app's CPU share and the host's busy share since the previous round, and the host's totals
+    /// read for them.
+    async fn cpu_shares(&self) -> (Option<f64>, Option<f64>, Option<HostTotals>) {
         let at = Instant::now();
         let own = self.counters.own_cpu_time().await.ok();
         let system = self.counters.system_cpu_times().await.ok();
-        let cpus = self.counters.host_totals().await.ok().map(|t| t.logical_cpus);
+        let totals = self.counters.host_totals().await.ok();
+        let cpus = totals.map(|t| t.logical_cpus);
         let mut watch = locks::lock(&self.cpu);
         let shares = match (watch.as_ref(), own) {
             (Some(before), Some(own)) => {
@@ -639,7 +725,7 @@ impl Metrics {
         if let Some(own) = own {
             *watch = Some(CpuWatch { at, own, system });
         }
-        shares
+        (shares.0, shares.1, totals)
     }
 
     /// Polls every [`Metrics::INTERVAL`] until `stop` is cancelled. The caller spawns it on its runtime.
@@ -671,6 +757,8 @@ impl Metrics {
             .map(|paths| paths.iter().map(|p| path_key(Path::new(p))).collect());
         let names: HashMap<Uuid, &crate::sessions::SessionRecord> = sessions.iter().map(|s| (s.id, s)).collect();
         let guest_of = |id: Uuid| self.hub.latest(MetricSource::Guest, &id.to_string());
+        // MO-13: each session's stored facts, for the one-line summary under a row.
+        let briefs = crate::host_details::briefs(&self.store, ctx).await.unwrap_or_default();
 
         let mut rows = Vec::new();
         let mut on_vm_rows: HashSet<Uuid> = HashSet::new();
@@ -699,6 +787,11 @@ impl Metrics {
             if !power_state.is_on() && watched_session.is_none() {
                 continue;
             }
+            // The watched session's facts first, then any linked session's.
+            let brief = watched_session
+                .into_iter()
+                .chain(linked.iter().map(|s| s.id))
+                .find_map(|id| briefs.get(&id));
             on_vm_rows.extend(linked.iter().map(|s| s.id));
             rows.push(DashboardRow {
                 kind: RowKind::Vm,
@@ -712,7 +805,12 @@ impl Metrics {
                 vcpus: vm.num_vcpus,
                 memsize_mb: vm.memsize_mb,
                 address: vm.ip_address.clone(),
-                guest_os: vm.guest_os_name.clone().or_else(|| vm.guest_os.clone()),
+                guest_os: vm
+                    .guest_os_name
+                    .clone()
+                    .or_else(|| brief.and_then(|b| b.os.clone()))
+                    .or_else(|| vm.guest_os.clone()),
+                specs_at: brief.map(|b| b.collected_at.clone()),
                 host: self.hub.latest(MetricSource::Host, &vm.vmx_path),
                 guest: watched_session.and_then(guest_of),
                 sessions: linked,
@@ -745,6 +843,7 @@ impl Metrics {
                 memsize_mb: None,
                 address: None,
                 guest_os: None,
+                specs_at: None,
                 host: self.hub.latest(MetricSource::Host, &vmx),
                 guest: None,
                 sessions: Vec::new(),
@@ -757,6 +856,7 @@ impl Metrics {
                 continue;
             }
             let user = session.username.as_deref().map(|u| format!("{u}@")).unwrap_or_default();
+            let brief = briefs.get(&session.id);
             rows.push(DashboardRow {
                 kind: RowKind::Session,
                 key: session.id.to_string(),
@@ -766,13 +866,16 @@ impl Metrics {
                 protected: session.protected,
                 tags: session.tags.clone(),
                 power_state: None,
-                vcpus: None,
-                memsize_mb: None,
+                vcpus: brief.and_then(|b| b.cpus),
+                memsize_mb: brief
+                    .and_then(|b| b.memory_bytes)
+                    .and_then(|bytes| u32::try_from(bytes / (1024 * 1024)).ok()),
                 address: Some(format!(
                     "{user}{}",
                     crate::known_hosts::address(&session.host, session.port)
                 )),
-                guest_os: None,
+                guest_os: brief.and_then(|b| b.os.clone()),
+                specs_at: brief.map(|b| b.collected_at.clone()),
                 host: None,
                 guest: guest_of(session.id),
                 sessions: vec![LinkedSession {
@@ -795,6 +898,8 @@ impl Metrics {
     pub async fn capacity(&self, ctx: &Context) -> HostCapacity {
         let mut capacity = self.capacity.host_capacity(ctx, self.hub.running()).await;
         capacity.host_cpu_pct = locks::lock(&self.hub.state).host_cpu_pct;
+        // MO-15: the paging files, as the last round read them.
+        capacity.paging = self.hub.this_pc().and_then(|m| m.paging);
         capacity
     }
 
@@ -870,6 +975,8 @@ mod tests {
             host_mem_pct: None,
             mem_bytes: None,
             mem_total_bytes: None,
+            swap_used_bytes: None,
+            swap_total_bytes: None,
             disk_read_bps: None,
             disk_write_bps: None,
             net_rx_bps: None,

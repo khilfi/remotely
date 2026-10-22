@@ -109,6 +109,10 @@ pub trait HostCounters: Send + Sync {
     async fn own_cpu_time(&self) -> Result<Duration>;
     /// MO-04, VM-07: size and free space of the drive holding `path` (an existing file or folder).
     async fn disk_space(&self, path: &Path) -> Result<DiskSpace>;
+    /// MO-15: this PC's paging files and commit charge ([`super::paging`]).
+    async fn paging(&self) -> Result<super::paging::PagingInfo> {
+        Err(CoreError::NotImplemented("paging files"))
+    }
 
     /// VM-07: free space on the drive holding `path`, as a percentage.
     async fn free_disk_pct(&self, path: &Path) -> Result<f64> {
@@ -172,6 +176,11 @@ impl HostCounters for WindowsCounters {
     async fn disk_space(&self, path: &Path) -> Result<DiskSpace> {
         let path = path.to_path_buf();
         blocking(move || win::disk_space(&path)).await
+    }
+
+    async fn paging(&self) -> Result<super::paging::PagingInfo> {
+        // Two system calls of a few microseconds: not worth a blocking thread.
+        super::paging::read()
     }
 }
 

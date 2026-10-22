@@ -6,7 +6,7 @@
 //
 // VM-18: the hypervisor comes first in `detailRows`, then its own facts (a VirtualBox VM's UUID), and the guest tools
 // row is named for it ("VMware Tools" or "Guest Additions").
-// Q7 (MO-13): OS and specs can be another section of the Details tab, or a tab of their own.
+// MO-13: the System tab (VmSystemTab) shows the VM's virtual hardware and its guest's own facts.
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -30,6 +30,7 @@ import { EnvBadge, StateBadge, ToolsLabel } from "@/components/Badges";
 import { MetricCell } from "@/components/MetricBits";
 import { SnapshotTree } from "@/components/SnapshotTree";
 import { VmSessionLinks } from "@/components/VmLinkControls";
+import { VmSystemTab } from "@/components/VmSystemTab";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
@@ -58,6 +59,8 @@ interface Props {
   busy: boolean;
   /** FD-01: the command palette on this VM (power and protection, with their tiers). */
   onActions: () => void;
+  /** MO-13: opens a linked session's host details. */
+  onHostDetails: (session: { id: string; name: string }) => void;
 
   usage: VmHostUsage | undefined;
   thresholds: Thresholds;
@@ -124,6 +127,7 @@ export function VmDetailsPanel(props: Props) {
         <div className="flex items-center gap-2 border-b px-3 py-2">
           <TabsList>
             <TabsTrigger value="details">Details</TabsTrigger>
+            <TabsTrigger value="system">System</TabsTrigger>
             <TabsTrigger value="snapshots">
               Snapshots
               {tree && (
@@ -140,6 +144,11 @@ export function VmDetailsPanel(props: Props) {
         </div>
         <TabsContent value="details" className="min-h-0 overflow-auto p-3">
           <DetailsTab {...props} />
+        </TabsContent>
+        <TabsContent value="system" className="min-h-0 overflow-auto p-3">
+          {view === "system" && (
+            <VmSystemTab vm={vm} thresholds={props.thresholds} onHostDetails={props.onHostDetails} />
+          )}
         </TabsContent>
         <TabsContent value="snapshots" className="min-h-0 overflow-auto p-3">
           <SnapshotsTab {...props} hints={hints} />

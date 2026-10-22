@@ -12,7 +12,7 @@
 //! audited. Secrets come from the vault for each new login and go only to the adapter.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -26,6 +26,7 @@ use crate::adapters::remote::{
 };
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::host_details::{CollectedBy, SpecsCollector};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
 use crate::locks;
 use crate::sessions;
@@ -75,12 +76,14 @@ pub fn backoff(failures: u32, min: Duration, max: Duration) -> Duration {
 struct Host {
     /// What the connection was made with: a session edited since then reconnects.
     spec_key: String,
-    conn: Option<Box<dyn ExecSession>>,
+    conn: Option<Arc<dyn ExecSession>>,
     previous: Option<(GuestReading, Instant)>,
     failures: u32,
     next_try: Option<Instant>,
     /// A changed host key was audited for this host already; not again every retry.
     blocked_recorded: bool,
+    /// MO-13: when this connection last looked at the age of the host's stored facts.
+    specs_checked: Option<Instant>,
 }
 
 impl Host {
@@ -92,6 +95,7 @@ impl Host {
             failures: 0,
             next_try: None,
             blocked_recorded: false,
+            specs_checked: None,
         }
     }
 
@@ -118,6 +122,8 @@ struct Shared {
     statuses: Mutex<HashMap<Uuid, StatusEntry>>,
     /// Good readings not yet handed to a round.
     fresh: Mutex<HashMap<Uuid, MetricSample>>,
+    /// MO-13: reads a watched host's facts on its kept connection when they are old.
+    specs: OnceLock<SpecsCollector>,
 }
 
 pub struct GuestSource {
@@ -241,9 +247,24 @@ impl GuestSource {
                 tuning: RwLock::new(GuestTuning::default()),
                 statuses: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(HashMap::new()),
+                specs: OnceLock::new(),
             }),
             hosts: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// MO-13: the kept connections also read each host's facts when they are older than
+    /// [`crate::host_details::SpecsTuning::dashboard_max_age`].
+    pub fn set_specs(&self, collector: SpecsCollector) {
+        let _ = self.shared.specs.set(collector);
+    }
+
+    /// MO-13, MO-14: the watched session's kept connection, when it is open and not in the middle of
+    /// connecting (waited for briefly). Commands on it run on channels of their own beside the polls.
+    pub async fn kept_connection(&self, session_id: Uuid) -> Option<Arc<dyn ExecSession>> {
+        let host = locks::lock(&self.hosts).get(&session_id).cloned()?;
+        let host = tokio::time::timeout(Duration::from_secs(2), host.lock()).await.ok()?;
+        host.conn.clone().filter(|c| !c.is_closed())
     }
 
     pub fn tuning(&self) -> GuestTuning {
@@ -375,6 +396,7 @@ async fn poll(shared: &Shared, id: Uuid, host: &mut Host) {
             status.last_ok = Some(sample.ts.clone());
             locks::lock(&shared.statuses).insert(id, StatusEntry { status, retry_at: None });
             locks::lock(&shared.fresh).insert(id, sample);
+            read_specs_when_old(shared, id, host).await;
         }
         Err(failure) => {
             let retry_at = if failure.retry_now {
@@ -471,6 +493,8 @@ async fn read_once(
         host_mem_pct: None,
         mem_bytes: reading.mem_used_bytes(),
         mem_total_bytes: reading.mem_total_bytes,
+        swap_used_bytes: reading.swap_used_bytes(),
+        swap_total_bytes: reading.swap_total_bytes,
         disk_read_bps: rates.disk_read_bps,
         disk_write_bps: rates.disk_write_bps,
         net_rx_bps: rates.net_rx_bps,
@@ -485,6 +509,37 @@ async fn read_once(
     Ok(sample)
 }
 
+/// MO-13: after a good reading, the host's facts on the same connection when they are older than
+/// the dashboard's limit. Their age is looked at every half hour at most, not every round.
+async fn read_specs_when_old(shared: &Shared, id: Uuid, host: &mut Host) {
+    let Some(collector) = shared.specs.get() else {
+        return;
+    };
+    let tuning = collector.tuning();
+    if host
+        .specs_checked
+        .is_some_and(|at| at.elapsed() < tuning.dashboard_check)
+    {
+        return;
+    }
+    host.specs_checked = Some(Instant::now());
+    let Some(conn) = host.conn.as_ref() else {
+        return;
+    };
+    if let Err(err) = collector
+        .collect_if_older(
+            &shared.ctx,
+            id,
+            conn.as_ref(),
+            tuning.dashboard_max_age,
+            CollectedBy::Dashboard,
+        )
+        .await
+    {
+        tracing::debug!(session_id = %id, error = %err, "host details: reading on the dashboard's connection failed");
+    }
+}
+
 /// Logs in with the session's saved login. Nothing is asked: a login that needs something typed
 /// fails, saying what to save.
 async fn connect(
@@ -492,7 +547,7 @@ async fn connect(
     tuning: &GuestTuning,
     spec: &SessionSpec,
     blocked_recorded: bool,
-) -> std::result::Result<Box<dyn ExecSession>, Failure> {
+) -> std::result::Result<Arc<dyn ExecSession>, Failure> {
     // SS-07: every jump host on the way logs in too, with its own saved login.
     let mut hops = spec.jumps();
     hops.push(spec);
@@ -556,7 +611,7 @@ async fn connect(
     )
     .await;
     match connected {
-        Ok(Ok(conn)) => Ok(conn),
+        Ok(Ok(conn)) => Ok(Arc::from(conn)),
         Ok(Err(err)) => Err(Failure::from_error(&err)),
         Err(_) => Err(Failure::new(
             GuestState::Unreachable,

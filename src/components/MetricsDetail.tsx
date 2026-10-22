@@ -1,9 +1,11 @@
 // MO-03 drill-down: one VM or host with live charts of the last 30 minutes (kept in memory by the core),
 // its current readings and each mounted disk. Host-side series come from the VM's process (MO-01),
-// guest series from a watched session (MO-02). Each chart has one axis and one unit.
+// guest series from a watched session (MO-02). Each chart has one axis and one unit. MO-15: the memory chart
+// draws what there is (a VM's configured RAM, a host's total) dashed next to what is in use, and Linux swap has a
+// chart of its own. MO-13: "Host details…" opens the session's host details.
 
 import { useEffect, useState } from "react";
-import { EyeIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
+import { EyeIcon, HardDriveIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -28,6 +30,8 @@ interface Props {
   onConnect: (sessionId: string) => void;
   /** Opens the command palette on this VM's actions. */
   onActions: (vmxPath: string) => void;
+  /** MO-13, MO-14: a session's host details. */
+  onHostDetails: (session: { id: string; name: string }) => void;
 }
 
 /** Both series on one time line: the core records host and guest samples of a round at the same t. */
@@ -50,7 +54,17 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
-export function MetricsDetail({ row, round, thresholds, theme, onClose, onWatch, onConnect, onActions }: Props) {
+export function MetricsDetail({
+  row,
+  round,
+  thresholds,
+  theme,
+  onClose,
+  onWatch,
+  onConnect,
+  onActions,
+  onHostDetails,
+}: Props) {
   const [series, setSeries] = useState<{ key: string; host: MetricPoint[]; guest: MetricPoint[] } | null>(null);
   const rowKey = row ? `${row.key}|${row.watchedSession ?? ""}` : null;
   const hostKey = row?.kind === "vm" ? row.key : null;
@@ -86,6 +100,31 @@ export function MetricsDetail({ row, round, thresholds, theme, onClose, onWatch,
   const cpu = row ? rowCpu(row) : null;
   const memory = row ? rowMemory(row) : null;
   const linked = row?.kind === "vm" ? row.sessions : [];
+  // MO-13: the session whose host details open: the watched one, else the first linked.
+  const detailsSession = row?.watchedSession
+    ? (row.sessions.find((s) => s.id === row.watchedSession) ?? null)
+    : (linked[0] ?? null);
+  // Host-side series show once the VM's process was seen, or when there is nothing else to show.
+  const showHost = hasHost && (host.some((p) => p !== null) || !hasGuest);
+  // MO-15: memory in use, and dashed what there is: one line in its colour, or muted when it bounds two.
+  const memorySeries = two(
+    showHost ? { label: "Working set", slot: 1, values: values(host, (p) => p.memBytes) } : null,
+    hasGuest ? { label: hasHost ? "Guest in use" : "In use", slot: 2, values: values(guest, (p) => p.memBytes) } : null,
+  );
+  if (hasHost) {
+    // The VM's settings say how much it has, whether or not its process was seen at that time.
+    const configured = row?.memsizeMb ? row.memsizeMb * 1024 * 1024 : null;
+    memorySeries.push({
+      label: "Configured RAM",
+      slot: memorySeries.length > 1 ? "muted" : (memorySeries[0]?.slot ?? 1),
+      dashed: true,
+      values: times.map((_, i) => host[i]?.memTotalBytes ?? configured),
+    });
+  } else if (hasGuest) {
+    memorySeries.push({ label: "Total", slot: 2, dashed: true, values: values(guest, (p) => p.memTotalBytes) });
+  }
+  const swapTotal = row?.guest?.swapTotalBytes ?? null;
+  const swapUsed = row?.guest?.swapUsedBytes ?? null;
 
   return (
     <Sheet open={row !== null} onOpenChange={(open) => !open && onClose()}>
@@ -118,6 +157,11 @@ export function MetricsDetail({ row, round, thresholds, theme, onClose, onWatch,
               {guestKey && (
                 <Button size="sm" variant="outline" onClick={() => onConnect(guestKey)}>
                   <SquareTerminalIcon /> Open terminal
+                </Button>
+              )}
+              {detailsSession && (
+                <Button size="sm" variant="outline" onClick={() => onHostDetails(detailsSession)}>
+                  <HardDriveIcon /> Host details…
                 </Button>
               )}
               {guestKey ? (
@@ -160,6 +204,11 @@ export function MetricsDetail({ row, round, thresholds, theme, onClose, onWatch,
                   [
                     memory?.total ? `of ${formatBytes(memory.total)}` : null,
                     row.host?.hostMemPct != null ? `${formatPct(row.host.hostMemPct)} of this host's RAM` : null,
+                    swapTotal === 0
+                      ? "no swap"
+                      : swapTotal
+                        ? `swap ${formatBytes(swapUsed)} of ${formatBytes(swapTotal)}`
+                        : null,
                   ]
                     .filter(Boolean)
                     .join(" · ") || undefined
@@ -185,21 +234,35 @@ export function MetricsDetail({ row, round, thresholds, theme, onClose, onWatch,
               max={100}
               format={(v) => `${Math.round(v)}%`}
               series={two(
-                hasHost ? { label: "Host side", slot: 1, values: values(host, (p) => p.cpuPct) } : null,
+                showHost ? { label: "Host side", slot: 1, values: values(host, (p) => p.cpuPct) } : null,
                 hasGuest ? { label: "Guest", slot: 2, values: values(guest, (p) => p.cpuPct) } : null,
               )}
             />
             <MetricChart
               title="Memory"
-              subtitle={hasHost ? "Host side: the VM process's working set. Guest: memory in use." : "Memory in use"}
+              subtitle={
+                hasHost
+                  ? "The VM process's working set on this host and, when watched, the guest's own use, under its configured RAM (dashed)"
+                  : "In use (total minus available), under all the memory the host has (dashed)"
+              }
               times={times}
               theme={theme}
               format={(v) => formatBytes(v)}
-              series={two(
-                hasHost ? { label: "Host side", slot: 1, values: values(host, (p) => p.memBytes) } : null,
-                hasGuest ? { label: "Guest", slot: 2, values: values(guest, (p) => p.memBytes) } : null,
-              )}
+              series={memorySeries}
             />
+            {hasGuest && swapTotal !== null && swapTotal > 0 && (
+              <MetricChart
+                title="Swap"
+                subtitle="Swap in use under the swap there is (dashed)"
+                times={times}
+                theme={theme}
+                format={(v) => formatBytes(v)}
+                series={[
+                  { label: "Swap in use", slot: 2, values: values(guest, (p) => p.swapUsedBytes) },
+                  { label: "Swap size", slot: 2, dashed: true, values: values(guest, (p) => p.swapTotalBytes) },
+                ]}
+              />
+            )}
             <MetricChart
               title="Disk I/O"
               subtitle={hasHost ? "Read and written by the VM's process" : "Read and written by the guest's disks"}

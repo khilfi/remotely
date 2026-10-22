@@ -1,19 +1,25 @@
-// MO-03 drill-down chart: a uPlot line chart (CLAUDE.md stack) with one y-axis and one or two series
-// of the same unit. 2 px lines, a 10% wash under a single series, hairline grid. uPlot's live legend
-// under the plot names each series and doubles as the hover readout (crosshair plus values). Canvas
-// colours come from the CSS tokens, so the chart is rebuilt when the theme changes.
+// MO-03 drill-down chart: a uPlot line chart (CLAUDE.md stack) with one y-axis and up to four series of the same
+// unit. 2 px lines, a 10% wash under a single series, hairline grid. MO-15: a series can be dashed, for what there
+// is (a VM's configured RAM, a host's total, the paging files' size) next to what is in use, in the same colour as
+// the solid line it bounds, or muted when it bounds several. The legend under the plot is the app's own: it shows
+// the latest reading of each series, and the hovered one while the pointer is over the plot (uPlot's own legend
+// showed dashes until hovered). Canvas colours come from the CSS tokens, so the chart is rebuilt when the theme
+// changes.
 
 import { useEffect, useRef, useState } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
+import { latestValue } from "@/lib/host-details";
 import type { ResolvedTheme } from "@/lib/theme";
 
 export interface ChartSeries {
   label: string;
   /** One value per time; null leaves a gap. */
   values: (number | null)[];
-  /** Categorical slot: the series' colour follows its identity, never its rank. */
-  slot: 1 | 2;
+  /** Categorical slot: the series' colour follows its identity, never its rank. "muted" for a shared limit. */
+  slot: 1 | 2 | "muted";
+  /** MO-15: a limit (what there is), drawn dashed. */
+  dashed?: boolean;
 }
 
 interface Props {
@@ -28,19 +34,46 @@ interface Props {
   /** A fixed top, e.g. 100 for percentages. */
   max?: number;
   theme: ResolvedTheme;
+  /** What shows instead of the plot while no series has a value. */
+  empty?: string;
 }
 
 const HEIGHT = 140;
+const DASH = [6, 4];
 
 function token(name: string) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
-export function MetricChart({ title, subtitle, times, series, format, max, theme }: Props) {
+function colourToken(slot: ChartSeries["slot"]) {
+  return slot === "muted" ? "--chart-axis" : `--series-${slot}`;
+}
+
+/** The legend's line sample: solid or dashed, in the series' colour. */
+function Swatch({ slot, dashed }: { slot: ChartSeries["slot"]; dashed?: boolean }) {
+  return (
+    <svg width="18" height="8" aria-hidden className="shrink-0">
+      <line
+        x1="1"
+        y1="4"
+        x2="17"
+        y2="4"
+        stroke={`var(${colourToken(slot)})`}
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeDasharray={dashed ? "4 3" : undefined}
+      />
+    </svg>
+  );
+}
+
+export function MetricChart({ title, subtitle, times, series, format, max, theme, empty }: Props) {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(0);
-  const labels = series.map((s) => `${s.slot}:${s.label}`).join("|");
+  /** The hovered point's index, or null when the pointer is elsewhere. */
+  const [hovered, setHovered] = useState<number | null>(null);
+  const labels = series.map((s) => `${s.slot}:${s.label}:${s.dashed ? 1 : 0}`).join("|");
   const hasData = series.some((s) => s.values.some((v) => v !== null));
 
   // Keep the plot as wide as its card.
@@ -61,12 +94,12 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
     const grid = token("--chart-grid");
     const axis = token("--chart-axis");
     const font = "11px system-ui, 'Segoe UI', sans-serif";
-    const single = series.length === 1;
+    const solid = series.filter((s) => !s.dashed);
     const options: uPlot.Options = {
       width,
       height: HEIGHT,
       cursor: { drag: { x: false, y: false }, points: { size: 8 } },
-      legend: { live: true },
+      legend: { show: false },
       scales: {
         x: { time: true },
         y: { range: (_u, _min, top) => [0, max ?? (top > 0 ? top * 1.15 : 1)] },
@@ -83,24 +116,31 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
         },
       ],
       series: [
-        { value: (_u, v) => (v == null ? "—" : new Date(v * 1000).toLocaleTimeString()) },
+        {},
         ...series.map((s) => {
-          const color = token(`--series-${s.slot}`);
+          const color = token(colourToken(s.slot));
           return {
             label: s.label,
             stroke: color,
-            width: 2,
-            fill: single ? `${color}1a` : undefined,
+            width: s.dashed ? 1.5 : 2,
+            dash: s.dashed ? DASH : undefined,
+            // A wash only under a lone solid line.
+            fill: !s.dashed && solid.length === 1 ? `${color}1a` : undefined,
             points: { show: false },
             spanGaps: false,
-            value: (_u: uPlot, v: number | null) => (v == null ? "—" : format(v)),
           };
         }),
       ],
+      hooks: {
+        setCursor: [(u) => setHovered(u.cursor.idx ?? null)],
+      },
     };
     const created = new uPlot(options, data, el);
     plot.current = created;
+    const leave = () => setHovered(null);
+    el.addEventListener("mouseleave", leave);
     return () => {
+      el.removeEventListener("mouseleave", leave);
       created.destroy();
       plot.current = null;
     };
@@ -108,9 +148,16 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [labels, theme, width, max, hasData]);
 
+  // New points only: hovering re-renders the chart (the legend follows the pointer) without new data.
+  const latest = times.length > 0 ? times[times.length - 1] : 0;
+  const filled = series.map((s) => s.values.filter((v) => v !== null).length).join(",");
   useEffect(() => {
     plot.current?.setData(data);
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [times.length, latest, filled]);
+
+  const at = hovered !== null && hovered < times.length ? hovered : null;
+  const when = at !== null ? new Date(times[at] ?? 0).toLocaleTimeString() : "Latest";
 
   return (
     <div className="rounded-lg border bg-card p-3">
@@ -123,10 +170,25 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
         <div ref={host} className="metric-chart" />
         {!hasData && (
           <div className="absolute inset-0 flex items-center justify-center text-xs text-muted-foreground">
-            No readings yet. They arrive every 5 seconds.
+            {empty ?? "No readings yet. They arrive every 5 seconds."}
           </div>
         )}
       </div>
+      {hasData && (
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" aria-live="off">
+          <span className="w-16 shrink-0 text-muted-foreground tabular-nums">{when}</span>
+          {series.map((s) => {
+            const value = at !== null ? (s.values[at] ?? null) : latestValue(s.values);
+            return (
+              <span key={s.label} className="flex items-center gap-1.5">
+                <Swatch slot={s.slot} dashed={s.dashed} />
+                <span className="text-muted-foreground">{s.label}</span>
+                <span className="font-medium tabular-nums">{value === null ? "—" : format(value)}</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

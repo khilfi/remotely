@@ -45,13 +45,31 @@ test("IPv6 addresses, compressed or not, are one address", () => {
   assert.equal(m.text("fe80::1ff:fe23:4567:890a%eth0 up"), "ip-2 up");
   assert.equal(m.text("::ffff:192.0.2.1"), "ip-3");
   assert.equal(m.text("2001:db8:85a3::8a2e:370:7334"), "ip-4");
-  // Not addresses: times, MAC addresses, C++ names, words of hex letters.
+  // Not IP addresses: times, MAC addresses (MO-13 masks those as MACs), C++ names, words of hex letters.
   assert.equal(m.text("at 12:34:56"), "at 12:34:56");
-  assert.equal(m.text("00:1a:2b:3c:4d:5e"), "00:1a:2b:3c:4d:5e");
+  assert.equal(m.text("00:1a:2b:3c:4d:5e"), "mac-1");
   assert.equal(m.text("std::vector and dead::beef"), "std::vector and dead::beef");
   assert.equal(canonicalIpv6(parseIpv6("2001:db8:0:0:1:0:0:1") ?? []), "2001:db8::1:0:0:1");
   assert.equal(parseIpv6("1:2:3"), null);
   assert.equal(parseIpv6("1::2::3"), null);
+});
+
+test("a listener's 'any' address stays, whatever ss calls it", () => {
+  const m = new Masker();
+  assert.equal(m.field("ip", "*"), "*");
+  assert.equal(m.field("ip", "[::]"), "[::]");
+  assert.equal(m.field("ip", "0.0.0.0"), "0.0.0.0");
+  assert.equal(m.field("ip", "192.0.2.10"), "ip-1");
+});
+
+test("MAC addresses with colons or hyphens get stand-ins, as text or as a field", () => {
+  const m = new Masker();
+  assert.equal(m.text("ethernet0 00:0C:29:AB:CD:EF nat"), "ethernet0 mac-1 nat");
+  assert.equal(m.text("the same one: 00-0c-29-ab-cd-ef"), "the same one: mac-1");
+  assert.equal(m.field("mac", "08:00:27:00:00:01"), "mac-2");
+  // Not a MAC: mixed separators, a time, an IPv6 address.
+  assert.equal(m.text("00:0c-29:ab:cd:ef at 10:30:00 from 2001:db8::1"), "00:0c-29:ab:cd:ef at 10:30:00 from ip-1");
+  assert.equal(m.learn("mac", "00:0c:29:00:00:02"), false);
 });
 
 test("FQDN-like names are hosts; file names and plain words are not", () => {
@@ -78,6 +96,9 @@ test("user@host masks both parts, with an IP or a bracketed IPv6 address too", (
   assert.equal(m.text("ssh-ed25519 AAAA alice@laptop"), "ssh-ed25519 AAAA user-1@host-2");
   // A package version is not a host.
   assert.equal(m.text("react@19.1.0"), "react@19.1.0");
+  // Nor is a systemd template unit (MO-14 lists services).
+  assert.equal(m.text("postgresql@16-main.service failed"), "postgresql@16-main.service failed");
+  assert.equal(m.text("getty@tty1.service user@1000.service"), "getty@tty1.service user@1000.service");
 });
 
 test("the Windows user name in local paths is masked, and /home/<name> on hosts", () => {

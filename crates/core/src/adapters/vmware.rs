@@ -19,6 +19,7 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 
+use super::vm_hardware::VmHardware;
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
 use crate::error::{CoreError, Result};
 use crate::locks;
@@ -147,6 +148,11 @@ pub trait VmwareAdapter: Send + Sync {
     /// AP-02: when the VM's running process started (its power-on or resume), from the first line of
     /// its `vmware.log`. Needs no guest login. Only meaningful while the VM runs; `None` without a log.
     async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>>;
+    /// MO-13: the VM's virtual hardware, from its .vmx and each virtual disk's files. Reads only; needs
+    /// no vmrun.
+    async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
+        super::vm_hardware::read_vmware(vmx).await
+    }
 }
 
 /// Builds the adapter for this machine. When vmrun cannot be found the app still starts: the library,
@@ -800,6 +806,9 @@ impl VmwareAdapter for SwitchableVmware {
     }
     async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
         self.current().running_since(vmx).await
+    }
+    async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
+        self.current().hardware(vmx).await
     }
 }
 

@@ -51,6 +51,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ColorDot, EnvBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ExportDialog } from "@/components/ExportDialog";
+import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { ImportDialog } from "@/components/ImportDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { SessionDialog } from "@/components/SessionDialog";
@@ -70,6 +71,7 @@ import {
 } from "@/lib/api";
 import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
+import { useThresholds } from "@/lib/metrics";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -116,6 +118,9 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
   const [version, setVersion] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
+  /** MO-13, MO-14: a session's host details. */
+  const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
+  const [thresholds] = useThresholds();
 
   const reload = useCallback(() => setVersion((v) => v + 1), []);
   /** SS-07: the whole way in, for the Via column's tooltip. */
@@ -538,6 +543,9 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end" className="w-52">
                             <DropdownMenuItem onSelect={() => connect(s)}>Connect</DropdownMenuItem>
+                            <DropdownMenuItem onSelect={() => setHostDetails({ id: s.id, name: s.name })}>
+                              Host details…
+                            </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem onSelect={() => setDialog({ kind: "editSession", session: s })}>
                               Edit…
@@ -579,6 +587,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
         )}
       </div>
 
+      <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
       {dialog?.kind === "editSession" && (
         <SessionDialog
           vault={vault}

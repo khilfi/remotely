@@ -1630,6 +1630,9 @@ export interface MetricSample {
   memBytes: number | null;
   /** Host side: RAM assigned to the VM. Guest side: the guest's total memory. */
   memTotalBytes: number | null;
+  /** MO-15, guest side: swap in use and its size. */
+  swapUsedBytes: number | null;
+  swapTotalBytes: number | null;
   diskReadBps: number | null;
   diskWriteBps: number | null;
   netRxBps: number | null;
@@ -1657,6 +1660,11 @@ export interface MetricPoint {
   t: number;
   cpuPct: number | null;
   memBytes: number | null;
+  /** MO-15: the memory there is: a VM's configured RAM, a guest's or this PC's total. */
+  memTotalBytes: number | null;
+  /** MO-15: swap (Linux) or the paging files (this PC) in use, and their size. */
+  swapUsedBytes: number | null;
+  swapTotalBytes: number | null;
   diskReadBps: number | null;
   diskWriteBps: number | null;
   netRxBps: number | null;
@@ -1712,11 +1720,15 @@ export interface DashboardRow {
   protected: boolean;
   tags: string[];
   powerState: PowerState | null;
+  /** A VM's vCPUs; MO-13: a host's CPUs from its stored facts. */
   vcpus: number | null;
+  /** A VM's configured RAM; MO-13: a host's RAM from its stored facts. */
   memsizeMb: number | null;
   /** A VM's IP, or a session's user@host:port. */
   address: string | null;
   guestOs: string | null;
+  /** MO-13: when the host's (or the VM's linked session's) facts were read. */
+  specsAt: string | null;
   host: MetricSample | null;
   guest: MetricSample | null;
   sessions: LinkedSession[];
@@ -1756,7 +1768,268 @@ export interface HostCapacity {
   runningVms: number;
   unsizedVms: number;
   drives: DriveCapacity[];
+  /** MO-15: this PC's paging files and commit charge, from the last metrics round. */
+  paging: PagingInfo | null;
   warnings: CapacityWarning[];
+}
+
+/** MO-15: one paging file of this PC. */
+export interface PagingFile {
+  path: string;
+  totalBytes: number;
+  usedBytes: number;
+  peakBytes: number;
+}
+
+/** MO-15: this PC's paging files and commit charge (RAM plus paging files). */
+export interface PagingInfo {
+  files: PagingFile[];
+  totalBytes: number;
+  usedBytes: number;
+  peakBytes: number;
+  commitUsedBytes: number;
+  commitLimitBytes: number;
+}
+
+/** MO-15: this PC's memory now. */
+export interface ThisPcMemory {
+  ramTotalBytes: number;
+  ramUsedBytes: number;
+  paging: PagingInfo | null;
+}
+
+/** MO-15: this PC's memory now and round by round (`memBytes`/`memTotalBytes`: RAM; `swap…`: paging files). */
+export interface ThisPcSeries {
+  latest: ThisPcMemory | null;
+  points: MetricPoint[];
+}
+
+// ---- MO-13, MO-14: host details ----
+
+export interface OsInfo {
+  name: string | null;
+  version: string | null;
+  versionId: string | null;
+  id: string | null;
+  idLike: string | null;
+  prettyName: string | null;
+}
+
+export interface CpuInfo {
+  model: string | null;
+  vendor: string | null;
+  logicalCpus: number | null;
+  sockets: number | null;
+  coresPerSocket: number | null;
+  threadsPerCore: number | null;
+  maxMhz: number | null;
+}
+
+export interface MemoryInfo {
+  totalBytes: number | null;
+  availableBytes: number | null;
+  swapTotalBytes: number | null;
+  swapFreeBytes: number | null;
+}
+
+export interface SwapArea {
+  path: string;
+  kind: string;
+  sizeBytes: number;
+  usedBytes: number;
+}
+
+/** A disk, partition, LVM volume... from lsblk. */
+export interface BlockDevice {
+  name: string;
+  kind: string;
+  sizeBytes: number | null;
+  fstype: string | null;
+  mountpoint: string | null;
+  model: string | null;
+  rotational: boolean | null;
+  transport: string | null;
+  /** 0 a disk, 1 its partitions, 2 what sits on those. */
+  depth: number;
+}
+
+export interface Filesystem {
+  source: string;
+  fstype: string | null;
+  sizeBytes: number;
+  usedBytes: number;
+  availableBytes: number;
+  usedPct: number;
+  mount: string;
+}
+
+/** MO-13: a Linux host's OS and hardware. */
+export interface HostSpecs {
+  os: OsInfo;
+  system: string | null;
+  kernel: string | null;
+  architecture: string | null;
+  hostname: string | null;
+  cpu: CpuInfo;
+  memory: MemoryInfo;
+  swaps: SwapArea[];
+  disks: BlockDevice[];
+  filesystems: Filesystem[];
+  virtualization: string | null;
+  uptimeSecs: number | null;
+}
+
+export type CollectedBy = "terminal" | "dashboard" | "refresh";
+
+/** MO-13: a session's facts with when and how they were read. */
+export interface SessionSpecs {
+  sessionId: string;
+  specs: HostSpecs;
+  collectedAt: string;
+  collectedBy: CollectedBy;
+  bootedAt: string | null;
+}
+
+/** Which connection a read ran on. */
+export type ReadVia = "terminal" | "dashboard" | "ownConnection";
+
+export type ServiceManager = "systemd" | "openRc" | "sysV" | "unknown";
+export type ServiceState = "running" | "failed" | "stopped" | "unknown";
+
+export interface HostService {
+  name: string;
+  description: string | null;
+  state: ServiceState;
+  sub: string | null;
+}
+
+export interface ListeningPort {
+  protocol: string;
+  ip: string;
+  port: number;
+  interface: string | null;
+  processes: string[];
+  pids: number[];
+}
+
+export interface LoggedInUser {
+  user: string;
+  terminal: string;
+  since: string;
+  ip: string | null;
+  host: string | null;
+}
+
+export interface BootEvent {
+  kind: string;
+  kernel: string | null;
+  when: string;
+}
+
+export interface ProcessInfo {
+  pid: number;
+  user: string;
+  cpuPct: number;
+  memPct: number;
+  rssBytes: number;
+  elapsedSecs: number | null;
+  command: string;
+}
+
+/** MO-14: an admin's view of a host, read on demand. */
+export interface AdminDetails {
+  serviceManager: ServiceManager;
+  running: HostService[];
+  failed: HostService[];
+  otherServices: HostService[];
+  ports: ListeningPort[];
+  portsNeedRoot: boolean;
+  users: LoggedInUser[];
+  bootText: string | null;
+  uptimeSecs: number | null;
+  boots: BootEvent[];
+  processCount: number;
+  topCpu: ProcessInfo[];
+  topMemory: ProcessInfo[];
+  notLinux: boolean;
+}
+
+export interface AdminReport {
+  sessionId: string;
+  details: AdminDetails;
+  collectedAt: string;
+  via: ReadVia;
+}
+
+export interface PendingUpdate {
+  name: string;
+  version: string;
+  current: string | null;
+  source: string;
+  security: boolean;
+}
+
+export interface UpdatesReport {
+  manager: "apt" | "dnf" | null;
+  packages: PendingUpdate[];
+  securityCount: number;
+  listsRefreshedUnix: number | null;
+  error: string | null;
+}
+
+export interface UpdatesCheck {
+  sessionId: string;
+  report: UpdatesReport;
+  checkedAt: string;
+  tookMs: number;
+  via: ReadVia;
+}
+
+export interface VirtualDisk {
+  slot: string;
+  path: string;
+  format: string | null;
+  provisionedBytes: number | null;
+  onDiskBytes: number | null;
+  files: number;
+  delta: boolean;
+  problem: string | null;
+}
+
+export interface VirtualNic {
+  slot: string;
+  connection: string | null;
+  model: string | null;
+  /** FD-03: masked while presenting (`mac` is a field `learnFields` knows). */
+  mac: string | null;
+  connected: boolean | null;
+}
+
+/** MO-13: a VM's virtual hardware from its hypervisor's files. */
+export interface VmHardware {
+  guestOs: string | null;
+  guestOsName: string | null;
+  guestKernel: string | null;
+  vcpus: number | null;
+  coresPerSocket: number | null;
+  memoryMb: number | null;
+  firmware: string | null;
+  hardwareVersion: string | null;
+  disks: VirtualDisk[];
+  nics: VirtualNic[];
+}
+
+export interface VmSpecs {
+  vmxPath: string;
+  hypervisor: Hypervisor;
+  hardware: VmHardware;
+  collectedAt: string;
+  /** The files could not be read now: this is what was read before. */
+  stored: boolean;
+  problem: string | null;
+  /** The guest's own facts, from a linked session. */
+  guest: SessionSpecs | null;
+  guestSessionName: string | null;
 }
 
 /** FD-14: a newer signed release on GitHub. */
@@ -2141,6 +2414,20 @@ export const api = {
   metricsHostUsage: () => invoke<VmHostUsage[]>("metrics_host_usage"),
   /** MO-02: watching a session logs in to it over SSH every round. Audited; returns the watched ids. */
   metricsWatch: (sessionId: string, watch: boolean) => invoke<string[]>("metrics_watch", { sessionId, watch }),
+  /** MO-15: this PC's RAM and paging files, from the metrics rounds. */
+  metricsThisPc: () => invoke<ThisPcSeries>("metrics_this_pc"),
+  /** MO-13: what was last read about the session (null before the first read). Makes no connection. */
+  hostSpecs: (sessionId: string) => invoke<SessionSpecs | null>("host_specs", { sessionId }),
+  /** MO-13: reads the session's OS and specs now (may log in once, since the user asked). */
+  hostSpecsRefresh: (sessionId: string) => invoke<SessionSpecs>("host_specs_refresh", { sessionId }),
+  /** MO-14: services, ports, users, boots and top processes, read now. */
+  hostAdmin: (sessionId: string) => invoke<AdminReport>("host_admin", { sessionId }),
+  /** MO-14: pending updates; dnf may take a minute to refresh its metadata. */
+  hostUpdates: (sessionId: string) => invoke<UpdatesCheck>("host_updates", { sessionId }),
+  /** The host details panel closed: its own connection, if it made one, closes. */
+  hostDetailsRelease: (sessionId: string) => invoke<void>("host_details_release", { sessionId }),
+  /** MO-13: a VM's hardware from its files, and its guest's facts from a linked session. */
+  vmSpecs: (vmxPath: string) => invoke<VmSpecs>("vm_specs", { vmxPath }),
   onMetricsRound: (handler: (cost: CollectorCost) => void): Promise<UnlistenFn> =>
     listen<CollectorCost>("metrics://round", (e) => handler(e.payload)),
 
