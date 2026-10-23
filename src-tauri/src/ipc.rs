@@ -10,7 +10,8 @@ use remotely_core::bulk::{
 };
 use remotely_core::capacity::HostCapacity;
 use remotely_core::command_bus::{
-    ApprovalAnswers, Command, CommandPreview, SubmitOutcome, MAX_EXEC_TIMEOUT_SECS, MAX_SCRIPT_BYTES, MAX_SNAPSHOT_NAME,
+    ApprovalAnswers, ApprovalRequest, Command, CommandPreview, SubmitOutcome, MAX_EXEC_TIMEOUT_SECS, MAX_SCRIPT_BYTES,
+    MAX_SNAPSHOT_NAME,
 };
 use remotely_core::domain::Environment;
 use remotely_core::import::{self, ImportPreview, ImportReport, ImportRequest, ImportSource};
@@ -41,6 +42,9 @@ use crate::AppState;
 pub struct IpcError {
     code: &'static str,
     message: String,
+    /// AP-01: `approval_changed` carries the approval asked again, for the dialog to show instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<Box<ApprovalRequest>>,
 }
 
 impl IpcError {
@@ -49,16 +53,20 @@ impl IpcError {
         Self {
             code,
             message: message.into(),
+            request: None,
         }
     }
 }
 
 impl From<CoreError> for IpcError {
     fn from(err: CoreError) -> Self {
-        Self {
-            code: err.code(),
-            message: err.to_string(),
-        }
+        let code = err.code();
+        let message = err.to_string();
+        let request = match err {
+            CoreError::ApprovalChanged { request, .. } => Some(request),
+            _ => None,
+        };
+        Self { code, message, request }
     }
 }
 

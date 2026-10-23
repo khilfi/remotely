@@ -561,11 +561,27 @@ impl JobRunner {
         });
 
         let this = Arc::clone(self);
+        let spec = Arc::new(spec);
         tokio::spawn(async move {
             let countdown = countdown.zip(countdown_until);
-            if let Err(err) = Arc::clone(&this).run(id, spec, summary, countdown, token).await {
+            let ran = Arc::clone(&this)
+                .run(id, Arc::clone(&spec), summary.clone(), countdown, token)
+                .await;
+            if let Err(err) = ran {
+                // QL-15: only a job that could not start ends here (its journal or start audit failed),
+                // so no target was touched. Each write is tried; one failing does not stop the next.
                 tracing::error!(%id, error = %err, "job failed to run");
-                let _ = this.store.set_job_status(id, JobStatus::Failed).await;
+                if let Err(journal) = this.store.set_job_status(id, JobStatus::Failed).await {
+                    tracing::error!(%id, error = %journal, "could not journal a job that failed to run");
+                }
+                let detail = format!("the job did not run, so no target was touched: {err}");
+                let result = Some(JobStatus::Failed.as_str());
+                if let Err(audit) = this
+                    .audit(&spec.ctx, "job_finished", &summary, &spec, id, result, Some(&detail))
+                    .await
+                {
+                    tracing::error!(%id, error = %audit, "could not audit a job that failed to run");
+                }
                 this.emit(JobEvent::Finished {
                     job_id: id,
                     status: JobStatus::Failed,
@@ -577,10 +593,12 @@ impl JobRunner {
         Ok(id)
     }
 
+    /// Runs the job. An error means it never started (no target touched); once targets run, a failing journal or
+    /// audit write is logged and the job goes on, so it always ends with its real result (QL-15).
     async fn run(
         self: Arc<Self>,
         id: Uuid,
-        spec: JobSpec,
+        spec: Arc<JobSpec>,
         summary: String,
         countdown: Option<(u32, String)>,
         token: CancellationToken,
@@ -596,9 +614,13 @@ impl JobRunner {
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_secs(seconds.into())) => {}
                 _ = token.cancelled() => {
-                    self.store.set_job_status(id, JobStatus::Cancelled).await?;
-                    self.audit(&ctx, "job_cancelled", &summary, &spec, id, Some("cancelled"),
-                        Some("cancelled during the countdown; no target was touched")).await?;
+                    if let Err(err) = self.store.set_job_status(id, JobStatus::Cancelled).await {
+                        tracing::error!(%id, error = %err, "could not journal a job cancelled in its countdown");
+                    }
+                    if let Err(err) = self.audit(&ctx, "job_cancelled", &summary, &spec, id, Some("cancelled"),
+                        Some("cancelled during the countdown; no target was touched")).await {
+                        tracing::error!(%id, error = %err, "could not audit a job cancelled in its countdown");
+                    }
                     self.emit(JobEvent::Finished { job_id: id, status: JobStatus::Cancelled });
                     return Ok(());
                 }
@@ -617,7 +639,6 @@ impl JobRunner {
         // VM-05: named once, when the job starts, so every VM's safety snapshot has the same name.
         let safety_name: Option<Arc<str>> = (spec.safety_snapshot && safety_snapshot_applies(&spec.command))
             .then(|| safety_snapshot_name(safety_verb(&spec.command), time::OffsetDateTime::now_utc(), id).into());
-        let spec = Arc::new(spec);
         let mut tasks = JoinSet::new();
         for target in spec.decision.targets.clone() {
             let this = Arc::clone(&self);
@@ -667,6 +688,8 @@ impl JobRunner {
         let mut cancelled_in_flight = Vec::new();
         let mut safety_snapshots = 0usize;
         let mut notes = Vec::new();
+        // QL-15: target results the journal could not keep. The other targets go on regardless.
+        let mut unjournaled = 0usize;
         while let Some(joined) = tasks.join_next().await {
             let (target, outcome, duration_ms, safety_snapshot, note) = match joined {
                 Ok(v) => v,
@@ -716,7 +739,8 @@ impl JobRunner {
             }
             let key = target.target.key();
             let out = done.output.as_ref();
-            self.store
+            let journaled = self
+                .store
                 .set_target_result(
                     id,
                     &key,
@@ -736,7 +760,12 @@ impl JobRunner {
                         safety_snapshot: safety_snapshot.as_deref(),
                     },
                 )
-                .await?;
+                .await;
+            if let Err(err) = journaled {
+                // Returning here would drop the JoinSet and abort every target still running.
+                tracing::error!(%id, error = %err, "could not journal a target's result");
+                unjournaled += 1;
+            }
             safety_snapshots += usize::from(safety_snapshot.is_some());
             self.emit(JobEvent::TargetFinished {
                 job_id: id,
@@ -759,8 +788,15 @@ impl JobRunner {
         } else {
             JobStatus::PartiallyFailed
         };
-        self.store.set_job_status(id, status).await?;
+        if let Err(err) = self.store.set_job_status(id, status).await {
+            tracing::error!(%id, error = %err, "could not journal how a job ended");
+        }
         let mut detail = format!("{succeeded} succeeded, {failed} failed, {cancelled} cancelled");
+        if unjournaled > 0 {
+            detail.push_str(&format!(
+                "; the job journal could not keep the result of {unjournaled} target(s)"
+            ));
+        }
         if let (Some(name), true) = (&safety_name, safety_snapshots > 0) {
             detail.push_str(&format!("; safety snapshot '{name}' taken on {safety_snapshots} VM(s)"));
         }
@@ -800,16 +836,21 @@ impl JobRunner {
                 targets: still_running,
             });
         }
-        self.audit(
-            &ctx,
-            "job_finished",
-            &summary,
-            &spec,
-            id,
-            Some(status.as_str()),
-            Some(&detail),
-        )
-        .await?;
+        // Best effort: a failing audit write must not turn the job's real result into a failure.
+        if let Err(err) = self
+            .audit(
+                &ctx,
+                "job_finished",
+                &summary,
+                &spec,
+                id,
+                Some(status.as_str()),
+                Some(&detail),
+            )
+            .await
+        {
+            tracing::error!(%id, error = %err, "could not audit a job's end");
+        }
         self.emit(JobEvent::Finished { job_id: id, status });
         Ok(())
     }
@@ -901,7 +942,13 @@ impl JobRunner {
                 let github_token = crate::updates::stored_token(&self.store, self.vault.as_ref(), &spec.ctx)
                     .await?
                     .require()?;
-                self.updater.install(&github_token, version).await?;
+                // Cancel stops the download (dropping it ends the request). The installer only starts after the
+                // job has ended, so nothing is half installed.
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => return Err(CoreError::Cancelled),
+                    installed = self.updater.install(&github_token, version) => installed?,
+                }
                 Ok(TargetOutcome::done())
             }
             (

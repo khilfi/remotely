@@ -33,6 +33,7 @@ import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   api,
+  changedRequest,
   errorCode,
   errorMessage,
   type ApprovalAnswers,
@@ -107,7 +108,7 @@ function ContainerImpactLines({ impact }: { impact: ContainerImpact }) {
 type Countdown = { jobId: string; until: number; seconds: number };
 
 export function ApprovalDialog({
-  request,
+  request: asked,
   vault,
   onOpenVault,
   onClose,
@@ -115,6 +116,10 @@ export function ApprovalDialog({
   approve: approveWith,
   cancel: cancelWith,
 }: Props) {
+  // AP-01: the core may ask again (a target became Prod or protected meanwhile) under the same id: the new request
+  // replaces this one. Another request from the caller (another id) is shown as it comes.
+  const [askedAgain, setRequest] = useState<ApprovalRequest | null>(null);
+  const request = askedAgain?.id === asked.id ? askedAgain : asked;
   const { steps, tier } = request;
   const snapshot = find(steps, "safetySnapshot");
   const typeCount = find(steps, "typeTargetCount");
@@ -135,18 +140,22 @@ export function ApprovalDialog({
   const [noVault, setNoVault] = useState(false);
   const [busy, setBusy] = useState(false);
   const [countdown, setCountdown] = useState<Countdown | null>(null);
+  // AP-01: the approval waited too long and is gone in the core; only Cancel is left.
+  const [expired, setExpired] = useState(false);
   const vaultMissing = reauth && (noVault || vault?.status === "notSetUp");
 
   const ready =
     (!typeCount || Number(typed) === typeCount.expected) &&
     (!needsReason || reason.trim() !== "") &&
     (!reauth || password !== "");
-  const notReady = approveReason({ steps, typedCount: typed, reason, password, busy });
+  const notReady = expired
+    ? "This approval expired: start the action again"
+    : approveReason({ steps, typedCount: typed, reason, password, busy });
   // FD-01: the first answer to type gets the focus, and Enter in any of them approves once all are
   // right (the same as pressing Approve).
   const firstField = typeCount ? "count" : needsReason ? "reason" : reauth ? "password" : null;
   const enterApproves = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && ready && !busy) {
+    if (e.key === "Enter" && ready && !busy && !expired) {
       e.preventDefault();
       void approve();
     }
@@ -176,6 +185,15 @@ export function ApprovalDialog({
     } catch (err) {
       // The request stays pending on a wrong answer, so the user can correct it.
       setError(errorMessage(err));
+      const again = changedRequest(err);
+      if (again) {
+        // Asked again under the same id: the answers start over, for what the action would do now.
+        setRequest(again);
+        setTyped("");
+        setReason("");
+        setSafetySnapshot(find(again.steps, "safetySnapshot")?.defaultOn ?? false);
+      }
+      setExpired(errorCode(err) === "approval_expired");
       setNoVault(errorCode(err) === "vault_not_set_up");
       setPassword("");
     } finally {
@@ -459,7 +477,7 @@ export function ApprovalDialog({
             <Button
               variant={risky ? "destructive" : "default"}
               onClick={() => void approve()}
-              disabled={!ready || busy}
+              disabled={!ready || busy || expired}
               autoFocus={tier === "medium"}
             >
               {request.exec?.multiExec

@@ -5,6 +5,8 @@
 mod clipboard;
 mod command_panel;
 mod containers;
+pub mod data_dirs;
+pub mod diagnostics;
 mod files;
 mod host_details;
 mod ipc;
@@ -13,168 +15,82 @@ mod terminal;
 mod tunnels;
 pub mod updater;
 
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use remotely_core::adapters::updater::{DisabledUpdater, UpdaterAdapter};
+use remotely_core::store::NewAuditEntry;
 use remotely_core::{Core, CoreConfig};
-use tauri::utils::config::AppDirectoriesOverride;
-use tauri::{DragDropEvent, Emitter, Manager, WindowEvent};
+use tauri::webview::{PageLoadEvent, PageLoadPayload};
+use tauri::{App, AppHandle, DragDropEvent, Emitter, Manager, Runtime, Webview, WindowEvent};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
+
+use crate::data_dirs::{app_directories_override, data_root};
 
 pub struct AppState {
     pub core: Arc<Core>,
 }
 
+/// QL-15: how many times the main window's page has started loading; every load after the first is a reload.
+#[derive(Default)]
+struct PageLoads(AtomicU32);
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,sqlx=warn,tao=warn,wry=warn".into()),
-        )
-        .init();
-
     let mut context = tauri::generate_context!();
-    match app_directories_override(
-        std::env::var_os("REMOTELY_DATA_DIR"),
-        &context.config().identifier,
-        cfg!(debug_assertions),
-    ) {
+    let identifier = context.config().identifier.clone();
+    let data_env = std::env::var_os("REMOTELY_DATA_DIR");
+    let debug_build = cfg!(debug_assertions);
+
+    // QL-15: the log file and the panic hook come first, so even a start that fails leaves a trace.
+    let log_dir = data_root(data_env.clone(), &identifier, debug_build)
+        .ok()
+        .map(|root| root.join(diagnostics::LOG_FOLDER));
+    let no_log_file = diagnostics::init_logging(log_dir.as_deref());
+    diagnostics::install_panic_hook(log_dir.clone());
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "Remotely is starting");
+    if let Some(problem) = no_log_file {
+        tracing::warn!(problem, "logging to stdout only");
+    }
+
+    match app_directories_override(data_env, &identifier, debug_build) {
         Ok(Some(dirs)) => context.config_mut().app.app_directories_override = Some(dirs),
         Ok(None) => {}
         Err(err) => {
             tracing::error!(error = err, "the app can't choose its data folder");
+            diagnostics::explain_startup_failure(err, log_dir.as_deref());
             std::process::exit(1);
         }
     }
 
-    let result = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    // QL-15: a second launch brings this window forward and exits before it opens the database, so it can't
+    // mark this one's running jobs as interrupted or race its audit writes. Release builds only: a debug build
+    // shares the identifier, and must be able to run beside the installed app (its data folder is its own).
+    #[cfg(not(debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| focus_main(app)));
+    let setup_logs = log_dir.clone();
+    let result = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         // AP-05: the audit export's save dialog, opened from Rust (no dialog permission for the UI).
         .plugin(tauri_plugin_dialog::init())
         // QL-07: notifications, shown from Rust (no notification permission for the UI).
         .plugin(tauri_plugin_notification::init())
-        .setup(|app| {
-            // %LOCALAPPDATA%\com.remotely.desktop, its `.dev` sibling for a debug build, or
-            // REMOTELY_DATA_DIR (see `app_directories_override`). Never the working directory, so nothing
-            // private can land in the public repo (CLAUDE.md).
-            let data_dir = app.path().app_local_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
-            // FD-14: signed updates from the private repo's GitHub Releases, with the token from the vault.
-            let updater: Arc<dyn UpdaterAdapter> = match updater::TauriUpdater::new(app.handle().clone()) {
-                Ok(updater) => Arc::new(updater),
-                Err(err) => {
-                    tracing::error!(error = %err, "update checks are unavailable");
-                    Arc::new(DisabledUpdater)
-                }
-            };
-            let config = CoreConfig {
-                db_path: data_dir.join("remotely.db"),
-                vmrun_path: None,
-                vboxmanage_path: None,
-                account: windows_account(),
-                display_name: std::env::var("USERNAME").unwrap_or_else(|_| "user".into()),
-                updater,
-            };
-            tracing::info!(data_dir = %data_dir.display(), "starting core");
-            let core = Arc::new(tauri::async_runtime::block_on(Core::init(config))?);
-
-            // Job progress -> UI.
-            let mut job_events = core.jobs.subscribe();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match job_events.recv().await {
-                        Ok(event) => {
-                            let _ = handle.emit("job://event", &event);
-                        }
-                        Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed job events"),
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            });
-
-            // SS-04: vault status -> UI, so the idle lock shows at once.
-            let mut vault_status = core.vault.watch();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                while vault_status.changed().await.is_ok() {
-                    let status = *vault_status.borrow_and_update();
-                    let _ = handle.emit("vault://status", status);
-                }
-            });
-
-            // MO-01 to MO-04: host-side and guest metrics every 5 s; each round's cost -> UI, which then
-            // reads what it shows.
-            let metrics = Arc::clone(&core.metrics);
-            tauri::async_runtime::spawn(async move { metrics.run(CancellationToken::new()).await });
-            let mut rounds = core.metrics.subscribe();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match rounds.recv().await {
-                        Ok(cost) => {
-                            let _ = handle.emit("metrics://round", &cost);
-                        }
-                        Err(RecvError::Lagged(_)) => {}
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            });
-
-            // SS-10: MultiExec lines that finished, and lines held while waiting keys were sent -> UI.
-            let mut lines = core.multiexec.subscribe();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match lines.recv().await {
-                        Ok(event) => {
-                            let _ = handle.emit("multiexec://event", &event);
-                        }
-                        Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed MultiExec events"),
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            });
-
-            // SS-08: file transfers (queued, progress, done) -> UI.
-            let mut transfers = core.terminals.subscribe_transfers();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match transfers.recv().await {
-                        Ok(transfer) => {
-                            let _ = handle.emit("files://transfer", &transfer);
-                        }
-                        Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed transfer events"),
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            });
-
-            // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
-            let reachability = Arc::clone(&core.reachability);
-            tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
-            let mut reach = core.reachability.subscribe();
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    match reach.recv().await {
-                        Ok(update) => {
-                            let _ = handle.emit("reachability://update", &update);
-                        }
-                        Err(RecvError::Lagged(_)) => {}
-                        Err(RecvError::Closed) => break,
-                    }
-                }
-            });
-
-            app.manage(AppState { core });
+        .manage(diagnostics::LogsFolder(log_dir.clone()))
+        .manage(PageLoads::default())
+        .setup(move |app| {
+            // Tauri turns a setup error into a panic, so a failed start is explained here and ends here.
+            if let Err(err) = start(app, setup_logs.as_deref()) {
+                tracing::error!(error = %err, "the app could not start");
+                diagnostics::explain_startup_failure(&err.to_string(), setup_logs.as_deref());
+                app.cleanup_before_exit();
+                std::process::exit(1);
+            }
             Ok(())
         })
+        .on_page_load(page_loaded)
         // SS-08: files dropped on the window are staged in Rust; the UI only learns where they fell.
         .on_window_event(|window, event| {
             if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, position }) = event {
@@ -183,200 +99,14 @@ pub fn run() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![
-            ipc::app_info,
-            ipc::vm_refresh,
-            ipc::vm_list,
-            ipc::tags_list,
-            ipc::vm_tag,
-            ipc::vm_untag,
-            ipc::vm_set_environment,
-            ipc::tag_delete,
-            ipc::filters_list,
-            ipc::filter_save,
-            ipc::filter_delete,
-            ipc::command_submit,
-            ipc::command_approve,
-            ipc::command_cancel_approval,
-            ipc::job_cancel,
-            ipc::jobs_recent,
-            ipc::job_targets,
-            ipc::snapshots_list,
-            ipc::snapshot_limits,
-            ipc::policy_rules,
-            ipc::policy_catalog,
-            ipc::policy_set_rules,
-            ipc::audit_recent,
-            ipc::audit_verify,
-            ipc::audit_export_csv,
-            ipc::settings_get,
-            ipc::settings_set_vmrun_path,
-            ipc::settings_set_vboxmanage_path,
-            ipc::settings_set_scan_folders,
-            ipc::settings_set_power_on_limit,
-            ipc::settings_set_shutdown_wait,
-            ipc::settings_set_update_checks,
-            ipc::settings_set_bulk_parallel,
-            ipc::presentation_get,
-            ipc::presentation_set,
-            ipc::update_check,
-            ipc::update_token_set,
-            ipc::update_token_test,
-            ipc::update_token_remove,
-            ipc::vault_info,
-            ipc::vault_setup,
-            ipc::vault_unlock,
-            ipc::vault_lock,
-            ipc::vault_change_password,
-            ipc::vault_set_windows_login,
-            ipc::secrets_list,
-            ipc::secret_add,
-            ipc::secret_import_key,
-            ipc::secret_replace,
-            ipc::secret_rename,
-            ipc::secret_delete,
-            ipc::sessions_list,
-            ipc::session_folders,
-            ipc::session_create,
-            ipc::session_update,
-            ipc::session_duplicate,
-            ipc::session_delete,
-            ipc::session_link_vm,
-            ipc::session_confirm_vm_link,
-            ipc::vm_links_ambiguous,
-            ipc::sessions_move,
-            ipc::folder_create,
-            ipc::folder_rename,
-            ipc::folder_move,
-            ipc::folder_delete,
-            ipc::import_preview,
-            ipc::import_guide,
-            ipc::import_save_sample,
-            ipc::import_commit,
-            ipc::transfer_export,
-            ipc::transfer_choose,
-            ipc::transfer_open,
-            ipc::transfer_refresh,
-            ipc::transfer_close,
-            ipc::transfer_commit,
-            ipc::ssh_keys_list,
-            ipc::ssh_key_generate,
-            ipc::ssh_key_public,
-            ipc::ssh_key_attach,
-            ipc::ssh_public_key_parse,
-            ipc::bulk_limits,
-            ipc::bulk_targets,
-            ipc::bulk_preview,
-            ipc::bulk_runs,
-            ipc::bulk_results,
-            ipc::bulk_host_output,
-            ipc::bulk_diff,
-            ipc::bulk_retry_failed,
-            ipc::bulk_export,
-            ipc::command_preview,
-            ipc::metrics_overview,
-            ipc::metrics_series,
-            ipc::metrics_host_usage,
-            ipc::metrics_capacity,
-            ipc::metrics_watch,
-            ipc::background_login_retry,
-            ipc::session_startup_rating,
-            host_details::metrics_this_pc,
-            host_details::host_specs,
-            host_details::host_specs_refresh,
-            host_details::host_admin,
-            host_details::host_updates,
-            host_details::host_details_release,
-            host_details::vm_specs,
-            terminal::terminal_open,
-            terminal::terminal_quick_connect,
-            terminal::terminal_open_like,
-            terminal::terminal_write,
-            terminal::terminal_resize,
-            terminal::terminal_reconnect,
-            terminal::terminal_close,
-            terminal::terminal_host_key_answer,
-            terminal::terminal_host_key_replace,
-            terminal::terminal_settings,
-            terminal::terminal_set_settings,
-            terminal::known_hosts_list,
-            terminal::known_host_remove,
-            terminal::quick_connect_history,
-            terminal::quick_connect_forget,
-            terminal::sessions_recent,
-            terminal::session_tree,
-            terminal::reachability_watch,
-            terminal::terminal_output_text,
-            terminal::terminal_output_print,
-            terminal::terminal_output_save,
-            terminal::terminal_log_start,
-            terminal::terminal_log_stop,
-            containers::containers_hosts,
-            containers::containers_marks,
-            containers::containers_set_marks,
-            containers::containers_detect,
-            containers::containers_version,
-            containers::containers_list,
-            containers::containers_stats,
-            containers::containers_details,
-            containers::containers_logs,
-            containers::containers_images,
-            containers::containers_volumes,
-            containers::containers_networks,
-            containers::containers_release,
-            containers::container_shell_open,
-            ipc::settings_set_docker_path,
-            tunnels::forwards_list,
-            tunnels::forwards_all,
-            tunnels::forwards_save,
-            tunnels::terminal_tunnels,
-            tunnels::terminal_tunnel_start,
-            tunnels::terminal_tunnel_request,
-            tunnels::terminal_tunnel_approve,
-            tunnels::terminal_tunnel_decline,
-            tunnels::terminal_tunnel_stop,
-            multiexec::multiexec_set_targets,
-            multiexec::multiexec_stop,
-            multiexec::multiexec_status,
-            multiexec::multiexec_input,
-            multiexec::multiexec_approve,
-            multiexec::multiexec_cancel,
-            multiexec::multiexec_recordings,
-            multiexec::multiexec_recorded,
-            multiexec::multiexec_recorded_output,
-            multiexec::multiexec_recorded_diff,
-            multiexec::multiexec_export,
-            command_panel::favourites_list,
-            command_panel::favourite_add,
-            command_panel::favourite_update,
-            command_panel::favourite_delete,
-            command_panel::favourites_reorder,
-            command_panel::command_library,
-            command_panel::command_inspect,
-            command_panel::command_fill,
-            command_panel::terminal_type_secret,
-            command_panel::notify_command_finished,
-            command_panel::open_manual,
-            clipboard::clipboard_read_text,
-            files::files_folder,
-            files::files_list,
-            files::files_back,
-            files::files_look_up,
-            files::files_pick_upload,
-            files::files_upload,
-            files::files_unstage,
-            files::files_download,
-            files::files_transfers,
-            files::files_cancel,
-            files::files_retry,
-            files::files_open_folder,
-        ])
+        .invoke_handler(commands())
         .build(context);
 
     let app = match result {
         Ok(app) => app,
         Err(err) => {
             tracing::error!(error = %err, "the app stopped with an error");
+            diagnostics::explain_startup_failure(&err.to_string(), log_dir.as_deref());
             std::process::exit(1);
         }
     };
@@ -384,10 +114,447 @@ pub fn run() {
         // SS-03: terminals still open are closed (and their closing audited) before the app exits.
         if let tauri::RunEvent::Exit = event {
             if let Some(state) = handle.try_state::<AppState>() {
-                tauri::async_runtime::block_on(state.core.terminals.close_all());
+                tauri::async_runtime::block_on(state.core.shutdown());
             }
+            tracing::info!("Remotely stopped");
         }
     });
+}
+
+/// QL-15: the running window, brought forward for a second launch.
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn focus_main<R: Runtime>(app: &AppHandle<R>) {
+    tracing::info!("Remotely was started again; showing the running window");
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// QL-15: the page started loading again (F5 in a debug build, "Reload" after a UI crash, or WebView2 itself).
+/// What the old page had open can no longer be seen or answered, so it is closed: terminals with their tunnels,
+/// MultiExec, and approvals still waiting. Running jobs go on (Activity shows them).
+fn page_loaded<R: Runtime>(webview: &Webview<R>, payload: &PageLoadPayload<'_>) {
+    if payload.event() != PageLoadEvent::Started || webview.label() != "main" {
+        return;
+    }
+    let loads = webview.state::<PageLoads>().0.fetch_add(1, Ordering::SeqCst);
+    if loads == 0 {
+        return;
+    }
+    let Some(state) = webview.try_state::<AppState>() else {
+        return;
+    };
+    let core = Arc::clone(&state.core);
+    // Taken now, so what the new page opens is left alone.
+    let shown = core.ui_snapshot();
+    if shown.is_empty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let released = core.release_ui(shown).await;
+        tracing::warn!(
+            terminals = released.terminals,
+            approvals = released.approvals,
+            "the window reloaded; closed what it had open"
+        );
+    });
+}
+
+/// Opens the database (offering a fresh one when it can't be opened), starts the core and wires its events to the
+/// UI. An error here ends the app with a message box (see `run`).
+fn start(app: &mut App, log_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    // %LOCALAPPDATA%\com.remotely.desktop, its `.dev` sibling for a debug build, or
+    // REMOTELY_DATA_DIR (see `app_directories_override`). Never the working directory, so nothing
+    // private can land in the public repo (CLAUDE.md).
+    let data_dir = app.path().app_local_data_dir()?;
+    if let (Ok(tauri_logs), Some(ours)) = (app.path().app_log_dir(), log_dir) {
+        if tauri_logs != ours {
+            tracing::warn!(tauri = %tauri_logs.display(), ours = %ours.display(), "two different log folders");
+        }
+    }
+    std::fs::create_dir_all(&data_dir)?;
+    // FD-14: signed updates from the private repo's GitHub Releases, with the token from the vault.
+    let updater: Arc<dyn UpdaterAdapter> = match updater::TauriUpdater::new(app.handle().clone()) {
+        Ok(updater) => Arc::new(updater),
+        Err(err) => {
+            tracing::error!(error = %err, "update checks are unavailable");
+            Arc::new(DisabledUpdater)
+        }
+    };
+    let db_path = data_dir.join("remotely.db");
+    let config = || CoreConfig {
+        db_path: db_path.clone(),
+        vmrun_path: None,
+        vboxmanage_path: None,
+        account: windows_account(),
+        display_name: std::env::var("USERNAME").unwrap_or_else(|_| "user".into()),
+        updater: Arc::clone(&updater),
+    };
+    tracing::info!(data_dir = %data_dir.display(), "starting core");
+    let core = match tauri::async_runtime::block_on(Core::init(config())) {
+        Ok(core) => core,
+        // QL-15: a database that won't open or migrate (damaged, or from a newer version) is set aside and
+        // replaced by an empty one only if the user says so; otherwise the app quits and nothing changes.
+        Err(err) if err.is_database() => {
+            tracing::error!(error = %err, "the database can't be opened");
+            if !diagnostics::offer_fresh_database(&err.to_string(), err.is_newer_database(), &db_path, log_dir) {
+                diagnostics::mark_explained();
+                return Err(err.into());
+            }
+            let aside = diagnostics::set_database_aside(&db_path)
+                .map_err(|io| format!("the database could not be set aside: {io}"))?;
+            tracing::warn!(backup = %aside.display(), "the database was set aside; starting with an empty one");
+            let core = tauri::async_runtime::block_on(Core::init(config()))?;
+            let name = aside
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let detail = format!("the database could not be opened ({err}); it was kept as {name}");
+            let noted = tauri::async_runtime::block_on(core.store.append_audit(
+                &core.ctx,
+                NewAuditEntry {
+                    event: "database_set_aside",
+                    action: "Started with an empty database",
+                    tier: None,
+                    job_id: None,
+                    targets: &[],
+                    approval: None,
+                    result: None,
+                    detail: Some(&detail),
+                },
+            ));
+            if let Err(err) = noted {
+                tracing::error!(error = %err, "could not audit the fresh start");
+            }
+            core
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let core = Arc::new(core);
+    forward_events(app, &core);
+    // QL-15: no F5, Ctrl+R or DevTools keys in a release build: a reload would leave the core's work unseen.
+    #[cfg(all(windows, not(debug_assertions)))]
+    turn_off_browser_keys(app);
+    app.manage(AppState { core });
+    Ok(())
+}
+
+/// QL-15: WebView2's own browser keys off (reload, find, print, zoom, DevTools); editing keys stay.
+#[cfg(all(windows, not(debug_assertions)))]
+fn turn_off_browser_keys(app: &App) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let asked = window.with_webview(|webview| {
+        use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings3;
+        use windows::core::Interface;
+        // SAFETY: COM calls on the window's own WebView2 controller, on the thread `with_webview` runs us on.
+        let turned_off = unsafe {
+            webview
+                .controller()
+                .CoreWebView2()
+                .and_then(|core| core.Settings())
+                .and_then(|settings| settings.cast::<ICoreWebView2Settings3>())
+                .and_then(|settings| settings.SetAreBrowserAcceleratorKeysEnabled(false))
+        };
+        if let Err(err) = turned_off {
+            tracing::warn!(error = %err, "the browser keys stay on");
+        }
+    });
+    if let Err(err) = asked {
+        tracing::warn!(error = %err, "the browser keys stay on");
+    }
+}
+
+/// Core events -> UI, and the background readers (metrics, reachability).
+fn forward_events(app: &App, core: &Arc<Core>) {
+    {
+        // Job progress -> UI.
+        let mut job_events = core.jobs.subscribe();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match job_events.recv().await {
+                    Ok(event) => {
+                        let _ = handle.emit("job://event", &event);
+                    }
+                    Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed job events"),
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // SS-04: vault status -> UI, so the idle lock shows at once.
+        let mut vault_status = core.vault.watch();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            while vault_status.changed().await.is_ok() {
+                let status = *vault_status.borrow_and_update();
+                let _ = handle.emit("vault://status", status);
+            }
+        });
+
+        // MO-01 to MO-04: host-side and guest metrics every 5 s; each round's cost -> UI, which then
+        // reads what it shows.
+        let metrics = Arc::clone(&core.metrics);
+        tauri::async_runtime::spawn(async move { metrics.run(CancellationToken::new()).await });
+        let mut rounds = core.metrics.subscribe();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match rounds.recv().await {
+                    Ok(cost) => {
+                        let _ = handle.emit("metrics://round", &cost);
+                    }
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // SS-10: MultiExec lines that finished, and lines held while waiting keys were sent -> UI.
+        let mut lines = core.multiexec.subscribe();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match lines.recv().await {
+                    Ok(event) => {
+                        let _ = handle.emit("multiexec://event", &event);
+                    }
+                    Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed MultiExec events"),
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // SS-08: file transfers (queued, progress, done) -> UI.
+        let mut transfers = core.terminals.subscribe_transfers();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match transfers.recv().await {
+                    Ok(transfer) => {
+                        let _ = handle.emit("files://transfer", &transfer);
+                    }
+                    Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed transfer events"),
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
+        // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
+        let reachability = Arc::clone(&core.reachability);
+        tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
+        let mut reach = core.reachability.subscribe();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match reach.recv().await {
+                    Ok(update) => {
+                        let _ = handle.emit("reachability://update", &update);
+                    }
+                    Err(RecvError::Lagged(_)) => {}
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+}
+
+/// Every IPC command the UI may call.
+fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        ipc::app_info,
+        diagnostics::logs_info,
+        diagnostics::logs_open,
+        diagnostics::ui_error,
+        ipc::vm_refresh,
+        ipc::vm_list,
+        ipc::tags_list,
+        ipc::vm_tag,
+        ipc::vm_untag,
+        ipc::vm_set_environment,
+        ipc::tag_delete,
+        ipc::filters_list,
+        ipc::filter_save,
+        ipc::filter_delete,
+        ipc::command_submit,
+        ipc::command_approve,
+        ipc::command_cancel_approval,
+        ipc::job_cancel,
+        ipc::jobs_recent,
+        ipc::job_targets,
+        ipc::snapshots_list,
+        ipc::snapshot_limits,
+        ipc::policy_rules,
+        ipc::policy_catalog,
+        ipc::policy_set_rules,
+        ipc::audit_recent,
+        ipc::audit_verify,
+        ipc::audit_export_csv,
+        ipc::settings_get,
+        ipc::settings_set_vmrun_path,
+        ipc::settings_set_vboxmanage_path,
+        ipc::settings_set_scan_folders,
+        ipc::settings_set_power_on_limit,
+        ipc::settings_set_shutdown_wait,
+        ipc::settings_set_update_checks,
+        ipc::settings_set_bulk_parallel,
+        ipc::presentation_get,
+        ipc::presentation_set,
+        ipc::update_check,
+        ipc::update_token_set,
+        ipc::update_token_test,
+        ipc::update_token_remove,
+        ipc::vault_info,
+        ipc::vault_setup,
+        ipc::vault_unlock,
+        ipc::vault_lock,
+        ipc::vault_change_password,
+        ipc::vault_set_windows_login,
+        ipc::secrets_list,
+        ipc::secret_add,
+        ipc::secret_import_key,
+        ipc::secret_replace,
+        ipc::secret_rename,
+        ipc::secret_delete,
+        ipc::sessions_list,
+        ipc::session_folders,
+        ipc::session_create,
+        ipc::session_update,
+        ipc::session_duplicate,
+        ipc::session_delete,
+        ipc::session_link_vm,
+        ipc::session_confirm_vm_link,
+        ipc::vm_links_ambiguous,
+        ipc::sessions_move,
+        ipc::folder_create,
+        ipc::folder_rename,
+        ipc::folder_move,
+        ipc::folder_delete,
+        ipc::import_preview,
+        ipc::import_guide,
+        ipc::import_save_sample,
+        ipc::import_commit,
+        ipc::transfer_export,
+        ipc::transfer_choose,
+        ipc::transfer_open,
+        ipc::transfer_refresh,
+        ipc::transfer_close,
+        ipc::transfer_commit,
+        ipc::ssh_keys_list,
+        ipc::ssh_key_generate,
+        ipc::ssh_key_public,
+        ipc::ssh_key_attach,
+        ipc::ssh_public_key_parse,
+        ipc::bulk_limits,
+        ipc::bulk_targets,
+        ipc::bulk_preview,
+        ipc::bulk_runs,
+        ipc::bulk_results,
+        ipc::bulk_host_output,
+        ipc::bulk_diff,
+        ipc::bulk_retry_failed,
+        ipc::bulk_export,
+        ipc::command_preview,
+        ipc::metrics_overview,
+        ipc::metrics_series,
+        ipc::metrics_host_usage,
+        ipc::metrics_capacity,
+        ipc::metrics_watch,
+        ipc::background_login_retry,
+        ipc::session_startup_rating,
+        host_details::metrics_this_pc,
+        host_details::host_specs,
+        host_details::host_specs_refresh,
+        host_details::host_admin,
+        host_details::host_updates,
+        host_details::host_details_release,
+        host_details::vm_specs,
+        terminal::terminal_open,
+        terminal::terminal_quick_connect,
+        terminal::terminal_open_like,
+        terminal::terminal_write,
+        terminal::terminal_resize,
+        terminal::terminal_reconnect,
+        terminal::terminal_close,
+        terminal::terminal_host_key_answer,
+        terminal::terminal_host_key_replace,
+        terminal::terminal_settings,
+        terminal::terminal_set_settings,
+        terminal::known_hosts_list,
+        terminal::known_host_remove,
+        terminal::quick_connect_history,
+        terminal::quick_connect_forget,
+        terminal::sessions_recent,
+        terminal::session_tree,
+        terminal::reachability_watch,
+        terminal::terminal_output_text,
+        terminal::terminal_output_print,
+        terminal::terminal_output_save,
+        terminal::terminal_log_start,
+        terminal::terminal_log_stop,
+        containers::containers_hosts,
+        containers::containers_marks,
+        containers::containers_set_marks,
+        containers::containers_detect,
+        containers::containers_version,
+        containers::containers_list,
+        containers::containers_stats,
+        containers::containers_details,
+        containers::containers_logs,
+        containers::containers_images,
+        containers::containers_volumes,
+        containers::containers_networks,
+        containers::containers_release,
+        containers::container_shell_open,
+        ipc::settings_set_docker_path,
+        tunnels::forwards_list,
+        tunnels::forwards_all,
+        tunnels::forwards_save,
+        tunnels::terminal_tunnels,
+        tunnels::terminal_tunnel_start,
+        tunnels::terminal_tunnel_request,
+        tunnels::terminal_tunnel_approve,
+        tunnels::terminal_tunnel_decline,
+        tunnels::terminal_tunnel_stop,
+        multiexec::multiexec_set_targets,
+        multiexec::multiexec_stop,
+        multiexec::multiexec_status,
+        multiexec::multiexec_input,
+        multiexec::multiexec_approve,
+        multiexec::multiexec_cancel,
+        multiexec::multiexec_recordings,
+        multiexec::multiexec_recorded,
+        multiexec::multiexec_recorded_output,
+        multiexec::multiexec_recorded_diff,
+        multiexec::multiexec_export,
+        command_panel::favourites_list,
+        command_panel::favourite_add,
+        command_panel::favourite_update,
+        command_panel::favourite_delete,
+        command_panel::favourites_reorder,
+        command_panel::command_library,
+        command_panel::command_inspect,
+        command_panel::command_fill,
+        command_panel::terminal_type_secret,
+        command_panel::notify_command_finished,
+        command_panel::open_manual,
+        clipboard::clipboard_read_text,
+        files::files_folder,
+        files::files_list,
+        files::files_back,
+        files::files_look_up,
+        files::files_pick_upload,
+        files::files_upload,
+        files::files_unstage,
+        files::files_download,
+        files::files_transfers,
+        files::files_cancel,
+        files::files_retry,
+        files::files_open_folder,
+    ]
 }
 
 /// DOMAIN\user, which keys the local user record.
@@ -396,79 +563,5 @@ fn windows_account() -> String {
     match std::env::var("USERDOMAIN") {
         Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
         _ => user,
-    }
-}
-
-/// Moves Tauri's app directories (the database and WebView2's profile) for this build.
-///
-/// A debug build (`npm run tauri dev`) uses `%LOCALAPPDATA%\com.remotely.desktop.dev`. Otherwise it would share the
-/// installed app's folder: a migration it adds would reach the installed app's database, which the older release then
-/// refuses to open, and its window would join the installed app's WebView2 browser process, which ignores
-/// `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`. A release build keeps Tauri's default, `%LOCALAPPDATA%\com.remotely.desktop`.
-/// `REMOTELY_DATA_DIR` overrides both. It must be absolute: Tauri resolves a relative override next to the executable,
-/// which for a dev build is inside the working directory.
-fn app_directories_override(
-    data_dir: Option<OsString>,
-    identifier: &str,
-    debug_build: bool,
-) -> Result<Option<AppDirectoriesOverride>, &'static str> {
-    match data_dir.filter(|dir| !dir.is_empty()).map(PathBuf::from) {
-        Some(dir) if dir.is_absolute() => Ok(Some(AppDirectoriesOverride::Root(dir))),
-        Some(_) => Err("REMOTELY_DATA_DIR must be an absolute path outside the repository"),
-        None if debug_build => Ok(Some(AppDirectoriesOverride::Root(
-            Path::new("$LOCALDATA").join(format!("{identifier}.dev")),
-        ))),
-        None => Ok(None),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    const IDENTIFIER: &str = "com.remotely.desktop";
-
-    #[test]
-    fn release_build_keeps_the_default_folder() {
-        assert_eq!(app_directories_override(None, IDENTIFIER, false), Ok(None));
-    }
-
-    #[test]
-    fn debug_build_uses_a_dev_folder_next_to_it() {
-        assert_eq!(
-            app_directories_override(None, IDENTIFIER, true),
-            Ok(Some(AppDirectoriesOverride::Root(
-                Path::new("$LOCALDATA").join("com.remotely.desktop.dev")
-            )))
-        );
-    }
-
-    #[test]
-    fn remotely_data_dir_overrides_both_builds() {
-        let dir = std::env::temp_dir().join("remotely-data");
-        for debug_build in [false, true] {
-            assert_eq!(
-                app_directories_override(Some(dir.clone().into()), IDENTIFIER, debug_build),
-                Ok(Some(AppDirectoriesOverride::Root(dir.clone())))
-            );
-        }
-    }
-
-    #[test]
-    fn empty_remotely_data_dir_counts_as_unset() {
-        assert_eq!(
-            app_directories_override(Some(OsString::new()), IDENTIFIER, false),
-            Ok(None)
-        );
-        assert_eq!(
-            app_directories_override(Some(OsString::new()), IDENTIFIER, true),
-            app_directories_override(None, IDENTIFIER, true)
-        );
-    }
-
-    #[test]
-    fn relative_remotely_data_dir_is_refused() {
-        assert!(app_directories_override(Some("data".into()), IDENTIFIER, true).is_err());
-        assert!(app_directories_override(Some("data".into()), IDENTIFIER, false).is_err());
     }
 }

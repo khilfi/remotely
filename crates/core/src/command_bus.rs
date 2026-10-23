@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use crate::adapters::containers::{EngineKind, ImageRef, PruneWhat};
 use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::remote::forward::ForwardKind;
 use crate::capacity::CapacityChecker;
-use crate::domain::{now_rfc3339, ContainerHost, Context, Target, TargetRef};
+use crate::domain::{now_rfc3339, ContainerHost, Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
 use crate::forwards::PortForward;
@@ -867,12 +868,24 @@ pub struct ApprovalRecord {
     pub approved_at: String,
 }
 
+/// AP-01: how long an approval waits for its answer. After that the targets' state, labels and protection
+/// the dialog showed may be out of date, so the request expires and the action has to be started again.
+pub const APPROVAL_TTL: Duration = Duration::from_secs(15 * 60);
+
 struct Pending {
     ctx: Context,
     command: Command,
     decision: Decision,
     request: ApprovalRequest,
     retry_of: Option<Uuid>,
+    /// When it was asked (or asked again), for [`APPROVAL_TTL`].
+    asked: Instant,
+}
+
+impl Pending {
+    fn expired(&self, ttl: Duration) -> bool {
+        self.asked.elapsed() > ttl
+    }
 }
 
 pub struct CommandBus {
@@ -885,6 +898,8 @@ pub struct CommandBus {
     capacity: CapacityChecker,
     impact: ImpactPreviewer,
     pending: Mutex<HashMap<Uuid, Pending>>,
+    /// [`APPROVAL_TTL`]; tests shorten it.
+    approval_ttl: RwLock<Duration>,
 }
 
 impl CommandBus {
@@ -906,7 +921,97 @@ impl CommandBus {
             capacity,
             impact,
             pending: Mutex::new(HashMap::new()),
+            approval_ttl: RwLock::new(APPROVAL_TTL),
         }
+    }
+
+    /// AP-01: how long approvals wait (tests shorten it). Applies to the ones open now too.
+    pub fn set_approval_ttl(&self, ttl: Duration) {
+        *locks::write(&self.approval_ttl) = ttl;
+    }
+
+    fn approval_ttl(&self) -> Duration {
+        *locks::read(&self.approval_ttl)
+    }
+
+    /// The ids of the approvals waiting for an answer now (QL-15: the window that asked them went away).
+    pub fn pending_approvals(&self) -> Vec<Uuid> {
+        locks::lock(&self.pending).keys().copied().collect()
+    }
+
+    /// AP-01: drops the approvals that waited too long, each audited as expired. A failing audit write is
+    /// logged; the approval is gone all the same.
+    async fn expire_stale(&self) {
+        let ttl = self.approval_ttl();
+        let expired: Vec<Pending> = {
+            let mut pending = locks::lock(&self.pending);
+            let ids: Vec<Uuid> = pending
+                .iter()
+                .filter(|(_, p)| p.expired(ttl))
+                .map(|(id, _)| *id)
+                .collect();
+            ids.iter().filter_map(|id| pending.remove(id)).collect()
+        };
+        for p in expired {
+            self.audit_expired(&p, ttl).await;
+        }
+    }
+
+    async fn audit_expired(&self, p: &Pending, ttl: Duration) {
+        let detail = format!(
+            "not answered within {}; nothing ran",
+            crate::error::in_minutes(ttl.as_secs().div_ceil(60))
+        );
+        let written = self
+            .store
+            .append_audit(
+                &p.ctx,
+                NewAuditEntry {
+                    event: "approval_expired",
+                    action: &p.request.summary,
+                    tier: Some(p.decision.tier),
+                    job_id: None,
+                    targets: &p.decision.targets,
+                    approval: None,
+                    result: None,
+                    detail: Some(&detail),
+                },
+            )
+            .await;
+        if let Err(err) = written {
+            tracing::error!(error = %err, "could not audit an approval expiring");
+        }
+    }
+
+    /// QL-15: cancels these approvals if they still wait (audited like a closed dialog, saying why), when the window
+    /// that would answer them has gone. Returns how many were cancelled.
+    pub async fn cancel_approvals(&self, ids: &[Uuid], why: &str) -> usize {
+        let all: Vec<Pending> = {
+            let mut pending = locks::lock(&self.pending);
+            ids.iter().filter_map(|id| pending.remove(id)).collect()
+        };
+        for p in &all {
+            let written = self
+                .store
+                .append_audit(
+                    &p.ctx,
+                    NewAuditEntry {
+                        event: "approval_cancelled",
+                        action: &p.request.summary,
+                        tier: Some(p.decision.tier),
+                        job_id: None,
+                        targets: &p.decision.targets,
+                        approval: None,
+                        result: None,
+                        detail: Some(why),
+                    },
+                )
+                .await;
+            if let Err(err) = written {
+                tracing::error!(error = %err, "could not audit an approval being cancelled");
+            }
+        }
+        all.len()
     }
 
     pub fn rules(&self) -> PolicyRules {
@@ -1125,47 +1230,19 @@ impl CommandBus {
     async fn submit_job(&self, ctx: &Context, command: Command, retry_of: Option<Uuid>) -> Result<SubmitOutcome> {
         // FD-03: nothing is checked, logged or asked while the read-only lock is on.
         locks::read(&self.policy).check_read_only(self.store.read_only().is_locked(), &command)?;
+        self.expire_stale().await;
         if command.targets().is_empty() {
             return Err(CoreError::NoTargets);
         }
         command.validate()?;
         self.check_sudo_password(ctx, &command).await?;
-        let mut targets = Vec::with_capacity(command.targets().len());
-        for target in command.targets() {
-            targets.push(self.directory.resolve(ctx, target).await?);
-        }
+        let targets = self.resolve_targets(ctx, &command).await?;
 
         let mut decision = locks::read(&self.policy).evaluate(&command, &targets);
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
         }
-        // SS-10: what a key other than Enter does in the shells, for the dialog. A Low line runs as is.
-        if let Command::TerminalLine { keys, .. } = &command {
-            decision.warnings.extend(run_key(keys).and_then(RunKey::note));
-        }
-        if let Command::VmPower {
-            op: PowerOp::Start { .. },
-            ..
-        } = &command
-        {
-            // VM-07: capacity check before power-on.
-            let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
-            decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
-        }
-        // VM-18: VirtualBox restores a snapshot only on a VM that is not running, so the revert powers
-        // a running one off first; the preview says which, and the user confirms it.
-        let mut impact = None;
-        if let Command::VmSnapshot {
-            op: SnapshotOp::Revert { .. },
-            ..
-        } = &command
-        {
-            if decision.targets.iter().any(is_virtualbox) {
-                let preview = self.impact.preview(ctx, &decision.targets).await;
-                decision.add_warnings(virtualbox_revert_warnings(&decision.targets, &preview));
-                impact = Some(preview);
-            }
-        }
+        let impact = self.add_warnings(ctx, &command, &mut decision).await;
         let summary = command.summary(decision.targets.len());
 
         if decision.steps.is_empty() {
@@ -1191,47 +1268,10 @@ impl CommandBus {
             });
         }
 
-        let request = ApprovalRequest {
-            id: Uuid::new_v4(),
-            action: decision.action,
-            tier: decision.tier,
-            summary: summary.clone(),
-            steps: decision.steps.clone(),
-            targets: decision.targets.clone(),
-            skipped: decision.skipped.clone(),
-            reasons: decision.reasons.clone(),
-            warnings: decision.warnings.clone(),
-            impact: match impact {
-                Some(impact) => impact,
-                // CT-01, CT-02: container targets are previewed by the containers service.
-                None => self.impact.preview_for(ctx, &command, &decision.targets).await,
-            },
-            exec: self.exec_details(ctx, &command, retry_of).await?,
-            upload: UploadDetails::of(&command),
-            tunnel: TunnelDetails::of(&command),
-        };
-        let detail = decision
-            .reasons
-            .iter()
-            .chain(&decision.warnings)
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("; ");
-        self.store
-            .append_audit(
-                ctx,
-                NewAuditEntry {
-                    event: "approval_requested",
-                    action: &summary,
-                    tier: Some(decision.tier),
-                    job_id: None,
-                    targets: &decision.targets,
-                    approval: None,
-                    result: None,
-                    detail: Some(&detail),
-                },
-            )
+        let request = self
+            .request_for(ctx, Uuid::new_v4(), &command, &decision, impact, retry_of)
             .await?;
+        self.audit_requested(ctx, &decision, &summary, None).await?;
         locks::lock(&self.pending).insert(
             request.id,
             Pending {
@@ -1240,23 +1280,242 @@ impl CommandBus {
                 decision,
                 request: request.clone(),
                 retry_of,
+                asked: Instant::now(),
             },
         );
         Ok(SubmitOutcome::NeedsApproval { request })
     }
 
+    async fn resolve_targets(&self, ctx: &Context, command: &Command) -> Result<Vec<Target>> {
+        let mut targets = Vec::with_capacity(command.targets().len());
+        for target in command.targets() {
+            targets.push(self.directory.resolve(ctx, target).await?);
+        }
+        Ok(targets)
+    }
+
+    /// Warnings found before the action (SS-10 a MultiExec line's run key, VM-07 capacity, VM-18 a VirtualBox
+    /// revert powering a VM off), and the impact preview read for them, if one was. Asking again (AP-01) adds
+    /// them too.
+    async fn add_warnings(
+        &self,
+        ctx: &Context,
+        command: &Command,
+        decision: &mut Decision,
+    ) -> Option<Vec<TargetImpact>> {
+        // SS-10: what a key other than Enter does in the shells, for the dialog. A Low line runs as is.
+        if let Command::TerminalLine { keys, .. } = command {
+            decision.warnings.extend(run_key(keys).and_then(RunKey::note));
+        }
+        if let Command::VmPower {
+            op: PowerOp::Start { .. },
+            ..
+        } = command
+        {
+            // VM-07: capacity check before power-on.
+            let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
+            decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
+        }
+        // VM-18: VirtualBox restores a snapshot only on a VM that is not running, so the revert powers
+        // a running one off first; the preview says which, and the user confirms it.
+        if let Command::VmSnapshot {
+            op: SnapshotOp::Revert { .. },
+            ..
+        } = command
+        {
+            if decision.targets.iter().any(is_virtualbox) {
+                let preview = self.impact.preview(ctx, &decision.targets).await;
+                decision.add_warnings(virtualbox_revert_warnings(&decision.targets, &preview));
+                return Some(preview);
+            }
+        }
+        None
+    }
+
+    /// What the approval dialog shows for `decision` (AP-02).
+    async fn request_for(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        command: &Command,
+        decision: &Decision,
+        impact: Option<Vec<TargetImpact>>,
+        retry_of: Option<Uuid>,
+    ) -> Result<ApprovalRequest> {
+        Ok(ApprovalRequest {
+            id,
+            action: decision.action,
+            tier: decision.tier,
+            summary: command.summary(decision.targets.len()),
+            steps: decision.steps.clone(),
+            targets: decision.targets.clone(),
+            skipped: decision.skipped.clone(),
+            reasons: decision.reasons.clone(),
+            warnings: decision.warnings.clone(),
+            impact: match impact {
+                Some(impact) => impact,
+                // CT-01, CT-02: container targets are previewed by the containers service.
+                None => self.impact.preview_for(ctx, command, &decision.targets).await,
+            },
+            exec: self.exec_details(ctx, command, retry_of).await?,
+            upload: UploadDetails::of(command),
+            tunnel: TunnelDetails::of(command),
+        })
+    }
+
+    /// `again`: what changed when an approval is asked again.
+    async fn audit_requested(
+        &self,
+        ctx: &Context,
+        decision: &Decision,
+        summary: &str,
+        again: Option<&str>,
+    ) -> Result<()> {
+        let detail = again
+            .map(|changes| format!("asked again: {changes}"))
+            .into_iter()
+            .chain(decision.reasons.iter().chain(&decision.warnings).cloned())
+            .collect::<Vec<_>>()
+            .join("; ");
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "approval_requested",
+                    action: summary,
+                    tier: Some(decision.tier),
+                    job_id: None,
+                    targets: &decision.targets,
+                    approval: None,
+                    result: None,
+                    detail: Some(&detail),
+                },
+            )
+            .await
+            .map(drop)
+    }
+
+    /// AP-01: each target as it is now, and what makes the approval out of date: a target labelled Prod, or
+    /// protected (AP-04), since it was asked. A label that went the other way leaves the approval as strict as it
+    /// was, so it needs nothing.
+    async fn label_changes(&self, pending: &Pending) -> Result<(Vec<Target>, Vec<String>)> {
+        let now = self.resolve_targets(&pending.ctx, &pending.command).await?;
+        let before: HashMap<String, &Target> = pending
+            .decision
+            .targets
+            .iter()
+            .chain(&pending.decision.skipped)
+            .map(|t| (t.target.key(), t))
+            .collect();
+        let mut changes = Vec::new();
+        for target in &now {
+            let Some(was) = before.get(&target.target.key()) else {
+                continue;
+            };
+            if target.protected && !was.protected {
+                changes.push(format!("{} is protected now", target.name));
+            } else if target.environment == Environment::Prod && was.environment != Environment::Prod {
+                changes.push(format!("{} is labelled Prod now", target.name));
+            }
+        }
+        Ok((now, changes))
+    }
+
+    /// AP-01: the approval again, for the targets as they are now, under the same id. Nothing runs; the
+    /// error carries the new request for the dialog to show.
+    async fn ask_again(&self, request_id: Uuid, pending: Pending, now: Vec<Target>, changes: Vec<String>) -> CoreError {
+        let ctx = pending.ctx;
+        let mut decision = locks::read(&self.policy).evaluate(&pending.command, &now);
+        let changes = changes.join("; ");
+        if decision.targets.is_empty() {
+            // Every target is protected now: nothing left to ask about.
+            let detail = format!("{changes}; every target is protected now, so nothing ran");
+            let written = self
+                .store
+                .append_audit(
+                    &ctx,
+                    NewAuditEntry {
+                        event: "approval_cancelled",
+                        action: &pending.request.summary,
+                        tier: Some(pending.decision.tier),
+                        job_id: None,
+                        targets: &pending.decision.targets,
+                        approval: None,
+                        result: None,
+                        detail: Some(&detail),
+                    },
+                )
+                .await;
+            if let Err(err) = written {
+                tracing::error!(error = %err, "could not audit an approval whose targets are all protected now");
+            }
+            return CoreError::AllTargetsProtected;
+        }
+        let impact = self.add_warnings(&ctx, &pending.command, &mut decision).await;
+        let request = match self
+            .request_for(&ctx, request_id, &pending.command, &decision, impact, pending.retry_of)
+            .await
+        {
+            Ok(request) => request,
+            Err(err) => return err,
+        };
+        if let Err(err) = self
+            .audit_requested(&ctx, &decision, &request.summary, Some(&changes))
+            .await
+        {
+            return err;
+        }
+        locks::lock(&self.pending).insert(
+            request_id,
+            Pending {
+                ctx,
+                command: pending.command,
+                decision,
+                request: request.clone(),
+                retry_of: pending.retry_of,
+                asked: Instant::now(),
+            },
+        );
+        CoreError::ApprovalChanged {
+            changes,
+            request: Box::new(request),
+        }
+    }
+
     /// Checks the answers against every required step. On a wrong answer the request stays pending
     /// so the user can correct it; on success the job is queued.
+    ///
+    /// QL-15: an approval that waited longer than [`APPROVAL_TTL`] has expired. One whose targets became Prod or
+    /// protected since it was asked is asked again ([`CoreError::ApprovalChanged`]) rather than run.
     pub async fn approve(&self, request_id: Uuid, answers: ApprovalAnswers) -> Result<Uuid> {
         let pending = locks::lock(&self.pending)
             .remove(&request_id)
             .ok_or(CoreError::UnknownApproval(request_id))?;
+        let ttl = self.approval_ttl();
+        if pending.expired(ttl) {
+            self.audit_expired(&pending, ttl).await;
+            self.expire_stale().await;
+            return Err(CoreError::ApprovalExpired {
+                minutes: ttl.as_secs().div_ceil(60),
+            });
+        }
         // FD-03: a request asked before the read-only lock came on waits; the user can cancel it, or approve it
         // once the lock is off.
         let locked = self.store.read_only().is_locked();
         if let Err(err) = locks::read(&self.policy).check_read_only(locked, &pending.command) {
             locks::lock(&self.pending).insert(request_id, pending);
             return Err(err);
+        }
+        let (now, changes) = match self.label_changes(&pending).await {
+            Ok(found) => found,
+            Err(err) => {
+                // A target can't be looked up any more (deleted, say): the user can still cancel it.
+                locks::lock(&self.pending).insert(request_id, pending);
+                return Err(err);
+            }
+        };
+        if !changes.is_empty() {
+            return Err(self.ask_again(request_id, pending, now, changes).await);
         }
 
         match self.check_answers(&pending, &answers).await {

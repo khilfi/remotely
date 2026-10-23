@@ -64,6 +64,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import {
   PresentationButton,
   PresentationLayer,
@@ -679,79 +680,97 @@ export default function App() {
               />
             )}
             <section hidden={page !== "vms"} className="h-full">
-              <VmsPage
-                active={page === "vms"}
-                onSubmitted={submitted}
-                onOpenSettings={() => setPage("settings")}
-                onActions={openPalette}
-                request={vmRequest}
-                refreshKey={jobsFinished + settingsVersion + inventoryVersion}
-              />
+              <ErrorBoundary name="Virtual machines">
+                <VmsPage
+                  active={page === "vms"}
+                  onSubmitted={submitted}
+                  onOpenSettings={() => setPage("settings")}
+                  onActions={openPalette}
+                  request={vmRequest}
+                  refreshKey={jobsFinished + settingsVersion + inventoryVersion}
+                />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "dashboard"}>
-              <DashboardPage
-                active={page === "dashboard"}
-                theme={resolved}
-                focus={dashboardFocus}
-                onConnect={openTerminal}
-                onActions={(vmxPath) => openPalette(vmxPath)}
-                onOpenVms={() => setPage("vms")}
-                onOpenSessions={() => setPage("sessions")}
-              />
+              <ErrorBoundary name="Dashboard">
+                <DashboardPage
+                  active={page === "dashboard"}
+                  theme={resolved}
+                  focus={dashboardFocus}
+                  onConnect={openTerminal}
+                  onActions={(vmxPath) => openPalette(vmxPath)}
+                  onOpenVms={() => setPage("vms")}
+                  onOpenSessions={() => setPage("sessions")}
+                />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "containers"} className="h-full">
-              <ContainersPage
-                active={page === "containers"}
-                onSubmitted={submitted}
-                onOpenShell={openContainerShell}
-                onOpenSettings={() => setPage("settings")}
-                refreshKey={jobsFinished + settingsVersion}
-              />
+              <ErrorBoundary name="Containers">
+                <ContainersPage
+                  active={page === "containers"}
+                  onSubmitted={submitted}
+                  onOpenShell={openContainerShell}
+                  onOpenSettings={() => setPage("settings")}
+                  refreshKey={jobsFinished + settingsVersion}
+                />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "sessions"}>
-              <SessionsPage
-                vault={vault}
-                onVaultChanged={setVault}
-                onOpenVault={() => setPage("vault")}
-                onConnect={openTerminal}
-                active={page === "sessions"}
-              />
+              <ErrorBoundary name="Sessions">
+                <SessionsPage
+                  vault={vault}
+                  onVaultChanged={setVault}
+                  onOpenVault={() => setPage("vault")}
+                  onConnect={openTerminal}
+                  active={page === "sessions"}
+                />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "terminal"} className="h-full">
-              <TerminalPage
-                active={page === "terminal"}
-                theme={resolved}
-                openRequest={terminalOpen}
-                newRequest={terminalNew}
-                compareRequest={terminalCompare}
-                multiExecRequest={terminalMultiExec}
-                vault={vault}
-                onSubmitted={submitted}
-                onOpenVault={() => setPage("vault")}
-              />
+              <ErrorBoundary name="Terminal">
+                <TerminalPage
+                  active={page === "terminal"}
+                  theme={resolved}
+                  openRequest={terminalOpen}
+                  newRequest={terminalNew}
+                  compareRequest={terminalCompare}
+                  multiExecRequest={terminalMultiExec}
+                  vault={vault}
+                  onSubmitted={submitted}
+                  onOpenVault={() => setPage("vault")}
+                />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "knownHosts"}>
-              <KnownHostsPage active={page === "knownHosts"} />
+              <ErrorBoundary name="Known hosts">
+                <KnownHostsPage active={page === "knownHosts"} />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "vault"}>
-              <VaultPage
-                vault={vault}
-                onVaultChanged={setVault}
-                active={page === "vault"}
-                onSubmitted={submitted}
-                onOpenSessions={() => setPage("sessions")}
-              />
+              <ErrorBoundary name="Vault">
+                <VaultPage
+                  vault={vault}
+                  onVaultChanged={setVault}
+                  active={page === "vault"}
+                  onSubmitted={submitted}
+                  onOpenSessions={() => setPage("sessions")}
+                />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "activity"}>
-              <ActivityPage version={jobsVersion} active={page === "activity"} />
+              <ErrorBoundary name="Activity">
+                <ActivityPage version={jobsVersion} active={page === "activity"} />
+              </ErrorBoundary>
             </section>
             <section hidden={page !== "settings"}>
-              <SettingsPage
-                onChanged={() => setSettingsVersion((v) => v + 1)}
-                vault={vault}
-                onVaultChanged={setVault}
-                onOpenVault={() => setPage("vault")}
-              />
+              <ErrorBoundary name="Settings">
+                <SettingsPage
+                  onChanged={() => setSettingsVersion((v) => v + 1)}
+                  vault={vault}
+                  onVaultChanged={setVault}
+                  onOpenVault={() => setPage("vault")}
+                />
+              </ErrorBoundary>
             </section>
           </div>
         </SidebarInset>

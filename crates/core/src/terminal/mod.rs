@@ -108,6 +108,8 @@ use crate::vm_links::VmLinks;
 
 /// The terminal settings (JSON) in the settings table.
 pub const TERMINAL_SETTINGS_KEY: &str = "terminal.settings";
+/// How long [`Terminals::close_all`] waits for every pane to audit its close and finish its log.
+pub const CLOSE_ALL_WAIT: Duration = Duration::from_secs(3);
 /// Longest keep-alive interval the settings take.
 pub const MAX_KEEPALIVE_SECS: u64 = 3600;
 /// Shortest keep-alive interval, so a typo can't flood a server.
@@ -490,6 +492,11 @@ pub enum TerminalEvent {
     /// SS-07: the terminal's tunnels, after any of them changed.
     Tunnels {
         tunnels: Vec<TunnelInfo>,
+    },
+    /// SS-11: the session log could not be written (a full disk, a removed drive), so it stopped. Audited.
+    LogStopped {
+        path: String,
+        reason: String,
     },
 }
 
@@ -1152,16 +1159,41 @@ impl Terminals {
         }
     }
 
-    /// Closes every pane and waits (briefly) for each to log its close, e.g. when the app exits.
+    /// Closes every pane (their tunnels close with them) and waits for them to audit their close and finish their
+    /// session logs, e.g. when the app exits or installs an update. The panes close side by side, so it takes as
+    /// long as the slowest, and never longer than [`CLOSE_ALL_WAIT`] (QL-15).
     pub async fn close_all(&self) {
-        let controls: Vec<Arc<Control>> = locks::lock(&self.inner.open).values().cloned().collect();
-        for control in controls {
+        let ids: Vec<Uuid> = locks::lock(&self.inner.open).keys().copied().collect();
+        self.close_these(&ids).await;
+    }
+
+    /// QL-15: closes these panes, as [`Terminals::close_all`] does. Panes opened since are left alone.
+    pub async fn close_these(&self, ids: &[Uuid]) {
+        let controls: Vec<Arc<Control>> = {
+            let open = locks::lock(&self.inner.open);
+            ids.iter().filter_map(|id| open.get(id).cloned()).collect()
+        };
+        for control in &controls {
             control.cancel.cancel();
         }
-        let tasks: Vec<JoinHandle<()>> = locks::lock(&self.inner.tasks).drain().map(|(_, t)| t).collect();
-        for task in tasks {
-            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        let tasks: Vec<JoinHandle<()>> = {
+            let mut tasks = locks::lock(&self.inner.tasks);
+            ids.iter().filter_map(|id| tasks.remove(id)).collect()
+        };
+        // Each pane runs in its own task already, so waiting on them in turn takes as long as the slowest one.
+        let all = async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        };
+        if tokio::time::timeout(CLOSE_ALL_WAIT, all).await.is_err() {
+            tracing::warn!("some terminals did not finish closing in time");
         }
+    }
+
+    /// Ids of the panes open now (QL-15: the window that showed them reloaded).
+    pub fn open_ids(&self) -> Vec<Uuid> {
+        locks::lock(&self.inner.open).keys().copied().collect()
     }
 
     /// Panes open now.
@@ -1356,7 +1388,8 @@ impl Terminals {
             log::clock(now),
             log::offset_label(now)
         );
-        let session_log = log::start(path, heading, control.known_secrets()).await?;
+        let on_failure = log_failed(self.inner.store.clone(), *ctx, Arc::downgrade(&control));
+        let session_log = log::start(path, heading, control.known_secrets(), on_failure).await?;
         *locks::lock(&control.log) = Some(session_log);
         audit(
             &self.inner.store,
@@ -1586,17 +1619,58 @@ async fn stop_log(store: &Store, ctx: &Context, control: &Control) -> Result<boo
     let Some(session_log) = locks::lock(&control.log).take() else {
         return Ok(false);
     };
-    let _ = session_log.sender.send(LogMessage::Stop).await;
+    let path = session_log.path.display().to_string();
+    // Waits for the last lines to reach the disk (the app may be about to exit).
+    session_log.stop().await;
     audit(
         store,
         ctx,
         "terminal_log_stopped",
         &format!("Stopped logging the terminal to {}", quoted_name(control)),
         control.targets(),
-        &session_log.path.display().to_string(),
+        &path,
     )
     .await?;
     Ok(true)
+}
+
+/// SS-11: what a terminal does when its log can't be written: the log is dropped (so it can be started
+/// again), the audit log says why, and the pane shows it. A pane that has closed since needs nothing.
+fn log_failed(store: Store, ctx: Context, control: std::sync::Weak<Control>) -> log::OnFailure {
+    Box::new(move |log_id, reason| {
+        Box::pin(async move {
+            let Some(control) = control.upgrade() else {
+                return;
+            };
+            let ended = {
+                let mut log = locks::lock(&control.log);
+                match log.as_ref() {
+                    Some(running) if running.id == log_id => log.take(),
+                    // Stopped (and audited) meanwhile, or another log started.
+                    _ => None,
+                }
+            };
+            let Some(ended) = ended else {
+                return;
+            };
+            let path = ended.path.display().to_string();
+            drop(ended);
+            let detail = format!("{path}: stopped because it could not be written ({reason})");
+            if let Err(err) = audit(
+                &store,
+                &ctx,
+                "terminal_log_stopped",
+                &format!("The log of the terminal to {} stopped", quoted_name(&control)),
+                control.targets(),
+                &detail,
+            )
+            .await
+            {
+                tracing::error!(error = %err, "could not audit a session log stopping");
+            }
+            let _ = control.events.send(TerminalEvent::LogStopped { path, reason }).await;
+        })
+    })
 }
 
 /// For the audit log: how the session logs in, never a secret.

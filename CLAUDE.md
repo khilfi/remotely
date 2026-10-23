@@ -66,11 +66,15 @@ docs/                 PRD.md, architecture.png, roadmap.png
 crates/core/          remotely-core: all app logic
   migrations/         sqlx migrations
   src/
-    command_bus.rs
+    command_bus.rs    AP-01 approvals expire after APPROVAL_TTL (15 min, audited approval_expired); one whose target
+                      became Prod or protected since is asked again (ApprovalChanged, same id) instead of running
+    settings.rs       QL-15 settings this version can't read are set aside (`<key>.unreadable`), audited, and get
+                      their defaults at start, instead of stopping the app
     policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
-    jobs.rs
+    jobs.rs           QL-15: a failing journal or audit write is logged and the job goes on to its real result
+                      (job_finished always tried); the update install races the job's cancel token
     adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec, every path
@@ -134,7 +138,8 @@ crates/core/          remotely-core: all app logic
                       QL-03 host name and IP, QL-06 a vault password typed at a prompt; SS-01 the startup command typed
                       at the first shell prompt, or not at all within STARTUP_WAIT, and after an automatic reconnect
                       only with startup_on_reconnect); quick.rs QL-02 quick connect;
-                      log.rs and output.rs SS-11 session logs and saved, printed or copied output (secrets scrubbed);
+                      log.rs and output.rs SS-11 session logs (one that can't be written stops: LogStopped, audited;
+                      stopping waits for the last lines) and saved, printed or copied output (secrets scrubbed);
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
                       detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
                       a line buffer, Enter and every other key that runs a line in bash or zsh held (RunKey: Ctrl+O,
@@ -209,7 +214,12 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
                       SS-07 port forwards and tunnels (tunnels.rs), CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
-                      (host_details.rs)
+                      (host_details.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
+                      startup message boxes, setting an unopenable database aside, Settings About's logs folder, UI
+                      crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
+                      instance (release builds), closes what a reloaded page had open (on_page_load), and turns
+                      WebView2's browser keys off in release builds; updater.rs timeouts and core.shutdown() before
+                      the installer exits the app
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -221,7 +231,7 @@ src/                  React + TypeScript UI
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
-                      and dashed limit lines)
+                      and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3)
@@ -236,6 +246,7 @@ src/                  React + TypeScript UI
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
                       delay, longer after failures), host-details.ts
                       (MO-13, MO-14 summaries, wording and the commands offered to copy),
+                      ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
                       addresses as `mac-N`),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
@@ -363,6 +374,12 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 
 - Install: `npm install`
 - Run the app: `npm run tauri dev`. A debug build keeps its data (database, WebView2 profile) in `%LOCALAPPDATA%\com.remotely.desktop.dev`, apart from the installed app's `%LOCALAPPDATA%\com.remotely.desktop`, so its migrations never reach the installed app's database. `REMOTELY_DATA_DIR` (an absolute path outside the repo) overrides both.
+- Logs (QL-15): `logs\` in that data folder (`%LOCALAPPDATA%\com.remotely.desktop\logs`, `...desktop.dev\logs` for a debug
+  build, or `logs` under `REMOTELY_DATA_DIR`): `remotely.YYYY-MM-DD.log`, one a day, 7 kept (`RUST_LOG` sets the level;
+  default `info,sqlx=warn,tao=warn,wry=warn`), and `crash-YYYYMMDD-HHMMSS.txt` from the panic hook, 7 kept. Settings,
+  About opens the folder; a debug build also logs to stdout. Never log a secret: `crates/core/tests/log_fields.rs` fails
+  on a log call that names one, and `src-tauri/tests/log_secrets.rs` reads the log file of a run that uses vault
+  secrets. A release build runs once (a second start shows the open window); a debug build can run beside it.
 - Rust tests: `cargo test --workspace` (run at the repo root; `cargo test` inside `src-tauri/` only tests the shell crate)
 - Try the terminal, MultiExec or Compare output without a real host:
   `cargo run -p remotely-core --example dev_ssh_server --features fakes [port] [count]` (default 2222 and 1 server;
