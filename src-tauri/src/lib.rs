@@ -456,6 +456,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::bulk_host_output,
         ipc::bulk_diff,
         ipc::bulk_retry_failed,
+        ipc::bulk_go_on,
         ipc::bulk_export,
         ipc::command_preview,
         ipc::metrics_overview,

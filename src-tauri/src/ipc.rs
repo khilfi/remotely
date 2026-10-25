@@ -1080,10 +1080,12 @@ pub async fn bulk_results(
     options: Option<GroupOptions>,
 ) -> IpcResult<BulkResults> {
     let core = &state.core;
-    Ok(core
+    let mut results = core
         .bulk
         .results(&core.ctx, job_id, options.unwrap_or_default())
-        .await?)
+        .await?;
+    results.canary_waiting = core.jobs.waiting_for_go_ahead().contains(&job_id);
+    Ok(results)
 }
 
 /// One host's stored output.
@@ -1110,10 +1112,25 @@ pub async fn bulk_diff(
 }
 
 /// BX-04: the same command on the hosts that failed, as a new job through the bus (it may need approval).
+/// H9: hosts whose outcome is unknown (timed out, or cancelled while running) only with `include_unknown`.
 #[tauri::command]
-pub async fn bulk_retry_failed(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<SubmitOutcome> {
+pub async fn bulk_retry_failed(
+    state: State<'_, AppState>,
+    job_id: Uuid,
+    include_unknown: Option<bool>,
+) -> IpcResult<SubmitOutcome> {
     let core = &state.core;
-    Ok(core.bus.retry_failed(&core.ctx, job_id).await?)
+    Ok(core
+        .bus
+        .retry_failed(&core.ctx, job_id, include_unknown.unwrap_or(false))
+        .await?)
+}
+
+/// H9: the canary host of a bulk run finished well; run on the other hosts.
+#[tauri::command]
+pub async fn bulk_go_on(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<bool> {
+    let core = &state.core;
+    Ok(core.bus.go_on(&core.ctx, job_id).await?)
 }
 
 /// BX-05: asks where to save, then writes the run's results there. `None` when the user closed the

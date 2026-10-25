@@ -231,8 +231,10 @@ export type Command =
       sudoPasswordId?: string | null;
       /** SS-05: trust (and save, audited) host keys never seen before. A changed key always blocks. */
       trustNewHostKeys?: boolean;
-      /** Seconds each host may take; null: no limit. */
+      /** Seconds each host may take; null: no limit. One that takes longer ends with its outcome unknown. */
       timeoutSecs?: number | null;
+      /** H9: one host first, and a stop after failures. */
+      rollout?: Rollout;
     }
   | { type: "appUpdate"; version: string }
   /** SS-09: adds a public key to ~/.ssh/authorized_keys on each host, unless it is there already. */
@@ -240,6 +242,16 @@ export type Command =
       type: "pushSshKey";
       targets: TargetRef[];
       /** The OpenSSH public key line; the core writes its own form of it. */
+      publicKey: string;
+      trustNewHostKeys?: boolean;
+      timeoutSecs?: number | null;
+      /** SS-09: restrictions written before the key (expiry-time, from). */
+      options?: KeyOptions;
+    }
+  | {
+      /** SS-09: remove a public key from the hosts' ~/.ssh/authorized_keys (every line with its data). */
+      type: "removeSshKey";
+      targets: TargetRef[];
       publicKey: string;
       trustNewHostKeys?: boolean;
       timeoutSecs?: number | null;
@@ -318,6 +330,22 @@ export interface DangerousMatch {
   line: number;
 }
 
+/** SS-09: what a pushed key may do (OpenSSH's authorized_keys options). */
+export interface KeyOptions {
+  /** `YYYY-MM-DD`: the key stops working at 00:00 UTC that day (expiry-time, OpenSSH 8.2+). */
+  expiresOn: string | null;
+  /** Hosts or networks it may log in from (from="..."). */
+  from: string[];
+}
+
+/** H9: a bulk run's blast-radius controls. */
+export interface Rollout {
+  /** The first host runs alone; the rest wait until the user, who sees its result, says go on. */
+  canary: boolean;
+  /** Start no more hosts once this many failed or ended with the outcome unknown; null: off. */
+  stopAfterFailures: number | null;
+}
+
 /** BX-02, BX-06, BX-07: a remote command as the approval dialog shows it. */
 export interface ExecDetails {
   script: string;
@@ -335,6 +363,8 @@ export interface ExecDetails {
   unreliable: boolean;
   /** SS-10: the key that runs the line when it is not Enter ("Ctrl+O", "Esc then A"...). */
   runKey: string | null;
+  /** H9: one host first, and a stop after failures. */
+  rollout: Rollout;
 }
 
 export interface ApprovalRequest {
@@ -384,7 +414,8 @@ export interface ApprovalAnswers {
 export type JobStatus =
   "queued" | "countdown" | "running" | "succeeded" | "failed" | "partially_failed" | "cancelled" | "interrupted";
 
-export type TargetStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
+/** H9 `unknown`: timed out, or cancelled while its command ran: it may have run. */
+export type TargetStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled" | "unknown";
 
 export type JobEvent =
   /** `quiet`: a MultiExec line, whose terminals show what happened (no toasts). */
@@ -407,6 +438,8 @@ export type JobEvent =
       /** VM-05: the safety snapshot taken on this target first. */
       safetySnapshot: string | null;
     }
+  /** H9: the canary host finished well; `rest` hosts wait until `until` for the go-ahead (`bulkGoOn`). */
+  | { event: "canaryWaiting"; jobId: string; target: string; name: string; rest: number; until: string }
   /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
   | { event: "stillRunning"; jobId: string; targets: Target[] }
   | { event: "finished"; jobId: string; status: JobStatus };
@@ -589,6 +622,8 @@ export interface JobSummary {
   targetsTotal: number;
   targetsSucceeded: number;
   targetsFailed: number;
+  /** H9: targets that timed out or were cancelled while their command ran. */
+  targetsUnknown: number;
   /** AP-03: when the countdown ends, while the job is in it. */
   countdownUntil: string | null;
   /** BX-04: the job whose failed targets this one retries. */
@@ -1528,10 +1563,23 @@ export interface VmWithoutSession {
   via: string[];
 }
 
+/** A4, H11: a picked VM reached only through a session linked automatically (by the guest's own IP). */
+export interface UnconfirmedLink {
+  vmxPath: string;
+  name: string;
+  sessionId: string;
+  sessionName: string;
+  /** `user@host:port` of the session. */
+  address: string;
+  via: string[];
+}
+
 export interface ResolvedTargets {
   hosts: BulkHost[];
   /** Picked VMs no session reaches; guest commands without SSH (VM-09) come in v2. */
   vmsWithoutSession: VmWithoutSession[];
+  /** A4, H11: picked VMs whose only link is automatic: not reached until the user confirms it. */
+  vmsUnconfirmed: UnconfirmedLink[];
   notes: string[];
 }
 
@@ -1573,6 +1621,10 @@ export interface HostResult {
   group: number | null;
   startedAt: string | null;
   finishedAt: string | null;
+  /** The address this PC reached (a host reached directly). */
+  peerIp: string | null;
+  /** The host key the host presented and the run accepted: `ssh-ed25519 SHA256:...`. */
+  hostKey: string | null;
 }
 
 /** BX-03: hosts with the same result. */
@@ -1603,6 +1655,10 @@ export interface BulkCounts {
   succeeded: number;
   failed: number;
   cancelled: number;
+  /** H9: timed out, or cancelled while the command ran. */
+  unknown: number;
+  /** H9: never started (the run stopped after its failures or its canary). */
+  skipped: number;
 }
 
 export interface BulkResults {
@@ -1614,6 +1670,8 @@ export interface BulkResults {
   /** "48 hosts same, 2 differ". */
   headline: string;
   ignoreTrailingWhitespace: boolean;
+  /** H9: the canary host finished and the rest wait for the go-ahead. */
+  canaryWaiting: boolean;
 }
 
 export interface HostOutput {
@@ -2644,8 +2702,14 @@ export const api = {
   bulkHostOutput: (jobId: string, targetKey: string) => invoke<HostOutput>("bulk_host_output", { jobId, targetKey }),
   bulkDiff: (jobId: string, left: string, right: string, options: GroupOptions) =>
     invoke<OutputDiff>("bulk_diff", { jobId, left, right, options }),
-  /** BX-04: the failed hosts again, as a new job through the bus (it may need approval). */
-  bulkRetryFailed: (jobId: string) => invoke<SubmitOutcome>("bulk_retry_failed", { jobId }),
+  /**
+   * BX-04: the failed hosts again, as a new job through the bus (it may need approval). H9: hosts whose outcome is
+   * unknown only with `includeUnknown` (the command may run there twice).
+   */
+  bulkRetryFailed: (jobId: string, includeUnknown = false) =>
+    invoke<SubmitOutcome>("bulk_retry_failed", { jobId, includeUnknown }),
+  /** H9: run on the hosts waiting after the canary. False when the job no longer waits. */
+  bulkGoOn: (jobId: string) => invoke<boolean>("bulk_go_on", { jobId }),
   /** BX-05: asks where to save, then writes the results; null when the user cancels. */
   bulkExport: (jobId: string, format: ExportFormat, options: GroupOptions) =>
     invoke<BulkExport | null>("bulk_export", { jobId, format, options }),

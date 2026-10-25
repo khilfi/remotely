@@ -398,6 +398,7 @@ async fn commands_and_compare_runs_go_through_the_chain() {
         sudo_password_id: None,
         trust_new_host_keys,
         timeout_secs: Some(30),
+        rollout: Default::default(),
     };
     let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, run(false)).await.unwrap() else {
         panic!("a read-only command on a Lab host runs at once");

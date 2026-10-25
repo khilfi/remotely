@@ -6,6 +6,10 @@
 //!
 //! * BX-01: hosts are saved sessions. A VM is reached through a session linked to it
 //!   (`sessions.vm_id`); a VM with none can't run commands yet (guest operations, VM-09, are v2).
+//!   A4, H11: only through a link the user chose or confirmed. An automatic link (QL-01) rests on the
+//!   address the guest reports about itself, which a hostile VM can make up (a production server's
+//!   IP), so a VM whose only links are automatic is listed in [`ResolvedTargets::vms_unconfirmed`]
+//!   instead of being reached, until the user confirms the link.
 //!   Tags pick sessions and VMs; saved filters pick VMs; an open terminal picks its saved session (a
 //!   quick connection that was not saved has none to run on).
 //! * BX-03: finished hosts group by exit code and output (stdout and stderr, hashed whole as they
@@ -82,6 +86,20 @@ pub struct VmWithoutSession {
     pub via: Vec<String>,
 }
 
+/// A4, H11: a picked VM whose linked session was linked automatically, by the address the guest
+/// reports. A run reaches it once the user confirms that link (`VmLinks::confirm`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnconfirmedLink {
+    pub vmx_path: String,
+    pub name: String,
+    pub session_id: Uuid,
+    pub session_name: String,
+    /// `user@host:port` of the session.
+    pub address: String,
+    pub via: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedTargets {
@@ -90,6 +108,9 @@ pub struct ResolvedTargets {
     /// Picked VMs a run can't reach yet: commands go over SSH, through a session linked to the VM.
     /// Running them through VMware Tools without SSH (VM-09) comes in v2.
     pub vms_without_session: Vec<VmWithoutSession>,
+    /// A4, H11: picked VMs reached only through an automatic link, which the user has to confirm
+    /// first. They are not in `hosts`.
+    pub vms_unconfirmed: Vec<UnconfirmedLink>,
     /// Worth knowing, e.g. a VM with two linked sessions (the first by name is used).
     pub notes: Vec<String>,
 }
@@ -101,6 +122,8 @@ struct Picked {
     via: HashMap<Uuid, Vec<String>>,
     vms: Vec<String>,
     vm_via: HashMap<String, Vec<String>>,
+    /// A4, H11: VMs reached only through an automatic link, with that session.
+    unconfirmed: Vec<(String, Uuid)>,
     notes: Vec<String>,
 }
 
@@ -115,15 +138,42 @@ impl Picked {
         }
     }
 
-    fn vm(&mut self, vm: &VmRecord, linked: &HashMap<String, Vec<Uuid>>, names: &HashMap<Uuid, &str>, via: String) {
-        match linked.get(&vm.id).map(Vec::as_slice) {
-            Some([first, rest @ ..]) => {
+    fn vm(
+        &mut self,
+        vm: &VmRecord,
+        linked: &HashMap<String, Vec<Uuid>>,
+        sessions: &HashMap<Uuid, &SessionRecord>,
+        via: String,
+    ) {
+        let all = linked.get(&vm.id).map(Vec::as_slice).unwrap_or_default();
+        // A4, H11: only links the user chose or confirmed reach a VM.
+        let confirmed: Vec<Uuid> = all
+            .iter()
+            .copied()
+            .filter(|id| {
+                sessions
+                    .get(id)
+                    .is_some_and(|s| s.vm_link != Some(crate::vm_links::VmLink::Auto))
+            })
+            .collect();
+        let name = |id: &Uuid| sessions.get(id).map_or("the first", |s| s.name.as_str());
+        match (confirmed.as_slice(), all.first()) {
+            ([first, rest @ ..], _) => {
                 if !rest.is_empty() {
                     let note = format!(
                         "VM '{}' has {} linked sessions; the run uses '{}'",
                         vm.display_name,
                         rest.len() + 1,
-                        names.get(first).copied().unwrap_or("the first")
+                        name(first)
+                    );
+                    if !self.notes.contains(&note) {
+                        self.notes.push(note);
+                    }
+                }
+                if confirmed.len() < all.len() {
+                    let note = format!(
+                        "VM '{}' also has a session linked automatically, which the run doesn't use",
+                        vm.display_name
                     );
                     if !self.notes.contains(&note) {
                         self.notes.push(note);
@@ -131,7 +181,16 @@ impl Picked {
                 }
                 self.session(*first, via);
             }
-            _ => {
+            ([], Some(auto)) => {
+                let reasons = self.vm_via.entry(vm.id.clone()).or_default();
+                if reasons.is_empty() {
+                    self.unconfirmed.push((vm.id.clone(), *auto));
+                }
+                if !reasons.contains(&via) {
+                    reasons.push(via);
+                }
+            }
+            ([], None) => {
                 let reasons = self.vm_via.entry(vm.id.clone()).or_default();
                 if reasons.is_empty() {
                     self.vms.push(vm.id.clone());
@@ -186,6 +245,10 @@ pub struct HostResult {
     pub group: Option<usize>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+    /// The address this PC reached (a host reached directly).
+    pub peer_ip: Option<String>,
+    /// The host key the host presented and the run accepted.
+    pub host_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -232,6 +295,10 @@ pub struct Counts {
     pub succeeded: usize,
     pub failed: usize,
     pub cancelled: usize,
+    /// H9: timed out, or cancelled while the command ran: it may have run.
+    pub unknown: usize,
+    /// H9: never started (the run stopped after its failures, or after its canary).
+    pub skipped: usize,
 }
 
 /// A run's results, grouped (BX-03).
@@ -247,6 +314,9 @@ pub struct BulkResults {
     /// "48 hosts same, 2 differ".
     pub headline: String,
     pub ignore_trailing_whitespace: bool,
+    /// H9: the canary host finished and the rest wait for the go-ahead (set by the caller, which
+    /// asks the job runner).
+    pub canary_waiting: bool,
 }
 
 /// One host's whole stored output.
@@ -277,8 +347,12 @@ pub fn group_label(index: usize) -> String {
     label.iter().rev().collect()
 }
 
-/// The group a finished target belongs to, or `None` while it waits or runs, or when it was cancelled.
+/// The group a finished target belongs to, or `None` while it waits or runs, or when it was cancelled
+/// or never started. H9: hosts whose outcome is unknown group by why (a time limit, a cancel).
 fn group_key(t: &JobTargetRecord, opts: GroupOptions) -> Option<String> {
+    if t.status == TargetStatus::Unknown.as_str() {
+        return Some(format!("err:{}", t.error_code.as_deref().unwrap_or("unknown")));
+    }
     if t.status != TargetStatus::Succeeded.as_str() && t.status != TargetStatus::Failed.as_str() {
         return None;
     }
@@ -383,6 +457,8 @@ fn host_rows(targets: impl IntoIterator<Item = JobTargetRecord>, of_target: Vec<
             group,
             started_at: t.started_at,
             finished_at: t.finished_at,
+            peer_ip: t.peer_ip,
+            host_key: t.host_key,
         })
         .collect()
 }
@@ -426,6 +502,8 @@ fn count(targets: &[JobTargetRecord]) -> Counts {
             "running" => counts.running += 1,
             "succeeded" => counts.succeeded += 1,
             "failed" => counts.failed += 1,
+            "unknown" => counts.unknown += 1,
+            "skipped" => counts.skipped += 1,
             _ => counts.cancelled += 1,
         }
     }
@@ -456,8 +534,14 @@ pub fn headline(groups: &[OutputGroup], counts: &Counts) -> String {
     if open > 0 {
         text.push_str(&format!("; {} still to finish", hosts(open)));
     }
+    if counts.unknown > 0 {
+        text.push_str(&format!("; {} with the outcome unknown", hosts(counts.unknown)));
+    }
     if counts.cancelled > 0 {
         text.push_str(&format!("; {} cancelled", counts.cancelled));
+    }
+    if counts.skipped > 0 {
+        text.push_str(&format!("; {} not started", hosts(counts.skipped)));
     }
     text
 }
@@ -481,9 +565,21 @@ fn run_info(command: &Command) -> Option<RunInfo> {
             public_key,
             trust_new_host_keys,
             timeout_secs,
+            options,
             ..
         } => crate::ssh_keys::parse_public_key(public_key).ok().map(|key| RunInfo {
-            script: crate::ssh_keys::authorized_keys_script(&key),
+            script: crate::ssh_keys::authorized_keys_script(&key, options),
+            sudo: false,
+            trust_new_host_keys: *trust_new_host_keys,
+            timeout_secs: *timeout_secs,
+        }),
+        Command::RemoveSshKey {
+            public_key,
+            trust_new_host_keys,
+            timeout_secs,
+            ..
+        } => crate::ssh_keys::parse_public_key(public_key).ok().map(|key| RunInfo {
+            script: crate::ssh_keys::remove_key_script(&key),
             sudo: false,
             trust_new_host_keys: *trust_new_host_keys,
             timeout_secs: *timeout_secs,
@@ -1197,7 +1293,6 @@ impl BulkRuns {
     pub async fn resolve(&self, ctx: &Context, picks: &TargetPicks) -> Result<ResolvedTargets> {
         let sessions = self.store.list_sessions(ctx).await?;
         let by_id: HashMap<Uuid, &SessionRecord> = sessions.iter().map(|s| (s.id, s)).collect();
-        let names: HashMap<Uuid, &str> = sessions.iter().map(|s| (s.id, s.name.as_str())).collect();
         let vms = self.store.list_vms(ctx).await?;
         let vm_by_id: HashMap<&str, &VmRecord> = vms.iter().map(|v| (v.id.as_str(), v)).collect();
         let linked = self.store.sessions_by_vm(ctx).await?;
@@ -1234,7 +1329,7 @@ impl BulkRuns {
         for path in &picks.vm_paths {
             let key = path_key(Path::new(path));
             match vms.iter().find(|v| path_key(Path::new(&v.vmx_path)) == key) {
-                Some(vm) => picked.vm(vm, &linked, &names, format!("VM '{}'", vm.display_name)),
+                Some(vm) => picked.vm(vm, &linked, &by_id, format!("VM '{}'", vm.display_name)),
                 None => picked.notes.push(format!("{path} is not in the VM list.")),
             }
         }
@@ -1251,7 +1346,7 @@ impl BulkRuns {
                 .iter()
                 .filter(|v| v.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)))
             {
-                picked.vm(vm, &linked, &names, via.clone());
+                picked.vm(vm, &linked, &by_id, via.clone());
             }
         }
         if !picks.filter_ids.is_empty() {
@@ -1262,7 +1357,7 @@ impl BulkRuns {
                     continue;
                 };
                 for vm in vms.iter().filter(|v| saved.filter.matches(v)) {
-                    picked.vm(vm, &linked, &names, format!("filter '{}'", saved.name));
+                    picked.vm(vm, &linked, &by_id, format!("filter '{}'", saved.name));
                 }
             }
         }
@@ -1299,9 +1394,23 @@ impl BulkRuns {
                 via: picked.vm_via.get(&vm.id).cloned().unwrap_or_default(),
             })
             .collect();
+        let vms_unconfirmed = picked
+            .unconfirmed
+            .iter()
+            .filter_map(|(vm_id, session)| Some((vm_by_id.get(vm_id.as_str())?, by_id.get(session)?)))
+            .map(|(vm, session)| UnconfirmedLink {
+                vmx_path: vm.vmx_path.clone(),
+                name: vm.display_name.clone(),
+                session_id: session.id,
+                session_name: session.name.clone(),
+                address: address(session),
+                via: picked.vm_via.get(&vm.id).cloned().unwrap_or_default(),
+            })
+            .collect();
         Ok(ResolvedTargets {
             hosts,
             vms_without_session,
+            vms_unconfirmed,
             notes: picked.notes,
         })
     }
@@ -1346,6 +1455,7 @@ impl BulkRuns {
             hosts,
             groups,
             ignore_trailing_whitespace: opts.ignore_trailing_whitespace,
+            canary_waiting: false,
         })
     }
 
@@ -1581,6 +1691,8 @@ mod tests {
             output_hash: hash.map(String::from),
             output_hash_loose: loose.map(String::from),
             error_code: None,
+            peer_ip: None,
+            host_key: None,
         }
     }
 

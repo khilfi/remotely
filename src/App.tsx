@@ -327,6 +327,15 @@ export default function App() {
           // Updates keep the earlier description unless it is cleared.
           toast.loading("Running…", { id, description: null });
           break;
+        case "canaryWaiting":
+          // H9: the rest wait for a look at the canary's result (Compare output, or the key push dialog), so the
+          // toast has no go-ahead of its own.
+          toast.warning(`${event.name} finished without errors`, {
+            id,
+            description: `The other ${event.rest === 1 ? "host waits" : `${event.rest} hosts wait`} for you to look at its result and say go on.`,
+            duration: 15000,
+          });
+          break;
         case "stillRunning": {
           // VM-03: offer the hard power-off, which goes through the bus and its own Critical approval.
           const names = event.targets.map((t) => t.name).join(", ");

@@ -881,6 +881,8 @@ fn target_record(v: &SlotView, now: Instant) -> JobTargetRecord {
         output_hash: v.hashes.as_ref().filter(|_| done).map(|h| h.0.clone()),
         output_hash_loose: v.hashes.as_ref().filter(|_| done).map(|h| h.1.clone()),
         error_code: error_code.map(str::to_owned),
+        peer_ip: None,
+        host_key: None,
     }
 }
 

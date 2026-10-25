@@ -47,6 +47,10 @@ pub struct TargetResult<'a> {
     pub duration_ms: Option<i64>,
     /// VM-05: the safety snapshot taken on the target before the action, if one was.
     pub safety_snapshot: Option<&'a str>,
+    /// The address this PC connected to, for a remote target reached directly.
+    pub peer_ip: Option<&'a str>,
+    /// The host key the target presented and the run accepted: `ssh-ed25519 SHA256:...`.
+    pub host_key: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,6 +67,8 @@ pub struct JobSummary {
     pub targets_total: i64,
     pub targets_succeeded: i64,
     pub targets_failed: i64,
+    /// H9: targets that timed out or were cancelled while their command ran.
+    pub targets_unknown: i64,
     /// AP-03: when the countdown ends (RFC 3339), while the job is in it.
     pub countdown_until: Option<String>,
     /// BX-04: the job whose failed targets this one retries.
@@ -105,6 +111,10 @@ pub struct JobTargetRecord {
     pub output_hash_loose: Option<String>,
     /// BX-03: why it failed, as a stable code.
     pub error_code: Option<String>,
+    /// The address this PC connected to (a remote target reached directly).
+    pub peer_ip: Option<String>,
+    /// The host key the target presented and the run accepted.
+    pub host_key: Option<String>,
 }
 
 impl JobTargetRecord {
@@ -135,7 +145,8 @@ impl JobTargetRecord {
 macro_rules! target_columns {
     () => {
         "target_kind, target_key, target_name, status, exit_code, error, error_code, started_at, finished_at,
-         duration_ms, safety_snapshot, stdout_bytes, stderr_bytes, output_truncated, output_hash, output_hash_loose"
+         duration_ms, safety_snapshot, stdout_bytes, stderr_bytes, output_truncated, output_hash, output_hash_loose,
+         peer_ip, host_key"
     };
 }
 
@@ -160,6 +171,8 @@ fn row_to_target(r: &sqlx::sqlite::SqliteRow, with_output: bool) -> Result<JobTa
         output_hash: r.try_get("output_hash")?,
         output_hash_loose: r.try_get("output_hash_loose")?,
         error_code: r.try_get("error_code")?,
+        peer_ip: r.try_get("peer_ip")?,
+        host_key: r.try_get("host_key")?,
     })
 }
 
@@ -241,7 +254,7 @@ impl Store {
         sqlx::query(
             "UPDATE job_targets SET status = ?, exit_code = ?, output = ?, stderr = ?, stdout_bytes = ?, stderr_bytes = ?,
                                     output_truncated = ?, output_hash = ?, output_hash_loose = ?, error = ?, error_code = ?,
-                                    duration_ms = ?, safety_snapshot = ?, finished_at = ?
+                                    duration_ms = ?, safety_snapshot = ?, peer_ip = ?, host_key = ?, finished_at = ?
              WHERE job_id = ? AND target_key = ?",
         )
         .bind(status.as_str())
@@ -257,6 +270,8 @@ impl Store {
         .bind(r.error_code)
         .bind(r.duration_ms)
         .bind(r.safety_snapshot)
+        .bind(r.peer_ip)
+        .bind(r.host_key)
         .bind(now_rfc3339())
         .bind(id.to_string())
         .bind(target_key)
@@ -298,7 +313,8 @@ impl Store {
                     j.countdown_until, j.retry_of,
                     COUNT(t.target_key) AS total,
                     COALESCE(SUM(t.status = 'succeeded'), 0) AS succeeded,
-                    COALESCE(SUM(t.status = 'failed'), 0) AS failed
+                    COALESCE(SUM(t.status = 'failed'), 0) AS failed,
+                    COALESCE(SUM(t.status = 'unknown'), 0) AS unknown
              FROM jobs j LEFT JOIN job_targets t ON t.job_id = j.id
              WHERE j.workspace_id = ? AND j.action LIKE ?
                AND IFNULL(json_extract(j.command_json, '$.type'), '') <> ?
@@ -326,6 +342,7 @@ impl Store {
                     targets_total: r.try_get("total")?,
                     targets_succeeded: r.try_get("succeeded")?,
                     targets_failed: r.try_get("failed")?,
+                    targets_unknown: r.try_get("unknown")?,
                     countdown_until: r.try_get("countdown_until")?,
                     retry_of: r.try_get("retry_of")?,
                 })
@@ -340,7 +357,8 @@ impl Store {
                     j.countdown_until, j.retry_of, j.command_json,
                     (SELECT COUNT(*) FROM job_targets t WHERE t.job_id = j.id) AS total,
                     (SELECT COUNT(*) FROM job_targets t WHERE t.job_id = j.id AND t.status = 'succeeded') AS succeeded,
-                    (SELECT COUNT(*) FROM job_targets t WHERE t.job_id = j.id AND t.status = 'failed') AS failed
+                    (SELECT COUNT(*) FROM job_targets t WHERE t.job_id = j.id AND t.status = 'failed') AS failed,
+                    (SELECT COUNT(*) FROM job_targets t WHERE t.job_id = j.id AND t.status = 'unknown') AS unknown
              FROM jobs j WHERE j.workspace_id = ? AND j.id = ?",
         )
         .bind(ctx.workspace_id.to_string())
@@ -363,6 +381,7 @@ impl Store {
             targets_total: r.try_get("total")?,
             targets_succeeded: r.try_get("succeeded")?,
             targets_failed: r.try_get("failed")?,
+            targets_unknown: r.try_get("unknown")?,
             countdown_until: r.try_get("countdown_until")?,
             retry_of: r.try_get("retry_of")?,
         };

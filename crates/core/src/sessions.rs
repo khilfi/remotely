@@ -509,6 +509,7 @@ pub fn rate_startup(policy: &PolicyEngine, command: &str, environment: Environme
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     };
     let target = Target {
         target: TargetRef::Session { session_id },
