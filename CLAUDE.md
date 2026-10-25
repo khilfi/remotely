@@ -173,7 +173,8 @@ crates/core/          remotely-core: all app logic
                       Deploy (each step a whole DeploySpec tagged with `stack: StackTag`, so R2's runner records each
                       VM in the instance as it is made), Power (start in boot order with the readiness checks and
                       delays, shut down or suspend the last step first; the power op's own ActionKind) and Teardown
-                      (R3's delete on each VM; ActionKind::StackTeardown, Critical; hand-added VMs only when picked);
+                      (R3's delete on each VM, linked-clone guard included; ActionKind::StackTeardown, Critical;
+                      hand-added VMs only when picked);
                       mod.rs Stacks (Core.stacks: CRUD, check, deploy, instances, power, teardown, add or take a VM
                       out by hand, forget, `stack_vms` for R7); runner.rs StackRunner, the job runner's StackActions
                       (instance records, readiness waits and delays on a StackClock: fakes/stack_clock.rs in tests);
@@ -423,7 +424,8 @@ crates/core/          remotely-core: all app logic
     linked_clones.rs  VM-04, VM-21, VM-24 linked clones: Workstation's from the golden VM's .vmsd (SnapshotInfo's
                       linked_clones; a clone whose .vmx is gone left out, one on a share counted unopened), VirtualBox's
                       from `list --long hdds` (vbox_clones: other VMs on disks made from a snapshot's). A snapshot or VM
-                      delete they depend on is refused (CoreError::LinkedClones, the clones named): by the bus before
+                      delete (a VM-08 stack teardown too) they depend on is refused (CoreError::LinkedClones, the
+                      clones named): by the bus before
                       it asks when every VM would be, else an approval warning and the AP-02 preview
                       (TargetImpact.linked_clones, VM-24's problem), and by the job runner just before it deletes; a
                       read failure refuses too. The snapshot list shows them (SnapshotNode.linked_clones); VM-27

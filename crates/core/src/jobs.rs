@@ -1522,6 +1522,8 @@ impl JobRunner {
                 if token.is_cancelled() {
                     return Err(CoreError::Cancelled);
                 }
+                // R3's delete, so its checks run again now: running, Workstation's lock, and linked clones made from
+                // the VM's snapshots (VM-24), a clone made since the approval included.
                 let delete = Command::VmLifecycle {
                     targets: vec![target.target.clone()],
                     op: crate::vm_settings::VmLifecycleOp::Delete,

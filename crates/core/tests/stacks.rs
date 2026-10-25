@@ -820,6 +820,151 @@ async fn a_hand_added_vm_is_deleted_only_when_picked() {
     std::fs::remove_dir_all(&lab.dir).unwrap();
 }
 
+/// A one-step instance ("solo 1": db-1 from the deploy) with `golden` added by hand and the instance shut down.
+async fn solo_with_golden(lab: &Lab) -> Uuid {
+    let core = &lab.core;
+    let ctx = &core.ctx;
+    core.inventory.refresh(ctx).await.unwrap();
+    let db = template(lab, "db").await;
+    let id = stack(lab, "solo", vec![step(db, 1, Readiness::None, 600, 0)]).await;
+    run(
+        core,
+        core.stacks
+            .deploy(
+                ctx,
+                &StackDeployRequest {
+                    stack_id: id,
+                    instance_name: None,
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let instance_id = core.stacks.instances(ctx).await.unwrap()[0].id;
+    core.stacks.add_vm(ctx, instance_id, &vmx("golden"), 0).await.unwrap();
+    run(
+        core,
+        core.stacks
+            .power(ctx, instance_id, PowerOp::Stop { mode: StopMode::Soft })
+            .await
+            .unwrap(),
+    )
+    .await;
+    instance_id
+}
+
+fn deleted_vms(fake: &FakeVmware) -> Vec<String> {
+    fake.calls()
+        .into_iter()
+        .filter(|c| c.starts_with("vmrun deleteVM"))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_teardown_refuses_a_golden_vm_linked_clones_depend_on_and_names_them() {
+    // VM-08 with VM-24's linked-clone guard: golden (snapshot "base") has the linked clone web-07, as Workstation
+    // records it in golden's .vmsd. A teardown is VM-24's delete on each VM, so the same guard stops golden.
+    let lab = lab_with("stack-golden", |_| {
+        FakeVmware::default()
+            .in_library(&vmx("golden"), Some("golden"))
+            .in_library(&vmx("web-07"), Some("web-07"))
+            .with_snapshot(
+                &vmx("golden"),
+                "base",
+                time::OffsetDateTime::now_utc() - time::Duration::days(40),
+            )
+            .with_linked_clone(&vmx("golden"), "base", &vmx("web-07"))
+    })
+    .await;
+    let core = &lab.core;
+    let ctx = &core.ctx;
+    let instance_id = solo_with_golden(&lab).await;
+
+    // Picked with db-1: the approval names the clones as golden's problem (AP-02), and the job deletes only db-1.
+    let approval = needs_approval(core.stacks.teardown(ctx, instance_id, &[vmx("golden")]).await.unwrap());
+    let mut names: Vec<&str> = approval.targets.iter().map(|t| t.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["db-1", "golden"]);
+    let change = approval.vm_change.as_ref().unwrap();
+    let golden = change.targets.iter().find(|t| t.name == "golden").unwrap();
+    let problem = golden.problem.as_deref().unwrap();
+    assert!(problem.contains("'base' (web-07 ("), "{problem}");
+    assert!(
+        approval.warnings.iter().any(|w| w.contains("web-07")),
+        "{:?}",
+        approval.warnings
+    );
+    let impact = approval.impact.iter().find(|i| i.target == vmx("golden")).unwrap();
+    assert_eq!(impact.linked_clones[0].clones[0].name, "web-07");
+    let (job, status) = approve_and_wait(core, &approval).await;
+    assert_eq!(status, JobStatus::PartiallyFailed);
+    let targets = targets_of(core, job).await;
+    let (_, state, error) = targets.iter().find(|(name, ..)| name == "golden").unwrap();
+    assert_eq!(state, "failed");
+    assert!(error.as_deref().unwrap_or_default().contains("web-07"), "{targets:?}");
+    assert_eq!(deleted_vms(&lab.fake), [format!("vmrun deleteVM {}", lab.vmx("db-1"))]);
+    // Never deleted: no deleteVM names it (above), and its snapshot and clone record are as they were.
+    assert_eq!(lab.fake.snapshot_names(&vmx("golden")), ["base"]);
+    assert_eq!(lab.fake.linked_clones(&vmx("golden")).len(), 1);
+    let instance = core.stacks.instance(ctx, instance_id).await.unwrap();
+    assert_eq!(
+        instance.vms.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        ["golden"]
+    );
+
+    // With golden alone left, the bus refuses before anything is asked, with the clones named.
+    match core.stacks.teardown(ctx, instance_id, &[vmx("golden")]).await {
+        Err(err @ remotely_core::CoreError::LinkedClones(_)) => {
+            assert_eq!(err.code(), "linked_clones");
+            let message = err.to_string();
+            assert!(
+                message.starts_with(
+                    "'golden': 1 linked clone depends on its snapshots: 'base' (web-07 (C:\\VMs\\web-07\\web-07.vmx))."
+                ),
+                "{message}"
+            );
+        }
+        other => panic!("expected a linked clones refusal, got {other:?}"),
+    }
+    assert_eq!(deleted_vms(&lab.fake).len(), 1);
+    assert_eq!(lab.fake.snapshot_names(&vmx("golden")), ["base"]);
+    std::fs::remove_dir_all(&lab.dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_linked_clone_made_after_a_teardowns_approval_stops_the_golden_vm_when_its_turn_comes() {
+    // The job runner checks again just before it deletes, through R3's delete (VM-24).
+    let lab = lab_with("stack-golden-late", |_| {
+        FakeVmware::default()
+            .in_library(&vmx("golden"), Some("golden"))
+            .with_snapshot(
+                &vmx("golden"),
+                "base",
+                time::OffsetDateTime::now_utc() - time::Duration::days(40),
+            )
+    })
+    .await;
+    let core = &lab.core;
+    let ctx = &core.ctx;
+    let instance_id = solo_with_golden(&lab).await;
+    let approval = needs_approval(core.stacks.teardown(ctx, instance_id, &[vmx("golden")]).await.unwrap());
+    assert!(approval.impact.iter().all(|i| i.linked_clones.is_empty()));
+    // A deploy makes a linked clone of golden's "base" while the approval waits.
+    lab.fake
+        .add_linked_clone(Path::new(&vmx("golden")), "base", Path::new(&vmx("web-08")));
+    lab.fake.set_file(&vmx("web-08"), true);
+
+    let (job, status) = approve_and_wait(core, &approval).await;
+    assert_eq!(status, JobStatus::PartiallyFailed);
+    let targets = targets_of(core, job).await;
+    let (_, _, error) = targets.iter().find(|(name, ..)| name == "golden").unwrap();
+    assert!(error.as_deref().unwrap_or_default().contains("web-08"), "{targets:?}");
+    assert_eq!(deleted_vms(&lab.fake), [format!("vmrun deleteVM {}", lab.vmx("db-1"))]);
+    assert_eq!(lab.fake.snapshot_names(&vmx("golden")), ["base"]);
+    std::fs::remove_dir_all(&lab.dir).unwrap();
+}
+
 #[tokio::test]
 async fn stack_edits_are_audited_checked_and_refused_by_the_read_only_lock() {
     let lab = lab("stack-edits").await;
