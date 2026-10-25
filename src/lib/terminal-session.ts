@@ -7,7 +7,9 @@
 //
 // A pane opens a saved session, a quick connection from the New terminal form (QL-02) or another
 // connection like an open pane (a split). QL-05: search (Ctrl+Shift+F), Ctrl+Shift+C / Ctrl+Shift+V,
-// right-click paste, and the font size, scrollback and copy-on-select settings, applied live. SS-11:
+// right-click paste, and the font size, scrollback and copy-on-select settings, applied live. Every copy of a
+// selection goes through the core, which scrubs this terminal's secrets from it, and the shell writes the clipboard
+// (kept out of Windows' clipboard history and cloud clipboard); never the browser's clipboard API. SS-11:
 // the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if typed;
 // QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
 // command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's keys go
@@ -29,6 +31,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { toast } from "sonner";
+import { latestOnly } from "@/lib/clipboard-copy";
 import { masker, TerminalMasker } from "@/lib/presentation";
 import { presentationView, subscribePresentation } from "@/lib/presentation-state";
 import { withVaultPassword } from "@/lib/reauth-prompt";
@@ -129,6 +133,15 @@ export interface CommandFinished {
 }
 
 const encoder = new TextEncoder();
+
+/**
+ * QL-05: one clipboard, so one queue for every pane's copies (the last selection ends up on it). A failure shows
+ * the reason, never the text.
+ */
+const copySelectionText = latestOnly<{ id: string | null; text: string }>(
+  ({ id, text }) => api.terminalCopySelection(id, text),
+  (err) => toast.error(`Copy failed: ${errorMessage(err)}`, { id: "terminal-copy" }),
+);
 
 /** FD-03: how long the masked terminal waits for the rest of a value split across reads. */
 const MASK_HOLD_MS = 25;
@@ -261,6 +274,17 @@ export class PaneSession {
       if (word && this.onFileWord) this.onFileWord(word, ev.clientX, ev.clientY);
       else void this.pasteFromClipboard();
     });
+    // QL-05: a copy the browser starts itself (Ctrl+Insert) would put xterm.js's selection on the clipboard as it is;
+    // caught before it reaches xterm.js, it goes through the core like every other copy.
+    this.element.addEventListener(
+      "copy",
+      (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.copySelection();
+      },
+      true,
+    );
     // FD-03: masked from its first output when the app is presenting, and from the moment it starts.
     this.stopFollowing = subscribePresentation(() => this.present(presentationView().presenting));
     this.present(presentationView().presenting);
@@ -304,8 +328,7 @@ export class PaneSession {
     });
     // SS-03 copy-on-select, like PuTTY (FD-03: the real text, even while presenting).
     term.onSelectionChange(() => {
-      if (term === this.screen && this.copyOnSelect && term.hasSelection())
-        void navigator.clipboard?.writeText(this.selectionText());
+      if (term === this.screen && this.copyOnSelect && term.hasSelection()) this.copySelection();
     });
     term.attachCustomKeyEventHandler((ev) => this.handleKey(ev));
   }
@@ -423,6 +446,16 @@ export class PaneSession {
     const text = this.term.getSelection();
     this.term.clearSelection();
     return text;
+  }
+
+  /**
+   * QL-05: what is selected on screen to the clipboard: through the core, which scrubs this terminal's secrets from
+   * it (FD-03: the real text, even while presenting), and the shell, which writes the clipboard.
+   */
+  private copySelection() {
+    if (!this.screen.hasSelection()) return;
+    const text = this.selectionText();
+    if (text) copySelectionText({ id: this.coreId, text });
   }
 
   // ---- state for React (useSyncExternalStore) ----
@@ -707,7 +740,7 @@ export class PaneSession {
     // Ctrl+Shift+C always copies.
     const shown = this.screen;
     if (ev.ctrlKey && !ev.altKey && key === "c" && (ev.shiftKey || shown.hasSelection())) {
-      if (shown.hasSelection()) void navigator.clipboard?.writeText(this.selectionText());
+      this.copySelection();
       shown.clearSelection();
       ev.preventDefault();
       return false;

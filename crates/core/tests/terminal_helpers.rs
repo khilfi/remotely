@@ -1,6 +1,6 @@
 //! Post-MVP P5 terminal helpers, end to end: QL-06 "Type vault password" (only at a password prompt
-//! unless forced, never leaking the value) and QL-07 notifications when a long command finishes
-//! (the prompt comes back, or the output stops).
+//! unless forced, never leaking the value), QL-05 selection copies scrubbed of the terminal's secrets, and
+//! QL-07 notifications when a long command finishes (the prompt comes back, or the output stops).
 //!
 //! SSH goes to `fakes::ssh_server` on 127.0.0.1 with passwords made at run time; its toy shell's
 //! `sudo` asks for a password without echoing it. No real host is contacted.
@@ -573,6 +573,86 @@ async fn a_password_no_saved_session_sends_to_this_host_needs_the_vault_password
         .await
         .unwrap();
     pane.expect_output("ok\r\n$ ").await;
+}
+
+// ---- QL-05: selection copies ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_copied_selection_is_scrubbed_of_the_terminals_secrets() {
+    let login = new_password();
+    let sudo = new_password();
+    // A broken sudo that prints the password it read back.
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &login)
+        .with_sudo(SudoMode::EchoesPassword(sudo.clone()));
+    let core = core().await;
+    trust_server(&core, &server).await;
+    let session_id = session(&core, &server, &login).await;
+    let sudo_id = secret(&core, SecretKind::Password, "web sudo", &sudo).await;
+    let mut pane = Pane::open(&core, session_id).await;
+
+    // The vault secret typed at sudo's prompt, and the login password (from the vault), both on screen.
+    pane.type_text(&core, "sudo id\r").await;
+    pane.expect_output("password for alice: ").await;
+    core.terminals
+        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
+        .await
+        .unwrap();
+    pane.expect_output(&format!("ok {sudo}\r\n$ ")).await;
+    pane.type_text(&core, &format!("echo {login}\r")).await;
+    pane.expect_output(&format!("{login}\r\n$ ")).await;
+
+    // What the user selected, as xterm.js reads it.
+    let selection = format!("ok {sudo}\r\n$ echo {login}\r\n{login}\r\n$ ");
+    let copied = core.terminals.scrub_for_copy(Some(pane.id), &selection).unwrap();
+    assert_eq!(copied, "ok [redacted]\r\n$ echo [redacted]\r\n[redacted]\r\n$ ");
+    // A selection without a secret is copied as it is.
+    assert_eq!(
+        core.terminals.scrub_for_copy(Some(pane.id), "$ uptime\r\n").unwrap(),
+        "$ uptime\r\n"
+    );
+
+    // The shell ending leaves the pane, and its secrets, until it is closed.
+    pane.type_text(&core, "exit\r").await;
+    pane.expect_event(|e| {
+        matches!(
+            e,
+            TerminalEvent::Status {
+                status: TerminalStatus::Ended { .. }
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    let copied = core.terminals.scrub_for_copy(Some(pane.id), &selection).unwrap();
+    assert!(!copied.contains(&sudo) && !copied.contains(&login), "{copied}");
+
+    // A closed terminal has dropped its secrets, so its text is refused rather than copied unchecked.
+    core.terminals.close(pane.id).await;
+    pane.expect_event(|e| {
+        matches!(
+            e,
+            TerminalEvent::Status {
+                status: TerminalStatus::Closed
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    let err = core.terminals.scrub_for_copy(Some(pane.id), &selection).unwrap_err();
+    assert_eq!(err.code(), "unknown_target");
+    assert!(
+        !err.to_string().contains(&sudo) && !err.to_string().contains(&login),
+        "{err}"
+    );
+
+    // A pane that never opened holds only the app's own lines: what looks like a password is redacted.
+    let copied = core
+        .terminals
+        .scrub_for_copy(None, &format!("[Not connected: refused]\r\nmysql --password={login}"))
+        .unwrap();
+    assert_eq!(copied, "[Not connected: refused]\r\nmysql --password=[redacted]");
 }
 
 // ---- QL-07: notifications when a long command finishes -------------------------------------------------

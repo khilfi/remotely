@@ -2769,9 +2769,17 @@ export const api = {
   reachabilityWatch: (sessionIds: string[]) => invoke<ReachabilityUpdate>("reachability_watch", { sessionIds }),
   onReachability: (handler: (update: ReachabilityUpdate) => void): Promise<UnlistenFn> =>
     listen<ReachabilityUpdate>("reachability://update", (e) => handler(e.payload)),
-  /** SS-11: the terminals' text with their login secrets scrubbed, for the clipboard. */
-  terminalOutputText: (items: TerminalText[]) => invoke<TerminalText[]>("terminal_output_text", { items }),
-  /** SS-11: the same for printing; audited as printed. */
+  /**
+   * SS-11 "Copy output": the shell puts the terminals' text on the clipboard, their login secrets scrubbed by the
+   * core, kept out of Windows' clipboard history and cloud clipboard.
+   */
+  terminalOutputCopy: (items: TerminalText[]) => invoke<void>("terminal_output_copy", { items }),
+  /**
+   * QL-05: a terminal's selection onto the clipboard the same way, scrubbed of that terminal's secrets. id: the
+   * core's terminal (null for a pane that never opened). Fails for a terminal that has closed.
+   */
+  terminalCopySelection: (id: string | null, text: string) => invoke<void>("terminal_copy_selection", { id, text }),
+  /** SS-11: the terminals' text with their login secrets scrubbed, for printing; audited as printed. */
   terminalOutputPrint: (items: TerminalText[]) => invoke<TerminalText[]>("terminal_output_print", { items }),
   /** SS-11: asks where (a file, or a folder for one file each), then saves. Audited. null: cancelled. */
   terminalOutputSave: (items: TerminalText[], layout: SaveLayout) =>
