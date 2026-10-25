@@ -656,7 +656,7 @@ impl VmConfigEdit {
                 secure_boot,
                 tpm,
             } => {
-                let mut what = firmware.label().to_owned();
+                let mut what = format!("{} firmware", firmware.label());
                 if *firmware == Firmware::Efi {
                     what.push_str(if *secure_boot {
                         " with Secure Boot"
@@ -669,7 +669,7 @@ impl VmConfigEdit {
                     Some(false) => what.push_str(", no TPM"),
                     None => {}
                 }
-                format!("Set {what} firmware on {vms}")
+                format!("Set {what} on {vms}")
             }
             VmConfigEdit::Rename { name } => format!("Rename {vms} to '{name}'"),
             VmConfigEdit::GuestOs { os_type } => format!("Set the guest OS type of {vms} to {os_type}"),

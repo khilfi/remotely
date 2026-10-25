@@ -7,7 +7,9 @@ import type { VmHardware, VmRecord } from "./api.ts";
 import { READ_ONLY_REASON } from "./disabled-reasons.ts";
 import {
   bulkResizeReason,
+  cableReason,
   diskActionReason,
+  diskFileLabel,
   formatMb,
   gbToMb,
   isoReason,
@@ -74,6 +76,7 @@ test("disk actions wait for the snapshots and refuse what can't be done", () => 
   const disk = { hypervisor: "vmware" as const, diskPath: "C:\\VMs\\web\\web.vmdk", vmFolder: "C:\\VMs\\web" };
   assert.equal(diskActionReason({ ...disk, action: "expand", snapshots: 0 }), null);
   assert.equal(diskActionReason({ ...disk, action: "expand", snapshots: null }), "Reading the VM's snapshots…");
+  assert.match(diskActionReason({ ...disk, action: "compact", snapshots: "failed" })!, /^Could not read the VM's snapshots/);
   assert.equal(
     diskActionReason({ ...disk, action: "expand", snapshots: 2 }),
     "The VM has 2 snapshots: a disk can't be expanded while snapshots depend on it. Delete the snapshots first",
@@ -88,6 +91,9 @@ test("disk actions wait for the snapshots and refuse what can't be done", () => 
     /outside the VM's folder/,
   );
   assert.equal(diskActionReason({ ...disk, action: "remove", snapshots: 0, diskPath: "c:/vms/WEB/web-1.vmdk" }), null);
+  assert.equal(diskFileLabel("C:\\VMs\\web\\web-1.vmdk", "c:/vms/WEB"), "web-1.vmdk", "in the VM's folder: its name");
+  assert.equal(diskFileLabel("D:\\shared\\common.vmdk", "C:\\VMs\\web"), "D:\\shared\\common.vmdk");
+  assert.equal(diskFileLabel("C:\\VMs\\web\\web.vmdk", null), "C:\\VMs\\web\\web.vmdk");
 });
 
 test("tools, ISOs and the TPM say why they are off", () => {
@@ -99,6 +105,17 @@ test("tools, ISOs and the TPM say why they are off", () => {
   assert.match(isoReason(running, null, noDrives)!, /no CD\/DVD drive/);
   assert.match(tpmReason("vmware")!, /encrypted/);
   assert.equal(tpmReason("virtualbox"), null);
+});
+
+test("a network cable is offered the way it isn't", () => {
+  const vbox = { connected: true, connectedNow: false };
+  assert.equal(cableReason(vbox, true, true, null), null, "running: the cable as it is now");
+  assert.equal(cableReason(vbox, false, true, null), "Already disconnected");
+  assert.equal(cableReason(vbox, true, false, null), "Already connected at power-on", "off: the power-on setting");
+  const workstation = { connected: true, connectedNow: null };
+  assert.equal(cableReason(workstation, true, true, null), null, "Workstation can't be asked: both stay on");
+  assert.equal(cableReason(workstation, false, true, null), null);
+  assert.equal(cableReason(vbox, true, true, READ_ONLY_REASON), READ_ONLY_REASON);
 });
 
 test("a bulk resize goes to the VMs that are off and unprotected", () => {

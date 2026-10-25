@@ -59,7 +59,9 @@ import { formatWhen } from "@/lib/format";
 import { toolsName } from "@/lib/hypervisors";
 import { formatBytes } from "@/lib/metrics";
 import {
+  cableReason,
   diskActionReason,
+  diskFileLabel,
   isoReason,
   nicText,
   toolsReason,
@@ -73,8 +75,8 @@ interface Props {
   /** FD-03: the read-only lock's reason, or null. */
   readOnly: string | null;
   busy: boolean;
-  /** The VM's snapshot count once its tree is read; null before. */
-  snapshots: number | null;
+  /** The VM's snapshot count once its tree is read; null before, "failed" when it couldn't be read. */
+  snapshots: number | "failed" | null;
   /** Changes when a job finished or a setting changed: the files are read again. */
   refreshKey: string;
   onSubmit: Submit;
@@ -438,7 +440,9 @@ export function VmSettingsTab({
                           {d.controller && <div className="text-muted-foreground">{d.controller}</div>}
                         </TableCell>
                         <TableCell className="text-xs whitespace-normal">
-                          <div className="font-mono break-all">{d.path}</div>
+                          <div className="font-mono break-all" title={d.path}>
+                            {diskFileLabel(d.path, folder)}
+                          </div>
                           <div className="text-muted-foreground">
                             {[
                               d.thin === null ? null : d.thin ? "thin" : "thick",
@@ -578,6 +582,7 @@ export function VmSettingsTab({
                             nic={n}
                             off={off}
                             anyState={anyState}
+                            running={running}
                             onEdit={() => setDialog({ kind: "nic", nic: n })}
                             onRun={(command) => void onSubmit(command)}
                             target={ref}
@@ -814,6 +819,7 @@ function NicMenu({
   nic,
   off,
   anyState,
+  running,
   onEdit,
   onRun,
   target,
@@ -821,10 +827,13 @@ function NicMenu({
   nic: VirtualNic;
   off: string | null;
   anyState: string | null;
+  running: boolean;
   onEdit: () => void;
   onRun: (command: Parameters<Submit>[0]) => void;
   target: TargetRef;
 }) {
+  const connect = cableReason(nic, true, running, anyState);
+  const disconnect = cableReason(nic, false, running, anyState);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -840,21 +849,21 @@ function NicMenu({
           </div>
         </DropdownMenuItem>
         <DropdownMenuItem
-          disabled={anyState !== null}
+          disabled={connect !== null}
           onSelect={() => onRun({ type: "vmDevice", targets: [target], op: { kind: "connectNic", slot: nic.slot } })}
         >
           <div>
             Connect
-            <ReasonLine reason={anyState} />
+            <ReasonLine reason={connect} />
           </div>
         </DropdownMenuItem>
         <DropdownMenuItem
-          disabled={anyState !== null}
+          disabled={disconnect !== null}
           onSelect={() => onRun({ type: "vmDevice", targets: [target], op: { kind: "disconnectNic", slot: nic.slot } })}
         >
           <div>
             Disconnect
-            <ReasonLine reason={anyState} />
+            <ReasonLine reason={disconnect} />
           </div>
         </DropdownMenuItem>
         <DropdownMenuSeparator />

@@ -140,7 +140,7 @@ export function VmDetailsPanel(props: Props) {
         className="min-h-0 flex-1 gap-0"
         aria-label={`${vm.displayName}'s details`}
       >
-        <div className="flex items-center gap-2 border-b px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
           <TabsList>
             <TabsTrigger value="details">Details</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
@@ -185,7 +185,7 @@ export function VmDetailsPanel(props: Props) {
               vm={vm}
               readOnly={props.readOnly}
               busy={props.busy}
-              snapshots={tree && !tree.error ? tree.snapshots.length : null}
+              snapshots={!tree ? null : tree.error ? "failed" : tree.snapshots.length}
               refreshKey={refreshKey}
               onSubmit={props.onSubmit}
               onSubmitted={props.onSubmitted}

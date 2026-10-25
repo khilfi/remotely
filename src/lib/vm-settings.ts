@@ -53,8 +53,8 @@ export function vmActionReason(input: {
 export function diskActionReason(input: {
   action: "expand" | "compact" | "defragment" | "remove";
   hypervisor: Hypervisor;
-  /** The VM's snapshot count, once read. */
-  snapshots: number | null;
+  /** The VM's snapshot count, once read, or "failed" when it couldn't be read. */
+  snapshots: number | "failed" | null;
   /** The disk's file, and the VM's folder: Remotely removes only disks in it. */
   diskPath: string;
   vmFolder: string | null;
@@ -63,6 +63,7 @@ export function diskActionReason(input: {
     return "VirtualBox has no defragment for its disks: compact the disk instead";
   }
   if (input.snapshots === null) return "Reading the VM's snapshots…";
+  if (input.snapshots === "failed") return "Could not read the VM's snapshots: refresh them on the Snapshots tab";
   if (input.snapshots > 0) {
     const what = {
       expand: "expanded",
@@ -87,6 +88,12 @@ function parentOf(path: string): string {
 function sameFolder(a: string, b: string) {
   const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
   return norm(a) === norm(b);
+}
+
+/** VM-16: a disk's file as the Settings tab lists it: its name when it is in the VM's folder, else the whole path. */
+export function diskFileLabel(diskPath: string, vmFolder: string | null): string {
+  if (!vmFolder || !sameFolder(parentOf(diskPath), vmFolder)) return diskPath;
+  return diskPath.slice(Math.max(diskPath.lastIndexOf("\\"), diskPath.lastIndexOf("/")) + 1);
 }
 
 /** VM-23: why the firmware dialog can't offer a TPM. */
@@ -121,6 +128,25 @@ export function isoReason(
   const on = vm.powerState === "running" || vm.powerState === "paused";
   if (on && hardware && hardware.cdroms.length === 0) {
     return "The VM has no CD/DVD drive, and one is added only while the VM is off: shut it down first";
+  }
+  return null;
+}
+
+/**
+ * VM-11: why connecting or disconnecting a network adapter is off. While the VM runs only VirtualBox says whether the
+ * cable is in (Workstation can't be asked, so both stay on); while it is off, the setting for power-on counts.
+ */
+export function cableReason(
+  nic: Pick<VirtualNic, "connected" | "connectedNow">,
+  connect: boolean,
+  running: boolean,
+  anyState: string | null,
+): string | null {
+  if (anyState) return anyState;
+  const now = running ? nic.connectedNow : nic.connected;
+  if (now === connect) {
+    if (running) return connect ? "Already connected" : "Already disconnected";
+    return connect ? "Already connected at power-on" : "Already not connected at power-on";
   }
   return null;
 }

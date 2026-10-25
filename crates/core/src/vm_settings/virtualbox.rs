@@ -142,7 +142,7 @@ pub fn config_calls(uuid: &str, info: &VboxVmInfo, edit: &VmConfigEdit) -> Resul
             ));
             if let Some(on) = tpm {
                 opt(&mut modify, "--tpm-type", if *on { "2.0" } else { "none" });
-                changes.push(format!("TPM: {}", if *on { "TPM 2.0" } else { "none" }));
+                changes.push(if *on { "TPM 2.0 added" } else { "TPM removed" }.to_owned());
             }
             calls.push(std::mem::take(&mut modify));
             let secure_now = info.secure_boot.unwrap_or(false);
