@@ -555,7 +555,20 @@ impl HostNetworks {
             let gate = Arc::clone(&gate);
             reads.spawn(async move {
                 let _slot = gate.acquire_owned().await;
-                let read = tokio::time::timeout(VM_READ_TIMEOUT, hypervisors.hardware(&vm.vmx_path)).await;
+                // VirtualBox refuses a read while another client (the VM list's refresh) holds the VM's lock: ask again.
+                let read = tokio::time::timeout(VM_READ_TIMEOUT, async {
+                    let mut waits = [300u64, 800, 1500].into_iter();
+                    loop {
+                        match hypervisors.hardware(&vm.vmx_path).await {
+                            Err(err) if net::vbox_busy(&err) => match waits.next() {
+                                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                                None => break Err(err),
+                            },
+                            other => break other,
+                        }
+                    }
+                })
+                .await;
                 (order, vm, read.ok().and_then(|r| r.ok()))
             });
         }
