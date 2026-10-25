@@ -552,7 +552,8 @@ src/                  React + TypeScript UI
   nothing of the golden VM's; a linked clone adds `snapshotN.cloneM = "<clone's .vmx>"` and `snapshotN.numClones` to
   its .vmsd, yet `vmrun deleteSnapshot` deletes that snapshot without a word (the linked clone breaks). Both clone a
   running golden VM from its snapshot, and the golden VM runs on; a VM started with `vmrun start ... nogui` has
-  `<disk>.vmdk.lck` folders (and a `.vmem.lck`) but no `.vmx.lck`; ovftool writes .vmx
+  `<disk>.vmdk.lck` folders (and a `.vmem.lck`) but no `.vmx.lck`; and vmrun ignores a `.vmx.lck` (an open tab's): it
+  clones beside one and writes the linked clone's record anyway, so only Remotely's own check stops it; ovftool writes .vmx
   keys in lower case (`displayname`, `virtualhw.version`; keys match without case, and `VmxFile` keeps one) and names
   an import's disk `<name>-disk1.vmdk`; a truncated OVA fails with "Disk (...) could not be found".
   cloud-init's VMware datasource reads `guestinfo.metadata` and `guestinfo.userdata` from the .vmx, each with

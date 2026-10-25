@@ -433,6 +433,15 @@ async fn golden_vm_clones_are_full_and_grow_or_linked_and_say_why_not() {
     let check = core.deploy.check(ctx, &request(full.id, 1)).await.unwrap();
     assert!(check.preview.unwrap().refusals.is_empty(), "a full clone goes ahead");
     fake.set_file(&lock, false);
+    // Off but open in a Workstation tab: the lock is beside the .vmx (vmrun itself clones regardless).
+    let tab_lock = format!("{golden}.lck");
+    fake.set_file(&tab_lock, true);
+    let check = core.deploy.check(ctx, &request(linked.id, 1)).await.unwrap();
+    assert!(
+        check.preview.unwrap().refusals.iter().any(|r| r.contains(&tab_lock)),
+        "the open tab's lock refuses it too"
+    );
+    fake.set_file(&tab_lock, false);
     // Workstation's window is open: the approval says to close the golden VM's tab.
     fake.set_workstation_open(true);
     let approval = needs_approval(core.deploy.submit(ctx, &request(linked.id, 1)).await.unwrap());
