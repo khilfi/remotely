@@ -114,10 +114,14 @@ import {
   type SessionRecord,
   type StagedFiles,
   type SubmitOutcome,
+  type TerminalAlert,
+  type TerminalRule,
   type TransferInfo,
   type UploadStart,
   type VaultInfo,
 } from "@/lib/api";
+import { rulesForPane } from "@/lib/highlight-rules";
+import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
 import { sendCommand } from "@/lib/command-send";
 import { connectedReason, multiExecReason, READ_ONLY_REASON, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
@@ -331,8 +335,10 @@ export function TerminalPage({
   /** QL-07: what Settings say about notifications (on, long commands or any while away, how long). */
   const [notify, setNotify] = useState<NotifyChoice>({ on: true, when: "long", afterSecs: 30 });
   const notifyOn = notify.on;
-  /** QL-07: tabs where a long command finished while they were in the background. */
+  /** QL-07: tabs where a long command finished (QL-17: or an alert rule matched) while they were in the background. */
   const [attention, setAttention] = useState<string[]>([]);
+  /** QL-17: the highlight and alert rules; each pane highlights with those for its scope. */
+  const [highlightRules, setHighlightRules] = useState<TerminalRule[]>([]);
   const [newOpen, setNewOpen] = useState(false);
   const [version, setVersion] = useState(0);
   /** SS-10: MultiExec is on; the picked tabs (`selection`) receive what is typed into any of them. */
@@ -393,6 +399,8 @@ export function TerminalPage({
   const loadSessions = useCallback(() => {
     api.sessions().then(setSessions, (err) => toast.error(errorMessage(err)));
     api.sessionFolders().then(setFolders, () => undefined);
+    // QL-17: Settings edits the rules, so they are read again each time the page shows.
+    api.terminalRules().then(setHighlightRules, () => undefined);
     api.terminalSettings().then(
       (s) => {
         setOptions({
@@ -445,6 +453,15 @@ export function TerminalPage({
 
   const sessionById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
 
+  // QL-17: each pane highlights with the enabled rules for its scope: its saved session, and that session's label
+  // (none for a quick connection that was not saved). The same rules again change nothing in a pane.
+  useEffect(() => {
+    for (const pane of tabs.flatMap((t) => allPanes(t.layout))) {
+      const session = pane.sessionId ? sessionById.get(pane.sessionId) : undefined;
+      pane.setHighlightRules(rulesForPane(highlightRules, pane.sessionId, session?.environment ?? "none"));
+    }
+  }, [tabs, highlightRules, sessionById]);
+
   /** SS-07: a tunnel needs the approval dialog (started here, or one that starts with the terminal). */
   const askTunnel = useCallback((pane: PaneSession, forwardId: string, request: ApprovalRequest) => {
     setTunnelApprovals((queue) =>
@@ -454,6 +471,8 @@ export function TerminalPage({
 
   // QL-07: a pane's finished command is handled with the page's latest state.
   const finishedRef = useRef<(pane: PaneSession, finished: CommandFinished) => void>(() => undefined);
+  // QL-17: so is an alert.
+  const alertRef = useRef<(pane: PaneSession, alert: TerminalAlert) => void>(() => undefined);
   // SS-08: a file name right-clicked in a pane, too.
   const fileWordRef = useRef<(pane: PaneSession, word: string, x: number, y: number) => void>(() => undefined);
   // QL-05: a paste with a line break waits for the confirm (one at a time: a newer one cancels the one shown).
@@ -462,6 +481,7 @@ export function TerminalPage({
     (opener: PaneOpener, label: string, fixedTitle = false) => {
       const pane = new PaneSession(newKey(), opener, label, theme, options, fixedTitle);
       pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
+      pane.onAlert = (alert) => alertRef.current(pane, alert);
       pane.onFileWord = (word, x, y) => fileWordRef.current(pane, word, x, y);
       pane.onPasteConfirm = (p, ask) => pasteAskRef.current(p, ask);
       // OSC 8 links from the host are never opened: the address shows, to copy.
@@ -666,6 +686,24 @@ export function TerminalPage({
       // FD-03: Windows shows it outside the window, so it is masked here while presenting.
       api
         .notifyCommandFinished(maskedOutside(title), maskedOutside(body))
+        .catch((err) => console.warn("notification failed", err));
+      if (tab.key !== activeTab || !active)
+        setAttention((prev) => (prev.includes(tab.key) ? prev : [...prev, tab.key]));
+    };
+  });
+
+  // QL-17: an alert (the core sends one per burst of matching lines, never one per line) is kept for the list of
+  // recent alerts, and notifies like a finished command when its tab is away, unless the tab's bell is off.
+  useEffect(() => {
+    alertRef.current = (pane, alert) => {
+      const name = nameOf(pane);
+      recordAlert(alert, name);
+      const tab = tabs.find((t) => allPanes(t.layout).includes(pane));
+      if (!tab || !tab.notify || !inBackground(tab.key, activeTab, active)) return;
+      const { title, body } = alertNotification(alert, name);
+      // FD-03: Windows shows it outside the window, so it is masked here while presenting.
+      api
+        .notifyTerminalAlert(maskedOutside(title), maskedOutside(body))
         .catch((err) => console.warn("notification failed", err));
       if (tab.key !== activeTab || !active)
         setAttention((prev) => (prev.includes(tab.key) ? prev : [...prev, tab.key]));
@@ -2005,7 +2043,7 @@ function TabButton({
     via.length > 0 && `Through ${routeText(via)}`,
     session ? null : "Not saved as a session",
     snapshot.logPath && `Logging to ${snapshot.logPath}`,
-    attention && "A long command finished here",
+    attention && "A long command finished, or an alert rule matched, here",
     !tab.notify && "No notifications from this tab",
     multiExec === "receives" && "MultiExec: what you type goes here",
     multiExec === "off" && "MultiExec: not picked, so typing elsewhere does not reach it (Ctrl+click to add it)",
@@ -2055,7 +2093,9 @@ function TabButton({
         )}
       </span>
       {snapshot.logPath && <FileTextIcon className="size-3.5 shrink-0 text-tier-medium" aria-label="Logging" />}
-      {attention && <BellRingIcon className="size-3.5 shrink-0 text-primary" aria-label="A long command finished" />}
+      {attention && (
+        <BellRingIcon className="size-3.5 shrink-0 text-primary" aria-label="A long command finished or an alert" />
+      )}
       {!tab.notify && <BellOffIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label="No notifications" />}
       {count > 1 && <span className="text-xs text-muted-foreground">{count}</span>}
       <button

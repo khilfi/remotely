@@ -39,6 +39,11 @@
 // starts from the real one's screen and the end of its scrollback, serialized, then masked and written in pieces cut at
 // line breaks, one at a time, so a long scrollback never holds the page up; output that arrives meanwhile waits and
 // follows in order. It is dropped when presenting stops. Nothing changes in what is sent to the host.
+//
+// QL-17: each terminal (the real one, and the masked one while presenting) has its own highlighter
+// (terminal-highlights.ts), which colours what the pane's rules match in its own text: the masked one never lights up
+// a stand-in for a host a rule names. The page gives the pane the rules for its scope (`setHighlightRules`); the
+// core's alerts arrive as events (`onAlert`), one per burst of matching lines.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -63,12 +68,16 @@ import {
   type KnownHost,
   type QuickConnectRequest,
   type SessionRecord,
+  type TerminalAlert,
   type TerminalEvent,
+  type TerminalRule,
   type TerminalStatus,
   type TunnelInfo,
   type TunnelStart,
 } from "@/lib/api";
+import { compileRules, rulesKey, type CompiledRule } from "@/lib/highlight-rules";
 import { pasteHasLineBreak, pastePreview, sanitizePaste, type PastePreview } from "@/lib/paste";
+import { Highlighter } from "@/lib/terminal-highlights";
 import { InputOrigin } from "@/lib/terminal-input";
 import type { ResolvedTheme } from "@/lib/theme";
 import {
@@ -205,6 +214,8 @@ interface MaskedView {
   /** The real terminal's screen has been copied in; output before that waits in `queue`. */
   ready: boolean;
   queue: string[];
+  /** QL-17: matches the masked text. */
+  highlighter: Highlighter;
 }
 
 /**
@@ -288,6 +299,16 @@ export class PaneSession {
   onFileWord: ((word: string, x: number, y: number) => void) | null = null;
   /** SS-07: a tunnel started waiting for the user's approval (the page fetches the request and shows it). */
   onTunnelAsking: ((pane: PaneSession, forwardId: string) => void) | null = null;
+  /** QL-17: an alert rule matched here (the core sends one per burst of matching lines). */
+  onAlert: ((alert: TerminalAlert) => void) | null = null;
+  /** QL-17: the real terminal's highlighter. */
+  private readonly highlighter: Highlighter;
+  /** QL-17: the pane's highlight rules, compiled, and what they were compiled from. */
+  private highlightRules: CompiledRule[] = [];
+  private highlightKey = "";
+  /** QL-17: the terminals whose highlighting paused (too much output), and the note that says so. */
+  private readonly highlightPaused = new Set<Terminal>();
+  private pauseNote: HTMLDivElement | null = null;
 
   constructor(
     key: string,
@@ -333,6 +354,7 @@ export class PaneSession {
     this.term.loadAddon(this.serializer);
     this.term.open(this.realHost);
     this.wire(this.term);
+    this.highlighter = this.newHighlighter(this.term, theme);
     // SS-03: WebGL while the pane is on screen; hidden (another tab or page, detached), the DOM renderer.
     this.visibility =
       typeof IntersectionObserver === "undefined"
@@ -548,6 +570,12 @@ export class PaneSession {
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    term.open(host);
+    term.resize(this.term.cols, this.term.rows);
+    this.wire(term);
+    // QL-17: its own matches, on the masked text, from its first line.
+    const highlighter = this.newHighlighter(term, this.theme);
+    highlighter.setRules(this.highlightRules);
     const view: MaskedView = {
       term,
       host,
@@ -558,11 +586,9 @@ export class PaneSession {
       timer: null,
       ready: false,
       queue: [],
+      highlighter,
     };
     this.masked = view;
-    term.open(host);
-    term.resize(this.term.cols, this.term.rows);
-    this.wire(term);
     this.searchAddon.clearDecorations();
     this.syncRenderer();
     // Once the real terminal has parsed what it was given so far, its screen and the end of its scrollback start the
@@ -596,6 +622,7 @@ export class PaneSession {
     const hadFocus = view.host.contains(document.activeElement);
     // SS-03: its WebGL context goes with it; the real terminal gets one if the pane shows.
     if (this.webgl?.term === view.term) this.dropWebgl();
+    view.highlighter.dispose();
     view.term.dispose();
     view.host.remove();
     this.realHost.style.visibility = "";
@@ -741,6 +768,9 @@ export class PaneSession {
           logError: `The session log stopped: it could not be written to ${event.path} (${event.reason}).`,
         });
         break;
+      case "alert":
+        this.onAlert?.(event.alert);
+        break;
     }
   };
 
@@ -844,9 +874,11 @@ export class PaneSession {
     this.showReal();
     this.visibility?.disconnect();
     this.dropWebgl();
+    this.highlighter.dispose();
     this.term.dispose();
     this.listeners.clear();
     this.onCommandFinished = null;
+    this.onAlert = null;
     this.onFileWord = null;
     this.onTunnelAsking = null;
     this.onPasteConfirm = null;
@@ -1148,7 +1180,52 @@ export class PaneSession {
   setTheme(theme: ResolvedTheme) {
     this.theme = theme;
     this.term.options.theme = TERMINAL_PALETTE[theme];
-    if (this.masked) this.masked.term.options.theme = TERMINAL_PALETTE[theme];
+    this.highlighter.setTheme(theme);
+    if (this.masked) {
+      this.masked.term.options.theme = TERMINAL_PALETTE[theme];
+      this.masked.highlighter.setTheme(theme);
+    }
+  }
+
+  // ---- QL-17 highlights ----
+
+  private newHighlighter(term: Terminal, theme: ResolvedTheme) {
+    return new Highlighter(term, theme, (paused) => {
+      if (paused) this.highlightPaused.add(term);
+      else this.highlightPaused.delete(term);
+      this.showPauseNote();
+    });
+  }
+
+  /**
+   * The rules that highlight in this pane (the page picks them for its scope). The same rules again change nothing;
+   * new ones replace what was painted and match the lines near the cursor again, never the whole scrollback.
+   */
+  setHighlightRules(rules: TerminalRule[]) {
+    const key = rulesKey(rules);
+    if (key === this.highlightKey || this.closed) return;
+    this.highlightKey = key;
+    this.highlightRules = compileRules(rules);
+    this.highlighter.setRules(this.highlightRules);
+    this.masked?.highlighter.setRules(this.highlightRules);
+  }
+
+  /** A small note while highlighting is paused in this pane (too much output), so missing colours are explained. */
+  private showPauseNote() {
+    const paused = this.highlightPaused.size > 0 && !this.closed;
+    if (!paused) {
+      this.pauseNote?.remove();
+      this.pauseNote = null;
+      return;
+    }
+    if (this.pauseNote) return;
+    const note = document.createElement("div");
+    note.className =
+      "pointer-events-none absolute top-1 right-3 z-10 rounded-md border bg-popover/90 px-2 py-0.5 text-xs text-muted-foreground shadow-sm";
+    note.setAttribute("role", "status");
+    note.textContent = "Highlighting paused: a lot of output";
+    this.element.appendChild(note);
+    this.pauseNote = note;
   }
 
   /** QL-05: font size, scrollback, copy-on-select and the paste question, applied to an open pane. */

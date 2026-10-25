@@ -19,6 +19,7 @@ mod retention_tests;
 mod sessions;
 mod ssh_keys;
 mod tags;
+mod terminal_rules;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
+pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};
 pub(crate) use vault::VaultMetaRow;
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";

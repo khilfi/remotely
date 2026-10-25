@@ -1074,7 +1074,9 @@ export type TerminalEvent =
   /** SS-08: the shell's folder, or how far it is known (each connection starts over). */
   | { event: "folder"; folder: FolderInfo }
   /** SS-11: the session log could not be written (a full disk, say), so it stopped. */
-  | { event: "logStopped"; path: string; reason: string };
+  | { event: "logStopped"; path: string; reason: string }
+  /** QL-17: an alert rule matched (one event per burst of matching lines). */
+  | { event: "alert"; alert: TerminalAlert };
 
 // ---- SS-07 port forwards and tunnels ----
 
@@ -1332,6 +1334,70 @@ export interface MultiExecGroup {
 export interface GroupInput {
   name: string;
   sessionIds: string[];
+}
+
+/** QL-17: how a rule colours what it matches: the text in the colour, or the colour behind it. */
+export type RuleStyle = "text" | "fill";
+
+/** QL-17: which terminals a rule applies to. */
+export type RuleScope =
+  | { kind: "global" }
+  | { kind: "environment"; environment: Exclude<Environment, "none"> }
+  | { kind: "session"; sessionId: string };
+
+/** QL-17: a highlight and alert rule. */
+export interface TerminalRule {
+  /** `builtin:<key>` for a built-in rule, else the rule's id. */
+  id: string;
+  builtin: boolean;
+  name: string;
+  /** A regular expression both Rust and JavaScript (with the u flag) read alike; the core checks it. */
+  pattern: string;
+  caseSensitive: boolean;
+  /** null: no highlight, the rule only alerts. */
+  color: SessionColor | null;
+  style: RuleStyle;
+  alert: boolean;
+  scope: RuleScope;
+  enabled: boolean;
+  /** Why a saved pattern can't be used any more (saved by another version): it neither highlights nor alerts. */
+  problem: string | null;
+  updatedAt: string | null;
+}
+
+export interface TerminalRuleInput {
+  name: string;
+  pattern: string;
+  caseSensitive: boolean;
+  color: SessionColor | null;
+  style: RuleStyle;
+  alert: boolean;
+  scope: RuleScope;
+  enabled: boolean;
+}
+
+/** QL-17: the editor's live check of a pattern. */
+export interface PatternCheck {
+  valid: boolean;
+  message: string | null;
+}
+
+/** QL-17: a burst of lines that matched an alert rule in one terminal (one event per burst, then a cooldown). */
+export interface TerminalAlert {
+  ruleId: string;
+  ruleName: string;
+  terminalId: string;
+  /** null: a quick connection that was not saved. */
+  sessionId: string | null;
+  /** Lines that matched in this burst. */
+  count: number;
+  /** Lines that matched during the cooldown since the last alert. */
+  suppressed: number;
+  /** RFC 3339, UTC. */
+  firstAt: string;
+  lastAt: string;
+  /** The first matching line, scrubbed of the terminal's secrets, at most 200 characters. */
+  sample: string;
 }
 
 /** BX-08: the two sections of the library: symptom runbooks first, then groups by area. */
@@ -3089,6 +3155,24 @@ export const api = {
     invoke<void>("terminal_type_secret", { id, secretId, force, vaultPassword: vaultPassword ?? null }),
   /** QL-07: a Windows notification that a long command finished in a background tab. */
   notifyCommandFinished: (title: string, body: string) => invoke<void>("notify_command_finished", { title, body }),
+  /** QL-17: a Windows notification that an alert rule matched in a background tab (one per burst). */
+  notifyTerminalAlert: (title: string, body: string) => invoke<void>("notify_terminal_alert", { title, body }),
+
+  /** QL-17 highlight and alert rules: built-in ones first, then the user's in their order. */
+  terminalRules: () => invoke<TerminalRule[]>("terminal_rules_list"),
+  /** QL-17: the editor's live check of a pattern (what Rust and JavaScript both read alike). */
+  terminalRuleValidate: (pattern: string, caseSensitive: boolean) =>
+    invoke<PatternCheck>("terminal_rule_validate", { pattern, caseSensitive }),
+  /** QL-17: changes are audited (name and scope, never the pattern) and refused by the read-only lock. */
+  addTerminalRule: (input: TerminalRuleInput) => invoke<TerminalRule>("terminal_rule_add", { input }),
+  updateTerminalRule: (id: string, input: TerminalRuleInput) =>
+    invoke<TerminalRule>("terminal_rule_update", { id, input }),
+  deleteTerminalRule: (id: string) => invoke<void>("terminal_rule_delete", { id }),
+  /** The user's rules (all of them, by id) in a new order. */
+  reorderTerminalRules: (ids: string[]) => invoke<TerminalRule[]>("terminal_rules_reorder", { ids }),
+  /** A built-in rule (by its key, e.g. "error") or its alert on or off. */
+  setBuiltinTerminalRule: (key: string, enabled: boolean, alert: boolean) =>
+    invoke<TerminalRule>("terminal_rule_set_builtin", { key, enabled, alert }),
 
   /** SS-08: the shell's folder as far as it is known. */
   filesFolder: (id: string) => invoke<FolderInfo | null>("files_folder", { id }),

@@ -7,6 +7,11 @@
 //! has had the terminal's login secrets scrubbed ([`Scrubber`]) twice: from the bytes as they arrive, and
 //! from each rendered line, where a secret the terminal drew in pieces (split by a colour code, a cursor
 //! move or a backspace, as in `hun\x1b[0mter2`) reads whole.
+//!
+//! QL-17: the same line splitter, without time stamps ([`ScrubbedLines`]), gives each pane's alert rules the
+//! lines its output completes ([`crate::terminal::alerts`]). Each [`Line`] also says whether a full-screen program
+//! drew it (xterm's alternate screen) and whether it was marked ([`LineLogger::mark_line`]: the line Enter was
+//! pressed on), which the log ignores.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -41,17 +46,42 @@ enum Escape {
     StringEsc,
 }
 
+/// The longest control sequence parameters kept: enough for any private mode.
+const MAX_CSI_CHARS: usize = 32;
+
+/// A line of output as rendered: escapes dropped, redraws and backspaces applied, secrets scrubbed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Line {
+    /// As drawn, not trimmed.
+    pub text: String,
+    /// QL-17: some of it was drawn while a full-screen program had the alternate screen (vim, less, top), or the
+    /// screen switched while it was drawn.
+    pub full_screen: bool,
+    /// QL-17: [`LineLogger::mark_line`] was called while it was drawn.
+    pub marked: bool,
+}
+
 /// Turns terminal output into timestamped text lines, with secrets scrubbed from the rendered text.
 pub struct LineLogger {
     /// Bytes of a UTF-8 character split across two reads.
     partial: Vec<u8>,
     line: String,
+    /// Characters in `line`, so a long line is not counted again for each character it gets.
+    chars: usize,
     escape: Escape,
+    /// The parameters of the control sequence being read (QL-17: the alternate screen's private modes).
+    csi: String,
     /// A `\r` that may be the start of `\r\n`.
     carriage_return: bool,
     /// SS-11: scrubs each line as rendered, so a secret split by escapes or backspaces in the output is caught.
     /// It holds back only the end of a line cut at [`MAX_LINE_CHARS`] that may start a secret, for the next piece.
     scrubber: Scrubber,
+    /// QL-17: a full-screen program has the alternate screen (`CSI ? 1049 h`, or the older 47 and 1047).
+    alternate: bool,
+    /// QL-17: the line being drawn is (partly) a full-screen program's.
+    line_full_screen: bool,
+    /// QL-17: the line being drawn was marked.
+    marked: bool,
 }
 
 impl Default for LineLogger {
@@ -71,9 +101,14 @@ impl LineLogger {
         Self {
             partial: Vec::new(),
             line: String::new(),
+            chars: 0,
             escape: Escape::None,
+            csi: String::new(),
             carriage_return: false,
             scrubber: Scrubber::new(secrets),
+            alternate: false,
+            line_full_screen: false,
+            marked: false,
         }
     }
 
@@ -82,8 +117,28 @@ impl LineLogger {
         self.scrubber.add(secret);
     }
 
+    /// QL-17: what follows is drawn on a full-screen program's screen (a splitter started while one was open).
+    pub fn set_alternate(&mut self, alternate: bool) {
+        self.alternate = alternate;
+        self.line_full_screen |= alternate;
+    }
+
+    /// QL-17: marks the line being drawn (the user pressed Enter on it); the mark comes back with it.
+    pub fn mark_line(&mut self) {
+        self.marked = true;
+    }
+
     /// Takes the next output bytes; returns the lines they completed, stamped with `now`.
     pub fn feed(&mut self, bytes: &[u8], now: OffsetDateTime) -> Vec<String> {
+        self.feed_lines(bytes)
+            .into_iter()
+            .map(|line| stamp(now, &line.text))
+            .collect()
+    }
+
+    /// Takes the next output bytes; returns the lines they completed, without time stamps. A line longer than
+    /// [`MAX_LINE_CHARS`] comes back in pieces.
+    pub fn feed_lines(&mut self, bytes: &[u8]) -> Vec<Line> {
         let mut data = std::mem::take(&mut self.partial);
         data.extend_from_slice(bytes);
         let text = match std::str::from_utf8(&data) {
@@ -98,41 +153,82 @@ impl LineLogger {
         };
         let mut lines = Vec::new();
         for ch in text.chars() {
-            self.push(ch, now, &mut lines);
+            self.push(ch, &mut lines);
         }
         lines
     }
 
     /// What is left of the last line, when the log stops.
     pub fn finish(&mut self, now: OffsetDateTime) -> Option<String> {
+        self.finish_line().map(|line| stamp(now, &line.text))
+    }
+
+    /// What is left of the last line, unless it is blank.
+    pub fn finish_line(&mut self) -> Option<Line> {
         if !self.partial.is_empty() {
             let rest = String::from_utf8_lossy(&std::mem::take(&mut self.partial)).into_owned();
             self.line.push_str(&rest);
         }
-        let line = self.scrubbed(true);
-        (!line.trim().is_empty()).then(|| stamp(now, &line))
+        let line = self.take_line(true);
+        (!line.text.trim().is_empty()).then_some(line)
     }
 
     /// Takes the line drawn so far, scrubbed. `whole`: it ended (a line break, or the log stopped); otherwise it was
-    /// cut at [`MAX_LINE_CHARS`], and an end that may start a secret waits for the next piece.
-    fn scrubbed(&mut self, whole: bool) -> String {
+    /// cut at [`MAX_LINE_CHARS`], and an end that may start a secret waits for the next piece (which keeps the marks).
+    fn take_line(&mut self, whole: bool) -> Line {
         // The text as drawn is wiped once scrubbed: it may hold a secret the raw bytes had in pieces.
         let drawn = Zeroizing::new(std::mem::take(&mut self.line));
+        self.chars = 0;
         let mut out = Vec::with_capacity(drawn.len());
         self.scrubber.push(drawn.as_bytes(), &mut out);
         if whole {
             self.scrubber.finish(&mut out);
         }
-        // Valid UTF-8: what is held back starts where a secret does, so on a character boundary.
-        String::from_utf8_lossy(&out).into_owned()
+        let line = Line {
+            // Valid UTF-8: what is held back starts where a secret does, so on a character boundary.
+            text: String::from_utf8_lossy(&out).into_owned(),
+            full_screen: self.line_full_screen,
+            marked: self.marked,
+        };
+        if whole {
+            self.line_full_screen = self.alternate;
+            self.marked = false;
+        }
+        line
     }
 
-    fn push(&mut self, ch: char, now: OffsetDateTime, lines: &mut Vec<String>) {
+    /// `CSI ? Pm h` / `CSI ? Pm l`: the private modes that switch to the alternate screen and back.
+    fn private_mode(&mut self, set: bool) {
+        if let Some(params) = self.csi.strip_prefix('?') {
+            if params.split(';').any(|p| matches!(p, "47" | "1047" | "1049")) {
+                self.switch_screen(set);
+            }
+        }
+    }
+
+    /// The screen switched. What was drawn on this line so far belongs to the full-screen program (on its way in or
+    /// out), and so does what follows while it has the screen.
+    fn switch_screen(&mut self, alternate: bool) {
+        self.alternate = alternate;
+        self.line_full_screen = alternate || !self.line.is_empty();
+    }
+
+    fn push(&mut self, ch: char, lines: &mut Vec<Line>) {
         match self.escape {
             Escape::Started => {
                 self.escape = match ch {
-                    '[' => Escape::Csi,
+                    '[' => {
+                        self.csi.clear();
+                        Escape::Csi
+                    }
                     ']' | 'P' | 'X' | '^' | '_' => Escape::String,
+                    // RIS, a full reset, leaves the alternate screen.
+                    'c' => {
+                        if self.alternate {
+                            self.switch_screen(false);
+                        }
+                        Escape::None
+                    }
                     _ => Escape::None,
                 };
                 return;
@@ -140,6 +236,11 @@ impl LineLogger {
             Escape::Csi => {
                 if ('@'..='~').contains(&ch) {
                     self.escape = Escape::None;
+                    if matches!(ch, 'h' | 'l') {
+                        self.private_mode(ch == 'h');
+                    }
+                } else if self.csi.len() < MAX_CSI_CHARS {
+                    self.csi.push(ch);
                 }
                 return;
             }
@@ -160,24 +261,87 @@ impl LineLogger {
         if self.carriage_return && ch != '\n' {
             // A lone carriage return: the line is redrawn from its start.
             self.line.clear();
+            self.chars = 0;
         }
         self.carriage_return = false;
         match ch {
             '\x1b' => self.escape = Escape::Started,
             '\r' => self.carriage_return = true,
-            '\n' => lines.push(stamp(now, &self.scrubbed(true))),
+            '\n' => lines.push(self.take_line(true)),
             '\x08' => {
-                self.line.pop();
+                if self.line.pop().is_some() {
+                    self.chars -= 1;
+                }
             }
-            '\t' => self.line.push('\t'),
+            '\t' => {
+                self.line.push('\t');
+                self.chars += 1;
+            }
             c if c.is_control() => {}
             c => {
                 self.line.push(c);
-                if self.line.chars().count() >= MAX_LINE_CHARS {
-                    lines.push(stamp(now, &self.scrubbed(false)));
+                self.chars += 1;
+                self.line_full_screen |= self.alternate;
+                if self.chars >= MAX_LINE_CHARS {
+                    lines.push(self.take_line(false));
                 }
             }
         }
+    }
+}
+
+/// QL-17: [`LineLogger`] behind a scrubber of the raw bytes, as the session log reads a terminal's output: a secret
+/// the output holds whole goes before the line is drawn (so a backspace or carriage return that redraws part of it
+/// can't leave the rest showing), and one drawn in pieces goes from the rendered line.
+pub struct ScrubbedLines {
+    raw: Scrubber,
+    lines: LineLogger,
+    clean: Vec<u8>,
+}
+
+impl ScrubbedLines {
+    pub fn new(secrets: &[&SecretString]) -> Self {
+        Self {
+            raw: Scrubber::new(secrets),
+            lines: LineLogger::scrubbing(secrets),
+            clean: Vec::new(),
+        }
+    }
+
+    /// One more secret to scrub from here on (QL-06: a vault password typed into the terminal).
+    pub fn add_secret(&mut self, secret: &SecretString) {
+        self.raw.add(secret);
+        self.lines.add_secret(secret);
+    }
+
+    /// See [`LineLogger::set_alternate`].
+    pub fn set_alternate(&mut self, alternate: bool) {
+        self.lines.set_alternate(alternate);
+    }
+
+    /// See [`LineLogger::mark_line`].
+    pub fn mark_line(&mut self) {
+        self.lines.mark_line();
+    }
+
+    /// The lines these bytes completed.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<Line> {
+        self.clean.clear();
+        self.raw.push(bytes, &mut self.clean);
+        let clean = std::mem::take(&mut self.clean);
+        let lines = self.lines.feed_lines(&clean);
+        self.clean = clean;
+        lines
+    }
+
+    /// The output ended: what the scrubber held back, and the last line unless it is blank.
+    pub fn finish(&mut self) -> Vec<Line> {
+        self.clean.clear();
+        self.raw.finish(&mut self.clean);
+        let clean = std::mem::take(&mut self.clean);
+        let mut lines = self.lines.feed_lines(&clean);
+        lines.extend(self.lines.finish_line());
+        lines
     }
 }
 
@@ -293,28 +457,23 @@ pub(crate) fn start_with<W: AsyncWrite + Unpin + Send + 'static>(
         // backspace or carriage return that redraws part of it later can't leave the rest showing. And from each
         // rendered line (the LineLogger's own scrubber): a secret the output drew in pieces (`hun\x1b[0mter2`,
         // `hunx\x08ter2`) reads whole only there.
-        let mut scrubber = Scrubber::new(&refs);
-        let mut lines = LineLogger::scrubbing(&refs);
-        let mut clean = Vec::new();
+        let mut lines = ScrubbedLines::new(&refs);
         let mut failure = out.write_all(format!("{heading}\r\n").as_bytes()).await.err();
         let mut flush = tokio::time::interval(FLUSH_EVERY);
         while failure.is_none() {
             tokio::select! {
                 message = receiver.recv() => match message {
                     Some(LogMessage::Output(bytes)) => {
-                        clean.clear();
-                        scrubber.push(&bytes, &mut clean);
-                        for line in lines.feed(&clean, local_now()) {
+                        let now = local_now();
+                        for line in lines.feed(&bytes) {
+                            let line = stamp(now, &line.text);
                             if let Err(err) = out.write_all(format!("{line}\r\n").as_bytes()).await {
                                 failure = Some(err);
                                 break;
                             }
                         }
                     }
-                    Some(LogMessage::Secret(secret)) => {
-                        scrubber.add(&secret);
-                        lines.add_secret(&secret);
-                    }
+                    Some(LogMessage::Secret(secret)) => lines.add_secret(&secret),
                     Some(LogMessage::Stop) | None => break,
                 },
                 _ = flush.tick() => {
@@ -329,11 +488,8 @@ pub(crate) fn start_with<W: AsyncWrite + Unpin + Send + 'static>(
             on_failure(id, err.to_string()).await;
             return;
         }
-        clean.clear();
-        scrubber.finish(&mut clean);
         let now = local_now();
-        let mut tail: Vec<String> = lines.feed(&clean, now);
-        tail.extend(lines.finish(now));
+        let mut tail: Vec<String> = lines.finish().iter().map(|line| stamp(now, &line.text)).collect();
         tail.push(format!("[{}] Remotely stopped logging", clock(now)));
         for line in tail {
             let _ = out.write_all(format!("{line}\r\n").as_bytes()).await;
@@ -555,6 +711,79 @@ mod tests {
         assert_eq!(out.len(), 2, "{out:?}");
         assert_eq!(out[0], stamp(AT, &"x".repeat(MAX_LINE_CHARS - 3)));
         assert_eq!(out[1], "[2026-10-19 14:03:22] [redacted]");
+    }
+
+    fn texts_of(lines: &[Line]) -> Vec<&str> {
+        lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
+    #[test]
+    fn lines_come_unstamped_and_untrimmed_too() {
+        // QL-17: the alert rules read the same lines as the log, without its time stamps.
+        let mut lines = LineLogger::new();
+        let out = lines.feed_lines(b"\x1b[31mER");
+        assert!(out.is_empty());
+        let out = lines.feed_lines(b"ROR\x1b[0m: disk full  \r\n$ ");
+        assert_eq!(texts_of(&out), ["ERROR: disk full  "]);
+        assert!(!out[0].full_screen && !out[0].marked);
+        assert_eq!(lines.finish_line().map(|l| l.text), Some("$ ".to_owned()));
+        assert_eq!(lines.finish_line(), None, "nothing left");
+    }
+
+    #[test]
+    fn lines_a_full_screen_program_drew_say_so() {
+        let mut lines = LineLogger::new();
+        let mut out = lines.feed_lines(b"before\r\n\x1b[?1049h\x1b[Htop - error\r\nTasks: 9\r\n");
+        // Split across reads, and the line the switch back happens on counts as the program's too.
+        out.extend(lines.feed_lines(b"q\x1b[?10"));
+        out.extend(lines.feed_lines(b"49l\r\nafter error\r\n"));
+        let flags: Vec<(&str, bool)> = out.iter().map(|l| (l.text.as_str(), l.full_screen)).collect();
+        assert_eq!(
+            flags,
+            [
+                ("before", false),
+                ("top - error", true),
+                ("Tasks: 9", true),
+                ("q", true),
+                ("after error", false)
+            ]
+        );
+        // A splitter that starts while one is open.
+        let mut late = LineLogger::new();
+        late.set_alternate(true);
+        let out = late.feed_lines(b"middle\r\n\x1bcfresh\r\n");
+        assert_eq!(out.iter().map(|l| l.full_screen).collect::<Vec<_>>(), [true, false]);
+    }
+
+    #[test]
+    fn a_marked_line_comes_back_marked_once() {
+        let mut lines = LineLogger::new();
+        lines.feed_lines(b"alice@web01:~$ grep error app.log");
+        lines.mark_line();
+        let out = lines.feed_lines(b"\r\nerror one\r\n");
+        assert_eq!(
+            out.iter().map(|l| (l.text.as_str(), l.marked)).collect::<Vec<_>>(),
+            [("alice@web01:~$ grep error app.log", true), ("error one", false)]
+        );
+    }
+
+    #[test]
+    fn scrubbed_lines_scrub_the_raw_bytes_and_the_rendered_line() {
+        let secret = SecretString::new(PW);
+        let mut lines = ScrubbedLines::new(&[&secret]);
+        // Whole in the raw bytes, then partly drawn over: the rest never shows.
+        let mut out = lines.feed(b"echo hunter2\x08\x08xx\r\n");
+        // In pieces: a colour code in the middle.
+        out.extend(lines.feed(b"echo hun\x1b[0mter2\r\n"));
+        // Added later, split across reads.
+        lines.add_secret(&SecretString::new("s3cr3t-later"));
+        out.extend(lines.feed(b"say s3cr3t-"));
+        out.extend(lines.feed(b"later ok\r\nhunt"));
+        out.extend(lines.finish());
+        assert_eq!(
+            texts_of(&out),
+            ["echo [redactexx", "echo [redacted]", "say [redacted] ok", "hunt"]
+        );
     }
 
     fn never_fails() -> OnFailure {
