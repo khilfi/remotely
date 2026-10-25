@@ -221,7 +221,15 @@ crates/core/          remotely-core: all app logic
                       FileTransfers (Core.files: staged files, uploads, retries);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
-                      closed with the terminal, audited tunnel_opened and tunnel_closed
+                      closed with the terminal, audited tunnel_opened and tunnel_closed;
+                      rules.rs QL-17 highlight and alert rules: built-ins (Error, Fatal, Panic, Python traceback,
+                      Warning; alerts off by default), the user's own (at most 50, audited terminal_rule_changed
+                      without the pattern, read-only lock Change::TerminalRules), check_pattern (a subset Rust regex
+                      and JS with the u flag read alike; \d \w \s \b . compiled with their JS meaning; nested
+                      repeats refused), RuleBook on a watch channel; alerts.rs per-pane AlertWatch: completed lines
+                      (log.rs ScrubbedLines, secrets scrubbed) matched on 2,000 characters, never full-screen,
+                      secret-prompt or typed lines; one TerminalEvent::Alert per 2 s burst, then a 60 s cooldown per
+                      rule per pane
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
                       library (library.rs: ~525 Linux commands in 30 area groups plus TROUBLESHOOT symptom runbooks
                       that reference them; two LibrarySections), {{variables}} (variables.rs); classified by the bus's
@@ -281,7 +289,8 @@ crates/core/          remotely-core: all app logic
     store/            jobs.rs: the journal stores Command::for_journal (scripts and lines redacted), command_type
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
-                      and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021)
+                      and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
+                      terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021)
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -298,9 +307,9 @@ crates/core/          remotely-core: all app logic
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
                       QL-16; multiexec_groups.rs: QL-19); opt-in workstation_it.rs and virtualbox_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
-                      QL-19 saved MultiExec groups), command
+                      QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
-                      (command_panel.rs), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
+                      (command_panel.rs; QL-17 notify_terminal_alert), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
                       copies: selections through terminal_copy_selection, Copy output through terminal_output_copy,
                       scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
                       formats), SS-08 file
@@ -332,7 +341,7 @@ src/                  React + TypeScript UI
                       presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; QL-16
                       FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
-                      (Ctrl+Shift+G))
+                      (Ctrl+Shift+G); TerminalRulesCard for QL-17)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3). P6: App memoises every page and passes stable callbacks, and renders
@@ -354,7 +363,11 @@ src/                  React + TypeScript UI
                       xterm's internal onUserInput, checked by a test), multiexec.ts, multiexec-groups.ts (QL-19 which
                       tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
                       logical lines, matching, caps, grouping by tab), scrollback-xterm.ts (QL-18 reading a pane's
-                      buffer, showing a match with a decoration), recordings.ts (QL-12 view texts,
+                      buffer, showing a match with a decoration), highlight-rules.ts (QL-17 scope, compile, match a
+                      logical line to cells, colours per theme, time budget), terminal-highlights.ts (QL-17 xterm
+                      decorations for lines the cursor passed, from a marker; CSI J/K recheck; hidden on the alternate
+                      screen; one per terminal including the FD-03 masked twin), terminal-alerts.ts (QL-17 recent
+                      alerts with subscribe, for QL-25; notification text), recordings.ts (QL-12 view texts,
                       QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
                       transfers-store.ts (SS-08, P6 every transfer outside React state), job-events.ts (P6, VM-01
                       which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest

@@ -303,6 +303,24 @@ them on this PC, so no host ever receives them.
   of the database or of its wrapped key opens nothing written since. Deleted and rewritten vault data is overwritten in
   the database file (`secure_delete`), and the database's write-ahead log is emptied after each vault change.
 
+### Highlight and alert rules
+
+Settings, Terminal, **Highlight and alert rules** (0.5.0, QL-17) colours what a regular expression matches in
+terminals. Built-in rules light up errors, fatal errors, panics, Python tracebacks and warnings; each can be turned off,
+and **Duplicate** makes an editable copy. Add your own for every terminal, for sessions with a label (Lab, Staging,
+Prod, the label a session has from its folder included), or for one session, as text in a colour or a coloured fill,
+with or without case.
+
+- Turn a rule's **alert** on to get a Windows notification when a matching line appears while its tab is in the
+  background: one for a burst of lines, then that rule waits a minute in that terminal and counts what it skipped.
+  Full-screen programs (vim, less, top), password prompts and the commands you type never alert. The bell in the
+  terminal toolbar silences a tab. Alerts are off for the built-in rules until you turn them on.
+- Lines are checked once, as they complete, never by rescanning the scrollback. A rule's pattern is at most 200
+  characters, there are at most 50 rules of your own, and patterns that can take very long to match (a repeat inside a
+  repeat, like `(a+)+`) are refused. While presenting, the masked terminal on screen is highlighted on its own text,
+  so a rule naming a real host never lights up its stand-in.
+- Rule changes are in the audit log (without the pattern) and the read-only lock refuses them.
+
 ### Command panel
 
 BX-08, on the right of the Terminal page: a click pastes a command into the current terminal, Shift+click also presses
