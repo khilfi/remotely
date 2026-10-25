@@ -1667,6 +1667,45 @@ CurrentSnapshotNode="SnapshotName-1"
         assert_eq!(parse_unattended_detect("IsInstallSupported=\"no\"\n"), (false, None));
     }
 
+    /// VM-21: the real adapter against a stand-in VBoxManage (a batch file made at run time) that writes its
+    /// arguments to a file: a deploy's calls arrive whole, a password only as its file's path.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn deploy_calls_reach_vboxmanage_whole() {
+        let dir = std::env::temp_dir().join(format!("remotely-vbox-deploy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("VBoxManage.cmd");
+        let args_file = dir.join("args.txt");
+        std::fs::write(
+            &tool,
+            format!("@echo off\r\necho %*>> \"{}\"\r\nexit /b 0\r\n", args_file.display()),
+        )
+        .unwrap();
+        let cli = VBoxManageCli::new(tool);
+        let uuid = "3f0c1a2b-1111-4222-8333-444455556666";
+        cli.change(
+            crate::deploy::virtualbox::createvm_args("web-1", uuid, "Ubuntu_64", &dir),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        let password_file = dir.join("password");
+        cli.change(
+            crate::deploy::virtualbox::unattended_args(uuid, &dir.join("noble.iso"), "alice", &password_file, "web-1"),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        let lines: Vec<&str> = args.lines().collect();
+        assert!(lines[0].starts_with("createvm --name web-1 --uuid 3f0c1a2b-"), "{args}");
+        assert!(lines[0].ends_with("--register"), "{args}");
+        assert!(lines[1].starts_with("unattended install 3f0c1a2b-"), "{args}");
+        assert!(lines[1].contains("--password-file"), "{args}");
+        assert!(lines[1].contains("--hostname web-1.localdomain"), "{args}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn parses_the_default_folder_and_host_adapters() {
         // VirtualBox 7.2's `list systemproperties` (shortened) and `list hostonlyifs`.

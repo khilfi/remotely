@@ -1807,6 +1807,105 @@ snapshot2.disk0.node = "scsi0:0"
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// VM-21: the real adapter against a stand-in ovftool and vmrun (batch files made at run time): each writes its
+    /// arguments to a file; ovftool fails like ovftool on `bad.ova`, and the clone's arguments arrive whole.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ovftool_and_vmrun_clone_run_with_their_arguments() {
+        let dir = std::env::temp_dir().join(format!("remotely-ovftool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ovftool = dir.join("ovftool.cmd");
+        let ovf_args = dir.join("ovftool-args.txt");
+        std::fs::write(
+            &ovftool,
+            format!(
+                "@echo off\r\necho %*> \"{}\"\r\necho %* | findstr /c:\"bad.ova\" >nul && (echo Opening OVA source: bad.ova\r\necho Error: Failed to open file: bad.ova\r\necho Completed with errors\r\nexit /b 1)\r\necho Completed successfully\r\nexit /b 0\r\n",
+                ovf_args.display()
+            ),
+        )
+        .unwrap();
+        let vmrun = dir.join("vmrun.cmd");
+        let vmrun_args = dir.join("vmrun-args.txt");
+        std::fs::write(&vmrun, format!("@echo off\r\necho %*> \"{}\"\r\nexit /b 0\r\n", vmrun_args.display())).unwrap();
+        let adapter = VmrunAdapter::with_tools(vmrun, None, None).with_ovftool(Some(ovftool));
+        let target = dir.join("app-1").join("app-1.vmx");
+        let out = adapter
+            .ovftool(
+                crate::deploy::workstation::ovftool_args(
+                    &dir.join("app.ova"),
+                    &target,
+                    "app-1",
+                    crate::catalog::sizes::Provisioning::Thin,
+                ),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("Completed successfully"));
+        // A batch file gets `=` arguments quoted; ovftool.exe gets them as they are.
+        let args = std::fs::read_to_string(&ovf_args).unwrap().replace('"', "");
+        assert!(args.starts_with("--name=app-1 --diskMode=monolithicSparse --noSSLVerify "), "{args}");
+        assert!(args.contains("app-1.vmx"), "{args}");
+        let err = adapter
+            .ovftool(
+                crate::deploy::workstation::ovftool_args(
+                    &dir.join("bad.ova"),
+                    &target,
+                    "app-1",
+                    crate::catalog::sizes::Provisioning::Thin,
+                ),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "ovftool_failed");
+        assert_eq!(err.to_string(), "ovftool failed: Failed to open file: bad.ova");
+        adapter
+            .vmrun_change(
+                crate::deploy::workstation::clone_args(
+                    &dir.join("golden.vmx"),
+                    &dir.join("web-1.vmx"),
+                    true,
+                    Some("base"),
+                    "web-1",
+                ),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let args = std::fs::read_to_string(&vmrun_args).unwrap().replace('"', "");
+        assert!(args.starts_with("-T ws clone "), "{args}");
+        assert!(args.contains("golden.vmx") && args.contains("web-1.vmx"), "{args}");
+        assert!(args.contains("linked -snapshot=base -cloneName=web-1"), "{args}");
+        let missing = VmrunAdapter::with_tools(dir.join("vmrun.exe"), None, None);
+        assert_eq!(
+            missing.ovftool(Vec::new(), Duration::from_secs(1)).await.unwrap_err().code(),
+            "ovftool_not_found"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ovftool_is_found_in_the_ovftool_folder_beside_vmrun() {
+        let dir = std::env::temp_dir().join(format!("remotely-ovf-find-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("OVFTool")).unwrap();
+        std::fs::write(dir.join("vmrun.exe"), b"").unwrap();
+        std::fs::write(dir.join("OVFTool").join("ovftool.exe"), b"").unwrap();
+        assert_eq!(
+            locate_ovftool(None, Some(&dir.join("vmrun.exe"))),
+            Some(dir.join("OVFTool").join("ovftool.exe"))
+        );
+        let chosen = dir.join("chosen").join("ovftool.exe");
+        std::fs::create_dir_all(chosen.parent().unwrap()).unwrap();
+        std::fs::write(&chosen, b"").unwrap();
+        assert_eq!(
+            locate_ovftool(Some(chosen.clone()), Some(&dir.join("vmrun.exe"))),
+            Some(chosen),
+            "the Settings path comes first"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn tools_beside_vmrun_are_found_in_its_folder() {
         let dir = std::env::temp_dir().join(format!("remotely-tools-{}", uuid::Uuid::new_v4()));
