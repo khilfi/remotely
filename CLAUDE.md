@@ -166,7 +166,13 @@ crates/core/          remotely-core: all app logic
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
                       command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
-                      or label) for the Terminal page
+                      or label) for the Terminal page; sessions/defaults.rs QL-16 folder defaults (user, login, jump
+                      host, label, tags; migration 0021) and Folders::resolve, the one resolver: a session's own
+                      value, then the nearest folder up the path, then the app's default (tags add up; labels only
+                      add; a folder's jump host never applies to itself). The store resolves every session it reads
+                      (SessionRecord's fields are what applies, `own` what the editor edits, `inherited` the folders),
+                      so every consumer gets it; set_folder_defaults, move_to, move_folder, delete_folder and restore
+                      check SecretBindings like a session edit (confirm_folder_change, SecretPlaces read once)
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited);
@@ -240,9 +246,11 @@ crates/core/          remotely-core: all app logic
                       authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
                       and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
-                      format version; new exports use file::KDF, 256 MiB and 3 passes, and a file opens with the
-                      parameters in its header, so older 64 MiB files still import), preview with conflicts (skip,
-                      replace, keep both), commit; audited; an export refuses the vault password as its passphrase
+                      format version 2 since 0.5.0, QL-16; new exports use file::KDF, 256 MiB and 3 passes, and a file
+                      opens with the parameters in its header, so older 64 MiB files still import), preview with
+                      conflicts (skip, replace, keep both), commit; audited; an export refuses the vault password as
+                      its passphrase; QL-16 sessions travel with what they set themselves and folders with their
+                      defaults (a folder here with other defaults: keep or replace)
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -256,7 +264,8 @@ crates/core/          remotely-core: all app logic
                       vault password may go without asking (a saved session at that host, port and jump host logs in
                       with it, gives it to sudo, or a session_secret_grants row from an earlier answer, migration
                       0016; one added since the unlock goes to its first place free; keys and key passphrases never
-                      ask; a right answer covers REAUTH_GRACE, 5 min, ended by a lock);
+                      ask; a right answer covers REAUTH_GRACE, 5 min, ended by a lock; QL-16 SecretPlaces: every
+                      session's place and what it sends, its folders' login included, read once per change);
                       Core::spawn_lock_watch closes kept connections, forgets typed logins and an open FD-07 file;
                       strength.rs (a new vault password or FD-07 export passphrase: 10 to 1024 characters and a
                       zxcvbn-style score of at least 3 of 4: common passwords and words, repeats, sequences,
@@ -312,7 +321,8 @@ src/                  React + TypeScript UI
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
                       and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
-                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice)
+                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; QL-16
+                      FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3). P6: App memoises every page and passes stable callbacks, and renders

@@ -28,9 +28,10 @@ unlock), and locks after 15 minutes without you typing or clicking in Remotely; 
 password again, and so does sending a vault password to a host that doesn't get it yet (see
 [The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
-tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
-Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
-encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
+tier); a folder can set the user, login, jump host, label and tags for the sessions in it (see
+[Folder defaults](#folder-defaults)). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+Sessions, folders (with their defaults), tags, labels, trusted host keys and (only when ticked) vault secrets move to
+another laptop in one encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
 AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
 [What Remotely does by itself](#what-remotely-does-by-itself)). The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
@@ -225,6 +226,30 @@ Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS
   `.git` folder or file in it or above it): the audit log CSV, Compare and MultiExec exports, saved terminal output,
   session logs, downloads and exports to another laptop. The message names the repository; choose a folder outside it.
 
+### Folder defaults
+
+A session folder can set the **user**, the **login** (a key, a vault password, the SSH agent, or a password asked when
+connecting), the **jump host**, the **environment label** and **tags** for the sessions in it and in its subfolders
+(Sessions page, a folder's menu, **Defaults…**). A session uses its own value first, then the nearest folder up the path
+that sets one, then the app's default (no user, a password asked when connecting, no jump host, no label). Everything
+that uses a session follows the same rule: terminals and quick connect, MultiExec, Compare and bulk runs, key pushes,
+containers, the dashboard, host details, reachability dots, exports and imports, and presentation mode.
+
+- The session editor shows each value a folder gives as "from folder X"; typing or choosing one overrides it. Login has
+  **From folder**, the jump host **No jump host (overrides the folder)**. The session list marks values from a folder.
+- **Labels only add**: a session with no label of its own takes its folder's, so a session in a Prod folder is Prod and
+  raises the approval tier. There is no "no label" override; a session or subfolder can choose another label. Taking
+  Prod off a folder asks first.
+- **Tags add up**: a session has its own tags and every folder's up the path.
+- A folder's **jump host** never applies to itself: the jump host session, when it sits in that folder, connects as the
+  folders above say. A jump host chain that would loop through folders is refused.
+- A folder password that would reach hosts that never got it asks for the vault password (below). An SS-02 import into
+  a folder takes the folder's key or agent login for sessions the source says nothing about, never its vault password.
+- Changes are in the audit log like session edits, with the sessions they change, and the read-only lock refuses them.
+- Exports carry folder defaults; an import shows a folder here with other defaults as a choice (keep this laptop's,
+  the default, or take the file's). Files exported by 0.5.0 use file format 2, which 0.4.x refuses ("a newer version
+  of Remotely"), since it would drop the defaults.
+
 ### The vault and where its passwords go
 
 An unlocked vault on a laptop at a customer's site shouldn't let whoever sits at it send the stored passwords anywhere.
@@ -242,7 +267,11 @@ the audit log:
 - a Compare run whose sudo password is new to some of its hosts: its approval asks for the vault password, even for a
   Low command;
 - an import from another laptop whose sessions would use passwords already in this vault (found by label, when the
-  file has no values), or that moves a session that sends vault passwords to another host.
+  file has no values), or that moves a session that sends vault passwords to another host;
+- a folder's defaults (0.5.0) that would send a vault password to hosts that don't get it yet: setting a folder's login
+  password, giving it a jump host while its sessions send vault passwords, moving sessions or a folder under such a
+  folder, or deleting a folder so its sessions move up under one. One prompt covers the whole change, as editing each
+  session would.
 
 For a saved session the answer counts from then on (`vault_secret_allowed` in the audit log), so the same password there
 doesn't ask again: a session's own login password at its own sudo prompt never asks. A right answer also covers the next
