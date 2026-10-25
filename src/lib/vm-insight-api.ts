@@ -235,6 +235,8 @@ export const insightApi = {
   vmTimeline: (vmxPath: string, before: number | null, limit?: number) =>
     invoke<TimelinePage>("vm_timeline", { vmxPath, before, limit: limit ?? null }),
   hostNetworks: () => invoke<HostNetworksReport>("host_networks"),
+  /** The networks alone, without VMs or forwards (the topology map's network nodes). */
+  hostNetworkList: () => invoke<HostNetworksReport>("host_network_list"),
   wasteReport: (options: WasteOptions) => invoke<WasteReport>("waste_report", { options }),
   /** Explorer at a known VM's folder, or a folder the last report listed. */
   wasteOpenFolder: (target: { folder: string } | { vmxPath: string }) =>

@@ -5,7 +5,9 @@
 //! file and starts no VBoxManage for a VM whose hardware is known; only a VM never read before is read now. A
 //! Refresh (`fresh`) reads every VM again, a few at a time, each with the hardware read's time limit, and keeps
 //! what was read before for a VM whose files can't be read. R4's host networks join the map on the UI side,
-//! keyed by the same network names.
+//! keyed by the same network names, and VM-11's report ([`crate::host_networks`]) takes its VMs' adapters from here
+//! too, so the app reads a VM's adapters one way. A VirtualBox VM another client holds the lock of is asked again
+//! ([`crate::adapters::host_networks::hardware_retrying`]).
 
 use std::sync::Arc;
 
@@ -14,6 +16,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use super::HostDetails;
+use crate::adapters::host_networks::hardware_retrying;
 use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::vm_hardware::{VirtualNic, VmHardware};
 use crate::domain::{now_rfc3339, Context};
@@ -31,6 +34,8 @@ pub struct VmNetworks {
     pub vmx_path: String,
     pub hypervisor: Hypervisor,
     pub nics: Vec<VirtualNic>,
+    /// VM-11: the guest's addresses the hypervisor reported with them (VirtualBox's guest properties).
+    pub guest_ips: Vec<String>,
     /// When they were read; None when they never could be.
     pub collected_at: Option<String>,
     /// What was read before: the files could not be read now, or nothing asked for a fresh read.
@@ -58,6 +63,7 @@ impl HostDetails {
                 vmx_path: vm.vmx_path.clone(),
                 hypervisor: vm.hypervisor,
                 nics: known.as_ref().map(|(h, _)| h.nics.clone()).unwrap_or_default(),
+                guest_ips: known.as_ref().map(|(h, _)| h.guest_ips.clone()).unwrap_or_default(),
                 collected_at: known.as_ref().map(|(_, at)| at.clone()),
                 stored: known.is_some(),
                 problem: None,
@@ -70,7 +76,7 @@ impl HostDetails {
             let (key, name) = (vm.vmx_path.clone(), vm.display_name.clone());
             reads.spawn(async move {
                 let _turn = at_once.acquire_owned().await;
-                let read = tokio::time::timeout(timeout, hypervisors.hardware(&key))
+                let read = tokio::time::timeout(timeout, hardware_retrying(&hypervisors, &key))
                     .await
                     .unwrap_or_else(|_| {
                         Err(CoreError::Timeout {
@@ -92,6 +98,7 @@ impl HostDetails {
                         store.put_vm_specs(ctx, &entry.vm_id, &json, &at).await?;
                     }
                     entry.nics = hardware.nics;
+                    entry.guest_ips = hardware.guest_ips;
                     entry.collected_at = Some(at);
                     entry.stored = false;
                 }

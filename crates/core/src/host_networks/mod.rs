@@ -3,8 +3,11 @@
 //! Reads skip the bus ([`HostNetworks::report`]): Workstation's vmnets (`vmrun listHostNetworks`) with a NAT vmnet's
 //! forwards (`listPortForwardings`, or `vmnetnat.conf` when its lines can't be read), VirtualBox's host-only
 //! interfaces, NAT networks with their rules, and each VM's NAT adapter rules. The VMs on each network come from
-//! each VM's network adapters as R3's settings model reads them ([`crate::adapters::vm_hardware`]), stored for the
-//! next time; a VM whose files can't be read now shows with what was read before.
+//! each VM's network adapters as R3's settings model reads them, through QL-21's read for the topology map
+//! ([`HostDetails::vm_networks`]: read now and stored, so the app reads a VM's adapters one way); a VM whose files
+//! can't be read now shows with what was read before. [`HostNetworks::networks_only`] is the networks alone, without
+//! VMs or forwards: the map's network nodes (QL-21 joins them to its VMs' adapters by network name) and the
+//! palette's search.
 //!
 //! Changes are [`crate::command_bus::Command::HostNetwork`] on the bus (High: a forward reaches every VM on the
 //! network), carried out by [`apply`] from the job runner. A network target counts as Prod when a VM on it is
@@ -14,14 +17,11 @@
 
 pub mod ops;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::sync::Semaphore;
-use tokio::task::JoinSet;
 
 use crate::adapters::host_networks::{
     self as net, ForwardProtocol, VboxHostOnlyIf, VboxNatNetwork, VboxRule, Vmnet, VmnetForward, VmnetKind,
@@ -31,6 +31,7 @@ use crate::adapters::vm_hardware::{VirtualNic, VmHardware};
 use crate::command_bus::Command;
 use crate::domain::{now_rfc3339, Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::host_details::HostDetails;
 use crate::store::{Store, VmRecord};
 
 pub use ops::{ForwardPlace, HostNetworkOp, NatForward};
@@ -39,10 +40,6 @@ pub use ops::{ForwardPlace, HostNetworkOp, NatForward};
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 /// Adding or removing one forward.
 const CHANGE_TIMEOUT: Duration = Duration::from_secs(60);
-/// One VM's adapters.
-const VM_READ_TIMEOUT: Duration = Duration::from_secs(10);
-/// VMs read at once.
-const READ_AT_ONCE: usize = 4;
 
 /// A VM on a network, as the networks view lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -356,22 +353,16 @@ fn virtualbox_views(
 /// The adapters a VM's stored facts list.
 fn stored_adapters(vm: &VmRecord, specs: Option<&str>) -> Option<VmAdapters> {
     let hardware: VmHardware = serde_json::from_str(specs?).ok()?;
-    Some(adapters_from(vm.clone(), hardware, true))
+    Some(adapters_of(vm.clone(), hardware.nics, hardware.guest_ips, true))
 }
 
-fn adapters_from(vm: VmRecord, hardware: VmHardware, stale: bool) -> VmAdapters {
-    let mut ips = hardware.guest_ips;
+fn adapters_of(vm: VmRecord, nics: Vec<VirtualNic>, mut ips: Vec<String>, stale: bool) -> VmAdapters {
     if let Some(ip) = &vm.ip_address {
         if !ips.contains(ip) {
             ips.push(ip.clone());
         }
     }
-    VmAdapters {
-        vm,
-        nics: hardware.nics,
-        ips,
-        stale,
-    }
+    VmAdapters { vm, nics, ips, stale }
 }
 
 /// Workstation's lists, read before the VMs' adapters are known.
@@ -412,11 +403,17 @@ struct VirtualBoxLists {
 pub struct HostNetworks {
     store: Store,
     hypervisors: Hypervisors,
+    /// QL-21's read of the VMs' adapters.
+    details: HostDetails,
 }
 
 impl HostNetworks {
-    pub fn new(store: Store, hypervisors: Hypervisors) -> Self {
-        Self { store, hypervisors }
+    pub fn new(store: Store, hypervisors: Hypervisors, details: HostDetails) -> Self {
+        Self {
+            store,
+            hypervisors,
+            details,
+        }
     }
 
     /// VM-11: both hypervisors' networks, the VMs on each and their forwards, read now. A hypervisor that isn't
@@ -424,8 +421,11 @@ impl HostNetworks {
     pub async fn report(&self, ctx: &Context) -> Result<HostNetworksReport> {
         // The VMs' adapters and the tools' lists don't depend on each other: read them at once (vmrun alone takes
         // seconds a call).
-        let (vms, vmware, virtualbox) =
-            tokio::join!(self.read_adapters(ctx), self.vmware_lists(), self.virtualbox_lists());
+        let (vms, vmware, virtualbox) = tokio::join!(
+            self.read_adapters(ctx),
+            self.vmware_lists(true),
+            self.virtualbox_lists()
+        );
         let vms = vms?;
         let stale_vms = vms
             .iter()
@@ -440,8 +440,21 @@ impl HostNetworks {
         })
     }
 
-    /// Workstation's vmnets and each NAT vmnet's forwards.
-    async fn vmware_lists(&self) -> VmwareLists {
+    /// VM-11, QL-21: the networks alone (`vmrun listHostNetworks` and VBoxManage's two lists), with no VMs on them
+    /// and no forwards: no VM's files are read and no VBoxManage runs per VM. The topology map's network nodes, which
+    /// it joins to the adapters QL-21 read by network name, and the palette's search.
+    pub async fn networks_only(&self) -> HostNetworksReport {
+        let (vmware, virtualbox) = tokio::join!(self.vmware_lists(false), self.virtualbox_lists());
+        HostNetworksReport {
+            vmware: vmware.with_vms(&[]),
+            virtualbox: self.virtualbox_side(virtualbox, &[]).await,
+            stale_vms: Vec::new(),
+            read_at: now_rfc3339(),
+        }
+    }
+
+    /// Workstation's vmnets and, with `forwards`, each NAT vmnet's forwards.
+    async fn vmware_lists(&self, forwards: bool) -> VmwareLists {
         let vmware = self.hypervisors.vmware();
         let listed = vmware
             .vmrun_host(vec!["listHostNetworks".into()], READ_TIMEOUT)
@@ -461,7 +474,7 @@ impl HostNetworks {
             Err(CoreError::VmrunNotFound) => lists.side.available = false,
             Err(err) => lists.side.problem = Some(err.to_string()),
         }
-        for vmnet in lists.vmnets.iter().filter(|n| n.kind == VmnetKind::Nat) {
+        for vmnet in lists.vmnets.iter().filter(|n| forwards && n.kind == VmnetKind::Nat) {
             let read = vmnet_forwards(&self.hypervisors, &vmnet.name)
                 .await
                 .unwrap_or_else(|err| (Vec::new(), Some(err.to_string())));
@@ -544,59 +557,25 @@ impl HostNetworks {
         side
     }
 
-    /// Every VM's adapters: read now (at most [`READ_AT_ONCE`] at a time, each within [`VM_READ_TIMEOUT`]) and
-    /// stored for next time, or what was stored when they can't be read. A VM never read before is left out.
+    /// Every VM's adapters from QL-21's read ([`HostDetails::vm_networks`], fresh: read now, a few at a time, and
+    /// stored; what was stored for a VM whose files can't be read now). A VM never read is left out.
     async fn read_adapters(&self, ctx: &Context) -> Result<Vec<VmAdapters>> {
-        let vms = self.store.list_vms(ctx).await?;
-        let gate = Arc::new(Semaphore::new(READ_AT_ONCE));
-        let mut reads = JoinSet::new();
-        for (order, vm) in vms.into_iter().enumerate() {
-            let hypervisors = self.hypervisors.clone();
-            let gate = Arc::clone(&gate);
-            reads.spawn(async move {
-                let _slot = gate.acquire_owned().await;
-                // VirtualBox refuses a read while another client (the VM list's refresh) holds the VM's lock: ask again.
-                let read = tokio::time::timeout(VM_READ_TIMEOUT, async {
-                    let mut waits = [300u64, 800, 1500].into_iter();
-                    loop {
-                        match hypervisors.hardware(&vm.vmx_path).await {
-                            Err(err) if net::vbox_busy(&err) => match waits.next() {
-                                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
-                                None => break Err(err),
-                            },
-                            other => break other,
-                        }
-                    }
-                })
-                .await;
-                (order, vm, read.ok().and_then(|r| r.ok()))
-            });
-        }
-        let mut found = Vec::new();
-        while let Some(joined) = reads.join_next().await {
-            let Ok((order, vm, hardware)) = joined else {
-                continue;
-            };
-            let entry = match hardware {
-                Some(hardware) => {
-                    if let Ok(json) = serde_json::to_string(&hardware) {
-                        if let Err(err) = self.store.put_vm_specs(ctx, &vm.id, &json, &now_rfc3339()).await {
-                            tracing::debug!(error = %err, "could not store a VM's adapters");
-                        }
-                    }
-                    Some(adapters_from(vm, hardware, false))
-                }
-                None => {
-                    let stored = self.store.vm_specs(ctx, &vm.id).await?;
-                    stored_adapters(&vm, stored.as_ref().map(|s| s.specs.as_str()))
-                }
-            };
-            if let Some(entry) = entry {
-                found.push((order, entry));
-            }
-        }
-        found.sort_by_key(|(order, _)| *order);
-        Ok(found.into_iter().map(|(_, e)| e).collect())
+        let read = self.details.vm_networks(ctx, true).await?;
+        let mut vms: HashMap<String, VmRecord> = self
+            .store
+            .list_vms(ctx)
+            .await?
+            .into_iter()
+            .map(|vm| (vm.id.clone(), vm))
+            .collect();
+        Ok(read
+            .into_iter()
+            .filter(|n| n.collected_at.is_some())
+            .filter_map(|n| {
+                let vm = vms.remove(&n.vm_id)?;
+                Some(adapters_of(vm, n.nics, n.guest_ips, n.problem.is_some()))
+            })
+            .collect())
     }
 
     /// Every VM's adapters as last stored (resolving a network target reads no VM).

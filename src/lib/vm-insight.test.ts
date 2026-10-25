@@ -21,16 +21,20 @@ import {
   logMatches,
   mergeTimeline,
   outcomeText,
+  prefixLength,
   splitMatches,
   startLog,
   suspendReason,
+  topologyHostNetworks,
   vboxForward,
   vmnetForward,
   vmnetKindLabel,
   wasteTotals,
   type ForwardPlace,
 } from "./vm-insight.ts";
-import type { LogChunk, TimelineEntry, WasteReport, WasteVm } from "./vm-insight-api.ts";
+import type { VirtualNic } from "./api.ts";
+import { networkKey } from "./topology.ts";
+import type { HostNetworksReport, LogChunk, TimelineEntry, WasteReport, WasteVm } from "./vm-insight-api.ts";
 
 function chunk(over: Partial<LogChunk>): LogChunk {
   return {
@@ -286,4 +290,125 @@ test("the report's sums add disk and memory", () => {
     readAt: "",
   };
   assert.deepEqual(wasteTotals(report), { diskBytes: 1370, memoryMb: 4096, rows: 4 });
+});
+
+function nic(connection: string, networkName: string | null = null): VirtualNic {
+  return {
+    slot: "nic1",
+    connection,
+    model: null,
+    mac: null,
+    connected: true,
+    networkName,
+    connectedNow: null,
+    staticMac: false,
+  };
+}
+
+const NETWORKS: HostNetworksReport = {
+  vmware: {
+    available: true,
+    problem: null,
+    forwardsRefused: null,
+    networks: [
+      {
+        network: { index: 1, name: "vmnet1", kind: "hostOnly", dhcp: true, subnet: "192.0.2.0", mask: "255.255.255.0" },
+        target: { kind: "network", hypervisor: "vmware", name: "vmnet1" },
+        vms: [],
+        forwards: [],
+        forwardsProblem: null,
+      },
+      {
+        network: { index: 8, name: "vmnet8", kind: "nat", dhcp: false, subnet: "198.51.100.0", mask: "255.255.255.0" },
+        target: { kind: "network", hypervisor: "vmware", name: "vmnet8" },
+        vms: [],
+        forwards: [{ protocol: "tcp", hostPort: 8022, guestIp: "198.51.100.10", guestPort: 22, description: null }],
+        forwardsProblem: null,
+      },
+      {
+        network: { index: 5, name: "vmnet5", kind: { other: "" }, dhcp: null, subnet: null, mask: null },
+        target: { kind: "network", hypervisor: "vmware", name: "vmnet5" },
+        vms: [],
+        forwards: [],
+        forwardsProblem: null,
+      },
+    ],
+  },
+  virtualbox: {
+    available: true,
+    problem: null,
+    hostOnly: [
+      {
+        iface: {
+          name: "VirtualBox Host-Only Ethernet Adapter",
+          ip: "203.0.113.1",
+          mask: "255.255.255.0",
+          dhcp: false,
+          status: "Down",
+        },
+        vms: [],
+      },
+    ],
+    natNetworks: [
+      {
+        network: {
+          name: "lab-net",
+          enabled: false,
+          network: "10.0.5.0/24",
+          gateway: null,
+          dhcp: true,
+          ipv6: false,
+          forwards: [],
+        },
+        target: { kind: "network", hypervisor: "virtualbox", name: "lab-net" },
+        vms: [],
+      },
+    ],
+    other: [],
+    vmNat: [],
+  },
+  staleVms: [],
+  readAt: "2026-10-26T10:00:00Z",
+};
+
+test("host networks are keyed like the map's adapters, named and described, and open the networks view", () => {
+  const list = topologyHostNetworks(NETWORKS);
+  const byKey = new Map(list.map((n) => [n.key, n]));
+  // The keys the map gives the adapters on these networks.
+  const keys = [
+    networkKey("vmware", nic("hostonly"))?.key,
+    networkKey("vmware", nic("nat"))?.key,
+    networkKey("vmware", nic("custom (VMnet5)", "vmnet5"))?.key,
+    networkKey("virtualbox", nic("hostonly", "VirtualBox Host-Only Ethernet Adapter"))?.key,
+    networkKey("virtualbox", nic("natnetwork", "lab-net"))?.key,
+  ];
+  assert.deepEqual(
+    keys.map((k) => byKey.has(k ?? "")),
+    [true, true, true, true, true],
+  );
+  assert.equal(list.length, 5);
+  assert.deepEqual(byKey.get("vmware:vmnet1"), {
+    key: "vmware:vmnet1",
+    label: "Host-only (VMnet1)",
+    detail: "Workstation · 192.0.2.0/24 · DHCP",
+    link: { kind: "hostNetworks" },
+  });
+  assert.equal(byKey.get("vmware:vmnet8")?.detail, "Workstation · 198.51.100.0/24 · 1 port forward");
+  assert.equal(byKey.get("vmware:vmnet5")?.label, "VMnet5");
+  assert.equal(byKey.get("vmware:vmnet5")?.detail, "Workstation");
+  const hostOnly = byKey.get("virtualbox:hostonly:VirtualBox Host-Only Ethernet Adapter");
+  assert.equal(hostOnly?.label, "Host-only: VirtualBox Host-Only Ethernet Adapter");
+  assert.equal(hostOnly?.detail, "VirtualBox · 203.0.113.1/24 · down");
+  assert.equal(byKey.get("virtualbox:natnetwork:lab-net")?.detail, "VirtualBox · 10.0.5.0/24 · DHCP · off");
+});
+
+test("a mask's prefix length, and none for what isn't a mask", () => {
+  assert.equal(prefixLength("255.255.255.0"), 24);
+  assert.equal(prefixLength("255.255.240.0"), 20);
+  assert.equal(prefixLength("255.255.255.255"), 32);
+  assert.equal(prefixLength("0.0.0.0"), 0);
+  assert.equal(prefixLength("255.0.255.0"), null);
+  assert.equal(prefixLength("255.255.255"), null);
+  assert.equal(prefixLength("255.255.256.0"), null);
+  assert.equal(prefixLength(null), null);
 });

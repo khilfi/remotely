@@ -643,9 +643,12 @@ export default function App() {
         case "map":
           setPage("map");
           break;
+        case "hostNetworks":
+          openVmsPanel("networks");
+          break;
       }
     },
-    [go, openVms, openSchedules],
+    [go, openVms, openSchedules, openVmsPanel],
   );
 
   // QL-23: the wizard offers itself when there is no vault and no session yet (once the vault is known), and opens

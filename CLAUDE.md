@@ -130,7 +130,8 @@ crates/core/          remotely-core: all app logic
                       refused; VmFiles: LocalFiles, or memory in tests), host_networks.rs (VM-11 the tools' network
                       output: listHostNetworks, listPortForwardings read loosely with vmnetnat.conf's [incomingtcp] and
                       [incomingudp] as the fallback, list hostonlyifs, list --long natnets, a VM's Forwarding(N) by
-                      the adapter keys before it; the change arguments; process_elevated), updater.rs, github.rs (FD-14
+                      the adapter keys before it; the change arguments; process_elevated; hardware_retrying: asked
+                      again while VirtualBox says another client holds the VM's lock), updater.rs, github.rs (FD-14
                       GitHub Releases API without a token or with the optional update token, public download links,
                       rate-limit backoff), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
@@ -222,7 +223,7 @@ crates/core/          remotely-core: all app logic
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests), networks.rs (QL-21
                       every VM's adapters for the map from the stored hardware; only VMs never read are read, `fresh`
-                      reads all, NETWORK_READS_AT_ONCE)
+                      reads all, NETWORK_READS_AT_ONCE; VM-11's report takes its VMs' adapters from here too)
     alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
@@ -276,11 +277,13 @@ crates/core/          remotely-core: all app logic
                       vm_console_opened, no tier, refused by the read-only lock)
     host_networks/    VM-11 (Core.networks): mod.rs the report (vmnets with a NAT vmnet's forwards, VirtualBox's
                       host-only interfaces, NAT networks and rules, each VM's NAT adapter rules, the VMs on each from
-                      the VMs' adapters, stored as vm_specs for next time), network targets (Prod when a VM on it is,
-                      from the stored adapters), the approval's warnings, the submit-time refusal (Workstation's
-                      forwards need administrator rights: nat_refusal), and apply for the job runner (a forward on a
-                      host port in use is refused, never replaced); ops.rs Command::HostNetwork's HostNetworkOp
-                      (AddForward, RemoveForward of a NatForward), ForwardPlace from the one target, the checks
+                      QL-21's fresh adapter read, host_details::networks), networks_only (the networks alone: one vmrun
+                      and two VBoxManage lists, no VM read; the map's network nodes), network targets (Prod when a VM
+                      on it is, from the stored adapters), the approval's warnings, the submit-time refusal
+                      (Workstation's forwards need administrator rights: nat_refusal), and apply for the job runner (a
+                      forward on a host port in use is refused, never replaced); ops.rs Command::HostNetwork's
+                      HostNetworkOp (AddForward, RemoveForward of a NatForward), ForwardPlace from the one target, the
+                      checks
     vm_insight/       VM-25 (Core.insight, reads only): logs.rs a VM's vmware.log/vmware-N.log or VBox.log/VBox.log.N,
                       a tail of at most 2 MB (256 KB by default), following from an offset (512 KB a read, a skip to
                       the tail beyond that, a replaced log reset), whole lines only, names only from the listing, A3
@@ -561,10 +564,13 @@ src/                  React + TypeScript UI
                       every word matches a field, name > address > tag > detail), search-sources.ts (each kind's
                       items), search-providers.ts (SEARCH_PROVIDERS: later packages add theirs), settings-index.ts
                       (Settings cards by label), container-cache.ts (what the Containers page read last; search
-                      makes no logins), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's host
-                      networks, layered layout), open-tunnels.ts (every pane's tunnels, from their events),
-                      status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs), notifications.ts and
-                      notifications-store.ts (QL-25 entries per source, JobNotes, grouping), navigation-api.ts,
+                      makes no logins), host-networks-cache.ts (VM-11 the host networks the map or the networks view
+                      read last, for search), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's
+                      host networks: vm-insight.ts topologyHostNetworks keys them alike and links them to the VM
+                      page's Networks sheet, AppLink `hostNetworks`; layered layout), open-tunnels.ts (every pane's
+                      tunnels, from their events), status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs),
+                      notifications.ts and notifications-store.ts (QL-25 entries per source, JobNotes, grouping),
+                      navigation-api.ts,
                       density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
                       shortcut), first-run.ts (QL-23); pure helpers with
                       *.test.ts

@@ -535,6 +535,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         vm_insight::vm_log_read,
         vm_insight::vm_timeline,
         vm_insight::host_networks,
+        vm_insight::host_network_list,
         vm_insight::waste_report,
         vm_insight::waste_open_folder,
         dashboard::metrics_history,

@@ -229,6 +229,64 @@ async fn the_report_lists_each_network_its_vms_and_forwards() {
     assert!(report.stale_vms.is_empty());
 }
 
+/// QL-21: the topology map's network nodes come from the networks alone: vmrun's list and VBoxManage's two, no VM
+/// read and no forward.
+#[tokio::test]
+async fn the_networks_alone_read_no_vm_and_no_forward() {
+    let setup = Setup::new(workstation()).with_virtualbox(virtualbox());
+    let (vmware, vbox) = (Arc::clone(&setup.vmware), Arc::clone(&setup.virtualbox));
+    let core = built(setup).await;
+    let (vmrun_before, vbox_before) = (vmware.vmrun_runs(), vbox.vboxmanage_runs());
+
+    let list = core.networks.networks_only().await;
+    let names: Vec<&str> = list.vmware.networks.iter().map(|n| n.network.name.as_str()).collect();
+    assert_eq!(names, ["vmnet1", "vmnet2", "vmnet8"], "as vmrun lists them");
+    assert!(list
+        .vmware
+        .networks
+        .iter()
+        .all(|n| n.vms.is_empty() && n.forwards.is_empty()));
+    assert_eq!(list.virtualbox.host_only.len(), 1);
+    assert_eq!(list.virtualbox.nat_networks[0].network.name, "lab-net");
+    assert!(list.virtualbox.nat_networks[0].vms.is_empty());
+    assert!(list.virtualbox.vm_nat.is_empty() && list.virtualbox.other.is_empty());
+    assert_eq!(vmware.vmrun_runs() - vmrun_before, 1, "listHostNetworks only");
+    assert_eq!(
+        vbox.vboxmanage_runs() - vbox_before,
+        2,
+        "list hostonlyifs and natnets: no showvminfo or guest properties"
+    );
+}
+
+/// VM-11: the report's VMs come from QL-21's adapter read, which stores them; a VM whose files can't be read now
+/// shows on its networks with what was stored, and is named as such.
+#[tokio::test]
+async fn the_report_shares_the_maps_adapter_read_and_falls_back_to_what_it_stored() {
+    let setup = Setup::new(workstation());
+    let vmware = Arc::clone(&setup.vmware);
+    let core = built(setup).await;
+    core.networks.report(&core.ctx).await.unwrap();
+    let stored = core.host_details.vm_networks(&core.ctx, false).await.unwrap();
+    let web = stored.iter().find(|n| n.vmx_path == vmx("web")).unwrap();
+    assert!(web.stored, "the report's read was kept for the map");
+    assert_eq!(web.nics.len(), 2);
+    assert_eq!(web.guest_ips, ["203.0.113.10", "192.0.2.77"]);
+
+    vmware.set_hardware_failing(true);
+    let report = core.networks.report(&core.ctx).await.unwrap();
+    let mut stale = report.stale_vms.clone();
+    stale.sort();
+    assert_eq!(stale, ["db", "web"]);
+    let nat = report
+        .vmware
+        .networks
+        .iter()
+        .find(|n| n.network.name == "vmnet8")
+        .unwrap();
+    assert_eq!(nat.vms[0].name, "web");
+    assert_eq!(nat.vms[0].ips, ["203.0.113.10"]);
+}
+
 #[tokio::test]
 async fn forwards_read_from_vmnetnat_conf_when_vmrun_prints_them_in_another_form() {
     let core = built(Setup::new(workstation().with_forwards_in_conf_only())).await;

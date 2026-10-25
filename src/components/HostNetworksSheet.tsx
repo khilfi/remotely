@@ -1,7 +1,8 @@
 // VM-11: the hypervisors' host networks in a side sheet on the Virtual machines page. Workstation's vmnets (vmrun
 // listHostNetworks) with a NAT vmnet's port forwards; VirtualBox's host-only interfaces, NAT networks with their
 // rules, each VM's NAT adapter rules, and the bridged and internal networks VMs are on. The VMs on each network come
-// from each VM's adapters (R3's settings model). Read when the sheet opens, on Refresh, and after a job ends.
+// from each VM's adapters (R3's settings model, through the topology map's read). Read when the sheet opens, on
+// Refresh, and after a job ends; what it read is kept for the palette's search (host-networks-cache.ts).
 //
 // Adding or removing a forward is a `hostNetwork` command on the bus: High (a forward reaches every VM on the network;
 // Critical when a VM on it is labelled Prod), with the approval dialog's warnings (who can reach it, whose address it
@@ -35,6 +36,7 @@ import { EnvBadge, StateBadge } from "@/components/Badges";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type SubmitOutcome } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
+import { rememberHostNetworks } from "@/lib/host-networks-cache";
 import {
   insightApi,
   type ForwardProtocol,
@@ -49,6 +51,7 @@ import {
   forwardFromForm,
   forwardProblems,
   forwardReason,
+  topologyHostNetworks,
   vboxForward,
   vmnetForward,
   vmnetKindLabel,
@@ -94,7 +97,10 @@ function NetworksBody({ readOnly, onSubmitted }: Pick<Props, "readOnly" | "onSub
   useEffect(() => {
     let stale = false;
     insightApi.hostNetworks().then(
-      (found) => !stale && setResult({ for: reads, report: found }),
+      (found) => {
+        rememberHostNetworks(topologyHostNetworks(found));
+        if (!stale) setResult({ for: reads, report: found });
+      },
       (err: unknown) => !stale && setResult({ for: reads, error: errorMessage(err) }),
     );
     return () => {

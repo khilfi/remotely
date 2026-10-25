@@ -130,7 +130,9 @@ through the bus and its approvals like anywhere else.
   reaches every VM on the network; Critical when a VM on it is labelled Prod), and the approval says who can reach it
   and whose address it leads to. Workstation keeps its forwards in `C:\ProgramData\VMware\vmnetnat.conf`, which only
   administrators can change, and Remotely never asks to run as administrator: change those in Workstation's Virtual
-  Network Editor, or start Remotely with Run as administrator. VirtualBox's need no administrator rights.
+  Network Editor, or start Remotely with Run as administrator. VirtualBox's need no administrator rights. The
+  topology map names its networks the way Workstation and VirtualBox list them, shows the ones no VM is on yet, and
+  opens Networks from a network's box; the palette's search finds the networks the map or Networks read last.
 - **Waste finder** (the VMs page's button, or the palette): running VMs idle for days (from the dashboard's history:
   their busiest hour under 2% of this PC's CPU, and their guest's CPU and network quiet when a linked session is
   watched), suspended VMs and what their saved state takes, long or large snapshot chains, and folders with VM files no

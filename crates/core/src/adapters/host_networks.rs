@@ -647,6 +647,24 @@ pub async fn showvminfo_pairs(
     }
 }
 
+/// A VM's hardware (R3's settings model, MO-13), asked again like [`showvminfo_pairs`] while VirtualBox says
+/// another client has the VM's session lock. QL-21's adapter read uses it, which VM-11's report shares.
+pub async fn hardware_retrying(
+    hypervisors: &crate::adapters::hypervisor::Hypervisors,
+    key: &str,
+) -> Result<crate::adapters::vm_hardware::VmHardware> {
+    let mut waits = BUSY_RETRIES.iter();
+    loop {
+        match hypervisors.hardware(key).await {
+            Err(err) if vbox_busy(&err) => match waits.next() {
+                Some(wait) => tokio::time::sleep(*wait).await,
+                None => return Err(err),
+            },
+            other => return other,
+        }
+    }
+}
+
 /// `natnetwork modify --netname <name> --port-forward-4 <rule>` (or `delete <rule name>`).
 pub fn natnet_rule_args(network: &str, rule: &VboxRule, delete: bool) -> Vec<String> {
     let mut args = vec![

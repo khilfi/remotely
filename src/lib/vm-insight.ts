@@ -1,12 +1,14 @@
 // R4 as pure functions (tested in vm-insight.test.ts): VM-25 following a log and searching it, grouping the timeline;
 // VM-11 the port forward form, its checks (the core's, in crates/core/src/host_networks/ops.rs, checked again there)
-// and the command it becomes; VM-16, VM-14 the waste finder's reasons and sums. QL-08: every reason says why an
-// action is off; `null` means it is available.
+// and the command it becomes, and the host networks as the topology map and search show them; VM-16, VM-14 the waste
+// finder's reasons and sums. QL-08: every reason says why an action is off; `null` means it is available.
 
 import type { Command, PowerState, TargetRef } from "./api.ts";
+import type { HostNetwork } from "./topology.ts";
 import { PROTECTED_REASON } from "./vm-snapshots.ts";
 import type {
   ForwardProtocol,
+  HostNetworksReport,
   LogChunk,
   LogFile,
   NatForward,
@@ -367,6 +369,78 @@ export function vmnetKindLabel(kind: VmnetKind): string {
   if (kind === "nat") return "NAT";
   if (kind === "bridged") return "Bridged";
   return kind.other || "Other";
+}
+
+// ---- VM-11, QL-21: host networks on the topology map and in search ----
+
+/** A dotted mask's prefix length (255.255.255.0 is 24), or null for one that isn't a mask. */
+export function prefixLength(mask: string | null): number | null {
+  const parts = (mask ?? "").split(".");
+  if (parts.length !== 4 || parts.some((p) => !/^\d{1,3}$/.test(p) || Number(p) > 255)) return null;
+  const bits = parts.map((p) => Number(p).toString(2).padStart(8, "0")).join("");
+  return /^1*0*$/.test(bits) ? bits.replace(/0+$/, "").length : null;
+}
+
+function withPrefix(address: string | null, mask: string | null): string | null {
+  if (!address) return null;
+  const bits = prefixLength(mask);
+  return bits === null ? address : `${address}/${bits}`;
+}
+
+function detailLine(...parts: (string | null | false)[]): string {
+  return parts.filter((p): p is string => typeof p === "string" && p !== "").join(" · ");
+}
+
+function forwardCount(n: number): string | false {
+  return n > 0 && (n === 1 ? "1 port forward" : `${n} port forwards`);
+}
+
+const HOST_NETWORKS_LINK = { kind: "hostNetworks" } as const;
+
+/**
+ * The networks Workstation and VirtualBox list, keyed like topology.ts `networkKey` (`vmware:vmnet8`,
+ * `virtualbox:hostonly:<adapter>`, `virtualbox:natnetwork:<name>`): the map names the networks its VMs' adapters are
+ * on by them and shows the ones no VM is on yet, and search finds them. Each opens the host networks view.
+ */
+export function topologyHostNetworks(report: HostNetworksReport): HostNetwork[] {
+  const vmnets = report.vmware.networks.map(({ network, forwards }) => ({
+    key: `vmware:${network.name.toLowerCase()}`,
+    label:
+      typeof network.kind === "string"
+        ? `${vmnetKindLabel(network.kind)} (VMnet${network.index})`
+        : `VMnet${network.index}`,
+    detail: detailLine(
+      "Workstation",
+      withPrefix(network.subnet, network.mask),
+      network.dhcp === true && "DHCP",
+      forwardCount(forwards.length),
+    ),
+    link: HOST_NETWORKS_LINK,
+  }));
+  const hostOnly = report.virtualbox.hostOnly.map(({ iface }) => ({
+    key: `virtualbox:hostonly:${iface.name}`,
+    label: `Host-only: ${iface.name}`,
+    detail: detailLine(
+      "VirtualBox",
+      withPrefix(iface.ip, iface.mask),
+      iface.dhcp === true && "DHCP",
+      iface.status !== null && iface.status !== "Up" && iface.status.toLowerCase(),
+    ),
+    link: HOST_NETWORKS_LINK,
+  }));
+  const natNetworks = report.virtualbox.natNetworks.map(({ network }) => ({
+    key: `virtualbox:natnetwork:${network.name}`,
+    label: `NAT network: ${network.name}`,
+    detail: detailLine(
+      "VirtualBox",
+      network.network,
+      network.dhcp === true && "DHCP",
+      network.enabled === false && "off",
+      forwardCount(network.forwards.length),
+    ),
+    link: HOST_NETWORKS_LINK,
+  }));
+  return [...vmnets, ...hostOnly, ...natNetworks];
 }
 
 // ---- VM-16, VM-14: the waste finder ----

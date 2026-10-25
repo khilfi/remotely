@@ -63,6 +63,12 @@ pub async fn host_networks(state: State<'_, AppState>) -> IpcResult<HostNetworks
     Ok(core.networks.report(&core.ctx).await?)
 }
 
+/// VM-11, QL-21: the host networks alone, without VMs or forwards: the topology map's network nodes.
+#[tauri::command]
+pub async fn host_network_list(state: State<'_, AppState>) -> IpcResult<HostNetworksReport> {
+    Ok(state.core.networks.networks_only().await)
+}
+
 /// VM-16, VM-14: the waste finder's report, read now.
 #[tauri::command]
 pub async fn waste_report(state: State<'_, AppState>, options: Option<WasteOptions>) -> IpcResult<WasteReport> {

@@ -502,7 +502,7 @@ impl Core {
         // MO-06: a prune compacts the file only while no job runs.
         history.set_jobs(Arc::clone(&jobs));
         // VM-11: network targets and port forward previews.
-        let networks = host_networks::HostNetworks::new(store.clone(), hypervisors.clone());
+        let networks = host_networks::HostNetworks::new(store.clone(), hypervisors.clone(), host_details.clone());
         let bus = Arc::new(CommandBus::new(
             policy,
             Arc::new(

@@ -37,7 +37,9 @@ export type AppLink =
   /** QL-21: the topology map. */
   | { kind: "map" }
   /** VM-14, VM-27: a schedule's runs on the Schedules page. */
-  | { kind: "schedule"; scheduleId: string };
+  | { kind: "schedule"; scheduleId: string }
+  /** VM-11: the Virtual machines page's host networks. */
+  | { kind: "hostNetworks" };
 
 export type AppLinkKind = AppLink["kind"];
 
@@ -56,6 +58,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   vault: [],
   map: [],
   schedule: ["scheduleId"],
+  hostNetworks: [],
 };
 
 /** A value (from the core, say) is a link this version can open: a known kind with its text fields. */
@@ -109,5 +112,7 @@ export function linkLabel(link: AppLink): string {
       return "Open the map";
     case "schedule":
       return "Show its runs";
+    case "hostNetworks":
+      return "Show the host networks";
   }
 }

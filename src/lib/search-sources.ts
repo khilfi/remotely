@@ -6,6 +6,7 @@ import type { CachedContainers } from "./container-cache.ts";
 import type { SearchField, SearchItem } from "./search.ts";
 import type { ScheduleView } from "./schedules-api.ts";
 import type { SettingsSection } from "./settings-index.ts";
+import type { HostNetwork } from "./topology.ts";
 
 function field(text: string | null | undefined, kind: SearchField["kind"]): SearchField[] {
   return text ? [{ text, kind }] : [];
@@ -252,5 +253,18 @@ export function scheduleItems(schedules: readonly ScheduleView[]): SearchItem[] 
     ],
     target: { open: { kind: "schedule", scheduleId: s.id } },
     boost: s.state === "needsApproval" ? 1 : 0,
+  }));
+}
+
+/** VM-11: the host networks Workstation and VirtualBox listed when the map or the host networks view last read them
+ * (host-networks-cache.ts), by name, kind and subnet; choosing one opens the host networks view. */
+export function hostNetworkItems(networks: readonly HostNetwork[]): SearchItem[] {
+  return networks.map((n) => ({
+    id: `hostNetwork:${n.key}`,
+    provider: "hostNetworks",
+    title: n.label,
+    detail: n.detail,
+    fields: [...field(n.label, "name"), ...field(n.detail, "detail")],
+    target: { open: n.link ?? { kind: "hostNetworks" } },
   }));
 }
