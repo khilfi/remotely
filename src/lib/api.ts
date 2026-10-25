@@ -1114,6 +1114,8 @@ export interface TerminalSettings {
   notifyQuietSecs: number;
   /** SS-08: type the folder prompt hook into bash and zsh (a session can say otherwise; Prod: off unless it does). */
   promptHook: boolean;
+  /** QL-05: ask before pasting text that holds a line break (see paste.ts). */
+  confirmMultilinePaste: boolean;
 }
 
 // ---- BX-08 command panel ----
