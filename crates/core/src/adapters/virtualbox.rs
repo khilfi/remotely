@@ -1715,7 +1715,7 @@ CurrentSnapshotNode="SnapshotName-1"
             Some(PathBuf::from(r"C:\Users\alice\VirtualBox VMs"))
         );
         assert_eq!(parse_default_machine_folder("Default machine folder:   \n"), None);
-        let ifs = "Name:            VirtualBox Host-Only Ethernet Adapter\nGUID:            0d2c-...\nDHCP:            Disabled\nIPAddress:       192.168.56.1\n\nName:            VirtualBox Host-Only Ethernet Adapter #2\nGUID:            1e3d-...\n";
+        let ifs = "Name:            VirtualBox Host-Only Ethernet Adapter\nGUID:            0d2c-...\nDHCP:            Disabled\nIPAddress:       192.0.2.1\n\nName:            VirtualBox Host-Only Ethernet Adapter #2\nGUID:            1e3d-...\n";
         assert_eq!(
             parse_host_adapters(ifs),
             [
