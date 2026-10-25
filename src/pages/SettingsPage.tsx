@@ -11,6 +11,7 @@
 import { useEffect, useState } from "react";
 import { FileTextIcon, FolderIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { QemuImgCard } from "@/components/QemuImgCard";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -333,6 +334,9 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
             </Button>
           </CardFooter>
         </Card>
+
+        {/* CV-03: qemu-img for qcow2 and VHDX conversions. */}
+        <QemuImgCard />
 
         <Card>
           <CardHeader>

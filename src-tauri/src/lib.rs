@@ -6,6 +6,7 @@ mod catalog;
 mod clipboard;
 mod command_panel;
 mod containers;
+mod convert;
 mod dashboard;
 pub mod data_dirs;
 mod deploy;
@@ -432,6 +433,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::settings_get,
         ipc::settings_set_vmrun_path,
         ipc::settings_set_ovftool_path,
+        ipc::settings_set_qemu_img_path,
         ipc::settings_set_vboxmanage_path,
         ipc::settings_set_scan_folders,
         ipc::settings_set_power_on_limit,
@@ -645,6 +647,19 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         deploy::deploy_clone_submit,
         deploy::deploy_host_adapters,
         deploy::deploy_default_folder,
+        convert::convert_tools,
+        convert::convert_pick,
+        convert::convert_inspect,
+        convert::convert_options,
+        convert::convert_submit,
+        convert::convert_verify,
+        convert::convert_verify_cancel,
+        convert::export_options,
+        convert::export_submit,
+        convert::import_analyze,
+        convert::import_check,
+        convert::import_submit,
+        convert::convert_open_qemu_site,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,

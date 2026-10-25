@@ -40,6 +40,8 @@ import {
   PlayIcon,
   RefreshCwIcon,
   RocketIcon,
+  ImportIcon,
+  PackageIcon,
   ShieldIcon,
   ShieldOffIcon,
   TagIcon,
@@ -145,6 +147,10 @@ interface Props {
   onSubmitted: (outcome: SubmitOutcome, onJob?: (jobId: string) => void) => void;
   /** VM-21: opens the Deploy dialog. */
   onDeploy: () => void;
+  /** CV-01: opens the Import dialog. */
+  onImport?: () => void;
+  /** VM-17, CV-02: opens the Export dialog on a VM. */
+  onExport?: (vmxPath: string) => void;
   onOpenSettings: () => void;
   /** FD-01: the command palette on one VM's actions. */
   onActions: (vmxPath: string) => void;
@@ -278,7 +284,17 @@ interface Column {
   ownClicks?: boolean;
 }
 
-export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActions, request, refreshKey }: Props) {
+export function VmsPage({
+  active,
+  onSubmitted,
+  onDeploy,
+  onImport,
+  onExport,
+  onOpenSettings,
+  onActions,
+  request,
+  refreshKey,
+}: Props) {
   // FD-03: power actions, snapshots, protection, tags and labels are off while the read-only lock applies (the core
   // refuses them too); the page's notice says so.
   const readOnly = useReadOnlyReason();
@@ -921,6 +937,15 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
             Deploy
           </Button>
         </WhyDisabled>
+        {/* CV-01: a foreign VM or disk (OVA, VHD/VHDX, qcow2, raw, libvirt, Proxmox) as a new VM. */}
+        {onImport && (
+          <WhyDisabled reason={readOnly}>
+            <Button variant="outline" disabled={readOnly !== null} onClick={onImport}>
+              <ImportIcon data-icon="inline-start" />
+              Import…
+            </Button>
+          </WhyDisabled>
+        )}
         <VmFilterBar
           filter={filter}
           onChange={setFilter}
@@ -1179,6 +1204,19 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
               Clone…
               <DropdownMenuShortcut>{selectedVms.length || ""}</DropdownMenuShortcut>
             </DropdownMenuItem>
+            {/* VM-17, CV-02: one VM exported for another hypervisor or a cloud. */}
+            {onExport && (
+              <DropdownMenuItem
+                disabled={selectedVms.length !== 1}
+                onSelect={() => selectedVms[0] && onExport(selectedVms[0].vmxPath)}
+              >
+                <PackageIcon />
+                <div>
+                  Export…
+                  <ReasonLine reason={selectedVms.length !== 1 ? "Select one VM to export" : null} />
+                </div>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuLabel>Tags</DropdownMenuLabel>
             <DropdownMenuItem onSelect={() => setDialog({ kind: "addTag" })}>

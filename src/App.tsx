@@ -32,6 +32,8 @@ import {
   HistoryIcon,
   KeyRoundIcon,
   LayersIcon,
+  HardDriveIcon,
+  ImportIcon,
   RocketIcon,
   LayoutDashboardIcon,
   ListTreeIcon,
@@ -75,6 +77,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { DeployDialog } from "@/components/DeployDialog";
+import { VmExportDialog } from "@/components/VmExportDialog";
+import { VmImportDialog } from "@/components/VmImportDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReauthDialog } from "@/components/ReauthDialog";
@@ -115,6 +119,7 @@ import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
+import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage, type VmPageRequest } from "@/pages/VmsPage";
@@ -134,6 +139,7 @@ import type { VmView } from "@/lib/vm-snapshots";
 type PageId =
   | "vms"
   | "templates"
+  | "images"
   | "dashboard"
   | "containers"
   | "sessions"
@@ -147,6 +153,8 @@ type PageId =
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "templates", label: "Templates", title: "VM templates", icon: LayersIcon, shortcut: "Ctrl+9" },
+  // CV-03: no Ctrl+digit is left; the palette opens it.
+  { id: "images", label: "Image tools", title: "Image tools", icon: HardDriveIcon, shortcut: "" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
   { id: "containers", label: "Containers", title: "Containers", icon: ContainerIcon, shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
@@ -160,6 +168,7 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 // P6: memoised pages. Each one renders again only when its own props change; App passes them stable callbacks.
 const Vms = memo(VmsPage);
 const Templates = memo(TemplatesPage);
+const ImageTools = memo(ImageToolsPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
 const Sessions = memo(SessionsPage);
@@ -210,6 +219,11 @@ export default function App() {
   const [deploying, setDeploying] = useState<{ templateId: string | null } | null>(null);
   const openDeploy = useCallback((templateId?: string) => setDeploying({ templateId: templateId ?? null }), []);
   const openDeployBlank = useCallback(() => setDeploying({ templateId: null }), []);
+  // CV-01: the Import dialog (on a file Image tools inspected, or none); VM-17: the Export dialog on a VM.
+  const [importing, setImporting] = useState<{ path: string | null } | null>(null);
+  const openImport = useCallback((path?: string) => setImporting({ path: path ?? null }), []);
+  const [exporting, setExporting] = useState<string | null>(null);
+  const openExport = useCallback((vmKey: string) => setExporting(vmKey), []);
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
   const [terminalOpen, setTerminalOpen] = useState<{
     sessionId: string;
@@ -441,6 +455,10 @@ export default function App() {
           // Updates keep the earlier description unless it is cleared.
           toast.loading("Running…", { id, description: null });
           break;
+        case "targetProgress":
+          // CV-03, VM-17: a conversion's or export's own progress.
+          toast.loading(`Running… ${Math.round(event.percent)}%`, { id, description: event.step });
+          break;
         case "canaryWaiting":
           // H9: the rest wait for a look at the canary's result (Compare output, or the key push dialog), so the
           // toast has no go-ahead of its own.
@@ -557,6 +575,20 @@ export default function App() {
       icon: RocketIcon,
       keywords: "vm template create clone cloud-init iso ova new virtual machine",
       run: () => openDeployBlank(),
+    },
+    {
+      id: "import-vm",
+      label: "Import a VM or disk (OVA, VHDX, qcow2, libvirt, Proxmox)…",
+      icon: ImportIcon,
+      keywords: "convert hyper-v kvm proxmox azure ova ovf vhd vhdx qcow2 raw img vdi vmdk foreign virtual machine",
+      run: () => openImport(),
+    },
+    {
+      id: "image-tools",
+      label: "Image tools: inspect, convert or verify a disk image",
+      icon: HardDriveIcon,
+      keywords: "convert vmdk vdi vhd vhdx qcow2 raw qemu-img checksum sha256 disk",
+      run: () => setPage("images"),
     },
     {
       id: "new-template",
@@ -757,8 +789,8 @@ export default function App() {
                     <SidebarMenuItem key={p.id}>
                       <SidebarMenuButton
                         isActive={page === p.id}
-                        tooltip={`${p.label} (${p.shortcut})`}
-                        aria-keyshortcuts={p.shortcut.replace("Ctrl", "Control")}
+                        tooltip={p.shortcut ? `${p.label} (${p.shortcut})` : p.label}
+                        aria-keyshortcuts={p.shortcut ? p.shortcut.replace("Ctrl", "Control") : undefined}
                         onClick={() => setPage(p.id)}
                       >
                         <p.icon />
@@ -874,6 +906,8 @@ export default function App() {
                   active={page === "vms"}
                   onSubmitted={submitted}
                   onDeploy={openDeployBlank}
+                  onImport={openImport}
+                  onExport={openExport}
                   onOpenSettings={show.settings}
                   onActions={openPalette}
                   request={vmRequest}
@@ -884,6 +918,16 @@ export default function App() {
             <section hidden={page !== "templates"}>
               <ErrorBoundary name="Templates">
                 <Templates active={page === "templates"} request={templatesRequest} onDeploy={openDeploy} />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "images"}>
+              <ErrorBoundary name="Image tools">
+                <ImageTools
+                  active={page === "images"}
+                  onSubmitted={submitted}
+                  onImport={openImport}
+                  onOpenSettings={show.settings}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "dashboard"}>
@@ -975,6 +1019,10 @@ export default function App() {
       {deploying && (
         <DeployDialog templateId={deploying.templateId} onSubmitted={submitted} onClose={() => setDeploying(null)} />
       )}
+      {importing && (
+        <VmImportDialog initialPath={importing.path} onSubmitted={submitted} onClose={() => setImporting(null)} />
+      )}
+      {exporting && <VmExportDialog vmKey={exporting} onSubmitted={submitted} onClose={() => setExporting(null)} />}
       {approval && (
         <ApprovalDialog
           request={approval.request}
