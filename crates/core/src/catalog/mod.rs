@@ -318,6 +318,27 @@ impl Catalog {
         Ok(templates::resolve(id, &row.spec, &refs, count, &taken, today()))
     }
 
+    /// R2: a template's fields as the Deploy dialog sends them (a saved template's, perhaps with another naming
+    /// pattern, or Custom's own) and `count` VMs as one plan; or why it can't deploy. `id` is the saved template's,
+    /// nil for Custom.
+    pub async fn plan_input(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        input: &TemplateInput,
+        count: u32,
+    ) -> Result<std::result::Result<DeployPlan, Vec<Problem>>> {
+        let spec = templates::check_template(input)?;
+        let facts = self.facts(ctx).await?;
+        let taken = self.vm_names(ctx).await?;
+        let refs = templates::Refs {
+            image: facts.image(spec.image_id),
+            size: facts.size(&spec.size_id),
+            key: facts.key(spec.ssh_key_id),
+        };
+        Ok(templates::resolve(id, &spec, &refs, count, &taken, today()))
+    }
+
     async fn vm_names(&self, ctx: &Context) -> Result<Vec<String>> {
         Ok(self
             .store
@@ -1001,7 +1022,7 @@ fn used_by(templates: &[String]) -> String {
 }
 
 /// Today on this PC, for `{date}`.
-fn today() -> time::Date {
+pub(crate) fn today() -> time::Date {
     time::OffsetDateTime::now_local()
         .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
         .date()

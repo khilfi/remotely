@@ -200,8 +200,11 @@ pub struct Core {
     /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
     /// through [`Core::bus`].
     pub snapshots: SnapshotReader,
-    /// VM-19 to VM-21: sizes, images and launch templates (the app's own data, audited). Deploying is R2's.
+    /// VM-19 to VM-21: sizes, images and launch templates (the app's own data, audited).
     pub catalog: Catalog,
+    /// VM-21, VM-22, VM-10: deploys from launch templates or the Deploy dialog, and bulk clones; each is a
+    /// command on [`Core::bus`].
+    pub deploy: deploy::service::Deploys,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
     /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
@@ -462,10 +465,19 @@ impl Core {
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
+        let catalog = Catalog::new(store.clone()).with_hypervisors(hypervisors.clone());
+        let deploy = deploy::service::Deploys::new(
+            store.clone(),
+            catalog.clone(),
+            hypervisors.clone(),
+            Arc::clone(&adapters.host_counters),
+            Arc::clone(&bus),
+        );
         let core = Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
-            catalog: Catalog::new(store.clone()).with_hypervisors(hypervisors.clone()),
+            catalog,
+            deploy,
             inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())

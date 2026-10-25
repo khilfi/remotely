@@ -854,6 +854,8 @@ pub struct ApprovalRequest {
     pub upload: Option<Box<UploadDetails>>,
     /// SS-07: for a tunnel, where it listens, where it leads and who can use it.
     pub tunnel: Option<Box<TunnelDetails>>,
+    /// VM-21: for a deploy, each VM it makes, where, and the disk space it may take (AP-02).
+    pub deploy: Option<Box<crate::deploy::preview::DeployPreview>>,
 }
 
 /// SS-07: a tunnel as the approval dialog shows it.
@@ -1677,6 +1679,11 @@ impl CommandBus {
         if let Command::TerminalLine { keys, .. } = command {
             decision.warnings.extend(run_key(keys).and_then(RunKey::note));
         }
+        // VM-21: thin disks that might not fit, and what changed since the deploy service checked it (a folder that
+        // is there now, thick disks that don't fit any more: those VMs fail when their turn comes).
+        if let Some(deploy) = self.impact.deploy(command, self.capacity.host().as_ref()).await {
+            decision.add_warnings(deploy.warnings.into_iter().chain(deploy.refusals).collect());
+        }
         if let Command::VmPower {
             op: PowerOp::Start { .. },
             ..
@@ -1733,6 +1740,11 @@ impl CommandBus {
             exec: self.exec_details(ctx, command, retry_of).await?,
             upload: UploadDetails::of(command),
             tunnel: TunnelDetails::of(command),
+            deploy: self
+                .impact
+                .deploy(command, self.capacity.host().as_ref())
+                .await
+                .map(Box::new),
         })
     }
 

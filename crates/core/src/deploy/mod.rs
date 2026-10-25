@@ -15,6 +15,7 @@ pub mod cloud_init;
 pub mod ovf;
 pub mod preview;
 pub mod seed;
+pub mod service;
 pub mod spec;
 pub mod vmx;
 
