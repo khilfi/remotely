@@ -418,7 +418,7 @@ async fn a_failed_upload_can_be_retried() {
     let Retried::Upload { start } = t.core.files.retry(failed.id).await.unwrap() else {
         panic!("an upload is retried as an upload");
     };
-    assert_eq!(t.finish(start).await, JobStatus::Succeeded);
+    assert_eq!(t.finish(*start).await, JobStatus::Succeeded);
     assert_eq!(t.files.file("/srv/backup.sql").unwrap(), body);
     let again = t.transfer("backup.sql");
     assert_ne!(again.id, failed.id);
