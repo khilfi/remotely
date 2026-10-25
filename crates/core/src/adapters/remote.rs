@@ -1326,22 +1326,26 @@ async fn keyboard_interactive(
                         prompter.show(&format!("{}\r\n", text.trim_end())).await;
                     }
                 }
-                let mut answers = Vec::with_capacity(prompts.len());
+                // SS-04: the answers (a password, a one-time code) are gathered as zeroizing secrets, so one left
+                // behind by a prompt that fails part way (the `?`) is wiped.
+                let mut answers: Vec<SecretString> = Vec::with_capacity(prompts.len());
                 for prompt in prompts {
-                    let saved = match password {
+                    let answer = match password {
                         Some(p) if !prompt.echo && prompt.prompt.to_lowercase().contains("password") => {
                             password = None;
-                            Some(p.expose().to_owned())
+                            p.clone()
                         }
-                        _ => None,
+                        _ => prompter.ask(&prompt.prompt, prompt.echo).await?,
                     };
-                    match saved {
-                        Some(answer) => answers.push(answer),
-                        None => answers.push(prompter.ask(&prompt.prompt, prompt.echo).await?.expose().to_owned()),
-                    }
+                    answers.push(answer);
                 }
+                // russh takes the answers as plain `String`s, by value, and drops them unwiped once it has written
+                // them into the encrypted packet. So the plain copies are made only here, as they go, and none is
+                // kept on this side.
+                let plain: Vec<String> = answers.iter().map(|answer| answer.expose().to_owned()).collect();
+                drop(answers);
                 reply = handle
-                    .authenticate_keyboard_interactive_respond(answers)
+                    .authenticate_keyboard_interactive_respond(plain)
                     .await
                     .map_err(ssh_err)?;
             }

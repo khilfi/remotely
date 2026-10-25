@@ -9,7 +9,8 @@
 //! could be acted on safely.
 //!
 //! Text from the engine is cleaned of control characters (and logs of ANSI colour codes) before it
-//! goes anywhere. Environment values never leave this module: only their names do.
+//! goes anywhere. Environment values never leave this module: only their names do. Commands come out
+//! with what looks like a password or token redacted ([`command_line`]).
 
 use std::collections::BTreeMap;
 
@@ -24,6 +25,7 @@ use super::{
     LogLine, LogStream, MountInfo, NetworkAttachment, NetworkSummary, PortMapping, VolumeSummary,
 };
 use crate::error::{ContainerProblem, CoreError, Result};
+use crate::export::redact_secrets;
 
 /// The Compose project label (Docker Compose and podman-compose).
 const PROJECT_LABEL: &str = "com.docker.compose.project";
@@ -423,15 +425,37 @@ fn health_from_status(status: &str) -> Option<String> {
     }
 }
 
-/// A command as one line: Docker's text (quoted in its list), or Podman's words.
+/// A command as one line: Docker's text (quoted in its list), or Podman's and `inspect`'s words; secrets redacted
+/// ([`command_line`]).
 fn command(value: &Value, keys: &[&str]) -> Option<String> {
     match get(value, keys)? {
-        Value::Array(words) => {
-            let words: Vec<String> = words.iter().filter_map(as_text).collect();
-            (!words.is_empty()).then(|| words.join(" "))
-        }
-        other => as_text(other).map(|t| t.trim_matches('"').to_owned()),
+        Value::Array(words) => command_line(words.iter().filter_map(as_text).collect()),
+        other => as_text(other).map(|t| redact_secrets(t.trim_matches('"')).0),
     }
+}
+
+/// CT-01: a command's words as one line, fit to show. A container's `Cmd` or `Entrypoint` may carry a secret
+/// (`redis-server --requirepass x`, `--password=x`): what [`redact_secrets`] takes for one reads `[redacted]`. A
+/// word with a space in it is quoted for that, so a flag's value of two words goes whole; the quotes stay only
+/// in a line that had something redacted. `None` for no words.
+pub fn command_line(words: Vec<String>) -> Option<String> {
+    if words.is_empty() {
+        return None;
+    }
+    let quoted: Vec<String> = words
+        .iter()
+        .map(|word| {
+            if !word.contains(char::is_whitespace) {
+                word.clone()
+            } else if !word.contains('"') {
+                format!("\"{word}\"")
+            } else {
+                format!("'{word}'")
+            }
+        })
+        .collect();
+    let (redacted, changed) = redact_secrets(&quoted.join(" "));
+    Some(if changed { redacted } else { words.join(" ") })
 }
 
 fn container_id(value: &Value, keys: &[&str]) -> Option<ContainerId> {
@@ -1160,6 +1184,57 @@ mod tests {
         let ports: Vec<String> = d.ports.iter().map(PortMapping::describe).collect();
         assert_eq!(ports, ["0.0.0.0:8080->80/tcp", "443/tcp"]);
         assert_eq!(d.project.as_deref(), Some("shop"));
+    }
+
+    #[test]
+    fn passwords_in_a_command_or_entrypoint_are_redacted() {
+        let out = format!(
+            r#"[{{"Id": "{ID1}", "Name": "/cache",
+  "Config": {{"Cmd": ["redis-server", "--requirepass", "hunter2", "--appendonly", "yes"],
+              "Entrypoint": ["/entrypoint.sh", "--password=hunter2"]}}}}]"#
+        );
+        let d = details(&out).unwrap();
+        assert_eq!(
+            d.command.as_deref(),
+            Some("redis-server --requirepass [redacted] --appendonly yes")
+        );
+        assert_eq!(d.entrypoint.as_deref(), Some("/entrypoint.sh --password=[redacted]"));
+        assert!(!serde_json::to_string(&d).unwrap().contains("hunter2"));
+
+        // Docker's list has the command as one text; Podman's as words.
+        let docker = format!(
+            r#"{{"Command":"\"redis-server --requirepass hunter2\"","ID":"{ID1}","Image":"redis:7","Names":"cache","State":"running"}}"#
+        );
+        let list = containers(&docker).unwrap();
+        assert_eq!(
+            list[0].command.as_deref(),
+            Some("redis-server --requirepass [redacted]")
+        );
+        let podman = format!(
+            r#"[{{"Command": ["app", "--token", "abc123", "--pass", "two words"], "Id": "{ID1}", "Names": ["app"], "State": "running"}}]"#
+        );
+        let list = containers(&podman).unwrap();
+        assert_eq!(
+            list[0].command.as_deref(),
+            Some("app --token [redacted] --pass [redacted]"),
+            "a value of two words goes whole"
+        );
+    }
+
+    #[test]
+    fn harmless_commands_are_shown_as_they_are() {
+        let words = |w: &[&str]| command_line(w.iter().map(|s| (*s).to_owned()).collect());
+        assert_eq!(
+            words(&["nginx", "-g", "daemon off;"]).as_deref(),
+            Some("nginx -g daemon off;")
+        );
+        assert_eq!(
+            words(&["redis-server", "--port", "6379", "--appendonly", "yes"]).as_deref(),
+            Some("redis-server --port 6379 --appendonly yes")
+        );
+        // `-p` names a port as often as a password: left alone.
+        assert_eq!(words(&["mysqld", "-p", "3306"]).as_deref(), Some("mysqld -p 3306"));
+        assert_eq!(words(&[]), None);
     }
 
     #[test]
