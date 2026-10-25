@@ -2478,6 +2478,7 @@ impl Vault for FakeVault {
             windows_login: false,
             windows_login_available: false,
             idle_lock_minutes: 15,
+            locks_in_secs: Some(15 * 60),
         }
     }
 

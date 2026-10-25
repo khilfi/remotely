@@ -622,8 +622,10 @@ pub async fn vault_turn_off_windows_login(state: State<'_, AppState>) -> IpcResu
 /// SS-04: the user typed or clicked in the window (the UI sends this at most every few seconds), so
 /// the vault's idle lock counts from now. Background reads never count.
 #[tauri::command]
-pub fn vault_activity(state: State<'_, AppState>) {
+pub fn vault_activity(state: State<'_, AppState>) -> VaultInfo {
     state.core.vault.note_activity();
+    // QL-22: the status bar's countdown starts again from here.
+    state.core.vault.info()
 }
 
 /// SS-04, FD-07: how hard a candidate vault password or export passphrase is to guess, for the meter
