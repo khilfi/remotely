@@ -23,6 +23,7 @@ use crate::export::redact_secrets;
 use crate::forwards::PortForward;
 use crate::impact::{ImpactPreviewer, TargetImpact};
 use crate::jobs::{JobRunner, JobSpec, TargetStatus};
+use crate::linked_clones::Blocked;
 use crate::locks;
 use crate::policy::{ActionKind, ApprovalStep, DangerousMatch, Decision, PolicyEngine, PolicyRules, Tier};
 use crate::presentation::Change;
@@ -928,6 +929,8 @@ pub struct ApprovalRequest {
 struct Previews {
     impact: Option<Vec<TargetImpact>>,
     vm_change: Option<VmChangePreview>,
+    /// VM-04, VM-21, VM-24: the VM targets a snapshot or VM delete must not touch, for linked clones.
+    linked_clones: Vec<Blocked>,
 }
 
 /// SS-07: a tunnel as the approval dialog shows it.
@@ -1715,6 +1718,12 @@ impl CommandBus {
             return Err(CoreError::AllTargetsProtected);
         }
         let impact = self.add_warnings(ctx, &command, &mut decision).await;
+        // VM-04, VM-21, VM-24: a snapshot or VM delete that linked clones stop on every VM is refused before anything is
+        // asked; with other VMs left, the approval says which it refuses, and each of those fails when its turn comes.
+        if !impact.linked_clones.is_empty() && impact.linked_clones.len() >= decision.targets.len() {
+            let reasons: Vec<&str> = impact.linked_clones.iter().map(|b| b.reason.as_str()).collect();
+            return Err(CoreError::LinkedClones(reasons.join(" ")));
+        }
         self.ask_for_sudo_places(ctx, &command, &mut decision).await?;
         self.ask_for_guest_password(ctx, &command, &mut decision).await?;
         let summary = command.summary(decision.targets.len());
@@ -1773,6 +1782,12 @@ impl CommandBus {
     /// revert powering a VM off, VM-23 a VM a settings change would be refused on), and the previews read for
     /// them. Asking again (AP-01) adds them too.
     async fn add_warnings(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Previews {
+        // VM-04, VM-21: a snapshot delete says which VMs it refuses for linked clones (VM-24's VM delete says it as the
+        // VM's problem in its own preview, below).
+        let linked_clones = self.impact.linked_clones(command, &decision.targets).await;
+        if matches!(command, Command::VmSnapshot { .. }) {
+            decision.add_warnings(linked_clones.iter().map(|b| b.reason.clone()).collect());
+        }
         let vm_change = self.impact.vm_change(command, &decision.targets).await;
         if let Some(preview) = &vm_change {
             // VM-23: a Low change (an ISO, a cable) gets a confirm too when a VM would refuse it, so it is seen.
@@ -1788,6 +1803,7 @@ impl CommandBus {
         Previews {
             impact: self.add_power_warnings(ctx, command, decision).await,
             vm_change,
+            linked_clones,
         }
     }
 
@@ -1844,7 +1860,22 @@ impl CommandBus {
         previews: Previews,
         retry_of: Option<Uuid>,
     ) -> Result<ApprovalRequest> {
-        let Previews { impact, vm_change } = previews;
+        let Previews {
+            impact,
+            vm_change,
+            linked_clones,
+        } = previews;
+        let mut impact = match impact {
+            Some(impact) => impact,
+            // CT-01, CT-02: container targets are previewed by the containers service.
+            None => self.impact.preview_for(ctx, command, &decision.targets).await,
+        };
+        // VM-04, VM-21, VM-24: the clones each refused VM's delete would break.
+        for row in &mut impact {
+            if let Some(blocked) = linked_clones.iter().find(|b| b.target == row.target) {
+                row.linked_clones = blocked.snapshots.clone();
+            }
+        }
         Ok(ApprovalRequest {
             id,
             action: decision.action,
@@ -1855,11 +1886,7 @@ impl CommandBus {
             skipped: decision.skipped.clone(),
             reasons: decision.reasons.clone(),
             warnings: decision.warnings.clone(),
-            impact: match impact {
-                Some(impact) => impact,
-                // CT-01, CT-02: container targets are previewed by the containers service.
-                None => self.impact.preview_for(ctx, command, &decision.targets).await,
-            },
+            impact,
             exec: self.exec_details(ctx, command, retry_of).await?,
             upload: UploadDetails::of(command),
             tunnel: TunnelDetails::of(command),

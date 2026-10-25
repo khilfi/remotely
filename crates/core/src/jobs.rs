@@ -67,6 +67,7 @@ use crate::containers::ContainerActions;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
+use crate::linked_clones::{LinkedClones, VboxMedia};
 use crate::locks;
 use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
 use crate::snapshots::safety_snapshot_name;
@@ -538,6 +539,8 @@ pub struct JobRunner {
     hypervisors: Hypervisors,
     /// VM-11, VM-12, VM-15, VM-16, VM-23, VM-24: settings, devices, disks and lifecycle changes.
     vm_editor: VmEditor,
+    /// VM-04, VM-21: a snapshot delete is checked again just before it runs, for linked clones made since the approval.
+    linked_clones: LinkedClones,
     remote: Arc<dyn RemoteAdapter>,
     updater: Arc<dyn UpdaterAdapter>,
     /// BX-02, BX-07: login and sudo secrets, read per host just before it connects.
@@ -581,6 +584,7 @@ impl JobRunner {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
             vm_editor: VmEditor::new(hypervisors.clone(), store.clone()),
+            linked_clones: LinkedClones::new(hypervisors.clone()),
             store,
             hypervisors,
             remote,
@@ -1333,6 +1337,11 @@ impl JobRunner {
                 Ok(TargetOutcome::done())
             }
             (Command::VmSnapshot { op, .. }, TargetRef::Vm { vmx_path }) => {
+                // VM-04, VM-21: a linked clone made from the snapshot since the approval (a deploy) counts too.
+                let mut media = VboxMedia::default();
+                if let Some(reason) = self.linked_clones.refusal(&spec.command, vmx_path, &mut media).await {
+                    return Err(CoreError::LinkedClones(reason));
+                }
                 self.hypervisors.snapshot(vmx_path, op).await?;
                 Ok(TargetOutcome::done())
             }

@@ -111,6 +111,11 @@ pub struct SnapshotInfo {
     /// VM-18: VirtualBox's own id for the snapshot (its UUID), which VBoxManage takes in place of a
     /// name that two snapshots share. `None` for VMware.
     pub id: Option<String>,
+    /// VM-04, VM-21: the linked clones made from this snapshot, as Workstation records them in the golden VM's
+    /// .vmsd (`snapshotN.cloneM`, the first `snapshotN.numClones`): each clone's .vmx, as written (absolute, or
+    /// relative to the golden VM's folder). Empty for VirtualBox, whose clones show in its media list instead
+    /// ([`crate::linked_clones`]).
+    pub linked_clones: Vec<String>,
 }
 
 /// A VM's snapshots (VM-04).
@@ -1084,6 +1089,10 @@ async fn read_library() -> Result<Vec<LibraryVm>> {
 /// `parent` names the parent's uid and is missing on a first snapshot. The creation time is
 /// microseconds since 1970 (UTC), split into a high and a signed low 32-bit half. Entries without a
 /// uid are left out.
+///
+/// VM-04, VM-21: a linked clone made from a snapshot adds `snapshotN.cloneM = "<the clone's .vmx>"` and
+/// `snapshotN.numClones`. Workstation 26 (hand check) lowers `numClones` when a clone is deleted but may leave the
+/// last `cloneM` line behind, so only the first `numClones` count.
 pub fn parse_vmsd(text: &str) -> SnapshotTree {
     #[derive(Default)]
     struct Entry {
@@ -1093,6 +1102,8 @@ pub fn parse_vmsd(text: &str) -> SnapshotTree {
         description: Option<String>,
         time_high: Option<i64>,
         time_low: Option<i64>,
+        num_clones: Option<u32>,
+        clones: BTreeMap<u32, String>,
     }
     let mut entries: BTreeMap<u32, Entry> = BTreeMap::new();
     let mut current_uid = None;
@@ -1116,12 +1127,26 @@ pub fn parse_vmsd(text: &str) -> SnapshotTree {
             "description" => entry.description = Some(value).filter(|d| !d.trim().is_empty()),
             "createtimehigh" => entry.time_high = value.trim().parse().ok(),
             "createtimelow" => entry.time_low = value.trim().parse().ok(),
-            _ => {}
+            "numclones" => entry.num_clones = value.trim().parse().ok(),
+            _ => {
+                if let Some(n) = field.strip_prefix("clone").and_then(|n| n.parse::<u32>().ok()) {
+                    if !value.trim().is_empty() {
+                        entry.clones.insert(n, value);
+                    }
+                }
+            }
         }
     }
     let snapshots = entries
         .into_values()
         .filter_map(|e| {
+            let count = e.num_clones.unwrap_or(0);
+            let mut linked_clones: Vec<String> = Vec::new();
+            for (_, clone) in e.clones.range(..count) {
+                if !linked_clones.iter().any(|c| c.eq_ignore_ascii_case(clone)) {
+                    linked_clones.push(clone.clone());
+                }
+            }
             Some(SnapshotInfo {
                 uid: e.uid?,
                 parent_uid: e.parent,
@@ -1132,6 +1157,7 @@ pub fn parse_vmsd(text: &str) -> SnapshotTree {
                     .zip(e.time_low)
                     .and_then(|(high, low)| snapshot_time(high, low)),
                 id: None,
+                linked_clones,
             })
         })
         .collect();
@@ -1647,6 +1673,48 @@ snapshot2.disk0.node = "scsi0:0"
             tree.snapshots[2].created_at,
             Some(time::macros::datetime!(2026-10-18 01:59:25.520 UTC))
         );
+    }
+
+    /// VM-04, VM-21: what Workstation 26 wrote (hand check): two linked clones from "S2", then `vmrun deleteVM` of
+    /// the first lowered `numClones` to 1 and moved the other to `clone0`, leaving the old `clone1` line behind.
+    const VMSD_LINKED: &str = r#".encoding = "UTF-8"
+snapshot.lastUID = "2"
+snapshot.current = "2"
+snapshot0.uid = "1"
+snapshot0.filename = "golden-Snapshot1.vmsn"
+snapshot0.displayName = "S1"
+snapshot0.disk0.fileName = "golden.vmdk"
+snapshot.numSnapshots = "2"
+snapshot1.uid = "2"
+snapshot1.filename = "golden-Snapshot2.vmsn"
+snapshot1.parent = "1"
+snapshot1.displayName = "S2"
+snapshot1.disk0.fileName = "golden-000001.vmdk"
+snapshot1.clone0 = "C:\Users\alice\Documents\Virtual Machines\web-02\web-02.vmx"
+snapshot1.numClones = "1"
+snapshot1.clone1 = "C:\Users\alice\Documents\Virtual Machines\web-02\web-02.vmx"
+"#;
+
+    #[test]
+    fn a_snapshot_lists_the_linked_clones_made_from_it() {
+        let tree = parse_vmsd(VMSD_LINKED);
+        assert!(tree.snapshots[0].linked_clones.is_empty());
+        assert_eq!(
+            tree.snapshots[1].linked_clones,
+            [r"C:\Users\alice\Documents\Virtual Machines\web-02\web-02.vmx"],
+            "the stale line past numClones is not counted twice"
+        );
+
+        // Only the first numClones count: a deleted clone's line that stayed behind is not a clone.
+        let stale = VMSD_LINKED.replace(
+            r#"snapshot1.clone1 = "C:\Users\alice\Documents\Virtual Machines\web-02\web-02.vmx""#,
+            r#"snapshot1.clone1 = "C:\Users\alice\Documents\Virtual Machines\web-01\web-01.vmx""#,
+        );
+        assert_eq!(parse_vmsd(&stale).snapshots[1].linked_clones.len(), 1);
+        let none = VMSD_LINKED.replace(r#"numClones = "1""#, r#"numClones = "0""#);
+        assert!(parse_vmsd(&none).snapshots[1].linked_clones.is_empty());
+        let two = stale.replace(r#"numClones = "1""#, r#"numClones = "2""#);
+        assert_eq!(parse_vmsd(&two).snapshots[1].linked_clones.len(), 2);
     }
 
     #[test]

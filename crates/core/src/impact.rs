@@ -6,8 +6,9 @@
 //! suspended VM from one that is off), the first line of the VM's `vmware.log` for how long it has
 //! been running, and its .vmsd for the snapshot count. A VirtualBox VM (VM-18) answers all three
 //! through `showvminfo` (its state, when that state began, its snapshots) and its .vbox file (snapshot
-//! times). Users logged in to the guest need a guest login, and dependent VMs need lab blueprints
-//! (VM-08, v2); neither is shown yet.
+//! times). VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it would delete
+//! ([`crate::linked_clones`]). Users logged in to the guest need a guest login, and other dependent VMs need lab
+//! blueprints (VM-08, v2); neither is shown yet.
 
 use std::path::Path;
 
@@ -20,6 +21,7 @@ use crate::adapters::hypervisor::{Hypervisor, Hypervisors, RunningVms};
 use crate::command_bus::Command;
 use crate::containers::Containers;
 use crate::domain::{Context, PowerState, Target, TargetRef};
+use crate::linked_clones::{Blocked, LinkedClones, SnapshotClones};
 use crate::snapshots;
 use crate::store::Store;
 use crate::vm_settings::{VmChangePreview, VmEditor};
@@ -42,6 +44,9 @@ pub struct TargetImpact {
     /// CT-01, CT-02: for a container target, what it is now (the VM fields are empty then).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerImpact>,
+    /// VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it would delete, by
+    /// snapshot. Such a VM is refused ([`crate::linked_clones`]).
+    pub linked_clones: Vec<SnapshotClones>,
 }
 
 /// CT-01, CT-02: one container, image or volume target as it is now, or what a pull or prune on a host
@@ -87,16 +92,25 @@ pub struct ImpactPreviewer {
     containers: Option<Containers>,
     /// VM-23, VM-24: what a VM settings or lifecycle change does to each VM.
     editor: VmEditor,
+    /// VM-04, VM-21, VM-24: the linked clones a delete would break.
+    linked_clones: LinkedClones,
 }
 
 impl ImpactPreviewer {
     pub fn new(store: Store, hypervisors: Hypervisors) -> Self {
         Self {
             editor: VmEditor::new(hypervisors.clone(), store.clone()),
+            linked_clones: LinkedClones::new(hypervisors.clone()),
             store,
             hypervisors,
             containers: None,
         }
+    }
+
+    /// VM-04, VM-21, VM-24: for a snapshot or VM delete, each VM target it must not touch because linked clones depend
+    /// on what it would delete (or that could not be checked). Empty for other commands. Reads only.
+    pub async fn linked_clones(&self, command: &Command, targets: &[Target]) -> Vec<Blocked> {
+        self.linked_clones.blocked(command, targets).await
     }
 
     /// VM-23, VM-24: for a VM settings or lifecycle command, what it changes on each VM, the files that go,
@@ -228,6 +242,7 @@ impl ImpactPreviewer {
             old_snapshot_count,
             notes,
             container: None,
+            linked_clones: Vec::new(),
         }
     }
 
@@ -258,6 +273,7 @@ impl ImpactPreviewer {
             old_snapshot_count,
             notes,
             container: None,
+            linked_clones: Vec::new(),
         }
     }
 
