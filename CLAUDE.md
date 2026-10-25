@@ -239,7 +239,7 @@ src/                  React + TypeScript UI
                       each timed from when the last one finished; useVisibility); use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), theme.ts, utils.ts, terminal-session.ts (SS-03 a pane: its xterm.js, its connection,
-                      every paste through paste.ts), paste.ts (QL-05 paste cleaning, the
+                      every paste through paste.ts, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
                       xterm's internal onUserInput, checked by a test), multiexec.ts, recordings.ts (QL-12 view texts,

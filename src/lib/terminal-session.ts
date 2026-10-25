@@ -14,7 +14,8 @@
 // typed; QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
 // command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's input
 // (keys, pastes, mouse reports) goes to `inputRouter` instead (see multiexec.ts); xterm.js's replies to the host's
-// queries go to this pane's own connection only (terminal-input.ts tells them apart). SS-08: the core says which
+// queries go to this pane's own connection only (terminal-input.ts tells them apart). OSC 8 links from the host are
+// never opened: a click hands the address to `onLink` (the page shows it, to copy). SS-08: the core says which
 // folder the shell is in (`folder`), and a right-click on a file name in the output goes to `onFileWord` (the page
 // offers to download it) instead of pasting.
 // SS-07: the core reports the session's tunnels (`tunnels`); one that waits for approval (e.g. one that starts with
@@ -224,6 +225,8 @@ export class PaneSession {
    * without asking.
    */
   onPasteConfirm: ((pane: PaneSession, ask: PasteAsk) => Promise<boolean>) | null = null;
+  /** An OSC 8 link from the host was clicked: the page shows its address (to copy). Nothing opens it. */
+  onLink: ((uri: string) => void) | null = null;
   /** QL-07: called when the core reports a long command that finished here. */
   onCommandFinished: ((finished: CommandFinished) => void) | null = null;
   /**
@@ -315,6 +318,12 @@ export class PaneSession {
       theme: TERMINAL_PALETTE[theme],
       // The search addon's match highlights use the decorations API.
       allowProposedApi: true,
+      // OSC 8 hyperlinks come from the host, which can put any address behind any text: never opened. Only http(s)
+      // ones are links at all (xterm.js drops the rest); a click hands the address to the page to show and copy.
+      linkHandler: {
+        activate: (_event, uri) => this.onLink?.(uri),
+        allowNonHttpProtocols: false,
+      },
     });
   }
 
@@ -659,6 +668,7 @@ export class PaneSession {
     this.onFileWord = null;
     this.onTunnelAsking = null;
     this.onPasteConfirm = null;
+    this.onLink = null;
   }
 
   // ---- SS-07 tunnels ----

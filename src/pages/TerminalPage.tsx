@@ -438,6 +438,12 @@ export function TerminalPage({
       pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
       pane.onFileWord = (word, x, y) => fileWordRef.current(pane, word, x, y);
       pane.onPasteConfirm = (p, ask) => pasteAskRef.current(p, ask);
+      // OSC 8 links from the host are never opened: the address shows, to copy.
+      pane.onLink = (uri) =>
+        toast.info("Links from a host don't open in Remotely", {
+          description: uri.length > 300 ? `${uri.slice(0, 299)}…` : uri,
+          action: { label: "Copy", onClick: () => void navigator.clipboard?.writeText(uri) },
+        });
       // SS-07: a tunnel that starts with the terminal may ask first (a Prod host): show its approval.
       pane.onTunnelAsking = (p, forwardId) => {
         p.tunnelRequest(forwardId).then(
