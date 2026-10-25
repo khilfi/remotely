@@ -1071,6 +1071,7 @@ async fn an_export_carries_container_marks_to_another_laptop() {
             &other.ctx,
             remotely_core::transfer::TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,

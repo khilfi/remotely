@@ -29,8 +29,8 @@ password again, and so does sending a vault password to a host that doesn't get 
 [The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
 tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
-Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
-encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
+Sessions, folders, tags, labels, trusted host keys, VM sizes, images (by path) and launch templates, and (only when
+ticked) vault secrets move to another laptop in one encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
 AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
 [What Remotely does by itself](#what-remotely-does-by-itself)). The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
@@ -76,6 +76,37 @@ VirtualBox VMs; the sidebar shows whether it was found.
   more children.
 - **Host usage** on the dashboard and the VM list comes from each VM's `VirtualBoxVM.exe` or `VBoxHeadless.exe` process,
   and the capacity check before a power-on counts Workstation and VirtualBox VMs together.
+
+### VM templates: sizes, images and launch templates
+
+VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does. Deploying from it
+arrives with the deploy package; until then the VMs page's **Deploy** button says so.
+
+- **Sizes**: CPU (sockets × cores per socket), RAM and disks (the first boots; each thin, taking only what the guest
+  writes, or thick). Twelve built-ins, read only: `gp.nano` (1 vCPU, 512 MB, 8 GB), `gp.micro`, `gp.small`,
+  `gp.medium` (2 vCPU, 4 GB, 40 GB, the default), `gp.large`, `gp.xlarge`, `gp.2xlarge` (8 vCPU, 32 GB, 200 GB),
+  `cpu.large`, `cpu.xlarge`, `mem.large`, `mem.xlarge` and `disk.large` (with a 500 GB data disk). **Duplicate** makes
+  an editable copy; your own sizes can be edited and deleted.
+- **OS profiles** set what depends on the guest: firmware (BIOS, EFI, Secure Boot), disk controller, network card
+  (`vmxnet3` or `e1000e` on Workstation, `virtio` or `82540EM` on VirtualBox), guest OS type and Workstation's hardware
+  version (20, which Workstation 17.0 and later run). Ubuntu, Debian, the RHEL family (RHEL, Rocky, Alma), Windows
+  Server, Windows 10, Windows 11 and Other Linux. Windows 11 deploys on VirtualBox only for now (its own TPM and Secure
+  Boot): Workstation's virtual TPM needs each VM encrypted with its own password.
+- **Images**: a golden VM and one of its snapshots, a cloud image (VMDK, OVA, `.img` or raw; qcow2 too, which deploys
+  once it is converted), an ISO, or an OVA/OVF appliance. Remotely checks that a file is what its name says (its first
+  bytes) and reads it once for its SHA-256, with progress and Stop. Files on network shares (`\\server\share`) are
+  refused: Windows would send your sign-in there, so copy them to this PC first. Deleting an image deletes only its
+  entry, never the file or VM. The Images tab links to the official cloud image pages of Ubuntu, Debian, Rocky Linux and
+  AlmaLinux; Remotely downloads nothing itself.
+- **Launch templates** put an image and a size together with the hypervisor, the VM folder, the network (NAT,
+  host-only, bridged, a custom vmnet, or a VirtualBox NAT or internal network), an SSH key (only its public half goes to
+  the VMs), a naming pattern (`{n}` the VM's number, `{template}` its name, `{date}` today: `web-{n}`), a default count,
+  an environment label and tags, and what happens after each VM is deployed (save an SSH session to its IP, link it to
+  the VM, take a "clean" snapshot, open the console). The editor shows the names a deploy would give (VMs already here
+  are skipped) and why it couldn't deploy; a template whose image, size or key was deleted later stays and says so.
+- Every change is in the audit log (no approval: it is the app's own data, like the session library) and is refused
+  while presenting with the read-only lock on. Exports to another laptop carry your own sizes, the images by path (the
+  import says when a file isn't on that laptop) and the templates, pointed at that laptop's images, sizes and keys.
 
 ### Reachability dots
 
@@ -991,6 +1022,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                |
 | Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                        | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each                                                    |
 | Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                               | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                       |
+| Spec catalogue     | `crates/core/src/catalog/`                                        | VM-19, VM-20, VM-21, FD-07                                                                                                                          | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                       |
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                               | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                   |
 | Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                       | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec |
 | MultiExec          | `crates/core/src/terminal/multiexec.rs`                           | SS-10, QL-07, QL-12                                                                                                                                 | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                 |

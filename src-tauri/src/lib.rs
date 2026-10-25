@@ -2,6 +2,7 @@
 //! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
 //! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
+mod catalog;
 mod clipboard;
 mod command_panel;
 mod containers;
@@ -592,6 +593,25 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         command_panel::terminal_type_secret,
         command_panel::notify_command_finished,
         command_panel::open_manual,
+        catalog::catalog_profiles,
+        catalog::catalog_sites,
+        catalog::catalog_sizes,
+        catalog::catalog_size_add,
+        catalog::catalog_size_update,
+        catalog::catalog_size_delete,
+        catalog::catalog_images,
+        catalog::catalog_image_pick,
+        catalog::catalog_folder_pick,
+        catalog::catalog_image_add,
+        catalog::catalog_image_cancel,
+        catalog::catalog_image_update,
+        catalog::catalog_image_delete,
+        catalog::catalog_templates,
+        catalog::catalog_template_preview,
+        catalog::catalog_template_add,
+        catalog::catalog_template_update,
+        catalog::catalog_template_delete,
+        catalog::catalog_open_site,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,
