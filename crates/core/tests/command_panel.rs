@@ -629,7 +629,11 @@ async fn library_entries_are_classified_by_the_policy_engine() {
         name: "service restart".into(),
         pattern: r"systemctl\s+restart".into(),
     });
-    core.bus.set_rules(&core.ctx, rules).await.unwrap();
+    // AP-06: dropping two dangerous-command rules loosens the rules.
+    core.bus
+        .set_rules_with(&core.ctx, rules, Some(&SecretString::new(common::VAULT_PASSWORD)))
+        .await
+        .unwrap();
     let library = core.snippets.library();
     let by_id = |id: &str| library.iter().find(|e| e.id == id).unwrap().clone();
     assert_eq!(by_id("services.restart").risk.action, ActionKind::ExecDangerous);

@@ -14,12 +14,13 @@ use std::time::Duration;
 use common::Setup;
 use remotely_core::adapters::remote::AgentSource;
 use remotely_core::bulk::{ExportFormat, GroupOptions};
-use remotely_core::command_bus::{Command, SubmitOutcome};
+use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
 use remotely_core::domain::{Environment, TargetRef};
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::fakes::FakeVmware;
 use remotely_core::jobs::{ExecTuning, JobEvent, JobStatus};
 use remotely_core::known_hosts::HostKey;
+use remotely_core::policy::ApprovalStep;
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::vault::{SecretKind, SecretString};
 use sqlx::{Column, Row};
@@ -87,6 +88,8 @@ async fn the_sudo_password_never_leaks() {
         .with_ssh()
         .build()
         .await;
+    // SS-04, AP-06: one vault password for several test servers, given once.
+    common::vault_password_given(&core).await;
     core.jobs.set_exec_tuning(ExecTuning {
         connect_timeout: Duration::from_secs(5),
         agent: AgentSource::NamedPipe(format!(r"\\.\pipe\remotely-test-none-{}", Uuid::new_v4())),
@@ -171,10 +174,29 @@ async fn the_sudo_password_never_leaks() {
         trust_new_host_keys: false,
         timeout_secs: Some(30),
     };
-    // Read-only commands, so Low: queued without a dialog. The approval path is in tests/bulk.rs.
-    let SubmitOutcome::Queued { job_id: job, .. } = core.bus.submit(&core.ctx, command).await.unwrap() else {
-        panic!("whoami, cat and echo only read");
+    // Read-only commands, so Low; but SS-04, AP-06: the chosen sudo password goes to these hosts for the first
+    // time, so the run asks for a confirm and the vault password. The secret never reaches the approval.
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+        panic!("a sudo password new to these hosts asks for the vault password");
     };
+    assert!(
+        request.steps.contains(&ApprovalStep::VaultReauth),
+        "{:?}",
+        request.steps
+    );
+    assert!(!format!("{request:?}").contains(&sudo));
+    let job = core
+        .bus
+        .approve(
+            request.id,
+            ApprovalAnswers {
+                confirmed: true,
+                vault_password: Some(SecretString::new(common::VAULT_PASSWORD)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let mut seen = Vec::new();
     let status = tokio::time::timeout(Duration::from_secs(30), async {
         loop {

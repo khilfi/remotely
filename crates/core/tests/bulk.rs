@@ -92,6 +92,8 @@ async fn trust(core: &Core, server: &TestSshServer) {
 /// A session on `server` that logs in as alice with `password` (saved in the vault), its key trusted.
 async fn host(core: &Core, server: &TestSshServer, name: &str, password: remotely_core::vault::SecretId) -> Uuid {
     trust(core, server).await;
+    // SS-04, AP-06: the tests share one vault password among several test servers, given once.
+    common::vault_password_given(core).await;
     core.sessions
         .create(
             &core.ctx,

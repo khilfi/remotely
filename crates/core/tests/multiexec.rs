@@ -158,6 +158,8 @@ impl Fleet {
             .await
             .unwrap()
             .id;
+        // SS-04, AP-06: one vault password for every test server, given once.
+        common::vault_password_given(&core).await;
         let mut fleet = Fleet {
             core,
             servers: Vec::new(),

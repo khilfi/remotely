@@ -123,7 +123,7 @@ impl SecretBindings {
         locks::lock(&self.inner.confirmed).take();
     }
 
-    /// `ids` went somewhere: a secret added since the app started asks like any other from now on.
+    /// `ids` went somewhere: a secret added since the unlock asks like any other from now on.
     pub(crate) fn settle(&self, ids: &[SecretId]) {
         let mut fresh = locks::lock(&self.inner.fresh);
         for id in ids {
@@ -155,7 +155,7 @@ impl SecretBindings {
     }
 
     /// Whether `secret` may go to `place` without asking: it already goes there, or it was added since
-    /// the app started and goes nowhere yet. The caller [`Self::settle`]s it once it is given, so the
+    /// the vault was unlocked and goes nowhere yet. The caller [`Self::settle`]s it once it is given, so the
     /// next new place asks.
     pub async fn may_go(
         &self,

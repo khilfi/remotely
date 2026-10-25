@@ -107,7 +107,7 @@ use crate::policy::Tier;
 use crate::presentation::Change;
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
-use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
+use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault, VaultStatus};
 use crate::vm_links::VmLinks;
 
 /// The terminal settings (JSON) in the settings table.
@@ -1510,6 +1510,10 @@ impl Terminals {
             return Err(CoreError::InvalidInput(
                 "Only passwords and passphrases can be typed into a terminal, not private keys.".into(),
             ));
+        }
+        // A locked vault can't type anything: say so before asking for its password.
+        if self.inner.vault.status() == VaultStatus::Locked {
+            return Err(CoreError::VaultLocked);
         }
         // SS-07: a jump host's login asking now gets it, so that is where it would go.
         let hop = *locks::lock(&control.hop);

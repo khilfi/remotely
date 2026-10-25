@@ -20,7 +20,7 @@ use remotely_core::transfer::{
 };
 use remotely_core::vault::{SecretKind, SecretString};
 use remotely_core::vm_links::VmLink;
-use remotely_core::Core;
+use remotely_core::{Core, CoreError};
 use uuid::Uuid;
 
 const PASSPHRASE: &str = "tulip anvil orbit";
@@ -180,6 +180,16 @@ async fn open(core: &Core, path: &Path) -> TransferPreview {
 }
 
 async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, ItemAction)]) -> TransferReport {
+    try_commit(core, preview, sessions, None).await.unwrap()
+}
+
+/// [`commit`], with the vault password (SS-04, AP-06) and the result as it comes.
+async fn try_commit(
+    core: &Core,
+    preview: &TransferPreview,
+    sessions: &[(usize, ItemAction)],
+    vault_password: Option<&str>,
+) -> Result<TransferReport, CoreError> {
     let choices = |list: &[(usize, ItemAction)]| {
         list.iter()
             .map(|&(index, action)| ItemChoice { index, action })
@@ -192,7 +202,7 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
-                vault_password: None,
+                vault_password: vault_password.map(SecretString::new),
                 favourites: vec![],
                 sessions: choices(sessions),
                 known_hosts: vec![],
@@ -204,7 +214,6 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
             &core.snippets,
         )
         .await
-        .unwrap()
 }
 
 /// Like [`commit`], with the sessions whose startup command and port forwards come along (SS-01, SS-07).
@@ -523,7 +532,16 @@ async fn without_secret_values_sessions_use_the_same_labels_in_this_vault() {
         "{:?}",
         web_row.notes
     );
-    let report = commit(&b, &preview, &[]).await;
+    // SS-04, AP-06: web01 would send a password already in this vault (found by label) to the file's host,
+    // so the import asks for the vault password, and the file stays open meanwhile.
+    let err = try_commit(&b, &preview, &[], None).await.unwrap_err();
+    assert_eq!(err.code(), "reauth_required");
+    assert!(err.to_string().contains("'web01'"), "{err}");
+    assert!(matches!(
+        try_commit(&b, &preview, &[], Some("not the vault password")).await,
+        Err(CoreError::WrongVaultPassword)
+    ));
+    let report = try_commit(&b, &preview, &[], Some(VAULT_PASSWORD)).await.unwrap();
     assert_eq!(report.without_credentials, 1, "only db01's key is missing");
     assert_eq!(
         by_name(&b, "web01").await.auth,
@@ -656,6 +674,10 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     let b = laptop().await;
     let preview = open(&b, &first).await;
     commit(&b, &preview, &[]).await;
+    // SS-04, AP-06: both laptops move sessions that send vault passwords (new ports); the user gives the
+    // vault password once on each.
+    common::vault_password_given(&a).await;
+    common::vault_password_given(&b).await;
 
     // Laptop A changes web01 and db01; laptop B has a session of its own to bastion's address and one
     // named like a session of A's, and trusts another key for web01.

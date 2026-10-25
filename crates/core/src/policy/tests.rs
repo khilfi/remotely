@@ -3127,13 +3127,11 @@ fn a_pager_or_editor_in_a_multiexec_line_is_never_read_only() {
         assert_eq!(engine().classify(&exec(text, &[])), ActionKind::ExecReadOnly, "{text}");
     }
     assert_eq!(commands::interactive_program("/usr/bin/less /etc/passwd"), Some("less"));
-    // Even when the read-only list names man, vim or view.
+    // Even when the read-only list names man or view (vim itself can't be on it: AP-01 RUNS_ANYTHING).
     let mut rules = PolicyRules::default();
-    rules
-        .read_only_commands
-        .extend(["man".to_owned(), "vim".to_owned(), "view".to_owned()]);
+    rules.read_only_commands.extend(["man".to_owned(), "view".to_owned()]);
     let e = PolicyEngine::new(rules).unwrap();
-    for text in ["man ls", "vim -R /etc/hosts", "view /etc/hosts"] {
+    for text in ["man ls", "view /etc/hosts"] {
         assert_eq!(e.classify(&line(text, false, &t)), ActionKind::ExecOther, "{text}");
     }
     // man, vi, fc... are not read-only anyway; a dangerous line stays dangerous.

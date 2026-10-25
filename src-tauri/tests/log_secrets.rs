@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use remotely_core::adapters::containers::cli::CliEngines;
 use remotely_core::adapters::remote::{AgentSource, PtySize, RusshAdapter};
-use remotely_core::command_bus::{Command, SubmitOutcome};
+use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
 use remotely_core::domain::{Environment, TargetRef};
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeUpdater, FakeVirtualBox, FakeVmware};
@@ -80,6 +80,11 @@ async fn the_log_file_never_holds_a_secret() {
         containers: Arc::new(CliEngines::without_this_pc()),
     };
     let core = Core::assemble(store, ctx, adapters, JobLimits::default())
+        .await
+        .unwrap();
+    // SS-04, AP-06: the test servers share one vault password; the user gives the vault password once.
+    core.secret_bindings()
+        .confirm(&ctx, Some(&SecretString::new(master.as_str())), "test", "test")
         .await
         .unwrap();
     let no_agent = AgentSource::NamedPipe(format!(r"\\.\pipe\remotely-test-none-{}", Uuid::new_v4()));
@@ -190,9 +195,22 @@ async fn the_log_file_never_holds_a_secret() {
         trust_new_host_keys: false,
         timeout_secs: Some(30),
     };
-    let SubmitOutcome::Queued { job_id: job, .. } = core.bus.submit(&core.ctx, command).await.unwrap() else {
-        panic!("whoami, cat and echo only read");
+    // SS-04, AP-06: the chosen sudo password is new to these hosts, so the run asks for the vault password.
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+        panic!("a sudo password new to these hosts asks for the vault password");
     };
+    let job = core
+        .bus
+        .approve(
+            request.id,
+            ApprovalAnswers {
+                confirmed: true,
+                vault_password: Some(SecretString::new(master.as_str())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let status = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
             if let JobEvent::Finished { job_id, status } = events.recv().await.unwrap() {
