@@ -14,6 +14,7 @@
 pub mod cloud_init;
 pub mod ovf;
 pub mod preview;
+pub mod runner;
 pub mod seed;
 pub mod service;
 pub mod spec;

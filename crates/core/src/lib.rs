@@ -210,7 +210,8 @@ impl UiSnapshot {
 pub struct Core {
     pub ctx: Context,
     pub store: Store,
-    pub inventory: Inventory,
+    /// Shared with the deploy runner, which lists the VMs it makes (VM-21).
+    pub inventory: Arc<Inventory>,
     /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
     /// through [`Core::bus`].
     pub snapshots: SnapshotReader,
@@ -287,6 +288,8 @@ pub struct Core {
     virtualbox: Arc<SwitchableVirtualBox>,
     /// SS-04, AP-06: where vault passwords may go without the vault password (shared by every module).
     bindings: SecretBindings,
+    /// VM-21: what the job runner makes new VMs with; tests shorten its waits.
+    deployer: Arc<deploy::runner::Deployer>,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -506,6 +509,20 @@ impl Core {
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
         let catalog = Catalog::new(store.clone()).with_hypervisors(hypervisors.clone());
+        let inventory = Arc::new(Inventory::new(store.clone(), hypervisors.clone(), Arc::clone(&links)));
+        // VM-21, VM-22, VM-10: the job runner makes each new VM through the deploy runner.
+        let deployer = Arc::new(deploy::runner::Deployer::new(
+            store.clone(),
+            hypervisors.clone(),
+            Arc::clone(&inventory),
+            Arc::new(
+                SessionLibrary::new(store.clone(), Arc::clone(&links))
+                    .with_policy(bus.policy())
+                    .with_bindings(bindings.clone()),
+            ),
+            Arc::clone(&adapters.vault),
+        ));
+        jobs.set_deployer(deployer.clone());
         let deploy = deploy::service::Deploys::new(
             store.clone(),
             catalog.clone(),
@@ -520,7 +537,8 @@ impl Core {
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog,
             deploy,
-            inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
+            inventory,
+            deployer,
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())
                 .with_bindings(bindings.clone()),
@@ -590,6 +608,11 @@ impl Core {
                 was = now;
             }
         });
+    }
+
+    /// VM-21: how the deploy runner waits for a guest's IP and for VirtualBox to let go of a VM; tests shorten it.
+    pub fn set_deploy_tuning(&self, tuning: deploy::runner::DeployTuning) {
+        self.deployer.set_tuning(tuning);
     }
 
     /// SS-04, AP-06: where vault passwords may go without asking; tests shorten its grace period.

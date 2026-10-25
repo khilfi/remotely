@@ -206,20 +206,34 @@ pub fn resize_args(disk: &str, size_gb: u32) -> Vec<String> {
 }
 
 pub fn attach_args(uuid: &str, controller: DiskController, port: u32, dvd: bool, medium: &str) -> Vec<String> {
+    attach_named(uuid, controller_name(controller), port, 0, dvd, medium)
+}
+
+/// `storageattach` on a controller by its name in the VM (a clone's or an import's own).
+pub fn attach_named(uuid: &str, controller: &str, port: u32, device: u32, dvd: bool, medium: &str) -> Vec<String> {
     vec![
         "storageattach".into(),
         uuid.into(),
         "--storagectl".into(),
-        controller_name(controller).into(),
+        controller.into(),
         "--port".into(),
         port.to_string(),
         "--device".into(),
-        "0".into(),
+        device.to_string(),
         "--type".into(),
         if dvd { "dvddrive" } else { "hdd" }.into(),
         "--medium".into(),
         medium.into(),
     ]
+}
+
+/// A `<controller>-<port>-<device>` slot (`SATA-1-0`) as its parts.
+pub fn parse_slot(slot: &str) -> Option<(String, u32, u32)> {
+    let mut parts = slot.rsplitn(3, '-');
+    let device = parts.next()?.parse().ok()?;
+    let port = parts.next()?.parse().ok()?;
+    let controller = parts.next()?.to_owned();
+    Some((controller, port, device))
 }
 
 /// Where each disk of a size goes: its controller and port, one controller of each kind (IDE takes ports 0 and 1
