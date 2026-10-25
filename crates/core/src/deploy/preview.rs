@@ -11,6 +11,7 @@ use serde::Serialize;
 use super::spec::{DeployOrigin, DeploySource, DeploySpec, FirstBootSpec, SizeSpec};
 use crate::adapters::host_counters::HostCounters;
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
+use crate::adapters::vmx_file::VmxFile;
 use crate::catalog::profiles::GuestFamily;
 use crate::catalog::sizes::Provisioning;
 use crate::catalog::templates::{hypervisor_label, AfterDeploy, Network};
@@ -36,6 +37,21 @@ pub fn size_text(bytes: u64) -> String {
     } else {
         format!("{} MB", (bytes as f64 / (1u64 << 20) as f64).round().max(1.0))
     }
+}
+
+/// VM-21: why a Workstation linked clone of this golden VM can't be made now. `vmrun clone ... linked` records the
+/// clone in the golden VM's .vmsd (`snapshotN.cloneM`, `numClones`, which Workstation reads before it deletes that
+/// snapshot), so, like every VM-23 change to a VM's files, it waits until Workstation holds no lock on the golden VM
+/// (running, or open in a tab). A full clone only reads the golden VM, so it goes ahead either way.
+pub(crate) async fn linked_clone_refusal(hypervisors: &Hypervisors, vm_key: &str) -> Option<String> {
+    let vmware = hypervisors.vmware();
+    let vmx = Path::new(vm_key);
+    let file = VmxFile::parse(&vmware.vmx_bytes(vmx).await.ok()?).ok()?;
+    let lock = crate::vm_settings::workstation_lock(vmware.as_ref(), vmx, &file).await?;
+    Some(format!(
+        "A linked clone records itself in the golden VM's snapshot list, and Workstation is using that VM: its lock {} is there. Shut it down and close its tab in Workstation, or deploy full clones.",
+        lock.display()
+    ))
 }
 
 /// One VM as the preview shows it.
@@ -241,6 +257,26 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
                 size_text(disk_bytes),
                 spec.folder,
                 size_text(free)
+            ));
+        }
+    }
+
+    // VM-21: a Workstation linked clone writes the golden VM's .vmsd, so VM-23's lock rule applies to it.
+    if let (
+        Hypervisor::Vmware,
+        DeploySource::GoldenVm {
+            vm_key,
+            vm_name,
+            linked: true,
+            ..
+        },
+    ) = (spec.hypervisor, &spec.source)
+    {
+        if let Some(refusal) = linked_clone_refusal(hypervisors, vm_key).await {
+            refusals.push(refusal);
+        } else if hypervisors.vmware().workstation_window_open().await {
+            warnings.push(format!(
+                "Close '{vm_name}''s tab in Workstation first, or Workstation may write its own copy of its snapshot list over the linked clones' record."
             ));
         }
     }

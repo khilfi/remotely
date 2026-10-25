@@ -277,6 +277,17 @@ impl FakeVmware {
         self
     }
 
+    /// VM-21: a file (say Workstation's lock `<disk>.vmdk.lck`) is there, or gone, from now on.
+    pub fn set_file(&self, path: &str, present: bool) {
+        let key = path_key(Path::new(path));
+        let mut files = locks::lock(&self.files);
+        if present {
+            files.insert(key, (PathBuf::from(path), 0));
+        } else {
+            files.remove(&key);
+        }
+    }
+
     /// VM-23: from now on writing a .vmx fails (or works again).
     pub fn set_failing_vmx_write(&self, failing: bool) {
         self.failing_vmx_write.store(failing, Ordering::SeqCst);

@@ -418,6 +418,42 @@ async fn golden_vm_clones_are_full_and_grow_or_linked_and_say_why_not() {
     linked.after_deploy.create_session = false;
     linked.after_deploy.link_session = false;
     let linked = core.catalog.add_template(ctx, linked).await.unwrap();
+
+    // A linked clone writes the golden VM's .vmsd, so while Workstation holds the golden VM (running, or open in a
+    // tab: a lock beside its .vmx or a disk) it is refused, like a VM-23 change; a full clone only reads it.
+    let lock = format!("{golden_disk}.lck");
+    fake.set_file(&lock, true);
+    let check = core.deploy.check(ctx, &request(linked.id, 1)).await.unwrap();
+    let refusals = &check.preview.as_ref().unwrap().refusals;
+    assert!(
+        refusals.iter().any(|r| r.contains("Workstation is using that VM")),
+        "{refusals:?}"
+    );
+    assert!(core.deploy.submit(ctx, &request(linked.id, 1)).await.is_err());
+    let check = core.deploy.check(ctx, &request(full.id, 1)).await.unwrap();
+    assert!(check.preview.unwrap().refusals.is_empty(), "a full clone goes ahead");
+    fake.set_file(&lock, false);
+    // Workstation's window is open: the approval says to close the golden VM's tab.
+    fake.set_workstation_open(true);
+    let approval = needs_approval(core.deploy.submit(ctx, &request(linked.id, 1)).await.unwrap());
+    fake.set_workstation_open(false);
+    let warnings = &approval.deploy.as_ref().unwrap().warnings;
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("Close 'golden''s tab in Workstation")),
+        "{warnings:?}"
+    );
+    // The golden VM starts after the approval: the runner checks again, and the clone isn't made.
+    fake.set_file(&lock, true);
+    let (job, status) = approve_and_wait(&core, &approval).await;
+    assert_eq!(status, JobStatus::Failed);
+    let error = job_outputs(&core, job).await[0].3.clone().unwrap();
+    assert!(error.contains("Workstation is using that VM"), "{error}");
+    assert!(!fake.calls().iter().any(|c| c.contains(" linked ")));
+    assert!(!dir.join("linked-1").exists());
+    fake.set_file(&lock, false);
+
     let approval = needs_approval(core.deploy.submit(ctx, &request(linked.id, 1)).await.unwrap());
     let notes = &approval.deploy.as_ref().unwrap().notes;
     assert!(

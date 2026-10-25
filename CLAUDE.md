@@ -163,7 +163,10 @@ crates/core/          remotely-core: all app logic
                       ActionKind::VmDeploy is Medium, High from PolicyRules.deploy_bulk_threshold VMs (5) or for Prod
                       (policy/deploy_tests.rs). preview.rs the AP-02 preview: names, hypervisor, folder, size, disk
                       space per VM and in all (thin disks at full size), network; a thick disk that doesn't fit or a
-                      VM folder that is there already refuses, thin disks that may not fit warn. service.rs Deploys
+                      VM folder that is there already refuses, thin disks that may not fit warn; a Workstation linked
+                      clone is refused while Workstation holds the golden VM (`vm_settings::workstation_lock`, VM-23's
+                      rule: the clone writes the golden VM's .vmsd), checked again by the runner, and warned about
+                      while Workstation's window is open; a full clone only reads the golden VM. service.rs Deploys
                       (Core.deploy: check and submit, check_clone and submit_clone for VM-10's bulk clone; a VirtualBox
                       unattended install's vault password adds VaultReauth). runner.rs Deployer, the job runner's
                       DeployActions (PARALLEL_VMS, 2, at a time): each VM made by clone, cloud image, ISO or OVA/OVF;
@@ -545,7 +548,11 @@ src/                  React + TypeScript UI
   appliance; without `--acceptAllEulas` one with a licence fails, and the job says so. ovftool.exe is in `OVFTool\`
   beside vmrun (`adapters::vmware::locate_ovftool`: the Settings path, `REMOTELY_OVFTOOL`, then that folder).
   Workstation 26 (hand check): a full clone's disk keeps the source's name with `-cl1` (`golden-cl1.vmdk`), and a
-  linked clone's is a delta whose `parentFileNameHint` is the golden VM's disk by absolute path; ovftool writes .vmx
+  linked clone's is a delta whose `parentFileNameHint` is the golden VM's disk by absolute path. A full clone writes
+  nothing of the golden VM's; a linked clone adds `snapshotN.cloneM = "<clone's .vmx>"` and `snapshotN.numClones` to
+  its .vmsd, yet `vmrun deleteSnapshot` deletes that snapshot without a word (the linked clone breaks). Both clone a
+  running golden VM from its snapshot, and the golden VM runs on; a VM started with `vmrun start ... nogui` has
+  `<disk>.vmdk.lck` folders (and a `.vmem.lck`) but no `.vmx.lck`; ovftool writes .vmx
   keys in lower case (`displayname`, `virtualhw.version`; keys match without case, and `VmxFile` keeps one) and names
   an import's disk `<name>-disk1.vmdk`; a truncated OVA fails with "Disk (...) could not be found".
   cloud-init's VMware datasource reads `guestinfo.metadata` and `guestinfo.userdata` from the .vmx, each with

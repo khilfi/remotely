@@ -255,6 +255,12 @@ impl Deployer {
                 ..
             } => {
                 let path = self.snapshot_path(vm_key, snapshot_id, snapshot_name).await?;
+                if *linked {
+                    // Checked again here: the golden VM may have started or opened in Workstation since the approval.
+                    if let Some(refusal) = super::preview::linked_clone_refusal(&self.hypervisors, vm_key).await {
+                        return Err(CoreError::InvalidInput(refusal));
+                    }
+                }
                 made.vmx = Some(vmx_path.clone());
                 vmware
                     .vmrun_change(
