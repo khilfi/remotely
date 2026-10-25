@@ -224,7 +224,8 @@ export function ApprovalDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && void cancel()}>
-      <DialogContent className="sm:max-w-3xl">
+      {/* VM-24: a long list of files to delete must not push Approve and Cancel off a small window. */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <div className="flex items-center gap-2">
             <TierBadge tier={tier} />
@@ -242,6 +243,7 @@ export function ApprovalDialog({
         {request.exec && <ExecSummary exec={request.exec} targets={request.targets.length} />}
         {request.upload && <UploadSummary upload={request.upload} />}
         {request.tunnel && <TunnelSummary tunnel={request.tunnel} />}
+        {request.vmChange && <VmChangeSummary change={request.vmChange} />}
 
         <div className="grid gap-1.5">
           <div className="max-h-64 overflow-auto rounded-md border">
@@ -556,6 +558,59 @@ function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exe
           </AlertDescription>
         </Alert>
       )}
+    </div>
+  );
+}
+
+/**
+ * VM-23, VM-24 (AP-02): what a settings or lifecycle change does to each VM, before and after, every file it deletes
+ * (with its size), what it keeps, and a VM it would be refused on.
+ */
+function VmChangeSummary({ change }: { change: NonNullable<ApprovalRequest["vmChange"]> }) {
+  const deletes = change.targets.reduce((n, t) => n + t.deletes.length, 0);
+  const bytes = change.targets.reduce((n, t) => n + t.deletes.reduce((m, f) => m + (f.bytes ?? 0), 0), 0);
+  return (
+    <div className="grid gap-2">
+      {deletes > 0 && (
+        <p className="text-sm font-medium text-destructive">
+          Deletes {plural(deletes, "file")} ({formatSize(bytes)}) for good: they don&apos;t go to the Recycle Bin.
+        </p>
+      )}
+      <ul className="max-h-56 divide-y overflow-auto rounded-md border text-sm">
+        {change.targets.map((t) => (
+          <li key={t.target} className="grid gap-1 px-3 py-2">
+            <span className="font-medium">{t.name}</span>
+            {t.problem ? (
+              <span className="text-xs text-tier-high">Refused as things are: {t.problem}</span>
+            ) : (
+              <ul className="list-disc pl-5 text-xs">
+                {t.changes.map((c) => (
+                  <li key={c}>{c}</li>
+                ))}
+              </ul>
+            )}
+            {t.deletes.length > 0 && (
+              <ul className="grid gap-0.5 text-xs">
+                {t.deletes.map((f) => (
+                  <li key={f.path} className="flex items-center gap-2">
+                    <span className="truncate font-mono" title={f.path}>
+                      {f.path}
+                    </span>
+                    <span className="ml-auto shrink-0 text-muted-foreground tabular-nums">
+                      {f.bytes === null ? "" : formatSize(f.bytes)}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {t.keeps.map((k) => (
+              <span key={k} className="text-xs text-muted-foreground">
+                Keeps {k}
+              </span>
+            ))}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

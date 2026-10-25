@@ -14,14 +14,18 @@ import {
   InfoIcon,
   MonitorIcon,
   PauseIcon,
+  PencilIcon,
   PlayIcon,
   PowerIcon,
   RotateCcwIcon,
   ServerIcon,
   ShieldIcon,
   ShieldOffIcon,
+  SlidersHorizontalIcon,
   SquareIcon,
   SquareTerminalIcon,
+  Trash2Icon,
+  WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -37,6 +41,8 @@ import {
 } from "@/components/ui/command";
 import { Command as CommandRoot } from "@/components/ui/command";
 import { StateBadge, TierBadge } from "@/components/Badges";
+import { toolsName } from "@/lib/hypervisors";
+import type { VmView } from "@/lib/vm-snapshots";
 import {
   api,
   errorMessage,
@@ -76,8 +82,10 @@ interface Props {
   onSubmit: (command: Command) => Promise<void>;
   onConnect: (sessionId: string) => void;
   onShowMetrics: (key: string) => void;
-  /** QL-14: the VM's details on the Virtual machines page, on its details or its snapshots. */
-  onOpenVm: (vmxPath: string, view: "details" | "snapshots") => void;
+  /** QL-14: the VM's details on the Virtual machines page, on a tab (VM-24: with its rename dialog). */
+  onOpenVm: (vmxPath: string, view: VmView, rename?: boolean) => void;
+  /** VM-24: the hypervisor's own window on the VM. */
+  onOpenConsole: (vmxPath: string) => void;
 }
 
 type View = { kind: "root" } | { kind: "vm"; vmxPath: string } | { kind: "session"; id: string };
@@ -119,6 +127,24 @@ function vmActions(vm: VmRecord): VmAction[] {
     icon: vm.protected ? ShieldOffIcon : ShieldIcon,
     command: { type: "vmProtect", targets: [{ kind: "vm", vmxPath: vm.vmxPath }], protected: !vm.protected },
   });
+  // VM-15, VM-24.
+  const target = [{ kind: "vm" as const, vmxPath: vm.vmxPath }];
+  if (vm.powerState === "running") {
+    actions.push({
+      id: "tools",
+      label: `Install or upgrade ${toolsName(vm.hypervisor)}`,
+      icon: WrenchIcon,
+      command: { type: "vmDevice", targets: target, op: { kind: "installTools" } },
+    });
+  }
+  if (!ON.includes(vm.powerState)) {
+    actions.push({
+      id: "delete",
+      label: "Delete the VM and its files…",
+      icon: Trash2Icon,
+      command: { type: "vmLifecycle", targets: target, op: { kind: "delete" } },
+    });
+  }
   return actions;
 }
 
@@ -133,6 +159,7 @@ export function CommandPalette({
   onConnect,
   onShowMetrics,
   onOpenVm,
+  onOpenConsole,
 }: Props) {
   // The app mounts the palette afresh for each opening, so it starts here.
   const [view, setView] = useState<View>(vmFocus ? { kind: "vm", vmxPath: vmFocus } : { kind: "root" });
@@ -304,6 +331,33 @@ export function CommandPalette({
                   }}
                 >
                   <CameraIcon /> Snapshots…
+                </CommandItem>
+                <CommandItem
+                  value="settings hardware cpu memory disks network firmware resize"
+                  onSelect={() => {
+                    close();
+                    onOpenVm(vm.vmxPath, "settings");
+                  }}
+                >
+                  <SlidersHorizontalIcon /> Settings…
+                </CommandItem>
+                <CommandItem
+                  value="rename name"
+                  onSelect={() => {
+                    close();
+                    onOpenVm(vm.vmxPath, "settings", true);
+                  }}
+                >
+                  <PencilIcon /> Rename…
+                </CommandItem>
+                <CommandItem
+                  value="open console window screen"
+                  onSelect={() => {
+                    close();
+                    onOpenConsole(vm.vmxPath);
+                  }}
+                >
+                  <MonitorIcon /> Open its console
                 </CommandItem>
                 {sessions
                   .filter((s) => s.vmId === vm.id)

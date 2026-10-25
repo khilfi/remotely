@@ -1131,6 +1131,15 @@ impl FileTransfers {
         locks::lock(&self.staged).remove(&id);
     }
 
+    /// VM-23: staged files taken for another use than an upload (an ISO dropped on a VM). They are no
+    /// longer staged afterwards.
+    pub fn take_staged(&self, id: Uuid) -> Result<Vec<PathBuf>> {
+        locks::lock(&self.staged)
+            .remove(&id)
+            .map(|s| s.paths)
+            .ok_or_else(|| CoreError::InvalidInput("Those files are no longer waiting; drop them again.".into()))
+    }
+
     /// Uploads staged files into `folder` on the terminal's host: a command on the bus. With
     /// [`Existing::Ask`], files that are there already come back as [`UploadStart::Conflicts`] and
     /// nothing is submitted.

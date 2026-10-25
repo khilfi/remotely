@@ -91,6 +91,7 @@ pub mod untrusted;
 pub mod updates;
 pub mod vault;
 pub mod vm_links;
+pub mod vm_settings;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -272,6 +273,9 @@ pub struct Core {
     pub login_guard: LoginGuard,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
     pub presentation: PresentationMode,
+    /// VM-23, VM-24: VM settings the shell builds from dialogs and drops (ISOs, shared folders, an existing
+    /// VM), guest OS types, screenshots and Open console. Changes go through [`Core::bus`].
+    pub vm_settings: vm_settings::VmSettings,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -495,7 +499,9 @@ impl Core {
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
+        let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
         let core = Self {
+            vm_settings,
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog: Catalog::new(store.clone()).with_hypervisors(hypervisors.clone()),

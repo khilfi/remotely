@@ -31,6 +31,7 @@ use crate::ssh_keys;
 use crate::store::{NewAuditEntry, Store};
 use crate::terminal::multiexec::{self, RunKey};
 use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
+use crate::vm_settings::{ops as vm_ops, VmChangePreview, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
 /// A state-changing request. Reads (inventory, metrics) do not go through the bus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,6 +139,18 @@ pub enum Command {
     /// [`TargetRef::Container`] whose object fits the op: containers for the container ops, images,
     /// volumes, or the engine itself for a pull or a prune (one per host).
     Container { targets: Vec<TargetRef>, op: ContainerOp },
+    /// VM-23, VM-12, VM-11: settings of powered-off VMs (CPU, memory, firmware, network adapters, shared
+    /// folders, name, guest OS type), or a Workstation VM's hardware version ([`crate::vm_settings`]).
+    VmConfig {
+        targets: Vec<TargetRef>,
+        edit: VmConfigEdit,
+    },
+    /// VM-23, VM-11, VM-15: CD/DVD images, network cables and the guest tools, on running VMs too.
+    VmDevice { targets: Vec<TargetRef>, op: VmDeviceOp },
+    /// VM-16: virtual disks of powered-off VMs.
+    VmDisk { targets: Vec<TargetRef>, op: VmDiskOp },
+    /// VM-24: deleting VMs, and adding an existing one.
+    VmLifecycle { targets: Vec<TargetRef>, op: VmLifecycleOp },
 }
 
 /// CT-01, CT-02: what a [`Command::Container`] does.
@@ -550,6 +563,20 @@ impl Command {
             Command::TerminalLine { .. } => {
                 "MultiExec lines start from what is typed into a terminal with MultiExec on, which holds and rates them."
             }
+            // VM-23, VM-24: a file or folder of this PC the guest (or the VM list) gets comes from a dialog or a
+            // drop in the shell, never from the UI: an attached file or a shared folder is the guest's to read.
+            Command::VmDevice {
+                op: VmDeviceOp::AttachIso { .. },
+                ..
+            } => "ISO images are attached from a file dialog or dropped on a VM.",
+            Command::VmConfig {
+                edit: VmConfigEdit::AddSharedFolder { .. },
+                ..
+            } => "Shared folders are chosen in a folder dialog.",
+            Command::VmLifecycle {
+                op: VmLifecycleOp::Register { .. },
+                ..
+            } => "An existing VM is added from a file dialog.",
             _ => return Ok(()),
         };
         Err(CoreError::InvalidInput(refused.into()))
@@ -602,6 +629,10 @@ impl Command {
             Command::FileUpload { targets, folder, files } => validate_upload(targets, folder, files),
             Command::OpenTunnel { targets, .. } => validate_tunnel(targets),
             Command::Container { targets, op } => validate_container(targets, op),
+            Command::VmConfig { targets, edit } => vm_ops::validate_config(targets, edit),
+            Command::VmDevice { targets, op } => vm_ops::validate_device(targets, op),
+            Command::VmDisk { targets, op } => vm_ops::validate_disk(targets, op),
+            Command::VmLifecycle { targets, op } => vm_ops::validate_lifecycle(targets, op),
             _ => Ok(()),
         }
     }
@@ -617,10 +648,23 @@ impl Command {
             | Command::PushSshKey { targets, .. }
             | Command::RemoveSshKey { targets, .. }
             | Command::FileUpload { targets, .. }
-            | Command::Container { targets, .. } => *targets = new,
+            | Command::Container { targets, .. }
+            | Command::VmConfig { targets, .. }
+            | Command::VmDevice { targets, .. }
+            | Command::VmDisk { targets, .. }
+            | Command::VmLifecycle {
+                targets,
+                op: VmLifecycleOp::Delete,
+            } => *targets = new,
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
-            // after something else. SS-07: a tunnel belongs to its terminal.
-            Command::AppUpdate { .. } | Command::TerminalLine { .. } | Command::OpenTunnel { .. } => return None,
+            // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
+            Command::AppUpdate { .. }
+            | Command::TerminalLine { .. }
+            | Command::OpenTunnel { .. }
+            | Command::VmLifecycle {
+                op: VmLifecycleOp::Register { .. },
+                ..
+            } => return None,
         }
         Some(command)
     }
@@ -636,7 +680,11 @@ impl Command {
             | Command::TerminalLine { targets, .. }
             | Command::FileUpload { targets, .. }
             | Command::OpenTunnel { targets, .. }
-            | Command::Container { targets, .. } => targets,
+            | Command::Container { targets, .. }
+            | Command::VmConfig { targets, .. }
+            | Command::VmDevice { targets, .. }
+            | Command::VmDisk { targets, .. }
+            | Command::VmLifecycle { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -655,6 +703,10 @@ impl Command {
             Command::FileUpload { .. } => "fileUpload",
             Command::OpenTunnel { .. } => "openTunnel",
             Command::Container { .. } => "container",
+            Command::VmConfig { .. } => "vmConfig",
+            Command::VmDevice { .. } => "vmDevice",
+            Command::VmDisk { .. } => "vmDisk",
+            Command::VmLifecycle { .. } => "vmLifecycle",
         }
     }
 
@@ -779,6 +831,10 @@ impl Command {
                 }
                 other => format!("{} {}", other.label(), noun("container")),
             },
+            Command::VmConfig { edit, .. } => edit.summary(target_count),
+            Command::VmDevice { op, .. } => op.summary(target_count),
+            Command::VmDisk { op, .. } => op.summary(target_count),
+            Command::VmLifecycle { op, .. } => op.summary(target_count),
         }
     }
 }
@@ -826,6 +882,16 @@ pub struct ApprovalRequest {
     pub upload: Option<Box<UploadDetails>>,
     /// SS-07: for a tunnel, where it listens, where it leads and who can use it.
     pub tunnel: Option<Box<TunnelDetails>>,
+    /// VM-23, VM-24: for a VM settings or lifecycle change, what changes on each VM, every file that is
+    /// deleted, and why a VM would be refused.
+    pub vm_change: Option<Box<VmChangePreview>>,
+}
+
+/// What [`CommandBus`] read about the targets before asking (AP-02).
+#[derive(Default)]
+struct Previews {
+    impact: Option<Vec<TargetImpact>>,
+    vm_change: Option<VmChangePreview>,
 }
 
 /// SS-07: a tunnel as the approval dialog shows it.
@@ -1637,9 +1703,28 @@ impl CommandBus {
     }
 
     /// Warnings found before the action (SS-10 a MultiExec line's run key, VM-07 capacity, VM-18 a VirtualBox
-    /// revert powering a VM off), and the impact preview read for them, if one was. Asking again (AP-01) adds
-    /// them too.
-    async fn add_warnings(
+    /// revert powering a VM off, VM-23 a VM a settings change would be refused on), and the previews read for
+    /// them. Asking again (AP-01) adds them too.
+    async fn add_warnings(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Previews {
+        let vm_change = self.impact.vm_change(command, &decision.targets).await;
+        if let Some(preview) = &vm_change {
+            // VM-23: a Low change (an ISO, a cable) gets a confirm too when a VM would refuse it, so it is seen.
+            let mut problems: Vec<String> = preview
+                .targets
+                .iter()
+                .filter_map(|t| t.problem.as_ref().map(|p| format!("{}: {p}", t.name)))
+                .collect();
+            // VM-23: Workstation's window is open while a Workstation VM's .vmx or disks change.
+            problems.extend(preview.warnings.iter().cloned());
+            decision.add_warnings(problems);
+        }
+        Previews {
+            impact: self.add_power_warnings(ctx, command, decision).await,
+            vm_change,
+        }
+    }
+
+    async fn add_power_warnings(
         &self,
         ctx: &Context,
         command: &Command,
@@ -1684,9 +1769,10 @@ impl CommandBus {
         id: Uuid,
         command: &Command,
         decision: &Decision,
-        impact: Option<Vec<TargetImpact>>,
+        previews: Previews,
         retry_of: Option<Uuid>,
     ) -> Result<ApprovalRequest> {
+        let Previews { impact, vm_change } = previews;
         Ok(ApprovalRequest {
             id,
             action: decision.action,
@@ -1705,6 +1791,7 @@ impl CommandBus {
             exec: self.exec_details(ctx, command, retry_of).await?,
             upload: UploadDetails::of(command),
             tunnel: TunnelDetails::of(command),
+            vm_change: vm_change.map(Box::new),
         })
     }
 

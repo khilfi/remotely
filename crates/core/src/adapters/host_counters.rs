@@ -196,6 +196,13 @@ impl HostCounters for WindowsCounters {
     }
 }
 
+/// VM-23: whether a process named `exe` (any letter case) runs on this PC; false when the list can't be read.
+pub async fn process_running(exe: &'static str) -> bool {
+    blocking(move || win::pids_named_any(&[exe]))
+        .await
+        .is_ok_and(|pids| !pids.is_empty())
+}
+
 /// One process as read this round, before rates.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RawProcess {
@@ -769,6 +776,10 @@ mod win {
     pub fn other_users_signed_in() -> Result<usize> {
         Ok(0)
     }
+
+    pub fn pids_named_any(_exes: &[&str]) -> Result<Vec<(u32, usize)>> {
+        Err(CoreError::NotImplemented("processes outside Windows"))
+    }
 }
 
 #[cfg(test)]
@@ -961,6 +972,17 @@ mod tests {
             let exe = std::env::current_exe().unwrap();
             let name = exe.file_name().unwrap().to_string_lossy().into_owned();
             assert!(win::pids_named(&name).unwrap().contains(&me));
+        }
+
+        /// VM-23: the check behind "Workstation's window is open" finds a program that runs (this test), and not
+        /// one that doesn't.
+        #[tokio::test]
+        async fn a_running_program_is_found_by_its_name() {
+            let exe = std::env::current_exe().unwrap();
+            let name: &'static str =
+                Box::leak(exe.file_name().unwrap().to_string_lossy().into_owned().into_boxed_str());
+            assert!(super::process_running(name).await);
+            assert!(!super::process_running("remotely-no-such-program.exe").await);
         }
 
         /// MO-01 NFR (a 50-VM dashboard at a 5 s refresh under 5% host CPU): reads 50 processes the

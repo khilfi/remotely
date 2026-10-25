@@ -429,6 +429,7 @@ fn web_hardware() -> VmHardware {
             files: 1,
             delta: false,
             problem: None,
+            ..VirtualDisk::default()
         }],
         nics: vec![VirtualNic {
             slot: "ethernet0".into(),
@@ -436,7 +437,9 @@ fn web_hardware() -> VmHardware {
             model: Some("vmxnet3".into()),
             mac: Some("00:0c:29:ab:cd:ef".into()),
             connected: None,
+            ..VirtualNic::default()
         }],
+        ..VmHardware::default()
     }
 }
 

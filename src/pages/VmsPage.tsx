@@ -28,7 +28,9 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Mouse
 import {
   CameraIcon,
   ChevronDownIcon,
+  CpuIcon,
   EllipsisIcon,
+  FilePlusIcon,
   FlagIcon,
   FolderPlusIcon,
   InfoIcon,
@@ -43,6 +45,7 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
   Undo2Icon,
+  WrenchIcon,
   XIcon,
 } from "lucide-react";
 import { usePanelRef } from "react-resizable-panels";
@@ -78,6 +81,7 @@ import { NameDialog } from "@/components/NameDialog";
 import { SnapshotActionDialog, type SnapshotAction } from "@/components/SnapshotActionDialog";
 import { SortableHead } from "@/components/SortableHead";
 import { VmDetailsPanel } from "@/components/VmDetailsPanel";
+import { ResourcesDialog } from "@/components/VmSettingsDialogs";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
 import { VmSessionLinks } from "@/components/VmLinkControls";
 import { useReadOnlyReason } from "@/components/Presentation";
@@ -88,6 +92,7 @@ import {
   errorMessage,
   type AutoLinkReport,
   type Command,
+  type DroppedFiles,
   type Environment,
   type InventoryWarning,
   type PowerOp,
@@ -120,6 +125,7 @@ import {
   type SnapshotMatch,
   type VmView,
 } from "@/lib/vm-snapshots";
+import { bulkResizeReason, resizeTargets } from "@/lib/vm-settings";
 
 /** QL-14: a VM to show from elsewhere (the palette, a shortcut, an old Snapshots link). `n` counts the requests. */
 export interface VmPageRequest {
@@ -127,6 +133,8 @@ export interface VmPageRequest {
   vmxPaths: string[];
   view: VmView;
   n: number;
+  /** VM-24: open the Settings tab's rename dialog too (the palette's Rename). */
+  rename?: boolean;
 }
 
 interface Props {
@@ -223,6 +231,8 @@ type Dialog =
   | { kind: "lowerProd"; vmxPaths: string[]; environment: Environment; prodNames: string[] }
   /** VM-04: selects the shown VMs that have a snapshot with this name. */
   | { kind: "snapshotName" }
+  /** VM-12: CPU and memory of the selected VMs that are off, one approval. */
+  | { kind: "resize" }
   | null;
 
 function formatRam(mb: number | null) {
@@ -481,6 +491,9 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
   // the list, and shows every VM first when the filter hides the one asked for. Handled while rendering, once each.
   const [handledRequest, setHandledRequest] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // VM-24: bumped when the palette asks to rename the VM; its Settings tab opens the dialog until it is seen.
+  const [renameAsk, setRenameAsk] = useState(0);
+  const [renameSeen, setRenameSeen] = useState(0);
   const listReady = !loading && listedFor === filter;
   if (request && request.n !== handledRequest && listReady) {
     const wanted = new Set(request.vmxPaths.map(keyOf));
@@ -491,6 +504,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
     } else {
       setHandledRequest(request.n);
       setView(request.view);
+      if (request.rename) setRenameAsk((n) => n + 1);
       setNotice(null);
       const first =
         wanted.size > 0
@@ -607,6 +621,60 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
     };
   }
 
+  /** VM-24: a VM's own window; a stopped VirtualBox VM starts with it (a power command, shown like any other). */
+  async function openConsole(vmxPath: string) {
+    try {
+      const done = await api.vmOpenConsole(vmxPath);
+      if (done.kind === "starting") onSubmitted(done.outcome);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
+  /** VM-24: an existing VM from a file dialog the shell opens. */
+  async function addExisting() {
+    try {
+      const outcome = await api.vmPickExisting();
+      if (outcome) onSubmitted(outcome);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
+  // VM-23: an ISO dropped on a VM's row or its details attaches to its CD/DVD drive. The shell stages the drop, so
+  // its path never comes through here; this page only says which VM it fell on.
+  const dropRef = useRef<(dropped: DroppedFiles) => void>(() => undefined);
+  useEffect(() => {
+    const unlisten = api.onFilesDropped((dropped) => dropRef.current(dropped));
+    return () => void unlisten.then((stop) => stop());
+  }, []);
+  useEffect(() => {
+    dropRef.current = (dropped) => {
+      if (!active) return;
+      if (dropped.error) {
+        toast.error(dropped.error);
+        return;
+      }
+      if (!dropped.staged) return;
+      const at = document.elementFromPoint(dropped.x, dropped.y)?.closest<HTMLElement>("[data-vm-drop]");
+      const vmxPath = at?.dataset.vmDrop;
+      if (!vmxPath) {
+        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
+        toast.info("Drop an ISO image on a VM to attach it to its CD/DVD drive.");
+        return;
+      }
+      if (readOnly) {
+        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
+        toast.error(readOnly);
+        return;
+      }
+      api.vmAttachDroppedIso(dropped.staged.id, vmxPath).then(onSubmitted, (err: unknown) => {
+        void api.filesUnstage(dropped.staged!.id).catch(() => undefined);
+        toast.error(errorMessage(err));
+      });
+    };
+  });
+
   /** VM-04: reverting to or deleting one snapshot of the open VM. Both are High: the approval dialog follows. */
   function onSnapshot(tree: VmSnapshots, node: SnapshotNode, kind: "revert" | "delete") {
     void submit({ type: "vmSnapshot", targets: refs([tree]), op: { kind, name: snapshotArg(tree, node) } });
@@ -680,6 +748,11 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
   const powerOff = power(POWER_OFF);
   const toProtect = selectedVms.filter((v) => !v.protected);
   const toUnprotect = selectedVms.filter((v) => v.protected);
+  // VM-12, VM-15, VM-24: what the selection's settings and lifecycle actions go to.
+  const resize = resizeTargets(selectedVms);
+  const resizeOff = bulkResizeReason(selectedVms, readOnly);
+  const toolsTargets = selectedVms.filter((v) => v.powerState === "running" && !v.protected);
+  const deletable = selectedVms.filter((v) => !v.protected && v.powerState !== "running" && v.powerState !== "paused");
   const selectedLabels = new Set(selectedVms.map((v) => v.environment));
   // Ticked in the Label menu when every selected VM has it.
   const sharedLabel = selectedLabels.size === 1 ? [...selectedLabels][0] : "";
@@ -825,6 +898,17 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
           <RefreshCwIcon data-icon="inline-start" className={loading ? "animate-spin" : undefined} />
           Refresh
         </Button>
+        <WhyDisabled reason={readOnly}>
+          <Button
+            variant="outline"
+            disabled={readOnly !== null}
+            title="A Workstation .vmx or a VirtualBox .vbox already on this PC"
+            onClick={() => void addExisting()}
+          >
+            <FilePlusIcon data-icon="inline-start" />
+            Add VM…
+          </Button>
+        </WhyDisabled>
         {/* VM-21: deploying a launch template (Templates page) arrives with the deploy package (R2). */}
         <WhyDisabled reason={DEPLOY_REASON}>
           <Button variant="outline" disabled>
@@ -1048,6 +1132,43 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
               );
             })}
             <DropdownMenuSeparator />
+            <DropdownMenuLabel>Settings</DropdownMenuLabel>
+            <DropdownMenuItem disabled={resizeOff !== null} onSelect={() => setDialog({ kind: "resize" })}>
+              <CpuIcon />
+              <div>
+                Resize CPU and memory…
+                <ReasonLine reason={resizeOff} />
+              </div>
+              <DropdownMenuShortcut>{resize.targets.length || ""}</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={toolsTargets.length === 0}
+              onSelect={() =>
+                void submit({ type: "vmDevice", targets: refs(toolsTargets), op: { kind: "installTools" } })
+              }
+            >
+              <WrenchIcon />
+              <div>
+                Install or upgrade guest tools
+                <ReasonLine reason={toolsTargets.length === 0 ? "None of the selected VMs is running" : null} />
+              </div>
+              <DropdownMenuShortcut>{toolsTargets.length || ""}</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              variant="destructive"
+              disabled={deletable.length === 0}
+              onSelect={() => void submit({ type: "vmLifecycle", targets: refs(deletable), op: { kind: "delete" } })}
+            >
+              <Trash2Icon />
+              <div>
+                Delete with their files…
+                <ReasonLine
+                  reason={deletable.length === 0 ? "Shut the VMs down first; protected VMs are left alone" : null}
+                />
+              </div>
+              <DropdownMenuShortcut>{deletable.length || ""}</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuLabel>Tags</DropdownMenuLabel>
             <DropdownMenuItem onSelect={() => setDialog({ kind: "addTag" })}>
               <TagIcon />
@@ -1201,6 +1322,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
                   {vms.map((vm, i) => (
                     <TableRow
                       key={vm.vmxPath}
+                      data-vm-drop={vm.vmxPath}
                       data-state={selected.has(vm.vmxPath) ? "selected" : undefined}
                       onClick={(e) => toggle(i, e)}
                       className={cn(
@@ -1271,6 +1393,12 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
                 onTake={() => detailTree && setSnapshotDialog({ kind: "take", vms: [detailTree] })}
                 onRevert={(node) => detailTree && onSnapshot(detailTree, node, "revert")}
                 onDelete={(node) => detailTree && onSnapshot(detailTree, node, "delete")}
+                onSubmit={submit}
+                onSubmitted={onSubmitted}
+                onOpenConsole={() => void openConsole(detailVm.vmxPath)}
+                askRename={renameAsk}
+                renameSeen={renameSeen}
+                onRenameSeen={setRenameSeen}
               />
             )}
           </ResizablePanel>
@@ -1333,6 +1461,15 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
           submitLabel="Select"
           maxLength={limits?.maxNameLength ?? 80}
           onSubmit={(name) => selectBySnapshots({ kind: "named", text: name })}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "resize" && (
+        <ResourcesDialog
+          vms={resize.targets}
+          hardware={null}
+          left={resize.left}
+          onSubmit={submit}
           onClose={() => setDialog(null)}
         />
       )}

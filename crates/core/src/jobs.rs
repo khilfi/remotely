@@ -76,6 +76,7 @@ use crate::terminal::files::UploadRun;
 use crate::terminal::tunnels::TunnelRun;
 use crate::terminal::TerminalActions;
 use crate::vault::{SecretId, SecretString, Vault};
+use crate::vm_settings::VmEditor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -291,7 +292,13 @@ pub enum JobScope {
 impl JobScope {
     pub fn of(command: &Command) -> Self {
         match command {
-            Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => JobScope::Vms,
+            Command::VmPower { .. }
+            | Command::VmSnapshot { .. }
+            | Command::VmProtect { .. }
+            | Command::VmConfig { .. }
+            | Command::VmDevice { .. }
+            | Command::VmDisk { .. }
+            | Command::VmLifecycle { .. } => JobScope::Vms,
             Command::Container { .. } => JobScope::Containers,
             _ => JobScope::Other,
         }
@@ -523,6 +530,8 @@ pub struct JobRunner {
     store: Store,
     /// VM-18: VMware and VirtualBox, each VM reached by its key.
     hypervisors: Hypervisors,
+    /// VM-11, VM-12, VM-15, VM-16, VM-23, VM-24: settings, devices, disks and lifecycle changes.
+    vm_editor: VmEditor,
     remote: Arc<dyn RemoteAdapter>,
     updater: Arc<dyn UpdaterAdapter>,
     /// BX-02, BX-07: login and sudo secrets, read per host just before it connects.
@@ -563,6 +572,7 @@ impl JobRunner {
         // Room for a 200-host bulk run's events (NFR Scale) without the UI lagging behind.
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
+            vm_editor: VmEditor::new(hypervisors.clone(), store.clone()),
             store,
             hypervisors,
             remote,
@@ -1317,6 +1327,25 @@ impl JobRunner {
                 }
                 Ok(TargetOutcome::done())
             }
+            // VM-23 and on. Once a VM's change has started it runs to its end: stopping vdiskmanager or
+            // VBoxManage halfway through a disk, or between a .vmx's backup and its write, could leave the VM
+            // broken. Cancel still stops the VMs not started yet.
+            (
+                Command::VmConfig { .. }
+                | Command::VmDevice { .. }
+                | Command::VmDisk { .. }
+                | Command::VmLifecycle { .. },
+                TargetRef::Vm { .. },
+            ) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let note = self.vm_editor.run(&spec.ctx, job_id, &spec.command, target).await?;
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
+            }
             (
                 Command::RemoteExec {
                     script,
@@ -1751,7 +1780,13 @@ impl JobRunner {
                 op: PowerOp::Start { .. },
                 ..
             } => limits.power_on,
-            Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => limits.vm_ops,
+            Command::VmPower { .. }
+            | Command::VmSnapshot { .. }
+            | Command::VmProtect { .. }
+            | Command::VmConfig { .. }
+            | Command::VmDevice { .. }
+            | Command::VmDisk { .. }
+            | Command::VmLifecycle { .. } => limits.vm_ops,
             Command::RemoteExec { .. }
             | Command::PushSshKey { .. }
             | Command::RemoveSshKey { .. }
@@ -1827,6 +1862,14 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::OpenTunnel { .. } => "tunnel",
         Command::Container { .. } => "container",
         Command::AppUpdate { .. } => "update",
+        Command::VmConfig {
+            edit: crate::vm_settings::VmConfigEdit::UpgradeHardware,
+            ..
+        } => "hardware upgrade",
+        Command::VmConfig { .. } => "settings change",
+        Command::VmDevice { .. } => "tools install",
+        Command::VmDisk { .. } => "disk change",
+        Command::VmLifecycle { .. } => "delete",
     }
 }
 
