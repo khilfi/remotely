@@ -1,8 +1,8 @@
-// MO-13: a VM's System tab in its details panel: what the hypervisor's files say (vCPUs and their layout, memory,
-// firmware, each virtual disk's provisioned size and size on this PC, each network adapter and its MAC), read when the
-// tab opens and on Refresh, and what was read before when the files can't be read now. "From the guest" shows a linked
-// session's own facts (OS, kernel, filesystems), with a way into that session's host details. MACs carry
-// data-mask="mac" (FD-03); disk paths go through the DOM masker like any text (C:\Users\<name> is masked).
+// MO-13: a VM's System tab in its details panel: the guest's OS, kernel, vCPUs and memory as the hypervisor's files
+// say, read when the tab opens and on Refresh, and what was read before when the files can't be read now. "From the
+// guest" shows a linked session's own facts (OS, kernel, filesystems), with a way into that session's host details.
+// VM-23: the VM's virtual hardware in full (disks, adapters, firmware, devices) and its edits are on the Settings tab
+// (VmSettingsTab).
 
 import { useEffect, useState } from "react";
 import { CircleAlertIcon, HardDriveIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
@@ -10,7 +10,6 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { FactList, SystemFacts } from "@/components/HostDetailsSheet";
 import { api, errorMessage, type VmRecord, type VmSpecs } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
@@ -121,85 +120,12 @@ export function VmSystemTab({ vm, thresholds, onHostDetails }: Props) {
               },
               { label: "vCPUs", value: vcpuText(specs) },
               { label: "Memory", value: h.memoryMb ? formatBytes(h.memoryMb * 1024 * 1024) : null },
-              { label: "Firmware", value: h.firmware },
-              ...(h.hardwareVersion ? [{ label: "Hardware version", value: h.hardwareVersion }] : []),
             ]}
           />
-
-          <section className="flex flex-col gap-2">
-            <h3 className="flex items-center gap-1.5 text-sm font-medium">
-              <HardDriveIcon className="size-4 text-muted-foreground" /> Virtual disks ({h.disks.length})
-            </h3>
-            {h.disks.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No virtual disk is attached.</p>
-            ) : (
-              <div className="rounded-lg border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Slot</TableHead>
-                      <TableHead>File</TableHead>
-                      <TableHead className="text-right" title="The size the guest sees">
-                        Provisioned
-                      </TableHead>
-                      <TableHead className="text-right" title="What its files take on this PC">
-                        On disk
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {h.disks.map((d) => (
-                      <TableRow key={`${d.slot}|${d.path}`}>
-                        <TableCell className="font-mono text-xs">{d.slot}</TableCell>
-                        <TableCell className="text-xs whitespace-normal">
-                          <div className="font-mono break-all">{d.path}</div>
-                          <div className="text-muted-foreground">
-                            {[d.format, d.delta ? "snapshot delta" : null, d.files > 1 ? `${d.files} files` : null]
-                              .filter(Boolean)
-                              .join(" · ")}
-                          </div>
-                          {d.problem && <div className="text-tier-medium">{d.problem}</div>}
-                        </TableCell>
-                        <TableCell className="text-right text-xs tabular-nums">
-                          {formatBytes(d.provisionedBytes)}
-                        </TableCell>
-                        <TableCell className="text-right text-xs tabular-nums">{formatBytes(d.onDiskBytes)}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-          </section>
-
-          <section className="flex flex-col gap-2">
-            <h3 className="text-sm font-medium">Network adapters ({h.nics.length})</h3>
-            {h.nics.length === 0 ? (
-              <p className="text-xs text-muted-foreground">No network adapter.</p>
-            ) : (
-              <div className="rounded-lg border">
-                <Table>
-                  <TableBody>
-                    {h.nics.map((n) => (
-                      <TableRow key={n.slot}>
-                        <TableCell className="text-xs">
-                          <div className="font-mono">{n.slot}</div>
-                          {n.model && <div className="text-muted-foreground">{n.model}</div>}
-                        </TableCell>
-                        <TableCell className="text-xs whitespace-normal">
-                          {n.connection ?? "—"}
-                          {n.connected === false && <div className="text-muted-foreground">not connected</div>}
-                        </TableCell>
-                        <TableCell className="text-right font-mono text-xs">
-                          {n.mac ? <span data-mask="mac">{n.mac}</span> : "—"}
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            )}
-          </section>
+          <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
+            <HardDriveIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+            The VM&apos;s disks, network adapters, firmware and other devices, and changing them, are on the Settings tab.
+          </p>
 
           <section className="flex flex-col gap-2">
             <div className="flex items-center gap-2">

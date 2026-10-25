@@ -85,7 +85,11 @@ function parentOf(path: string): string {
 }
 
 function sameFolder(a: string, b: string) {
-  const norm = (p: string) => p.replaceAll("/", "\\").replace(/\\+$/, "").toLowerCase();
+  const norm = (p: string) =>
+    p
+      .replace(/\//g, "\\")
+      .replace(/\\+$/, "")
+      .toLowerCase();
   return norm(a) === norm(b);
 }
 

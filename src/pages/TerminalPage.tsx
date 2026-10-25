@@ -1025,14 +1025,15 @@ export function TerminalPage({
   useEffect(() => {
     dropRef.current = (dropped) => {
       if (dropped.error) {
-        toast.error(`Not uploaded: ${dropped.error}`);
+        if (active) toast.error(`Not uploaded: ${dropped.error}`);
         return;
       }
-      if (!dropped.staged) return;
-      const pane = active ? paneAt(dropped.x, dropped.y) : undefined;
+      // VM-23: the page on screen owns a drop (an ISO dropped on the Virtual machines page is that page's).
+      if (!dropped.staged || !active) return;
+      const pane = paneAt(dropped.x, dropped.y);
       if (!pane) {
         void api.filesUnstage(dropped.staged.id).catch(() => undefined);
-        if (active) toast.info("Drop files on a terminal to upload them into its folder.");
+        toast.info("Drop files on a terminal to upload them into its folder.");
         return;
       }
       void uploadStaged(pane, dropped.staged, null);

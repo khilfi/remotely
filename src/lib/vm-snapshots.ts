@@ -7,8 +7,8 @@ import type { ApprovalStep, Hypervisor, SnapshotNode, Tier, VmSnapshots } from "
 import { slashIsPath } from "./hypervisors.ts";
 
 /** Where a VM's details panel opens: its details, or its snapshot tree and actions. */
-/** The VM details panel's tabs (MO-13: System). */
-export type VmView = "details" | "system" | "snapshots";
+/** The VM details panel's tabs (MO-13: System, the guest's own facts; VM-23: Settings, the VM's hardware). */
+export type VmView = "details" | "settings" | "system" | "snapshots";
 
 /** AP-04: what a protected VM's actions say. */
 export const PROTECTED_REASON = "Protected: actions skip this VM until it is unprotected";
