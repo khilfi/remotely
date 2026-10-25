@@ -1,6 +1,7 @@
-// FD-01 page shortcuts (Ctrl+1 to Ctrl+9, Ctrl+,) follow each page's own shortcut, not its place in the sidebar, so a
-// page leaving the sidebar doesn't renumber the others. QL-14: Snapshots moved into the Virtual machines page; its old
-// page id and shortcut (Ctrl+3) open the snapshot view there until another page takes the slot (Containers, Q6).
+// FD-01 page shortcuts (Ctrl+1 to Ctrl+9, Ctrl+0 for the map since 0.5.0, Ctrl+,) follow each page's own shortcut,
+// not its place in the sidebar, so a page leaving the sidebar doesn't renumber the others. QL-14: Snapshots moved into
+// the Virtual machines page; its old page id and shortcut (Ctrl+3) open the snapshot view there until another page
+// takes the slot (Containers, Q6).
 
 export interface ShortcutPage {
   id: string;

@@ -304,6 +304,22 @@ async fn it_locks_after_the_idle_time_without_use() {
 }
 
 #[tokio::test]
+async fn the_info_counts_down_to_the_idle_lock_and_activity_resets_it() {
+    // QL-22: the status bar's countdown.
+    let idle = Duration::from_secs(60);
+    let (_ctx, vault) = quick_to_lock(idle).await;
+    let fresh = vault.info().locks_in_secs.expect("unlocked: a countdown");
+    assert!((59..=60).contains(&fresh), "{fresh}");
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let later = vault.info().locks_in_secs.unwrap();
+    assert!(later < fresh, "{later} < {fresh}");
+    vault.note_activity();
+    assert!(vault.info().locks_in_secs.unwrap() >= 59);
+    vault.lock();
+    assert_eq!(vault.info().locks_in_secs, None, "locked: no countdown");
+}
+
+#[tokio::test]
 async fn the_idle_lock_happens_on_its_own_and_is_announced() {
     let (_ctx, vault) = quick_to_lock(Duration::from_millis(300)).await;
     let mut status = vault.watch();

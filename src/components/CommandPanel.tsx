@@ -112,13 +112,20 @@ interface Props {
   /** Pastes into the current terminal (and presses Enter when `enter`). False when it is not connected. */
   onSend: (command: string, enter: boolean) => boolean;
   onClose: () => void;
+  /** QL-20: a command found in the palette: the panel searches for it when this changes. */
+  query?: { text: string; n: number } | null;
 }
 
-export function CommandPanel({ active, targetName, onSend, onClose }: Props) {
+export function CommandPanel({ active, targetName, onSend, onClose, query = null }: Props) {
   const [section, setSection] = useState<Section>(() => readJson(SECTION_KEY, "favourites"));
   const [favourites, setFavourites] = useState<Favourite[]>([]);
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
-  const [text, setText] = useState("");
+  const [text, setText] = useState(query?.text ?? "");
+  const [queryHandled, setQueryHandled] = useState(query?.n ?? 0);
+  if (query && query.n !== queryHandled) {
+    setQueryHandled(query.n);
+    setText(query.text);
+  }
   const [open, setOpen] = useState<Record<string, boolean>>(() => readJson(OPEN_KEY, {}));
   const [editing, setEditing] = useState<{ existing?: Favourite; initial?: Partial<FavouriteInput> } | null>(null);
   const [deleting, setDeleting] = useState<Favourite | null>(null);

@@ -306,7 +306,8 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
   );
 }
 
-function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultInfo) => void }) {
+/** SS-04: the vault's setup form; QL-23's first-run wizard shows it too. */
+export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultInfo) => void }) {
   const [password, setPassword] = useState("");
   const [repeat, setRepeat] = useState("");
   // SS-04: off unless the user turns it on (the trade-off is spelt out next to the switch).

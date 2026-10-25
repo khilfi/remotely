@@ -722,6 +722,14 @@
   --chart-axis: oklch(0.708 0 0);
 }
 
+/* ---- QL-24 density ----
+   Compact sets the tokens everything is measured in: Tailwind's spacing unit (every p-*, m-*, gap-*, h-* and w-*
+   utility, shadcn's components included) and shadcn's radius. Text sizes stay as they are. Set by lib/density.ts. */
+html[data-density="compact"] {
+  --spacing: 0.2rem;
+  --radius: 0.5rem;
+}
+
 /* xterm.js fills the host element the terminal page gives it. The space below the last row shows the
    host's background, and xterm's own scrollbar replaces the native one (WebView2 draws both otherwise). */
 .terminal-host .xterm {

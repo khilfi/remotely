@@ -46,7 +46,16 @@ function secondsLeft(job: JobSummary, now: number) {
  * `version` changes when a job is queued or ends; `active` is true while the page is shown, so entries written
  * without a job (terminals, host keys, imports, settings) show up when the user comes back.
  */
-export function ActivityPage({ version, active }: { version: number; active: boolean }) {
+export function ActivityPage({
+  version,
+  active,
+  focusJob = null,
+}: {
+  version: number;
+  active: boolean;
+  /** R10: a job to open (a notification, the status bar). */
+  focusJob?: { jobId: string; n: number } | null;
+}) {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [check, setCheck] = useState<ChainCheck | null>(null);
@@ -55,6 +64,11 @@ export function ActivityPage({ version, active }: { version: number; active: boo
   const [now, setNow] = useState(() => Date.now());
   // The job whose results are open; read from `jobs`, so its status stays current.
   const [openedId, setOpenedId] = useState<string | null>(null);
+  const [focusHandled, setFocusHandled] = useState(focusJob?.n ?? 0);
+  if (focusJob && focusJob.n !== focusHandled) {
+    setFocusHandled(focusJob.n);
+    setOpenedId(focusJob.jobId);
+  }
   const opened = jobs.find((j) => j.id === openedId);
   const [exporting, setExporting] = useState(false);
   const counting = jobs.some((j) => j.status === "countdown");

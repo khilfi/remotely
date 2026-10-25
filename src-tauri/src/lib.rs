@@ -1,5 +1,5 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
+//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`], [`navigation`],
 //! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
 mod catalog;
@@ -15,6 +15,7 @@ mod groups;
 mod host_details;
 mod ipc;
 mod multiexec;
+mod navigation;
 mod terminal;
 mod terminal_rules;
 mod tunnels;
@@ -540,6 +541,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         dashboard::dashboard_layout_set,
         dashboard::dashboard_layout_reset,
         dashboard::host_services,
+        navigation::notifications_list,
+        navigation::notifications_add,
+        navigation::notifications_mark_read,
+        navigation::notifications_clear,
+        navigation::topology_vm_networks,
+        navigation::vm_folder_pick,
         terminal::terminal_open,
         terminal::terminal_quick_connect,
         terminal::terminal_open_like,
