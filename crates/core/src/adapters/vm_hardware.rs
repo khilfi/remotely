@@ -11,6 +11,15 @@
 //!   a VHD footer or a qcow2 header. Its size on disk is what its files take on this PC; for a
 //!   VMware snapshot's delta disk that is the whole chain down to the base disk, through
 //!   `parentFileNameHint`.
+//!
+//! Hostile files (A3, A9): the .vmx, VMDK descriptors and `showvminfo` name disk files, and any of
+//! them may come from someone else (a VM copied from a customer, an appliance). A disk, extent or
+//! parent whose path (after it is resolved against its folder) is on a network share or a device path
+//! ([`path_refusal`]) is never opened, since Windows would send the user's sign-in to that server: the
+//! disk shows its path, no sizes and a note. So a .vmx the user keeps on a share is read (its place is
+//! the user's choice), but its disks there are not. The .vmx is read whole only up to
+//! [`MAX_VM_CONFIG_BYTES`], a text VMDK descriptor up to [`MAX_DESCRIPTOR`]; a larger one is reported,
+//! never read in part.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::virtualbox::VboxVmInfo;
+use crate::untrusted::{path_refusal, read_capped, size_words, ReadError, MAX_VM_CONFIG_BYTES};
 
 /// A VM's virtual hardware as its hypervisor's files describe it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,8 +101,53 @@ pub struct VirtualNic {
 /// Bytes of a disk header read at most. Descriptors are a few hundred bytes; a sparse VMDK's
 /// embedded descriptor is at most a few kilobytes.
 const MAX_HEADER: u64 = 64 * 1024;
+/// A text VMDK descriptor longer than [`MAX_HEADER`] (thousands of 2 GB extents) is read whole up to
+/// this; a larger one is not read.
+pub const MAX_DESCRIPTOR: u64 = 1024 * 1024;
 /// Delta disks followed at most, down to the base disk.
 const MAX_CHAIN: usize = 32;
+
+/// How MO-13 reads a VM's files: this PC's file system in the app ([`LocalFiles`]), memory in tests, so
+/// a test can show that a refused path is never asked for.
+pub(crate) trait VmFiles: Sync {
+    /// The whole file, when it is at most `cap` bytes.
+    async fn read(&self, path: &Path, cap: u64) -> Result<Vec<u8>, ReadError>;
+    /// The first `max` bytes of a file, and its size.
+    async fn head(&self, path: &Path, max: u64) -> std::io::Result<(Vec<u8>, u64)>;
+    /// The last 512 bytes of a file of `size` bytes (a fixed VHD's footer).
+    async fn tail(&self, path: &Path, size: u64) -> std::io::Result<Vec<u8>>;
+    /// A file's size.
+    async fn len(&self, path: &Path) -> std::io::Result<u64>;
+}
+
+/// The files on this PC.
+pub(crate) struct LocalFiles;
+
+impl VmFiles for LocalFiles {
+    async fn read(&self, path: &Path, cap: u64) -> Result<Vec<u8>, ReadError> {
+        read_capped(path, cap).await
+    }
+
+    async fn head(&self, path: &Path, max: u64) -> std::io::Result<(Vec<u8>, u64)> {
+        let mut file = tokio::fs::File::open(path).await?;
+        let size = file.metadata().await?.len();
+        let mut head = Vec::new();
+        (&mut file).take(max).read_to_end(&mut head).await?;
+        Ok((head, size))
+    }
+
+    async fn tail(&self, path: &Path, size: u64) -> std::io::Result<Vec<u8>> {
+        let mut file = tokio::fs::File::open(path).await?;
+        file.seek(std::io::SeekFrom::Start(size.saturating_sub(512))).await?;
+        let mut tail = Vec::new();
+        file.take(512).read_to_end(&mut tail).await?;
+        Ok(tail)
+    }
+
+    async fn len(&self, path: &Path) -> std::io::Result<u64> {
+        tokio::fs::metadata(path).await.map(|meta| meta.len())
+    }
+}
 
 // ---- VMware .vmx ----
 
@@ -301,14 +356,18 @@ pub fn normal_mac(text: &str) -> Option<String> {
     Some((0..6).map(|i| &hex[i * 2..i * 2 + 2]).collect::<Vec<_>>().join(":"))
 }
 
-/// MO-13: a VMware VM's hardware, from its .vmx and each disk's files.
+/// MO-13: a VMware VM's hardware, from its .vmx (at most [`MAX_VM_CONFIG_BYTES`]) and each disk's files.
 pub async fn read_vmware(vmx: &Path) -> crate::error::Result<VmHardware> {
-    let bytes = tokio::fs::read(vmx).await?;
+    read_vmware_with(&LocalFiles, vmx).await
+}
+
+async fn read_vmware_with(files: &impl VmFiles, vmx: &Path) -> crate::error::Result<VmHardware> {
+    let bytes = files.read(vmx, MAX_VM_CONFIG_BYTES).await?;
     let (mut hardware, disks) = parse_vmx_hardware(&String::from_utf8_lossy(&bytes));
     let folder = vmx.parent().unwrap_or(Path::new(""));
     for disk in disks {
         let path = resolve(folder, &disk.file_name);
-        let mut read = read_disk(&path).await;
+        let mut read = read_disk_with(files, &path).await;
         read.slot = disk.slot;
         hardware.disks.push(read);
     }
@@ -318,6 +377,15 @@ pub async fn read_vmware(vmx: &Path) -> crate::error::Result<VmHardware> {
 /// MO-13: a VirtualBox VM's hardware, from `showvminfo` and each disk image's header. `os_name` and
 /// `kernel` come from the Guest Additions, when they run.
 pub async fn read_virtualbox(info: &VboxVmInfo, os_name: Option<String>, kernel: Option<String>) -> VmHardware {
+    read_virtualbox_with(&LocalFiles, info, os_name, kernel).await
+}
+
+async fn read_virtualbox_with(
+    files: &impl VmFiles,
+    info: &VboxVmInfo,
+    os_name: Option<String>,
+    kernel: Option<String>,
+) -> VmHardware {
     let mut hardware = VmHardware {
         guest_os: info.os_type.clone(),
         guest_os_name: os_name,
@@ -348,7 +416,7 @@ pub async fn read_virtualbox(info: &VboxVmInfo, os_name: Option<String>, kernel:
             .collect(),
     };
     for disk in &info.disks {
-        let mut read = read_disk(&disk.path).await;
+        let mut read = read_disk_with(files, &disk.path).await;
         read.slot = disk.slot.clone();
         hardware.disks.push(read);
     }
@@ -533,64 +601,99 @@ pub fn parse_header(head: &[u8]) -> DiskHeader {
     if let Some(vhd) = parse_vhd(head) {
         return vhd;
     }
-    let text = String::from_utf8_lossy(&head[..head.len().min(4096)]);
-    if text.contains("Disk DescriptorFile") || text.lines().any(|l| l.trim_start().starts_with("createType")) {
-        return DiskHeader::Vmdk(parse_vmdk_descriptor(&text));
+    // Told apart by its start; the whole descriptor is parsed, every extent counts.
+    if is_text_descriptor(head) {
+        return DiskHeader::Vmdk(parse_vmdk_descriptor(&String::from_utf8_lossy(head)));
     }
     DiskHeader::Unknown
 }
 
-/// The first bytes of a file (enough for any header and an embedded VMDK descriptor) and its size.
-async fn head_of(path: &Path) -> std::io::Result<(Vec<u8>, u64)> {
-    let mut file = tokio::fs::File::open(path).await?;
-    let size = file.metadata().await?.len();
-    let mut head = Vec::new();
-    (&mut file).take(MAX_HEADER).read_to_end(&mut head).await?;
-    Ok((head, size))
+/// A VMDK text descriptor, by its first 4 KB.
+fn is_text_descriptor(head: &[u8]) -> bool {
+    let text = String::from_utf8_lossy(&head[..head.len().min(4096)]);
+    text.contains("Disk DescriptorFile") || text.lines().any(|l| l.trim_start().starts_with("createType"))
 }
 
-/// A fixed VHD has its footer only in its last 512 bytes.
-async fn tail_of(path: &Path, size: u64) -> std::io::Result<Vec<u8>> {
-    let mut file = tokio::fs::File::open(path).await?;
-    file.seek(std::io::SeekFrom::Start(size.saturating_sub(512))).await?;
-    let mut tail = Vec::new();
-    file.take(512).read_to_end(&mut tail).await?;
-    Ok(tail)
+/// Why a disk file's header could not be read.
+enum HeaderError {
+    Io(std::io::Error),
+    /// A text descriptor larger than [`MAX_DESCRIPTOR`].
+    DescriptorTooLarge,
+}
+
+/// What a disk file's header says, and the file's size. A text VMDK descriptor longer than
+/// [`MAX_HEADER`] is read whole when it is at most [`MAX_DESCRIPTOR`], and refused when larger, so a
+/// descriptor is never parsed in part into a wrong capacity. A fixed VHD has its footer only in its
+/// last 512 bytes.
+async fn read_header(files: &impl VmFiles, path: &Path) -> Result<(DiskHeader, u64), HeaderError> {
+    let (head, size) = files.head(path, MAX_HEADER).await.map_err(HeaderError::Io)?;
+    let mut header = parse_header(&head);
+    let text = !head.starts_with(b"KDMV") && matches!(header, DiskHeader::Vmdk(_));
+    if text && size > head.len() as u64 {
+        if size > MAX_DESCRIPTOR {
+            return Err(HeaderError::DescriptorTooLarge);
+        }
+        let whole = match files.read(path, MAX_DESCRIPTOR).await {
+            Ok(whole) => whole,
+            Err(ReadError::TooLarge { .. }) => return Err(HeaderError::DescriptorTooLarge),
+            Err(ReadError::Io(err)) => return Err(HeaderError::Io(err)),
+        };
+        header = DiskHeader::Vmdk(parse_vmdk_descriptor(&String::from_utf8_lossy(&whole)));
+    }
+    if header == DiskHeader::Unknown && is_extension(path, "vhd") {
+        if let Ok(tail) = files.tail(path, size).await {
+            header = parse_header(&tail);
+        }
+    }
+    Ok((header, size))
 }
 
 /// Reads one virtual disk's sizes from its files. Never fails: what could not be read is said in
 /// [`VirtualDisk::problem`].
 pub async fn read_disk(path: &Path) -> VirtualDisk {
+    read_disk_with(&LocalFiles, path).await
+}
+
+async fn read_disk_with(files: &impl VmFiles, path: &Path) -> VirtualDisk {
     let mut disk = VirtualDisk {
         path: path.display().to_string(),
         ..VirtualDisk::default()
     };
-    let (head, size) = match head_of(path).await {
+    // A3: never opened, not even to see whether it is there.
+    if let Some(refusal) = path_refusal(path) {
+        disk.problem = Some(format!(
+            "the disk file {}, so Remotely didn't read it",
+            refusal.describe()
+        ));
+        return disk;
+    }
+    let (header, size) = match read_header(files, path).await {
         Ok(read) => read,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+        Err(HeaderError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
             disk.problem = Some("the disk file is not there".into());
             return disk;
         }
-        Err(err) => {
+        Err(HeaderError::Io(err)) => {
             disk.problem = Some(format!("the disk file could not be read: {err}"));
             return disk;
         }
-    };
-    let mut header = parse_header(&head);
-    if header == DiskHeader::Unknown && is_extension(path, "vhd") {
-        if let Ok(tail) = tail_of(path, size).await {
-            header = parse_header(&tail);
+        Err(HeaderError::DescriptorTooLarge) => {
+            disk.problem = Some(format!(
+                "the disk's descriptor is larger than {}, so Remotely didn't read it",
+                size_words(MAX_DESCRIPTOR)
+            ));
+            return disk;
         }
-    }
+    };
     match header {
         DiskHeader::Vmdk(descriptor) => {
             let folder = path.parent().unwrap_or(Path::new(""));
             disk.format = descriptor.create_type.clone();
             disk.provisioned_bytes = descriptor.capacity_bytes();
             disk.delta = descriptor.parent.is_some();
-            let (bytes, files, problem) = vmdk_chain_size(path, size, &descriptor, folder).await;
+            let (bytes, count, problem) = vmdk_chain_size(files, path, size, &descriptor, folder).await;
             disk.on_disk_bytes = Some(bytes);
-            disk.files = files;
+            disk.files = count;
             disk.problem = problem;
         }
         DiskHeader::SparseVmdk { capacity_bytes } => {
@@ -638,8 +741,10 @@ fn is_extension(path: &Path, ext: &str) -> bool {
 }
 
 /// What a VMDK and the disks under it take on this PC: its descriptor and extents, then each parent's
-/// down to the base disk. Returns (bytes, files, why something was left out).
+/// down to the base disk. Returns (bytes, files, why something was left out). An extent or parent on a
+/// network share or a device path is not opened (A3).
 async fn vmdk_chain_size(
+    vm_files: &impl VmFiles,
     path: &Path,
     size: u64,
     descriptor: &VmdkDescriptor,
@@ -664,9 +769,15 @@ async fn vmdk_chain_size(
             if extent_path == path {
                 continue;
             }
-            match tokio::fs::metadata(&extent_path).await {
-                Ok(meta) => {
-                    total = total.saturating_add(meta.len());
+            if let Some(refusal) = path_refusal(&extent_path) {
+                problem.get_or_insert_with(|| {
+                    format!("the extent {name} {}, so Remotely didn't count it", refusal.describe())
+                });
+                continue;
+            }
+            match vm_files.len(&extent_path).await {
+                Ok(len) => {
+                    total = total.saturating_add(len);
                     files += 1;
                 }
                 Err(_) => {
@@ -681,11 +792,32 @@ async fn vmdk_chain_size(
         if seen.contains(&parent_path) {
             return (total, files, problem);
         }
-        let Ok((head, parent_size)) = head_of(&parent_path).await else {
-            problem.get_or_insert_with(|| format!("the parent disk {parent} is not there"));
+        if let Some(refusal) = path_refusal(&parent_path) {
+            problem.get_or_insert_with(|| {
+                format!(
+                    "the parent disk {parent} {}, so Remotely didn't read it",
+                    refusal.describe()
+                )
+            });
             return (total, files, problem);
+        }
+        let (parent_header, parent_size) = match read_header(vm_files, &parent_path).await {
+            Ok(read) => read,
+            Err(HeaderError::DescriptorTooLarge) => {
+                problem.get_or_insert_with(|| {
+                    format!(
+                        "the parent disk {parent} has a descriptor larger than {}, so Remotely didn't read it",
+                        size_words(MAX_DESCRIPTOR)
+                    )
+                });
+                return (total, files, problem);
+            }
+            Err(HeaderError::Io(_)) => {
+                problem.get_or_insert_with(|| format!("the parent disk {parent} is not there"));
+                return (total, files, problem);
+            }
         };
-        let DiskHeader::Vmdk(parent_descriptor) = parse_header(&head) else {
+        let DiskHeader::Vmdk(parent_descriptor) = parent_header else {
             return (total.saturating_add(parent_size), files + 1, problem);
         };
         let parent_folder = parent_path.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -954,6 +1086,217 @@ guestInfo.detailed.data = "architecture='X86' bitness='64' distroName='Ubuntu' d
         assert_eq!(vhd.provisioned_bytes, Some(4096));
         assert_eq!(vhd.format.as_deref(), Some("VHD (fixed)"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A VM's files in memory, so these tests touch no file system. Asked for a path that must be
+    /// refused (a share, a device), it fails the test instead of opening anything; `chosen` is the
+    /// .vmx the user picked, which may be anywhere.
+    #[derive(Default)]
+    struct MemFiles {
+        files: std::collections::HashMap<PathBuf, Vec<u8>>,
+        chosen: Option<PathBuf>,
+        asked: std::sync::Mutex<Vec<PathBuf>>,
+    }
+
+    impl MemFiles {
+        fn with(mut self, path: &str, bytes: impl Into<Vec<u8>>) -> Self {
+            self.files.insert(PathBuf::from(path), bytes.into());
+            self
+        }
+
+        fn chosen(mut self, vmx: &str, text: &str) -> Self {
+            self.chosen = Some(PathBuf::from(vmx));
+            self.with(vmx, text)
+        }
+
+        fn ask(&self, path: &Path) -> std::io::Result<&Vec<u8>> {
+            if self.chosen.as_deref() != Some(path) {
+                assert_eq!(path_refusal(path), None, "asked for {}", path.display());
+            }
+            self.asked.lock().unwrap().push(path.to_path_buf());
+            self.files
+                .get(path)
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
+        }
+
+        fn asked(&self) -> Vec<String> {
+            self.asked
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect()
+        }
+    }
+
+    impl VmFiles for MemFiles {
+        async fn read(&self, path: &Path, cap: u64) -> Result<Vec<u8>, ReadError> {
+            let bytes = self.ask(path)?;
+            if bytes.len() as u64 > cap {
+                return Err(ReadError::TooLarge {
+                    path: path.display().to_string(),
+                    cap,
+                });
+            }
+            Ok(bytes.clone())
+        }
+
+        async fn head(&self, path: &Path, max: u64) -> std::io::Result<(Vec<u8>, u64)> {
+            let bytes = self.ask(path)?;
+            let end = bytes.len().min(max as usize);
+            Ok((bytes[..end].to_vec(), bytes.len() as u64))
+        }
+
+        async fn tail(&self, path: &Path, _: u64) -> std::io::Result<Vec<u8>> {
+            let bytes = self.ask(path)?;
+            Ok(bytes[bytes.len().saturating_sub(512)..].to_vec())
+        }
+
+        async fn len(&self, path: &Path) -> std::io::Result<u64> {
+            Ok(self.ask(path)?.len() as u64)
+        }
+    }
+
+    #[tokio::test]
+    async fn disks_on_shares_or_device_paths_are_never_opened() {
+        let vmx = r#"numvcpus = "2"
+memsize = "4096"
+scsi0:0.fileName = "\\nas.example.com\vms\data.vmdk"
+scsi0:1.fileName = "//nas.example.com/vms/logs.vmdk"
+scsi0:2.fileName = "|5C|5Cnas.example.com|5Cvms|5Cescaped.vmdk"
+scsi0:3.fileName = "\\?\C:\VMs\web01\device.vmdk"
+scsi0:4.fileName = "\??\C:\VMs\web01\nt.vmdk"
+scsi0:5.fileName = "web01.vmdk"
+"#;
+        // A local descriptor whose second extent and parent are on a share.
+        let descriptor = "# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\nparentFileNameHint=\"\\\\nas.example.com\\base\\base.vmdk\"\nRW 100 SPARSE \"web01-s001.vmdk\"\nRW 100 SPARSE \"\\\\nas.example.com\\x\\web01-s002.vmdk\"\n";
+        let files = MemFiles::default()
+            .with(r"C:\VMs\web01\web01.vmx", vmx)
+            .with(r"C:\VMs\web01\web01.vmdk", descriptor)
+            .with(r"C:\VMs\web01\web01-s001.vmdk", vec![0u8; 3000]);
+        let hardware = read_vmware_with(&files, Path::new(r"C:\VMs\web01\web01.vmx"))
+            .await
+            .unwrap();
+        assert_eq!(hardware.vcpus, Some(2));
+        assert_eq!(hardware.disks.len(), 6);
+        for disk in &hardware.disks[..5] {
+            assert_eq!(
+                (disk.provisioned_bytes, disk.on_disk_bytes, disk.files),
+                (None, None, 0),
+                "{disk:?}"
+            );
+            let problem = disk.problem.as_deref().unwrap();
+            assert!(problem.ends_with("so Remotely didn't read it"), "{problem}");
+        }
+        assert_eq!(
+            hardware.disks[0].path, r"\\nas.example.com\vms\data.vmdk",
+            "the path is still shown"
+        );
+        assert!(hardware.disks[0]
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("is on a network share"));
+        assert!(hardware.disks[2]
+            .problem
+            .as_deref()
+            .unwrap()
+            .contains("is on a network share"));
+        assert!(hardware.disks[3].problem.as_deref().unwrap().contains("device path"));
+        assert!(hardware.disks[4].problem.as_deref().unwrap().contains("device path"));
+
+        let local = &hardware.disks[5];
+        assert_eq!(local.provisioned_bytes, Some(200 * 512));
+        assert_eq!(local.on_disk_bytes, Some(descriptor.len() as u64 + 3000));
+        assert_eq!(local.files, 2);
+        assert_eq!(
+            local.problem.as_deref(),
+            Some(r"the extent \\nas.example.com\x\web01-s002.vmdk is on a network share, so Remotely didn't count it")
+        );
+        assert_eq!(
+            files.asked(),
+            [
+                r"C:\VMs\web01\web01.vmx",
+                r"C:\VMs\web01\web01.vmdk",
+                r"C:\VMs\web01\web01-s001.vmdk"
+            ],
+            "nothing on the share was asked for, not even the parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vmx_kept_on_a_share_is_read_but_its_disks_there_are_not() {
+        let vmx = r"\\nas.example.com\vms\web01\web01.vmx";
+        let files = MemFiles::default()
+            .chosen(vmx, "numvcpus = \"4\"\nscsi0:0.fileName = \"web01.vmdk\"\n")
+            .with(r"\\nas.example.com\vms\web01\web01.vmdk", "# Disk DescriptorFile\n");
+        let hardware = read_vmware_with(&files, Path::new(vmx)).await.unwrap();
+        assert_eq!(hardware.vcpus, Some(4));
+        assert_eq!(hardware.disks[0].path, r"\\nas.example.com\vms\web01\web01.vmdk");
+        assert_eq!(
+            hardware.disks[0].problem.as_deref(),
+            Some("the disk file is on a network share, so Remotely didn't read it")
+        );
+        assert_eq!(files.asked(), [vmx], "only the .vmx the user keeps there");
+    }
+
+    #[tokio::test]
+    async fn virtualbox_disks_on_shares_are_never_opened() {
+        let info = VboxVmInfo {
+            disks: vec![
+                crate::adapters::virtualbox::VboxDisk {
+                    slot: "SATA-0-0".into(),
+                    path: PathBuf::from(r"\\nas.example.com\vbox\web01.vdi"),
+                },
+                crate::adapters::virtualbox::VboxDisk {
+                    slot: "SATA-0-1".into(),
+                    path: PathBuf::from(r"C:\VirtualBox VMs\web01\data.vdi"),
+                },
+            ],
+            ..VboxVmInfo::default()
+        };
+        let files = MemFiles::default().with(r"C:\VirtualBox VMs\web01\data.vdi", vdi(1 << 30, 1));
+        let hardware = read_virtualbox_with(&files, &info, None, None).await;
+        assert_eq!(hardware.disks[0].slot, "SATA-0-0");
+        assert_eq!(hardware.disks[0].provisioned_bytes, None);
+        assert!(hardware.disks[0].problem.as_deref().unwrap().contains("network share"));
+        assert_eq!(hardware.disks[1].provisioned_bytes, Some(1 << 30));
+        assert_eq!(files.asked(), [r"C:\VirtualBox VMs\web01\data.vdi"]);
+    }
+
+    #[tokio::test]
+    async fn oversized_vmx_and_descriptors_are_refused_not_read_in_part() {
+        let mut huge = "numvcpus = \"2\"\n".to_owned().into_bytes();
+        huge.resize(MAX_VM_CONFIG_BYTES as usize + 1, b'#');
+        let files = MemFiles::default().with(r"C:\VMs\big\big.vmx", huge);
+        let err = read_vmware_with(&files, Path::new(r"C:\VMs\big\big.vmx"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_input");
+        assert_eq!(
+            err.to_string(),
+            r"C:\VMs\big\big.vmx is larger than 4 MB, so Remotely didn't read it"
+        );
+
+        // A descriptor of 3000 2 GB extents is longer than the header read: read whole, every extent counted.
+        let mut long = "# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\n".to_owned();
+        for n in 1..=3000 {
+            long.push_str(&format!("RW 4192256 SPARSE \"web01-s{n:04}.vmdk\"\n"));
+        }
+        assert!(long.len() as u64 > MAX_HEADER);
+        let files = MemFiles::default().with(r"C:\VMs\web01\web01.vmdk", long.clone());
+        let disk = read_disk_with(&files, Path::new(r"C:\VMs\web01\web01.vmdk")).await;
+        assert_eq!(disk.provisioned_bytes, Some(3000 * 4_192_256 * 512));
+
+        let mut too_long = long.into_bytes();
+        too_long.resize(MAX_DESCRIPTOR as usize + 1, b'\n');
+        let files = MemFiles::default().with(r"C:\VMs\web01\web01.vmdk", too_long);
+        let disk = read_disk_with(&files, Path::new(r"C:\VMs\web01\web01.vmdk")).await;
+        assert_eq!(disk.provisioned_bytes, None);
+        assert_eq!(
+            disk.problem.as_deref(),
+            Some("the disk's descriptor is larger than 1 MB, so Remotely didn't read it")
+        );
     }
 
     #[test]

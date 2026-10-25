@@ -6,6 +6,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::names::{shell_line, shown};
 use super::{
@@ -13,6 +14,7 @@ use super::{
     ContainerSummary, EngineChange, EngineKind, EngineVersion, ImageSummary, LogQuery, Logs, NetworkSummary, PruneWhat,
     SudoRun, VolumeSummary, MAX_LOG_TAIL,
 };
+use crate::adapters::exec_output::{CollectedOutput, OutputCollector};
 use crate::adapters::remote::ExecSession;
 use crate::error::{ContainerProblem, CoreError, Result};
 use crate::locks;
@@ -119,11 +121,33 @@ impl LocalCli {
     }
 }
 
-/// At most `max` bytes of `bytes`, as text.
-fn capped(bytes: &[u8], max: usize) -> (String, bool) {
-    let cut = bytes.len() > max;
-    let kept = if cut { &bytes[..max] } else { bytes };
-    (String::from_utf8_lossy(kept).into_owned(), cut)
+/// Bytes read from a pipe at a time.
+const PIPE_CHUNK: usize = 64 * 1024;
+
+/// A9: what a program on this PC prints, streamed through BX-02's [`OutputCollector`] as the SSH exec
+/// path does: each stream keeps its first and last `max / 2` bytes and is hashed whole, and what lies
+/// between is dropped and counted, never buffered. Both pipes are read at once, so neither fills up.
+async fn stream_output(
+    mut stdout: impl AsyncRead + Unpin,
+    mut stderr: impl AsyncRead + Unpin,
+    max: usize,
+) -> std::io::Result<CollectedOutput> {
+    let mut collector = OutputCollector::new(&[], max);
+    let (mut out_buf, mut err_buf) = (vec![0u8; PIPE_CHUNK], vec![0u8; PIPE_CHUNK]);
+    let (mut out_open, mut err_open) = (true, true);
+    while out_open || err_open {
+        tokio::select! {
+            read = stdout.read(&mut out_buf), if out_open => match read? {
+                0 => out_open = false,
+                n => collector.stdout(&out_buf[..n]),
+            },
+            read = stderr.read(&mut err_buf), if err_open => match read? {
+                0 => err_open = false,
+                n => collector.stderr(&err_buf[..n]),
+            },
+        }
+    }
+    Ok(collector.finish())
 }
 
 #[async_trait]
@@ -140,14 +164,9 @@ impl Cli for LocalCli {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let output = match tokio::time::timeout(timeout, cmd.output()).await {
-            Err(_) => {
-                return Err(CoreError::Timeout {
-                    command: format!("docker {}", args.first().map_or("", String::as_str)),
-                    seconds: timeout.as_secs(),
-                })
-            }
-            Ok(Err(err)) if err.kind() == std::io::ErrorKind::NotFound => {
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Err(CoreError::Container {
                     problem: ContainerProblem::CliMissing,
                     message: format!(
@@ -156,15 +175,30 @@ impl Cli for LocalCli {
                     ),
                 })
             }
-            Ok(other) => other?,
+            Err(err) => return Err(err.into()),
         };
-        let (stdout, cut_out) = capped(&output.stdout, max_output);
-        let (stderr, cut_err) = capped(&output.stderr, max_output);
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            return Err(CoreError::Io(std::io::Error::other(
+                "docker.exe's output could not be read",
+            )));
+        };
+        let run = async {
+            let output = stream_output(stdout, stderr, max_output).await?;
+            let status = child.wait().await?;
+            Ok::<_, std::io::Error>((status, output))
+        };
+        // On a timeout the child is dropped, which kills it (`kill_on_drop`).
+        let (status, output) = tokio::time::timeout(timeout, run)
+            .await
+            .map_err(|_| CoreError::Timeout {
+                command: format!("docker {}", args.first().map_or("", String::as_str)),
+                seconds: timeout.as_secs(),
+            })??;
         Ok(CliOutput {
-            status: output.status.code().map(i64::from),
-            stdout,
-            stderr,
-            truncated: cut_out || cut_err,
+            status: status.code().map(i64::from),
+            truncated: output.truncated,
+            stdout: output.stdout,
+            stderr: output.stderr,
         })
     }
 
@@ -758,6 +792,22 @@ mod tests {
         assert!(validate_docker_path(&docker).is_ok());
         assert_eq!(locate_docker(Some(&docker)), Some(docker.clone()));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_on_this_pc_is_capped_as_it_streams_not_buffered() {
+        // 2 MB on stdout with an 8 KB cap: its first and last 4 KB are kept, the rest only counted.
+        let stdout = tokio::io::repeat(b'x').take(2 * 1024 * 1024);
+        let stderr: &[u8] = b"WARNING: no swap limit support\n";
+        let out = stream_output(stdout, stderr, 8 * 1024).await.unwrap();
+        assert!(out.truncated);
+        assert_eq!(out.stdout_bytes, 2 * 1024 * 1024);
+        assert!(out.stdout.len() < 9 * 1024, "{} bytes kept", out.stdout.len());
+        assert!(out.stdout.contains("Remotely cut"), "the cut is marked");
+        assert_eq!(out.stderr, "WARNING: no swap limit support\n");
+
+        let short = stream_output(&b"[]\n"[..], &b""[..], 8 * 1024).await.unwrap();
+        assert_eq!((short.stdout.as_str(), short.truncated), ("[]\n", false));
     }
 
     #[test]

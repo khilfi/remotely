@@ -84,8 +84,9 @@ crates/core/          remotely-core: all app logic
                       host_key (BulkVerifier; migration 0018), listed at job_finished
     adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
-                      Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec, every path
-                      through the SS-07 jump host chain over
+                      Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec, A9 at most
+                      16 login banners and 64 KB per connection, then one note; every path through the SS-07 jump host
+                      chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
                       terminal's own connection, behind the RemoteFiles trait (H8: a replace writes a hidden temp
                       file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; A9
@@ -96,12 +97,16 @@ crates/core/          remotely-core: all app logic
                       VBoxHeadless.exe; MO-15 `paging()`), paging.rs (MO-15 this PC's paging files and commit charge:
                       GlobalMemoryStatusEx and NtQuerySystemInformation's page file list), vm_hardware.rs (MO-13 a VM's
                       hardware from its .vmx or showvminfo; VMDK descriptor and sparse header, VDI, VHD and qcow2
-                      headers for provisioned sizes; size on disk down a snapshot chain), updater.rs, github.rs (FD-14
+                      headers for provisioned sizes; size on disk down a snapshot chain; A3 a disk, extent or parent
+                      whose resolved path is on a share or a device path is never opened, so a .vmx kept on a share
+                      shows its disks as not read; A9 the .vmx up to 4 MB, a text descriptor up to 1 MB, read whole or
+                      refused; VmFiles: LocalFiles, or memory in tests), updater.rs, github.rs (FD-14
                       GitHub Releases API with the
                       update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
                       the docker and podman CLIs over a kept SSH connection's exec channels, with sudo from the vault
-                      (ExecSession::run_sudo) or NOPASSWD, and docker.exe on this PC, found like vmrun; parse.rs both
+                      (ExecSession::run_sudo) or NOPASSWD, and docker.exe on this PC, found like vmrun, its output
+                      streamed through exec_output's OutputCollector (A9: capped, never buffered whole); parse.rs both
                       CLIs' JSON field by field (env values never leave it); names.rs checked ids, volume names and
                       image references, every word shell-quoted on hosts)
     containers/       CT-01, CT-02 container hosts: marks.rs (sessions marked Docker or Podman, how each runs: as the
@@ -123,7 +128,13 @@ crates/core/          remotely-core: all app logic
     snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
                       names
     impact.rs         AP-02 impact preview for the approval dialog
-    export.rs         AP-05 audit log CSV export and secret redaction
+    export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
+                      Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
+                      formula (=, +, -, @, their full-width forms, tab or CR, also after leading whitespace), quoted
+                      for `,` `"` `;` tab and line breaks
+    untrusted.rs      A3, A8, A9 hostile input: path_refusal (shares `\\x` `//x`, `\\?\` `\\.\` `\??\`, DOS device
+                      names; by text alone, never the file system), read_capped (a file whole up to a cap, or
+                      TooLarge; MAX_VM_CONFIG_BYTES 4 MB), is_format_char (Unicode 16.0's Cf table), is_device_name
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
                       and this PC's RAM and paging files per round), guest.rs (MO-02 SSH polling, kept connections,
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
@@ -172,7 +183,9 @@ crates/core/          remotely-core: all app logic
                       RemoteFiles::user) and who the shell may run as (the hook's report, a prompt that stopped
                       reporting after su or sudo -i, a prompt naming a user); files.rs SS-08 the "Files here" listing
                       (QL-09: a folder that can't be opened comes back with its path and the reason; typed paths go on
-                      from the folder shown; Back through the folders that opened), downloads (audited reads), the
+                      from the folder shown; Back through the folders that opened), downloads (audited reads; A8 Cf
+                      characters such as U+202E in a name become `_`, and each file gets a Mark of the Web, its
+                      `Zone.Identifier` stream with ZoneId=3 and no host, or a note when its drive has no streams), the
                       upload job's work (Command::FileUpload on the bus), the transfers list with cancel and retry, and
                       FileTransfers (Core.files: staged files, uploads, retries);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
@@ -205,7 +218,10 @@ crates/core/          remotely-core: all app logic
                       format version), preview with conflicts (skip, replace, keep both), commit; audited
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
-                      ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample)
+                      ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
+                      Include on a share or a device path is never opened (a note or warning; the key or include left
+                      out); A9 the source up to 10 MB, included files 1 MB each and 4 MB and 256 files in all
+                      (openssh.rs IncludeFiles: DiskIncludes, or memory in tests)
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18
@@ -363,6 +379,10 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
+- Never let a `\\server\share`, `//server/share`, `\\?\` or `\\.\` path reach the real file system in a test, not
+  even a made-up one (Windows would send the sign-in to it). Tests of refused paths (A3) go through in-memory fakes
+  that fail when asked for one (`import::openssh::IncludeFiles`, `adapters::vm_hardware::VmFiles`) or an injected
+  check (`import::importer::key_file`); an end-to-end test may use a DOS device name such as `NUL` instead.
 - Tests against real Workstation or VirtualBox are opt-in: they run only when `REMOTELY_IT=1` is set, read only, and only touch VMs whose display name starts with `it-`.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, and runs exec requests in a toy

@@ -445,6 +445,20 @@ async fn downloads_are_audited_and_never_overwrite_a_file_here() {
     assert_eq!(std::fs::read(&saved).unwrap(), body);
     assert_eq!(std::fs::read(dest.join("report.pdf")).unwrap(), b"mine");
     assert_eq!(t.core.files.saved_at(done.id), Some(saved.clone()));
+    // A8: marked as from the internet, as a browser marks a download, with no host name in the mark.
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            zone_identifier(&saved).as_deref(),
+            Some("[ZoneTransfer]\r\nZoneId=3\r\n")
+        );
+        assert_eq!(done.message, None, "marked, so nothing to say");
+        assert_eq!(
+            zone_identifier(&dest.join("report.pdf")),
+            None,
+            "the file that was here is left alone"
+        );
+    }
 
     let entries = audit(&t.core).await;
     let entry = entries.iter().find(|e| e.event == "file_downloaded").expect("audited");
@@ -477,6 +491,48 @@ async fn downloads_are_audited_and_never_overwrite_a_file_here() {
     };
     let again = t.wait_transfer(transfers[0].id).await;
     assert_eq!(PathBuf::from(again.local_path.unwrap()), dest.join("report (2).pdf"));
+    std::fs::remove_dir_all(&dest).unwrap();
+}
+
+/// A8: the Mark of the Web a download got: its `Zone.Identifier` stream, if any.
+#[cfg(windows)]
+fn zone_identifier(path: &Path) -> Option<String> {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    std::fs::read_to_string(PathBuf::from(stream)).ok()
+}
+
+#[tokio::test]
+async fn a_name_that_hides_its_real_extension_is_saved_plainly_and_marked() {
+    // U+202E RIGHT-TO-LEFT OVERRIDE shows this as "invoiceexe.pdf"; a zero-width space and a BOM
+    // hide in the other.
+    let files = FakeFiles::default()
+        .with_file("/home/alice/invoice\u{202E}fdp.exe", b"MZ")
+        .with_file("/home/alice/notes\u{200B}\u{FEFF}.txt", b"hi");
+    let (t, terminal) = fake(files, Environment::Lab).await;
+    let dest = temp_folder("download-names");
+    let queued = t
+        .core
+        .terminals
+        .download(
+            &t.core.ctx,
+            terminal,
+            &["invoice\u{202E}fdp.exe".into(), "notes\u{200B}\u{FEFF}.txt".into()],
+            &dest,
+        )
+        .await
+        .unwrap();
+    let first = t.wait_transfer(queued[0].id).await;
+    let second = t.wait_transfer(queued[1].id).await;
+    assert_eq!(first.state, TransferState::Done);
+    assert_eq!(PathBuf::from(first.local_path.unwrap()), dest.join("invoice_fdp.exe"));
+    assert_eq!(PathBuf::from(second.local_path.unwrap()), dest.join("notes__.txt"));
+    assert_eq!(std::fs::read(dest.join("invoice_fdp.exe")).unwrap(), b"MZ");
+    #[cfg(windows)]
+    assert_eq!(
+        zone_identifier(&dest.join("invoice_fdp.exe")).as_deref(),
+        Some("[ZoneTransfer]\r\nZoneId=3\r\n")
+    );
     std::fs::remove_dir_all(&dest).unwrap();
 }
 
