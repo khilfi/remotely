@@ -22,6 +22,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
+  CalendarClockIcon,
   CameraIcon,
   FilePlusIcon,
   DownloadIcon,
@@ -110,6 +111,7 @@ import { ActivityPage } from "@/pages/ActivityPage";
 import { ContainersPage, type ContainerShellRequest } from "@/pages/ContainersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
+import { SchedulesPage, type SchedulesRequest } from "@/pages/SchedulesPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
@@ -128,10 +130,12 @@ import {
   type SettingsChange,
 } from "@/lib/job-events";
 import type { VmView } from "@/lib/vm-snapshots";
+import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 
 type PageId =
   | "vms"
   | "templates"
+  | "schedules"
   | "dashboard"
   | "containers"
   | "sessions"
@@ -145,6 +149,8 @@ type PageId =
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "templates", label: "Templates", title: "VM templates", icon: LayersIcon, shortcut: "Ctrl+9" },
+  // VM-14, VM-27: no Ctrl+digit is left; the palette opens it.
+  { id: "schedules", label: "Schedules", title: "Schedules", icon: CalendarClockIcon, shortcut: "" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
   { id: "containers", label: "Containers", title: "Containers", icon: ContainerIcon, shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
@@ -158,6 +164,7 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 // P6: memoised pages. Each one renders again only when its own props change; App passes them stable callbacks.
 const Vms = memo(VmsPage);
 const Templates = memo(TemplatesPage);
+const Schedules = memo(SchedulesPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
 const Sessions = memo(SessionsPage);
@@ -204,6 +211,8 @@ export default function App() {
   const [templatesRequest, setTemplatesRequest] = useState<{ tab: TemplatesTab; create?: boolean; n: number } | null>(
     null,
   );
+  // VM-14, VM-27: a new schedule (for some VMs) or one schedule's runs, asked from a VM's tab or the palette.
+  const [schedulesRequest, setSchedulesRequest] = useState<SchedulesRequest | null>(null);
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
   const [terminalOpen, setTerminalOpen] = useState<{
     sessionId: string;
@@ -244,6 +253,12 @@ export default function App() {
   const openVms = useCallback((vmxPaths: string[], view: VmView, rename?: boolean) => {
     setVmRequest((prev) => ({ vmxPaths, view, rename, n: (prev?.n ?? 0) + 1 }));
     setPage("vms");
+  }, []);
+
+  /** VM-14, VM-27: the Schedules page, with a new schedule or one schedule's runs open. */
+  const openSchedules = useCallback((ask: ScheduleAsk) => {
+    setSchedulesRequest((prev) => ({ ...ask, n: (prev?.n ?? 0) + 1 }));
+    setPage("schedules");
   }, []);
 
   /** A page, or a page from before 0.4.0 that is now part of another (Snapshots). */
@@ -576,6 +591,21 @@ export default function App() {
       },
     },
     {
+      // VM-14, VM-27.
+      id: "new-schedule",
+      label: "New schedule (snapshots, power, auto-suspend)…",
+      icon: CalendarClockIcon,
+      keywords: "schedule timetable nightly snapshot keep retention start stop suspend resume idle cron daily weekly",
+      run: () => openSchedules({ create: true }),
+    },
+    {
+      id: "schedules",
+      label: "Schedules: next runs, history, approvals",
+      icon: CalendarClockIcon,
+      keywords: "schedule timetable missed runs paused approval",
+      run: () => setPage("schedules"),
+    },
+    {
       id: "watch",
       label: "Watch hosts on the dashboard",
       icon: GaugeIcon,
@@ -744,8 +774,8 @@ export default function App() {
                     <SidebarMenuItem key={p.id}>
                       <SidebarMenuButton
                         isActive={page === p.id}
-                        tooltip={`${p.label} (${p.shortcut})`}
-                        aria-keyshortcuts={p.shortcut.replace("Ctrl", "Control")}
+                        tooltip={p.shortcut ? `${p.label} (${p.shortcut})` : p.label}
+                        aria-keyshortcuts={p.shortcut ? p.shortcut.replace("Ctrl", "Control") : undefined}
                         onClick={() => setPage(p.id)}
                       >
                         <p.icon />
@@ -864,12 +894,23 @@ export default function App() {
                   onActions={openPalette}
                   request={vmRequest}
                   refreshKey={vmJobs + vmSettings + inventoryVersion}
+                  onSchedules={openSchedules}
                 />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "templates"}>
               <ErrorBoundary name="Templates">
                 <Templates active={page === "templates"} request={templatesRequest} />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "schedules"}>
+              <ErrorBoundary name="Schedules">
+                <Schedules
+                  active={page === "schedules"}
+                  vault={vault}
+                  onOpenVault={show.vault}
+                  request={schedulesRequest}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "dashboard"}>

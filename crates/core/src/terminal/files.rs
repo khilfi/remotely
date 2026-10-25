@@ -1057,8 +1057,13 @@ pub enum UploadStart {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Retried {
-    Upload { start: UploadStart },
-    Download { transfers: Vec<TransferInfo> },
+    /// Boxed: an upload's start holds a whole approval request.
+    Upload {
+        start: Box<UploadStart>,
+    },
+    Download {
+        transfers: Vec<TransferInfo>,
+    },
 }
 
 /// SS-08: the bus-facing side of file transfers (`Core.files`): files staged for upload, uploads
@@ -1226,7 +1231,7 @@ impl FileTransfers {
                     replace: !there.is_empty(),
                 };
                 let start = self.submit(info.terminal_id, &folder, vec![file]).await?;
-                Ok(Retried::Upload { start })
+                Ok(Retried::Upload { start: Box::new(start) })
             }
             Again::Download { dest } => {
                 let transfers = self

@@ -1350,7 +1350,8 @@ impl Schedules {
                 report.skipped += 1;
                 continue;
             }
-            if let Some(going) = locks::lock(&self.inner.running).get(&row.id).copied() {
+            let going = locks::lock(&self.inner.running).get(&row.id).copied();
+            if let Some(going) = going {
                 let detail = format!("Not run: the last run (run {}) was still going.", short(going));
                 self.record_unrun(&row, due, RunOutcome::Skipped, &detail, &targets)
                     .await?;
@@ -1896,10 +1897,8 @@ impl Schedules {
         if let Some(keep) = keep {
             let (deleted, kept_renamed, errors) = self.retain(row, run_id, due, keep, &taken, jobs).await;
             if deleted > 0 {
-                parts.push(format!(
-                    "deleted {} older (keeping the last {keep})",
-                    plural(deleted, "snapshot")
-                ));
+                let what = if deleted == 1 { "snapshot" } else { "snapshots" };
+                parts.push(format!("deleted {deleted} older {what} (keeping the last {keep})"));
             }
             if kept_renamed > 0 {
                 parts.push(format!(
