@@ -47,7 +47,7 @@ export function betweenText(step: Pick<StackStep, "readiness" | "readyTimeoutSec
   if (step.readiness.kind !== "none") {
     parts.push(`waits up to ${secondsText(step.readyTimeoutSecs)} for ${readinessText(step.readiness)}`);
   }
-  if (step.delaySecs > 0) parts.push(`then ${secondsText(step.delaySecs)}`);
+  if (step.delaySecs > 0) parts.push(`${parts.length ? "then " : ""}waits ${secondsText(step.delaySecs)}`);
   return parts.join(", ");
 }
 
@@ -212,11 +212,11 @@ export function cpuLine(capacity: DeployCapacity): string {
   return `${plural(capacity.cpu.afterVcpus, "vCPU")} on ${cpus} logical CPUs after (${capacity.cpu.runningVcpus} now)`;
 }
 
-/** VM-26: a drive's line: "D: 80 GB of 500 GB free taken at most (420 GB left)". */
+/** VM-26: a drive's line beside its name: "up to 80 GB of 500 GB free (420 GB left)". */
 export function driveLine(drive: DeployCapacity["drives"][number]): string {
-  if (drive.freeBytes === null) return `${drive.drive}: up to ${bytesText(drive.addsBytes)} (free space unknown)`;
+  if (drive.freeBytes === null) return `up to ${bytesText(drive.addsBytes)} (free space unknown)`;
   const left = drive.freeAfterBytes ?? 0;
-  return `${drive.drive}: up to ${bytesText(drive.addsBytes)} of ${bytesText(drive.freeBytes)} free (${bytesText(left)} left)`;
+  return `up to ${bytesText(drive.addsBytes)} of ${bytesText(drive.freeBytes)} free (${bytesText(left)} left)`;
 }
 
 /** VM-26: the suspend suggestion's VMs as power targets. */

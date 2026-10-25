@@ -381,8 +381,8 @@ export function ApprovalDialog({
             <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
               <InfoIcon className="mt-px size-3.5 shrink-0" aria-hidden />
               <span>
-                Up for is how long each VM has run since it was last powered on or resumed. Not shown yet: users logged
-                in to each guest (that needs a guest login) and VMs that depend on these (that needs lab blueprints).
+                Up for is how long each VM has run since it was last powered on or resumed; a VM in a stack instance
+                says which one and its step. Not shown yet: users logged in to each guest (that needs a guest login).
               </span>
             </p>
           )}

@@ -35,7 +35,7 @@ test("readiness and waits read in words", () => {
   assert.equal(secondsText(3600), "1 h");
   assert.equal(
     betweenText({ readiness: { kind: "tools" }, readyTimeoutSecs: 300, delaySecs: 30 }),
-    "waits up to 5 min for the guest tools running, then 30 s",
+    "waits up to 5 min for the guest tools running, then waits 30 s",
   );
   assert.equal(betweenText({ readiness: { kind: "none" }, readyTimeoutSecs: 300, delaySecs: 0 }), "");
   assert.equal(
@@ -174,7 +174,7 @@ test("the capacity plan reads in lines and its suspend suggestion is a power tar
   const c = capacity();
   assert.equal(ramLine(c), "20.0 GB of 32.0 GB after (12.0 GB now)");
   assert.equal(cpuLine(c), "8 vCPUs on 16 logical CPUs after (4 now)");
-  assert.equal(driveLine(c.drives[0]), "D:: up to 80 GB of 500 GB free (420 GB left)");
+  assert.equal(driveLine(c.drives[0]), "up to 80 GB of 500 GB free (420 GB left)");
   assert.deepEqual(suspendTargets(c), []);
   const tight = capacity({
     fits: false,

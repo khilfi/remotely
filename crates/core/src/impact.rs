@@ -6,8 +6,8 @@
 //! suspended VM from one that is off), the first line of the VM's `vmware.log` for how long it has
 //! been running, and its .vmsd for the snapshot count. A VirtualBox VM (VM-18) answers all three
 //! through `showvminfo` (its state, when that state began, its snapshots) and its .vbox file (snapshot
-//! times). Users logged in to the guest need a guest login, and dependent VMs need lab blueprints
-//! (VM-08, v2); neither is shown yet.
+//! times). VM-08: a VM in a stack instance says which one and its step ([`StackMembership`]), so the dialog
+//! shows a stack's VMs as a group. Users logged in to the guest need a guest login; they are not shown yet.
 
 use std::path::Path;
 
