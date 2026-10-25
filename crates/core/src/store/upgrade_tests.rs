@@ -441,3 +441,151 @@ async fn an_upgrade_from_0_4_2_backfills_the_command_types_and_redacts_old_scrip
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }
+
+/// VM-11 (R4): migration 0024 rebuilds `job_targets` once more for the target kind 'network'. A database at 0023
+/// holding a deploy's 'new_vm' row (R2) keeps it, with every column 0023 has, and both kinds go in afterwards.
+#[tokio::test]
+async fn an_upgrade_from_0023_keeps_new_vm_targets_through_the_network_rebuild() {
+    let path = std::env::temp_dir().join(format!("remotely-upgrade-{}.db", Uuid::new_v4()));
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!("./migrations").run_to(23, &pool).await.unwrap();
+
+    let (user, workspace) = (Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+    let at = "2026-10-20T10:00:00Z";
+    sqlx::query("INSERT INTO users (id, account, display_name, created_at) VALUES (?, ?, 'Alice', ?)")
+        .bind(&user)
+        .bind(r"LAB\alice")
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO workspaces (id, user_id, name, created_at) VALUES (?, ?, 'Default', ?)")
+        .bind(&workspace)
+        .bind(&user)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deploy = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO jobs (id, workspace_id, user_id, summary, action, tier, command_json, approval_json, status,
+                           retry_of, created_at, started_at, finished_at, command_type)
+         VALUES (?, ?, ?, 'Deploy 2 VMs from web', 'deploy', 'medium', '{\"type\":\"deploy\"}', NULL,
+                 'partially_failed', NULL, ?, ?, ?, 'deploy')",
+    )
+    .bind(deploy.to_string())
+    .bind(&workspace)
+    .bind(&user)
+    .bind(at)
+    .bind(at)
+    .bind(at)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Every column 0023's table has, none left NULL on the first row.
+    for (key, name, status, error) in [
+        ("new-vm/vmware/web-1", "web-1", "succeeded", None),
+        ("new-vm/virtualbox/web-2", "web-2", "failed", Some("ovftool failed")),
+    ] {
+        sqlx::query(
+            "INSERT INTO job_targets (job_id, workspace_id, user_id, target_kind, target_key, target_name, status,
+                                      exit_code, output, error, started_at, finished_at, duration_ms, safety_snapshot,
+                                      stderr, stdout_bytes, stderr_bytes, output_truncated, output_hash,
+                                      output_hash_loose, error_code, peer_ip, host_key)
+             VALUES (?, ?, ?, 'new_vm', ?, ?, ?, 0, 'made', ?, ?, ?, 4321, 'before', 'warn', 4, 4, 1, 'h1', 'h2',
+                     ?, '192.0.2.10', 'ssh-ed25519 SHA256:abc')",
+        )
+        .bind(deploy.to_string())
+        .bind(&workspace)
+        .bind(&user)
+        .bind(key)
+        .bind(name)
+        .bind(status)
+        .bind(error)
+        .bind(at)
+        .bind(at)
+        .bind(error.map(|_| "deploy_failed"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    pool.close().await;
+
+    let store = Store::open(&path).await.unwrap();
+    let ctx = store.ensure_identity(r"LAB\alice", "Alice").await.unwrap();
+    let targets = store.job_targets(&ctx, deploy).await.unwrap();
+    assert_eq!(targets.len(), 2, "both new VMs kept");
+    let web = targets.iter().find(|t| t.target_name == "web-1").unwrap();
+    assert_eq!(
+        (web.target_kind.as_str(), web.target_key.as_str(), web.status.as_str()),
+        ("new_vm", "new-vm/vmware/web-1", "succeeded")
+    );
+    assert_eq!((web.exit_code, web.duration_ms), (Some(0), Some(4321)));
+    assert_eq!(web.output.as_deref(), Some("made"));
+    assert_eq!(web.started_at.as_deref(), Some(at));
+    assert_eq!(web.finished_at.as_deref(), Some(at));
+    assert_eq!(web.safety_snapshot.as_deref(), Some("before"));
+    assert_eq!(web.stderr.as_deref(), Some("warn"));
+    assert_eq!((web.stdout_bytes, web.stderr_bytes), (Some(4), Some(4)));
+    assert!(web.output_truncated);
+    assert_eq!(web.output_hash.as_deref(), Some("h1"));
+    assert_eq!(web.output_hash_loose.as_deref(), Some("h2"));
+    assert_eq!(web.peer_ip.as_deref(), Some("192.0.2.10"));
+    assert_eq!(web.host_key.as_deref(), Some("ssh-ed25519 SHA256:abc"));
+    let failed = targets.iter().find(|t| t.target_name == "web-2").unwrap();
+    assert_eq!(failed.error.as_deref(), Some("ovftool failed"));
+    assert_eq!(failed.error_code.as_deref(), Some("deploy_failed"));
+
+    let pool = store.pool();
+    let problems = sqlx::query("PRAGMA foreign_key_check").fetch_all(pool).await.unwrap();
+    assert!(problems.is_empty(), "{} foreign key problems", problems.len());
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    let index: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'job_targets_by_key'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(index, 1, "the Timeline's index");
+    // Both kinds go in after 0024; deleting the job still takes its targets with it.
+    for (kind, key) in [("new_vm", "new-vm/vmware/web-3"), ("network", "vmware:vmnet8")] {
+        sqlx::query(
+            "INSERT INTO job_targets (job_id, workspace_id, user_id, target_kind, target_key, target_name, status)
+             VALUES (?, ?, ?, ?, ?, 'new', 'pending')",
+        )
+        .bind(deploy.to_string())
+        .bind(&workspace)
+        .bind(&user)
+        .bind(kind)
+        .bind(key)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("DELETE FROM jobs WHERE id = ?")
+        .bind(deploy.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM job_targets")
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0, "the deleted job's targets went with it");
+    store.close().await;
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}

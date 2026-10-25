@@ -3,15 +3,16 @@
 -- A NAT port forward's change goes through the command bus with the network as its target (a Workstation vmnet
 -- or a VirtualBox NAT network), so job_targets takes the target kind 'network'. SQLite can't change a CHECK
 -- constraint in place, so the table is rebuilt with the same columns, in the same order, and its rows, as 0010,
--- 0013 and 0018 did. Nothing else changes: the Log and Timeline tabs read the VM's own files, the audit log and
--- the job journal, and the waste finder reads the inventory, the VMs' files and the dashboard's history.
+-- 0013, 0018 and 0023 did, keeping every kind they allow (0023's 'new_vm' included). Nothing else changes: the Log
+-- and Timeline tabs read the VM's own files, the audit log and the job journal, and the waste finder reads the
+-- inventory, the VMs' files and the dashboard's history.
 
 CREATE TABLE job_targets_new (
     job_id            TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     workspace_id      TEXT NOT NULL REFERENCES workspaces(id),
     user_id           TEXT NOT NULL REFERENCES users(id),
     target_kind       TEXT NOT NULL CHECK (target_kind IN ('vm', 'session', 'app', 'terminal', 'container',
-                                                           'network')),
+                                                           'new_vm', 'network')),
     target_key        TEXT NOT NULL,
     target_name       TEXT NOT NULL,
     status            TEXT NOT NULL CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'skipped',
