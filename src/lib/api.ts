@@ -1806,6 +1806,8 @@ export interface DeployRequest {
   namingPattern?: string | null;
   /** VirtualBox's host-only or bridged adapter; null: the first. */
   hostAdapter?: string | null;
+  /** VirtualBox, an ISO it installs by itself: the vault password its guest user gets; null: install from the console. */
+  guestPasswordId?: string | null;
 }
 
 /** VM-10: one full clone of each picked VM. */

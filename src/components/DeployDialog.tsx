@@ -33,6 +33,7 @@ import {
   type Image,
   type LaunchTemplate,
   type OsProfile,
+  type SecretMeta,
   type Size,
   type SshKey,
   type SubmitOutcome,
@@ -138,6 +139,8 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
   const [pattern, setPattern] = useState("");
   const [adapters, setAdapters] = useState<string[]>([]);
   const [adapter, setAdapter] = useState<string | null>(null);
+  const [passwords, setPasswords] = useState<SecretMeta[]>([]);
+  const [guestPassword, setGuestPassword] = useState<string | null>(null);
   const [check, setCheck] = useState<{ key: string; check: DeployCheck } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -165,6 +168,10 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
       (k) => !stopped && setKeys(k),
       () => {},
     );
+    api.secrets().then(
+      (list) => !stopped && setPasswords(list.filter((x) => x.kind === "password")),
+      () => {},
+    );
     return () => {
       stopped = true;
     };
@@ -189,6 +196,9 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
   const hypervisor = mode === "template" ? template?.hypervisor : customInput?.hypervisor;
   const network = mode === "template" ? template?.network : customInput?.network;
   const needsAdapter = hypervisor === "virtualbox" && (network?.kind === "hostOnly" || network?.kind === "bridged");
+  // VM-21: VirtualBox installs some ISOs by itself, with a vault password for the guest user.
+  const imageId = mode === "template" ? template?.imageId : customInput?.imageId;
+  const isoOnVirtualBox = hypervisor === "virtualbox" && images.find((i) => i.id === imageId)?.source.kind === "iso";
   const bridged = network?.kind === "bridged";
 
   // VirtualBox's host-only or bridged adapters, when the network needs one.
@@ -218,6 +228,7 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
               count,
               namingPattern: pattern.trim() && pattern.trim() !== template.namingPattern ? pattern.trim() : null,
               hostAdapter: needsAdapter ? adapter : null,
+              guestPasswordId: isoOnVirtualBox ? guestPassword : null,
             }
           : null
         : customInput && customInput.imageId
@@ -225,6 +236,7 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
               from: { kind: "custom", input: customInput },
               count,
               hostAdapter: needsAdapter ? adapter : null,
+              guestPasswordId: isoOnVirtualBox ? guestPassword : null,
             }
           : null;
   const requestKey = JSON.stringify(request);
@@ -381,6 +393,32 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
               )
             )}
 
+            {isoOnVirtualBox && (
+              <div className="grid max-w-md gap-2">
+                <Label htmlFor="deploy-guest-password">Install by itself</Label>
+                <Select
+                  value={guestPassword ?? "none"}
+                  onValueChange={(v) => setGuestPassword(v === "none" ? null : v)}
+                >
+                  <SelectTrigger id="deploy-guest-password" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">No: install it from the console</SelectItem>
+                    {passwords.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        Yes, with the vault password {p.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  VirtualBox installs the ISOs it knows unattended, as the template&apos;s guest user with this
+                  password. It reads it from a file only you can read, which Remotely deletes at once; approving asks
+                  for the vault password.
+                </p>
+              </div>
+            )}
             {needsAdapter && (
               <div className="grid max-w-md gap-2">
                 <Label htmlFor="deploy-adapter">{bridged ? "Bridge to" : "Host-only network"}</Label>
