@@ -84,6 +84,8 @@ interface Props {
   onConnect: (sessionId: string) => void;
   /** True while the page is shown, so the lists are read again when the user comes back. */
   active: boolean;
+  /** R10: a session to show (a search result, a map node): the filters cleared, its row scrolled to and lit. */
+  focus?: { sessionId: string; n: number } | null;
 }
 
 type DialogState =
@@ -113,7 +115,7 @@ function FromFolderNote({ name }: { name: string }) {
   return <div className="text-xs text-muted-foreground">from folder &apos;{name}&apos;</div>;
 }
 
-export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, active }: Props) {
+export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, active, focus = null }: Props) {
   const [all, setAll] = useState<SessionRecord[]>([]);
   const [shown, setShown] = useState<SessionRecord[]>([]);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
@@ -129,6 +131,24 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
   /** MO-13, MO-14: a session's host details. */
   const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
   const [thresholds] = useThresholds();
+  // R10: the session a link asked for, lit until it has been seen.
+  const [lit, setLit] = useState<string | null>(null);
+  const [focusHandled, setFocusHandled] = useState(focus?.n ?? 0);
+  if (focus && focus.n !== focusHandled) {
+    setFocusHandled(focus.n);
+    setFolderId(null);
+    setText("");
+    setEnvironments([]);
+    setTagFilter([]);
+    setLit(focus.sessionId);
+  }
+  const litShown = lit !== null && shown.some((s) => s.id === lit);
+  useEffect(() => {
+    if (!litShown || !lit) return;
+    document.getElementById(`session-row-${lit}`)?.scrollIntoView({ block: "center" });
+    const timer = window.setTimeout(() => setLit(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [litShown, lit]);
 
   const reload = useCallback(() => setVersion((v) => v + 1), []);
   /** SS-07: the whole way in, for the Via column's tooltip. */
@@ -482,7 +502,12 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                 {shown.map((s) => (
                   <TableRow
                     key={s.id}
-                    className={cn("select-none", s.environment === "prod" && "bg-env-prod/5")}
+                    id={`session-row-${s.id}`}
+                    className={cn(
+                      "select-none",
+                      s.environment === "prod" && "bg-env-prod/5",
+                      lit === s.id && "bg-accent ring-2 ring-ring ring-inset",
+                    )}
                     onDoubleClick={() => connect(s)}
                   >
                     <TableCell className="whitespace-normal">

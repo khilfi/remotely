@@ -1,11 +1,13 @@
 //! 0.5.0 navigation (R10): QL-25 the notification centre's history (in the core's memory: the UI adds what
 //! it notified, the core redacts and keeps it) and QL-21 the topology map's read of each VM's networks. Reads and
-//! the notification list's own state: nothing here goes through the bus, and none of it is audited.
+//! the notification list's own state, and QL-23 the first-run wizard's folder dialog: nothing here goes through the bus,
+//! and none of it is audited (the settings the wizard saves go through Settings' own commands).
 
 use remotely_core::host_details::networks::VmNetworks;
 use remotely_core::notifications::{Notification, NotificationInput, NotificationList};
 use remotely_core::CoreError;
-use tauri::State;
+use tauri::{Manager, State, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 
 use crate::ipc::IpcError;
 use crate::AppState;
@@ -58,4 +60,29 @@ pub fn notifications_clear(state: State<'_, AppState>, ids: Option<Vec<u64>>) ->
 pub async fn topology_vm_networks(state: State<'_, AppState>, fresh: bool) -> IpcResult<Vec<VmNetworks>> {
     let core = &state.core;
     Ok(core.host_details.vm_networks(&core.ctx, fresh).await?)
+}
+
+/// QL-23: the first-run wizard's folder dialog, for a folder that holds VMs. Only picks it: adding it to the
+/// scanned folders is `settings_set_scan_folders`, as in Settings. `None` when the dialog was closed.
+#[tauri::command]
+pub async fn vm_folder_pick(window: WebviewWindow) -> IpcResult<Option<String>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Choose a folder that holds VMs");
+    if let Ok(documents) = window.path().document_dir() {
+        dialog = dialog.set_directory(documents);
+    }
+    dialog.pick_folder(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't use that folder: {err}")))?;
+    Ok(Some(path.display().to_string()))
 }
