@@ -7,6 +7,7 @@
 
 mod common;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use common::{vm, vmx, wait_finished, Setup, VAULT_PASSWORD};
@@ -265,6 +266,67 @@ async fn retention_never_deletes_a_snapshot_its_schedule_did_not_take_even_with_
     assert!(names.contains(&lookalike.to_owned()), "{names:?}");
     assert!(names.contains(&"base".to_owned()));
     assert_eq!(names.len(), 3, "base, the lookalike and the one kept: {names:?}");
+}
+
+#[tokio::test]
+async fn retention_keeps_a_snapshot_a_linked_clone_is_made_from_until_the_clone_is_gone() {
+    // VM-04, VM-21: deleting it would break the clone. The run keeps it, says why, and doesn't fail; its record stays,
+    // so a later run deletes it once the clone is gone.
+    let lab = lab(&[], datetime!(2026-06-10 10:00 UTC)).await;
+    let view = save_and_approve(
+        &lab.core,
+        input(
+            "nightly",
+            ScheduleAction::Snapshot { keep: Some(1) },
+            vms(&["web01", "db01"]),
+            daily(2, 0),
+        ),
+    )
+    .await;
+    let first = due(&view);
+    lab.clock.set(first + Duration::seconds(20));
+    tick(&lab).await;
+    let cloned = schedule_snapshots(&lab.vmware, "web01");
+    assert_eq!(cloned.len(), 1);
+    let clone = vmx("web-clone");
+    lab.vmware
+        .add_linked_clone(Path::new(&vmx("web01")), &cloned[0], Path::new(&clone));
+    lab.vmware.set_file(&clone, true);
+
+    lab.clock.set(first + Duration::days(1) + Duration::seconds(20));
+    tick(&lab).await;
+    assert_eq!(schedule_snapshots(&lab.vmware, "db01").len(), 1);
+    let web = schedule_snapshots(&lab.vmware, "web01");
+    assert_eq!(web.len(), 2, "the clone's snapshot and the new one: {web:?}");
+    assert!(web.contains(&cloned[0]));
+    let runs = lab.core.schedules.runs(view.id, 10).await.unwrap();
+    assert_eq!(runs[0].outcome, RunOutcome::Succeeded, "{runs:?}");
+    let detail = runs[0].detail.as_deref().unwrap();
+    assert!(
+        detail.contains("kept 1 older snapshot that linked clones are made from, until the clones are deleted"),
+        "{detail}"
+    );
+    assert!(detail.contains(&format!("on web01 (web-clone ({clone}))")), "{detail}");
+    assert!(
+        detail.contains("deleted 1 older snapshot (keeping the last 1)"),
+        "db01's: {detail}"
+    );
+    assert!(!lab
+        .vmware
+        .calls()
+        .iter()
+        .any(|c| c.contains("snapshot delete") && c.contains(&cloned[0]) && c.contains("web01")));
+
+    // The clone is deleted (by hand: its folder is gone): the next run deletes both of web01's older ones.
+    lab.vmware.set_file(&clone, false);
+    lab.clock.set(first + Duration::days(2) + Duration::seconds(20));
+    tick(&lab).await;
+    assert_eq!(schedule_snapshots(&lab.vmware, "web01").len(), 1);
+    let detail = lab.core.schedules.runs(view.id, 1).await.unwrap()[0]
+        .detail
+        .clone()
+        .unwrap();
+    assert!(detail.contains("deleted 3 older snapshots"), "{detail}");
 }
 
 #[tokio::test]
