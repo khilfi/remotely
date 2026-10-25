@@ -167,7 +167,15 @@ export function snippetItems(favourites: readonly Favourite[], library: readonly
     target: { open: { kind: "snippet" as const, command: f.name } },
     boost: 1,
   }));
-  const builtIn = library.map((e) => ({
+  // The library lists a command under a symptom's runbook and under its area: one result each.
+  const seen = new Set(favourites.map((f) => `${f.name}\n${f.command}`));
+  const unique = library.filter((e) => {
+    const key = `${e.name}\n${e.command}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const builtIn = unique.map((e) => ({
     id: `library:${e.id}`,
     provider: "snippets",
     title: e.name,

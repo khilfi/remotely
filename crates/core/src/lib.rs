@@ -45,6 +45,7 @@
 //!   metrics::history (MO-06): the rounds' 1-minute averages on disk, pruned daily; alerts (MO-07): rules
 //!     run on each round, an alert list and events for the UI's notifications; dashboard (MO-16): the
 //!     dashboard's layout, per workspace
+//!   notifications (QL-25): the notification centre's history, in memory and redacted
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job

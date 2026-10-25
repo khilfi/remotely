@@ -977,7 +977,7 @@ export default function App() {
             <Button
               variant="outline"
               size="sm"
-              className="ml-auto w-64 justify-start text-muted-foreground"
+              className="ml-auto min-w-64 justify-start text-muted-foreground"
               aria-keyshortcuts="Control+K"
               onClick={() => openPalette(null)}
             >

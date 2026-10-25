@@ -254,6 +254,41 @@ test("ordering by neighbours uncrosses lines", () => {
   ]);
 });
 
+test("an edge across several columns runs in a lane of its own, never behind a node", () => {
+  const nodes = [
+    { id: "a", kind: "vm" as const, label: "a", layer: 2 },
+    { id: "b", kind: "session" as const, label: "b", layer: 3 },
+    { id: "t", kind: "tunnel" as const, label: "t", layer: 4 },
+    { id: "c", kind: "session" as const, label: "c", layer: 5 },
+  ];
+  const edges = [
+    { from: "a", to: "b", kind: "reaches" as const },
+    { from: "b", to: "t", kind: "tunnel" as const },
+    { from: "a", to: "c", kind: "reaches" as const },
+  ];
+  const o = DEFAULT_LAYOUT;
+  const layout = layoutTopology(nodes, edges);
+  const long = layout.edges.find((e) => e.edge.to === "c");
+  assert.ok(long);
+  const lanes = [...long.path.matchAll(/L (\S+) (\S+)/g)].map((m) => Number(m[2]));
+  assert.equal(lanes.length, 2, "one lane in each column it crosses");
+  for (const id of ["b", "t"]) {
+    const box = layout.nodes.find((p) => p.node.id === id);
+    assert.ok(box);
+    for (const y of lanes)
+      assert.ok(y < box.y - o.gapY / 2 || y > box.y + o.nodeHeight + o.gapY / 2, `the lane at ${y} misses ${id}`);
+  }
+  assert.ok(long.path.startsWith(`M ${o.nodeWidth} `));
+});
+
+test("a listening tunnel says where it listens and where it leads", () => {
+  const tunnel = open("web", "t-1");
+  const graph = buildTopology(
+    input({ vms: [vm("web")], sessions: [session("web", { vmId: "vm-web" })], tunnels: [tunnel] }),
+  );
+  assert.equal(graph.nodes.find((n) => n.kind === "tunnel")?.sub, "127.0.0.1:5432 → db01.example.com:5432");
+});
+
 test("an edge is a curve from the right middle of one box to the left middle of the next", () => {
   const o = DEFAULT_LAYOUT;
   assert.equal(edgePath({ x: 0, y: 0 }, { x: 272, y: 66 }, o), `M 200 26 C 236 26, 236 92, 272 92`);

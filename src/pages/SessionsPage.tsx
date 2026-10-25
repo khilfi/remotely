@@ -74,6 +74,7 @@ import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
 import { useThresholds } from "@/lib/metrics";
 import { withVaultPassword } from "@/lib/reauth-prompt";
+import { reveal } from "@/lib/reveal";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -145,7 +146,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
   const litShown = lit !== null && shown.some((s) => s.id === lit);
   useEffect(() => {
     if (!litShown || !lit) return;
-    document.getElementById(`session-row-${lit}`)?.scrollIntoView({ block: "center" });
+    reveal(document.getElementById(`session-row-${lit}`));
     const timer = window.setTimeout(() => setLit(null), 2500);
     return () => window.clearTimeout(timer);
   }, [litShown, lit]);

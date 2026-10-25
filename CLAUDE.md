@@ -179,7 +179,9 @@ crates/core/          remotely-core: all app logic
                       session and VM, migration 0014), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
-                      apt or dnf; every command checked read-only by `classify_script` in tests)
+                      apt or dnf; every command checked read-only by `classify_script` in tests), networks.rs (QL-21
+                      every VM's adapters for the map from the stored hardware; only VMs never read are read, `fresh`
+                      reads all, NETWORK_READS_AT_ONCE)
     alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
@@ -187,6 +189,10 @@ crates/core/          remotely-core: all app logic
                       alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
     dashboard.rs      MO-16 the layout (`dashboard.layout`, per workspace, null is the default): widgets on 4 columns
                       and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout
+    notifications.rs  QL-25 the notification centre's history in memory (no migration; the module says why): the UI
+                      adds entries, titles and bodies through export::redact_secrets and without control or Cf
+                      characters, MAX_NOTIFICATIONS 500, per workspace, read, unread, clear, `once` keys; links are the
+                      UI's AppLink JSON, kept as given; not audited, not locked
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
                       command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
@@ -356,7 +362,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
                       (host_details.rs), MO-06, MO-07, MO-16 the dashboard's history, alerts, layout and
-                      services widget, and the alerts' Windows notification (dashboard.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
+                      services widget, and the alerts' Windows notification (dashboard.rs); R10 navigation.rs (QL-25
+                      notifications_*, QL-21 topology_vm_networks, QL-23 vm_folder_pick); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
                       startup message boxes, setting an unopenable database aside, Settings About's logs folder, UI
                       crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
                       instance (release builds), closes what a reloaded page had open (on_page_load), and turns
@@ -389,11 +396,17 @@ src/                  React + TypeScript UI
                       VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
-                      (Ctrl+Shift+G); TerminalRulesCard for QL-17)
+                      (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
+                      NotificationSources (QL-25: jobs and MO-07 alerts kept whatever page shows), ShortcutSheet
+                      (QL-24, Ctrl+/), FirstRunWizard (QL-23: the Vault page's SetupCard, the import dialog))
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
-                      templates; the VMs page's Deploy button waits for R2). P6: App memoises every page and passes
+                      templates; the VMs page's Deploy button waits for R2; MapPage at Ctrl+0: QL-21 HTML nodes over an
+                      SVG of lines only, so FD-03's DOM masking covers it). R10: App's `openLink` opens every AppLink
+                      (lib/links.ts), and pages take a request to show one item (Sessions `focus`, Activity
+                      `focusJob`, Settings `focus` by settings-index.ts, Containers `request`, Terminal `focusRequest`
+                      and `snippetRequest`, Templates `request.id`). P6: App memoises every page and passes
                       stable callbacks, and renders
                       only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
                       shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
@@ -426,7 +439,7 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form,
+                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0), catalog.ts (VM-19 to VM-21 texts, the size form,
                       DEPLOY_REASON), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
@@ -444,7 +457,17 @@ src/                  React + TypeScript UI
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
-                      mentions it, presentation-rescan.ts), presentation-state.ts; pure helpers with
+                      mentions it, presentation-rescan.ts), presentation-state.ts; R10: links.ts (AppLink, isAppLink:
+                      every search result, map node, status bar item and notification), search.ts (QL-20 ranking:
+                      every word matches a field, name > address > tag > detail), search-sources.ts (each kind's
+                      items), search-providers.ts (SEARCH_PROVIDERS: later packages add theirs), settings-index.ts
+                      (Settings cards by label), container-cache.ts (what the Containers page read last; search
+                      makes no logins), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's host
+                      networks, layered layout), open-tunnels.ts (every pane's tunnels, from their events),
+                      status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs), notifications.ts and
+                      notifications-store.ts (QL-25 entries per source, JobNotes, grouping), navigation-api.ts,
+                      density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
+                      shortcut), first-run.ts (QL-23); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```

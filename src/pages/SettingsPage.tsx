@@ -34,6 +34,7 @@ import { checkMessage, isNotice } from "@/lib/updates";
 import { DENSITIES, useDensity, type Density } from "@/lib/density";
 import { requestFirstRun } from "@/lib/first-run";
 import { settingsCardId, settingsSection, type SettingsTab } from "@/lib/settings-index";
+import { reveal } from "@/lib/reveal";
 import { cn } from "@/lib/utils";
 
 /** MO-02: the dashboard's polling intervals for watched hosts, in seconds (the core takes these only). */
@@ -87,9 +88,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
   }
   useEffect(() => {
     if (!lit) return;
-    const frame = window.requestAnimationFrame(() =>
-      document.getElementById(settingsCardId(lit))?.scrollIntoView({ block: "start", behavior: "smooth" }),
-    );
+    const frame = window.requestAnimationFrame(() => reveal(document.getElementById(settingsCardId(lit)), "top"));
     const timer = window.setTimeout(() => setLit(null), 2500);
     return () => {
       window.cancelAnimationFrame(frame);

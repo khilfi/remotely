@@ -1,5 +1,5 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
+//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`], [`navigation`],
 //! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
 mod catalog;

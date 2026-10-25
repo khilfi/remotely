@@ -67,6 +67,7 @@ import {
   templateReason,
 } from "@/lib/catalog";
 import { plural } from "@/lib/format";
+import { reveal } from "@/lib/reveal";
 import { cn } from "@/lib/utils";
 
 export type TemplatesTab = "sizes" | "images" | "templates";
@@ -129,7 +130,7 @@ export function TemplatesPage({ active, request }: Props) {
   const litShown = lit !== null && [...sizes, ...images, ...templates].some((item) => item.id === lit);
   useEffect(() => {
     if (!litShown || !lit) return;
-    document.querySelector(`[data-catalog-id="${CSS.escape(lit)}"]`)?.scrollIntoView({ block: "center" });
+    reveal(document.querySelector(`[data-catalog-id="${CSS.escape(lit)}"]`));
     const timer = window.setTimeout(() => setLit(null), 2500);
     return () => window.clearTimeout(timer);
   }, [litShown, lit]);

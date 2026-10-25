@@ -81,6 +81,9 @@ test("matches rank exact, then prefix, then word start, then inside, then letter
   assert.ok(matchQuality("wb1", "web01") > 0 && matchQuality("wb1", "web01") < 40);
   assert.equal(matchQuality("zz", "web01"), 0);
   assert.equal(matchQuality("x", "web01"), 0, "one letter is never a letters-in-order match");
+  assert.equal(matchQuality("shop", "dashboard polling"), 0, "too many letters skipped");
+  assert.equal(matchQuality("shop", "present: mask host names, ip addresses"), 0);
+  assert.ok(matchQuality("sbn", "sub-net") > 0, "a few skipped letters still match");
 });
 
 test("text is matched without case or accents", () => {
@@ -96,6 +99,19 @@ test("every word of the query has to match some field", () => {
   assert.ok(scoreItem(["web", "prod"], web) > 0);
   assert.equal(scoreItem(["web", "staging"], web), 0);
   assert.equal(scoreItem([], web), 0);
+});
+
+test("a name that starts with the word beats a keyword that is the word", () => {
+  const size = item("disk.large", [{ text: "disk.large", kind: "name" }], "sizes");
+  const action = item(
+    "VM sizes",
+    [
+      { text: "VM sizes", kind: "name" },
+      { text: "disk", kind: "tag" },
+    ],
+    "actions",
+  );
+  assert.equal(rankItems("disk", [action, size], ["actions", "sizes"])[0].item.title, "disk.large");
 });
 
 test("a name beats a tag, and a tag beats a detail, for the same match", () => {
@@ -234,6 +250,9 @@ test("commands are found by name, text and group; favourites first on a tie", ()
   const ranked = rankItems("disk", items);
   assert.equal(ranked[0].item.id, "favourite:f1");
   assert.equal(rankItems("df -h", items)[0].item.id, "favourite:f1");
+  // A command listed under a runbook and under its area is one result.
+  const twice = snippetItems([], [entry, { ...entry, id: "l2", groupLabel: "Slow disk" }] as unknown as LibraryEntry[]);
+  assert.equal(twice.length, 1);
   assert.deepEqual(items[1].target, { open: { kind: "snippet", command: "disk usage" } });
 });
 

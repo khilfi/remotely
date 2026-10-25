@@ -609,9 +609,9 @@ export function CommandPalette({
           )}
         </CommandList>
         <div className="flex items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
-          <span>Enter to choose</span>
-          <span>Esc to close</span>
-          <span>Ctrl+/ shortcuts</span>
+          <span className="whitespace-nowrap">Enter to choose</span>
+          <span className="whitespace-nowrap">Esc to close</span>
+          <span className="whitespace-nowrap">Ctrl+/ shortcuts</span>
           <span className="ml-auto">Actions go through the approval rules; the tier shows first.</span>
         </div>
       </CommandRoot>

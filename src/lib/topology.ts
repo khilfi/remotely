@@ -131,6 +131,14 @@ export function networkKey(
   }
 }
 
+/** Where a tunnel listens now and where it leads ("127.0.0.1:51234 → web.test:80"), or what it was set to do. */
+function tunnelLine(t: OpenTunnel): string {
+  const { forward, state } = t.tunnel;
+  if (state.state !== "listening") return forwardText(forward);
+  if (forward.kind === "dynamic") return `SOCKS on ${state.at}`;
+  return `${state.at} → ${forward.destHost}:${forward.destPort}`;
+}
+
 function vmState(vm: VmRecord): TopoState {
   if (vm.powerState === "running") return "on";
   if (vm.powerState === "paused" || vm.powerState === "suspended") return "warning";
@@ -260,7 +268,7 @@ export function buildTopology(input: TopologyInput): Topology {
       id,
       kind: "tunnel",
       label: t.tunnel.forward.label ?? (t.tunnel.forward.kind === "dynamic" ? "SOCKS proxy" : "Tunnel"),
-      sub: forwardText(t.tunnel.forward),
+      sub: tunnelLine(t),
       state: t.tunnel.state.state === "listening" ? "on" : "warning",
       link: { kind: "terminal", terminalId: t.terminalId, tunnels: true },
       layer: from.layer + 1,

@@ -39,9 +39,9 @@ export function ShortcutSheet({ open, onOpenChange, pages }: Props) {
           autoFocus
         />
         <div className="-mx-1 min-h-0 overflow-auto px-1">
-          <div className="grid gap-x-8 gap-y-5 md:grid-cols-2">
+          <div className="gap-x-8 md:columns-2">
             {groups.map((group) => (
-              <section key={group.title} aria-label={group.title}>
+              <section key={group.title} aria-label={group.title} className="mb-5 break-inside-avoid">
                 <h3 className="mb-2 text-xs font-medium text-muted-foreground">{group.title}</h3>
                 <dl className="grid gap-1.5">
                   {group.shortcuts.map((s) => (

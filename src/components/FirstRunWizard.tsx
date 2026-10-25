@@ -99,7 +99,7 @@ export function FirstRunWizard({
             General opens this again.
           </DialogDescription>
         </DialogHeader>
-        <div className="grid min-h-0 gap-6 overflow-auto md:grid-cols-[13rem_1fr]">
+        <div className="grid min-h-0 min-w-0 gap-6 overflow-auto md:grid-cols-[13rem_minmax(0,1fr)]">
           <ol className="flex flex-col gap-1" aria-label="Steps">
             {FIRST_RUN_STEPS.map((s, i) => {
               const mark = stepMark(s.id, facts);
@@ -231,7 +231,7 @@ function PathField({
     }
   }
   return (
-    <div className="grid gap-2">
+    <div className="grid grid-cols-1 gap-2">
       <Label htmlFor={id}>{label}</Label>
       <p className="text-sm">
         {inUse ? (
@@ -275,7 +275,7 @@ function HypervisorsStep({
   onChanged: (change: SettingsChange) => void;
 }) {
   return (
-    <div className="grid gap-6">
+    <div className="grid grid-cols-1 gap-6">
       <p className="text-sm text-muted-foreground">
         Remotely runs every VM action through VMware Workstation&apos;s vmrun.exe and VirtualBox&apos;s VBoxManage.exe.
         It looks for them the way Settings does: a path saved there, then the registry and the default install folders.
@@ -346,13 +346,13 @@ function FoldersStep({
   }
 
   return (
-    <div className="grid gap-4">
+    <div className="grid grid-cols-1 gap-4">
       <p className="text-sm text-muted-foreground">
         Every VM in Workstation&apos;s library and every VM registered in VirtualBox is listed already. Add folders that
         hold other Workstation VMs: they are searched for .vmx files up to five folder levels down.
       </p>
       {folders.length > 0 && (
-        <ul className="grid gap-1">
+        <ul className="grid grid-cols-1 gap-1">
           {folders.map((folder) => (
             <li key={folder} className="flex items-center gap-2 rounded-md border px-3 py-1.5">
               <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
@@ -429,7 +429,7 @@ function SessionsStep({
   }
 
   return (
-    <div className="grid gap-4">
+    <div className="grid grid-cols-1 gap-4">
       <p className="text-sm text-muted-foreground">
         Bring your saved sessions from PuTTY (this PC&apos;s or an exported .reg file), MobaXterm, an OpenSSH config or
         a CSV file. You see what would be imported before anything is saved; passwords are never read from them.
@@ -468,7 +468,7 @@ function SessionsStep({
 
 function DoneStep({ facts, onGoTo }: { facts: FirstRunFacts; onGoTo: (page: string) => void }) {
   return (
-    <div className="grid gap-4">
+    <div className="grid grid-cols-1 gap-4">
       <p className="text-sm">
         {facts.vaultStatus === "notSetUp"
           ? "The vault isn't set up yet: sessions that log in with a password or a key ask for it first."

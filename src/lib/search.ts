@@ -48,7 +48,7 @@ export interface RankedGroup {
   more: number;
 }
 
-const WEIGHT: Record<FieldKind, number> = { name: 1, address: 0.9, tag: 0.8, detail: 0.5 };
+const WEIGHT: Record<FieldKind, number> = { name: 1, address: 0.9, tag: 0.75, detail: 0.5 };
 
 /** Lower case, accents dropped, so "Café" is found by "cafe". */
 export function normalise(text: string): string {
@@ -76,19 +76,29 @@ export function matchQuality(word: string, text: string): number {
   return word.length >= 2 ? subsequence(word, text) : 0;
 }
 
-/** Letters in order with gaps ("wb1" in "web01"): a weak match, weaker for each gap. */
+/** Letters skipped at most in a letters-in-order match: more, and "shop" would find "dashboard polling". */
+const MAX_SKIPPED = 3;
+
+/** Letters in order with a few skipped ("wb1" in "web01"): a weak match, weaker for each gap. */
 function subsequence(word: string, text: string): number {
-  let at = 0;
-  let gaps = 0;
-  let last = -1;
-  for (const ch of word) {
-    const found = text.indexOf(ch, at);
-    if (found < 0) return 0;
-    if (last >= 0 && found > last + 1) gaps += 1;
-    last = found;
-    at = found + 1;
+  let best = 0;
+  for (let start = text.indexOf(word[0]); start >= 0; start = text.indexOf(word[0], start + 1)) {
+    let last = start;
+    let gaps = 0;
+    let ok = true;
+    for (const ch of word.slice(1)) {
+      const found = text.indexOf(ch, last + 1);
+      if (found < 0) {
+        ok = false;
+        break;
+      }
+      if (found > last + 1) gaps += 1;
+      last = found;
+    }
+    if (!ok) break;
+    if (last - start + 1 - word.length <= MAX_SKIPPED) best = Math.max(best, Math.max(5, 25 - gaps * 5));
   }
-  return Math.max(5, 25 - gaps * 5);
+  return best;
 }
 
 /** An item's score for the query: every word must match some field (0 otherwise). */
