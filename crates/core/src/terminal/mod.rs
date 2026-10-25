@@ -60,7 +60,7 @@ pub mod record;
 pub mod shell_user;
 pub mod tunnels;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,7 +94,7 @@ use crate::adapters::remote::{
 };
 use crate::command_bus::CommandBus;
 use crate::containers::ContainerShell;
-use crate::domain::{Context, Target, TargetRef};
+use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::host_details::SpecsCollector;
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
@@ -108,6 +108,8 @@ use crate::vm_links::VmLinks;
 
 /// The terminal settings (JSON) in the settings table.
 pub const TERMINAL_SETTINGS_KEY: &str = "terminal.settings";
+/// How long [`Terminals::close_all`] waits for every pane to audit its close and finish its log.
+pub const CLOSE_ALL_WAIT: Duration = Duration::from_secs(3);
 /// Longest keep-alive interval the settings take.
 pub const MAX_KEEPALIVE_SECS: u64 = 3600;
 /// Shortest keep-alive interval, so a typo can't flood a server.
@@ -118,9 +120,11 @@ pub const MAX_FONT_SIZE: u16 = 32;
 /// QL-05: lines each terminal keeps to scroll back through.
 pub const MIN_SCROLLBACK: u32 = 1_000;
 pub const MAX_SCROLLBACK: u32 = 100_000;
-/// QL-04: how often reachability is checked, in seconds.
+/// QL-04: how often reachability is checked, in seconds (each check shows in the host's sshd log).
 pub const MIN_REACHABILITY_SECS: u64 = 15;
 pub const MAX_REACHABILITY_SECS: u64 = 3600;
+/// QL-04: 5 minutes since 0.4.1 (60 s before), to stay out of strict fail2ban rules' way.
+pub const DEFAULT_REACHABILITY_SECS: u64 = 300;
 /// QL-07: the shortest and longest run that counts as long, and quiet spell that ends one, in seconds.
 pub const MIN_NOTIFY_SECS: u64 = 5;
 pub const MAX_NOTIFY_SECS: u64 = 3600;
@@ -175,7 +179,9 @@ pub struct TerminalSettings {
     pub scrollback: u32,
     /// QL-04: background TCP checks of each session's port (the dots in the session tree).
     pub reachability: ReachabilityMode,
-    /// QL-04: seconds between two checks of the same session.
+    /// QL-04: seconds between two checks of the same host and port while it is up (a host that is
+    /// down waits longer: [`crate::reachability::next_check_after`]). 5 minutes by default since
+    /// 0.4.1; a value saved before is kept.
     pub reachability_secs: u64,
     /// QL-07: a Windows notification when a command in a background tab finishes.
     pub notify_finished: bool,
@@ -186,6 +192,9 @@ pub struct TerminalSettings {
     /// QL-07: seconds without output, after some came, that end a run whose prompt was not
     /// recognized; 0 waits for the prompt only.
     pub notify_quiet_secs: u64,
+    /// SS-08: type the folder prompt hook into bash and zsh. A session can say otherwise, and a
+    /// Prod-labelled session has it off unless it says so.
+    pub prompt_hook: bool,
 }
 
 impl Default for TerminalSettings {
@@ -197,11 +206,12 @@ impl Default for TerminalSettings {
             font_size: 13,
             scrollback: 10_000,
             reachability: ReachabilityMode::Auto,
-            reachability_secs: 60,
+            reachability_secs: DEFAULT_REACHABILITY_SECS,
             notify_finished: true,
             notify_when: NotifyWhen::Long,
             notify_after_secs: 30,
             notify_quiet_secs: 30,
+            prompt_hook: true,
         }
     }
 }
@@ -270,8 +280,13 @@ impl TerminalSettings {
             (true, 0) => format!("notify after {which}"),
             (true, quiet) => format!("notify after {which} (or {quiet} s quiet)"),
         };
+        let hook = if self.prompt_hook {
+            ""
+        } else {
+            ", folder prompt hook off"
+        };
         format!(
-            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}",
+            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}",
             on(self.auto_reconnect),
             on(self.copy_on_select),
             self.font_size,
@@ -477,6 +492,11 @@ pub enum TerminalEvent {
     /// SS-07: the terminal's tunnels, after any of them changed.
     Tunnels {
         tunnels: Vec<TunnelInfo>,
+    },
+    /// SS-11: the session log could not be written (a full disk, a removed drive), so it stopped. Audited.
+    LogStopped {
+        path: String,
+        reason: String,
     },
 }
 
@@ -1005,6 +1025,7 @@ impl Terminals {
             size,
             settings,
             asked_dns: false,
+            automatic: false,
         };
         let task = tokio::spawn(pane.run());
         locks::lock(&self.inner.tasks).insert(id, task);
@@ -1138,21 +1159,56 @@ impl Terminals {
         }
     }
 
-    /// Closes every pane and waits (briefly) for each to log its close, e.g. when the app exits.
+    /// Closes every pane (their tunnels close with them) and waits for them to audit their close and finish their
+    /// session logs, e.g. when the app exits or installs an update. The panes close side by side, so it takes as
+    /// long as the slowest, and never longer than [`CLOSE_ALL_WAIT`] (QL-15).
     pub async fn close_all(&self) {
-        let controls: Vec<Arc<Control>> = locks::lock(&self.inner.open).values().cloned().collect();
-        for control in controls {
+        let ids: Vec<Uuid> = locks::lock(&self.inner.open).keys().copied().collect();
+        self.close_these(&ids).await;
+    }
+
+    /// QL-15: closes these panes, as [`Terminals::close_all`] does. Panes opened since are left alone.
+    pub async fn close_these(&self, ids: &[Uuid]) {
+        let controls: Vec<Arc<Control>> = {
+            let open = locks::lock(&self.inner.open);
+            ids.iter().filter_map(|id| open.get(id).cloned()).collect()
+        };
+        for control in &controls {
             control.cancel.cancel();
         }
-        let tasks: Vec<JoinHandle<()>> = locks::lock(&self.inner.tasks).drain().map(|(_, t)| t).collect();
-        for task in tasks {
-            let _ = tokio::time::timeout(Duration::from_secs(2), task).await;
+        let tasks: Vec<JoinHandle<()>> = {
+            let mut tasks = locks::lock(&self.inner.tasks);
+            ids.iter().filter_map(|id| tasks.remove(id)).collect()
+        };
+        // Each pane runs in its own task already, so waiting on them in turn takes as long as the slowest one.
+        let all = async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        };
+        if tokio::time::timeout(CLOSE_ALL_WAIT, all).await.is_err() {
+            tracing::warn!("some terminals did not finish closing in time");
         }
+    }
+
+    /// Ids of the panes open now (QL-15: the window that showed them reloaded).
+    pub fn open_ids(&self) -> Vec<Uuid> {
+        locks::lock(&self.inner.open).keys().copied().collect()
     }
 
     /// Panes open now.
     pub fn open_count(&self) -> usize {
         locks::lock(&self.inner.open).len()
+    }
+
+    /// QL-04: the saved sessions with a terminal whose shell is up now (not connecting, or waiting to
+    /// reconnect). The reachability checks leave their hosts alone.
+    pub fn connected_sessions(&self) -> HashSet<Uuid> {
+        locks::lock(&self.inner.open)
+            .values()
+            .filter(|control| control.screen().connected)
+            .filter_map(|control| control.session_id())
+            .collect()
     }
 
     /// QL-03: what is known about a pane's host so far.
@@ -1332,7 +1388,8 @@ impl Terminals {
             log::clock(now),
             log::offset_label(now)
         );
-        let session_log = log::start(path, heading, control.known_secrets()).await?;
+        let on_failure = log_failed(self.inner.store.clone(), *ctx, Arc::downgrade(&control));
+        let session_log = log::start(path, heading, control.known_secrets(), on_failure).await?;
         *locks::lock(&control.log) = Some(session_log);
         audit(
             &self.inner.store,
@@ -1562,17 +1619,58 @@ async fn stop_log(store: &Store, ctx: &Context, control: &Control) -> Result<boo
     let Some(session_log) = locks::lock(&control.log).take() else {
         return Ok(false);
     };
-    let _ = session_log.sender.send(LogMessage::Stop).await;
+    let path = session_log.path.display().to_string();
+    // Waits for the last lines to reach the disk (the app may be about to exit).
+    session_log.stop().await;
     audit(
         store,
         ctx,
         "terminal_log_stopped",
         &format!("Stopped logging the terminal to {}", quoted_name(control)),
         control.targets(),
-        &session_log.path.display().to_string(),
+        &path,
     )
     .await?;
     Ok(true)
+}
+
+/// SS-11: what a terminal does when its log can't be written: the log is dropped (so it can be started
+/// again), the audit log says why, and the pane shows it. A pane that has closed since needs nothing.
+fn log_failed(store: Store, ctx: Context, control: std::sync::Weak<Control>) -> log::OnFailure {
+    Box::new(move |log_id, reason| {
+        Box::pin(async move {
+            let Some(control) = control.upgrade() else {
+                return;
+            };
+            let ended = {
+                let mut log = locks::lock(&control.log);
+                match log.as_ref() {
+                    Some(running) if running.id == log_id => log.take(),
+                    // Stopped (and audited) meanwhile, or another log started.
+                    _ => None,
+                }
+            };
+            let Some(ended) = ended else {
+                return;
+            };
+            let path = ended.path.display().to_string();
+            drop(ended);
+            let detail = format!("{path}: stopped because it could not be written ({reason})");
+            if let Err(err) = audit(
+                &store,
+                &ctx,
+                "terminal_log_stopped",
+                &format!("The log of the terminal to {} stopped", quoted_name(&control)),
+                control.targets(),
+                &detail,
+            )
+            .await
+            {
+                tracing::error!(error = %err, "could not audit a session log stopping");
+            }
+            let _ = control.events.send(TerminalEvent::LogStopped { path, reason }).await;
+        })
+    })
 }
 
 /// For the audit log: how the session logs in, never a secret.
@@ -1650,8 +1748,17 @@ const DIM: &str = "2";
 const YELLOW: &str = "33";
 const RED: &str = "31";
 
-/// SS-01: how long a session's startup command waits for the SS-08 prompt hook at most.
-const STARTUP_WAIT: Duration = Duration::from_secs(3);
+/// SS-01: how long a session's startup command waits for a shell prompt at most. Without one it is not
+/// typed: at a menu or a question it would be read as an answer.
+const STARTUP_WAIT: Duration = Duration::from_secs(15);
+
+/// What a new connection types by itself (SS-01, SS-08).
+struct Typed {
+    /// The startup command's lines (or a container shell's command), typed at the first prompt.
+    startup: Vec<String>,
+    /// SS-08: whether the folder prompt hook may be typed.
+    hook: bool,
+}
 
 /// A live shell, as the pump keeps it.
 struct Live {
@@ -1677,7 +1784,14 @@ impl Live {
     /// QL-12: MultiExec keys reached the shell. Enter starts recording the line they were armed for
     /// (ending one still running: the next line came first); Ctrl+C before it drops the arm.
     fn record_keys(&mut self, bytes: &[u8], secrets: impl FnOnce() -> Vec<SecretString>, quiet: Option<Duration>) {
-        let enter = bytes.iter().position(|b| matches!(*b, b'\r' | b'\n'));
+        // SS-10: a line held for another run key (Ctrl+O, Esc then #...) gets just that key. While a
+        // line is armed MultiExec sends this terminal nothing else, so typed text can't look like one.
+        let run_key =
+            self.armed.is_some() && multiexec::RunKey::parse(bytes).is_some_and(|(_, len)| len == bytes.len());
+        let enter = bytes
+            .iter()
+            .position(|b| matches!(*b, b'\r' | b'\n'))
+            .or(run_key.then_some(0));
         let interrupt = bytes.iter().position(|b| *b == 0x03);
         let now = Instant::now();
         match (enter, interrupt) {
@@ -1761,6 +1875,8 @@ struct Pane {
     settings: TerminalSettings,
     /// QL-03: DNS is asked once, before the first connection.
     asked_dns: bool,
+    /// SS-01: the next connection is an automatic reconnect (the pane's own retry, not the user's).
+    automatic: bool,
 }
 
 impl Pane {
@@ -1801,12 +1917,12 @@ impl Pane {
             };
             let Some(connected) = connected else { break };
             let wait = match connected {
-                Ok((shell, startup)) => {
+                Ok((shell, typed)) => {
                     connections += 1;
                     attempt = 0;
                     last_error = None;
                     self.status(TerminalStatus::Connected).await;
-                    match self.pump(shell, startup).await {
+                    match self.pump(shell, typed).await {
                         Pump::Closed => break,
                         Pump::Reconnect => continue,
                         Pump::Ended(ShellEnd::Exited { status }) => {
@@ -1932,9 +2048,11 @@ impl Pane {
     }
 
     /// One connection: the session as saved now, its secrets from the vault, then the adapter. Also
-    /// returns the session's startup command (SS-01), which the pump types once the SS-08 prompt hook
-    /// is out of the way.
-    async fn connect(&mut self) -> Result<(ShellHandle, Vec<String>)> {
+    /// returns what the pump types by itself: the session's startup command (SS-01), at the first
+    /// shell prompt once the SS-08 prompt hook is out of the way, and whether the hook may go.
+    async fn connect(&mut self) -> Result<(ShellHandle, Typed)> {
+        // SS-01: the pane's own retry after a lost connection, not a connection the user asked for.
+        let automatic = std::mem::take(&mut self.automatic);
         let spec = self.spec().await?;
         // SS-07: the chain, as the tab and the session details show it.
         let via: Vec<String> = spec.jumps().iter().map(|j| j.name.clone()).collect();
@@ -2016,20 +2134,33 @@ impl Pane {
                 })
                 .await;
         }
-        // SS-01: the session's startup command, typed into each new shell by the pump. CT-01: a container's
-        // shell instead, in a pane opened for one.
+        // SS-01: the session's startup command, typed into each new shell by the pump: on the connections
+        // the user opens, and after an automatic reconnect only when the session asks for it. CT-01: a
+        // container's shell instead, in a pane opened for one (what the pane is for).
         let startup = match &self.control.container {
             Some(shell) => vec![shell.command.clone()],
+            None if automatic && !spec.startup_on_reconnect && spec.startup_command.is_some() => {
+                self.say(notice(
+                    DIM,
+                    "Reconnected by itself, so the startup command was not typed again (the session can ask for it)",
+                ))
+                .await;
+                Vec::new()
+            }
             None => spec
                 .startup_command
                 .as_deref()
                 .map(|command| command.lines().map(str::to_owned).collect())
                 .unwrap_or_default(),
         };
+        // SS-08: the session's choice, else Settings, and off for Prod unless the session turns it on.
+        let hook = spec
+            .prompt_hook
+            .unwrap_or(self.settings.prompt_hook && spec.environment != Environment::Prod);
         if let Some(ip) = shell.peer_ip {
             self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
         }
-        Ok((shell, startup))
+        Ok((shell, Typed { startup, hook }))
     }
 
     /// QL-03: fills in what the session lacks, beside the connection so a slow DNS server never
@@ -2191,7 +2322,7 @@ impl Pane {
     }
 
     /// Moves bytes between the pane and the shell until one side ends.
-    async fn pump(&mut self, shell: ShellHandle, startup: Vec<String>) -> Pump {
+    async fn pump(&mut self, shell: ShellHandle, typed: Typed) -> Pump {
         let ShellHandle {
             input: shell_input,
             output: mut shell_output,
@@ -2243,10 +2374,14 @@ impl Pane {
             input: shell_input,
             // QL-06, QL-07: a new shell, watched from its first output.
             watch: RunWatch::new(self.watch_config()),
-            hook: PromptHook::new(&Uuid::new_v4().simple().to_string(), now),
+            hook: if typed.hook {
+                PromptHook::new(&Uuid::new_v4().simple().to_string(), now)
+            } else {
+                PromptHook::off(&Uuid::new_v4().simple().to_string(), now)
+            },
             folders: FolderWatch::new(),
             users: UserWatch::new(&login),
-            startup,
+            startup: typed.startup,
             startup_until: now + STARTUP_WAIT,
             armed: None,
             recording: None,
@@ -2276,13 +2411,23 @@ impl Pane {
         end
     }
 
-    /// SS-01: types the session's startup command once the SS-08 hook is set up or given up (or after
-    /// [`STARTUP_WAIT`]), never while the hook is out and unanswered.
+    /// SS-01: types the session's startup command at the first line that looks like a shell prompt,
+    /// once the SS-08 hook is set up, given up or off, never while the hook is out and unanswered.
+    /// Without a prompt by [`STARTUP_WAIT`] it is not typed at all, and the terminal says so.
     async fn type_startup(&self, live: &mut Live) -> bool {
         if live.startup.is_empty() || live.hook.typing() {
             return true;
         }
-        if !live.hook.settled() && Instant::now() < live.startup_until {
+        let at_prompt = !live.watch.alternate() && shell_user::looks_like_prompt(live.watch.line());
+        if !(live.hook.settled() && at_prompt) {
+            if Instant::now() >= live.startup_until {
+                live.startup.clear();
+                self.say(notice(
+                    YELLOW,
+                    "The startup command was not typed: no shell prompt showed. Type it yourself if it is still wanted",
+                ))
+                .await;
+            }
             return true;
         }
         // Like typing: the hook gives up or shows the prompt it held.
@@ -2353,6 +2498,7 @@ impl Pane {
                     let tick = live.hook.tick(now, live.watch.line(), live.watch.alternate());
                     if let Some(hook) = tick.type_now {
                         let _ = live.input.send(ShellInput::Data(hook)).await;
+                        self.audit_hook().await;
                     }
                     if !self.pass(tick.show, &mut live).await {
                         let _ = live.input.send(ShellInput::Close).await;
@@ -2499,12 +2645,38 @@ impl Pane {
         loop {
             tokio::select! {
                 () = cancel.cancelled() => return Wait::Close,
-                () = &mut sleep => return Wait::Connect,
+                () = &mut sleep => {
+                    // SS-01: the pane's own retry; Enter or Reconnect during the wait is the user's.
+                    self.automatic = true;
+                    return Wait::Connect;
+                }
                 msg = self.input.recv() => match self.waiting_input(msg) {
                     Some(wait) => return wait,
                     None => continue,
                 },
             }
+        }
+    }
+
+    /// SS-08: the prompt hook was typed into the shell: audited once per connection, since it changes
+    /// the shell's prompt hook (`PROMPT_COMMAND` or zsh's `precmd`) and runs `id -un` on the host.
+    async fn audit_hook(&self) {
+        let action = format!(
+            "Typed the folder prompt hook into the shell of {}",
+            quoted_name(&self.control)
+        );
+        let detail = "bash: PROMPT_COMMAND, zsh: a precmd hook; reports the folder (OSC 7) and the user (id -un) at each prompt; leading space, so ignorespace keeps it out of the history";
+        if let Err(err) = audit(
+            &self.inner.store,
+            &self.ctx,
+            "folder_hook_installed",
+            &action,
+            self.control.targets(),
+            detail,
+        )
+        .await
+        {
+            tracing::error!(error = %err, "could not audit the folder prompt hook");
         }
     }
 
@@ -2608,6 +2780,13 @@ impl HostKeyVerifier for PaneVerifier {
                     .await
             }
         }
+    }
+
+    async fn known_key_types(&self, host: &str, port: u16) -> Vec<String> {
+        self.known_hosts
+            .key_types(&self.ctx, host, port)
+            .await
+            .unwrap_or_default()
     }
 }
 
@@ -2795,7 +2974,7 @@ mod tests {
         assert_eq!(
             TerminalSettings::default().describe(),
             "keep-alive every 30 s, auto-reconnect on, copy on select on, font 13 pt, 10000 lines of scrollback, \
-             reachability checks auto (every 60 s), notify after commands of 30 s or more (or 30 s quiet)"
+             reachability checks auto (every 300 s), notify after commands of 30 s or more (or 30 s quiet)"
         );
         let quiet_off = TerminalSettings {
             notify_quiet_secs: 0,
@@ -2820,6 +2999,7 @@ mod tests {
         assert_eq!(old.font_size, 13);
         assert_eq!(old.scrollback, 10_000);
         assert_eq!(old.reachability, ReachabilityMode::Auto);
+        assert_eq!(old.reachability_secs, 300, "QL-04: every 5 minutes unless chosen");
         assert!(old.notify_finished, "QL-07 is on for settings saved before it");
         assert_eq!(old.notify_after_secs, 30);
         assert_eq!(
@@ -2827,6 +3007,14 @@ mod tests {
             NotifyWhen::Long,
             "QL-07's choice: long commands, as before"
         );
+    }
+
+    #[test]
+    fn a_reachability_interval_saved_before_0_4_1_is_kept() {
+        let saved: TerminalSettings = serde_json::from_str(r#"{"reachability":"on","reachabilitySecs":60}"#).unwrap();
+        assert_eq!(saved.reachability_secs, 60);
+        assert!(saved.validate().is_ok());
+        assert_eq!(TerminalSettings::default().reachability_secs, DEFAULT_REACHABILITY_SECS);
     }
 
     #[test]

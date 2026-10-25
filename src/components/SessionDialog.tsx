@@ -9,6 +9,7 @@ import { PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -34,13 +35,14 @@ import {
   type SessionFolder,
   type SessionInput,
   type SessionRecord,
+  type StartupRating,
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { forwardsProblem, jumpChain, routeText, toInput } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
-import { ColorDot, SESSION_COLORS } from "./Badges";
+import { ColorDot, SESSION_COLORS, StartupRatingBadges } from "./Badges";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ForwardsEditor } from "./ForwardsEditor";
 import { SecretDialog } from "./SecretDialog";
@@ -118,6 +120,12 @@ export function SessionDialog({
   const [passphrase, setPassphrase] = useState(session ? (idOf(session.auth, "passphrase") ?? NONE) : NONE);
   const [jump, setJump] = useState(session?.jumpSessionId ?? NONE);
   const [startup, setStartup] = useState(session?.startupCommand ?? "");
+  /** SS-01: typed again after an automatic reconnect. */
+  const [startupAgain, setStartupAgain] = useState(session?.startupOnReconnect ?? false);
+  /** SS-01: the last rating read, for the command and label it was read for. */
+  const [rated, setRated] = useState<{ command: string; environment: Environment; rating: StartupRating | null }>();
+  /** SS-08: the folder prompt hook: as Settings say, on, or off. */
+  const [hook, setHook] = useState<string>(session?.promptHook == null ? NONE : session.promptHook ? "on" : "off");
   const [environment, setEnvironment] = useState<Environment>(session?.environment ?? "none");
   const [color, setColor] = useState<SessionColor | null>(session?.color ?? null);
   const [tags, setTags] = useState((session?.tags ?? []).join(", "));
@@ -147,6 +155,25 @@ export function SessionDialog({
       (err) => setForwardsError(errorMessage(err)),
     );
   }, [editedId]);
+
+  // SS-01: the startup command rated as it is typed, for this session's label.
+  useEffect(() => {
+    const command = startup.trim();
+    if (!command) return;
+    let stale = false;
+    const timer = window.setTimeout(() => {
+      api.sessionStartupRating(command, environment).then(
+        (rating) => !stale && setRated({ command, environment, rating }),
+        () => !stale && setRated({ command, environment, rating: null }),
+      );
+    }, 250);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+  }, [startup, environment]);
+  const startupRating =
+    rated && rated.command === startup.trim() && rated.environment === environment ? rated.rating : null;
 
   const of = (kind: SecretKind) => secrets.filter((s) => s.kind === kind);
   const portNumber = Number(port);
@@ -201,6 +228,8 @@ export function SessionDialog({
       auth: auth(),
       jumpSessionId: jump === NONE ? null : jump,
       startupCommand: startup.trim() || null,
+      startupOnReconnect: startupAgain,
+      promptHook: hook === NONE ? null : hook === "on",
       environment,
       color,
       tags: tagList,
@@ -478,8 +507,49 @@ export function SessionDialog({
                 value={startup}
                 onChange={(e) => setStartup(e.currentTarget.value)}
               />
+              {startupRating && (
+                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                  <StartupRatingBadges rating={startupRating} />
+                  <span>
+                    {startupRating.action === "execReadOnly"
+                      ? "Only reads, as a command on this session."
+                      : "Typed without asking: as a command on this session it would need this approval."}
+                  </span>
+                </div>
+              )}
               <p className="text-xs text-muted-foreground">
-                Kept in the session, not the vault: don&apos;t put passwords here.
+                Typed at the first shell prompt of each connection you open, without asking. Kept in the session, not
+                the vault: don&apos;t put passwords here.
+              </p>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="session-startup-again"
+                  checked={startupAgain}
+                  disabled={!startup.trim()}
+                  onCheckedChange={(v) => setStartupAgain(v === true)}
+                />
+                <Label htmlFor="session-startup-again" className="font-normal">
+                  Type it again when the terminal reconnects by itself
+                </Label>
+              </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="session-hook">Folder tracking (prompt hook)</Label>
+              <Select value={hook} onValueChange={setHook}>
+                <SelectTrigger id="session-hook" className="w-full sm:w-80">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>As in Settings{environment === "prod" ? " (off for Prod)" : ""}</SelectItem>
+                  <SelectItem value="on">On</SelectItem>
+                  <SelectItem value="off">Off</SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                In bash and zsh, Remotely types a one-line hook at the first prompt so Files here follows the
+                shell&apos;s folder. It sets PROMPT_COMMAND (or a zsh precmd hook) and runs id -un, and is logged in the
+                audit log. Off, Files here starts in the home folder.
               </p>
             </div>
 

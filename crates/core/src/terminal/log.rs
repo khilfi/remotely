@@ -6,12 +6,16 @@
 //! The writer runs in a task of its own, so a slow disk never holds up the terminal. What it writes
 //! has had the terminal's login secrets scrubbed first ([`Scrubber`]).
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
 
 use time::OffsetDateTime;
-use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use uuid::Uuid;
 
 use crate::adapters::exec_output::Scrubber;
 use crate::error::Result;
@@ -187,40 +191,87 @@ pub(crate) enum LogMessage {
     Stop,
 }
 
-/// A running session log: send it output; dropping the sender (or [`LogMessage::Stop`]) ends it.
+/// A running session log: send it output; [`SessionLog::stop`] ends it (dropping the sender does too, without
+/// waiting for the last lines to reach the disk).
 pub(crate) struct SessionLog {
+    /// Tells this log from one started after it on the same terminal.
+    pub id: Uuid,
     pub path: PathBuf,
     pub sender: mpsc::Sender<LogMessage>,
+    writer: JoinHandle<()>,
 }
+
+impl SessionLog {
+    /// Ends the log and waits (up to [`STOP_WAIT`]) until its last lines are on disk, so a log closed as the app
+    /// exits (or installs an update) is complete.
+    pub(crate) async fn stop(self) {
+        let Self { sender, writer, .. } = self;
+        // Both under the time limit: a full queue in front of a disk that hangs must not hold the exit up.
+        let stopped = async move {
+            let _ = sender.send(LogMessage::Stop).await;
+            let _ = writer.await;
+        };
+        if tokio::time::timeout(STOP_WAIT, stopped).await.is_err() {
+            tracing::warn!("a session log did not finish writing in time");
+        }
+    }
+}
+
+/// QL-15: called once when the log can't be written (a full disk, a removed drive), with why. The log has
+/// stopped by then; the terminal says so and audits it. Gets the log's [`SessionLog::id`].
+pub(crate) type OnFailure = Box<dyn FnOnce(Uuid, String) -> BoxFuture + Send>;
+
+pub(crate) type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
 /// How often the writer flushes to disk while output keeps coming.
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
 
+/// How long [`SessionLog::stop`] waits for the last lines.
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
 /// Opens (appends to) `path` and starts the writer task. `heading` is written first.
-pub(crate) async fn start(path: &Path, heading: String, secrets: Vec<SecretString>) -> Result<SessionLog> {
+pub(crate) async fn start(
+    path: &Path,
+    heading: String,
+    secrets: Vec<SecretString>,
+    on_failure: OnFailure,
+) -> Result<SessionLog> {
     let file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
         .await?;
+    Ok(start_with(file, path, heading, secrets, on_failure))
+}
+
+/// [`start`] on any writer (tests give one that fails).
+pub(crate) fn start_with<W: AsyncWrite + Unpin + Send + 'static>(
+    file: W,
+    path: &Path,
+    heading: String,
+    secrets: Vec<SecretString>,
+    on_failure: OnFailure,
+) -> SessionLog {
     let (sender, mut receiver) = mpsc::channel::<LogMessage>(1024);
-    tokio::spawn(async move {
+    let id = Uuid::new_v4();
+    let writer = tokio::spawn(async move {
         let mut out = BufWriter::new(file);
         let refs: Vec<&SecretString> = secrets.iter().collect();
         let mut scrubber = Scrubber::new(&refs);
         let mut lines = LineLogger::new();
         let mut clean = Vec::new();
-        let _ = out.write_all(format!("{heading}\r\n").as_bytes()).await;
+        let mut failure = out.write_all(format!("{heading}\r\n").as_bytes()).await.err();
         let mut flush = tokio::time::interval(FLUSH_EVERY);
-        loop {
+        while failure.is_none() {
             tokio::select! {
                 message = receiver.recv() => match message {
                     Some(LogMessage::Output(bytes)) => {
                         clean.clear();
                         scrubber.push(&bytes, &mut clean);
                         for line in lines.feed(&clean, local_now()) {
-                            if out.write_all(format!("{line}\r\n").as_bytes()).await.is_err() {
-                                tracing::warn!("a session log could not be written");
+                            if let Err(err) = out.write_all(format!("{line}\r\n").as_bytes()).await {
+                                failure = Some(err);
+                                break;
                             }
                         }
                     }
@@ -228,9 +279,16 @@ pub(crate) async fn start(path: &Path, heading: String, secrets: Vec<SecretStrin
                     Some(LogMessage::Stop) | None => break,
                 },
                 _ = flush.tick() => {
-                    let _ = out.flush().await;
+                    failure = out.flush().await.err();
                 }
             }
+        }
+        if let Some(err) = failure {
+            // Stopping beats losing lines silently: the terminal shows why, and the audit log has it.
+            tracing::warn!(error = %err, "a session log could not be written; it stopped");
+            drop(receiver);
+            on_failure(id, err.to_string()).await;
+            return;
         }
         clean.clear();
         scrubber.finish(&mut clean);
@@ -243,10 +301,12 @@ pub(crate) async fn start(path: &Path, heading: String, secrets: Vec<SecretStrin
         }
         let _ = out.flush().await;
     });
-    Ok(SessionLog {
+    SessionLog {
+        id,
         path: path.to_owned(),
         sender,
-    })
+        writer,
+    }
 }
 
 #[cfg(test)]
@@ -313,30 +373,92 @@ mod tests {
     async fn the_log_file_has_a_heading_scrubbed_lines_and_an_ending() {
         let path = std::env::temp_dir().join(format!("remotely-log-{}.log", uuid::Uuid::new_v4()));
         let secret = SecretString::new(format!("pw-{}", uuid::Uuid::new_v4().simple()));
-        let log = start(&path, "Remotely session log".into(), vec![secret.clone()])
-            .await
-            .unwrap();
+        let log = start(
+            &path,
+            "Remotely session log".into(),
+            vec![secret.clone()],
+            never_fails(),
+        )
+        .await
+        .unwrap();
         log.sender
             .send(LogMessage::Output(
                 format!("echo {}\r\nok\r\n", secret.expose()).into_bytes(),
             ))
             .await
             .unwrap();
-        log.sender.send(LogMessage::Stop).await.unwrap();
-        drop(log);
-        let mut text = String::new();
-        for _ in 0..50 {
-            text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-            if text.contains("stopped logging") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
+        // QL-15: stopping waits until the last lines are on disk, as before an update's installer exits the app.
+        log.stop().await;
+        let text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
         let _ = std::fs::remove_file(&path);
         assert!(text.starts_with("Remotely session log\r\n"), "{text}");
         assert!(text.contains("] echo [redacted]\r\n"), "{text}");
         assert!(text.contains("] ok\r\n"), "{text}");
         assert!(!text.contains(secret.expose()), "{text}");
         assert!(text.trim_end().ends_with("Remotely stopped logging"), "{text}");
+    }
+
+    fn never_fails() -> OnFailure {
+        Box::new(|_, reason| Box::pin(async move { panic!("the log failed: {reason}") }))
+    }
+
+    /// A disk that takes `room` bytes, then reports itself full.
+    struct FullDisk {
+        room: usize,
+    }
+
+    impl AsyncWrite for FullDisk {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            if self.room < buf.len() {
+                return std::task::Poll::Ready(Err(std::io::Error::other("There is not enough space on the disk.")));
+            }
+            self.room -= buf.len();
+            std::task::Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_log_that_cant_be_written_stops_and_says_why() {
+        let (failed, said) = tokio::sync::oneshot::channel();
+        let on_failure: OnFailure = Box::new(move |id, reason| {
+            Box::pin(async move {
+                let _ = failed.send((id, reason));
+            })
+        });
+        let log = start_with(
+            FullDisk { room: 100 },
+            Path::new("full.log"),
+            "Remotely session log".into(),
+            Vec::new(),
+            on_failure,
+        );
+        // More than the BufWriter holds, so it reaches the "disk" at once.
+        let line = "x".repeat(10_000);
+        log.sender
+            .send(LogMessage::Output(format!("{line}\r\n").into_bytes()))
+            .await
+            .unwrap();
+        let (id, reason) = tokio::time::timeout(Duration::from_secs(5), said)
+            .await
+            .expect("the failure is reported")
+            .unwrap();
+        assert_eq!(id, log.id);
+        assert!(reason.contains("not enough space"), "{reason}");
+        // The writer has stopped: nothing takes output any more.
+        tokio::time::timeout(Duration::from_secs(5), log.sender.closed())
+            .await
+            .expect("the log stopped");
     }
 }

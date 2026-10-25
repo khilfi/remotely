@@ -709,13 +709,23 @@ export function TerminalPage({
         case "held":
           if (outcome.request) {
             setMxApproval({ lineId: outcome.lineId, request: outcome.request });
-            setMxNote({ tone: "wait", text: "The line waits for your approval; Enter is held in every terminal" });
+            setMxNote({
+              tone: "wait",
+              text: `The line waits for your approval; ${outcome.runKey} is held in every terminal`,
+            });
           } else {
-            setMxNote({ tone: "info", text: `Read-only: Enter sent to ${plural(outcome.reached.length, "terminal")}` });
+            setMxNote({
+              tone: "info",
+              text: `Read-only: ${outcome.runKey} sent to ${plural(outcome.reached.length, "terminal")}`,
+            });
           }
           break;
         case "queued":
           if (outcome.dropped) toast.warning("Too much was typed while a line waited: the rest was dropped");
+          break;
+        case "refused":
+          setMxNote({ tone: "warn", text: outcome.reason });
+          toast.warning(outcome.reason);
           break;
       }
     },
@@ -770,7 +780,8 @@ export function TerminalPage({
       if (event.event === "outcome") outcomeRef.current(event.outcome);
       else if (event.event === "lineFinished") lineFinishedRef.current(event);
       else if (event.event !== "lineDone") return;
-      else if (event.sent) setMxNote({ tone: "info", text: `Enter sent to ${plural(event.terminals, "terminal")}` });
+      else if (event.sent)
+        setMxNote({ tone: "info", text: `${event.runKey} sent to ${plural(event.terminals, "terminal")}` });
       else
         setMxNote({
           tone: "warn",
@@ -1654,6 +1665,7 @@ const NO_SNAPSHOT: PaneSnapshot = {
   facts: null,
   sessionId: null,
   logPath: null,
+  logError: null,
   searching: false,
   searchResults: null,
   folder: null,
@@ -2096,6 +2108,7 @@ function PaneView({
         onOpenVault={onOpenVault}
         onReviewKey={() => pane.reviewChangedKey()}
         onStopLog={() => void pane.stopLog().catch((err) => toast.error(errorMessage(err)))}
+        onDismissLogError={() => pane.dismissLogError()}
       />
       {snapshot.searching && <SearchBar pane={pane} results={snapshot.searchResults} />}
       <div
@@ -2227,6 +2240,7 @@ function PaneStatusBar({
   onOpenVault,
   onReviewKey,
   onStopLog,
+  onDismissLogError,
 }: {
   snapshot: PaneSnapshot;
   onReconnect: () => void;
@@ -2234,6 +2248,7 @@ function PaneStatusBar({
   onOpenVault: () => void;
   onReviewKey: () => void;
   onStopLog: () => void;
+  onDismissLogError: () => void;
 }) {
   const left = useSecondsLeft(snapshot);
   const { status } = snapshot;
@@ -2302,6 +2317,18 @@ function PaneStatusBar({
   }
   return (
     <>
+      {snapshot.logError && (
+        <div
+          className="flex shrink-0 items-center gap-2 border-b border-destructive/40 bg-destructive/10 px-3 py-1 text-xs"
+          role="alert"
+        >
+          <FileTextIcon className="size-3.5 text-destructive" aria-hidden />
+          <span className="min-w-0 flex-1">{snapshot.logError}</span>
+          <Button size="xs" variant="ghost" onClick={onDismissLogError}>
+            Dismiss
+          </Button>
+        </div>
+      )}
       {snapshot.logPath && (
         <div
           className="flex shrink-0 items-center gap-2 border-b border-tier-medium/30 bg-tier-medium/5 px-3 py-1 text-xs"

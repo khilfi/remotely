@@ -94,6 +94,8 @@ fn input(name: &str, host: &str, port: u16, user: &str, password: SecretId, jump
         },
         jump_session_id: jump,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::Lab,
         color: None,
         tags: vec![],
@@ -599,4 +601,148 @@ async fn open_a_shell_runs_docker_exec_in_a_terminal_and_is_audited_with_the_con
         .await
         .unwrap_err();
     assert!(err.to_string().contains("is not running"), "{err}");
+}
+
+/// MO-02, CT-01: the page polls every few seconds, so a refused sudo password, a refused login or a
+/// changed host key must not be tried again at every poll: each try is a failed sudo or login in the
+/// host's logs, which pam_faillock, AD or fail2ban count. They park until Retry or a change.
+#[tokio::test]
+async fn refused_sudo_logins_and_changed_keys_are_not_retried_at_every_poll() {
+    let core = core().await;
+    let ctx = &core.ctx;
+    let (server, web, password) = container_host(&core, DOCKER, Fixture::sample(), SudoMode::Off, |s| {
+        s.without_docker_group()
+    })
+    .await;
+    let server = server.with_sudo(ServerSudo::Password(password.clone()));
+    let wrong = saved(&core, "old sudo password", "not-the-password").await;
+    let sudo_with = |password_id| MarkInput {
+        engine: DOCKER,
+        sudo: SudoMode::Password { password_id },
+    };
+    core.containers
+        .marks()
+        .set(ctx, web, &[sudo_with(Some(wrong))])
+        .await
+        .unwrap();
+    let refused = |server: &TestSshServer| server.log().iter().filter(|l| *l == "sudo refused").count();
+
+    for _ in 0..3 {
+        let err = core.containers.containers(ctx, host(web), DOCKER).await.unwrap_err();
+        assert_eq!(err.code(), "login_parked", "{err}");
+        assert!(err.to_string().contains("refused the password"), "{err}");
+        assert!(err.to_string().contains("press Retry"), "{err}");
+        // The stats poll and the details panel stop too.
+        assert_eq!(
+            core.containers.stats(ctx, host(web), DOCKER).await.unwrap_err().code(),
+            "login_parked"
+        );
+    }
+    let tried = refused(&server);
+    assert!(tried >= 1);
+    let after_first = server.log().len();
+
+    // Retry: one more sudo, refused again.
+    core.retry_background_logins(web);
+    assert_eq!(
+        core.containers
+            .containers(ctx, host(web), DOCKER)
+            .await
+            .unwrap_err()
+            .code(),
+        "login_parked"
+    );
+    assert_eq!(refused(&server), tried * 2);
+    assert!(server.log().len() > after_first);
+
+    // Choosing the login password for sudo is a change: it runs.
+    core.containers.marks().set(ctx, web, &[sudo_with(None)]).await.unwrap();
+    assert_eq!(
+        core.containers
+            .containers(ctx, host(web), DOCKER)
+            .await
+            .unwrap()
+            .containers
+            .len(),
+        6
+    );
+
+    // A login the host refuses parks every read of the host, without a new connection.
+    let other = TestSshServer::start()
+        .await
+        .with_password("alice", &new_password())
+        .with_containers(DOCKER, Fixture::sample());
+    trust(&core, "127.0.0.1", other.port(), &other).await;
+    let stale = saved(&core, "db01 login", "rotated-away").await;
+    let db = core
+        .sessions
+        .create(ctx, input("db01", "127.0.0.1", other.port(), "alice", stale, None))
+        .await
+        .unwrap()
+        .id;
+    core.containers
+        .marks()
+        .set(
+            ctx,
+            db,
+            &[MarkInput {
+                engine: DOCKER,
+                sudo: SudoMode::Off,
+            }],
+        )
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let err = core.containers.containers(ctx, host(db), DOCKER).await.unwrap_err();
+        assert_eq!(err.code(), "login_parked", "{err}");
+        assert!(err.to_string().contains("login failed"), "{err}");
+    }
+    assert_eq!(other.connections(), 1);
+
+    // A changed host key: blocked, audited once, and not tried again at every poll.
+    let moved = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_containers(DOCKER, Fixture::sample());
+    let key = HostKey {
+        host: "127.0.0.1".into(),
+        port: moved.port(),
+        key_type: "ssh-ed25519".into(),
+        fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+    };
+    core.known_hosts.trust(ctx, &key, None).await.unwrap();
+    let login = saved(&core, "app01 login", &password).await;
+    let app = core
+        .sessions
+        .create(ctx, input("app01", "127.0.0.1", moved.port(), "alice", login, None))
+        .await
+        .unwrap()
+        .id;
+    core.containers
+        .marks()
+        .set(
+            ctx,
+            app,
+            &[MarkInput {
+                engine: DOCKER,
+                sudo: SudoMode::Off,
+            }],
+        )
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        let err = core.containers.containers(ctx, host(app), DOCKER).await.unwrap_err();
+        assert_eq!(err.code(), "login_parked", "{err}");
+        assert!(err.to_string().contains("has changed"), "{err}");
+    }
+    assert_eq!(moved.connections(), 1);
+    let blocked = core
+        .store
+        .recent_audit(ctx, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.event == "host_key_changed")
+        .count();
+    assert_eq!(blocked, 1, "audited once per park");
 }

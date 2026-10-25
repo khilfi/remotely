@@ -84,6 +84,8 @@ function trackingNote(tracking: FolderTracking | undefined, following: boolean) 
       return "This shell doesn't report its folder (Remotely follows bash and zsh), so this starts in your home folder.";
     case "missed":
       return "Folder tracking wasn't set up because something was typed first. Reconnect to follow the shell's folder.";
+    case "off":
+      return "The prompt hook is off for this session (Settings, the session, or a Prod session), so this starts in your home folder.";
     default:
       return null;
   }

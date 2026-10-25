@@ -6,8 +6,13 @@
 //! * bash and zsh ([`PromptShell`], from the probe beside each new shell) get a prompt hook typed into
 //!   them once their first prompt shows ([`PromptHook`]): a function that prints OSC 7 before each
 //!   prompt (bash's `PROMPT_COMMAND`, zsh's `precmd`), keeping `$?` for the prompt. The line starts with
-//!   a space, so `ignorespace` keeps it out of the history, and in bash it deletes itself from the
-//!   history anyway.
+//!   a space, so `ignorespace` (bash's `HISTCONTROL`, zsh's `HIST_IGNORE_SPACE`) keeps it out of the
+//!   history; nothing deletes history entries. It is typed only at a line that looks like a shell
+//!   prompt (`user@host:~$ `), never at a menu or a question such as `oraenv`'s, and the terminal audits
+//!   it once per connection (`folder_hook_installed`).
+//! * The hook can be turned off in Settings and per session; a Prod-labelled session has it off unless
+//!   the session turns it on ([`PromptHook::off`], [`FolderTracking::Off`]). The drawer then starts in
+//!   the home folder.
 //! * The hook stays invisible: from the moment it is typed, the shell's output (the echo of the line)
 //!   is held back until a marker the line prints last. The prompt that follows then replaces the one
 //!   already on screen (carriage return and erase line, and the lines above for a prompt of several
@@ -67,9 +72,7 @@ pub fn hook_line(token: &str) -> String {
     );
     let register = concat!(
         r#"if [ -n "${ZSH_VERSION:-}" ];then autoload -Uz add-zsh-hook;add-zsh-hook precmd __remotely_cwd;"#,
-        r#"else PROMPT_COMMAND="__remotely_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}";__remotely_h=$(history 1);"#,
-        r#"case $__remotely_h in *__remotely_cwd*)read -r __remotely_h _ <<<"$__remotely_h";history -d "$__remotely_h";;esac;"#,
-        r#"unset __remotely_h;fi"#,
+        r#"else PROMPT_COMMAND="__remotely_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}";fi"#,
     );
     format!(" {function};{user};{register};printf '\\033]7777;remotely-%s\\007' {token}\r")
 }
@@ -92,6 +95,8 @@ pub enum FolderTracking {
     /// bash or zsh, but the hook could not be set up: something was typed first, or the shell did not
     /// answer it. A reconnect tries again.
     Missed,
+    /// The hook is turned off (Settings, the session, or a Prod session by default).
+    Off,
 }
 
 /// SS-08: a terminal's current folder, as the UI shows it.
@@ -368,6 +373,18 @@ impl PromptHook {
         }
     }
 
+    /// The hook is turned off: nothing is typed, and the folder is known only if the shell reports it
+    /// itself (OSC 7).
+    pub fn off(token: &str, now: Instant) -> Self {
+        Self {
+            state: HookState::Done {
+                tracking: FolderTracking::Off,
+            },
+            token: token.to_owned(),
+            started: now,
+        }
+    }
+
     /// The probe beside the shell answered (`None`: not bash or zsh, or no answer).
     pub fn probe(&mut self, answer: Option<PromptShell>) {
         match &mut self.state {
@@ -381,7 +398,9 @@ impl PromptHook {
                 }
             }
             // Given up before the answer came: say why the right way.
-            HookState::Done { tracking } if answer.is_none() => *tracking = FolderTracking::Unsupported,
+            HookState::Done { tracking } if answer.is_none() && *tracking != FolderTracking::Off => {
+                *tracking = FolderTracking::Unsupported;
+            }
             _ => {}
         }
     }
@@ -505,9 +524,8 @@ impl PromptHook {
                 last_output: Some(at),
                 ..
             } if now.saturating_duration_since(*at) >= PROMPT_QUIET
-                && !line.trim().is_empty()
                 && !alternate
-                && !super::activity::is_password_prompt(line) =>
+                && super::shell_user::looks_like_prompt(line) =>
             {
                 self.state = HookState::Hiding {
                     since: now,
@@ -670,6 +688,8 @@ mod tests {
         assert!(line.contains("remotely-%s"));
         assert!(line.contains("PROMPT_COMMAND"));
         assert!(line.contains("add-zsh-hook precmd"));
+        // It never edits the shell's history: the leading space keeps it out where ignorespace is on.
+        assert!(!line.contains("history"), "{line}");
         // QL-09: the user is asked once, and reported with the folder.
         assert_eq!(line.matches("id -un").count(), 1);
         assert!(line.contains(r"\033]7777;remotely-user=%s\007"));
@@ -772,6 +792,49 @@ mod tests {
         // The first prompt never came.
         hook.tick(t0 + PROMPT_WAIT, "x", true);
         assert_eq!(hook.tracking(), FolderTracking::Missed);
+    }
+
+    /// Only a line that looks like a shell prompt gets the hook: never a menu or a question a login
+    /// script asks (oraenv, a site's "choose a project" menu), where it would be read as an answer.
+    #[test]
+    fn no_hook_at_a_question_or_a_menu() {
+        let t0 = Instant::now();
+        let mut hook = PromptHook::new("t8", t0);
+        hook.probe(Some(PromptShell::Bash));
+        for (i, line) in [
+            "ORACLE_SID = [orcl] ? ",
+            "Choose a project [1-3]: ",
+            "Continue (y/n)? ",
+            "> ",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = t0 + PROMPT_QUIET * (i as u32 + 1);
+            hook.output(line.as_bytes(), at);
+            assert!(hook.tick(at + PROMPT_QUIET, line, false).type_now.is_none(), "{line}");
+        }
+        hook.output(
+            b"
+alice@web01:~$ ",
+            t0 + PROMPT_QUIET * 6,
+        );
+        assert!(hook
+            .tick(t0 + PROMPT_QUIET * 7, "alice@web01:~$ ", false)
+            .type_now
+            .is_some());
+    }
+
+    #[test]
+    fn a_hook_turned_off_types_nothing_and_says_so() {
+        let t0 = Instant::now();
+        let mut hook = PromptHook::off("t9", t0);
+        hook.probe(Some(PromptShell::Bash));
+        assert!(hook.settled());
+        assert_eq!(hook.deadline(), None);
+        assert_eq!(hook.output(b"alice@web01:~$ ", t0), b"alice@web01:~$ ");
+        assert!(hook.tick(t0 + PROMPT_WAIT, "alice@web01:~$ ", false).type_now.is_none());
+        assert_eq!(hook.tracking(), FolderTracking::Off);
     }
 
     #[test]
