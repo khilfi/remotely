@@ -71,6 +71,7 @@ use crate::locks;
 use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
 use crate::snapshots::safety_snapshot_name;
 use crate::ssh_keys;
+use crate::stacks::{ReadyOutcome, StackOp};
 use crate::store::{NewAuditEntry, NewJob, Store, TargetResult};
 use crate::terminal::files::UploadRun;
 use crate::terminal::tunnels::TunnelRun;
@@ -268,6 +269,16 @@ pub enum JobEvent {
         rest: usize,
         until: String,
     },
+    /// VM-08: a stack job's step starts (`waiting: None`), or waits for its readiness check or delay before the
+    /// next one (`waiting` says what for).
+    StackStep {
+        job_id: Uuid,
+        /// From 1.
+        step: usize,
+        steps: usize,
+        label: String,
+        waiting: Option<String>,
+    },
     /// VM-03: these VMs did not shut down. Sent before `Finished`, so the UI can offer to force
     /// them off (a separate, Critical command).
     StillRunning {
@@ -303,8 +314,8 @@ impl JobScope {
             | Command::VmDevice { .. }
             | Command::VmDisk { .. }
             | Command::VmLifecycle { .. } => JobScope::Vms,
-            // VM-21: the new VMs show in the list.
-            Command::Deploy { .. } => JobScope::Vms,
+            // VM-21: the new VMs show in the list. VM-08: a stack's VMs are made, started, stopped or deleted.
+            Command::Deploy { .. } | Command::Stack { .. } => JobScope::Vms,
             Command::Container { .. } => JobScope::Containers,
             _ => JobScope::Other,
         }
@@ -550,6 +561,9 @@ pub struct JobRunner {
     containers: RwLock<Option<Arc<dyn ContainerActions>>>,
     /// VM-21, VM-22, VM-10: what makes each new VM of a deploy (set once the core is put together).
     deployer: RwLock<Option<Arc<dyn crate::deploy::DeployActions>>>,
+    /// VM-08: readiness checks, delays and instance records between a stack's steps (set once the core is put
+    /// together).
+    stacks: RwLock<Option<Arc<dyn crate::stacks::StackActions>>>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -590,6 +604,7 @@ impl JobRunner {
             terminals,
             containers: RwLock::new(None),
             deployer: RwLock::new(None),
+            stacks: RwLock::new(None),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -627,6 +642,17 @@ impl JobRunner {
     /// VM-21, VM-22, VM-10: what makes a deploy's VMs.
     pub fn set_deployer(&self, deployer: Arc<dyn crate::deploy::DeployActions>) {
         *locks::write(&self.deployer) = Some(deployer);
+    }
+
+    /// VM-08: what runs between a stack's steps.
+    pub fn set_stacks(&self, stacks: Arc<dyn crate::stacks::StackActions>) {
+        *locks::write(&self.stacks) = Some(stacks);
+    }
+
+    fn stacks(&self) -> Result<Arc<dyn crate::stacks::StackActions>> {
+        locks::read(&self.stacks)
+            .clone()
+            .ok_or_else(|| CoreError::NotImplemented("stacks"))
     }
 
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
@@ -862,6 +888,10 @@ impl JobRunner {
             .await?;
         self.emit(JobEvent::Started { job_id: id });
 
+        // VM-08: a stack deploy's instance is there before its first VM joins it.
+        if let Command::Stack { op, .. } = &spec.command {
+            self.stacks()?.begin(&ctx, id, op).await?;
+        }
         let semaphore = Arc::new(Semaphore::new(self.parallelism(&spec.command)));
         // VM-05: named once, when the job starts, so every VM's safety snapshot has the same name.
         let safety_name: Option<Arc<str>> = (spec.safety_snapshot && safety_snapshot_applies(&spec.command))
@@ -888,7 +918,12 @@ impl JobRunner {
             safety_name: &safety_name,
             rollout,
         };
-        Arc::clone(&self).run_targets(&run, targets, &mut tally).await;
+        if let Command::Stack { op, .. } = &spec.command {
+            // VM-08: step by step, in boot order (the last step first to stop).
+            Arc::clone(&self).run_stack(&run, op, targets, &mut tally).await;
+        } else {
+            Arc::clone(&self).run_targets(&run, targets, &mut tally).await;
+        }
         if !rest.is_empty() {
             let go = self.canary_answer(&run, &tally, rest.len()).await;
             match go {
@@ -901,6 +936,12 @@ impl JobRunner {
             }
         }
 
+        // VM-08: what became of the instance (forgotten when it has no VM left).
+        if let (Command::Stack { op, .. }, Ok(stacks)) = (&spec.command, self.stacks()) {
+            if let Some(note) = stacks.end(&ctx, op).await {
+                tally.notes.push(note);
+            }
+        }
         let Tally {
             succeeded,
             failed,
@@ -1039,6 +1080,103 @@ impl JobRunner {
                 }
             };
             self.record(run, ran, tally).await;
+        }
+    }
+
+    /// VM-08: a stack's targets, one step after another. A step whose VMs didn't all succeed stops the steps after it
+    /// (they are skipped, saying why); otherwise its VMs must pass its readiness check, then its delay passes, and the
+    /// next step starts. Cancel stops the waits too.
+    async fn run_stack(self: Arc<Self>, run: &TargetsRun<'_>, op: &StackOp, targets: Vec<Target>, tally: &mut Tally) {
+        let ctx = run.spec.ctx;
+        let stacks = self.stacks().ok();
+        let steps = stack_steps(op, targets);
+        let count = steps.len();
+        for (i, step) in steps.into_iter().enumerate() {
+            let n = i + 1;
+            let going = !run.halt.is_cancelled() && !run.token.is_cancelled();
+            if going {
+                self.emit(JobEvent::StackStep {
+                    job_id: run.id,
+                    step: n,
+                    steps: count,
+                    label: step.label.clone(),
+                    waiting: None,
+                });
+            }
+            let before = tally.failed + tally.unknown + tally.cancelled + tally.skipped;
+            Arc::clone(&self).run_targets(run, step.targets, tally).await;
+            if n == count || !going || run.halt.is_cancelled() || run.token.is_cancelled() {
+                continue;
+            }
+            if tally.failed + tally.unknown + tally.cancelled + tally.skipped > before {
+                tally.halted = Some(format!(
+                    "step {n} ('{}') didn't finish, so the steps after it did not start",
+                    step.label
+                ));
+                run.halt.cancel();
+                continue;
+            }
+            let Some(stacks) = &stacks else {
+                continue;
+            };
+            if !step.readiness.is_none() {
+                let vms = match &step.ready {
+                    ReadyFrom::Instance(instance, index) => match stacks.step_vms(&ctx, *instance, *index).await {
+                        Ok(vms) => vms,
+                        Err(err) => {
+                            tracing::warn!(error = %err, "could not read a stack step's VMs");
+                            Vec::new()
+                        }
+                    },
+                    ReadyFrom::Vms(vms) => vms.iter().map(|v| (v.key.clone(), v.name.clone())).collect(),
+                };
+                let timeout = Duration::from_secs(u64::from(step.ready_timeout_secs));
+                self.emit(JobEvent::StackStep {
+                    job_id: run.id,
+                    step: n,
+                    steps: count,
+                    label: step.label.clone(),
+                    waiting: Some(format!(
+                        "waiting up to {} for {}",
+                        crate::error::in_minutes(timeout.as_secs().div_ceil(60)),
+                        step.readiness.describe()
+                    )),
+                });
+                match stacks.wait_ready(&vms, step.readiness, timeout, run.token).await {
+                    ReadyOutcome::Ready { after } => tally.notes.push(format!(
+                        "step {n} ('{}') was ready ({}) after {} s",
+                        step.label,
+                        step.readiness.describe(),
+                        after.as_secs()
+                    )),
+                    ReadyOutcome::NotReady { why } => {
+                        tally.halted = Some(format!(
+                            "step {n} ('{}') was {why}, so the steps after it did not start",
+                            step.label
+                        ));
+                        run.halt.cancel();
+                        continue;
+                    }
+                    ReadyOutcome::Cancelled => continue,
+                }
+            }
+            if step.delay_secs > 0 {
+                self.emit(JobEvent::StackStep {
+                    job_id: run.id,
+                    step: n,
+                    steps: count,
+                    label: step.label.clone(),
+                    waiting: Some(format!("waiting {} s before the next step", step.delay_secs)),
+                });
+                if stacks
+                    .pause(Duration::from_secs(u64::from(step.delay_secs)), run.token)
+                    .await
+                {
+                    tally
+                        .notes
+                        .push(format!("waited {} s after step {n} ('{}')", step.delay_secs, step.label));
+                }
+            }
         }
     }
 
@@ -1313,24 +1451,68 @@ impl JobRunner {
     ) -> Result<TargetOutcome> {
         match (&spec.command, &target.target) {
             (Command::VmPower { op, .. }, TargetRef::Vm { vmx_path }) => {
+                self.power_target(spec, vmx_path, *op, token).await
+            }
+            // VM-08: an instance's VM is started, shut down or suspended exactly as by the power command.
+            (
+                Command::Stack {
+                    op: crate::stacks::StackOp::Power { spec: power },
+                    ..
+                },
+                TargetRef::Vm { vmx_path },
+            ) => self.power_target(spec, vmx_path, power.op, token).await,
+            // VM-08: a stack's new VM, made by the deploy runner like any deploy's, as its step says.
+            (
+                Command::Stack {
+                    op: crate::stacks::StackOp::Deploy { spec: stack },
+                    ..
+                },
+                TargetRef::NewVm { name, .. },
+            ) => {
                 if token.is_cancelled() {
                     return Err(CoreError::Cancelled);
                 }
-                let in_flight = match Hypervisor::of_key(vmx_path) {
-                    Hypervisor::Vmware => CoreError::CancelledInFlight,
-                    Hypervisor::VirtualBox => CoreError::VboxCancelledInFlight,
-                };
-                // BX-04: cancel stops waiting. Dropping the call kills vmrun or VBoxManage (kill_on_drop).
-                tokio::select! {
-                    biased;
-                    result = self.power(vmx_path, *op) => result?,
-                    _ = token.cancelled() => return Err(in_flight),
+                let deployer = locks::read(&self.deployer)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("deploys"))?;
+                let (_, step) = stack
+                    .step_of(name)
+                    .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
+                let vm = step
+                    .spec
+                    .vm(name)
+                    .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
+                let note = deployer.deploy_vm(&spec.ctx, job_id, &step.spec, vm, token).await?;
+                let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
+                Ok(TargetOutcome {
+                    output: Some(output),
+                    note: Some(format!("{}: {note}", vm.name)),
+                    ..TargetOutcome::done()
+                })
+            }
+            // VM-08: a teardown is R3's delete on each VM (its checks and locks), then the VM leaves its instance.
+            (
+                Command::Stack {
+                    op: crate::stacks::StackOp::Teardown { .. },
+                    ..
+                },
+                TargetRef::Vm { vmx_path },
+            ) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
                 }
-                // The VM list shows the new state before the next refresh asks vmrun.
-                self.store
-                    .set_vm_power_state(&spec.ctx, vmx_path, state_after(*op))
-                    .await?;
-                Ok(TargetOutcome::done())
+                let delete = Command::VmLifecycle {
+                    targets: vec![target.target.clone()],
+                    op: crate::vm_settings::VmLifecycleOp::Delete,
+                };
+                let note = self.vm_editor.run(&spec.ctx, job_id, &delete, target).await?;
+                if let Err(err) = self.stacks()?.torn_down(&spec.ctx, vmx_path).await {
+                    tracing::warn!(error = %err, "a deleted VM could not leave its stack instance");
+                }
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
             }
             (Command::VmSnapshot { op, .. }, TargetRef::Vm { vmx_path }) => {
                 self.hypervisors.snapshot(vmx_path, op).await?;
@@ -1659,6 +1841,34 @@ impl JobRunner {
         self.vault.get(ctx, id).await
     }
 
+    /// VM-02, VM-03 (and VM-08's instance power): one VM's power operation as a job target. Cancel stops waiting;
+    /// dropping the call kills vmrun or VBoxManage (kill_on_drop).
+    async fn power_target(
+        &self,
+        spec: &JobSpec,
+        vmx_path: &str,
+        op: PowerOp,
+        token: &CancellationToken,
+    ) -> Result<TargetOutcome> {
+        if token.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let in_flight = match Hypervisor::of_key(vmx_path) {
+            Hypervisor::Vmware => CoreError::CancelledInFlight,
+            Hypervisor::VirtualBox => CoreError::VboxCancelledInFlight,
+        };
+        tokio::select! {
+            biased;
+            result = self.power(vmx_path, op) => result?,
+            _ = token.cancelled() => return Err(in_flight),
+        }
+        // The VM list shows the new state before the next refresh asks vmrun.
+        self.store
+            .set_vm_power_state(&spec.ctx, vmx_path, state_after(op))
+            .await?;
+        Ok(TargetOutcome::done())
+    }
+
     /// VM-02, VM-03: one power operation on one VM, by its hypervisor.
     async fn power(&self, key: &str, op: PowerOp) -> Result<()> {
         match Hypervisor::of_key(key) {
@@ -1835,6 +2045,12 @@ impl JobRunner {
             Command::FileUpload { .. } | Command::OpenTunnel { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
+            // VM-08: within a step, as the commands it stands for.
+            Command::Stack { op, .. } => match op {
+                crate::stacks::StackOp::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
+                crate::stacks::StackOp::Power { spec } if spec.starts() => limits.power_on,
+                crate::stacks::StackOp::Power { .. } | crate::stacks::StackOp::Teardown { .. } => limits.vm_ops,
+            },
         };
         n.max(1)
     }
@@ -1874,6 +2090,80 @@ impl JobRunner {
     }
 }
 
+/// VM-08: where a step's VMs to check for readiness come from.
+enum ReadyFrom {
+    /// A deploy's: the instance's VMs at this step (index from 0), as the deploy runner recorded them.
+    Instance(Uuid, usize),
+    /// A start's: those the step started and those that ran already.
+    Vms(Vec<crate::stacks::NamedVm>),
+}
+
+/// VM-08: one step of a stack job, as it runs.
+struct PlannedStep {
+    label: String,
+    targets: Vec<Target>,
+    readiness: crate::stacks::Readiness,
+    ready_timeout_secs: u32,
+    delay_secs: u32,
+    ready: ReadyFrom,
+}
+
+/// VM-08: the job's targets (protected ones already left out) in their steps, in the order they run. A teardown is
+/// one step.
+fn stack_steps(op: &StackOp, targets: Vec<Target>) -> Vec<PlannedStep> {
+    let mut left = targets;
+    let mut take = |keep: &dyn Fn(&Target) -> bool| -> Vec<Target> {
+        let (mine, rest): (Vec<Target>, Vec<Target>) = left.drain(..).partition(|t| keep(t));
+        left = rest;
+        mine
+    };
+    let mut steps: Vec<PlannedStep> = match op {
+        StackOp::Deploy { spec } => spec
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| PlannedStep {
+                label: step.label.clone(),
+                targets: take(&|t| matches!(&t.target, TargetRef::NewVm { name, .. } if step.spec.vm(name).is_some())),
+                readiness: step.readiness,
+                ready_timeout_secs: step.ready_timeout_secs,
+                delay_secs: step.delay_secs,
+                ready: ReadyFrom::Instance(spec.instance_id, i),
+            })
+            .collect(),
+        StackOp::Power { spec } => spec
+            .steps
+            .iter()
+            .map(|step| {
+                let keys: std::collections::HashSet<String> =
+                    step.vms.iter().map(|k| path_key(Path::new(k))).collect();
+                PlannedStep {
+                    label: step.label.clone(),
+                    targets: take(&|t| keys.contains(&path_key(Path::new(&t.target.key())))),
+                    readiness: step.readiness,
+                    ready_timeout_secs: step.ready_timeout_secs,
+                    delay_secs: step.delay_secs,
+                    ready: ReadyFrom::Vms(step.ready.clone()),
+                }
+            })
+            .collect(),
+        StackOp::Teardown { .. } => Vec::new(),
+    };
+    // A teardown's VMs, and any target no step names (none should be), run last.
+    let rest = take(&|_| true);
+    if !rest.is_empty() || steps.is_empty() {
+        steps.push(PlannedStep {
+            label: "the rest".into(),
+            targets: rest,
+            readiness: crate::stacks::Readiness::None,
+            ready_timeout_secs: 0,
+            delay_secs: 0,
+            ready: ReadyFrom::Vms(Vec::new()),
+        });
+    }
+    steps
+}
+
 /// Names the action in a safety snapshot's name ("before shut down").
 fn safety_verb(command: &Command) -> &'static str {
     match command {
@@ -1910,6 +2200,15 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::VmDevice { .. } => "tools install",
         Command::VmDisk { .. } => "disk change",
         Command::VmLifecycle { .. } => "delete",
+        Command::Stack { op, .. } => match op {
+            crate::stacks::StackOp::Power { spec } => match spec.op {
+                PowerOp::Suspend => "suspend",
+                PowerOp::Start { .. } => "start",
+                _ => "shut down",
+            },
+            crate::stacks::StackOp::Deploy { .. } => "deploy",
+            crate::stacks::StackOp::Teardown { .. } => "teardown",
+        },
     }
 }
 

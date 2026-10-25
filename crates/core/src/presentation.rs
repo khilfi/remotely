@@ -122,11 +122,13 @@ pub enum Change {
     Alerts,
     /// MO-16: the dashboard's widgets and their places.
     DashboardLayout,
+    /// VM-08: stacks, and the VMs a stack instance holds.
+    Stacks,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 19] = [
+    pub const ALL: [Change; 20] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -146,6 +148,7 @@ impl Change {
         Change::Catalog,
         Change::Alerts,
         Change::DashboardLayout,
+        Change::Stacks,
     ];
 
     pub fn label(self) -> &'static str {
@@ -169,6 +172,7 @@ impl Change {
             Change::Catalog => "Edit sizes, images and launch templates",
             Change::Alerts => "Change alert rules or acknowledge alerts",
             Change::DashboardLayout => "Change the dashboard layout",
+            Change::Stacks => "Edit stacks and their instances",
         }
     }
 }

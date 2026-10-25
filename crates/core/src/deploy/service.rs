@@ -71,6 +71,8 @@ pub struct CloneRequest {
 pub struct DeployCheck {
     pub problems: Vec<Problem>,
     pub preview: Option<DeployPreview>,
+    /// VM-26: RAM, CPU and disk on this PC after the deploy, next to now; with the preview.
+    pub capacity: Option<crate::capacity_plan::DeployCapacity>,
 }
 
 /// The VMs page's default naming pattern for a bulk clone.
@@ -91,6 +93,8 @@ pub struct Deploys {
     hypervisors: Hypervisors,
     host: Arc<dyn HostCounters>,
     bus: Arc<CommandBus>,
+    /// VM-26: the capacity planner's reads.
+    capacity: Arc<crate::capacity::CapacityChecker>,
 }
 
 impl Deploys {
@@ -101,13 +105,50 @@ impl Deploys {
         host: Arc<dyn HostCounters>,
         bus: Arc<CommandBus>,
     ) -> Self {
+        let capacity = Arc::new(crate::capacity::CapacityChecker::new(
+            store.clone(),
+            hypervisors.clone(),
+            Arc::clone(&host),
+        ));
         Self {
             store,
             catalog,
             hypervisors,
             host,
             bus,
+            capacity,
         }
+    }
+
+    /// VM-26: this PC after the deploy of `spec` (whose preview is `preview`), next to now. A read.
+    pub async fn capacity(
+        &self,
+        ctx: &Context,
+        spec: &DeploySpec,
+        preview: &DeployPreview,
+    ) -> crate::capacity_plan::DeployCapacity {
+        let demands = crate::capacity_plan::deploy_demands(spec, preview);
+        self.capacity.deploy_capacity(ctx, &demands).await
+    }
+
+    /// VM-26: this PC after a deploy of `demands` (VM-08: a stack's every step). A read.
+    pub(crate) async fn plan_capacity(
+        &self,
+        ctx: &Context,
+        demands: &[crate::capacity_plan::VmDemand],
+    ) -> crate::capacity_plan::DeployCapacity {
+        self.capacity.deploy_capacity(ctx, demands).await
+    }
+
+    /// The deploy's AP-02 preview, and VM-26's capacity after it.
+    pub(crate) async fn preview_spec(
+        &self,
+        ctx: &Context,
+        spec: &DeploySpec,
+    ) -> (DeployPreview, crate::capacity_plan::DeployCapacity) {
+        let preview = preview(spec, &self.hypervisors, self.host.as_ref()).await;
+        let capacity = self.capacity(ctx, spec, &preview).await;
+        (preview, capacity)
     }
 
     /// The folder a hypervisor puts new VMs in, as a full path with `\`.
@@ -129,6 +170,16 @@ impl Deploys {
         &self,
         ctx: &Context,
         request: &DeployRequest,
+    ) -> Result<std::result::Result<DeploySpec, Vec<Problem>>> {
+        self.spec_for_taken(ctx, request, &[]).await
+    }
+
+    /// [`Self::spec_for`], numbering past `also_taken` too (VM-08: the names a stack's earlier steps give).
+    pub(crate) async fn spec_for_taken(
+        &self,
+        ctx: &Context,
+        request: &DeployRequest,
+        also_taken: &[String],
     ) -> Result<std::result::Result<DeploySpec, Vec<Problem>>> {
         if !(1..=MAX_DEPLOY_COUNT).contains(&request.count) {
             return Ok(Err(vec![Problem {
@@ -163,7 +214,11 @@ impl Deploys {
         }
         // The template's own default count is checked only as the template's.
         input.default_count = request.count;
-        let plan = match self.catalog.plan_input(ctx, id, &input, request.count).await? {
+        let plan = match self
+            .catalog
+            .plan_input_taken(ctx, id, &input, request.count, also_taken)
+            .await?
+        {
             Ok(plan) => plan,
             Err(problems) => return Ok(Err(problems)),
         };
@@ -260,11 +315,16 @@ impl Deploys {
             Err(problems) => Ok(DeployCheck {
                 problems,
                 preview: None,
+                capacity: None,
             }),
-            Ok(spec) => Ok(DeployCheck {
-                problems: Vec::new(),
-                preview: Some(preview(&spec, &self.hypervisors, self.host.as_ref()).await),
-            }),
+            Ok(spec) => {
+                let (preview, capacity) = self.preview_spec(ctx, &spec).await;
+                Ok(DeployCheck {
+                    problems: Vec::new(),
+                    preview: Some(preview),
+                    capacity: Some(capacity),
+                })
+            }
         }
     }
 
@@ -420,6 +480,7 @@ impl Deploys {
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
             unattended: None,
             vms,
+            stack: None,
         };
         spec.validate()?;
         Ok(Ok(spec))
@@ -431,11 +492,16 @@ impl Deploys {
             Err(problems) => Ok(DeployCheck {
                 problems,
                 preview: None,
+                capacity: None,
             }),
-            Ok(spec) => Ok(DeployCheck {
-                problems: Vec::new(),
-                preview: Some(preview(&spec, &self.hypervisors, self.host.as_ref()).await),
-            }),
+            Ok(spec) => {
+                let (preview, capacity) = self.preview_spec(ctx, &spec).await;
+                Ok(DeployCheck {
+                    problems: Vec::new(),
+                    preview: Some(preview),
+                    capacity: Some(capacity),
+                })
+            }
         }
     }
 

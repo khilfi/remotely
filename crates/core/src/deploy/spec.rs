@@ -227,6 +227,9 @@ pub struct DeploySpec {
     #[serde(default)]
     pub unattended: Option<UnattendedSpec>,
     pub vms: Vec<DeployVm>,
+    /// VM-08: a step of a stack deploy: each VM made joins this stack instance, at this step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::stacks::StackTag>,
 }
 
 /// How long after-deploy steps wait for the guest's IP by default: first boots with cloud-init take a minute or
@@ -315,6 +318,7 @@ impl DeploySpec {
             after_deploy: plan.after_deploy,
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
             unattended: None,
+            stack: None,
             vms: plan
                 .vms
                 .iter()
@@ -482,6 +486,9 @@ impl DeploySpec {
         }
         if self.after_deploy.link_session && !self.after_deploy.create_session {
             return invalid("Linking a session to the VM needs the session.");
+        }
+        if self.stack.is_some() && matches!(self.source, DeploySource::BulkClone) {
+            return invalid("A stack deploys launch templates, not bulk clones.");
         }
         Ok(())
     }

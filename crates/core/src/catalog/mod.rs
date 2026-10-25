@@ -329,9 +329,22 @@ impl Catalog {
         input: &TemplateInput,
         count: u32,
     ) -> Result<std::result::Result<DeployPlan, Vec<Problem>>> {
+        self.plan_input_taken(ctx, id, input, count, &[]).await
+    }
+
+    /// [`Self::plan_input`], numbering past `also_taken` as well as the VMs here (VM-08: a stack's earlier steps).
+    pub async fn plan_input_taken(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        input: &TemplateInput,
+        count: u32,
+        also_taken: &[String],
+    ) -> Result<std::result::Result<DeployPlan, Vec<Problem>>> {
         let spec = templates::check_template(input)?;
         let facts = self.facts(ctx).await?;
-        let taken = self.vm_names(ctx).await?;
+        let mut taken = self.vm_names(ctx).await?;
+        taken.extend(also_taken.iter().cloned());
         let refs = templates::Refs {
             image: facts.image(spec.image_id),
             size: facts.size(&spec.size_id),

@@ -19,6 +19,8 @@ mod deploy_tests;
 mod tests;
 #[cfg(test)]
 mod vm_settings_tests;
+#[cfg(test)]
+mod stack_tests;
 
 use std::collections::BTreeMap;
 
@@ -31,6 +33,7 @@ use crate::command_bus::{Command, ContainerOp, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::presentation::Change;
+use crate::stacks::StackOp;
 use crate::vm_settings::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
 pub use commands::{default_dangerous_patterns, default_read_only_commands, DangerousPattern};
@@ -163,11 +166,13 @@ pub enum ActionKind {
     /// VM-21, VM-10 (docs/plan-0.5.md, "Approval tiers"): make new VMs (create, clone, import). Its bulk tier
     /// applies from [`PolicyRules::deploy_bulk_threshold`] VMs.
     VmDeploy,
+    /// VM-08 (docs/plan-0.5.md, "Approval tiers"): delete a stack instance's VMs and their files.
+    StackTeardown,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 50] = [
+    pub const ALL: [ActionKind; 51] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -194,6 +199,7 @@ impl ActionKind {
         ActionKind::VmRegister,
         ActionKind::VmDelete,
         ActionKind::VmDeploy,
+        ActionKind::StackTeardown,
         ActionKind::ExecReadOnly,
         ActionKind::ExecOther,
         ActionKind::ExecDangerous,
@@ -273,6 +279,7 @@ impl ActionKind {
             ActionKind::VmDelete => "Delete VMs (deletes their files)",
             ActionKind::VmRegister => "Add an existing VM",
             ActionKind::VmDeploy => "Deploy VMs (create, clone or import)",
+            ActionKind::StackTeardown => "Tear down a stack instance (deletes its VMs)",
         }
     }
 
@@ -892,6 +899,8 @@ impl Default for PolicyRules {
                     bulk: High,
                 },
             ),
+            // VM-08: its VMs and their files go, like deleting them.
+            (StackTeardown, TierRule::same(Critical)),
         ]);
         Self {
             tiers,
@@ -1048,15 +1057,12 @@ impl PolicyEngine {
 
     pub fn classify(&self, command: &Command) -> ActionKind {
         match command {
-            Command::VmPower { op, .. } => match op {
-                PowerOp::Start { .. } => ActionKind::VmStart,
-                PowerOp::Unpause => ActionKind::VmUnpause,
-                PowerOp::Pause => ActionKind::VmPause,
-                PowerOp::Suspend => ActionKind::VmSuspend,
-                PowerOp::Reset { mode: StopMode::Soft } => ActionKind::VmResetSoft,
-                PowerOp::Reset { mode: StopMode::Hard } => ActionKind::VmResetHard,
-                PowerOp::Stop { mode: StopMode::Soft } => ActionKind::VmStopSoft,
-                PowerOp::Stop { mode: StopMode::Hard } => ActionKind::VmStopHard,
+            Command::VmPower { op, .. } => power_kind(op),
+            // VM-08: an instance's deploy is a deploy of all its VMs, its start or stop the power action on them.
+            Command::Stack { op, .. } => match op {
+                StackOp::Deploy { .. } => ActionKind::VmDeploy,
+                StackOp::Power { spec } => power_kind(&spec.op),
+                StackOp::Teardown { .. } => ActionKind::StackTeardown,
             },
             Command::VmSnapshot { op, .. } => match op {
                 SnapshotOp::Take { .. } => ActionKind::SnapshotTake,
@@ -1253,6 +1259,34 @@ impl PolicyEngine {
                 op: VmLifecycleOp::Delete,
                 ..
             } => reasons.push("the VMs' files are deleted with them".into()),
+            // VM-08: what a stack command does as a whole, for the dialog and the audit log.
+            Command::Stack { op, .. } => match op {
+                StackOp::Deploy { spec } => reasons.push(format!(
+                    "stack '{}': {} in {} step(s), made in boot order",
+                    spec.stack_name,
+                    match spec.vm_count() {
+                        1 => "1 new VM".to_owned(),
+                        n => format!("{n} new VMs"),
+                    },
+                    spec.steps.len()
+                )),
+                StackOp::Power { spec } if spec.starts() => {
+                    reasons.push(format!("stack instance '{}': started in boot order", spec.instance_name))
+                }
+                StackOp::Power { spec } => reasons.push(format!(
+                    "stack instance '{}': its last step first",
+                    spec.instance_name
+                )),
+                StackOp::Teardown { spec } => {
+                    reasons.push("the stack instance's VMs are deleted with their files".into());
+                    if !spec.kept.is_empty() {
+                        reasons.push(format!(
+                            "{} VM(s) of the instance are kept (added by hand, or gone already)",
+                            spec.kept.len()
+                        ));
+                    }
+                }
+            },
             Command::VmConfig {
                 edit: VmConfigEdit::UpgradeHardware,
                 ..
@@ -1357,6 +1391,20 @@ impl PolicyEngine {
     }
 }
 
+/// VM-02, VM-03 (and VM-08's instance power): the action a power operation is.
+pub fn power_kind(op: &PowerOp) -> ActionKind {
+    match op {
+        PowerOp::Start { .. } => ActionKind::VmStart,
+        PowerOp::Unpause => ActionKind::VmUnpause,
+        PowerOp::Pause => ActionKind::VmPause,
+        PowerOp::Suspend => ActionKind::VmSuspend,
+        PowerOp::Reset { mode: StopMode::Soft } => ActionKind::VmResetSoft,
+        PowerOp::Reset { mode: StopMode::Hard } => ActionKind::VmResetHard,
+        PowerOp::Stop { mode: StopMode::Soft } => ActionKind::VmStopSoft,
+        PowerOp::Stop { mode: StopMode::Hard } => ActionKind::VmStopHard,
+    }
+}
+
 /// FD-03: while presenting with the read-only lock on, the bus refuses every command, whatever its tier, targets or
 /// labels: each one changes a VM, a host or the app (reads never reach the bus). That includes read-only remote
 /// commands, which run programs on customer hosts, and MultiExec lines. The refusal names the action as Settings
@@ -1394,6 +1442,13 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
     let on_vms = command.targets().iter().any(|t| matches!(t, TargetRef::Vm { .. }));
     let can_lose_state = match command {
         Command::VmPower { op, .. } => matches!(op, PowerOp::Stop { .. } | PowerOp::Reset { .. } | PowerOp::Suspend),
+        // VM-08: an instance's shut down or suspend is the power action on its VMs; a deploy's VMs don't exist yet,
+        // and a teardown deletes the VMs with their snapshots.
+        Command::Stack {
+            op: StackOp::Power { spec },
+            ..
+        } => matches!(spec.op, PowerOp::Stop { .. } | PowerOp::Suspend),
+        Command::Stack { .. } => false,
         Command::VmSnapshot { op, .. } => matches!(op, SnapshotOp::Revert { .. }),
         Command::VmConfig { edit, .. } => !matches!(edit, VmConfigEdit::Rename { .. }),
         Command::VmDevice { op, .. } => matches!(op, VmDeviceOp::InstallTools),

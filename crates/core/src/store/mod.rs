@@ -19,6 +19,7 @@ mod quick_connect;
 #[cfg(test)]
 mod retention_tests;
 mod sessions;
+mod stacks;
 mod ssh_keys;
 mod tags;
 mod terminal_rules;
@@ -53,6 +54,8 @@ pub use metrics::{HistoryPruned, HistorySize};
 pub(crate) use multiexec_groups::GroupRow;
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub(crate) use sessions::unsaved_spec;
+pub use stacks::MemberOrigin;
+pub(crate) use stacks::{InstanceRow, NewInstance, StackRow};
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
 pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};

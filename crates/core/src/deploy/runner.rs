@@ -83,6 +83,8 @@ struct Made {
     /// VirtualBox: the seed's DVD drive (controller, port, device), ejected after the first boot.
     seed: Option<(String, u32, u32)>,
     seed_file: Option<PathBuf>,
+    /// VM-08: the VM's key as its stack instance records it.
+    member: Option<String>,
     /// What the job says about the VM besides where it is.
     notes: Vec<String>,
 }
@@ -193,6 +195,21 @@ impl Deployer {
             }
         };
         self.list(ctx, spec, &key, made).await?;
+        if let Some(tag) = spec.stack {
+            // VM-08: in its stack instance as soon as it is made, so teardown finds it even if the job stops here.
+            let listed = self.store.find_vm(ctx, &key).await?.map_or_else(|| key.clone(), |vm| vm.vmx_path);
+            self.store
+                .add_stack_vm(
+                    ctx,
+                    tag.instance_id,
+                    &listed,
+                    &vm.name,
+                    tag.step,
+                    crate::store::MemberOrigin::Deploy,
+                )
+                .await?;
+            made.member = Some(listed);
+        }
         if spec.after_deploy.clean_snapshot {
             // Before the first boot: quick, with no memory to save, and going back to it boots the VM as deployed.
             match self
@@ -1166,6 +1183,11 @@ impl DeployActions for Deployer {
             Ok(key) => Ok(self.after_deploy(ctx, spec, vm, &key, &mut made, token).await),
             Err(err) => {
                 let left = self.clean_up(spec, &made).await;
+                if let Some(member) = &made.member {
+                    if let Err(err) = self.store.remove_stack_vm(ctx, member).await {
+                        tracing::warn!(error = %err, "deploy cleanup: could not take the VM out of its stack instance");
+                    }
+                }
                 if matches!(err, CoreError::Cancelled) && left.is_empty() {
                     return Err(CoreError::Cancelled);
                 }
