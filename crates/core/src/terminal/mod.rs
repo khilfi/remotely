@@ -75,7 +75,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use self::activity::{is_password_prompt, FinishedHow, RunWatch, WatchConfig};
+use self::activity::{is_password_prompt, is_secret_prompt, FinishedHow, RunWatch, WatchConfig};
 use self::files::{Transfers, UploadReport, UploadRun};
 use self::folder::{FolderInfo, FolderTracking, FolderWatch, PromptHook};
 use self::log::{LogMessage, SessionLog};
@@ -512,8 +512,10 @@ pub struct PaneScreen {
 }
 
 impl PaneScreen {
-    pub fn at_password_prompt(&self) -> bool {
-        is_password_prompt(&self.line)
+    /// SS-10: the line asks for a password, passphrase or one-time code, so MultiExec passes keys straight
+    /// through and never rates, journals or audits them.
+    pub fn at_secret_prompt(&self) -> bool {
+        is_secret_prompt(&self.line)
     }
 }
 
