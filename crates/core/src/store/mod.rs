@@ -3,6 +3,7 @@
 //!
 //! Queries are checked at runtime, not with `query!`, so building needs no `DATABASE_URL`.
 
+mod alerts;
 mod audit;
 mod containers;
 mod favourites;
@@ -44,6 +45,7 @@ pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, JobTargetRecord, PurgedBodies, TargetResult};
+pub use metrics::{HistoryPruned, HistorySize};
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};

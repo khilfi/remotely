@@ -4,9 +4,10 @@
 // the solid line it bounds, or muted when it bounds several. The legend under the plot is the app's own: it shows
 // the latest reading of each series, and the hovered one while the pointer is over the plot (uPlot's own legend
 // showed dashes until hovered). Canvas colours come from the CSS tokens, so the chart is rebuilt when the theme
-// changes.
+// changes. MO-06, MO-16: a chart can take its height from its widget and show controls (a range picker) beside its
+// title; over a range longer than a day its legend names the day too.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { latestValue } from "@/lib/host-details";
@@ -36,9 +37,14 @@ interface Props {
   theme: ResolvedTheme;
   /** What shows instead of the plot while no series has a value. */
   empty?: string;
+  /** The plot's height in pixels; 140 by default. */
+  height?: number;
+  /** Controls beside the title, e.g. a range picker. */
+  actions?: ReactNode;
 }
 
 const HEIGHT = 140;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const DASH = [6, 4];
 
 function token(name: string) {
@@ -67,7 +73,8 @@ function Swatch({ slot, dashed }: { slot: ChartSeries["slot"]; dashed?: boolean 
   );
 }
 
-export function MetricChart({ title, subtitle, times, series, format, max, theme, empty }: Props) {
+export function MetricChart({ title, subtitle, times, series, format, max, theme, empty, height, actions }: Props) {
+  const plotHeight = Math.max(60, Math.round(height ?? HEIGHT));
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
   const [width, setWidth] = useState(0);
@@ -97,7 +104,7 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
     const solid = series.filter((s) => !s.dashed);
     const options: uPlot.Options = {
       width,
-      height: HEIGHT,
+      height: plotHeight,
       cursor: { drag: { x: false, y: false }, points: { size: 8 } },
       legend: { show: false },
       scales: {
@@ -146,7 +153,7 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
     };
     // Rebuilt only when what is drawn changes shape; new points go through setData below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [labels, theme, width, max, hasData]);
+  }, [labels, theme, width, max, hasData, plotHeight]);
 
   // New points only: hovering re-renders the chart (the legend follows the pointer) without new data.
   const latest = times.length > 0 ? times[times.length - 1] : 0;
@@ -157,15 +164,29 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
   }, [times.length, latest, filled]);
 
   const at = hovered !== null && hovered < times.length ? hovered : null;
-  const when = at !== null ? new Date(times[at] ?? 0).toLocaleTimeString() : "Latest";
+  const longSpan = times.length > 1 && times[times.length - 1] - times[0] > DAY_MS * 0.8;
+  const when =
+    at === null
+      ? "Latest"
+      : longSpan
+        ? new Date(times[at] ?? 0).toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : new Date(times[at] ?? 0).toLocaleTimeString();
 
   return (
     <div className="rounded-lg border bg-card p-3">
-      <div className="mb-2">
-        <div className="text-sm font-medium">{title}</div>
-        {subtitle && <div className="text-xs text-muted-foreground">{subtitle}</div>}
+      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{title}</div>
+          {subtitle && <div className="text-xs text-muted-foreground">{subtitle}</div>}
+        </div>
+        {actions}
       </div>
-      <div className="relative min-h-[140px]">
+      <div className="relative" style={{ minHeight: plotHeight }}>
         {/* uPlot owns this element's children; React renders nothing inside it. */}
         <div ref={host} className="metric-chart" />
         {!hasData && (
@@ -176,7 +197,7 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
       </div>
       {hasData && (
         <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" aria-live="off">
-          <span className="w-16 shrink-0 text-muted-foreground tabular-nums">{when}</span>
+          <span className={`${longSpan ? "w-28" : "w-16"} shrink-0 text-muted-foreground tabular-nums`}>{when}</span>
           {series.map((s) => {
             const value = at !== null ? (s.values[at] ?? null) : latestValue(s.values);
             return (
