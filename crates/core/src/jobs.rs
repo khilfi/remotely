@@ -1605,8 +1605,10 @@ impl JobRunner {
             {
                 let mut last = locks::lock(&last);
                 if let Some((at, shown, shown_step)) = last.as_ref() {
+                    // A step's start and end always go out; in between, a few a second.
                     let same_step = shown_step == step;
-                    if same_step && (*shown == tenths || now.duration_since(*at) < PROGRESS_EVERY) {
+                    let soon = now.duration_since(*at) < PROGRESS_EVERY && tenths < 1000;
+                    if same_step && (*shown == tenths || soon) {
                         return;
                     }
                 }

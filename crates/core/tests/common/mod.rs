@@ -14,7 +14,7 @@ use remotely_core::adapters::remote::{RemoteAdapter, RusshAdapter};
 use remotely_core::adapters::updater::UpdaterAdapter;
 use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{
-    FakeContainers, FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault,
+    FakeContainers, FakeDiskTools, FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault,
     FakeVirtualBox, FakeVmware,
 };
 use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
@@ -46,6 +46,8 @@ pub struct Setup {
     /// CT-01, CT-02: [`FakeContainers`] with no host, or the real CLIs over SSH ([`Setup::with_ssh`]),
     /// which never look for this PC's Docker.
     pub containers: Arc<dyn ContainerEngines>,
+    /// CV-01 to CV-03: the conversion tools, without qemu-img unless a test installs it ([`FakeDiskTools::with_qemu_img`]).
+    pub disk_tools: Arc<FakeDiskTools>,
 }
 
 impl Setup {
@@ -64,6 +66,7 @@ impl Setup {
             updater: Arc::new(FakeUpdater::default()),
             network: Arc::new(FakeNetwork::default()),
             containers: Arc::new(FakeContainers::default()),
+            disk_tools: Arc::new(FakeDiskTools::new()),
         }
     }
 
@@ -140,6 +143,7 @@ impl Setup {
             updater: self.updater,
             network: self.network,
             containers: self.containers,
+            disk_tools: self.disk_tools,
         };
         Core::assemble(store, ctx, adapters, JobLimits::default())
             .await

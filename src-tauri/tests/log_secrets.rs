@@ -78,6 +78,7 @@ async fn the_log_file_never_holds_a_secret() {
         updater: Arc::new(FakeUpdater::default()),
         network: Arc::new(FakeNetwork::default()),
         containers: Arc::new(CliEngines::without_this_pc()),
+        disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
     };
     let core = Core::assemble(store, ctx, adapters, JobLimits::default())
         .await

@@ -14,6 +14,8 @@
 
 mod commands;
 #[cfg(test)]
+mod convert_tests;
+#[cfg(test)]
 mod deploy_tests;
 #[cfg(test)]
 mod tests;
