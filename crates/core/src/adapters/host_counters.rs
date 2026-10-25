@@ -974,6 +974,17 @@ mod tests {
             assert!(win::pids_named(&name).unwrap().contains(&me));
         }
 
+        /// VM-23: the check behind "Workstation's window is open" finds a program that runs (this test), and not
+        /// one that doesn't.
+        #[tokio::test]
+        async fn a_running_program_is_found_by_its_name() {
+            let exe = std::env::current_exe().unwrap();
+            let name: &'static str =
+                Box::leak(exe.file_name().unwrap().to_string_lossy().into_owned().into_boxed_str());
+            assert!(super::process_running(name).await);
+            assert!(!super::process_running("remotely-no-such-program.exe").await);
+        }
+
         /// MO-01 NFR (a 50-VM dashboard at a 5 s refresh under 5% host CPU): reads 50 processes the
         /// way a round reads 50 VMs, with the command lines already known as after the first round, and
         /// measures the CPU time of this thread, which does all of that work (not the process's: in a
