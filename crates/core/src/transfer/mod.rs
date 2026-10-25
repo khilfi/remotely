@@ -3,7 +3,8 @@
 //!
 //! * Export writes one file (see [`file`]) with the session folders (QL-16: with their defaults), the sessions
 //!   (with their tags, environment labels and colours: what each sets itself, so it takes the rest from its folders
-//!   again), the trusted host keys, the favourite commands (BX-08) and, only
+//!   again), the trusted host keys, the favourite commands (BX-08), the spec catalogue (VM-19 to VM-21: own sizes,
+//!   images by path, launch templates; [`catalog`]), the saved MultiExec groups (QL-19) and, only
 //!   when the user ticks it, the vault's secrets with their values. The user chooses the passphrase; Argon2id turns it into the
 //!   AES-256-GCM key. The passphrase passes the same strength check as a new vault password (SS-04) and
 //!   may not be the vault password itself. The vault's labels always go along (they are not secret), so
@@ -37,6 +38,7 @@
 //!
 //! QL-19: saved MultiExec groups go along with their member sessions ([`groups`]).
 
+mod catalog;
 pub mod file;
 mod groups;
 
@@ -71,6 +73,7 @@ use crate::vault::{
 };
 use crate::vm_links::VmLink;
 
+pub use catalog::{CatalogChoices, CatalogCounts, CatalogPreview, CatalogReport};
 pub use file::{FORMAT, FORMAT_VERSION, FORMAT_VERSION_PLAIN, MAX_FILE_BYTES};
 
 /// The export file's extension.
@@ -113,6 +116,9 @@ struct Payload {
     /// QL-19 saved MultiExec groups, by name. Files from before 0.5.0 have none.
     #[serde(default)]
     groups: Vec<groups::GroupEntry>,
+    /// VM-19 to VM-21. Files from before 0.5.0 have none.
+    #[serde(default)]
+    catalog: catalog::CatalogEntries,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -378,6 +384,8 @@ pub struct ExportReport {
     pub folder_defaults: usize,
     /// QL-19 saved MultiExec groups.
     pub groups: usize,
+    /// VM-19 to VM-21: own sizes, images and launch templates.
+    pub catalog: CatalogCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -463,6 +471,8 @@ pub struct TransferPreview {
     pub folder_defaults: Vec<PreviewItem>,
     /// QL-19 saved MultiExec groups.
     pub groups: Vec<PreviewItem>,
+    /// VM-19 to VM-21: sizes, images and launch templates.
+    pub catalog: CatalogPreview,
     pub warnings: Vec<String>,
 }
 
@@ -490,6 +500,9 @@ pub struct TransferCommit {
     /// QL-19 saved MultiExec groups.
     #[serde(default)]
     pub groups: Vec<ItemChoice>,
+    /// VM-19 to VM-21.
+    #[serde(default)]
+    pub catalog: CatalogChoices,
     /// SS-01: sessions (by index) whose startup command comes along. The others come without it (a
     /// replaced session keeps the one it has here).
     #[serde(default)]
@@ -555,6 +568,8 @@ pub struct TransferReport {
     pub favourites: Counts,
     /// QL-19 saved MultiExec groups.
     pub groups: Counts,
+    /// VM-19 to VM-21.
+    pub catalog: CatalogReport,
     /// SS-07: port forwards saved with the imported sessions.
     pub forwards: usize,
     /// SS-01: startup commands in the file that were not ticked, so left out.
@@ -582,6 +597,7 @@ struct Local {
     secrets: Vec<SecretMeta>,
     vault: VaultStatus,
     favourites: Vec<FavouriteRow>,
+    catalog: catalog::LocalCatalog,
 }
 
 impl Local {
@@ -596,6 +612,7 @@ impl Local {
             secrets: vault.list(ctx).await?,
             vault: vault.info().status,
             favourites: store.list_favourites(ctx).await?,
+            catalog: catalog::LocalCatalog::read(store, ctx).await?,
         })
     }
 
@@ -1170,6 +1187,7 @@ struct Decided {
     /// QL-19.
     group_rows: Vec<RowPlan<Uuid>>,
     group_actions: Vec<ItemAction>,
+    catalog: catalog::CatalogDecided,
 }
 
 /// SS-04: closes an opened file, which may hold secret values, when the vault locks: its secrets are
@@ -1435,6 +1453,7 @@ impl Transfer {
                 .collect(),
             // QL-19.
             groups: groups::entries(&self.store, ctx).await?,
+            catalog: catalog::export(&self.store, ctx).await?,
         };
         let report = ExportReport {
             path: path.display().to_string(),
@@ -1448,6 +1467,7 @@ impl Transfer {
             container_hosts: payload.sessions.iter().filter(|s| !s.containers.is_empty()).count(),
             folder_defaults: payload.folders.iter().filter(|f| !f.defaults.is_empty()).count(),
             groups: payload.groups.len(),
+            catalog: payload.catalog.counts(),
         };
         let version = payload.format_version();
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
@@ -1462,7 +1482,7 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, {}, {}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, {}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
@@ -1470,6 +1490,7 @@ impl Transfer {
             plural(report.forwards, "port forward"),
             plural(report.container_hosts, "container host"),
             plural(report.groups, "MultiExec group"),
+            report.catalog.describe(),
             report.path
         );
         self.audit(
@@ -1807,6 +1828,8 @@ impl Transfer {
             })
             .collect();
 
+        let catalog = catalog::preview(&payload.catalog, &local.catalog).await?;
+
         let secret_values = payload.secrets.iter().any(|s| s.value.is_some());
         let mut warnings = Vec::new();
         if secret_values {
@@ -1843,6 +1866,7 @@ impl Transfer {
             favourites,
             folder_defaults,
             groups,
+            catalog,
             warnings,
         })
     }
@@ -1918,6 +1942,7 @@ impl Transfer {
             folder_actions,
             group_rows,
             group_actions,
+            catalog: catalog_decided,
         } = decided;
         let mut report = TransferReport::default();
 
@@ -2206,7 +2231,18 @@ impl Transfer {
             }
         }
 
-        // 6. QL-19 saved MultiExec groups, each saved and audited by the groups module, with the sessions
+        // 6. The spec catalogue (VM-19 to VM-21): sizes and images, then the templates that use them.
+        report.catalog = catalog::commit(
+            &self.store,
+            ctx,
+            &payload.catalog,
+            catalog_decided,
+            &secret_map,
+            &mut report.problems,
+        )
+        .await?;
+
+        // 7. QL-19 saved MultiExec groups, each saved and audited by the groups module, with the sessions
         // their members became here.
         let here_before: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
         groups::commit(
@@ -2232,6 +2268,9 @@ impl Transfer {
             report.secrets.describe(),
             report.favourites.describe()
         );
+        if !report.catalog.is_empty() {
+            detail.push_str(&format!("; {}", report.catalog.describe()));
+        }
         if !payload.groups.is_empty() {
             detail.push_str(&format!("; MultiExec groups {}", report.groups.describe()));
         }
@@ -2330,6 +2369,7 @@ impl Transfer {
         for row in &group_rows {
             group_actions.push(row.action(&group_choices, &payload.groups[row.index].name)?);
         }
+        let catalog = catalog::decide(&payload.catalog, &local.catalog, &request.catalog)?;
         if secret_actions.iter().any(|a| *a != ItemAction::Skip) {
             match local.vault {
                 VaultStatus::Unlocked => {}
@@ -2351,6 +2391,7 @@ impl Transfer {
             folder_actions,
             group_rows,
             group_actions,
+            catalog,
         })
     }
 

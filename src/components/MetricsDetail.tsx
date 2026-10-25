@@ -3,7 +3,8 @@
 // guest series from a watched session (MO-02). Each chart has one axis and one unit. MO-15: the memory chart
 // draws what there is (a VM's configured RAM, a host's total) dashed next to what is in use, and Linux swap has a
 // chart of its own. MO-13: "Host details…" opens the session's host details. MO-02: a guest polled less often than
-// the host side (Settings, Dashboard) keeps its line on a VM's charts (chart-gaps.ts).
+// the host side (Settings, Dashboard) keeps its line on a VM's charts (chart-gaps.ts). MO-06: a range picker shows the
+// last hour to the last week from the history on disk, carried on with the live rounds.
 
 import { useEffect, useState } from "react";
 import { EyeIcon, HardDriveIcon, RotateCwIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
@@ -15,8 +16,12 @@ import { EnvBadge, StateBadge } from "@/components/Badges";
 import { GuestStatusBadge } from "@/components/GuestStatusBadge";
 import { LevelIcon, Meter } from "@/components/MetricBits";
 import { MetricChart, type ChartSeries } from "@/components/MetricChart";
+import { RangePicker } from "@/components/RangePicker";
+import { chartPoints, useHistory } from "@/hooks/use-chart-points";
 import { api, type DashboardRow, type MetricPoint } from "@/lib/api";
 import { guestGapMs, joinShortGaps } from "@/lib/chart-gaps";
+import type { ChartRange } from "@/lib/dashboard-api";
+import { isHistoryRange } from "@/lib/history";
 import { formatDuration } from "@/lib/format";
 import { formatBytes, formatPct, formatRate, level, rowCpu, rowMemory, type Thresholds } from "@/lib/metrics";
 import type { ResolvedTheme } from "@/lib/theme";
@@ -25,6 +30,8 @@ interface Props {
   row: DashboardRow | null;
   /** Bumped on every metrics round while the dashboard shows, so the charts move on. */
   round: number;
+  /** MO-06: the dashboard shows and the window is visible, so the history may be read. */
+  live: boolean;
   /** MO-02: seconds between two polls of a watched host. */
   guestIntervalSecs: number;
   thresholds: Thresholds;
@@ -63,6 +70,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 export function MetricsDetail({
   row,
   round,
+  live,
   guestIntervalSecs,
   thresholds,
   theme,
@@ -97,14 +105,28 @@ export function MetricsDetail({
     };
   }, [rowKey, hostKey, guestKey, round]);
 
+  const [range, setRange] = useState<ChartRange>("live");
+  const open = row !== null && live;
+  const hostHistory = useHistory(hostKey ? { source: "host", key: hostKey } : null, range, open);
+  const guestHistory = useHistory(guestKey ? { source: "guest", key: guestKey } : null, range, open);
   const current = series && series.key === rowKey ? series : { host: [], guest: [] };
-  const { times, host, guest } = align(current.host, current.guest);
+  const { times, host, guest } = align(
+    chartPoints(range, current.host, hostHistory),
+    chartPoints(range, current.guest, guestHistory),
+  );
   const hasHost = row?.kind === "vm";
   const values = (points: (MetricPoint | null)[], pick: (p: MetricPoint) => number | null) => {
     const raw = points.map((p) => (p ? pick(p) : null));
-    // A VM's guest has no reading at the host-only rounds between its polls.
-    return hasHost && points === guest ? joinShortGaps(times, raw, guestGapMs(guestIntervalSecs)) : raw;
+    // A VM's guest has no reading at the host-only rounds between its polls (a history range is in buckets).
+    return hasHost && points === guest && !isHistoryRange(range)
+      ? joinShortGaps(times, raw, guestGapMs(guestIntervalSecs))
+      : raw;
   };
+  const empty = isHistoryRange(range)
+    ? hostHistory || guestHistory
+      ? "No history for this range yet: it is kept from the first minute a VM runs or a host is watched."
+      : "Reading the history…"
+    : undefined;
   const hasGuest = guestKey !== null;
   const two = (a: ChartSeries | null, b: ChartSeries | null) => [a, b].filter((s): s is ChartSeries => s !== null);
 
@@ -209,6 +231,14 @@ export function MetricsDetail({
           </SheetHeader>
 
           <div className="flex flex-col gap-4 overflow-auto px-4 pb-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-xs text-muted-foreground">
+                {isHistoryRange(range)
+                  ? "From the history on this PC (1-minute averages), then the live rounds"
+                  : "The last 30 minutes, every round"}
+              </span>
+              <RangePicker value={range} onChange={setRange} label={`Charts of ${row.name}: range`} />
+            </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <Stat
                 label="CPU"
@@ -249,6 +279,7 @@ export function MetricsDetail({
               subtitle="Busy share of its own CPUs"
               times={times}
               theme={theme}
+              empty={empty}
               max={100}
               format={(v) => `${Math.round(v)}%`}
               series={two(
@@ -265,6 +296,7 @@ export function MetricsDetail({
               }
               times={times}
               theme={theme}
+              empty={empty}
               format={(v) => formatBytes(v)}
               series={memorySeries}
             />
@@ -274,6 +306,7 @@ export function MetricsDetail({
                 subtitle="Swap in use under the swap there is (dashed)"
                 times={times}
                 theme={theme}
+                empty={empty}
                 format={(v) => formatBytes(v)}
                 series={[
                   { label: "Swap in use", slot: 2, values: values(guest, (p) => p.swapUsedBytes) },
@@ -286,6 +319,7 @@ export function MetricsDetail({
               subtitle={hasHost ? "Read and written by the VM's process" : "Read and written by the guest's disks"}
               times={times}
               theme={theme}
+              empty={empty}
               format={(v) => formatRate(v)}
               series={[
                 { label: "Read", slot: 1, values: values(hasHost ? host : guest, (p) => p.diskReadBps) },
@@ -299,6 +333,7 @@ export function MetricsDetail({
                   subtitle="All interfaces but loopback and container links"
                   times={times}
                   theme={theme}
+                  empty={empty}
                   format={(v) => formatRate(v)}
                   series={[
                     { label: "Received", slot: 1, values: values(guest, (p) => p.netRxBps) },
@@ -310,6 +345,7 @@ export function MetricsDetail({
                   subtitle="1-minute load average"
                   times={times}
                   theme={theme}
+                  empty={empty}
                   format={(v) => v.toFixed(2)}
                   series={[{ label: "Load", slot: 1, values: values(guest, (p) => p.load1) }]}
                 />

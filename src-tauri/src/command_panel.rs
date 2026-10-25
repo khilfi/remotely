@@ -101,9 +101,10 @@ fn open_checked(url: &str, open: impl FnOnce(&str) -> IpcResult<()>) -> IpcResul
     open(url.as_str())
 }
 
-/// The default browser, through the shell's "open" verb, as Explorer opens a link.
+/// The default browser, through the shell's "open" verb, as Explorer opens a link. Callers check the address first
+/// (QL-13 manual pages here, VM-20 cloud image pages in `catalog`).
 #[cfg(windows)]
-fn open_in_browser(url: &str) -> IpcResult<()> {
+pub(crate) fn open_in_browser(url: &str) -> IpcResult<()> {
     use windows::core::{w, HSTRING, PCWSTR};
     use windows::Win32::System::Com::{
         CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
@@ -125,7 +126,7 @@ fn open_in_browser(url: &str) -> IpcResult<()> {
     };
     // ShellExecute returns a value above 32 when it worked, an error code otherwise.
     if result.0 as usize > 32 {
-        tracing::info!("manual page opened in the browser");
+        tracing::info!("a page on the allow-list opened in the browser");
         Ok(())
     } else {
         Err(IpcError::new(
@@ -136,8 +137,8 @@ fn open_in_browser(url: &str) -> IpcResult<()> {
 }
 
 #[cfg(not(windows))]
-fn open_in_browser(_url: &str) -> IpcResult<()> {
-    Err(IpcError::new("unsupported", "Opening a manual page needs Windows."))
+pub(crate) fn open_in_browser(_url: &str) -> IpcResult<()> {
+    Err(IpcError::new("unsupported", "Opening a page needs Windows."))
 }
 
 /// BX-08: the command with its `{{variables}}` filled in, ready to paste.

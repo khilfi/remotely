@@ -201,6 +201,7 @@ async fn try_commit(
             &core.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: vault_password.map(SecretString::new),
@@ -231,6 +232,7 @@ async fn commit_keeping(
             &core.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: keep_startup.to_vec(),
                 keep_forwards: keep_forwards.to_vec(),
                 vault_password: None,
@@ -619,6 +621,7 @@ async fn a_closed_preview_can_not_be_imported() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,
@@ -843,6 +846,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,
@@ -875,6 +879,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,
@@ -1070,6 +1075,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,

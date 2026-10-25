@@ -116,11 +116,17 @@ pub enum Change {
     TerminalRules,
     /// QL-19: saved MultiExec groups.
     MultiExecGroups,
+    /// VM-19 to VM-21: sizes, images and launch templates.
+    Catalog,
+    /// MO-07: alert rules, and acknowledging alerts.
+    Alerts,
+    /// MO-16: the dashboard's widgets and their places.
+    DashboardLayout,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 16] = [
+    pub const ALL: [Change; 19] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -137,6 +143,9 @@ impl Change {
         Change::ContainerHosts,
         Change::TerminalRules,
         Change::MultiExecGroups,
+        Change::Catalog,
+        Change::Alerts,
+        Change::DashboardLayout,
     ];
 
     pub fn label(self) -> &'static str {
@@ -157,6 +166,9 @@ impl Change {
             Change::ContainerHosts => "Mark container hosts",
             Change::TerminalRules => "Edit highlight and alert rules",
             Change::MultiExecGroups => "Edit saved MultiExec groups",
+            Change::Catalog => "Edit sizes, images and launch templates",
+            Change::Alerts => "Change alert rules or acknowledge alerts",
+            Change::DashboardLayout => "Change the dashboard layout",
         }
     }
 }

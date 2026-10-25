@@ -141,6 +141,15 @@ crates/core/          remotely-core: all app logic
                       adapters plugged in at power-on (one confirm)
     snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
                       names
+    catalog/          VM-19 to VM-21 the spec catalogue (migration 0019; audited `catalog_changed`, no tier,
+                      Change::Catalog): sizes.rs (the twelve built-ins, read only, named by their name; own sizes by
+                      UUID), profiles.rs (OS profiles: firmware, controller, NIC, guestOS / --ostype, hardware version
+                      20; Windows 11 on VirtualBox only), images.rs (golden VM + snapshot id, cloud image, ISO,
+                      OVA/OVF; format by extension checked against the first bytes; SHA-256 on a blocking thread with
+                      progress and cancel; untrusted::path_refusal first; IMAGE_SITES and checked_site, the cloud
+                      image pages allow-list), templates.rs (check_template, problems, naming {n} {template} {date},
+                      resolve: a template and a count into a DeployPlan per VM, pure); mod.rs the Catalog service
+                      (Core.catalog; `plan` is R2's entry)
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
                       Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
@@ -150,7 +159,11 @@ crates/core/          remotely-core: all app logic
                       names; by text alone, never the file system), read_capped (a file whole up to a cap, or
                       TooLarge; MAX_VM_CONFIG_BYTES 4 MB), is_format_char (Unicode 16.0's Cf table), is_device_name
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
-                      and this PC's RAM and paging files per round), guest.rs (MO-02 SSH polling, kept connections,
+                      and this PC's RAM and paging files per round; RoundObserver: after each round, history.rs and
+                      alerts; collect_once_at for tests' own clock), history.rs (MO-06 Rollup: 1-minute averages with
+                      min and max, written once a minute in one transaction; bucket: ranges of 1 h to 7 d;
+                      HistoryRetention 1 to 30 days, 7 by default, `metrics.historyRetention`; the daily prune with
+                      resolved alerts, checkpoint and VACUUM through when_idle, audited history_pruned), guest.rs (MO-02 SSH polling, kept connections,
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
                       GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
                       POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
@@ -163,6 +176,13 @@ crates/core/          remotely-core: all app logic
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests)
+    alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
+                      Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
+                      stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
+                      as the grid shows them, rule edits and acknowledge audited and locked (Change::Alerts), the
+                      alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
+    dashboard.rs      MO-16 the layout (`dashboard.layout`, per workspace, null is the default): widgets on 4 columns
+                      and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
                       command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
@@ -260,13 +280,14 @@ crates/core/          remotely-core: all app logic
                       and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
                       format version 2 for an export that uses QL-16 folder defaults, else 1, which 0.4.x reads; new
-                      exports use file::KDF, 256 MiB and 3 passes, and a file
-                      opens with the parameters in its header, so older 64 MiB files still import), preview with
-                      conflicts (skip, replace, keep both), commit; audited; an export refuses the vault password as
-                      its passphrase; QL-16 sessions travel with what they set themselves and folders with their
-                      defaults (a folder here with other defaults: keep or replace); groups.rs QL-19 MultiExec groups
-                      by name with their sessions' ids (members become the sessions imported or matched here, the rest
-                      left out with a note)
+                      exports use file::KDF, 256 MiB and 3 passes, and a file opens with the parameters in its header,
+                      so older 64 MiB files still import), preview with conflicts (skip, replace, keep both), commit;
+                      audited; an export refuses the vault password as its passphrase; catalog.rs VM-19 to VM-21 own
+                      sizes, images by path (a note when the file isn't here; a refused path can only be skipped) and
+                      templates mapped to this laptop's images, sizes and keys; QL-16 sessions travel with what they
+                      set themselves and folders with their defaults (a folder here with other defaults: keep or
+                      replace); groups.rs QL-19 MultiExec groups by name with their sessions' ids (members become the
+                      sessions imported or matched here, the rest left out with a note)
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -306,7 +327,8 @@ crates/core/          remotely-core: all app logic
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
-                      QL-16; multiexec_groups.rs: QL-19); opt-in workstation_it.rs and virtualbox_it.rs
+                      QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16); opt-in
+                      workstation_it.rs and virtualbox_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
@@ -315,9 +337,12 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
                       formats), SS-08 file
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
-                      SS-07 port forwards and tunnels (tunnels.rs), CT-01 the Containers page's reads, marks and
+                      SS-07 port forwards and tunnels (tunnels.rs), VM-19 to VM-21 the Templates page (catalog.rs:
+                      image and folder dialogs, `catalog://hash` progress, cloud image pages after checked_site),
+                      CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
-                      (host_details.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
+                      (host_details.rs), MO-06, MO-07, MO-16 the dashboard's history, alerts, layout and
+                      services widget, and the alerts' Windows notification (dashboard.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
                       startup message boxes, setting an unopenable database aside, Settings About's logs folder, UI
                       crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
                       instance (release builds), closes what a reloaded page had open (on_page_load), and turns
@@ -337,21 +362,28 @@ src/                  React + TypeScript UI
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
-                      and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
+                      and dashed limit lines; MO-06, MO-07, MO-16 RangePicker, AlertsWidget, AlertRulesSheet,
+                      AlertNotifier (one Windows notification per round of alerts, masked), DashboardGrid (pointer
+                      drag, keyboard moves, resize; no drag-and-drop library), WidgetSettings, ServicesWidget,
+                      MetricChartWidget, DashboardHistoryCard; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
-                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; QL-16
-                      FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
+                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; VM-19 to
+                      VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check);
+                      QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
-                      ContainersPage at Ctrl+3). P6: App memoises every page and passes stable callbacks, and renders
+                      ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
+                      templates; the VMs page's Deploy button waits for R2). P6: App memoises every page and passes
+                      stable callbacks, and renders
                       only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
                       shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
   hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
                       each timed from when the last one finished; useVisibility); use-transfers.ts (SS-08, P6 the
                       transfers store through useSyncExternalStore); use-debounced.ts (Compare reloads once per burst
                       of job events; Activity coalesces its own asks, at most one read a second);
+                      use-chart-points.ts (MO-06 a series' live rounds, or a history range carried on with them);
                       use-password-strength.ts; use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), reauth.ts and reauth-prompt.ts (SS-04, AP-06: on `reauth_required` ask for the vault
@@ -376,11 +408,15 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
+                      Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form,
+                      DEPLOY_REASON), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
                       delay, longer after failures), host-details.ts
-                      (MO-13, MO-14 summaries, wording and the commands offered to copy),
+                      (MO-13, MO-14 summaries, wording and the commands offered to copy), dashboard-api.ts (MO-06,
+                      MO-07, MO-16 wrappers and types), history.ts (MO-06 ranges, buckets, stored minutes carried on
+                      with live rounds, gaps), alerts.ts (MO-07 wording, the editor's checks, one notification per
+                      round), dashboard-layout.ts (MO-16 add, remove, move, resize, drag snapping),
                       ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
                       debounce.ts (when a reload after job events runs), retention.ts (BX-02 the retention choices
                       and a purge's summary for Settings' DataRetentionCard),

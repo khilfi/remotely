@@ -357,6 +357,7 @@ async fn commit(
                 secrets: vec![],
                 favourites: vec![],
                 groups: choices(groups),
+                catalog: Default::default(),
                 folder_defaults: vec![],
                 keep_startup: vec![],
                 keep_forwards: vec![],

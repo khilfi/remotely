@@ -5,7 +5,8 @@
 // MultiExec (SS-10) and Compare output (BX-03) replace the MVP's Bulk run page.
 //
 // FD-01 keyboard: Ctrl+K opens the command palette (Ctrl+Shift+K inside a terminal, where Ctrl+K belongs
-// to the shell), Ctrl+1 to Ctrl+9 open the pages by their own shortcut and Ctrl+, opens Settings.
+// to the shell), Ctrl+1 to Ctrl+9 open the pages by their own shortcut and Ctrl+, opens Settings. VM-19 to VM-21: the
+// Templates page (sizes, images, launch templates) sits under Virtual machines with Ctrl+9.
 //
 // QL-14: snapshots are part of the Virtual machines page. The sidebar's third slot is left for Containers (Q6); until
 // then Ctrl+3, Snapshots' old shortcut, opens the snapshot view there (lib/navigation.ts).
@@ -25,9 +26,11 @@ import {
   DownloadIcon,
   GaugeIcon,
   ContainerIcon,
+  DiscIcon,
   GitCompareArrowsIcon,
   HistoryIcon,
   KeyRoundIcon,
+  LayersIcon,
   LayoutDashboardIcon,
   ListTreeIcon,
   LockIcon,
@@ -85,6 +88,7 @@ import {
   useReadOnlyReason,
 } from "@/components/Presentation";
 import { UpdateBanner, UpdateNotice } from "@/components/UpdateBanner";
+import { AlertNotifier } from "@/components/AlertNotifier";
 import {
   api,
   errorCode,
@@ -107,6 +111,7 @@ import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage, type VmPageRequest } from "@/pages/VmsPage";
@@ -124,11 +129,21 @@ import {
 import type { VmView } from "@/lib/vm-snapshots";
 
 type PageId =
-  "vms" | "dashboard" | "containers" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
+  | "vms"
+  | "templates"
+  | "dashboard"
+  | "containers"
+  | "sessions"
+  | "terminal"
+  | "knownHosts"
+  | "vault"
+  | "activity"
+  | "settings";
 
 /** In sidebar order, each with its own shortcut. Ctrl+3 is Containers (Q6); the old Snapshots alias stops. */
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
+  { id: "templates", label: "Templates", title: "VM templates", icon: LayersIcon, shortcut: "Ctrl+9" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
   { id: "containers", label: "Containers", title: "Containers", icon: ContainerIcon, shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
@@ -141,6 +156,7 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 
 // P6: memoised pages. Each one renders again only when its own props change; App passes them stable callbacks.
 const Vms = memo(VmsPage);
+const Templates = memo(TemplatesPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
 const Sessions = memo(SessionsPage);
@@ -183,6 +199,10 @@ export default function App() {
   const offered = updateCheck?.status === "available" ? updateCheck.update : null;
   // QL-14: a VM (or the snapshot view) to show on the Virtual machines page.
   const [vmRequest, setVmRequest] = useState<VmPageRequest | null>(null);
+  // VM-19 to VM-21: a tab of the Templates page, or a new item there, asked for from the palette.
+  const [templatesRequest, setTemplatesRequest] = useState<{ tab: TemplatesTab; create?: boolean; n: number } | null>(
+    null,
+  );
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
   const [terminalOpen, setTerminalOpen] = useState<{
     sessionId: string;
@@ -510,6 +530,36 @@ export default function App() {
       run: () => openVms([], "snapshots"),
     },
     {
+      id: "new-template",
+      label: "New launch template…",
+      icon: LayersIcon,
+      keywords: "vm template size image deploy create cloud",
+      run: () => {
+        setTemplatesRequest((prev) => ({ tab: "templates", create: true, n: (prev?.n ?? 0) + 1 }));
+        setPage("templates");
+      },
+    },
+    {
+      id: "add-image",
+      label: "Add a VM image (cloud image, ISO, OVA or golden VM)…",
+      icon: DiscIcon,
+      keywords: "vmdk qcow2 iso ova ovf snapshot template cloud-init",
+      run: () => {
+        setTemplatesRequest((prev) => ({ tab: "images", create: true, n: (prev?.n ?? 0) + 1 }));
+        setPage("templates");
+      },
+    },
+    {
+      id: "sizes",
+      label: "VM sizes (gp.medium and the others)",
+      icon: LayersIcon,
+      keywords: "instance type cpu ram disk vcpu template",
+      run: () => {
+        setTemplatesRequest((prev) => ({ tab: "sizes", n: (prev?.n ?? 0) + 1 }));
+        setPage("templates");
+      },
+    },
+    {
       id: "watch",
       label: "Watch hosts on the dashboard",
       icon: GaugeIcon,
@@ -801,6 +851,11 @@ export default function App() {
                 />
               </ErrorBoundary>
             </section>
+            <section hidden={page !== "templates"}>
+              <ErrorBoundary name="Templates">
+                <Templates active={page === "templates"} request={templatesRequest} />
+              </ErrorBoundary>
+            </section>
             <section hidden={page !== "dashboard"}>
               <ErrorBoundary name="Dashboard">
                 <Dashboard
@@ -919,6 +974,8 @@ export default function App() {
         onOpenVm={(vmxPath, view) => openVms([vmxPath], view)}
       />
       <ReauthDialog />
+      {/* MO-07: alerts notify through Windows whatever page shows. */}
+      <AlertNotifier />
       <Toaster theme={resolved} position="bottom-right" />
       <PresentationLayer />
     </TooltipProvider>

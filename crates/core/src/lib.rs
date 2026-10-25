@@ -37,19 +37,27 @@
 //!     (the Terminal page's Compare output)
 //!   retention (BX-02): the job journal keeps outputs and command text for as long as Settings says, then
 //!     a daily purge removes them; save_guard: no save path writes into a Git working tree
+//!   catalog (VM-19 to VM-21): sizes, OS profiles, images and launch templates, what deploy (R2) runs; edits
+//!     are audited like the session library, and a template resolves into one plan per VM
 //!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
 //!     ──► adapters::containers (their CLIs, over adapters::remote or on this PC); reads skip the bus,
 //!     changes are commands on it that the job runner carries out there
+//!   metrics::history (MO-06): the rounds' 1-minute averages on disk, pruned daily; alerts (MO-07): rules
+//!     run on each round, an alert list and events for the UI's notifications; dashboard (MO-16): the
+//!     dashboard's layout, per workspace
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
 //! runner (changes) or [`inventory::Inventory`] and [`metrics`] (reads).
 
 pub mod adapters;
+pub mod alerts;
 pub mod bulk;
 pub mod capacity;
+pub mod catalog;
 pub mod command_bus;
 pub mod containers;
+pub mod dashboard;
 pub mod domain;
 pub mod error;
 pub mod export;
@@ -97,10 +105,13 @@ use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::UpdaterAdapter;
 use adapters::virtualbox::{SwitchableVirtualBox, VirtualBoxAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
+use alerts::Alerts;
 use bulk::BulkRuns;
 use capacity::CapacityChecker;
+use catalog::Catalog;
 use command_bus::CommandBus;
 use containers::Containers;
+use dashboard::Layouts;
 use domain::Context;
 use forwards::Forwards;
 use host_details::{HostDetails, HostDetailsParts, SpecsCollector};
@@ -110,6 +121,7 @@ use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
 use login_guard::LoginGuard;
+use metrics::history::MetricsHistory;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use multiexec_groups::MultiExecGroups;
 use policy::{PolicyEngine, PolicyRules};
@@ -200,6 +212,8 @@ pub struct Core {
     /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
     /// through [`Core::bus`].
     pub snapshots: SnapshotReader,
+    /// VM-19 to VM-21: sizes, images and launch templates (the app's own data, audited). Deploying is R2's.
+    pub catalog: Catalog,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
     /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
@@ -245,6 +259,13 @@ pub struct Core {
     /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
     /// The shell starts its polling with [`Metrics::run`].
     pub metrics: Arc<Metrics>,
+    /// MO-06: the dashboard's history on disk (1-minute averages), its retention and prune. The shell starts
+    /// the prune's schedule with [`MetricsHistory::run`].
+    pub history: Arc<MetricsHistory>,
+    /// MO-07: alert rules, the alert list and alert events, evaluated on every metrics round.
+    pub alerts: Arc<Alerts>,
+    /// MO-16: the dashboard's layout of this workspace.
+    pub layouts: Layouts,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
@@ -414,6 +435,11 @@ impl Core {
             guest,
             capacity: CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
         }));
+        // MO-06, MO-07: the rounds go on to the history on disk, then to the alert rules.
+        let history = Arc::new(MetricsHistory::new(store.clone(), ctx));
+        metrics.add_observer(history.clone());
+        let alerts = Arc::new(Alerts::load(store.clone(), ctx).await?);
+        metrics.add_observer(alerts.clone());
         let host_details = HostDetails::new(HostDetailsParts {
             store: store.clone(),
             collector: specs,
@@ -436,6 +462,8 @@ impl Core {
         );
         // CT-01, CT-02: container changes go from the job runner to the containers service.
         jobs.set_containers(Arc::new(containers.clone()));
+        // MO-06: a prune compacts the file only while no job runs.
+        history.set_jobs(Arc::clone(&jobs));
         let bus = Arc::new(CommandBus::new(
             policy,
             Arc::new(
@@ -470,6 +498,7 @@ impl Core {
         let core = Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
+            catalog: Catalog::new(store.clone()).with_hypervisors(hypervisors.clone()),
             inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())
@@ -496,6 +525,9 @@ impl Core {
             terminal_rules,
             reachability,
             metrics,
+            history,
+            alerts,
+            layouts: Layouts::new(store.clone(), ctx),
             host_details,
             login_guard,
             presentation,
@@ -575,6 +607,10 @@ impl Core {
     /// closes, audited, with its tunnels, and session logs are written out to the end.
     pub async fn shutdown(&self) {
         self.terminals.close_all().await;
+        // MO-06: the minute still open is written as it is.
+        if let Err(err) = self.history.flush_all().await {
+            tracing::warn!(error = %err, "could not write the dashboard's last minute of history");
+        }
     }
 
     /// MO-02, CT-01: the user pressed Retry on a parked or waiting host: the dashboard and the

@@ -794,6 +794,7 @@ async fn favourites_travel_in_the_encrypted_export() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,
@@ -848,6 +849,7 @@ async fn favourites_travel_in_the_encrypted_export() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,
