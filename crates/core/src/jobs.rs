@@ -2128,7 +2128,8 @@ fn stack_steps(op: &StackOp, targets: Vec<Target>) -> Vec<PlannedStep> {
                 readiness: step.readiness,
                 ready_timeout_secs: step.ready_timeout_secs,
                 delay_secs: step.delay_secs,
-                ready: ReadyFrom::Instance(spec.instance_id, i),
+                // Its place in the instance (a retry's steps keep theirs).
+                ready: ReadyFrom::Instance(spec.instance_id, step.spec.stack.map_or(i, |t| t.step as usize)),
             })
             .collect(),
         StackOp::Power { spec } => spec

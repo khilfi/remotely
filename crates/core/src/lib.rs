@@ -558,6 +558,7 @@ impl Core {
             hypervisors.clone(),
             Arc::clone(&adapters.host_counters),
             Arc::clone(&bus),
+            Arc::clone(&inventory),
         );
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
         let core = Self {

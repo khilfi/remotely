@@ -150,6 +150,8 @@ pub struct Stacks {
     hypervisors: Hypervisors,
     host: Arc<dyn HostCounters>,
     bus: Arc<CommandBus>,
+    /// Read again before an instance starts, stops or goes, so VMs already in that state are left alone.
+    inventory: Arc<crate::inventory::Inventory>,
 }
 
 /// `'a', 'b' and 3 more`.
@@ -233,6 +235,7 @@ impl Stacks {
         hypervisors: Hypervisors,
         host: Arc<dyn HostCounters>,
         bus: Arc<CommandBus>,
+        inventory: Arc<crate::inventory::Inventory>,
     ) -> Self {
         Self {
             store,
@@ -241,6 +244,14 @@ impl Stacks {
             hypervisors,
             host,
             bus,
+            inventory,
+        }
+    }
+
+    /// The VM list as the hypervisors have it now; when they can't be asked, as the last refresh saw it.
+    async fn refresh(&self, ctx: &Context) {
+        if let Err(err) = self.inventory.refresh(ctx).await {
+            tracing::debug!(error = %err, "the VM list couldn't be read again before a stack instance's action");
         }
     }
 
@@ -642,6 +653,7 @@ impl Stacks {
         if !spec::instance_op_allowed(&op) {
             return invalid("A stack instance starts, shuts down or suspends as a whole.");
         }
+        self.refresh(ctx).await;
         let instance = self.instance(ctx, id).await?;
         let starts = matches!(op, PowerOp::Start { .. });
         let applies = |state: PowerState| match op {
@@ -716,6 +728,7 @@ impl Stacks {
     /// names (by key) on purpose; the other hand-added VMs are kept and said so. Refused while a VM of it runs (shut
     /// it down first), as R3's delete is; protected VMs are left out by the policy engine (AP-04).
     pub async fn teardown(&self, ctx: &Context, id: Uuid, also: &[String]) -> Result<SubmitOutcome> {
+        self.refresh(ctx).await;
         let instance = self.instance(ctx, id).await?;
         let also: HashSet<String> = also.iter().map(|k| path_key(Path::new(k))).collect();
         let mut targets = Vec::new();

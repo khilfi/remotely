@@ -297,10 +297,14 @@ impl StackDeploySpec {
             return invalid(format!("A stack makes 1 to {MAX_STACK_VMS} VMs."));
         }
         let mut names = HashSet::new();
-        for (i, step) in self.steps.iter().enumerate() {
+        let mut last: Option<u32> = None;
+        for step in &self.steps {
             step.spec.validate()?;
+            // A retry keeps only the steps with VMs left, each at its place in the instance.
             match &step.spec.stack {
-                Some(tag) if tag.instance_id == self.instance_id && tag.step as usize == i => {}
+                Some(tag) if tag.instance_id == self.instance_id && last.is_none_or(|l| tag.step > l) => {
+                    last = Some(tag.step);
+                }
                 _ => return invalid("Each step of a stack deploy belongs to its instance, in order."),
             }
             check_readiness(&step.readiness)?;

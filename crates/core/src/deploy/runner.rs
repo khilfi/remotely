@@ -246,6 +246,15 @@ impl Deployer {
                     seconds: START.as_secs(),
                 })??,
         }
+        // The VM list shows it running before the next refresh asks (VM-08: a stack instance's start and stop go
+        // by it).
+        if let Err(err) = self
+            .store
+            .set_vm_power_state(ctx, &key, crate::domain::PowerState::Running)
+            .await
+        {
+            tracing::warn!(error = %err, "a new VM's power state could not be noted");
+        }
         Ok(key)
     }
 

@@ -7,6 +7,7 @@
 pub mod containers;
 pub mod github_server;
 pub mod ssh_server;
+pub mod stack_clock;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
