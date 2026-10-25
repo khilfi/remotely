@@ -33,6 +33,10 @@ use crate::terminal::multiexec::{self, RunKey};
 use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
 use crate::vm_settings::{ops as vm_ops, VmChangePreview, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
+// VM-14, VM-27: schedules are approved when they are saved; each run submits under that standing approval.
+mod standing;
+pub use standing::{StandingAsk, StandingDetails, StandingDraft, StandingGrant, StandingRun, StandingUse};
+
 /// A state-changing request. Reads (inventory, metrics) do not go through the bus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -885,6 +889,8 @@ pub struct ApprovalRequest {
     /// VM-23, VM-24: for a VM settings or lifecycle change, what changes on each VM, every file that is
     /// deleted, and why a VM would be refused.
     pub vm_change: Option<Box<VmChangePreview>>,
+    /// VM-14, VM-27: for a schedule's approval, when it runs and what each run does.
+    pub standing: Option<Box<StandingDetails>>,
 }
 
 /// What [`CommandBus`] read about the targets before asking (AP-02).
@@ -1064,6 +1070,9 @@ pub struct ApprovalRecord {
     pub safety_snapshot: bool,
     pub vault_reauth: bool,
     pub approved_at: String,
+    /// VM-14, VM-27: a scheduled run's job: the standing approval it runs under, and which run it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing: Option<StandingUse>,
 }
 
 /// AP-01: how long an approval waits for its answer. After that the targets' state, labels and protection
@@ -1078,6 +1087,8 @@ struct Pending {
     retry_of: Option<Uuid>,
     /// When it was asked (or asked again), for [`APPROVAL_TTL`].
     asked: Instant,
+    /// VM-14, VM-27: a schedule's approval, answered with [`CommandBus::approve_standing`].
+    standing: Option<Box<StandingDraft>>,
 }
 
 impl Pending {
@@ -1689,6 +1700,7 @@ impl CommandBus {
                 request: request.clone(),
                 retry_of,
                 asked: Instant::now(),
+                standing: None,
             },
         );
         Ok(SubmitOutcome::NeedsApproval { request })
@@ -1792,6 +1804,7 @@ impl CommandBus {
             upload: UploadDetails::of(command),
             tunnel: TunnelDetails::of(command),
             vm_change: vm_change.map(Box::new),
+            standing: None,
         })
     }
 
@@ -1910,6 +1923,7 @@ impl CommandBus {
                 request: request.clone(),
                 retry_of: pending.retry_of,
                 asked: Instant::now(),
+                standing: None,
             },
         );
         CoreError::ApprovalChanged {
@@ -1927,6 +1941,13 @@ impl CommandBus {
         let pending = locks::lock(&self.pending)
             .remove(&request_id)
             .ok_or(CoreError::UnknownApproval(request_id))?;
+        // VM-14, VM-27: a schedule's approval is answered on its own way, which records the grant instead of a job.
+        if pending.standing.is_some() {
+            locks::lock(&self.pending).insert(request_id, pending);
+            return Err(CoreError::InvalidInput(
+                "That approval is for a schedule: answer it from the Schedules page.".into(),
+            ));
+        }
         let ttl = self.approval_ttl();
         if pending.expired(ttl) {
             self.audit_expired(&pending, ttl).await;
@@ -2093,6 +2114,7 @@ impl CommandBus {
             safety_snapshot,
             vault_reauth,
             approved_at: now_rfc3339(),
+            standing: None,
         })
     }
 }

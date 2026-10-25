@@ -13,6 +13,7 @@
 //! The rules are data ([`PolicyRules`]) so they can be edited and saved.
 
 mod commands;
+mod standing;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

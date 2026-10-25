@@ -19,6 +19,7 @@ use crate::metrics::guest::{POLL_KEY, WATCHED_KEY};
 use crate::metrics::history::{HistoryRetention, HISTORY_RETENTION_KEY};
 use crate::policy::PolicyRules;
 use crate::retention::{Retention, RETENTION_KEY};
+use crate::schedules::{ChainLimits, CHAIN_LIMITS_KEY};
 use crate::store::{self, NewAuditEntry, Store};
 use crate::terminal::{TerminalSettings, TERMINAL_SETTINGS_KEY};
 use crate::updates::{UPDATE_TOKEN_EXPIRES_KEY, UPDATE_TOKEN_KEY};
@@ -100,6 +101,7 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
     )
     .await?;
     check::<Option<DashboardLayout>>(store, ctx, LAYOUT_KEY, "the dashboard layout", &mut reset).await?;
+    check::<ChainLimits>(store, ctx, CHAIN_LIMITS_KEY, "the snapshot chain warnings", &mut reset).await?;
     Ok(reset)
 }
 
