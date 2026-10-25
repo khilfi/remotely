@@ -34,7 +34,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { EnvBadge } from "@/components/Badges";
+import { EnvBadge, StartupRatingBadges } from "@/components/Badges";
 import { VaultUnlock } from "@/components/VaultUnlock";
 import {
   api,
@@ -178,6 +178,8 @@ function StatusBadge({ row, preview }: { row: ImportRow; preview: ImportPreview 
 export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenVault, onImported, onClose }: Props) {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [picked, setPicked] = useState<Set<number>>(new Set());
+  /** SS-01: rows whose startup command is imported too; none by default. */
+  const [keepStartup, setKeepStartup] = useState<Set<number>>(new Set());
   const [target, setTarget] = useState<string>(folderId ?? TOP);
   const [addKeys, setAddKeys] = useState(true);
   const [busy, setBusy] = useState<ImportSource | "import" | null>(null);
@@ -214,6 +216,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
         setGuide(null);
         setPreview(found);
         setPicked(new Set(found.rows.filter((r) => r.selected).map((r) => r.index)));
+        setKeepStartup(new Set());
       }
     } catch (err) {
       setError(errorMessage(err));
@@ -229,6 +232,8 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
   }, [preview, picked]);
   const vaultReady = vault?.status === "unlocked";
   const keysWanted = addKeys && keyFiles.size > 0 && vault?.status !== "notSetUp";
+  /** SS-01: picked rows with a startup command. */
+  const withStartup = (preview?.rows ?? []).filter((r) => picked.has(r.index) && r.candidate.startupCommand);
 
   async function commit() {
     if (!preview) return;
@@ -240,6 +245,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
         rows: [...picked].sort((a, b) => a - b),
         folderId: target === TOP ? null : target,
         addKeys: keysWanted,
+        keepStartup: [...keepStartup].filter((i) => picked.has(i)).sort((a, b) => a - b),
       });
       setReport(done);
       onImported();
@@ -448,6 +454,48 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                 </Table>
               </div>
             )}
+            {withStartup.length > 0 && (
+              <Alert>
+                <AlertTriangleIcon />
+                <AlertTitle>
+                  {plural(withStartup.length, "session")} {withStartup.length === 1 ? "has" : "have"} a startup command
+                </AlertTitle>
+                <AlertDescription className="grid gap-2">
+                  <p>
+                    A startup command is typed into the shell at every connection, without asking. They are left out
+                    unless you tick them; tick only the ones you know.
+                  </p>
+                  <ul className="grid gap-1.5">
+                    {withStartup.map((row) => (
+                      <li key={row.index} className="flex min-w-0 items-start gap-2">
+                        <Checkbox
+                          id={`import-startup-${row.index}`}
+                          className="mt-0.5"
+                          checked={keepStartup.has(row.index)}
+                          onCheckedChange={(v) =>
+                            setKeepStartup((prev) => {
+                              const next = new Set(prev);
+                              if (v === true) next.add(row.index);
+                              else next.delete(row.index);
+                              return next;
+                            })
+                          }
+                        />
+                        <Label htmlFor={`import-startup-${row.index}`} className="grid min-w-0 gap-1 font-normal">
+                          <span className="flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-foreground">{row.candidate.name}</span>
+                            {row.startupRating && <StartupRatingBadges rating={row.startupRating} />}
+                          </span>
+                          <code className="font-mono text-xs break-all whitespace-pre-wrap">
+                            {row.candidate.startupCommand}
+                          </code>
+                        </Label>
+                      </li>
+                    ))}
+                  </ul>
+                </AlertDescription>
+              </Alert>
+            )}
             {preview.skipped.length > 0 && (
               <details className="text-sm">
                 <summary className="cursor-pointer text-muted-foreground">
@@ -517,6 +565,8 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
               {report.keysAdded > 0 && `, added ${plural(report.keysAdded, "key")} to the vault`}
               {report.foldersCreated > 0 && `, created ${plural(report.foldersCreated, "folder")}`}. Each one is in the
               audit log.
+              {report.startupLeftOut > 0 &&
+                ` ${plural(report.startupLeftOut, "startup command")} left out; add one in the session editor if it is wanted.`}
             </p>
             {report.problems.length > 0 && (
               <Alert>

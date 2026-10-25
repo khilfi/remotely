@@ -20,14 +20,17 @@
 pub mod tree;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::adapters::remote::{AuthMethod, Credentials, SessionSpec};
+use crate::command_bus::Command;
 use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::locks;
+use crate::policy::{ActionKind, PolicyEngine, Tier};
 use crate::presentation::Change;
 use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
@@ -157,6 +160,13 @@ pub struct SessionInput {
     pub jump_session_id: Option<Uuid>,
     #[serde(default)]
     pub startup_command: Option<String>,
+    /// SS-01: type the startup command again after an automatic reconnect (off: only on connections
+    /// the user opens).
+    #[serde(default)]
+    pub startup_on_reconnect: bool,
+    /// SS-08: the folder prompt hook. `None` follows Settings (off for a Prod-labelled session).
+    #[serde(default)]
+    pub prompt_hook: Option<bool>,
     #[serde(default)]
     pub environment: Environment,
     #[serde(default)]
@@ -187,6 +197,10 @@ pub struct SessionRecord {
     pub auth: SessionAuth,
     pub jump_session_id: Option<Uuid>,
     pub startup_command: Option<String>,
+    /// SS-01: type the startup command again after an automatic reconnect.
+    pub startup_on_reconnect: bool,
+    /// SS-08: the folder prompt hook; `None` follows Settings.
+    pub prompt_hook: Option<bool>,
     pub environment: Environment,
     pub color: Option<SessionColor>,
     /// AP-04: bulk actions skip it until it is unlocked.
@@ -239,6 +253,8 @@ impl SessionRecord {
             auth: self.auth.clone(),
             jump_session_id: self.jump_session_id,
             startup_command: self.startup_command.clone(),
+            startup_on_reconnect: self.startup_on_reconnect,
+            prompt_hook: self.prompt_hook,
             environment: self.environment,
             color: self.color,
             tags: self.tags.clone(),
@@ -458,14 +474,88 @@ pub(crate) async fn jump_credentials(
     Ok(all)
 }
 
+/// SS-01: what the policy engine makes of a startup command, as if it were run on the session by hand
+/// (BX-06): it is typed into the shell without asking, so the editor and the import preview show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupRating {
+    /// [`ActionKind::ExecReadOnly`], [`ActionKind::ExecOther`] or [`ActionKind::ExecDangerous`].
+    pub action: ActionKind,
+    /// The tier a command like it gets on this session (a Prod session raises it).
+    pub tier: Tier,
+    /// The dangerous-command rules it matches, by name.
+    pub dangerous: Vec<String>,
+}
+
+impl StartupRating {
+    /// "Medium: other", "High: dangerous (rm -rf)".
+    pub fn describe(&self) -> String {
+        let kind = match self.action {
+            ActionKind::ExecReadOnly => "read-only".to_owned(),
+            ActionKind::ExecDangerous => format!("dangerous ({})", self.dangerous.join(", ")),
+            _ => "other".to_owned(),
+        };
+        format!("{:?}: {kind}", self.tier)
+    }
+}
+
+/// SS-01: rates a startup command the way a bulk run on this one session would be rated.
+pub fn rate_startup(policy: &PolicyEngine, command: &str, environment: Environment) -> StartupRating {
+    let session_id = Uuid::nil();
+    let run = Command::RemoteExec {
+        targets: vec![TargetRef::Session { session_id }],
+        script: command.to_owned(),
+        sudo: false,
+        sudo_password_id: None,
+        trust_new_host_keys: false,
+        timeout_secs: None,
+    };
+    let target = Target {
+        target: TargetRef::Session { session_id },
+        name: String::new(),
+        environment,
+        protected: false,
+    };
+    StartupRating {
+        action: policy.classify_script(command),
+        tier: policy.evaluate(&run, &[target]).tier,
+        dangerous: policy.dangerous_matches(command),
+    }
+}
+
+/// One "name: before -> after" entry when they differ.
+fn field_text(out: &mut Vec<String>, name: &str, before: &str, after: &str) {
+    if before != after {
+        out.push(format!("{name}: {before} -> {after}"));
+    }
+}
+
 pub struct SessionLibrary {
     store: Store,
     links: Arc<VmLinks>,
+    /// SS-01: the bus's engine, to rate startup commands in the audit log.
+    policy: Option<Arc<RwLock<PolicyEngine>>>,
 }
 
 impl SessionLibrary {
     pub fn new(store: Store, links: Arc<VmLinks>) -> Self {
-        Self { store, links }
+        Self {
+            store,
+            links,
+            policy: None,
+        }
+    }
+
+    /// The command bus's policy engine, so a startup command is rated with the current rules.
+    pub fn with_policy(mut self, policy: Arc<RwLock<PolicyEngine>>) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+
+    /// SS-01: a startup command's rating on a session with `environment`, with the current rules.
+    pub fn rate_startup(&self, command: &str, environment: Environment) -> Option<StartupRating> {
+        let policy = self.policy.as_ref()?;
+        Some(rate_startup(&locks::read(policy), command, environment))
     }
 
     /// QL-01: links every session it can to the VM whose guest IP it reaches. The importer calls it
@@ -973,8 +1063,14 @@ impl SessionLibrary {
         if let Some(vm) = self.vm_name(ctx, s.vm_id.as_deref()).await? {
             parts.push(format!("reaches VM {}", quoted(&vm)));
         }
-        if s.startup_command.is_some() {
-            parts.push("with a startup command".into());
+        if let Some(command) = &s.startup_command {
+            parts.push(format!("with a startup command{}", self.rating(command, s.environment)));
+            if s.startup_on_reconnect {
+                parts.push("typed again after automatic reconnects".into());
+            }
+        }
+        if let Some(hook) = s.prompt_hook {
+            parts.push(format!("folder prompt hook {}", if hook { "on" } else { "off" }));
         }
         if !s.tags.is_empty() {
             parts.push(format!("tags {}", s.tags.join(", ")));
@@ -1031,12 +1127,33 @@ impl SessionLibrary {
         }
         if a.startup_command != b.startup_command {
             out.push(match (&a.startup_command, &b.startup_command) {
-                (None, Some(_)) => "startup command added".into(),
+                (None, Some(c)) => format!("startup command added{}", self.rating(c, b.environment)),
                 (Some(_), None) => "startup command removed".into(),
+                (_, Some(c)) => format!("startup command changed{}", self.rating(c, b.environment)),
                 _ => "startup command changed".into(),
             });
         }
+        if a.startup_on_reconnect != b.startup_on_reconnect {
+            out.push(if b.startup_on_reconnect {
+                "startup command typed again after automatic reconnects".into()
+            } else {
+                "startup command no longer typed after automatic reconnects".into()
+            });
+        }
+        let hook = |h: Option<bool>| match h {
+            None => "as in Settings",
+            Some(true) => "on",
+            Some(false) => "off",
+        };
+        field_text(&mut out, "folder prompt hook", hook(a.prompt_hook), hook(b.prompt_hook));
         Ok(out)
+    }
+
+    /// SS-01: " (rated Medium: other)" for the audit log, when the library knows the rules.
+    fn rating(&self, command: &str, environment: Environment) -> String {
+        self.rate_startup(command, environment)
+            .map(|rating| format!(" (rated {})", rating.describe()))
+            .unwrap_or_default()
     }
 
     async fn audit(&self, ctx: &Context, action: &str, session: &SessionRecord, detail: Option<&str>) -> Result<()> {
@@ -1111,6 +1228,8 @@ mod tests {
             auth: SessionAuth::Agent,
             jump_session_id: None,
             startup_command: None,
+            startup_on_reconnect: false,
+            prompt_hook: None,
             environment: Environment::None,
             color: None,
             tags: vec![],
@@ -1130,6 +1249,8 @@ mod tests {
             auth: SessionAuth::Agent,
             jump_session_id: None,
             startup_command: None,
+            startup_on_reconnect: false,
+            prompt_hook: None,
             environment: Environment::Lab,
             color: None,
             protected: false,

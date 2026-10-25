@@ -795,6 +795,8 @@ async fn a_session_reaching_a_virtualbox_guest_is_linked_by_a_refresh() {
         auth: SessionAuth::Agent,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::None,
         color: None,
         tags: vec![],

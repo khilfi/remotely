@@ -150,6 +150,8 @@ async fn the_sudo_password_never_leaks() {
             },
             jump_session_id: None,
             startup_command: None,
+            startup_on_reconnect: false,
+            prompt_hook: None,
             environment: Environment::Lab,
             color: None,
             tags: vec![],

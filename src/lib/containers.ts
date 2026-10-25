@@ -1,6 +1,7 @@
 // CT-01, CT-02: the Containers page's decisions, as pure functions (tested in containers.test.ts): container targets
 // keyed as the core keys them, which actions fit the selection and why the others are off (QL-08), filters, ports,
-// sizes and following a log. Nothing here talks to the core.
+// sizes, how often stats and a followed log are read (when: polling.ts) and following a log. Nothing here talks to the
+// core.
 
 import type {
   ContainerHost,
@@ -220,6 +221,24 @@ export function formatBytes(bytes: number | null | undefined): string {
   }
   if (unit === 0) return `${bytes} B`;
   return `${value < 10 ? value.toFixed(1) : value.toFixed(0)} ${units[unit]}`;
+}
+
+/**
+ * How often the open host's stats are read, while the Containers page shows and the window is visible: one read for
+ * the list's CPU and memory columns and the details panel's Stats tab.
+ */
+export const STATS_POLL_MS = 10_000;
+/** How often a followed log asks for new lines (same conditions), and its longest wait after failures. */
+export const LOG_FOLLOW_MS = 2_000;
+export const LOG_FOLLOW_MAX_MS = 30_000;
+
+/** The last stats read of one host's engine (`key`: engineKey), shared by the list and the details panel. */
+export interface StatsRead {
+  key: string;
+  list: ContainerStats[];
+  error: string | null;
+  /** When it came back (ms since 1970). */
+  readAt: number;
 }
 
 /** A container's stats: Podman gives 12-digit ids, so either id may be the start of the other. */

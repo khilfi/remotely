@@ -2,7 +2,7 @@
 name = "remotely"
 description = "Remotely desktop shell (Tauri 2)"
 # Release version: keep in step with package.json and tauri.conf.json (see CLAUDE.md).
-version = "0.4.0"
+version = "0.4.2"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -40,11 +40,21 @@ tauri-plugin-dialog = "2"
 arboard = { version = "3", default-features = false }
 # QL-07: a Windows notification when a long command in a background tab finishes, shown from Rust.
 tauri-plugin-notification = "2"
+# QL-15: the daily log file under the app's data folder, the last 7 kept.
+tracing-appender = "0.2"
+# QL-15: %LOCALAPPDATA%, found the way Tauri finds it, so the log folder is known before the app starts.
+# The version Tauri already uses.
+dirs = "7"
+# QL-15: a second launch brings the running window forward and exits.
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
-# QL-13: a library entry's manual page opens in the default browser (ShellExecuteW). The version the
-# core and Tauri already use.
+# QL-13: a library entry's manual page opens in the default browser (ShellExecuteW); QL-15: the startup error
+# message box. The version the core and Tauri already use.
 windows = { version = "0.62", features = ["Win32_System_Com", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+# QL-15: turns WebView2's browser keys off in release builds (F5 and Ctrl+R reload, Ctrl+Shift+I). The version
+# wry already uses.
+webview2-com = "0.39"
 
 [dev-dependencies]
 # FD-14: the updater against a local fake GitHub, with a throwaway signing key, on Tauri's mock runtime.

@@ -169,7 +169,7 @@ impl UserWatch {
 }
 
 /// A shell waiting for a command; not bash's `> ` for a line that goes on.
-fn looks_like_prompt(line: &str) -> bool {
+pub(super) fn looks_like_prompt(line: &str) -> bool {
     line.trim() != ">" && is_shell_prompt(line)
 }
 

@@ -13,6 +13,7 @@ const STATE: Record<GuestState, { label: string; className: string }> = {
   unreachable: { label: "Unreachable", className: "border-tier-critical/40 text-tier-critical" },
   loginFailed: { label: "Login failed", className: "border-tier-critical/40 text-tier-critical" },
   hostKey: { label: "Host key", className: "border-tier-critical/40 text-tier-critical" },
+  paused: { label: "Paused", className: "border-tier-medium/40 text-tier-medium" },
   noData: { label: "Not Linux", className: "border-tier-medium/40 text-tier-medium" },
   error: { label: "Error", className: "border-tier-critical/40 text-tier-critical" },
 };

@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,8 +18,11 @@ use super::{split_address, text, Candidate, CandidateAuth, Parsed, Skipped};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::locks;
+use crate::policy::PolicyEngine;
 use crate::presentation::Change;
-use crate::sessions::{SessionAuth, SessionInput, SessionLibrary, SessionRecord, MAX_SESSION_NAME};
+use crate::sessions::{
+    rate_startup, SessionAuth, SessionInput, SessionLibrary, SessionRecord, StartupRating, MAX_SESSION_NAME,
+};
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, VaultService, VaultStatus, MAX_SECRET_BYTES};
 
@@ -105,6 +108,10 @@ pub struct PreviewRow {
     /// Ticked in the preview by default.
     pub selected: bool,
     pub key_file: Option<KeyFile>,
+    /// SS-01: what the policy engine makes of the row's startup command. A startup command is typed
+    /// into the shell at every connection without asking, so it is left out unless the user ticks it
+    /// ([`ImportRequest::keep_startup`]).
+    pub startup_rating: Option<StartupRating>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -133,6 +140,9 @@ pub struct ImportRequest {
     /// Add the rows' key files to the vault and log in with them.
     #[serde(default)]
     pub add_keys: bool,
+    /// SS-01: rows whose startup command is imported too. Others are imported without it.
+    #[serde(default)]
+    pub keep_startup: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -141,6 +151,8 @@ pub struct ImportReport {
     pub created: usize,
     pub keys_added: usize,
     pub folders_created: usize,
+    /// SS-01: startup commands left out because their row was not ticked for it.
+    pub startup_left_out: usize,
     /// Sessions that were not saved, or saved with something missing, and why.
     pub problems: Vec<Skipped>,
 }
@@ -154,6 +166,8 @@ struct Stored {
 pub struct Importer {
     store: Store,
     previews: Mutex<VecDeque<Stored>>,
+    /// SS-01: the bus's engine, to rate startup commands in the preview.
+    policy: Option<Arc<RwLock<PolicyEngine>>>,
 }
 
 /// The user's home folder, where `~` and MobaXterm's `_ProfileDir_` point.
@@ -199,7 +213,14 @@ impl Importer {
         Self {
             store,
             previews: Mutex::default(),
+            policy: None,
         }
+    }
+
+    /// The command bus's policy engine, so the preview rates startup commands with the current rules.
+    pub fn with_policy(mut self, policy: Arc<RwLock<PolicyEngine>>) -> Self {
+        self.policy = Some(policy);
+        self
     }
 
     /// PuTTY's sessions from this Windows user's registry.
@@ -310,12 +331,19 @@ impl Importer {
                 }),
                 _ => None,
             };
+            let startup_rating = match (&self.policy, &candidate.startup_command) {
+                (Some(policy), Some(command)) => {
+                    Some(rate_startup(&locks::read(policy), command, candidate.environment))
+                }
+                _ => None,
+            };
             rows.push(PreviewRow {
                 index,
                 selected: matches!(status, RowStatus::New | RowStatus::NameConflict { .. }),
                 candidate,
                 status,
                 key_file,
+                startup_rating,
             });
         }
         let preview = ImportPreview {
@@ -368,6 +396,15 @@ impl Importer {
             }
             (stored.source, picked)
         };
+        // SS-01: a startup command comes along only when its row was ticked for it.
+        let mut rows = rows;
+        let mut startup_left_out = 0;
+        for row in &mut rows {
+            if row.candidate.startup_command.is_some() && !request.keep_startup.contains(&row.index) {
+                row.candidate.startup_command = None;
+                startup_left_out += 1;
+            }
+        }
         if rows.is_empty() {
             return Err(CoreError::InvalidInput("Choose at least one session to import.".into()));
         }
@@ -382,7 +419,10 @@ impl Importer {
             return Err(CoreError::VaultLocked);
         }
 
-        let mut report = ImportReport::default();
+        let mut report = ImportReport {
+            startup_left_out,
+            ..ImportReport::default()
+        };
         let keys = if wants_keys {
             self.add_keys(ctx, &rows, vault, &mut report).await?
         } else {
@@ -610,6 +650,8 @@ impl Importer {
             auth,
             jump_session_id: jump,
             startup_command: c.startup_command.clone(),
+            startup_on_reconnect: false,
+            prompt_hook: None,
             environment: c.environment,
             color: c.color,
             tags: c.tags.clone(),
@@ -640,6 +682,12 @@ impl Importer {
         }
         if report.folders_created > 0 {
             parts.push(format!("{} created", plural(report.folders_created, "folder")));
+        }
+        if report.startup_left_out > 0 {
+            parts.push(format!(
+                "{} left out",
+                plural(report.startup_left_out, "startup command")
+            ));
         }
         if !report.problems.is_empty() {
             parts.push(plural(report.problems.len(), "problem"));

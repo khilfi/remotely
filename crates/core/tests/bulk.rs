@@ -62,6 +62,8 @@ fn session_input(name: &str, port: u16, auth: SessionAuth) -> SessionInput {
         auth,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::Lab,
         color: None,
         tags: vec![],
@@ -575,6 +577,59 @@ async fn unknown_host_keys_fail_unless_the_run_trusts_them_and_changed_keys_alwa
     assert!(audit.iter().any(|e| e.event == "host_key_changed"));
 }
 
+/// SS-05: a host with a trusted key of one type that presents a key of another type may be a man in
+/// the middle, who would get the login and sudo passwords: "Trust new host keys" never trusts it.
+#[tokio::test]
+async fn trusting_new_keys_never_trusts_a_new_key_type_for_a_host_with_a_trusted_key() {
+    let core = ssh_core().await;
+    let password = new_password();
+    let pw = add_password(&core, "lab", &password).await;
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    // The host is known by an RSA key; the server here presents ed25519.
+    let rsa = HostKey {
+        host: "127.0.0.1".into(),
+        port: server.port(),
+        key_type: "ssh-rsa".into(),
+        fingerprint: "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into(),
+    };
+    core.known_hosts.trust(&core.ctx, &rsa, None).await.unwrap();
+    let id = core
+        .sessions
+        .create(
+            &core.ctx,
+            session_input("web01", server.port(), SessionAuth::Password { password_id: Some(pw) }),
+        )
+        .await
+        .unwrap()
+        .id;
+    let mut events = core.jobs.subscribe();
+    let mut trusting = exec("uptime", &[id]);
+    if let Command::RemoteExec {
+        trust_new_host_keys, ..
+    } = &mut trusting
+    {
+        *trust_new_host_keys = true;
+    }
+    let job = run(&core, trusting).await;
+    assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
+    let results = core
+        .bulk
+        .results(&core.ctx, job, GroupOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(results.hosts[0].error_code.as_deref(), Some("host_key_changed"));
+    let known = core.known_hosts.list(&core.ctx).await.unwrap();
+    assert_eq!(known.len(), 1, "the new type was not trusted: {known:?}");
+    assert_eq!(known[0].key_type, "ssh-rsa");
+    assert!(
+        !server.log().iter().any(|l| l.starts_with("password")),
+        "no password offered to it"
+    );
+    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let blocked = audit.iter().find(|e| e.event == "host_key_changed").unwrap();
+    assert!(blocked.action.contains("new kind of host key"), "{blocked:?}");
+}
+
 // ---- BX-04: cancel and retry -------------------------------------------------------------------
 
 #[tokio::test]
@@ -1080,6 +1135,8 @@ async fn linking_a_session_to_a_vm_is_checked_and_audited() {
         auth: s.auth.clone(),
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: s.environment,
         color: None,
         tags: vec![],

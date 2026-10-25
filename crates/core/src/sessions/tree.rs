@@ -249,6 +249,8 @@ mod tests {
             auth: super::super::SessionAuth::Agent,
             jump_session_id: None,
             startup_command: None,
+            startup_on_reconnect: false,
+            prompt_hook: None,
             environment: env,
             color: None,
             protected: false,

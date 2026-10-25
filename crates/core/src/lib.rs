@@ -29,7 +29,8 @@
 //!     tunnels (SS-07): saved port forwards (forwards) open on a terminal's connection; opening one is
 //!     a command on the bus, which the job runner carries out in the terminal; closing is audited
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
-//!   reachability (QL-04): background TCP checks of the sessions the tree shows ──► adapters::network
+//!   reachability (QL-04): background TCP checks of the sessions the tree shows, skipping hosts with an
+//!     open connection and backing off from hosts that are down ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //!     (the Terminal page's Compare output)
 //!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
@@ -58,11 +59,13 @@ pub mod inventory;
 pub mod jobs;
 pub mod known_hosts;
 pub mod locks;
+pub mod login_guard;
 pub mod metrics;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
 pub mod sessions;
+pub mod settings;
 pub mod snapshots;
 pub mod snippets;
 pub mod ssh_keys;
@@ -98,10 +101,11 @@ use import::Importer;
 use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
+use login_guard::LoginGuard;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
-use reachability::ReachabilityChecker;
+use reachability::{ReachabilityChecker, TrackedRemote};
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
@@ -158,6 +162,26 @@ pub struct AuditExport {
     pub redacted: usize,
 }
 
+/// QL-15: the terminals and approvals a window had open, from [`Core::ui_snapshot`].
+#[derive(Debug, Clone, Default)]
+pub struct UiSnapshot {
+    pub terminals: Vec<uuid::Uuid>,
+    pub approvals: Vec<uuid::Uuid>,
+}
+
+/// QL-15: what [`Core::release_ui`] closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiReleased {
+    pub terminals: usize,
+    pub approvals: usize,
+}
+
+impl UiSnapshot {
+    pub fn is_empty(&self) -> bool {
+        self.terminals.is_empty() && self.approvals.is_empty()
+    }
+}
+
 pub struct Core {
     pub ctx: Context,
     pub store: Store,
@@ -205,6 +229,8 @@ pub struct Core {
     pub metrics: Arc<Metrics>,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
+    /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
+    pub login_guard: LoginGuard,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
     pub presentation: PresentationMode,
     pub host_counters: Arc<dyn HostCounters>,
@@ -217,11 +243,24 @@ pub struct Core {
 impl Core {
     pub async fn init(config: CoreConfig) -> Result<Self> {
         let store = Store::open(&config.db_path).await?;
+        match Self::init_on(store.clone(), config).await {
+            Ok(core) => Ok(core),
+            Err(err) => {
+                // QL-15: the database file is closed before the error is reported.
+                store.close().await;
+                Err(err)
+            }
+        }
+    }
+
+    async fn init_on(store: Store, config: CoreConfig) -> Result<Self> {
         let interrupted = store.mark_interrupted_jobs().await?;
         if interrupted > 0 {
             tracing::warn!(interrupted, "jobs were open when the app last stopped");
         }
         let ctx = store.ensure_identity(&config.account, &config.display_name).await?;
+        // QL-15: before the saved paths are read below; `assemble` checks again, which then finds nothing.
+        settings::repair(&store, &ctx).await?;
         let saved = saved_vmrun_path(&store, &ctx).await?;
         let vmware: Arc<dyn VmwareAdapter> = Arc::from(adapters::vmware::connect(config.vmrun_path.or(saved)));
         let docker = saved_docker_path(&store, &ctx).await?;
@@ -250,15 +289,27 @@ impl Core {
 
     /// Wires the modules together. Tests pass fake adapters here.
     pub async fn assemble(store: Store, ctx: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
+        // QL-15: a setting that can't be read gets its default (audited) rather than stopping the start.
+        settings::repair(&store, &ctx).await?;
         let policy = load_policy(&store, &ctx).await?;
         // FD-03: the lock applies before anything else can run.
         let presentation = PresentationMode::load(store.clone(), ctx).await;
+        // QL-04: every service reaches SSH through this, which notes the kept connections (the
+        // dashboard's, the Containers page's, host details') so the reachability checks skip their hosts.
+        let tracked = Arc::new(TrackedRemote::new(adapters.remote));
+        let adapters = Adapters {
+            remote: tracked.clone(),
+            ..adapters
+        };
         let vmware = Arc::new(SwitchableVmware::new(adapters.vmware));
         let vmware_dyn: Arc<dyn VmwareAdapter> = vmware.clone();
         let virtualbox = Arc::new(SwitchableVirtualBox::new(adapters.virtualbox));
         // VM-18: every module that reads or changes VMs reaches both hypervisors through this.
         let hypervisors = Hypervisors::new(vmware_dyn, virtualbox.clone());
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
+        // MO-02, CT-01: one guard for every background login (dashboard and Containers page).
+        let login_guard = LoginGuard::new();
+        known_hosts.set_login_guard(login_guard.clone());
         let links = Arc::new(VmLinks::new(store.clone(), Arc::clone(&adapters.network)));
         let containers = Containers::new(
             store.clone(),
@@ -266,6 +317,7 @@ impl Core {
             Arc::clone(&adapters.remote),
             Arc::clone(&known_hosts),
             Arc::clone(&adapters.containers),
+            login_guard.clone(),
         );
         let terminals = Terminals::new(
             store.clone(),
@@ -283,6 +335,9 @@ impl Core {
             ctx,
             Arc::clone(&adapters.network),
         ));
+        // QL-04: a host with a connected terminal or a kept connection is not probed.
+        reachability.add_connections(Arc::new(terminals.clone()));
+        reachability.add_connections(tracked);
         // MO-01 to MO-04: reads only, so the collector holds adapters directly, not the job runner.
         let guest = GuestSource::new(
             store.clone(),
@@ -290,6 +345,7 @@ impl Core {
             Arc::clone(&adapters.remote),
             Arc::clone(&adapters.vault),
             Arc::clone(&known_hosts),
+            login_guard.clone(),
         );
         guest.set_specs(specs.clone());
         let metrics = Arc::new(Metrics::new(MetricsParts {
@@ -353,14 +409,14 @@ impl Core {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
-            vault: VaultService::new(adapters.vault, store.clone()),
-            sessions: SessionLibrary::new(store.clone(), Arc::clone(&links)),
+            vault: VaultService::new(adapters.vault, store.clone()).with_login_guard(login_guard.clone()),
+            sessions: SessionLibrary::new(store.clone(), Arc::clone(&links)).with_policy(bus.policy()),
             forwards: Forwards::new(store.clone()),
             links,
-            import: Importer::new(store.clone()),
+            import: Importer::new(store.clone()).with_policy(bus.policy()),
             known_hosts,
             keys,
-            transfer: Transfer::new(store.clone()),
+            transfer: Transfer::new(store.clone()).with_policy(bus.policy()),
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
             containers,
             terminals,
@@ -370,6 +426,7 @@ impl Core {
             reachability,
             metrics,
             host_details,
+            login_guard,
             presentation,
             store,
             bus,
@@ -379,6 +436,47 @@ impl Core {
             vmware,
             virtualbox,
         })
+    }
+
+    /// QL-15: what the window shows now, taken when its page starts loading again (a reload, or a crash
+    /// the user reloaded from), so [`Core::release_ui`] closes only what the old page had.
+    pub fn ui_snapshot(&self) -> UiSnapshot {
+        UiSnapshot {
+            terminals: self.terminals.open_ids(),
+            approvals: self.bus.pending_approvals(),
+        }
+    }
+
+    /// QL-15: the page that showed `shown` is gone, so nothing it started may go on without anyone seeing it:
+    /// MultiExec stops (a held line is cancelled), its terminals close with their tunnels (each audited), and the
+    /// approvals it would have answered are cancelled (audited). Running jobs go on; Activity shows them.
+    pub async fn release_ui(&self, shown: UiSnapshot) -> UiReleased {
+        if let Err(err) = self.multiexec.stop().await {
+            tracing::warn!(error = %err, "MultiExec did not stop cleanly after the window reloaded");
+        }
+        self.terminals.close_these(&shown.terminals).await;
+        let approvals = self
+            .bus
+            .cancel_approvals(&shown.approvals, "the window reloaded, so nobody could answer it")
+            .await;
+        UiReleased {
+            terminals: shown.terminals.len(),
+            approvals,
+        }
+    }
+
+    /// Before the app exits, also when an update's installer is about to end it (FD-14, QL-15): every terminal
+    /// closes, audited, with its tunnels, and session logs are written out to the end.
+    pub async fn shutdown(&self) {
+        self.terminals.close_all().await;
+    }
+
+    /// MO-02, CT-01: the user pressed Retry on a parked or waiting host: the dashboard and the
+    /// Containers page log in to it again on their next read. Changes nothing on the host or in the
+    /// app's data, so it is not audited and the read-only lock allows it.
+    pub fn retry_background_logins(&self, session_id: uuid::Uuid) {
+        self.metrics.guest().retry(session_id);
+        self.containers.retry(session_id);
     }
 
     /// Path of the vmrun.exe in use, or `None` when Workstation was not found.

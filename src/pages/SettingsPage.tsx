@@ -3,10 +3,11 @@
 // power-on limit (VM-06), shutdown wait (VM-03), hosts Compare output reaches at once (BX-02), and update
 // checks with the GitHub update token (FD-14) under General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
-// Approval rules. QL-11: "Follow Windows" for the theme is under General; the Dark mode switch is in the top bar.
+// Approval rules. QL-11: "Follow Windows" for the theme is under General; the Dark mode switch is in the top bar. QL-15:
+// About has the version and opens the logs folder (logs and crash reports).
 
 import { useEffect, useState } from "react";
-import { FolderIcon, XIcon } from "lucide-react";
+import { FileTextIcon, FolderIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -17,7 +18,15 @@ import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { PresentationCard } from "@/components/Presentation";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
-import { api, errorMessage, type Settings, type UpdateCheck, type VaultInfo } from "@/lib/api";
+import {
+  api,
+  errorMessage,
+  type AppInfo,
+  type LogsInfo,
+  type Settings,
+  type UpdateCheck,
+  type VaultInfo,
+} from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 
 interface Props {
@@ -205,7 +214,11 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
         <TabsTrigger value="general">General</TabsTrigger>
         <TabsTrigger value="terminal">Terminal</TabsTrigger>
         <TabsTrigger value="rules">Approval rules</TabsTrigger>
+        <TabsTrigger value="about">About</TabsTrigger>
       </TabsList>
+      <TabsContent value="about">
+        <AboutCard />
+      </TabsContent>
       <TabsContent value="terminal">
         <TerminalSettingsCard />
       </TabsContent>
@@ -505,6 +518,52 @@ function AppearanceCard() {
             : `Dark mode is ${resolved === "dark" ? "on" : "off"}. Turning this on lets Windows decide again.`}
         </p>
       </CardContent>
+    </Card>
+  );
+}
+
+/** QL-15: the version, and where the logs and crash reports are, with a button that opens the folder. */
+function AboutCard() {
+  const [info, setInfo] = useState<AppInfo | null>(null);
+  const [logs, setLogs] = useState<LogsInfo | null>(null);
+  const [message, setMessage] = useState<Message>(null);
+  useEffect(() => {
+    api.appInfo().then(setInfo, () => setInfo(null));
+    api.logsInfo().then(setLogs, () => setLogs(null));
+  }, []);
+
+  async function openLogs() {
+    try {
+      await api.openLogs();
+      setMessage(null);
+    } catch (err) {
+      setMessage({ ok: false, text: errorMessage(err) });
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Remotely {info?.version ?? ""}</CardTitle>
+        <CardDescription>
+          Remotely keeps a log of what it did and what went wrong, one file a day for the last {logs?.keepDays ?? 7}{" "}
+          days, and a crash report if it ever stops unexpectedly. Neither holds passwords, keys or tokens. Send them
+          along when you report a problem.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-1.5">
+        <Label>Logs folder</Label>
+        <p className="font-mono text-sm break-all">
+          {logs?.folder ?? "Not known: the app's data folder was not found."}
+        </p>
+        <StatusLine message={message} />
+      </CardContent>
+      <CardFooter>
+        <Button variant="outline" onClick={() => void openLogs()} disabled={!logs?.folder}>
+          <FileTextIcon />
+          Open the logs folder
+        </Button>
+      </CardFooter>
     </Card>
   );
 }

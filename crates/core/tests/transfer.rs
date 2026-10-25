@@ -45,6 +45,8 @@ fn input(name: &str, host: &str) -> SessionInput {
         auth: SessionAuth::Agent,
         jump_session_id: None,
         startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
         environment: Environment::None,
         color: None,
         tags: vec![],
@@ -188,8 +190,38 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
             &core.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 favourites: vec![],
                 sessions: choices(sessions),
+                known_hosts: vec![],
+                secrets: vec![],
+            },
+            &core.sessions,
+            &core.vault,
+            &core.known_hosts,
+            &core.snippets,
+        )
+        .await
+        .unwrap()
+}
+
+/// Like [`commit`], with the sessions whose startup command and port forwards come along (SS-01, SS-07).
+async fn commit_keeping(
+    core: &Core,
+    preview: &TransferPreview,
+    keep_startup: &[usize],
+    keep_forwards: &[usize],
+) -> TransferReport {
+    core.transfer
+        .commit(
+            &core.ctx,
+            TransferCommit {
+                preview_id: preview.id,
+                keep_startup: keep_startup.to_vec(),
+                keep_forwards: keep_forwards.to_vec(),
+                favourites: vec![],
+                sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
             },
@@ -283,8 +315,13 @@ async fn sessions_folders_tags_labels_and_host_keys_move_without_secrets() {
         "{:?}",
         web_row.notes
     );
+    // SS-01: the startup command is shown and rated (other, raised for Prod), and left out unless ticked.
+    assert_eq!(web_row.startup_command.as_deref(), Some("cd /srv/www"));
+    let rating = web_row.startup_rating.as_ref().unwrap();
+    assert_eq!(rating.tier, remotely_core::policy::Tier::High, "{rating:?}");
 
     let report = commit(&b, &preview, &[]).await;
+    assert_eq!(report.startup_left_out, 1);
     assert_eq!(report.sessions.added, 3);
     assert_eq!(report.known_hosts.added, 2);
     assert_eq!(report.folders_added, 3, "Customer A, Web and the empty folder");
@@ -300,7 +337,7 @@ async fn sessions_folders_tags_labels_and_host_keys_move_without_secrets() {
     assert_eq!(web.environment, Environment::Prod);
     assert_eq!(web.color, Some(SessionColor::Red));
     assert_eq!(web.tags, ["frontend", "nginx"]);
-    assert_eq!(web.startup_command.as_deref(), Some("cd /srv/www"));
+    assert_eq!(web.startup_command, None, "not ticked");
     assert_eq!(web.auth, SessionAuth::Password { password_id: None });
     assert_eq!(folder_path(&b, &web).await, "Customer A/Web");
     let db = by_name(&b, "db01").await;
@@ -557,6 +594,8 @@ async fn a_closed_preview_can_not_be_imported() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
@@ -706,6 +745,8 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![ItemChoice {
@@ -733,6 +774,8 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 favourites: vec![],
                 sessions: vec![
                     ItemChoice {
@@ -923,6 +966,8 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
             &b.ctx,
             TransferCommit {
                 preview_id: preview.id,
+                keep_startup: vec![],
+                keep_forwards: vec![],
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
@@ -995,9 +1040,25 @@ async fn port_forwards_and_jump_host_chains_move_with_their_sessions() {
 
     let b = laptop().await;
     let preview = open(&b, &path).await;
-    let report = commit(&b, &preview, &[]).await;
+    // SS-07: shown, and only imported when ticked.
+    let app_row = preview.sessions.iter().find(|s| s.name == "app01").unwrap();
+    assert_eq!(app_row.forwards.len(), 2, "{app_row:?}");
+    assert!(
+        app_row.forwards[0].contains("pg.test:5432") && app_row.forwards[0].contains("starts with the terminal"),
+        "{:?}",
+        app_row.forwards
+    );
+    assert!(app_row.forwards[1].contains("SOCKS"), "{:?}", app_row.forwards);
+    let web_index = preview.sessions.iter().find(|s| s.name == "web01").unwrap().index;
+    let report = commit_keeping(&b, &preview, &[web_index], &[app_row.index]).await;
     assert!(report.problems.is_empty(), "{:?}", report.problems);
     assert_eq!(report.forwards, 2);
+    assert_eq!(report.startup_left_out, 0);
+    assert_eq!(
+        by_name(&b, "web01").await.startup_command.as_deref(),
+        Some("cd /srv/www"),
+        "ticked"
+    );
     let app_b = by_name(&b, "app01").await;
     let db_b = by_name(&b, "db01").await;
     assert_eq!(app_b.jump_session_id, Some(db_b.id));
@@ -1019,5 +1080,103 @@ async fn port_forwards_and_jump_host_chains_move_with_their_sessions() {
         .as_deref()
         .unwrap()
         .contains("2 port forwards saved with them"));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// SS-05: a key of a new type for a host that has a trusted key here is what a man in the middle
+/// would present, so an import shows it as a conflict and skips it unless the user picks it.
+#[tokio::test]
+async fn a_new_key_type_for_a_host_trusted_here_is_a_conflict_skipped_by_default() {
+    let dir = temp_folder("transfer");
+    let a = laptop().await;
+    fill(&a).await;
+    let path = export(&a, &dir, false).await;
+
+    let b = laptop().await;
+    let rsa = HostKey {
+        key_type: "ssh-rsa".into(),
+        ..host_key("web01.example.com", "SHA256:rsarsarsarsarsa")
+    };
+    b.known_hosts.trust(&b.ctx, &rsa, None).await.unwrap();
+    let preview = open(&b, &path).await;
+    let row = preview
+        .known_hosts
+        .iter()
+        .find(|k| k.name == "web01.example.com:22")
+        .unwrap();
+    assert_eq!(row.status, ItemStatus::Conflict, "{row:?}");
+    assert_eq!(row.default_action, ItemAction::Skip);
+    assert_eq!(row.choices, [ItemAction::Skip, ItemAction::Import]);
+    let why = row.conflict.as_deref().unwrap();
+    assert!(
+        why.contains("another kind trusted here") && why.contains("ssh-rsa"),
+        "{why}"
+    );
+    let other = preview.known_hosts.iter().find(|k| k.name == "192.0.2.10:22").unwrap();
+    assert_eq!(
+        other.status,
+        ItemStatus::New,
+        "a host with no key here is new as before"
+    );
+
+    // Imported with the defaults: the new type stays out.
+    let report = commit(&b, &preview, &[]).await;
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    let web: Vec<String> = b
+        .known_hosts
+        .list(&b.ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|k| k.host == "web01.example.com")
+        .map(|k| k.key_type)
+        .collect();
+    assert_eq!(web, ["ssh-rsa"]);
+}
+
+/// SS-07: port forwards that were not ticked stay behind and are counted.
+#[tokio::test]
+async fn port_forwards_stay_behind_unless_ticked() {
+    use remotely_core::adapters::remote::forward::ForwardKind;
+    use remotely_core::forwards::ForwardInput;
+
+    let dir = temp_folder("transfer-forwards-default");
+    let a = laptop().await;
+    fill(&a).await;
+    let app = a.sessions.create(&a.ctx, input("app01", "app01.test")).await.unwrap();
+    a.forwards
+        .save(
+            &a.ctx,
+            app.id,
+            &[ForwardInput {
+                id: None,
+                label: None,
+                kind: ForwardKind::Remote,
+                bind_address: String::new(),
+                bind_port: 9000,
+                dest_host: "127.0.0.1".into(),
+                dest_port: 22,
+                auto_start: true,
+            }],
+        )
+        .await
+        .unwrap();
+    let path = export(&a, &dir, false).await;
+    let b = laptop().await;
+    let preview = open(&b, &path).await;
+    let report = commit(&b, &preview, &[]).await;
+    assert_eq!(report.forwards, 0);
+    assert_eq!(report.forwards_left_out, 1);
+    let app_b = by_name(&b, "app01").await;
+    assert!(b.forwards.list(&b.ctx, app_b.id).await.unwrap().is_empty());
+    let imported = audit(&b)
+        .await
+        .into_iter()
+        .find(|e| e.event == "data_imported")
+        .unwrap();
+    assert!(
+        imported.detail.as_deref().unwrap().contains("1 port forward left out"),
+        "{imported:?}"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
