@@ -1,11 +1,16 @@
-//! FD-14: update checks from the private repository's GitHub Releases, with a read-only GitHub
-//! update token kept in the vault.
+//! FD-14: update checks from the repository's GitHub Releases, which are public, with an optional
+//! read-only GitHub update token kept in the vault.
 //!
+//! * Without a token, or with the vault locked, a check reads the public releases without one. If
+//!   GitHub doesn't show them (the repository went private again), the check says a token is needed,
+//!   or that the vault holds one but is locked ([`UpdateCheck`]), instead of failing quietly.
+//! * With a token (it has a higher API limit, and reads a private repository), every check and
+//!   install uses it, as while the repository was private from 0.2.0 to 0.4.0.
+//! * A used-up API limit is a state of its own ([`UpdateCheck::RateLimited`]): no call goes to GitHub
+//!   until the time it named.
 //! * The token is a vault secret ([`UPDATE_TOKEN_LABEL`]), so it is encrypted at rest and readable
 //!   only while the vault is unlocked. Settings keep its id and the expiry date GitHub reports, never
 //!   the value. The UI can store, replace, test and remove it, never read it back.
-//! * Without a token, or with the vault locked, a check makes no network call and says why
-//!   ([`UpdateCheck`]) instead of failing quietly.
 //! * Saving, replacing and removing the token are audited like other vault changes, without the value.
 
 use serde::Serialize;
@@ -37,16 +42,29 @@ pub struct UpdateTokenInfo {
     pub expires_on: Option<String>,
 }
 
-/// What an update check found, or why it did not ask GitHub.
+/// What an update check found, or why it found nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum UpdateCheck {
     /// Update checks are turned off in Settings.
     Off,
-    /// No GitHub update token in the vault, so the private repository's releases can't be read.
-    NoToken,
-    /// The token is in the vault, but the vault is locked. The UI checks again once it is unlocked.
+    /// GitHub doesn't show the releases without a token (the repository is private again), and there
+    /// is none in the vault.
+    TokenNeeded {
+        /// `owner/name`.
+        repository: String,
+    },
+    /// GitHub doesn't show the releases without a token, and the token is in the vault, which is
+    /// locked. The UI checks again once it is unlocked.
     VaultLocked,
+    /// GitHub's API limit is used up. No call goes to GitHub before `until`.
+    #[serde(rename_all = "camelCase")]
+    RateLimited {
+        /// RFC 3339, UTC.
+        until: String,
+        /// The token's limit, not the one for calls without a token.
+        with_token: bool,
+    },
     UpToDate,
     Available {
         update: UpdateInfo,
@@ -61,12 +79,29 @@ pub(crate) enum StoredToken {
 }
 
 impl StoredToken {
-    /// For installing: the token, or why there is none.
+    /// For Settings' Test: the token, or why there is none.
     pub(crate) fn require(self) -> Result<SecretString> {
         match self {
             StoredToken::Present(token) => Ok(token),
             StoredToken::Locked => Err(CoreError::VaultLocked),
             StoredToken::Missing => Err(CoreError::UpdateTokenMissing),
+        }
+    }
+
+    /// For checking and installing: the token when it can be read, else `None` to go without one.
+    pub(crate) fn usable(&self) -> Option<&SecretString> {
+        match self {
+            StoredToken::Present(token) => Some(token),
+            StoredToken::Locked | StoredToken::Missing => None,
+        }
+    }
+
+    /// GitHub didn't show the releases without a token: with the token in the locked vault, that
+    /// means unlocking it.
+    pub(crate) fn explain(&self, err: CoreError) -> CoreError {
+        match (self, err) {
+            (StoredToken::Locked, CoreError::UpdateTokenNeeded { .. }) => CoreError::VaultLocked,
+            (_, err) => err,
         }
     }
 }
@@ -99,21 +134,31 @@ pub(crate) async fn stored_token(store: &Store, vault: &dyn Vault, ctx: &Context
 
 impl Core {
     /// FD-14: a read, so it skips the bus. Installing is [`crate::command_bus::Command::AppUpdate`].
-    /// With checks off, no token or the vault locked, it makes no network call.
+    /// With checks off it makes no network call. With the token readable it asks GitHub with it,
+    /// else without one.
     pub async fn check_for_update(&self) -> Result<UpdateCheck> {
         if !self.update_checks_enabled().await? {
             return Ok(UpdateCheck::Off);
         }
-        let token = match stored_token(&self.store, self.vault.vault().as_ref(), &self.ctx).await? {
-            StoredToken::Missing => return Ok(UpdateCheck::NoToken),
-            StoredToken::Locked => return Ok(UpdateCheck::VaultLocked),
-            StoredToken::Present(token) => token,
-        };
-        let checked = match self.updater.check(&token).await {
+        let stored = stored_token(&self.store, self.vault.vault().as_ref(), &self.ctx).await?;
+        let token = stored.usable();
+        let checked = match self.updater.check(token).await {
             Ok(checked) => checked,
+            Err(CoreError::UpdateRateLimited { until, with_token }) => {
+                return Ok(UpdateCheck::RateLimited { until, with_token });
+            }
+            Err(CoreError::UpdateTokenNeeded { repo }) => {
+                return Ok(match stored {
+                    StoredToken::Locked => UpdateCheck::VaultLocked,
+                    _ => UpdateCheck::TokenNeeded { repository: repo },
+                });
+            }
             Err(err) => return Err(self.explain_token_error(err).await),
         };
-        self.remember_expiry(checked.token_expires_on).await?;
+        // Only an answer to the token says when it expires.
+        if token.is_some() {
+            self.remember_expiry(checked.token_expires_on).await?;
+        }
         Ok(match checked.update {
             Some(update) => UpdateCheck::Available { update },
             None => UpdateCheck::UpToDate,
@@ -157,7 +202,7 @@ impl Core {
         self.update_token_info().await
     }
 
-    /// FD-14: deletes the token from the vault. Update checks then say there is none. Audited.
+    /// FD-14: deletes the token from the vault. Update checks then go without one. Audited.
     pub async fn remove_update_token(&self) -> Result<UpdateTokenInfo> {
         self.store.read_only().check(Change::Settings)?;
         let vault = self.vault.vault();

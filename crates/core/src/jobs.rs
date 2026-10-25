@@ -938,16 +938,14 @@ impl JobRunner {
             (Command::AppUpdate { version }, TargetRef::App) => {
                 // FD-14: never update under a running job.
                 self.wait_to_run_alone(job_id, token).await?;
-                // The private repo's releases need the GitHub update token from the vault.
-                let github_token = crate::updates::stored_token(&self.store, self.vault.as_ref(), &spec.ctx)
-                    .await?
-                    .require()?;
+                // The public releases need no token; the GitHub update token goes along when the vault can give it.
+                let stored = crate::updates::stored_token(&self.store, self.vault.as_ref(), &spec.ctx).await?;
                 // Cancel stops the download (dropping it ends the request). The installer only starts after the
                 // job has ended, so nothing is half installed.
                 tokio::select! {
                     biased;
                     _ = token.cancelled() => return Err(CoreError::Cancelled),
-                    installed = self.updater.install(&github_token, version) => installed?,
+                    installed = self.updater.install(stored.usable(), version) => installed.map_err(|err| stored.explain(err))?,
                 }
                 Ok(TargetOutcome::done())
             }

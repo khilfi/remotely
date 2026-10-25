@@ -1,7 +1,7 @@
 // Settings: the vmrun.exe and (VM-18) VBoxManage.exe paths (configurable, never hard-coded), the folders scanned for
 // VMs (VM-01),
 // power-on limit (VM-06), shutdown wait (VM-03), hosts Compare output reaches at once (BX-02), and update
-// checks with the GitHub update token (FD-14) under General, keep-alive,
+// checks with the optional GitHub update token (FD-14) under General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
 // Approval rules. QL-11: "Follow Windows" for the theme is under General; the Dark mode switch is in the top bar. QL-15:
 // About has the version and opens the logs folder (logs and crash reports).
@@ -18,16 +18,9 @@ import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { PresentationCard } from "@/components/Presentation";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
-import {
-  api,
-  errorMessage,
-  type AppInfo,
-  type LogsInfo,
-  type Settings,
-  type UpdateCheck,
-  type VaultInfo,
-} from "@/lib/api";
+import { api, errorMessage, type AppInfo, type LogsInfo, type Settings, type VaultInfo } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
+import { checkMessage, isNotice } from "@/lib/updates";
 
 interface Props {
   /** Called after a setting changes, so the sidebar status and update banner refresh. */
@@ -36,22 +29,6 @@ interface Props {
   vault: VaultInfo | null;
   onVaultChanged: (info: VaultInfo) => void;
   onOpenVault: () => void;
-}
-
-/** FD-14: what "Check now" found, for the status line. */
-function checkResult(result: UpdateCheck) {
-  switch (result.status) {
-    case "available":
-      return `Version ${result.update.version} is available.`;
-    case "upToDate":
-      return "You have the latest version.";
-    case "noToken":
-      return "Add a GitHub update token below first: the releases are in a private repository.";
-    case "vaultLocked":
-      return "Unlock the vault first: the GitHub update token is kept there.";
-    case "off":
-      return "Update checks are off.";
-  }
 }
 
 type Message = { ok: boolean; text: string } | null;
@@ -198,9 +175,10 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
       const result = await api.checkForUpdate();
       setUpdateMessage({
         ok: result.status === "available" || result.status === "upToDate",
-        text: checkResult(result),
+        text: checkMessage(result),
       });
-      if (result.status === "available") onChanged();
+      // The banner shows the update, or asks for a token; after a used-up limit, the app checks again later.
+      if (result.status === "available" || isNotice(result)) onChanged();
     } catch (err) {
       setUpdateMessage({ ok: false, text: `Could not check for updates: ${errorMessage(err)}` });
     } finally {
@@ -460,8 +438,9 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
           <CardHeader>
             <CardTitle>Updates</CardTitle>
             <CardDescription>
-              Remotely checks GitHub Releases at start and every 24 hours. Every update is signature-checked, and
-              installing always asks first. Turn checks off at air-gapped sites.
+              Remotely checks GitHub Releases at start and every 24 hours, without a token while the repository is
+              public. Every update is signature-checked, and installing always asks first. Turn checks off at air-gapped
+              sites.
             </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">
