@@ -316,7 +316,7 @@ pub struct BulkResults {
     pub ignore_trailing_whitespace: bool,
     /// H9: the canary host finished and the rest wait for the go-ahead (set by the caller, which
     /// asks the job runner).
-    pub canary_waiting: bool,
+    pub canary: Option<crate::jobs::CanaryWait>,
 }
 
 /// One host's whole stored output.
@@ -1455,7 +1455,7 @@ impl BulkRuns {
             hosts,
             groups,
             ignore_trailing_whitespace: opts.ignore_trailing_whitespace,
-            canary_waiting: false,
+            canary: None,
         })
     }
 

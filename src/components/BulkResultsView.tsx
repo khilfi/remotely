@@ -196,8 +196,7 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
   const retries = retryChoices(counts);
   const canRetry = !open && retries.failed > 0;
   // H9: the event may have come before this view opened; the results say whether the rest still wait.
-  const waiting =
-    canary ?? (shown.canaryWaiting ? { name: hosts[0]?.name ?? "The first host", rest: 0, until: "" } : null);
+  const waiting = canary ?? shown.canary;
 
   return (
     <div className="grid gap-4">
@@ -269,14 +268,10 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
       {open && waiting && (
         <Alert>
           <HourglassIcon />
-          <AlertTitle>
-            {waiting.rest > 0
-              ? canaryPrompt(waiting.name, waiting.rest)
-              : `${waiting.name} finished without errors. Run on the other hosts?`}
-          </AlertTitle>
+          <AlertTitle>{canaryPrompt(waiting.name, waiting.rest)}</AlertTitle>
           <AlertDescription>
             Check its result below first. Nothing else has run yet.
-            {waiting.until && ` The others wait ${timeLeft(waiting.until, now)} more, then the run stops.`}
+            {` The others wait ${timeLeft(waiting.until, now)} more, then the run stops.`}
           </AlertDescription>
           <AlertAction className="flex gap-2">
             <Button size="sm" onClick={() => void goOn()} disabled={busy}>

@@ -1084,7 +1084,7 @@ pub async fn bulk_results(
         .bulk
         .results(&core.ctx, job_id, options.unwrap_or_default())
         .await?;
-    results.canary_waiting = core.jobs.waiting_for_go_ahead().contains(&job_id);
+    results.canary = core.jobs.canary_wait(job_id);
     Ok(results)
 }
 

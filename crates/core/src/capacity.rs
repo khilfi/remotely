@@ -231,14 +231,21 @@ impl CapacityChecker {
     /// VM-02: for a start of two or more VMs, a warning for those with a bridged adapter plugged in at
     /// power-on, which put them on this PC's own network. Read from each VM's .vmx or `showvminfo`
     /// within [`BRIDGED_CHECK_BUDGET`]; VMs that can't be read in time are left out.
-    pub async fn bridged(&self, targets: &[Target]) -> Vec<String> {
-        let vms: Vec<(&str, &str)> = targets
-            .iter()
-            .filter_map(|t| match &t.target {
-                TargetRef::Vm { vmx_path } => Some((vmx_path.as_str(), t.name.as_str())),
-                _ => None,
-            })
-            .collect();
+    pub async fn bridged(&self, ctx: &Context, targets: &[Target]) -> Vec<String> {
+        let mut vms: Vec<(&str, &str)> = Vec::new();
+        for t in targets {
+            let TargetRef::Vm { vmx_path } = &t.target else {
+                continue;
+            };
+            // A VM that runs already is on its network; starting it changes nothing.
+            let running = matches!(
+                self.store.find_vm(ctx, vmx_path).await,
+                Ok(Some(vm)) if vm.power_state == crate::domain::PowerState::Running
+            );
+            if !running {
+                vms.push((vmx_path.as_str(), t.name.as_str()));
+            }
+        }
         if vms.len() < 2 {
             return Vec::new();
         }
@@ -266,11 +273,13 @@ impl CapacityChecker {
                 }
             }
         }
-        if bridged.is_empty() {
-            return Vec::new();
-        }
+        let joins = match bridged.len() {
+            0 => return Vec::new(),
+            1 => "joins",
+            _ => "join",
+        };
         vec![format!(
-            "Bridged network adapter: {} join the network this PC is on. A clone keeps the fixed IP address of the VM it was made from, which may clash with a machine on that network.",
+            "Bridged network adapter: {} {joins} the network this PC is on. A clone keeps the fixed IP address of the VM it was made from, which may clash with a machine on that network.",
             bridged.join(", ")
         )]
     }

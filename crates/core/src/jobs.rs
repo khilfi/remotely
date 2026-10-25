@@ -303,6 +303,18 @@ impl TargetOutcome {
 /// H9: how long the rest of a run waits for the go-ahead after its canary host.
 pub const CANARY_WAIT: Duration = Duration::from_secs(15 * 60);
 
+/// H9: a job that waits for the go-ahead after its canary host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryWait {
+    /// The canary host's name.
+    pub name: String,
+    /// How many hosts wait.
+    pub rest: usize,
+    /// Until when they wait (RFC 3339).
+    pub until: String,
+}
+
 /// Why a target did not run to an outcome of its own.
 enum Stop {
     /// The job was cancelled before the target started.
@@ -507,7 +519,7 @@ pub struct JobRunner {
     /// Signalled whenever a job closes, for jobs waiting to run alone (FD-14).
     idle: Notify,
     /// H9: jobs whose canary host finished, waiting for the go-ahead.
-    waiting: Mutex<HashMap<Uuid, tokio::sync::oneshot::Sender<Context>>>,
+    waiting: Mutex<HashMap<Uuid, (tokio::sync::oneshot::Sender<Context>, CanaryWait)>>,
 }
 
 impl JobRunner {
@@ -623,7 +635,7 @@ impl JobRunner {
     /// ([`crate::command_bus::CommandBus::go_on`]). False when the job is not waiting for it.
     pub(crate) fn go_on(&self, ctx: &Context, job_id: Uuid) -> bool {
         match locks::lock(&self.waiting).remove(&job_id) {
-            Some(go) => go.send(*ctx).is_ok(),
+            Some((go, _)) => go.send(*ctx).is_ok(),
             None => false,
         }
     }
@@ -631,6 +643,11 @@ impl JobRunner {
     /// H9: the jobs waiting for the go-ahead after their canary host.
     pub fn waiting_for_go_ahead(&self) -> Vec<Uuid> {
         locks::lock(&self.waiting).keys().copied().collect()
+    }
+
+    /// H9: what a job waits for after its canary host, while it does.
+    pub fn canary_wait(&self, job_id: Uuid) -> Option<CanaryWait> {
+        locks::lock(&self.waiting).get(&job_id).map(|(_, wait)| wait.clone())
     }
 
     /// Cancels a job in its countdown, or the targets of a running job that have not started yet.
@@ -1164,17 +1181,24 @@ impl JobRunner {
             return Err("the canary host did not succeed, so the other hosts did not run".into());
         }
         let (go, answer) = tokio::sync::oneshot::channel();
-        locks::lock(&self.waiting).insert(id, go);
         let until = time::OffsetDateTime::now_utc() + time::Duration::seconds(CANARY_WAIT.as_secs() as i64);
+        let until = until
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
         let canary = run.spec.decision.targets.first();
+        let name = canary.map(|t| t.name.clone()).unwrap_or_default();
+        let wait = CanaryWait {
+            name: name.clone(),
+            rest,
+            until: until.clone(),
+        };
+        locks::lock(&self.waiting).insert(id, (go, wait));
         self.emit(JobEvent::CanaryWaiting {
             job_id: id,
             target: canary.map(|t| t.target.key()).unwrap_or_default(),
-            name: canary.map(|t| t.name.clone()).unwrap_or_default(),
+            name,
             rest,
-            until: until
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default(),
+            until,
         });
         let answered = tokio::select! {
             ctx = answer => ctx.ok(),

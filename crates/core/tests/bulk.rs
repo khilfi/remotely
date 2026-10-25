@@ -1356,6 +1356,8 @@ async fn a_canary_runs_on_one_host_and_the_rest_wait_for_the_go_ahead() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(ran_on(&remote), ["h0.example.com"], "only the canary ran");
     assert_eq!(core.jobs.waiting_for_go_ahead(), [job]);
+    let wait = core.jobs.canary_wait(job).unwrap();
+    assert_eq!((wait.name.as_str(), wait.rest), ("h0", 3));
     let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
     let pending = targets.iter().filter(|t| t.status == "pending").count();
     assert_eq!(pending, 3);

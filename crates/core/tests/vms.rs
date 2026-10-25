@@ -696,7 +696,11 @@ async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first(
     assert_eq!(request.steps, [ApprovalStep::Confirm]);
     let bridged: Vec<&String> = request.warnings.iter().filter(|w| w.starts_with("Bridged")).collect();
     assert_eq!(bridged.len(), 1, "{:?}", request.warnings);
-    assert!(bridged[0].contains("'clone' (ethernet1)"), "{}", bridged[0]);
+    assert!(
+        bridged[0].contains("'clone' (ethernet1) joins the network"),
+        "{}",
+        bridged[0]
+    );
     assert!(
         !bridged[0].contains("unplugged"),
         "an adapter not plugged in at power-on joins nothing"
@@ -714,6 +718,24 @@ async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first(
     ));
     assert!(matches!(
         core.bus.submit(&core.ctx, start(&["clone"])).await.unwrap(),
+        SubmitOutcome::Queued { .. }
+    ));
+
+    // A bridged VM that runs already is on its network: starting the others is not asked about.
+    let fake = FakeVmware::with_running([vmx("clone")])
+        .in_library(&vmx("clone"), Some("clone"))
+        .in_library(&vmx("natted"), Some("natted"))
+        .in_library(&vmx("unplugged"), Some("unplugged"))
+        .with_hardware(&vmx("clone"), hardware(vec![nic("ethernet0", "bridged", true)]))
+        .with_hardware(&vmx("natted"), hardware(vec![nic("ethernet0", "nat", true)]))
+        .with_hardware(&vmx("unplugged"), hardware(vec![nic("ethernet0", "bridged", false)]));
+    let core = Setup::new(fake).build().await;
+    core.inventory.refresh(&core.ctx).await.unwrap();
+    assert!(matches!(
+        core.bus
+            .submit(&core.ctx, start(&["clone", "natted", "unplugged"]))
+            .await
+            .unwrap(),
         SubmitOutcome::Queued { .. }
     ));
 }

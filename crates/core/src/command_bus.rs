@@ -1474,7 +1474,7 @@ impl CommandBus {
             let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
             decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
             // VM-02: VMs that join this PC's own network when they start.
-            let bridged = self.capacity.bridged(&decision.targets).await;
+            let bridged = self.capacity.bridged(ctx, &decision.targets).await;
             decision.add_warnings(bridged);
         }
         // VM-18: VirtualBox restores a snapshot only on a VM that is not running, so the revert powers

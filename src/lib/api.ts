@@ -1673,8 +1673,8 @@ export interface BulkResults {
   /** "48 hosts same, 2 differ". */
   headline: string;
   ignoreTrailingWhitespace: boolean;
-  /** H9: the canary host finished and the rest wait for the go-ahead. */
-  canaryWaiting: boolean;
+  /** H9: the canary host finished and the rest wait for the go-ahead, until `until`. */
+  canary: { name: string; rest: number; until: string } | null;
 }
 
 export interface HostOutput {
