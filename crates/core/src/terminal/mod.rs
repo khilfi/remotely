@@ -3251,7 +3251,11 @@ mod tests {
         assert_eq!(tuning.retry_delay(1000, 0.5).as_secs(), 300);
         let fast: f64 = (1..=10).map(|a| tuning.retry_delay(a, 0.5).as_secs_f64()).sum();
         let slow: f64 = (11..=22).map(|a| tuning.retry_delay(a, 0.5).as_secs_f64()).sum();
-        assert_eq!((fast, slow), (181.0, 3600.0), "about 3 minutes of quick tries, then an hour of slow ones");
+        assert_eq!(
+            (fast, slow),
+            (181.0, 3600.0),
+            "about 3 minutes of quick tries, then an hour of slow ones"
+        );
     }
 
     #[test]
