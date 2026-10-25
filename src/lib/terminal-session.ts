@@ -7,12 +7,17 @@
 //
 // A pane opens a saved session, a quick connection from the New terminal form (QL-02) or another
 // connection like an open pane (a split). QL-05: search (Ctrl+Shift+F), Ctrl+Shift+C / Ctrl+Shift+V,
-// right-click paste, and the font size, scrollback and copy-on-select settings, applied live. SS-11:
-// the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if typed;
-// QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
-// command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's keys go
-// to `inputRouter` instead (see multiexec.ts). SS-08: the core says which folder the shell is in (`folder`), and a
-// right-click on a file name in the output goes to `onFileWord` (the page offers to download it) instead of pasting.
+// right-click paste, and the font size, scrollback, copy-on-select and multi-line paste settings, applied live. Every
+// paste (Ctrl+V and Ctrl+Shift+V, caught before xterm.js sees them, right-click, the menu, the command panel) is
+// cleaned by paste.ts first, and one with a line break asks the page (`onPasteConfirm`) unless the setting is off.
+// SS-11: the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if
+// typed; QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
+// command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's input
+// (keys, pastes, mouse reports) goes to `inputRouter` instead (see multiexec.ts); xterm.js's replies to the host's
+// queries go to this pane's own connection only (terminal-input.ts tells them apart). OSC 8 links from the host are
+// never opened: a click hands the address to `onLink` (the page shows it, to copy). SS-08: the core says which
+// folder the shell is in (`folder`), and a right-click on a file name in the output goes to `onFileWord` (the page
+// offers to download it) instead of pasting.
 // SS-07: the core reports the session's tunnels (`tunnels`); one that waits for approval (e.g. one that starts with
 // a Prod session's terminal) goes to `onTunnelAsking`, so the page can show the dialog. Host key questions name the
 // jump host that asks.
@@ -49,6 +54,8 @@ import {
   type TunnelInfo,
   type TunnelStart,
 } from "@/lib/api";
+import { pasteHasLineBreak, pastePreview, sanitizePaste, type PastePreview } from "@/lib/paste";
+import { InputOrigin } from "@/lib/terminal-input";
 import type { ResolvedTheme } from "@/lib/theme";
 import { fileWordAt } from "@/lib/transfers";
 
@@ -117,9 +124,23 @@ export interface PaneOptions {
   fontSize: number;
   scrollback: number;
   copyOnSelect: boolean;
+  /** Ask (`onPasteConfirm`) before a paste that holds a line break. */
+  confirmMultilinePaste: boolean;
 }
 
-export const DEFAULT_PANE_OPTIONS: PaneOptions = { fontSize: 13, scrollback: 10000, copyOnSelect: true };
+export const DEFAULT_PANE_OPTIONS: PaneOptions = {
+  fontSize: 13,
+  scrollback: 10000,
+  copyOnSelect: true,
+  confirmMultilinePaste: true,
+};
+
+/** QL-05: a paste with a line break, for the page to confirm. */
+export interface PasteAsk {
+  preview: PastePreview;
+  /** The shell asked for bracketed paste (it holds pasted text until Enter). */
+  bracketed: boolean;
+}
 
 /** QL-07: a command that ran long has ended in this pane. */
 export interface CommandFinished {
@@ -194,7 +215,18 @@ export class PaneSession {
   private readonly listeners = new Set<() => void>();
   private pending: Uint8Array[] = [];
   private writing = false;
+  /** SS-10: each terminal's input told from its replies (the real one, and the masked one while presenting). */
+  private readonly origins = new WeakMap<Terminal, InputOrigin>();
   copyOnSelect = true;
+  /** QL-05: a paste with a line break asks first. */
+  confirmMultilinePaste = true;
+  /**
+   * QL-05: asks the user about a paste with a line break; resolves true to paste. Without it, such a paste goes
+   * without asking.
+   */
+  onPasteConfirm: ((pane: PaneSession, ask: PasteAsk) => Promise<boolean>) | null = null;
+  /** An OSC 8 link from the host was clicked: the page shows its address (to copy). Nothing opens it. */
+  onLink: ((uri: string) => void) | null = null;
   /** QL-07: called when the core reports a long command that finished here. */
   onCommandFinished: ((finished: CommandFinished) => void) | null = null;
   /**
@@ -245,6 +277,7 @@ export class PaneSession {
     this.realHost.className = "absolute inset-0";
     this.element.appendChild(this.realHost);
     this.copyOnSelect = options.copyOnSelect;
+    this.confirmMultilinePaste = options.confirmMultilinePaste;
     this.term = this.newTerminal(theme, options);
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
@@ -260,6 +293,17 @@ export class PaneSession {
       if (word && this.onFileWord) this.onFileWord(word, ev.clientX, ev.clientY);
       else void this.pasteFromClipboard();
     });
+    // QL-05: Ctrl+V, Ctrl+Shift+V and any other paste the browser makes, caught on the way down (capture), before
+    // xterm.js's own handler would send the text as it is.
+    this.element.addEventListener(
+      "paste",
+      (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void this.paste(ev.clipboardData?.getData("text/plain") ?? "");
+      },
+      true,
+    );
     // FD-03: masked from its first output when the app is presenting, and from the moment it starts.
     this.stopFollowing = subscribePresentation(() => this.present(presentationView().presenting));
     this.present(presentationView().presenting);
@@ -274,6 +318,12 @@ export class PaneSession {
       theme: TERMINAL_PALETTE[theme],
       // The search addon's match highlights use the decorations API.
       allowProposedApi: true,
+      // OSC 8 hyperlinks come from the host, which can put any address behind any text: never opened. Only http(s)
+      // ones are links at all (xterm.js drops the rest); a click hands the address to the page to show and copy.
+      linkHandler: {
+        activate: (_event, uri) => this.onLink?.(uri),
+        allowNonHttpProtocols: false,
+      },
     });
   }
 
@@ -286,12 +336,21 @@ export class PaneSession {
     return search;
   }
 
-  /** Keys, pastes, the host's queries and size changes come from the terminal on screen only. */
+  /**
+   * Keys, pastes, the host's queries and size changes come from the terminal on screen only. SS-10: input goes
+   * through `send` (MultiExec, when it has this pane); xterm.js's replies to the host go to this pane alone.
+   */
   private wire(term: Terminal) {
+    const origin = new InputOrigin(term);
+    this.origins.set(term, origin);
     term.onData((data) => {
-      if (term === this.screen) this.send(encoder.encode(data));
+      // Asked for every event, in order, so a mark never outlives its own data.
+      const input = origin.isInput(data);
+      if (term !== this.screen) return;
+      if (input) this.send(encoder.encode(data));
+      else this.reply(encoder.encode(data));
     });
-    // Binary data (some mouse reports) is one byte per character.
+    // Binary data (mouse reports in the default encoding) is one byte per character: input, like other mouse reports.
     term.onBinary((data) => {
       if (term === this.screen) this.send(Uint8Array.from(data, (c) => c.charCodeAt(0) & 0xff));
     });
@@ -332,6 +391,7 @@ export class PaneSession {
       fontSize: this.term.options.fontSize ?? DEFAULT_PANE_OPTIONS.fontSize,
       scrollback: this.term.options.scrollback ?? DEFAULT_PANE_OPTIONS.scrollback,
       copyOnSelect: this.copyOnSelect,
+      confirmMultilinePaste: this.confirmMultilinePaste,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -607,6 +667,8 @@ export class PaneSession {
     this.onCommandFinished = null;
     this.onFileWord = null;
     this.onTunnelAsking = null;
+    this.onPasteConfirm = null;
+    this.onLink = null;
   }
 
   // ---- SS-07 tunnels ----
@@ -663,6 +725,7 @@ export class PaneSession {
 
   // ---- input ----
 
+  /** The user's input: keys, pastes, mouse reports. */
   private send(bytes: Uint8Array) {
     // Always, so no key typed with MultiExec on skips its checks (one typed just before may still be writing; the
     // core then knows that terminal's line holds text it did not see).
@@ -670,6 +733,15 @@ export class PaneSession {
       this.inputRouter(this, bytes);
       return;
     }
+    this.pending.push(bytes);
+    this.flush();
+  }
+
+  /**
+   * SS-10: xterm.js's reply to the host's query (cursor position, device attributes, colours, focus): to this pane's
+   * own connection only, never through MultiExec. The core still counts it as text MultiExec did not see on the line.
+   */
+  private reply(bytes: Uint8Array) {
     this.pending.push(bytes);
     this.flush();
   }
@@ -721,10 +793,40 @@ export class PaneSession {
 
   /**
    * BX-08: a command pasted as if typed, through xterm.js (bracketed when the shell asked for it, so the shell waits
-   * for Enter even when the command has several lines). See `sendCommand` in command-send.ts.
+   * for Enter even when the command has several lines). See `sendCommand` in command-send.ts. Cleaned like any paste
+   * (QL-05), but never asked about: the panel shows the command it pastes.
    */
   pasteCommand(command: string) {
-    this.screen.paste(command);
+    const clean = sanitizePaste(command);
+    if (clean) this.pasteText(clean);
+  }
+
+  /**
+   * QL-05: a paste from the clipboard (keys, right-click, the menu): cleaned (paste.ts), and asked about first when
+   * it holds a line break, unless the setting is off.
+   */
+  async paste(text: string) {
+    const clean = sanitizePaste(text);
+    if (!clean || this.closed) return;
+    if (this.confirmMultilinePaste && this.onPasteConfirm && pasteHasLineBreak(clean)) {
+      const ask = { preview: pastePreview(clean), bracketed: this.screen.modes.bracketedPasteMode };
+      const ok = await this.onPasteConfirm(this, ask);
+      if (!ok || this.closed) return;
+      this.pasteText(clean);
+      this.focus();
+      return;
+    }
+    this.pasteText(clean);
+  }
+
+  /**
+   * Into the terminal on screen, as the user's input: xterm.js turns each CRLF or LF into CR and brackets the text
+   * when the shell asked for bracketed paste.
+   */
+  private pasteText(text: string) {
+    const term = this.screen;
+    this.origins.get(term)?.mark();
+    term.paste(text);
   }
 
   /** BX-08 Shift+click: runs what was pasted. */
@@ -747,12 +849,14 @@ export class PaneSession {
    * for permission, and fail while the window is not focused.
    */
   async pasteFromClipboard() {
+    let text: string | null;
     try {
-      const text = await api.clipboardReadText();
-      if (text) this.screen.paste(text);
+      text = await api.clipboardReadText();
     } catch {
       this.say("\r\n\x1b[2m[Paste with Ctrl+V]\x1b[0m\r\n");
+      return;
     }
+    if (text) await this.paste(text);
   }
 
   // ---- QL-05 search ----
@@ -829,9 +933,10 @@ export class PaneSession {
     if (this.masked) this.masked.term.options.theme = TERMINAL_PALETTE[theme];
   }
 
-  /** QL-05: font size, scrollback and copy-on-select, applied to an open pane. */
+  /** QL-05: font size, scrollback, copy-on-select and the paste question, applied to an open pane. */
   setOptions(options: PaneOptions) {
     this.copyOnSelect = options.copyOnSelect;
+    this.confirmMultilinePaste = options.confirmMultilinePaste;
     for (const term of [this.term, this.masked?.term]) {
       if (!term) continue;
       if (term.options.fontSize !== options.fontSize) term.options.fontSize = options.fontSize;

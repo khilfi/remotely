@@ -265,6 +265,11 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **Notifications** (QL-07): Settings, Terminal, chooses between commands longer than N seconds (5 to 3600) and any
   command that finishes while you're away (the tab isn't on screen or Remotely isn't the window in front), whatever its
   length. A line sent with MultiExec gives one notification once all its terminals are done, never one per terminal.
+- **Pasting and links** (QL-05, SS-10, SS-03): a paste loses its control characters (tabs and line breaks aside) and any
+  bracketed-paste markers, and text with a line break asks first, showing its first lines and, with MultiExec on, how
+  many terminals get it (Settings, Terminal can turn the question off). The terminal's own answers to a host's queries
+  (cursor position, colours, focus) go to that host only, never through MultiExec. Links a host prints are never
+  opened: a click shows the address, to copy.
 
 ### File transfer in the terminal
 
