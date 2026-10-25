@@ -17,18 +17,27 @@
 // a Prod session's terminal) goes to `onTunnelAsking`, so the page can show the dialog. Host key questions name the
 // jump host that asks.
 //
+// SS-03 rendering: a pane on screen draws with WebGL (@xterm/addon-webgl), which keeps the DOM small and the main
+// thread free while a host prints a lot. A pane that is hidden (another tab, another page) gives its WebGL context back
+// after WEBGL_RELEASE_MS and draws with xterm.js's DOM renderer, so dozens of panes never run into the browser's limit
+// of about 16 contexts; so does a pane whose WebGL failed too often, or every pane when WebGL can't start in this
+// window (terminal-render.ts has the limits).
+//
 // FD-03: while presenting, the pane shows a second, masked terminal in front of the real one. Output goes to both:
 // as it is to the real one, through presentation.ts's TerminalMasker to the masked one, whose stand-ins keep the
 // width of what they replace, so both hold the same cells in the same places. Keys, pastes and the host's queries
 // are answered by the one on screen; copies (selection, Ctrl+Shift+C, copy-on-select), the whole-buffer text that
 // SS-11 saves and prints, and the file name under a right-click are read from the real one at the same place. The
-// masked one starts from the real one's screen and scrollback (serialized, then masked) and is dropped when
-// presenting stops. Nothing changes in what is sent to the host.
+// masked one keeps less scrollback (MASKED_SCROLLBACK lines, so search while presenting looks only that far back). It
+// starts from the real one's screen and the end of its scrollback, serialized, then masked and written in pieces cut at
+// line breaks, one at a time, so a long scrollback never holds the page up; output that arrives meanwhile waits and
+// follows in order. It is dropped when presenting stops. Nothing changes in what is sent to the host.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { masker, TerminalMasker } from "@/lib/presentation";
 import { presentationView, subscribePresentation } from "@/lib/presentation-state";
 import {
@@ -50,6 +59,13 @@ import {
   type TunnelStart,
 } from "@/lib/api";
 import type { ResolvedTheme } from "@/lib/theme";
+import {
+  MASK_CHUNK_CHARS,
+  maskedScrollback,
+  splitAtLineBreaks,
+  WEBGL_RELEASE_MS,
+  wantsWebgl,
+} from "@/lib/terminal-render";
 import { fileWordAt } from "@/lib/transfers";
 
 const MONO = "'Cascadia Mono', 'Cascadia Code', Consolas, monospace";
@@ -132,6 +148,13 @@ const encoder = new TextEncoder();
 /** FD-03: how long the masked terminal waits for the rest of a value split across reads. */
 const MASK_HOLD_MS = 25;
 
+/** SS-03: the panes holding a WebGL context now. */
+const webglPanes = new Set<PaneSession>();
+/** SS-03: WebGL could not start in this window at all (no WebGL 2): every pane draws with the DOM renderer. */
+let webglUnavailable = false;
+/** SS-03: how long after a lost WebGL context a pane on screen tries again. */
+const WEBGL_RETRY_MS = 1000;
+
 /** FD-03: the masked terminal on screen while presenting. */
 interface MaskedView {
   term: Terminal;
@@ -184,6 +207,13 @@ export class PaneSession {
   private readonly searchAddon: SearchAddon;
   private readonly serializer: SerializeAddon;
   private masked: MaskedView | null = null;
+  /** SS-03: the WebGL renderer on the terminal on screen, while the pane shows. */
+  private webgl: { term: Terminal; addon: WebglAddon } | null = null;
+  private webglFailures = 0;
+  private webglTimer: number | null = null;
+  /** SS-03: the pane is on screen (laid out and in view), as its IntersectionObserver last said. */
+  private visible = false;
+  private readonly visibility: IntersectionObserver | null;
   private readonly stopFollowing: () => void;
   private theme: ResolvedTheme;
   private opener: PaneOpener | null;
@@ -253,6 +283,15 @@ export class PaneSession {
     this.term.loadAddon(this.serializer);
     this.term.open(this.realHost);
     this.wire(this.term);
+    // SS-03: WebGL while the pane is on screen; hidden (another tab or page, detached), the DOM renderer.
+    this.visibility =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver((entries) => {
+            const last = entries[entries.length - 1];
+            if (last) this.setVisible(last.isIntersecting && this.element.isConnected);
+          });
+    this.visibility?.observe(this.element);
     // QL-05: right-click pastes, like PuTTY; SS-08: on a file name, the page may offer to download it first.
     this.element.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
@@ -314,6 +353,90 @@ export class PaneSession {
     return this.masked?.term ?? this.term;
   }
 
+  // ---- SS-03 rendering ----
+
+  private setVisible(visible: boolean) {
+    this.visible = visible;
+    this.syncRenderer();
+  }
+
+  /**
+   * WebGL on the terminal on screen while the pane shows; a hidden pane gives its context back after a moment (a quick
+   * tab switch keeps it). A terminal that is no longer on screen (presenting started or stopped) gives it back at once.
+   */
+  private syncRenderer() {
+    const screen = this.closed ? null : this.screen;
+    if (this.webgl && this.webgl.term !== screen) this.dropWebgl();
+    if (!screen) return;
+    if (!this.visible) {
+      if (this.webgl && this.webglTimer === null)
+        this.webglTimer = window.setTimeout(() => {
+          this.webglTimer = null;
+          if (!this.visible) this.dropWebgl();
+        }, WEBGL_RELEASE_MS);
+      return;
+    }
+    this.clearWebglTimer();
+    if (this.webgl) return;
+    const check = {
+      visible: true,
+      failures: this.webglFailures,
+      unavailable: webglUnavailable,
+      others: webglPanes.size,
+    };
+    if (!wantsWebgl(check)) return;
+    let addon: WebglAddon | null = null;
+    try {
+      addon = new WebglAddon();
+      screen.loadAddon(addon);
+    } catch (err) {
+      // No WebGL 2 here, or no context to be had: the DOM renderer draws. With no other pane on WebGL, none will be.
+      this.webglFailures += 1;
+      if (webglPanes.size === 0) webglUnavailable = true;
+      try {
+        addon?.dispose();
+      } catch {
+        // It never started.
+      }
+      console.warn("WebGL renderer unavailable; drawing the terminal with the DOM renderer", err);
+      return;
+    }
+    const held = { term: screen, addon };
+    this.webgl = held;
+    webglPanes.add(this);
+    addon.onContextLoss(() => {
+      if (this.webgl !== held) return;
+      // The GPU process restarted or the browser took the context back: the DOM renderer draws, and a pane still on
+      // screen tries again in a moment, until it failed too often.
+      this.webglFailures += 1;
+      this.dropWebgl();
+      this.webglTimer = window.setTimeout(() => {
+        this.webglTimer = null;
+        this.syncRenderer();
+      }, WEBGL_RETRY_MS);
+    });
+  }
+
+  /** Back to xterm.js's DOM renderer (disposing the addon puts it back). */
+  private dropWebgl() {
+    this.clearWebglTimer();
+    const held = this.webgl;
+    if (!held) return;
+    this.webgl = null;
+    webglPanes.delete(this);
+    try {
+      held.addon.dispose();
+    } catch {
+      // Its terminal was disposed first.
+    }
+  }
+
+  private clearWebglTimer() {
+    if (this.webglTimer === null) return;
+    window.clearTimeout(this.webglTimer);
+    this.webglTimer = null;
+  }
+
   // ---- FD-03 presentation mode ----
 
   private present(on: boolean) {
@@ -327,10 +450,13 @@ export class PaneSession {
     this.realHost.style.visibility = "hidden";
     const host = document.createElement("div");
     host.className = "absolute inset-0";
+    // Shown once it holds the real screen, so it never scrolls through the copied scrollback on screen.
+    host.style.visibility = "hidden";
     this.element.appendChild(host);
+    const scrollback = maskedScrollback(this.term.options.scrollback ?? DEFAULT_PANE_OPTIONS.scrollback);
     const term = this.newTerminal(this.theme, {
       fontSize: this.term.options.fontSize ?? DEFAULT_PANE_OPTIONS.fontSize,
-      scrollback: this.term.options.scrollback ?? DEFAULT_PANE_OPTIONS.scrollback,
+      scrollback,
       copyOnSelect: this.copyOnSelect,
     });
     const fit = new FitAddon();
@@ -351,16 +477,27 @@ export class PaneSession {
     term.resize(this.term.cols, this.term.rows);
     this.wire(term);
     this.searchAddon.clearDecorations();
-    // Once the real terminal has parsed what it was given so far, its screen and scrollback, masked, start the copy;
-    // output that arrived since follows in order.
+    this.syncRenderer();
+    // Once the real terminal has parsed what it was given so far, its screen and the end of its scrollback start the
+    // copy: masked and written a piece at a time, each once the one before was parsed and in a task of its own, so
+    // the page stays responsive. Output that arrived meanwhile follows in order.
     this.term.write("", () => {
       if (this.masked !== view) return;
-      const screen = this.serializer.serialize({ scrollback: this.term.options.scrollback });
-      term.write(view.mask.mask(screen));
-      view.ready = true;
-      for (const chunk of view.queue) term.write(chunk);
-      view.queue = [];
-      if (hadFocus) term.focus();
+      const pieces = splitAtLineBreaks(this.serializer.serialize({ scrollback }), MASK_CHUNK_CHARS);
+      const next = () => {
+        if (this.masked !== view) return;
+        const piece = pieces.shift();
+        if (piece !== undefined) {
+          term.write(view.mask.mask(piece), () => window.setTimeout(next, 0));
+          return;
+        }
+        view.ready = true;
+        for (const chunk of view.queue) term.write(chunk);
+        view.queue = [];
+        host.style.visibility = "";
+        if (hadFocus) term.focus();
+      };
+      next();
     });
   }
 
@@ -370,9 +507,12 @@ export class PaneSession {
     this.masked = null;
     if (view.timer !== null) window.clearTimeout(view.timer);
     const hadFocus = view.host.contains(document.activeElement);
+    // SS-03: its WebGL context goes with it; the real terminal gets one if the pane shows.
+    if (this.webgl?.term === view.term) this.dropWebgl();
     view.term.dispose();
     view.host.remove();
     this.realHost.style.visibility = "";
+    this.syncRenderer();
     this.fit();
     this.term.refresh(0, this.term.rows - 1);
     if (this.snapshot.searching) this.update({ searchResults: null });
@@ -408,7 +548,7 @@ export class PaneSession {
 
   /**
    * The real text of what is selected on screen. Both terminals hold the same cells, counted from the bottom (the
-   * masked one may have less scrollback when it started late).
+   * masked one keeps less scrollback: MASKED_SCROLLBACK lines at most).
    */
   private selectionText(): string {
     const view = this.masked;
@@ -602,6 +742,8 @@ export class PaneSession {
     if (this.coreId) void api.terminalClose(this.coreId);
     this.stopFollowing();
     this.showReal();
+    this.visibility?.disconnect();
+    this.dropWebgl();
     this.term.dispose();
     this.listeners.clear();
     this.onCommandFinished = null;
@@ -835,7 +977,9 @@ export class PaneSession {
     for (const term of [this.term, this.masked?.term]) {
       if (!term) continue;
       if (term.options.fontSize !== options.fontSize) term.options.fontSize = options.fontSize;
-      if (term.options.scrollback !== options.scrollback) term.options.scrollback = options.scrollback;
+      // FD-03: the masked copy keeps less scrollback than the setting.
+      const scrollback = term === this.term ? options.scrollback : maskedScrollback(options.scrollback);
+      if (term.options.scrollback !== scrollback) term.options.scrollback = scrollback;
     }
     this.fit();
   }
