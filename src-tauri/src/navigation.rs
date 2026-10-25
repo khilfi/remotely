@@ -1,7 +1,7 @@
 //! 0.5.0 navigation (R10): QL-25 the notification centre's history (in the core's memory: the UI adds what
-//! it notified, the core redacts and keeps it) and QL-21 the topology map's read of each VM's networks. Reads and
-//! the notification list's own state, and QL-23 the first-run wizard's folder dialog: nothing here goes through the bus,
-//! and none of it is audited (the settings the wizard saves go through Settings' own commands).
+//! it notified, the core redacts and keeps it), QL-21 the topology map's read of each VM's networks, and QL-23
+//! the first-run wizard's folder dialog. Reads, the notification list's own state and a dialog: nothing here goes
+//! through the bus, and none of it is audited (the settings the wizard saves go through Settings' own commands).
 
 use remotely_core::host_details::networks::VmNetworks;
 use remotely_core::notifications::{Notification, NotificationInput, NotificationList};
