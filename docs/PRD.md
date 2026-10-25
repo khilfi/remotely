@@ -128,6 +128,15 @@ Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM i
 | Deploy 5 or more VMs (the bulk tier for deploys, from 5 VMs by default), or VMs labelled Prod | High |
 | Deploy 5 or more VMs labelled Prod | Critical |
 
+Conversion (0.5.0, `docs/plan-0.5.md` "Approval tiers"; CV-01 to CV-03, VM-17). The source is only read and only new files are written, so these are Low; a Prod-labelled VM moves its export up one tier, and a protected VM is skipped. An import of a foreign VM or disk is a deploy, with the deploy rows above. Inspect and Verify only read, so they are not commands:
+
+| Action | Tier |
+| --- | --- |
+| Convert a disk image into a new one (CV-03) | Low |
+| Export a powered-off VM for another hypervisor or a cloud (VM-17, CV-02) | Low |
+| Export a VM labelled Prod | Medium |
+| Import a foreign VM or disk as a new VM (CV-01) | As a deploy: Medium, High for Prod |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |
