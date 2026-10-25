@@ -224,7 +224,8 @@ export function ApprovalDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && void cancel()}>
-      <DialogContent className="sm:max-w-3xl">
+      {/* VM-24: a long list of files to delete must not push Approve and Cancel off a small window. */}
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <div className="flex items-center gap-2">
             <TierBadge tier={tier} />
@@ -575,7 +576,7 @@ function VmChangeSummary({ change }: { change: NonNullable<ApprovalRequest["vmCh
           Deletes {plural(deletes, "file")} ({formatSize(bytes)}) for good: they don&apos;t go to the Recycle Bin.
         </p>
       )}
-      <ul className="max-h-72 divide-y overflow-auto rounded-md border text-sm">
+      <ul className="max-h-56 divide-y overflow-auto rounded-md border text-sm">
         {change.targets.map((t) => (
           <li key={t.target} className="grid gap-1 px-3 py-2">
             <span className="font-medium">{t.name}</span>
