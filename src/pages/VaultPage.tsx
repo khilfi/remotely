@@ -349,8 +349,8 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
           </CardTitle>
           <CardDescription>
             The vault keeps the passwords, private keys and passphrases your sessions log in with, encrypted on this PC.
-            Choose a vault password: Critical actions, such as a hard power-off, ask for it again. It also opens the
-            vault if Windows can&apos;t, for example after an administrator resets your Windows password.
+            Choose a vault password: it unlocks the vault, and Critical actions, such as a hard power-off, ask for it
+            again, as does sending a vault password to a host that doesn&apos;t get it yet.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
