@@ -17,9 +17,10 @@ use crate::store::AuditEntry;
 #[allow(clippy::expect_used)]
 static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     [
-        // --password hunter2, -token=abc, --api-key 'x y'
+        // --password hunter2, -token=abc, --api-key 'x y'; CT-01 Redis's --requirepass and --masterauth (a
+        // container's command line)
         (
-            r#"(?i)(--?(?:password|passwd|pass|pwd|passphrase|secret|token|api-?key|access-?key)(?:=|\s+))("[^"]*"|'[^']*'|[^\s;&|`"']+)"#,
+            r#"(?i)(--?(?:password|passwd|pass|pwd|passphrase|secret|token|api-?key|access-?key|requirepass|masterauth)(?:=|\s+))("[^"]*"|'[^']*'|[^\s;&|`"']+)"#,
             "${1}[redacted]",
         ),
         // password=hunter2, TOKEN: abc, api_key = "x"
@@ -231,6 +232,14 @@ mod tests {
                 "header 'Authorization: Bearer [redacted]'",
             ),
             ("client_secret=xyz", "client_secret=[redacted]"),
+            (
+                "redis-server --requirepass hunter2 --port 6379",
+                "redis-server --requirepass [redacted] --port 6379",
+            ),
+            (
+                "redis-server --masterauth=hunter2",
+                "redis-server --masterauth=[redacted]",
+            ),
         ] {
             assert_eq!(redact_secrets(input), (expected.to_owned(), true), "{input}");
         }
@@ -246,6 +255,7 @@ mod tests {
             "mkdir -p /tmp/x",
             "https://example.com/docs",
             "[redacted]",
+            "redis-server --appendonly yes",
         ] {
             assert_eq!(redact_secrets(text), (text.to_owned(), false), "{text}");
         }

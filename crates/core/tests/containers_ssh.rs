@@ -210,6 +210,8 @@ async fn docker_over_ssh_reads_every_list_from_its_json() {
     assert_eq!(site.mounts, ["shop_static"]);
     let cache = list.containers.iter().find(|c| c.name == "cache").unwrap();
     assert_eq!(cache.state, ContainerState::Paused);
+    // CT-01: the password on its command line never reaches the page.
+    assert_eq!(cache.command.as_deref(), Some("redis-server --requirepass [redacted]"));
     let worker = list.containers.iter().find(|c| c.name == "shop-worker-1").unwrap();
     assert!(worker.status.starts_with("Exited (1)"), "{}", worker.status);
 
@@ -229,6 +231,16 @@ async fn docker_over_ssh_reads_every_list_from_its_json() {
     assert!(details.env_names.contains(&"POSTGRES_PASSWORD".to_owned()));
     assert!(!serde_json::to_string(&details).unwrap().contains("hunter2"));
     assert_eq!(details.mounts[0].name.as_deref(), Some("pgdata"));
+    let cache_details = core
+        .containers
+        .details(ctx, host(web), DOCKER, &cache.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        cache_details.command.as_deref(),
+        Some("redis-server --requirepass [redacted]")
+    );
+    assert!(!serde_json::to_string(&cache_details).unwrap().contains("hunter2"));
 
     // Logs: both streams by time; following asks only for what came after.
     let id = site.id.clone();
@@ -281,6 +293,7 @@ async fn podman_over_ssh_reads_its_own_json() {
     assert_eq!(redis.state, ContainerState::Paused);
     assert_eq!(redis.image, "docker.io/library/redis:7");
     assert_eq!(redis.ports[0].describe(), "6379->6379/tcp");
+    assert_eq!(redis.command.as_deref(), Some("redis-server --requirepass [redacted]"));
     let api = list.containers.iter().find(|c| c.name == "shop-api-1").unwrap();
     assert_eq!(api.image, "registry.example.com/shop/api:2.3");
     assert!(api.started_at.is_some(), "Podman says when it started");
