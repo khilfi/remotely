@@ -62,6 +62,7 @@ fn exec(script: &str, targets: &[Target]) -> Command {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     }
 }
 
@@ -285,7 +286,27 @@ fn push_key(targets: &[Target]) -> Command {
         public_key: "ssh-ed25519 AAAA alice@example.com".into(),
         trust_new_host_keys: false,
         timeout_secs: None,
+        options: Default::default(),
     }
+}
+
+#[test]
+fn removing_an_ssh_key_is_medium_and_prod_raises_it() {
+    // SS-09: taking a key away can lock its holder out, so it is a change with one confirm.
+    let lab: Vec<Target> = (0..3).map(|_| host(Environment::Lab)).collect();
+    let remove = |t: &[Target]| Command::RemoveSshKey {
+        targets: refs(t),
+        public_key: "ssh-ed25519 AAAA alice@example.com".into(),
+        trust_new_host_keys: false,
+        timeout_secs: None,
+    };
+    let d = engine().evaluate(&remove(&lab), &lab);
+    assert_eq!((d.action, d.tier), (ActionKind::SshKeyRemove, Tier::Medium));
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+    let prod = vec![host(Environment::Prod)];
+    assert_eq!(engine().evaluate(&remove(&prod), &prod).tier, Tier::High);
+    // A failed removal can be retried on the hosts it failed on.
+    assert!(remove(&lab).with_targets(refs(&lab[..1])).is_some());
 }
 
 #[test]
@@ -3332,6 +3353,35 @@ fn a_tunnel_only_this_pc_can_use_is_low_and_medium_on_prod() {
 }
 
 #[test]
+fn a_socks_tunnel_on_loopback_asks_while_other_users_are_signed_in_to_this_pc() {
+    use crate::adapters::remote::forward::ForwardKind;
+    let lab = vec![terminal(Environment::Lab)];
+    let mut shared_pc = engine();
+    shared_pc.set_other_users(2);
+    let d = shared_pc.evaluate(&tunnel(ForwardKind::Dynamic, "127.0.0.1", &lab), &lab);
+    assert_eq!((d.action, d.tier), (ActionKind::TunnelLocal, Tier::Medium));
+    assert_eq!(d.steps, vec![ApprovalStep::Confirm]);
+    assert!(
+        d.reasons
+            .iter()
+            .any(|r| r.starts_with("2 other users are signed in to this PC")),
+        "{:?}",
+        d.reasons
+    );
+    // A local forward leads to one place only: as before.
+    let d = shared_pc.evaluate(&tunnel(ForwardKind::Local, "127.0.0.1", &lab), &lab);
+    assert_eq!(d.tier, Tier::Low);
+    // Alone on the PC, a SOCKS tunnel is Low again; on Prod the Prod rule still raises it.
+    shared_pc.set_other_users(0);
+    let d = shared_pc.evaluate(&tunnel(ForwardKind::Dynamic, "localhost", &lab), &lab);
+    assert_eq!(d.tier, Tier::Low);
+    shared_pc.set_other_users(1);
+    let prod = vec![terminal(Environment::Prod)];
+    let d = shared_pc.evaluate(&tunnel(ForwardKind::Dynamic, "127.0.0.1", &prod), &prod);
+    assert_eq!(d.tier, Tier::High, "Medium for the shared PC, then one up for Prod");
+}
+
+#[test]
 fn a_remote_tunnel_asks_for_a_confirm() {
     use crate::adapters::remote::forward::ForwardKind;
     let lab = vec![terminal(Environment::Lab)];
@@ -3453,6 +3503,15 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
         (exec("systemctl restart nginx", &hosts), hosts.clone()),
         (exec("rm -rf /var/lib/app", &hosts), hosts.clone()),
         (push_key(&hosts), hosts.clone()),
+        (
+            Command::RemoveSshKey {
+                targets: refs(&hosts),
+                public_key: "ssh-ed25519 AAAA alice@example.com".into(),
+                trust_new_host_keys: false,
+                timeout_secs: None,
+            },
+            hosts.clone(),
+        ),
         (line("uptime", false, &t), t.clone()),
         (upload(&[("a.txt", false)], &t), t.clone()),
         (upload(&[("a.txt", true)], &t), t.clone()),
