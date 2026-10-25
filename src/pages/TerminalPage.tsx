@@ -27,6 +27,10 @@
 // Right-clicking a file name in a terminal offers to download it. Uploads are commands on the bus (Low; Prod and
 // replacing ask); the transfers panel shows progress, speed and time left, with cancel and retry. No path on this PC
 // comes from here: the shell opens the dialogs and catches drops.
+//
+// 0.5.0: QL-18 searches every open terminal's scrollback from a panel under the terminals (Ctrl+Shift+G), results
+// grouped by tab, a click showing the match in its pane. QL-19's Groups menu, next to the MultiExec switch, opens or
+// selects a saved group of sessions for MultiExec, saves the picked tabs as one, and manages them.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
@@ -54,6 +58,7 @@ import {
   ShieldAlertIcon,
   SquareChevronRightIcon,
   SquareTerminalIcon,
+  TextSearchIcon,
   UploadIcon,
   XIcon,
 } from "lucide-react";
@@ -85,6 +90,7 @@ import { MultiExecGroupsMenu } from "@/components/MultiExecGroupsMenu";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
 import { usePresentation } from "@/components/Presentation";
+import { ScrollbackSearchPanel, type SearchPane } from "@/components/ScrollbackSearchPanel";
 import { SessionTree } from "@/components/SessionTree";
 import { TunnelsButton } from "@/components/TunnelsPanel";
 import { TypeSecretMenu } from "@/components/TypeSecretMenu";
@@ -119,6 +125,7 @@ import { useThresholds } from "@/lib/metrics";
 import { MultiExecSender } from "@/lib/multiexec";
 import { groupTabs, memberNames, saveGroupReason, sessionsOfTabs, type GroupTab } from "@/lib/multiexec-groups";
 import { lineNotification, shouldNotify, type NotifyChoice } from "@/lib/recordings";
+import type { LineHit } from "@/lib/scrollback-search";
 import type { PickableTab } from "@/lib/multiexec-picks";
 import { clickTab, isMulti, NO_SELECTION, pruneSelection, type TabSelection } from "@/lib/tab-selection";
 import { copyOutput, paneTitle, printOutput, saveOutput, type NamedPane } from "@/lib/terminal-output";
@@ -188,6 +195,8 @@ interface Props {
   compareRequest: number;
   /** SS-10: turns MultiExec on when it changes (the command palette). */
   multiExecRequest: number;
+  /** QL-18: opens Search all terminals when it changes (the command palette). */
+  searchRequest?: number;
   vault: VaultInfo | null;
   /** Compare runs go through the app, which opens the approval dialog; `onJob` gets the job once queued. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
@@ -303,6 +312,7 @@ export function TerminalPage({
   newRequest,
   compareRequest,
   multiExecRequest,
+  searchRequest = 0,
   vault,
   onSubmitted,
   onOpenVault,
@@ -559,7 +569,10 @@ export function TerminalPage({
       ),
     );
     if (!next.some((t) => t.key === activeTab)) setActiveTab(next[next.length - 1]?.key ?? null);
-    if (next.length === 0) stopMultiExec();
+    if (next.length === 0) {
+      stopMultiExec();
+      setSearchAll(false);
+    }
   }
 
   function closeTab(tab: Tab) {
@@ -573,7 +586,10 @@ export function TerminalPage({
       ),
     );
     if (activeTab === tab.key) setActiveTab(next[next.length - 1]?.key ?? null);
-    if (next.length === 0) stopMultiExec();
+    if (next.length === 0) {
+      stopMultiExec();
+      setSearchAll(false);
+    }
   }
 
   function pickTab(key: string, modifiers: { ctrl: boolean; shift: boolean }) {
@@ -983,6 +999,77 @@ export function TerminalPage({
   const compareTerminals = comparePanes.map((p) => p.terminalId).filter((id): id is string => id !== null);
   const unsavedTabs = comparePanes.filter((p) => !p.sessionId).length;
 
+  // ---- QL-18 search all terminals ---------------------------------------------------------------------
+
+  const [searchAll, setSearchAll] = useState(false);
+  /** Bumped to put the focus in the search panel's input. */
+  const [searchFocus, setSearchFocus] = useState(0);
+  /** A match to show once its tab and pane are on screen. */
+  const [reveal, setReveal] = useState<{ pane: PaneSession; hit: LineHit } | null>(null);
+  const openSearchAll = useCallback(() => {
+    setSearchAll(true);
+    setSearchFocus((n) => n + 1);
+  }, []);
+  function closeSearchAll() {
+    setSearchAll(false);
+    setReveal(null);
+    for (const pane of everyPane) pane.endScrollbackSearch();
+    currentPane?.focus();
+  }
+  // The palette opened it.
+  const [searchHandled, setSearchHandled] = useState(searchRequest);
+  if (searchRequest !== searchHandled) {
+    setSearchHandled(searchRequest);
+    openSearchAll();
+  }
+  // Ctrl+Shift+G, caught before a focused terminal sees it (Ctrl+Shift+F searches that terminal alone).
+  const hasTabs = tabs.length > 0;
+  // Asked for with no terminal open (the palette): nothing to search. Closing the last tab closes it quietly.
+  useEffect(() => {
+    if (!searchAll || hasTabs) return;
+    setSearchAll(false);
+    toast.info("No terminal is open: open one, then search");
+  }, [searchAll, hasTabs]);
+  useEffect(() => {
+    if (!active || !hasTabs) return;
+    function onKey(e: KeyboardEvent) {
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey || e.key.toLowerCase() !== "g") return;
+      e.preventDefault();
+      e.stopPropagation();
+      openSearchAll();
+    }
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [active, hasTabs, openSearchAll]);
+
+  /** Every pane of every tab, in tab order, named as their tabs and titles show them. */
+  const searchPanes: SearchPane[] = tabs.flatMap((t) => {
+    const panes = allPanes(t.layout);
+    const shown = findPane(t.layout, t.activePane) ?? panes[0];
+    const title = shown ? nameOf(shown) : "Terminal";
+    return panes.map((pane) => ({ tabKey: t.key, title, pane, name: nameOf(pane), split: panes.length > 1 }));
+  });
+
+  /** A result clicked: its tab and pane shown, then (once they are on screen) the match. */
+  function revealMatch(target: SearchPane, hit: LineHit) {
+    if (!tabs.some((t) => t.key === target.tabKey && findPane(t.layout, target.pane.key))) {
+      toast.info("That terminal has closed: search again");
+      return;
+    }
+    for (const pane of everyPane) if (pane !== target.pane) pane.clearReveal();
+    setActiveTab(target.tabKey);
+    setTabs((prev) => prev.map((t) => (t.key === target.tabKey ? { ...t, activePane: target.pane.key } : t)));
+    setReveal({ pane: target.pane, hit });
+  }
+  useEffect(() => {
+    if (!reveal) return;
+    const frame = window.requestAnimationFrame(() => {
+      const why = reveal.pane.revealMatch(reveal.hit);
+      if (why) toast.info(why);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [reveal]);
+
   /** BX-08: the command panel pastes into the current pane; with MultiExec on, into a picked one, which sends it on. */
   function sendToCurrent(command: string, enter: boolean) {
     if (multiExec) {
@@ -1248,9 +1335,13 @@ export function TerminalPage({
     <ResizablePanelGroup
       orientation="vertical"
       className="min-h-0 flex-1"
-      id={`terminal-stack-${compareOpen ? "compare" : "plain"}`}
+      id={`terminal-stack-${compareOpen ? "compare" : "plain"}${searchAll ? "-search" : ""}`}
     >
-      <ResizablePanel id="terminal-panes" defaultSize={compareOpen ? "55%" : "100%"} minSize="20%">
+      <ResizablePanel
+        id="terminal-panes"
+        defaultSize={compareOpen && searchAll ? "45%" : compareOpen || searchAll ? "55%" : "100%"}
+        minSize="20%"
+      >
         {multiExec && tile && pickedTabs.length > 1 ? (
           <TileView
             tabs={pickedTabs}
@@ -1283,10 +1374,23 @@ export function TerminalPage({
           </div>
         )}
       </ResizablePanel>
+      {searchAll && (
+        <>
+          <ResizableHandle withHandle className="my-1" />
+          <ResizablePanel id="terminal-search" defaultSize={compareOpen ? "25%" : "45%"} minSize="15%">
+            <ScrollbackSearchPanel
+              panes={searchPanes}
+              focus={searchFocus}
+              onReveal={revealMatch}
+              onClose={closeSearchAll}
+            />
+          </ResizablePanel>
+        </>
+      )}
       {compareOpen && (
         <>
           <ResizableHandle withHandle className="my-1" />
-          <ResizablePanel id="terminal-compare" defaultSize="45%" minSize="20%">
+          <ResizablePanel id="terminal-compare" defaultSize={searchAll ? "30%" : "45%"} minSize="20%">
             <ComparePanel
               active={active}
               vault={vault}
@@ -1393,6 +1497,14 @@ export function TerminalPage({
           <div className="flex shrink-0 items-center gap-0.5 pb-1">
             <IconButton label="Search (Ctrl+Shift+F)" onClick={() => currentPane?.openSearch()}>
               <SearchIcon />
+            </IconButton>
+            <IconButton
+              label={searchAll ? "Hide Search all terminals" : "Search all terminals (Ctrl+Shift+G)"}
+              onClick={() => (searchAll ? closeSearchAll() : openSearchAll())}
+              className={cn(searchAll && "bg-accent")}
+              pressed={searchAll}
+            >
+              <TextSearchIcon />
             </IconButton>
             <IconButton label="Split right" onClick={() => split("horizontal")} disabledReason={splitBlocked}>
               <Columns2Icon />
@@ -1597,10 +1709,10 @@ export function TerminalPage({
       <p className="text-xs text-muted-foreground">
         {options.copyOnSelect ? "Selecting text copies it. " : "Ctrl+Shift+C copies a selection. "}
         Ctrl+Shift+V or right-click pastes{options.confirmMultilinePaste ? " (text with line breaks asks first)" : ""},
-        Ctrl+Shift+F searches. Ctrl+click tabs to pick several for Output, MultiExec and Compare. Typing into one
-        terminal is not audited; each line MultiExec sends is (the command, the sessions, the tier), and so are opening
-        and closing a terminal, saving its output, typing a vault password and every file uploaded or downloaded (its
-        name, size and SHA-256).
+        Ctrl+Shift+F searches, Ctrl+Shift+G searches every terminal. Ctrl+click tabs to pick several for Output,
+        MultiExec and Compare. Typing into one terminal is not audited; each line MultiExec sends is (the command, the
+        sessions, the tier), and so are opening and closing a terminal, saving its output, typing a vault password and
+        every file uploaded or downloaded (its name, size and SHA-256).
       </p>
     </div>
   );

@@ -79,6 +79,9 @@ import {
   wantsWebgl,
 } from "@/lib/terminal-render";
 import { fileWordAt } from "@/lib/transfers";
+import type { IDisposable } from "@xterm/xterm";
+import type { LineHit, PaneHits } from "@/lib/scrollback-search";
+import { endScan, revealHit, scanTerminal, type ScrollbackScan } from "@/lib/scrollback-xterm";
 
 const MONO = "'Cascadia Mono', 'Cascadia Code', Consolas, monospace";
 
@@ -1049,6 +1052,42 @@ export class PaneSession {
     this.masked?.search.clearDecorations();
     this.update({ searching: false, searchResults: null });
     this.focus();
+  }
+
+  // ---- QL-18 search all terminals (scrollback-xterm.ts) ----
+
+  private scan: ScrollbackScan | null = null;
+  private revealed: IDisposable[] = [];
+
+  /** The matches in this pane's buffer, read once: the terminal on screen (FD-03: the masked one while presenting). */
+  scanScrollback(pattern: RegExp): PaneHits {
+    this.endScrollbackSearch();
+    if (this.closed) return { hits: [], capped: false, longLines: 0 };
+    this.scan = scanTerminal(this.screen, pattern);
+    return this.scan.hits;
+  }
+
+  /** Scrolls to a match of the last scan and highlights it; why it can't, as a message. */
+  revealMatch(hit: LineHit): string | null {
+    this.clearReveal();
+    if (!this.scan || this.closed) return "Search again: this terminal was not searched";
+    const shown = revealHit(this.screen, this.scan, hit);
+    if (typeof shown === "string") return shown;
+    this.revealed = shown;
+    return null;
+  }
+
+  /** Takes the highlight of a match off. */
+  clearReveal() {
+    for (const d of this.revealed) d.dispose();
+    this.revealed = [];
+  }
+
+  /** The search panel closed. */
+  endScrollbackSearch() {
+    this.clearReveal();
+    endScan(this.scan);
+    this.scan = null;
   }
 
   /** Finds the next (or previous) match; false when there is none. */
