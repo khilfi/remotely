@@ -168,10 +168,12 @@ crates/core/          remotely-core: all app logic
                       unattended install's vault password adds VaultReauth). runner.rs Deployer, the job runner's
                       DeployActions (PARALLEL_VMS, 2, at a time): each VM made by clone, cloud image, ISO or OVA/OVF;
                       the size's CPU and memory, the boot disk grown to the size's (never shrunk; not for a linked
-                      clone); its folder joins the scanned folders; the clean snapshot before the first boot; power on;
+                      clone); its folder joins the scanned folders; the clean snapshot before the first boot; power on
+                      (a bulk clone's copy stays off, like its source);
                       the IP waited for (300 s; a report, not a failure); its SSH session saved and linked by hand
                       (QL-01); the console. A failure or a cancel removes only what that VM's step made (`Made`:
-                      deleteVM or unregistervm --delete, retried, then its folder; never a folder that was there);
+                      deleteVM, or unregistervm --delete, retried, and closemedium for its seed; then its folder;
+                      never a folder that was there);
                       VMs already made stay. workstation.rs and virtualbox.rs the command lines, pure; vmx.rs a new
                       VM's .vmx; cloud_init.rs VM-22 meta-data and user-data (hostname, guest user with sudo, SSH
                       public key, packages; never a password) and Workstation's guestinfo keys; seed.rs the NoCloud
@@ -542,6 +544,10 @@ src/                  React + TypeScript UI
   `ovftool --name=<name> --diskMode=monolithicSparse|monolithicFlat --noSSLVerify <ova|ovf> <new vmx>` imports an
   appliance; without `--acceptAllEulas` one with a licence fails, and the job says so. ovftool.exe is in `OVFTool\`
   beside vmrun (`adapters::vmware::locate_ovftool`: the Settings path, `REMOTELY_OVFTOOL`, then that folder).
+  Workstation 26 (hand check): a full clone's disk keeps the source's name with `-cl1` (`golden-cl1.vmdk`), and a
+  linked clone's is a delta whose `parentFileNameHint` is the golden VM's disk by absolute path; ovftool writes .vmx
+  keys in lower case (`displayname`, `virtualhw.version`; keys match without case, and `VmxFile` keeps one) and names
+  an import's disk `<name>-disk1.vmdk`; a truncated OVA fails with "Disk (...) could not be found".
   cloud-init's VMware datasource reads `guestinfo.metadata` and `guestinfo.userdata` from the .vmx, each with
   `.encoding = "base64"`. Workstation's default VM folder is `prefvmx.defaultVMPath` in
   `%APPDATA%\VMware\preferences.ini`, else Documents\Virtual Machines.
@@ -613,7 +619,13 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   image's first boot reads a NoCloud seed: an ISO labelled `cidata` with `user-data` and `meta-data`, attached as a
   DVD, then ejected (`storageattach --medium emptydrive`) and closed after the first boot. `list systemproperties`
   gives `Default machine folder:`; `list hostonlyifs` and `list bridgedifs` the adapters a network can use. A cancelled
-  `clonevm` may hold the VM for a moment, so cleanup tries `unregistervm --delete` again a few times.
+  `clonevm` may hold the VM for a moment, so cleanup tries `unregistervm --delete` again a few times. VirtualBox 7.2
+  (hand check): `unregistervm --delete` deletes a VM's disks but leaves its DVD images in the media list, so cleanup
+  closes the seed with `closemedium dvd`; it refuses to delete a golden VM while a linked clone uses its snapshot;
+  `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing `IsInstallSupported="off"`, and
+  Remotely takes any failure as "can't install it by itself"; `import` takes an OVA that ovftool made, and a truncated
+  one fails with VERR_EOF. Windows' own `tar.exe` (libarchive) lists a seed's Joliet names, a check that doesn't use
+  Remotely's reader.
 - MO-13: `showvminfo` also gives `firmware` (`BIOS`, `EFI`...), `nictypeN` (the card, e.g. `82540EM`, `virtio`) and
   `cableconnectedN` (`on`/`off`); the storage key (`"SATA-0-0"`) is the disk's slot. A VDI's header has the signature
   0xbeda107f at 0x40, its type at 0x4c (4 is a snapshot's differencing image) and the disk size at 0x170; a VHD's

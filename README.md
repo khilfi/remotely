@@ -175,7 +175,8 @@ launch template, or from **Custom** values typed in the dialog.
   its IP (a VM without VMware Tools or Guest Additions may not report one: the job says so and goes on), its SSH
   session saved and linked to it, and its console, as the template says.
 - **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
-  job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default).
+  job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
+  VMs they copy: started as they are, they would use their source's name and addresses.
 
 ### Reachability dots
 
