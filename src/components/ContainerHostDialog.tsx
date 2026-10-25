@@ -31,6 +31,7 @@ import {
   type SudoMode,
 } from "@/lib/api";
 import { ENGINE_LABEL, sentence } from "@/lib/containers";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 
 interface Props {
   /** The session to edit; null: pick one. */
@@ -115,7 +116,8 @@ export function ContainerHostDialog({ sessionId, readOnly, onSaved, onClose }: P
     setError(null);
     try {
       const chosen = choices.docker.sudo.startsWith("vault:") ? choices.docker.sudo.slice(6) : null;
-      const found = await api.detectContainers(picked, chosen);
+      // SS-04, AP-06: a sudo password this host doesn't get yet asks for the vault password.
+      const found = await withVaultPassword((password) => api.detectContainers(picked, chosen, password));
       setDetection(found);
       setChoices((prev) => {
         const next = { ...prev };
@@ -143,7 +145,7 @@ export function ContainerHostDialog({ sessionId, readOnly, onSaved, onClose }: P
         engine,
         sudo: sudoOf(choices[engine].sudo),
       }));
-      const saved = await api.setContainerMarks(picked, marks);
+      const saved = await withVaultPassword((password) => api.setContainerMarks(picked, marks, password));
       onSaved(picked, saved);
       onClose();
     } catch (err) {

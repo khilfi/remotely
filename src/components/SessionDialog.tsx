@@ -40,6 +40,7 @@ import {
   type VmRecord,
 } from "@/lib/api";
 import { flattenFolders, folderPath } from "@/lib/folders";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 import { forwardsProblem, jumpChain, routeText, toInput } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 import { ColorDot, SESSION_COLORS, StartupRatingBadges } from "./Badges";
@@ -235,7 +236,10 @@ export function SessionDialog({
       tags: tagList,
       vmId: vm === NONE ? null : vm,
     };
-    const saved = session ? await api.updateSession(session.id, input) : await api.createSession(input);
+    // SS-04, AP-06: a vault password sent to a host where no saved session sends it yet asks for the vault password.
+    const saved = await withVaultPassword((password) =>
+      session ? api.updateSession(session.id, input, password) : api.createSession(input, password),
+    );
     // SS-07: the forwards are saved after the session (a new one needs its id); the core skips an unchanged list.
     if (forwards) {
       try {

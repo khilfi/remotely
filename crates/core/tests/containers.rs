@@ -309,6 +309,12 @@ async fn reads_list_containers_images_volumes_networks_details_and_logs() {
     let web_1 = list.containers.iter().find(|c| c.name == "shop-web-1").unwrap();
     assert_eq!(web_1.state, ContainerState::Running);
     assert_eq!(web_1.project.as_deref(), Some("shop"));
+    let cache = list.containers.iter().find(|c| c.name == "cache").unwrap();
+    assert_eq!(
+        cache.command.as_deref(),
+        Some("redis-server --requirepass [redacted]"),
+        "CT-01: as the parser gives it"
+    );
     let stats = core.containers.stats(ctx, host(web), DOCKER).await.unwrap();
     assert_eq!(stats.len(), 4, "running and paused ones");
     let images = core.containers.images(ctx, host(web), DOCKER).await.unwrap();
@@ -1067,6 +1073,7 @@ async fn an_export_carries_container_marks_to_another_laptop() {
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],

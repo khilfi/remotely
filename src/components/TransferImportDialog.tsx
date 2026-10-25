@@ -44,6 +44,7 @@ import {
   type VaultInfo,
 } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -180,7 +181,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
     const list = (section: Section) =>
       Object.entries(choices[section]).map(([index, action]) => ({ index: Number(index), action }));
     try {
-      const done = await api.transferCommit({
+      const request = {
         previewId: preview.id,
         sessions: list("sessions"),
         knownHosts: list("knownHosts"),
@@ -188,7 +189,9 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         favourites: list("favourites"),
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),
-      });
+      };
+      // SS-04, AP-06: sessions that would use passwords already in this vault ask for the vault password once.
+      const done = await withVaultPassword((vaultPassword) => api.transferCommit({ ...request, vaultPassword }));
       setReport(done);
       onImported();
       toast.success(`Imported from ${preview.file}`);

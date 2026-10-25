@@ -47,13 +47,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { SECRET_KIND_LABEL } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
+import { NewPasswordField } from "@/components/NewPasswordField";
 import { SecretDialog } from "@/components/SecretDialog";
 import { SshKeysCard } from "@/components/SshKeysCard";
 import { VaultUnlock } from "@/components/VaultUnlock";
+import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
 import { api, errorMessage, type SecretKind, type SecretMeta, type SubmitOutcome, type VaultInfo } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
+import { usePasswordStrength } from "@/hooks/use-password-strength";
 
-/** The vault password's minimum length, as the core checks it. */
+/** The vault password's minimum length, as the core checks it (with how hard it is to guess). */
 const MIN_PASSWORD = 10;
 
 interface Props {
@@ -106,6 +109,7 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
 
   return (
     <div className="flex max-w-3xl flex-col gap-6">
+      <WindowsLoginNotice vault={vault} onVaultChanged={onVaultChanged} />
       <StatusCard vault={vault} onVaultChanged={onVaultChanged} />
 
       <Card>
@@ -227,7 +231,18 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
       <PasswordCard
         vault={vault}
         onVaultChanged={onVaultChanged}
-        onWindowsLogin={(enable) => setDialog({ kind: "windowsLogin", enable })}
+        onWindowsLogin={(enable) => {
+          // SS-04: turning it off removes a way in, so it needs no password; turning it on does.
+          if (enable) setDialog({ kind: "windowsLogin", enable });
+          else
+            api.vaultTurnOffWindowsLogin().then(
+              (info) => {
+                onVaultChanged(info);
+                toast.success("The Windows login no longer unlocks the vault");
+              },
+              (err) => toast.error(errorMessage(err)),
+            );
+        }}
       />
 
       {(dialog?.kind === "add" || dialog?.kind === "replace") && (
@@ -279,7 +294,7 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
           title={dialog.enable ? "Unlock with the Windows login" : "Stop unlocking with the Windows login"}
           description={
             dialog.enable
-              ? "Anyone signed in to this Windows account can then unlock the vault with one click. Critical actions still ask for the vault password."
+              ? "Anyone signed in to this Windows account can then unlock the vault with one click, and so can any program running under it, even from a copy of Remotely's database, without the vault password. Critical actions still ask for the vault password. Leave it off on a shared PC or one you don't manage."
               : "Only the vault password will unlock the vault."
           }
           submitLabel={dialog.enable ? "Turn on" : "Turn off"}
@@ -294,10 +309,12 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
 function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultInfo) => void }) {
   const [password, setPassword] = useState("");
   const [repeat, setRepeat] = useState("");
-  const [windowsLogin, setWindowsLogin] = useState(vault.windowsLoginAvailable);
+  // SS-04: off unless the user turns it on (the trade-off is spelt out next to the switch).
+  const [windowsLogin, setWindowsLogin] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const tooShort = password.length > 0 && password.length < MIN_PASSWORD;
+  const strength = usePasswordStrength(password);
+  const weak = !strength?.acceptable;
   const mismatch = repeat.length > 0 && repeat !== password;
 
   async function setup() {
@@ -322,7 +339,7 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
         className="contents"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!tooShort && !mismatch && password && repeat) void setup();
+          if (!weak && !mismatch && password && repeat) void setup();
         }}
       >
         <CardHeader>
@@ -332,26 +349,21 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
           </CardTitle>
           <CardDescription>
             The vault keeps the passwords, private keys and passphrases your sessions log in with, encrypted on this PC.
-            Choose a vault password: Critical actions, such as a hard power-off, ask for it again. It also opens the
-            vault if Windows can&apos;t, for example after an administrator resets your Windows password.
+            Choose a vault password: it unlocks the vault, and Critical actions, such as a hard power-off, ask for it
+            again, as does sending a vault password to a host that doesn&apos;t get it yet.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
-          <div className="grid gap-2">
-            <Label htmlFor="vault-new-password">Vault password</Label>
-            <Input
-              id="vault-new-password"
-              type="password"
-              autoComplete="new-password"
-              className="max-w-sm"
-              value={password}
-              onChange={(e) => setPassword(e.currentTarget.value)}
-              aria-invalid={tooShort || undefined}
-            />
-            <p className={tooShort ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
-              At least {MIN_PASSWORD} characters. A few unrelated words make a good one. There is no way to recover it.
-            </p>
-          </div>
+          <NewPasswordField
+            id="vault-new-password"
+            label="Vault password"
+            className="max-w-sm"
+            value={password}
+            onChange={setPassword}
+            onGenerated={setRepeat}
+            strength={strength}
+            description={`At least ${MIN_PASSWORD} characters and hard to guess. A few unrelated words make a good one. There is no way to recover it.`}
+          />
           <div className="grid gap-2">
             <Label htmlFor="vault-repeat-password">Type it again</Label>
             <Input
@@ -373,10 +385,10 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
               disabled={!vault.windowsLoginAvailable}
             />
             <div className="grid gap-1">
-              <Label htmlFor="vault-windows-login">Unlock with my Windows login</Label>
+              <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
               <p className="text-sm text-muted-foreground">
                 {vault.windowsLoginAvailable
-                  ? "One click unlocks the vault while you are signed in to Windows (DPAPI). Recommended."
+                  ? "Off by default. One click would then unlock the vault while you are signed in to Windows (DPAPI), but so could any program running under your Windows account, even from a copy of Remotely's database, without the vault password. Turn it on only on a PC that is yours alone."
                   : "Not available on this PC; the vault password unlocks it."}
               </p>
             </div>
@@ -388,7 +400,7 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
           )}
         </CardContent>
         <CardFooter>
-          <Button type="submit" disabled={!password || !repeat || tooShort || mismatch || busy}>
+          <Button type="submit" disabled={!password || !repeat || weak || mismatch || busy}>
             Set up the vault
           </Button>
         </CardFooter>
@@ -418,7 +430,7 @@ function StatusCard({ vault, onVaultChanged }: { vault: VaultInfo; onVaultChange
         </CardTitle>
         <CardDescription>
           {unlocked
-            ? `Locks itself after ${vault.idleLockMinutes} minutes without use, and whenever you lock it.`
+            ? `Locks itself after ${vault.idleLockMinutes} minutes without you typing or clicking in Remotely (background reads don't count), and whenever you lock it.`
             : vault.windowsLogin
               ? "Unlock it with your Windows login or the vault password."
               : "Unlock it with the vault password."}
@@ -455,7 +467,8 @@ function PasswordCard({
   const [repeat, setRepeat] = useState("");
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const tooShort = next.length > 0 && next.length < MIN_PASSWORD;
+  const strength = usePasswordStrength(next);
+  const weak = !strength?.acceptable;
   const mismatch = repeat.length > 0 && repeat !== next;
 
   async function change() {
@@ -488,7 +501,7 @@ function PasswordCard({
           className="grid max-w-sm gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            if (current && next && !tooShort && !mismatch && repeat) void change();
+            if (current && next && !weak && !mismatch && repeat) void change();
           }}
         >
           <div className="grid gap-2">
@@ -501,18 +514,15 @@ function PasswordCard({
               onChange={(e) => setCurrent(e.currentTarget.value)}
             />
           </div>
-          <div className="grid gap-2">
-            <Label htmlFor="vault-next">New password</Label>
-            <Input
-              id="vault-next"
-              type="password"
-              autoComplete="new-password"
-              value={next}
-              onChange={(e) => setNext(e.currentTarget.value)}
-              aria-invalid={tooShort || undefined}
-            />
-            {tooShort && <p className="text-sm text-destructive">At least {MIN_PASSWORD} characters.</p>}
-          </div>
+          <NewPasswordField
+            id="vault-next"
+            label="New password"
+            value={next}
+            onChange={setNext}
+            onGenerated={setRepeat}
+            strength={strength}
+            description={`At least ${MIN_PASSWORD} characters and hard to guess.`}
+          />
           <div className="grid gap-2">
             <Label htmlFor="vault-next-repeat">Type it again</Label>
             <Input
@@ -529,7 +539,7 @@ function PasswordCard({
             type="submit"
             variant="outline"
             className="justify-self-start"
-            disabled={!current || !next || !repeat || tooShort || mismatch || busy}
+            disabled={!current || !next || !repeat || weak || mismatch || busy}
           >
             Change the password
           </Button>
@@ -550,7 +560,7 @@ function PasswordCard({
             <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
             <p className="text-sm text-muted-foreground">
               {vault.windowsLoginAvailable
-                ? "One click unlocks the vault while you are signed in to this Windows account. Asks for the vault password to change."
+                ? "One click unlocks the vault while you are signed in to this Windows account, and any program running under it could too, without the vault password. Turning it on asks for the vault password; turning it off doesn't."
                 : "Not available on this PC."}
             </p>
           </div>

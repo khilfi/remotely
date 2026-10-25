@@ -1,6 +1,6 @@
 //! Post-MVP P5 terminal helpers, end to end: QL-06 "Type vault password" (only at a password prompt
-//! unless forced, never leaking the value) and QL-07 notifications when a long command finishes
-//! (the prompt comes back, or the output stops).
+//! unless forced, never leaking the value), QL-05 selection copies scrubbed of the terminal's secrets, and
+//! QL-07 notifications when a long command finishes (the prompt comes back, or the output stops).
 //!
 //! SSH goes to `fakes::ssh_server` on 127.0.0.1 with passwords made at run time; its toy shell's
 //! `sudo` asks for a password without echoing it. No real host is contacted.
@@ -11,7 +11,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::Setup;
+use common::{Setup, VAULT_PASSWORD};
 use remotely_core::adapters::remote::{AgentSource, PtySize};
 use remotely_core::domain::Environment;
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
@@ -254,7 +254,7 @@ async fn a_vault_password_answers_sudo_without_ever_showing() {
     pane.type_text(&core, "sudo whoami\r").await;
     pane.expect_output("[sudo] password for alice: ").await;
     core.terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false)
+        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
         .await
         .unwrap();
     pane.expect_output("ok\r\n$ ").await;
@@ -299,7 +299,7 @@ async fn at_a_shell_prompt_the_password_is_held_back_unless_the_user_insists() {
 
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false)
+        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "no_password_prompt");
@@ -311,9 +311,23 @@ async fn at_a_shell_prompt_the_password_is_held_back_unless_the_user_insists() {
     assert!(!pane.text().contains(&sudo));
     assert!(!audit(&core).await.iter().any(|e| e.event == "vault_secret_typed"));
 
-    // Insisting types it (the toy shell echoes it as a command, as a real one would).
+    // Insisting needs the vault password (SS-04, AP-06), then types it (the toy shell echoes it as a
+    // command, as a real one would).
+    let err = core
+        .terminals
+        .type_secret(&core.ctx, pane.id, sudo_id, true, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "reauth_required");
+    assert!(err.to_string().contains("No password prompt is showing"), "{err}");
     core.terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, true)
+        .type_secret(
+            &core.ctx,
+            pane.id,
+            sudo_id,
+            true,
+            Some(&SecretString::new(VAULT_PASSWORD)),
+        )
         .await
         .unwrap();
     pane.expect_output(": command not found\r\n$ ").await;
@@ -324,7 +338,7 @@ async fn at_a_shell_prompt_the_password_is_held_back_unless_the_user_insists() {
         .unwrap();
     assert_eq!(
         typed.detail.as_deref(),
-        Some("no password prompt was showing; typed at the user's request")
+        Some("no password prompt was showing; typed at the user's request; the vault password was asked again (AP-06)")
     );
     // What showed on screen is scrubbed from copies and saved output.
     let copied = core.terminals.scrub_output(vec![TerminalText {
@@ -362,7 +376,7 @@ async fn a_typed_password_is_scrubbed_from_saved_output_and_the_session_log() {
     pane.type_text(&core, "sudo id\r").await;
     pane.expect_output("password for alice: ").await;
     core.terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false)
+        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
         .await
         .unwrap();
     pane.expect_output(&format!("ok {sudo}\r\n$ ")).await;
@@ -416,26 +430,26 @@ async fn only_passwords_and_passphrases_of_an_unlocked_vault_are_typed() {
 
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, key, false)
+        .type_secret(&core.ctx, pane.id, key, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, SecretId(Uuid::new_v4()), false)
+        .type_secret(&core.ctx, pane.id, SecretId(Uuid::new_v4()), false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "unknown_target");
     let err = core
         .terminals
-        .type_secret(&core.ctx, Uuid::new_v4(), sudo_id, false)
+        .type_secret(&core.ctx, Uuid::new_v4(), sudo_id, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "unknown_target");
     core.vault.lock(&core.ctx).await.unwrap();
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false)
+        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "vault_locked");
@@ -464,11 +478,184 @@ async fn nothing_is_typed_into_a_terminal_that_is_not_connected() {
     .await;
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, true)
+        .type_secret(
+            &core.ctx,
+            pane.id,
+            sudo_id,
+            true,
+            Some(&SecretString::new(VAULT_PASSWORD)),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
     assert!(err.to_string().contains("not connected"), "{err}");
+}
+
+#[tokio::test]
+async fn a_password_no_saved_session_sends_to_this_host_needs_the_vault_password_before_it_is_typed() {
+    let login = new_password();
+    let sudo = new_password();
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &login)
+        .with_sudo(SudoMode::Password(sudo.clone()));
+    let core = core().await;
+    trust_server(&core, &server).await;
+    let session_id = session(&core, &server, &login).await;
+    // In the vault before this run, and used by no session here: someone else's customer password, as far as
+    // this host is concerned.
+    let other = core
+        .vault
+        .vault()
+        .put(
+            &core.ctx,
+            SecretKind::Password,
+            "customer root",
+            SecretString::new(&sudo),
+        )
+        .await
+        .unwrap();
+    let mut pane = Pane::open(&core, session_id).await;
+    pane.type_text(&core, "sudo whoami\r").await;
+    pane.expect_output("[sudo] password for alice: ").await;
+
+    let err = core
+        .terminals
+        .type_secret(&core.ctx, pane.id, other, false, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "reauth_required");
+    assert!(err.to_string().contains("password 'customer root'"), "{err}");
+    assert!(
+        !server.log().iter().any(|l| l.contains("sudo alice")),
+        "nothing typed: {:?}",
+        server.log()
+    );
+    let err = core
+        .terminals
+        .type_secret(
+            &core.ctx,
+            pane.id,
+            other,
+            false,
+            Some(&SecretString::new("guess-guess-guess")),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "wrong_vault_password");
+    assert!(audit(&core).await.iter().any(|e| e.event == "vault_auth_failed"));
+
+    core.terminals
+        .type_secret(
+            &core.ctx,
+            pane.id,
+            other,
+            false,
+            Some(&SecretString::new(VAULT_PASSWORD)),
+        )
+        .await
+        .unwrap();
+    pane.expect_output("ok\r\n$ ").await;
+    let entries = audit(&core).await;
+    let typed = entries.iter().find(|e| e.event == "vault_secret_typed").unwrap();
+    assert_eq!(
+        typed.detail.as_deref(),
+        Some("at a password prompt; the vault password was asked again (AP-06)")
+    );
+    let allowed = entries.iter().find(|e| e.event == "vault_secret_allowed").unwrap();
+    assert_eq!(
+        allowed.action,
+        "Let session 'web01' use the password 'customer root' from now on"
+    );
+
+    // From now on it goes to this host without asking.
+    pane.type_text(&core, "sudo whoami\r").await;
+    pane.expect_output("[sudo] password for alice: ").await;
+    core.terminals
+        .type_secret(&core.ctx, pane.id, other, false, None)
+        .await
+        .unwrap();
+    pane.expect_output("ok\r\n$ ").await;
+}
+
+// ---- QL-05: selection copies ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_copied_selection_is_scrubbed_of_the_terminals_secrets() {
+    let login = new_password();
+    let sudo = new_password();
+    // A broken sudo that prints the password it read back.
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &login)
+        .with_sudo(SudoMode::EchoesPassword(sudo.clone()));
+    let core = core().await;
+    trust_server(&core, &server).await;
+    let session_id = session(&core, &server, &login).await;
+    let sudo_id = secret(&core, SecretKind::Password, "web sudo", &sudo).await;
+    let mut pane = Pane::open(&core, session_id).await;
+
+    // The vault secret typed at sudo's prompt, and the login password (from the vault), both on screen.
+    pane.type_text(&core, "sudo id\r").await;
+    pane.expect_output("password for alice: ").await;
+    core.terminals
+        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
+        .await
+        .unwrap();
+    pane.expect_output(&format!("ok {sudo}\r\n$ ")).await;
+    pane.type_text(&core, &format!("echo {login}\r")).await;
+    pane.expect_output(&format!("{login}\r\n$ ")).await;
+
+    // What the user selected, as xterm.js reads it.
+    let selection = format!("ok {sudo}\r\n$ echo {login}\r\n{login}\r\n$ ");
+    let copied = core.terminals.scrub_for_copy(Some(pane.id), &selection).unwrap();
+    assert_eq!(copied, "ok [redacted]\r\n$ echo [redacted]\r\n[redacted]\r\n$ ");
+    // A selection without a secret is copied as it is.
+    assert_eq!(
+        core.terminals.scrub_for_copy(Some(pane.id), "$ uptime\r\n").unwrap(),
+        "$ uptime\r\n"
+    );
+
+    // The shell ending leaves the pane, and its secrets, until it is closed.
+    pane.type_text(&core, "exit\r").await;
+    pane.expect_event(|e| {
+        matches!(
+            e,
+            TerminalEvent::Status {
+                status: TerminalStatus::Ended { .. }
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    let copied = core.terminals.scrub_for_copy(Some(pane.id), &selection).unwrap();
+    assert!(!copied.contains(&sudo) && !copied.contains(&login), "{copied}");
+
+    // A closed terminal has dropped its secrets, so its text is refused rather than copied unchecked.
+    core.terminals.close(pane.id).await;
+    pane.expect_event(|e| {
+        matches!(
+            e,
+            TerminalEvent::Status {
+                status: TerminalStatus::Closed
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    let err = core.terminals.scrub_for_copy(Some(pane.id), &selection).unwrap_err();
+    assert_eq!(err.code(), "unknown_target");
+    assert!(
+        !err.to_string().contains(&sudo) && !err.to_string().contains(&login),
+        "{err}"
+    );
+
+    // A pane that never opened holds only the app's own lines: what looks like a password is redacted.
+    let copied = core
+        .terminals
+        .scrub_for_copy(None, &format!("[Not connected: refused]\r\nmysql --password={login}"))
+        .unwrap();
+    assert_eq!(copied, "[Not connected: refused]\r\nmysql --password=[redacted]");
 }
 
 // ---- QL-07: notifications when a long command finishes -------------------------------------------------

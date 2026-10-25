@@ -122,7 +122,7 @@ use terminal::files::FileTransfers;
 use terminal::multiexec::MultiExec;
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use transfer::Transfer;
-use vault::{Dpapi, LocalVault, Vault, VaultOptions, VaultService};
+use vault::{Dpapi, LocalVault, SecretBindings, Vault, VaultOptions, VaultService, VaultStatus};
 use vm_links::VmLinks;
 
 pub use error::{CoreError, Result};
@@ -247,6 +247,35 @@ pub struct Core {
     vmware: Arc<SwitchableVmware>,
     /// VM-18: swapped when the VBoxManage path changes in Settings.
     virtualbox: Arc<SwitchableVirtualBox>,
+    /// SS-04, AP-06: where vault passwords may go without the vault password (shared by every module).
+    bindings: SecretBindings,
+}
+
+/// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
+struct LockParts {
+    guest: std::sync::Weak<Metrics>,
+    containers: Containers,
+    host_details: HostDetails,
+    terminals: Terminals,
+    transfer_closed: transfer::Closer,
+    bindings: SecretBindings,
+}
+
+impl LockParts {
+    async fn vault_locked(&self) {
+        self.bindings.vault_locked();
+        self.terminals.forget_logins();
+        let file_closed = self.transfer_closed.close();
+        self.containers.close_all().await;
+        self.host_details.close_all().await;
+        if let Some(metrics) = self.guest.upgrade() {
+            metrics.guest().close_all().await;
+        }
+        tracing::info!(
+            file_closed,
+            "the vault locked: background connections closed, typed login passwords forgotten"
+        );
+    }
 }
 
 impl Core {
@@ -316,6 +345,8 @@ impl Core {
         // VM-18: every module that reads or changes VMs reaches both hypervisors through this.
         let hypervisors = Hypervisors::new(vmware_dyn, virtualbox.clone());
         let known_hosts = Arc::new(KnownHosts::new(store.clone()));
+        // SS-04, AP-06: one record of where vault passwords may go, for every module that sends one.
+        let bindings = SecretBindings::new(store.clone(), Arc::clone(&adapters.vault));
         // MO-02, CT-01: one guard for every background login (dashboard and Containers page).
         let login_guard = LoginGuard::new();
         known_hosts.set_login_guard(login_guard.clone());
@@ -328,6 +359,7 @@ impl Core {
             Arc::clone(&adapters.containers),
             login_guard.clone(),
         );
+        containers.set_bindings(bindings.clone());
         let terminals = Terminals::new(
             store.clone(),
             Arc::clone(&adapters.vault),
@@ -336,6 +368,7 @@ impl Core {
             Arc::clone(&known_hosts),
             Arc::clone(&links),
         );
+        terminals.set_bindings(bindings.clone());
         // MO-13: terminals and the dashboard's kept connections read a session's facts as they go.
         let specs = SpecsCollector::new(store.clone());
         terminals.set_specs(specs.clone());
@@ -404,6 +437,7 @@ impl Core {
             CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
             ImpactPreviewer::new(store.clone(), hypervisors.clone()).with_containers(containers.clone()),
         ));
+        bus.set_bindings(bindings.clone());
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
         }
@@ -420,18 +454,25 @@ impl Core {
         let multiexec = MultiExec::new(ctx, terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
-        Ok(Self {
+        let vault_status = adapters.vault.watch();
+        let core = Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
-            vault: VaultService::new(adapters.vault, store.clone()).with_login_guard(login_guard.clone()),
-            sessions: SessionLibrary::new(store.clone(), Arc::clone(&links)).with_policy(bus.policy()),
+            vault: VaultService::new(adapters.vault, store.clone())
+                .with_login_guard(login_guard.clone())
+                .with_bindings(bindings.clone()),
+            sessions: SessionLibrary::new(store.clone(), Arc::clone(&links))
+                .with_policy(bus.policy())
+                .with_bindings(bindings.clone()),
             forwards: Forwards::new(store.clone()),
             links,
             import: Importer::new(store.clone()).with_policy(bus.policy()),
             known_hosts,
             keys,
-            transfer: Transfer::new(store.clone()).with_policy(bus.policy()),
+            transfer: Transfer::new(store.clone())
+                .with_policy(bus.policy())
+                .with_bindings(bindings.clone()),
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
             retention,
             containers,
@@ -451,7 +492,42 @@ impl Core {
             updater: adapters.updater,
             vmware,
             virtualbox,
-        })
+            bindings,
+        };
+        core.spawn_lock_watch(vault_status);
+        Ok(core)
+    }
+
+    /// SS-04: when the vault locks (idle, or on demand), what holds decrypted secrets lets go of them:
+    /// the dashboard's, the Containers page's and host details' kept connections close, terminals forget
+    /// the passwords typed for their logins (open shells stay open), and an opened FD-07 file closes.
+    fn spawn_lock_watch(&self, mut status: tokio::sync::watch::Receiver<VaultStatus>) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let parts = LockParts {
+            guest: Arc::downgrade(&self.metrics),
+            containers: self.containers.clone(),
+            host_details: self.host_details.clone(),
+            terminals: self.terminals.clone(),
+            transfer_closed: self.transfer.closer(),
+            bindings: self.bindings.clone(),
+        };
+        runtime.spawn(async move {
+            let mut was = *status.borrow_and_update();
+            while status.changed().await.is_ok() {
+                let now = *status.borrow_and_update();
+                if was == VaultStatus::Unlocked && now == VaultStatus::Locked {
+                    parts.vault_locked().await;
+                }
+                was = now;
+            }
+        });
+    }
+
+    /// SS-04, AP-06: where vault passwords may go without asking; tests shorten its grace period.
+    pub fn secret_bindings(&self) -> &SecretBindings {
+        &self.bindings
     }
 
     /// QL-15: what the window shows now, taken when its page starts loading again (a reload, or a crash

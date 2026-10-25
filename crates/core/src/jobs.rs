@@ -1502,6 +1502,9 @@ impl JobRunner {
         if token.is_cancelled() {
             return Err(CoreError::Cancelled);
         }
+        // SS-04: a run the user started (and approved) counts as activity, so the vault doesn't lock
+        // half-way through a long one. Background reads never do.
+        self.vault.note_activity();
         let credentials = crate::sessions::credentials(&*self.vault, &spec.ctx, &session, None).await?;
         // SS-07: each jump host on the way logs in with its own session's credentials.
         let jump_credentials =

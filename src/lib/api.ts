@@ -842,6 +842,16 @@ export interface VaultInfo {
   idleLockMinutes: number;
 }
 
+/** SS-04, FD-07: how hard a new vault password or export passphrase is to guess. The core checks again on submit. */
+export interface PasswordStrength {
+  /** 0 (guessed at once) to 4 (very hard to guess); at most 2 while the length is wrong. */
+  score: number;
+  /** The core would take it as a new vault password or export passphrase. */
+  acceptable: boolean;
+  /** Why it is weak, or how strong it is. Never quotes the password; empty for an empty one. */
+  hint: string;
+}
+
 export type SecretKind = "password" | "privateKey" | "passphrase";
 
 /** A vault item as the UI sees it: its label and kind, never its value. */
@@ -1310,6 +1320,8 @@ export interface QuickConnectRequest {
   auth: SessionAuth;
   password: string | null;
   save: { name: string; folderId: string | null; environment: Environment; color: SessionColor | null } | null;
+  /** SS-04, AP-06: the vault password, when the core asked for it (`reauth_required`). */
+  vaultPassword?: string;
 }
 
 /** QL-02: a quick connection that was not saved. Never holds a password. */
@@ -2561,8 +2573,12 @@ export const api = {
   /** AP-01: the approval rules in force, and what the editor needs to change them. */
   policyRules: () => invoke<PolicyRules>("policy_rules"),
   policyCatalog: () => invoke<PolicyCatalog>("policy_catalog"),
-  /** Checked by the core (an invalid rule fails with code "invalid_rule") and audited. */
-  setPolicyRules: (rules: PolicyRules) => invoke<PolicySaved>("policy_set_rules", { rules }),
+  /**
+   * Checked by the core (an invalid rule fails with code "invalid_rule") and audited. AP-06: a change that loosens
+   * the rules fails with `reauth_required` until it comes with the vault password.
+   */
+  setPolicyRules: (rules: PolicyRules, vaultPassword?: string) =>
+    invoke<PolicySaved>("policy_set_rules", { rules, vaultPassword: vaultPassword ?? null }),
   onJobEvent: (handler: (event: JobEvent) => void): Promise<UnlistenFn> =>
     listen<JobEvent>("job://event", (e) => handler(e.payload)),
 
@@ -2639,6 +2655,14 @@ export const api = {
     invoke<VaultInfo>("vault_change_password", { current, new: next }),
   vaultSetWindowsLogin: (password: string, enabled: boolean) =>
     invoke<VaultInfo>("vault_set_windows_login", { password, enabled }),
+  /** SS-04: one click, no password: the Windows login stops unlocking the vault. */
+  vaultTurnOffWindowsLogin: () => invoke<VaultInfo>("vault_turn_off_windows_login"),
+  /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). */
+  vaultActivity: () => invoke<void>("vault_activity"),
+  /** SS-04, FD-07: scores a candidate vault password or export passphrase for the meter. Never logged. */
+  passwordStrength: (text: string) => invoke<PasswordStrength>("password_strength", { text }),
+  /** SS-04, FD-07: six random words joined by "-", for the Generate button. */
+  passphraseGenerate: () => invoke<string>("passphrase_generate"),
   /** Status changes, including the lock after the idle time. */
   onVaultStatus: (handler: (status: VaultStatus) => void): Promise<UnlistenFn> =>
     listen<VaultStatus>("vault://status", (e) => handler(e.payload)),
@@ -2654,8 +2678,14 @@ export const api = {
   /** SS-01, SS-06 session library. Changes are the app's own data: audited, no approval. */
   sessions: (filter?: SessionFilter) => invoke<SessionRecord[]>("sessions_list", { filter: filter ?? null }),
   sessionFolders: () => invoke<SessionFolder[]>("session_folders"),
-  createSession: (input: SessionInput) => invoke<SessionRecord>("session_create", { input }),
-  updateSession: (id: string, input: SessionInput) => invoke<SessionRecord>("session_update", { id, input }),
+  /**
+   * SS-04, AP-06: a session that would send a vault password to a host where no saved session sends it yet fails with
+   * `reauth_required` until it comes with the vault password.
+   */
+  createSession: (input: SessionInput, vaultPassword?: string) =>
+    invoke<SessionRecord>("session_create", { input, vaultPassword: vaultPassword ?? null }),
+  updateSession: (id: string, input: SessionInput, vaultPassword?: string) =>
+    invoke<SessionRecord>("session_update", { id, input, vaultPassword: vaultPassword ?? null }),
   duplicateSession: (id: string) => invoke<SessionRecord>("session_duplicate", { id }),
   deleteSession: (id: string) => invoke<void>("session_delete", { id }),
   /** QL-01: links a session to a VM by hand (vmId null removes the link); auto-linking leaves it alone. Audited. */
@@ -2738,6 +2768,8 @@ export const api = {
     /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
     keepStartup: number[];
     keepForwards: number[];
+    /** SS-04, AP-06: the vault password, when the core asked for it (`reauth_required`). */
+    vaultPassword?: string;
   }) => invoke<TransferReport>("transfer_commit", { request }),
 
   /** SS-09 SSH keys in the vault. Pushing one is `submit` with a pushSshKey command. */
@@ -2872,9 +2904,17 @@ export const api = {
   reachabilityWatch: (sessionIds: string[]) => invoke<ReachabilityUpdate>("reachability_watch", { sessionIds }),
   onReachability: (handler: (update: ReachabilityUpdate) => void): Promise<UnlistenFn> =>
     listen<ReachabilityUpdate>("reachability://update", (e) => handler(e.payload)),
-  /** SS-11: the terminals' text with their login secrets scrubbed, for the clipboard. */
-  terminalOutputText: (items: TerminalText[]) => invoke<TerminalText[]>("terminal_output_text", { items }),
-  /** SS-11: the same for printing; audited as printed. */
+  /**
+   * SS-11 "Copy output": the shell puts the terminals' text on the clipboard, their login secrets scrubbed by the
+   * core, kept out of Windows' clipboard history and cloud clipboard.
+   */
+  terminalOutputCopy: (items: TerminalText[]) => invoke<void>("terminal_output_copy", { items }),
+  /**
+   * QL-05: a terminal's selection onto the clipboard the same way, scrubbed of that terminal's secrets. id: the
+   * core's terminal (null for a pane that never opened). Fails for a terminal that has closed.
+   */
+  terminalCopySelection: (id: string | null, text: string) => invoke<void>("terminal_copy_selection", { id, text }),
+  /** SS-11: the terminals' text with their login secrets scrubbed, for printing; audited as printed. */
   terminalOutputPrint: (items: TerminalText[]) => invoke<TerminalText[]>("terminal_output_print", { items }),
   /** SS-11: asks where (a file, or a folder for one file each), then saves. Audited. null: cancelled. */
   terminalOutputSave: (items: TerminalText[], layout: SaveLayout) =>
@@ -2912,8 +2952,8 @@ export const api = {
    * QL-06: types a vault password or passphrase, then Enter, into the terminal when it shows a password prompt (or
    * with `force`). The value never reaches the UI. Fails with `no_password_prompt` at a shell prompt.
    */
-  terminalTypeSecret: (id: string, secretId: string, force: boolean) =>
-    invoke<void>("terminal_type_secret", { id, secretId, force }),
+  terminalTypeSecret: (id: string, secretId: string, force: boolean, vaultPassword?: string) =>
+    invoke<void>("terminal_type_secret", { id, secretId, force, vaultPassword: vaultPassword ?? null }),
   /** QL-07: a Windows notification that a long command finished in a background tab. */
   notifyCommandFinished: (title: string, body: string) => invoke<void>("notify_command_finished", { title, body }),
 
@@ -2954,11 +2994,11 @@ export const api = {
   containerHosts: () => invoke<ContainerHostInfo[]>("containers_hosts"),
   containerMarks: (sessionId: string) => invoke<ContainerMark[]>("containers_marks", { sessionId }),
   /** Replaces a session's engines (empty: no container host any more). Audited like a session edit. */
-  setContainerMarks: (sessionId: string, marks: MarkInput[]) =>
-    invoke<ContainerMark[]>("containers_set_marks", { sessionId, marks }),
+  setContainerMarks: (sessionId: string, marks: MarkInput[], vaultPassword?: string) =>
+    invoke<ContainerMark[]>("containers_set_marks", { sessionId, marks, vaultPassword: vaultPassword ?? null }),
   /** Which CLIs the host has and whether they need sudo. A read: nothing is marked. */
-  detectContainers: (sessionId: string, sudoPasswordId: string | null = null) =>
-    invoke<Detection>("containers_detect", { sessionId, sudoPasswordId }),
+  detectContainers: (sessionId: string, sudoPasswordId: string | null = null, vaultPassword?: string) =>
+    invoke<Detection>("containers_detect", { sessionId, sudoPasswordId, vaultPassword: vaultPassword ?? null }),
   containerVersion: (host: ContainerHost, engine: EngineKind) =>
     invoke<EngineVersion>("containers_version", { host, engine }),
   containers: (host: ContainerHost, engine: EngineKind) => invoke<ContainerList>("containers_list", { host, engine }),

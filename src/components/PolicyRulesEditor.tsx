@@ -25,6 +25,7 @@ import {
   type Tier,
   type TierRule,
 } from "@/lib/api";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 
 const TIERS: Tier[] = ["low", "medium", "high", "critical"];
 
@@ -136,7 +137,9 @@ export function PolicyRulesEditor() {
     if (!draft) return;
     setBusy(true);
     try {
-      const result = await api.setPolicyRules(withReadOnly(draft));
+      // AP-06: a change that loosens the rules asks for the vault password first.
+      const rules = withReadOnly(draft);
+      const result = await withVaultPassword((password) => api.setPolicyRules(rules, password));
       setSaved(result.rules);
       load(result.rules);
       setMessage(

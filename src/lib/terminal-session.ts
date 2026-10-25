@@ -10,6 +10,8 @@
 // right-click paste, and the font size, scrollback, copy-on-select and multi-line paste settings, applied live. Every
 // paste (Ctrl+V and Ctrl+Shift+V, caught before xterm.js sees them, right-click, the menu, the command panel) is
 // cleaned by paste.ts first, and one with a line break asks the page (`onPasteConfirm`) unless the setting is off.
+// QL-05: every copy of a selection goes through the core, which scrubs this terminal's secrets from it, and the shell
+// writes the clipboard (kept out of Windows' clipboard history and cloud clipboard); never the browser's clipboard API.
 // SS-11: the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if
 // typed; QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
 // command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's input
@@ -42,9 +44,12 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { toast } from "sonner";
+import { latestOnly } from "@/lib/clipboard-copy";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { masker, TerminalMasker } from "@/lib/presentation";
 import { presentationView, subscribePresentation } from "@/lib/presentation-state";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 import {
   api,
   errorCode,
@@ -165,6 +170,15 @@ export interface CommandFinished {
 }
 
 const encoder = new TextEncoder();
+
+/**
+ * QL-05: one clipboard, so one queue for every pane's copies (the last selection ends up on it). A failure shows
+ * the reason, never the text.
+ */
+const copySelectionText = latestOnly<{ id: string | null; text: string }>(
+  ({ id, text }) => api.terminalCopySelection(id, text),
+  (err) => toast.error(`Copy failed: ${errorMessage(err)}`, { id: "terminal-copy" }),
+);
 
 /** FD-03: how long the masked terminal waits for the rest of a value split across reads. */
 const MASK_HOLD_MS = 25;
@@ -332,6 +346,17 @@ export class PaneSession {
       if (word && this.onFileWord) this.onFileWord(word, ev.clientX, ev.clientY);
       else void this.pasteFromClipboard();
     });
+    // QL-05: a copy the browser starts itself (Ctrl+Insert) would put xterm.js's selection on the clipboard as it is;
+    // caught before it reaches xterm.js, it goes through the core like every other copy.
+    this.element.addEventListener(
+      "copy",
+      (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        this.copySelection();
+      },
+      true,
+    );
     // QL-05: Ctrl+V, Ctrl+Shift+V and any other paste the browser makes, caught on the way down (capture), before
     // xterm.js's own handler would send the text as it is.
     this.element.addEventListener(
@@ -401,8 +426,7 @@ export class PaneSession {
     });
     // SS-03 copy-on-select, like PuTTY (FD-03: the real text, even while presenting).
     term.onSelectionChange(() => {
-      if (term === this.screen && this.copyOnSelect && term.hasSelection())
-        void navigator.clipboard?.writeText(this.selectionText());
+      if (term === this.screen && this.copyOnSelect && term.hasSelection()) this.copySelection();
     });
     term.attachCustomKeyEventHandler((ev) => this.handleKey(ev));
   }
@@ -624,6 +648,16 @@ export class PaneSession {
     return text;
   }
 
+  /**
+   * QL-05: what is selected on screen to the clipboard: through the core, which scrubs this terminal's secrets from
+   * it (FD-03: the real text, even while presenting), and the shell, which writes the clipboard.
+   */
+  private copySelection() {
+    if (!this.screen.hasSelection()) return;
+    const text = this.selectionText();
+    if (text) copySelectionText({ id: this.coreId, text });
+  }
+
   // ---- state for React (useSyncExternalStore) ----
 
   subscribe = (listener: () => void) => {
@@ -729,7 +763,10 @@ export class PaneSession {
       if (opener.kind === "session") {
         id = await api.terminalOpen(opener.sessionId, cols, rows, this.onOutput, this.onEvent);
       } else if (opener.kind === "quick") {
-        const opened = await api.terminalQuickConnect(opener.request, cols, rows, this.onOutput, this.onEvent);
+        // SS-04, AP-06: a vault password for a host where no saved session sends it yet asks for the vault password.
+        const opened = await withVaultPassword((vaultPassword) =>
+          api.terminalQuickConnect({ ...opener.request, vaultPassword }, cols, rows, this.onOutput, this.onEvent),
+        );
         id = opened.id;
         // A saved quick connection is a session from now on: reconnects and splits follow it.
         this.opener = opened.session ? { kind: "session", sessionId: opened.session.id } : null;
@@ -917,7 +954,7 @@ export class PaneSession {
     // Ctrl+Shift+C always copies.
     const shown = this.screen;
     if (ev.ctrlKey && !ev.altKey && key === "c" && (ev.shiftKey || shown.hasSelection())) {
-      if (shown.hasSelection()) void navigator.clipboard?.writeText(this.selectionText());
+      this.copySelection();
       shown.clearSelection();
       ev.preventDefault();
       return false;
@@ -978,11 +1015,11 @@ export class PaneSession {
 
   /**
    * QL-06: the core types a vault password or passphrase into this terminal, then Enter, if it shows a password
-   * prompt (or `force`). The value never comes here.
+   * prompt (or `force`). The value never comes here. SS-04, AP-06: `vaultPassword` when the core asked for it.
    */
-  async typeSecret(secretId: string, force: boolean) {
+  async typeSecret(secretId: string, force: boolean, vaultPassword?: string) {
     if (!this.coreId) throw new Error("This terminal has not connected yet.");
-    await api.terminalTypeSecret(this.coreId, secretId, force);
+    await api.terminalTypeSecret(this.coreId, secretId, force, vaultPassword);
     this.focus();
   }
 

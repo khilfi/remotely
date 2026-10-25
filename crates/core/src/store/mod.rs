@@ -87,8 +87,9 @@ impl Store {
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
             .busy_timeout(Duration::from_secs(5))
-            // BX-02: text the retention purge removes (job outputs, scripts) is overwritten on disk, not left in
-            // free pages.
+            // SS-04, BX-02: a deleted or rewritten row (an old wrapped key or ciphertext, job outputs and scripts the
+            // retention purge removes) is overwritten on disk, not left in a free page for a copy of the file to give
+            // back.
             .pragma("secure_delete", "ON");
         let pool = SqlitePoolOptions::new()
             .max_connections(4)

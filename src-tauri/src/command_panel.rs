@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use remotely_core::snippets::manual;
 use remotely_core::snippets::{CommandInfo, Favourite, FavouriteInput, LibraryEntry};
-use remotely_core::vault::SecretId;
+use remotely_core::vault::{SecretId, SecretString};
 use remotely_core::CoreError;
 use tauri::{AppHandle, State};
 use tauri_plugin_notification::NotificationExt;
@@ -147,16 +147,21 @@ pub fn command_fill(state: State<'_, AppState>, command: String, values: HashMap
 }
 
 /// QL-06: types a vault password or passphrase into the terminal, then Enter, when it shows a
-/// password prompt (or `force`). The value never comes back here. Audited with the label.
+/// password prompt (or `force`). The value never comes back here. Audited with the label. SS-04, AP-06:
+/// `vault_password` is the master password, when the core asked for it (`reauth_required`).
 #[tauri::command]
 pub async fn terminal_type_secret(
     state: State<'_, AppState>,
     id: Uuid,
     secret_id: SecretId,
     force: bool,
+    vault_password: Option<SecretString>,
 ) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.terminals.type_secret(&core.ctx, id, secret_id, force).await?)
+    Ok(core
+        .terminals
+        .type_secret(&core.ctx, id, secret_id, force, vault_password.as_ref())
+        .await?)
 }
 
 /// QL-07: a Windows notification that a long command finished in a background tab. The UI decides

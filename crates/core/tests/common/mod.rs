@@ -147,6 +147,21 @@ impl Setup {
     }
 }
 
+/// SS-04, AP-06: as if the user had just given the vault password in its prompt, so the next steps
+/// within 5 minutes don't ask again: tests that put one vault password on sessions to several test
+/// servers (several places) call it once before saving them.
+pub async fn vault_password_given(core: &Core) {
+    core.secret_bindings()
+        .confirm(
+            &core.ctx,
+            Some(&SecretString::new(VAULT_PASSWORD)),
+            "test",
+            "sessions on several test servers share one vault password",
+        )
+        .await
+        .unwrap();
+}
+
 /// `C:\VMs\<name>\<name>.vmx`.
 pub fn vmx(name: &str) -> String {
     format!(r"C:\VMs\{name}\{name}.vmx")

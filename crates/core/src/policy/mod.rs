@@ -305,6 +305,100 @@ fn default_exec_bulk_threshold() -> usize {
 /// writing command ride along on a read-only one.
 const SHELL_SPECIAL: &[char] = &[';', '&', '|', '>', '<', '`', '$', '(', ')', '\n', '\r'];
 
+/// AP-01: programs that run whatever they are given: shells, interpreters and programs that start
+/// another command. As a read-only entry any of them would let every command through as a read
+/// (`bash -c 'rm -rf /'`, `xargs rm`, `sudo -s`), so none can be one. `env` alone (print the
+/// environment) can; `env` with a command can't.
+const RUNS_ANYTHING: &[&str] = &[
+    "sh",
+    "bash",
+    "zsh",
+    "dash",
+    "ksh",
+    "mksh",
+    "csh",
+    "tcsh",
+    "fish",
+    "ash",
+    "busybox",
+    "pwsh",
+    "powershell",
+    "ruby",
+    "irb",
+    "node",
+    "nodejs",
+    "deno",
+    "bun",
+    "tclsh",
+    "wish",
+    "expect",
+    "rscript",
+    "julia",
+    "awk",
+    "gawk",
+    "mawk",
+    "nawk",
+    "xargs",
+    "parallel",
+    "sudo",
+    "doas",
+    "su",
+    "pkexec",
+    "runuser",
+    "sudoedit",
+    "exec",
+    "eval",
+    "source",
+    ".",
+    "command",
+    "builtin",
+    "nohup",
+    "timeout",
+    "nice",
+    "ionice",
+    "stdbuf",
+    "time",
+    "chroot",
+    "nsenter",
+    "setsid",
+    "unshare",
+    "watch",
+    "strace",
+    "ltrace",
+    "flock",
+    "unbuffer",
+    "script",
+    "ssh",
+    "socat",
+    "vi",
+    "vim",
+    "nvim",
+    "ex",
+    "ed",
+    "emacs",
+    "gdb",
+];
+
+/// Families named by a prefix: `python3.12`, `perl5.36`, `lua5.4`, `php8.2`, `pypy3`.
+const RUNS_ANYTHING_PREFIXES: &[&str] = &["python", "perl", "lua", "php", "pypy"];
+
+/// Why a read-only entry is refused for running other commands, if it is.
+fn runs_anything(entry: &str) -> Option<String> {
+    let words: Vec<&str> = entry.split_whitespace().collect();
+    let first = words.first()?;
+    // `/bin/bash` is bash.
+    let program = first.rsplit('/').next().unwrap_or(first).to_ascii_lowercase();
+    if program == "env" {
+        return words[1..]
+            .iter()
+            .any(|w| !w.starts_with('-'))
+            .then(|| format!("'{entry}' runs another command through env"));
+    }
+    let named = RUNS_ANYTHING.contains(&program.as_str())
+        || RUNS_ANYTHING_PREFIXES.iter().any(|prefix| program.starts_with(prefix));
+    named.then(|| format!("'{entry}' starts {program}, which runs any command it is given"))
+}
+
 impl PolicyRules {
     /// Target count from which an action's bulk tier applies: [`Self::exec_bulk_threshold`] hosts for
     /// commands on hosts, [`Self::bulk_threshold`] targets for the rest.
@@ -431,11 +525,60 @@ impl PolicyRules {
                     format!("'{shown}' holds a shell operator (; & | > < ` $ or brackets)"),
                 );
             }
+            if let Some(why) = runs_anything(shown) {
+                return invalid("Read-only commands", format!("{why}, so it can't be read-only"));
+            }
             if !entries.insert(shown.split_whitespace().collect::<Vec<_>>().join(" ")) {
                 return invalid("Read-only commands", format!("'{shown}' is listed twice"));
             }
         }
         Ok(())
+    }
+
+    /// AP-01, AP-06: how `new` is looser than `self`, one line per way: an action's tier lowered, the
+    /// Prod rule off, a dangerous-command rule removed or changed, a command added to the read-only list,
+    /// a bulk threshold raised, a shorter countdown, safety snapshots off by default. Empty when it only
+    /// tightens or changes nothing.
+    pub fn loosened(&self, new: &PolicyRules) -> Vec<String> {
+        let mut out = Vec::new();
+        for kind in ActionKind::ALL {
+            let (Some(before), Some(after)) = (self.tiers.get(&kind), new.tiers.get(&kind)) else {
+                continue;
+            };
+            if after.single < before.single || after.bulk < before.bulk {
+                out.push(format!("{} asks less", kind.label()));
+            }
+        }
+        if self.prod_bump && !new.prod_bump {
+            out.push("Prod no longer raises the tier".into());
+        }
+        for p in &self.dangerous_commands {
+            match new.dangerous_commands.iter().find(|n| n.name == p.name) {
+                None => out.push(format!("dangerous command '{}' removed", p.name)),
+                Some(n) if n.pattern != p.pattern => out.push(format!("dangerous command '{}' changed", p.name)),
+                Some(_) => {}
+            }
+        }
+        let squeeze = |e: &str| e.split_whitespace().collect::<Vec<_>>().join(" ");
+        let known: std::collections::HashSet<String> = self.read_only_commands.iter().map(|e| squeeze(e)).collect();
+        for entry in &new.read_only_commands {
+            if !known.contains(&squeeze(entry)) {
+                out.push(format!("'{}' counts as read-only", entry.trim()));
+            }
+        }
+        if new.bulk_threshold > self.bulk_threshold {
+            out.push("a higher bulk threshold".into());
+        }
+        if new.exec_bulk_threshold > self.exec_bulk_threshold {
+            out.push("a higher bulk threshold for commands on hosts".into());
+        }
+        if new.countdown_seconds < self.countdown_seconds {
+            out.push("a shorter countdown".into());
+        }
+        if self.safety_snapshot_default && !new.safety_snapshot_default {
+            out.push("no safety snapshot by default".into());
+        }
+        out
     }
 
     /// What changed from `self` to `new`, one line per change, for the audit log (AP-01).

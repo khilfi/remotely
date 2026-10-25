@@ -296,11 +296,19 @@ pub struct PolicySaved {
 }
 
 /// AP-01: saves edited tier rules through the command bus, which checks them (an invalid rule comes
-/// back as `invalid_rule` with the reason) and audits the change.
+/// back as `invalid_rule` with the reason) and audits the change. AP-06: a change that loosens them
+/// needs the vault password (`reauth_required` asks for it).
 #[tauri::command]
-pub async fn policy_set_rules(state: State<'_, AppState>, rules: PolicyRules) -> IpcResult<PolicySaved> {
+pub async fn policy_set_rules(
+    state: State<'_, AppState>,
+    rules: PolicyRules,
+    vault_password: Option<SecretString>,
+) -> IpcResult<PolicySaved> {
     let core = &state.core;
-    let changes = core.bus.set_rules(&core.ctx, rules).await?;
+    let changes = core
+        .bus
+        .set_rules_with(&core.ctx, rules, vault_password.as_ref())
+        .await?;
     Ok(PolicySaved {
         rules: core.bus.rules(),
         changes,
@@ -602,6 +610,34 @@ pub async fn vault_set_windows_login(
     Ok(core.vault.set_windows_login(&core.ctx, &password, enabled).await?)
 }
 
+/// SS-04: one click, no password: the Windows login stops unlocking the vault.
+#[tauri::command]
+pub async fn vault_turn_off_windows_login(state: State<'_, AppState>) -> IpcResult<VaultInfo> {
+    let core = &state.core;
+    Ok(core.vault.turn_off_windows_login(&core.ctx).await?)
+}
+
+/// SS-04: the user typed or clicked in the window (the UI sends this at most every few seconds), so
+/// the vault's idle lock counts from now. Background reads never count.
+#[tauri::command]
+pub fn vault_activity(state: State<'_, AppState>) {
+    state.core.vault.note_activity();
+}
+
+/// SS-04, FD-07: how hard a candidate vault password or export passphrase is to guess, for the meter
+/// under the field. The core checks again when it is submitted, and that check decides. Never logged.
+#[tauri::command]
+pub fn password_strength(text: SecretString) -> remotely_core::vault::Strength {
+    remotely_core::vault::password_strength(text.expose())
+}
+
+/// SS-04, FD-07: a random passphrase for the field's Generate button, which shows it once so it can be
+/// written down. Nothing keeps it.
+#[tauri::command]
+pub fn passphrase_generate() -> IpcResult<String> {
+    Ok(remotely_core::vault::generate_passphrase()?.expose().to_owned())
+}
+
 /// Labels and kinds, with how many sessions use each. Works while the vault is locked.
 #[tauri::command]
 pub async fn secrets_list(state: State<'_, AppState>) -> IpcResult<Vec<SecretMeta>> {
@@ -713,16 +749,33 @@ pub async fn session_folders(state: State<'_, AppState>) -> IpcResult<Vec<Sessio
     Ok(core.sessions.folders(&core.ctx).await?)
 }
 
+/// SS-04, AP-06: `vault_password` is the master password, when the core asked for it (`reauth_required`:
+/// the session would send a vault password to a host where no saved session sends it yet).
 #[tauri::command]
-pub async fn session_create(state: State<'_, AppState>, input: SessionInput) -> IpcResult<SessionRecord> {
+pub async fn session_create(
+    state: State<'_, AppState>,
+    input: SessionInput,
+    vault_password: Option<SecretString>,
+) -> IpcResult<SessionRecord> {
     let core = &state.core;
-    Ok(core.sessions.create(&core.ctx, input).await?)
+    Ok(core
+        .sessions
+        .create_with(&core.ctx, input, vault_password.as_ref())
+        .await?)
 }
 
 #[tauri::command]
-pub async fn session_update(state: State<'_, AppState>, id: Uuid, input: SessionInput) -> IpcResult<SessionRecord> {
+pub async fn session_update(
+    state: State<'_, AppState>,
+    id: Uuid,
+    input: SessionInput,
+    vault_password: Option<SecretString>,
+) -> IpcResult<SessionRecord> {
     let core = &state.core;
-    Ok(core.sessions.update(&core.ctx, id, input).await?)
+    Ok(core
+        .sessions
+        .update_with(&core.ctx, id, input, vault_password.as_ref())
+        .await?)
 }
 
 #[tauri::command]

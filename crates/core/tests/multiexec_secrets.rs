@@ -99,6 +99,8 @@ async fn a_password_typed_with_multiexec_is_never_logged_or_kept() {
         .with_ssh()
         .build()
         .await;
+    // SS-04, AP-06: one vault password for several test servers, given once.
+    common::vault_password_given(&core).await;
     core.terminals.set_tuning(TerminalTuning {
         connect_timeout: Duration::from_secs(5),
         agent: AgentSource::NamedPipe(format!(r"\\.\pipe\remotely-test-none-{}", Uuid::new_v4())),

@@ -20,7 +20,7 @@ use remotely_core::transfer::{
 };
 use remotely_core::vault::{SecretKind, SecretString};
 use remotely_core::vm_links::VmLink;
-use remotely_core::Core;
+use remotely_core::{Core, CoreError};
 use uuid::Uuid;
 
 const PASSPHRASE: &str = "tulip anvil orbit";
@@ -180,6 +180,16 @@ async fn open(core: &Core, path: &Path) -> TransferPreview {
 }
 
 async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, ItemAction)]) -> TransferReport {
+    try_commit(core, preview, sessions, None).await.unwrap()
+}
+
+/// [`commit`], with the vault password (SS-04, AP-06) and the result as it comes.
+async fn try_commit(
+    core: &Core,
+    preview: &TransferPreview,
+    sessions: &[(usize, ItemAction)],
+    vault_password: Option<&str>,
+) -> Result<TransferReport, CoreError> {
     let choices = |list: &[(usize, ItemAction)]| {
         list.iter()
             .map(|&(index, action)| ItemChoice { index, action })
@@ -192,6 +202,7 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: vault_password.map(SecretString::new),
                 favourites: vec![],
                 sessions: choices(sessions),
                 known_hosts: vec![],
@@ -203,7 +214,6 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
             &core.snippets,
         )
         .await
-        .unwrap()
 }
 
 /// Like [`commit`], with the sessions whose startup command and port forwards come along (SS-01, SS-07).
@@ -220,6 +230,7 @@ async fn commit_keeping(
                 preview_id: preview.id,
                 keep_startup: keep_startup.to_vec(),
                 keep_forwards: keep_forwards.to_vec(),
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
@@ -521,7 +532,16 @@ async fn without_secret_values_sessions_use_the_same_labels_in_this_vault() {
         "{:?}",
         web_row.notes
     );
-    let report = commit(&b, &preview, &[]).await;
+    // SS-04, AP-06: web01 would send a password already in this vault (found by label) to the file's host,
+    // so the import asks for the vault password, and the file stays open meanwhile.
+    let err = try_commit(&b, &preview, &[], None).await.unwrap_err();
+    assert_eq!(err.code(), "reauth_required");
+    assert!(err.to_string().contains("'web01'"), "{err}");
+    assert!(matches!(
+        try_commit(&b, &preview, &[], Some("not the vault password")).await,
+        Err(CoreError::WrongVaultPassword)
+    ));
+    let report = try_commit(&b, &preview, &[], Some(VAULT_PASSWORD)).await.unwrap();
     assert_eq!(report.without_credentials, 1, "only db01's key is missing");
     assert_eq!(
         by_name(&b, "web01").await.auth,
@@ -596,6 +616,7 @@ async fn a_closed_preview_can_not_be_imported() {
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
@@ -614,7 +635,7 @@ async fn a_closed_preview_can_not_be_imported() {
 }
 
 #[tokio::test]
-async fn an_export_is_never_written_into_a_git_repository_or_with_a_short_passphrase() {
+async fn an_export_is_never_written_into_a_git_repository_or_with_a_weak_passphrase() {
     let dir = temp_folder("transfer");
     std::fs::create_dir_all(dir.join("repo").join(".git")).unwrap();
     let a = laptop().await;
@@ -638,7 +659,73 @@ async fn an_export_is_never_written_into_a_git_repository_or_with_a_short_passph
         .unwrap_err();
     assert!(err.to_string().contains("at least 10 characters"), "{err}");
     assert!(!outside.exists());
+
+    // FD-07: as hard to guess as a new vault password (SS-04), and never quoted back.
+    for weak in ["Password123!", "qwertyuiop12", "aaaaaaaaaaaa"] {
+        let mut guessable = request(false);
+        guessable.passphrase = SecretString::new(weak);
+        let err = a
+            .transfer
+            .export(&a.ctx, &outside, guessable, &a.vault, "Remotely test")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().starts_with("The passphrase is too easy to guess."),
+            "{err}"
+        );
+        assert!(!err.to_string().contains(weak), "{err}");
+        assert!(!outside.exists());
+    }
+
+    // Not the vault password, with or without secrets, locked or unlocked.
+    for include_secrets in [false, true] {
+        let mut same = request(include_secrets);
+        same.passphrase = SecretString::new(VAULT_PASSWORD);
+        let err = a
+            .transfer
+            .export(&a.ctx, &outside, same, &a.vault, "Remotely test")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not your vault password"), "{err}");
+        assert!(!err.to_string().contains(VAULT_PASSWORD), "{err}");
+        assert!(!outside.exists());
+    }
+    a.vault.lock(&a.ctx).await.unwrap();
+    let mut same = request(false);
+    same.passphrase = SecretString::new(VAULT_PASSWORD);
+    let err = a
+        .transfer
+        .export(&a.ctx, &outside, same, &a.vault, "Remotely test")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not your vault password"), "{err}");
+    assert!(!outside.exists());
     assert!(!audit(&a).await.iter().any(|e| e.event == "data_exported"));
+
+    // Any other good passphrase still exports, the vault locked or not.
+    a.transfer
+        .export(&a.ctx, &outside, request(false), &a.vault, "Remotely test")
+        .await
+        .unwrap();
+    assert!(outside.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn exports_derive_their_key_with_256_mib_and_still_open_elsewhere() {
+    // The app's own key derivation, not the tests' fast one: slow on purpose (about two seconds each way).
+    let dir = temp_folder("transfer");
+    let a = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    fill(&a).await;
+    let path = export(&a, &dir, false).await;
+    let envelope: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(envelope["kdf"]["algorithm"], "argon2id");
+    assert_eq!(envelope["kdf"]["memoryKib"], 256 * 1024);
+    assert_eq!(envelope["kdf"]["iterations"], 3);
+
+    let b = laptop().await;
+    let preview = open(&b, &path).await;
+    assert_eq!(preview.sessions.len(), sessions(&a).await.len());
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -653,6 +740,10 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     let b = laptop().await;
     let preview = open(&b, &first).await;
     commit(&b, &preview, &[]).await;
+    // SS-04, AP-06: both laptops move sessions that send vault passwords (new ports); the user gives the
+    // vault password once on each.
+    common::vault_password_given(&a).await;
+    common::vault_password_given(&b).await;
 
     // Laptop A changes web01 and db01; laptop B has a session of its own to bastion's address and one
     // named like a session of A's, and trusts another key for web01.
@@ -747,6 +838,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![ItemChoice {
@@ -776,6 +868,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![
                     ItemChoice {
@@ -968,6 +1061,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],

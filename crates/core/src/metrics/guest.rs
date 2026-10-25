@@ -371,6 +371,19 @@ impl GuestSource {
             .collect()
     }
 
+    /// SS-04: the vault locked: every kept connection closes, since it logged in with vault secrets and
+    /// keeps the login password to scrub output. A host that needs the vault then waits for it to be
+    /// unlocked; one that logs in with the SSH agent connects again next round.
+    pub async fn close_all(&self) {
+        let hosts: Vec<Arc<tokio::sync::Mutex<Host>>> = locks::lock(&self.hosts).values().cloned().collect();
+        for host in hosts {
+            // Waits for a poll in the middle of its round, then closes what it used.
+            let mut host = host.lock().await;
+            host.disconnect().await;
+            host.spec_key.clear();
+        }
+    }
+
     /// Drops what is kept for hosts no longer watched and closes their connections.
     async fn forget_unwatched(&self, watched: &[Uuid]) {
         let gone: Vec<Arc<tokio::sync::Mutex<Host>>> = {

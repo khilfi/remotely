@@ -2,6 +2,8 @@
 // current terminal, then Enter, for a sudo, su or key prompt. Only labels come here; the value goes from the vault to
 // the shell without the clipboard or the UI. At a shell prompt the core holds it back (it would run as a command and
 // stay in the history) unless the user confirms. Each use is audited with the label, never the value.
+// SS-04, AP-06: a password typed where no saved session sends it yet, or typed anyway with no prompt showing, asks
+// for the vault password first (the shared ReauthDialog); for a saved session it is then allowed there from now on.
 
 import { useState } from "react";
 import { toast } from "sonner";
@@ -29,6 +31,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorCode, errorMessage, type SecretMeta } from "@/lib/api";
 import { connectedReason } from "@/lib/disabled-reasons";
+import { isReauthCancelled } from "@/lib/reauth";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 import type { PaneSession } from "@/lib/terminal-session";
 
 interface Props {
@@ -62,11 +66,12 @@ export function TypeSecretMenu({ pane, loginSecretId, terminalName, onOpenVault 
   async function type(secret: SecretMeta, force: boolean) {
     if (!pane) return;
     try {
-      await pane.typeSecret(secret.id, force);
+      await withVaultPassword((password) => pane.typeSecret(secret.id, force, password));
       toast.success(`Typed '${secret.label}' into ${terminalName}`);
     } catch (err) {
       const code = errorCode(err);
-      if (code === "no_password_prompt") setAsking(secret);
+      if (isReauthCancelled(err)) toast.info("Nothing was typed.");
+      else if (code === "no_password_prompt") setAsking(secret);
       else if (code === "vault_locked")
         toast.error("The vault is locked, so nothing was typed.", {
           action: { label: "Open the vault", onClick: onOpenVault },
@@ -130,7 +135,8 @@ export function TypeSecretMenu({ pane, loginSecretId, terminalName, onOpenVault 
             <AlertDialogDescription>
               The last line in {terminalName} doesn&apos;t ask for a password. At a shell prompt, &apos;{asking?.label}
               &apos; would run as a command, show on screen and stay in the shell&apos;s history. Type it only if the
-              terminal is waiting for a password Remotely doesn&apos;t recognise.
+              terminal is waiting for a password Remotely doesn&apos;t recognise. Typing it anyway asks for the vault
+              password.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

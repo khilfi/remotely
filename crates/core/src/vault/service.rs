@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 
-use super::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultStatus};
+use super::{
+    SecretBindings, SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultStatus,
+};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::login_guard::LoginGuard;
@@ -18,6 +20,8 @@ pub struct VaultService {
     store: Store,
     /// MO-02, CT-01: unlocking and changing secrets give parked background logins one more try.
     guard: Option<LoginGuard>,
+    /// SS-04, AP-06: a secret added here goes to its first place without the master password.
+    bindings: Option<SecretBindings>,
 }
 
 impl VaultService {
@@ -26,7 +30,18 @@ impl VaultService {
             vault,
             store,
             guard: None,
+            bindings: None,
         }
+    }
+
+    pub fn with_bindings(mut self, bindings: SecretBindings) -> Self {
+        self.bindings = Some(bindings);
+        self
+    }
+
+    /// SS-04: the user typed, clicked or started something; the idle lock counts from now.
+    pub fn note_activity(&self) {
+        self.vault.note_activity();
     }
 
     pub fn with_login_guard(mut self, guard: LoginGuard) -> Self {
@@ -53,13 +68,15 @@ impl VaultService {
         self.vault.watch()
     }
 
+    /// `windows_login` is off unless the user turns it on: a DPAPI copy of the key opens the vault for any
+    /// program running as this Windows user, without the master password.
     pub async fn setup(&self, ctx: &Context, password: SecretString, windows_login: bool) -> Result<VaultInfo> {
         self.store.read_only().check(Change::Vault)?;
         self.vault.setup(ctx, password, windows_login).await?;
         let detail = if windows_login {
             "unlocks with the Windows login or the vault password"
         } else {
-            "unlocks with the vault password"
+            "unlocks with the vault password only"
         };
         self.audit(ctx, "vault_changed", "Set up the vault", Some(detail))
             .await?;
@@ -97,8 +114,13 @@ impl VaultService {
         self.store.read_only().check(Change::Vault)?;
         match self.vault.change_password(current, new).await {
             Ok(()) => {
-                self.audit(ctx, "vault_changed", "Changed the vault password", None)
-                    .await?;
+                self.audit(
+                    ctx,
+                    "vault_changed",
+                    "Changed the vault password",
+                    Some("a new data key; every secret was sealed with it again"),
+                )
+                .await?;
                 Ok(self.info())
             }
             Err(err) => Err(self.failed(ctx, "Failed to change the vault password", "", err).await),
@@ -121,6 +143,22 @@ impl VaultService {
         }
     }
 
+    /// SS-04: the Windows login stops unlocking the vault; its DPAPI copy of the key is deleted and
+    /// overwritten on disk. One click, no password: it only removes a way in. Audited when it was on.
+    pub async fn turn_off_windows_login(&self, ctx: &Context) -> Result<VaultInfo> {
+        self.store.read_only().check(Change::Vault)?;
+        if self.vault.turn_off_windows_login().await? {
+            self.audit(
+                ctx,
+                "vault_changed",
+                "Stopped the Windows login from unlocking the vault",
+                Some("the vault password unlocks it from now on; its Windows-protected key was deleted"),
+            )
+            .await?;
+        }
+        Ok(self.info())
+    }
+
     pub async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {
         self.vault.list(ctx).await
     }
@@ -128,6 +166,9 @@ impl VaultService {
     pub async fn add(&self, ctx: &Context, kind: SecretKind, label: &str, secret: SecretString) -> Result<SecretMeta> {
         self.store.read_only().check(Change::Vault)?;
         let id = self.vault.put(ctx, kind, label, secret).await?;
+        if let Some(bindings) = &self.bindings {
+            bindings.note_added(id);
+        }
         self.credentials_changed();
         let meta = self.meta(ctx, id).await?;
         let action = format!("Added the {} '{}' to the vault", kind.label(), meta.label);

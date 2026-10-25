@@ -114,6 +114,12 @@ pub enum CoreError {
     #[error("wrong vault password")]
     WrongVaultPassword,
 
+    /// SS-04, AP-06: the step would send a vault password somewhere it has not gone before (or loosen
+    /// the approval rules), so the master password is asked again. The UI asks for it and sends the
+    /// same request again with it. `reason` names what would happen, never a value.
+    #[error("{reason}. Enter the vault password to go ahead")]
+    ReauthRequired { reason: String },
+
     /// FD-07: an export file did not open. AES-GCM can't tell a wrong passphrase from a changed file.
     #[error("the passphrase is wrong, or the file was changed or damaged after it was exported")]
     WrongPassphrase,
@@ -363,6 +369,7 @@ impl CoreError {
             CoreError::VaultLocked => "vault_locked",
             CoreError::VaultNotSetUp => "vault_not_set_up",
             CoreError::WrongVaultPassword => "wrong_vault_password",
+            CoreError::ReauthRequired { .. } => "reauth_required",
             CoreError::WrongPassphrase => "wrong_passphrase",
             CoreError::Vault(_) => "vault",
             CoreError::InvalidSetting(_) => "invalid_setting",

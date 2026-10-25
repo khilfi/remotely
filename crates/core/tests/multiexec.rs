@@ -161,6 +161,8 @@ impl Fleet {
             .await
             .unwrap()
             .id;
+        // SS-04, AP-06: one vault password for every test server, given once.
+        common::vault_password_given(&core).await;
         let mut fleet = Fleet {
             core,
             servers: Vec::new(),
@@ -1294,7 +1296,7 @@ async fn a_vault_password_typed_while_a_line_records_is_scrubbed() {
         fleet
             .core
             .terminals
-            .type_secret(&fleet.core.ctx, fleet.id(i), secret, false)
+            .type_secret(&fleet.core.ctx, fleet.id(i), secret, false, None)
             .await
             .unwrap();
     }

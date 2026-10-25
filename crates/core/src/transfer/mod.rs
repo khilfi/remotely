@@ -4,8 +4,9 @@
 //! * Export writes one file (see [`file`]) with the session folders, the sessions (with their tags,
 //!   environment labels and colours), the trusted host keys, the favourite commands (BX-08) and, only
 //!   when the user ticks it, the vault's secrets with their values. The user chooses the passphrase; Argon2id turns it into the
-//!   AES-256-GCM key. The vault's labels always go along (they are not secret), so on the other laptop
-//!   sessions find secrets with the same label even when the values stayed behind. Exporting secret
+//!   AES-256-GCM key. The passphrase passes the same strength check as a new vault password (SS-04) and
+//!   may not be the vault password itself. The vault's labels always go along (they are not secret), so
+//!   on the other laptop sessions find secrets with the same label even when the values stayed behind. Exporting secret
 //!   values asks for the vault password again, as Critical actions do (AP-06): otherwise anyone at an
 //!   unlocked laptop could carry every secret away under a passphrase of their own.
 //! * Import opens the file with its passphrase, compares it with this laptop's library and shows a
@@ -19,6 +20,11 @@
 //!   the command panel's favourites),
 //!   so it is checked and audited as if the user had made it there. Export and import themselves are
 //!   audited with counts and the file path, never the contents.
+//! * SS-04, AP-06: an import whose sessions would send passwords already in this vault (found by label,
+//!   for a file without values or a secret skipped), or that moves a session that sends vault passwords
+//!   to another host, asks for the vault password once: otherwise a crafted file could point a session
+//!   at a server of someone's choosing with a customer's password. When the vault locks, an opened file
+//!   (which may hold secret values) is closed.
 //! * An export is never written into a Git working tree (the default folder is Documents), so it can't
 //!   end up in a commit by mistake.
 //!
@@ -45,14 +51,15 @@ use crate::locks;
 use crate::policy::PolicyEngine;
 use crate::presentation::Change;
 use crate::sessions::{
-    rate_startup, SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord, StartupRating,
+    rate_startup, Reauth, SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord,
+    StartupRating,
 };
 use crate::snippets::{FavouriteInput, Snippets};
 use crate::ssh_keys::PublicKeyInfo;
 use crate::store::{FavouriteRow, NewAuditEntry, Store};
 use crate::vault::{
-    check_master_password, KdfParams, SecretId, SecretKind, SecretMeta, SecretString, VaultService, VaultStatus,
-    MAX_LABEL_LEN,
+    check_new_password, Destination, KdfParams, SecretBindings, SecretId, SecretKind, SecretMeta, SecretString,
+    VaultService, VaultStatus, MAX_LABEL_LEN,
 };
 use crate::vm_links::VmLink;
 
@@ -423,6 +430,10 @@ pub struct TransferCommit {
     /// replaced session keeps the ones it has here).
     #[serde(default)]
     pub keep_forwards: Vec<usize>,
+    /// SS-04, AP-06: the master password, when the import would send passwords already in this vault
+    /// to the file's hosts (the core asks with `reauth_required`).
+    #[serde(default)]
+    pub vault_password: Option<SecretString>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -873,12 +884,10 @@ fn credential_note(entry: &SessionEntry, payload: &Payload, local: &Local) -> Op
     })
 }
 
+/// FD-07: as long and as hard to guess as a new vault password (SS-04): the file can be attacked offline
+/// by anyone who gets a copy.
 fn check_passphrase(passphrase: &SecretString) -> Result<()> {
-    check_master_password(passphrase).map_err(|_| {
-        CoreError::InvalidInput(
-            "The passphrase needs at least 10 characters. A few unrelated words make a good one.".into(),
-        )
-    })
+    check_new_password(passphrase, "passphrase")
 }
 
 /// FD-07: an export is never written into a Git working tree, where it could be committed by mistake
@@ -942,6 +951,21 @@ struct Decided {
     favourite_actions: Vec<ItemAction>,
 }
 
+/// SS-04: closes an opened file, which may hold secret values, when the vault locks: its secrets are
+/// zeroized, and the import starts again from the file once the vault is unlocked.
+pub struct Closer {
+    chosen: Arc<Mutex<Option<PathBuf>>>,
+    opened: Arc<Mutex<Option<Opened>>>,
+}
+
+impl Closer {
+    /// True when a file was open.
+    pub fn close(&self) -> bool {
+        locks::lock(&self.chosen).take();
+        locks::lock(&self.opened).take().is_some()
+    }
+}
+
 /// An opened export, kept until it is imported or closed. Its secrets are zeroized when it is dropped.
 struct Opened {
     id: Uuid,
@@ -955,8 +979,10 @@ pub struct Transfer {
     policy: Option<Arc<RwLock<PolicyEngine>>>,
     kdf: Mutex<KdfParams>,
     /// The file the user picked to import, until its passphrase opens it.
-    chosen: Mutex<Option<PathBuf>>,
-    opened: Mutex<Option<Opened>>,
+    chosen: Arc<Mutex<Option<PathBuf>>>,
+    opened: Arc<Mutex<Option<Opened>>>,
+    /// SS-04, AP-06: imported sessions that use passwords already here ask for the master password.
+    bindings: Option<SecretBindings>,
 }
 
 impl Transfer {
@@ -964,9 +990,23 @@ impl Transfer {
         Self {
             store,
             policy: None,
-            kdf: Mutex::new(KdfParams::DEFAULT),
-            chosen: Mutex::new(None),
-            opened: Mutex::new(None),
+            kdf: Mutex::new(file::KDF),
+            chosen: Arc::default(),
+            opened: Arc::default(),
+            bindings: None,
+        }
+    }
+
+    pub fn with_bindings(mut self, bindings: SecretBindings) -> Self {
+        self.bindings = Some(bindings);
+        self
+    }
+
+    /// SS-04: what closes an opened file when the vault locks.
+    pub fn closer(&self) -> Closer {
+        Closer {
+            chosen: Arc::clone(&self.chosen),
+            opened: Arc::clone(&self.opened),
         }
     }
 
@@ -1024,6 +1064,13 @@ impl Transfer {
         check_passphrase(&passphrase)?;
         refuse_repository(path)?;
         let status = vault.info().status;
+        // Not the vault password: whoever gets the file and learns its passphrase would then also know the
+        // password that unlocks this vault and confirms Critical actions (AP-06). One Argon2id run.
+        if status != VaultStatus::NotSetUp && vault.vault().verify_password(&passphrase).await? {
+            return Err(CoreError::InvalidInput(
+                "Choose a passphrase that is not your vault password: anyone who learns it from the file would then know your vault password too.".into(),
+            ));
+        }
         if include_secrets {
             match status {
                 VaultStatus::Unlocked => {}
@@ -1267,6 +1314,92 @@ impl Transfer {
     }
 
     /// Forgets the opened file (the dialog was closed). False when it was not open.
+    /// SS-04, AP-06: whether the import needs the master password, and if so that it came and is right.
+    /// It does when a session it saves would send a password already in this vault (found by label: the
+    /// file has no value for it, or its secret is skipped), or when a replaced session that sends vault
+    /// passwords would move to another host or port. True when it was asked and given.
+    async fn confirm_secrets_here(
+        &self,
+        ctx: &Context,
+        payload: &Payload,
+        decided: &Decided,
+        vault_password: Option<&SecretString>,
+        file: &str,
+    ) -> Result<bool> {
+        let Some(bindings) = &self.bindings else {
+            return Ok(false);
+        };
+        let local = &decided.local;
+        let mut here_ids: HashMap<SecretId, SecretId> = HashMap::new();
+        for e in payload.secrets.iter().filter(|e| e.value.is_none()) {
+            if let Some(here) = local.secret(&e.label, e.kind) {
+                here_ids.insert(e.id, here.id);
+            }
+        }
+        for (row, action) in decided.secret_rows.iter().zip(&decided.secret_actions) {
+            let e = &payload.secrets[row.index];
+            if e.value.is_some() && *action == ItemAction::Skip {
+                if let Some(here) = local.secret(&e.label, e.kind) {
+                    here_ids.insert(e.id, here.id);
+                }
+            }
+        }
+        let mut sessions = Vec::new();
+        for (index, entry) in payload.sessions.iter().enumerate() {
+            let action = decided.session_actions[index];
+            if action == ItemAction::Skip {
+                continue;
+            }
+            let mut sends: Vec<SecretId> = Vec::new();
+            if let SessionAuth::Password { password_id: Some(id) } = entry.auth {
+                sends.extend(here_ids.get(&id));
+            }
+            for c in &entry.containers {
+                if let SudoMode::Password { password_id: Some(id) } = c.sudo {
+                    sends.extend(here_ids.get(&id));
+                }
+            }
+            let here = decided.session_rows[index]
+                .local
+                .and_then(|id| local.sessions.iter().find(|s| s.id == id));
+            if let (ItemAction::Replace, Some(here)) = (action, here) {
+                let moved = !Destination::new(&entry.host, entry.port, None)
+                    .same(&Destination::new(&here.host, here.port, None));
+                if moved {
+                    sends.extend(bindings.sent_by(ctx, here.id).await?);
+                }
+            }
+            let mut reaches = false;
+            for secret in sends {
+                if bindings.reaches_hosts(ctx, secret).await? {
+                    reaches = true;
+                    break;
+                }
+            }
+            if reaches {
+                sessions.push(entry.name.clone());
+            }
+        }
+        if sessions.is_empty() {
+            return Ok(false);
+        }
+        let shown: Vec<String> = sessions.iter().take(3).map(|n| format!("'{n}'")).collect();
+        let more = sessions.len().saturating_sub(shown.len());
+        let names = if more > 0 {
+            format!("{} and {more} more", shown.join(", "))
+        } else {
+            shown.join(", ")
+        };
+        let reason = format!(
+            "{} from this file would send passwords already in this vault to the file's hosts ({names})",
+            plural(sessions.len(), "session")
+        );
+        bindings
+            .confirm(ctx, vault_password, &format!("Failed to import from {file}"), &reason)
+            .await?;
+        Ok(true)
+    }
+
     pub fn close(&self, preview_id: Uuid) -> bool {
         let mut opened = locks::lock(&self.opened);
         if opened.as_ref().is_some_and(|o| o.id == preview_id) {
@@ -1433,6 +1566,26 @@ impl Transfer {
                 return Err(err);
             }
         };
+        let path_name = opened.path.display().to_string();
+        let confirmed = match self
+            .confirm_secrets_here(
+                ctx,
+                &opened.payload,
+                &decided,
+                request.vault_password.as_ref(),
+                &path_name,
+            )
+            .await
+        {
+            Ok(confirmed) => confirmed,
+            Err(err) => {
+                let mut slot = locks::lock(&self.opened);
+                if slot.is_none() {
+                    *slot = Some(opened);
+                }
+                return Err(err);
+            }
+        };
         let Opened { path, payload, .. } = opened;
         let Decided {
             mut local,
@@ -1549,7 +1702,8 @@ impl Transfer {
                         input.auth = here.auth.clone();
                     }
                     input.vm_id = input.vm_id.or_else(|| here.vm_id.clone());
-                    library.update(ctx, here.id, input).await
+                    let reauth = if confirmed { Reauth::Given } else { Reauth::Ask(None) };
+                    library.update_checked(ctx, here.id, input, reauth).await
                 }
                 (ItemAction::KeepBoth, _) => {
                     if taken_names.contains(&input.name.to_lowercase()) {

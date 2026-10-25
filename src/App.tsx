@@ -70,6 +70,7 @@ import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ReauthDialog } from "@/components/ReauthDialog";
 import {
   PresentationButton,
   PresentationLayer,
@@ -95,6 +96,7 @@ import {
   type UpdateCheck,
   type VaultInfo,
 } from "@/lib/api";
+import { shouldPingActivity } from "@/lib/reauth";
 import { useTheme } from "@/lib/theme";
 import { checkMessage, isNotice, recheckDelayMs, UPDATE_CHECK_INTERVAL_MS } from "@/lib/updates";
 import { cn } from "@/lib/utils";
@@ -260,6 +262,23 @@ export default function App() {
     window.addEventListener("keydown", onKey, { capture: true });
     return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [go]);
+
+  // SS-04: the vault's idle lock counts from the user's own input, never from background reads, so typing and
+  // clicking anywhere in the window (terminals included) tell the core, at most every 20 seconds.
+  useEffect(() => {
+    let last: number | null = null;
+    function onInput() {
+      const now = Date.now();
+      if (!shouldPingActivity(last, now)) return;
+      last = now;
+      void api.vaultActivity().catch(() => {});
+    }
+    const events = ["keydown", "pointerdown", "wheel"] as const;
+    for (const name of events) window.addEventListener(name, onInput, { capture: true, passive: true });
+    return () => {
+      for (const name of events) window.removeEventListener(name, onInput, { capture: true });
+    };
+  }, []);
 
   const loadVault = useCallback(() => {
     api.vaultInfo().then(
@@ -885,6 +904,7 @@ export default function App() {
         }}
         onOpenVm={(vmxPath, view) => openVms([vmxPath], view)}
       />
+      <ReauthDialog />
       <Toaster theme={resolved} position="bottom-right" />
       <PresentationLayer />
     </TooltipProvider>

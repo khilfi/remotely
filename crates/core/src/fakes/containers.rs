@@ -18,6 +18,7 @@ use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+use crate::adapters::containers::parse::command_line;
 use crate::adapters::containers::{
     ChangeOutput, ContainerDetails, ContainerEngine, ContainerEngines, ContainerId, ContainerState, ContainerStats,
     ContainerSummary, EngineChange, EngineKind, EngineVersion, HealthInfo, ImageId, ImageSummary, LogLine, LogQuery,
@@ -274,6 +275,8 @@ impl Fixture {
         .log(5, LogStream::Stderr, "fatal: queue shop.example.com:5672 unreachable");
         worker.exit_code = 1;
         let mut cache = FakeContainer::new("cache", "redis:7", ContainerState::Paused).port("0.0.0.0", 6379, 6379);
+        // CT-01: a password on the command line, which the page shows redacted.
+        cache.command = vec!["redis-server".into(), "--requirepass".into(), "hunter2-example".into()];
         cache.mem_bytes = 8_388_608;
         let old = FakeContainer::new("old-job", "busybox:latest", ContainerState::Exited);
         f.containers = vec![web, api, db, worker, cache, old];
@@ -605,7 +608,7 @@ pub fn summary(c: &FakeContainer) -> Option<ContainerSummary> {
         id: ContainerId::parse(&c.id).ok()?,
         name: c.name.clone(),
         image: c.image.clone(),
-        command: Some(c.command.join(" ")),
+        command: command_line(c.command.clone()),
         state: c.state,
         status: c.status(),
         created_at: Some(rfc3339(c.created)),
@@ -641,7 +644,8 @@ fn details(c: &FakeContainer) -> Option<ContainerDetails> {
         }),
         restart_policy: Some(c.restart_policy.clone()),
         restart_count: Some(0),
-        command: Some(c.command.join(" ")),
+        // Secrets redacted, as the parser gives it.
+        command: command_line(c.command.clone()),
         entrypoint: None,
         working_dir: None,
         runs_as: None,

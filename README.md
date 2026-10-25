@@ -23,12 +23,15 @@ formula (starting with `=`, `+`, `-` or `@`, also after spaces, or with a tab) g
 `;`, quotes, tabs or line breaks are quoted.
 Auto-update checks this repo's public GitHub Releases without a token (an optional read-only GitHub token can be kept in
 the vault, see [GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
-(AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
-or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
+(AES-256-GCM per item, the key wrapped by an Argon2id-derived vault password, and by DPAPI only if you turn on Windows
+unlock), and locks after 15 minutes without you typing or clicking in Remotely; Critical actions ask for the vault
+password again, and so does sending a vault password to a host that doesn't get it yet (see
+[The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
 tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
-encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
+encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
+AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
 [What Remotely does by itself](#what-remotely-does-by-itself)). The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
 the vault, copies their public keys, lets sessions log in with them and pushes a public key to many hosts'
@@ -221,6 +224,55 @@ Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS
 - **Nothing lands in a Git repository by accident**: no save path writes into a Git working tree (a folder with a
   `.git` folder or file in it or above it): the audit log CSV, Compare and MultiExec exports, saved terminal output,
   session logs, downloads and exports to another laptop. The message names the repository; choose a folder outside it.
+
+### The vault and where its passwords go
+
+An unlocked vault on a laptop at a customer's site shouldn't let whoever sits at it send the stored passwords anywhere.
+So a password from the vault goes, without asking, only where it already goes: to the host (and port, and jump host)
+of a saved session that logs in with it, gives it to sudo as a container host, or was allowed to use it before.
+Anything else asks for the **vault password** first (as Critical actions do), and each answer, right or wrong, is in
+the audit log:
+
+- a session saved, or edited, with a vault password no saved session sends to its host yet; moving a session that
+  sends vault passwords (its login, a container host's sudo password, ones it was allowed) to another host, port or
+  jump host;
+- a quick connection with a vault password for a host no saved session sends it to;
+- **Type vault password** with a password not used at that host, or "Type it anyway" with no password prompt showing;
+- a container host's sudo password (Containers page: marking or detecting) the host doesn't get yet;
+- a Compare run whose sudo password is new to some of its hosts: its approval asks for the vault password, even for a
+  Low command;
+- an import from another laptop whose sessions would use passwords already in this vault (found by label, when the
+  file has no values), or that moves a session that sends vault passwords to another host.
+
+For a saved session the answer counts from then on (`vault_secret_allowed` in the audit log), so the same password there
+doesn't ask again: a session's own login password at its own sudo prompt never asks. A right answer also covers the next
+5 minutes (as sudo does), so setting up several sessions that share a password asks once; each step is still audited,
+and locking the vault ends it. A password you have just added (on the Vault page, or "New password" in the session
+editor) goes to its first place without asking. Private keys and their passphrases never ask: a login only signs with
+them on this PC, so no host ever receives them.
+
+- **Approval rules**: any change that loosens them (a lower tier, Prod no longer raising the tier, a dangerous-command
+  rule removed or changed, a new read-only command, a higher bulk threshold, a shorter countdown, no safety snapshot by
+  default) asks for the vault password; tightening doesn't. Shells, interpreters and programs that run other commands
+  (`bash`, `python3`, `perl`, `awk`, `xargs`, `sudo`, `env bash`, ...) can't be read-only commands at all.
+- **Windows unlock** (DPAPI) is off for new vaults. With it on, one click unlocks the vault while you are signed in to
+  Windows, but any program running under your Windows account could open it too, even from a copy of Remotely's
+  database, without the vault password. Vaults set up before keep their setting; the Vault page and Settings, General
+  say so plainly and turn it off in one click (no password needed: it deletes the Windows-protected copy of the key).
+- **The idle lock** counts from your own typing and clicking in Remotely and the actions you start, not from the
+  dashboard's or the Containers page's background reads, so it really locks after 15 minutes away. When the vault locks,
+  the dashboard's, the Containers page's and host details' kept connections close, terminals forget passwords typed for
+  their logins (open shells stay open; the next login asks again), and an opened import file closes.
+- **Copies and logs**: copying from a terminal (a selection, Ctrl+Shift+C, copy-on-select, Copy output) removes the
+  passwords Remotely knows for that terminal, and the copy is kept out of Windows' clipboard history (Win+V) and the
+  cloud clipboard; other text you copy in Windows still appears there. Session logs scrub those passwords even when the
+  terminal draws them in pieces (colour codes, backspaces), and container commands show passwords as `[redacted]`.
+- **New passwords**: a new vault password, like an export passphrase, needs 10 characters and must be hard to guess (a
+  meter shows why, and common passwords, repeats, keyboard rows and dates count against it); **Generate** makes up six
+  random words. An existing vault keeps the password it has.
+- **Changing the vault password** makes a new data key and seals every secret with it again, in one go, so an old copy
+  of the database or of its wrapped key opens nothing written since. Deleted and rewritten vault data is overwritten in
+  the database file (`secure_delete`), and the database's write-ahead log is emptied after each vault change.
 
 ### Command panel
 
@@ -898,7 +950,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                   |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                         |
 | Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                              |
-| Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; DPAPI and Argon2id key wrapping; 15-minute idle lock; values never leave it except to adapters                                                                                                                               |
+| Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                           |
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                |
 | Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                        | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each                                                    |
 | Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                               | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                       |
