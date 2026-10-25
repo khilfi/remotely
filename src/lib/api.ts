@@ -42,7 +42,9 @@ export type TargetRef =
   /** SS-10: an open terminal (MultiExec); the core fills in the session behind it. */
   | { kind: "terminal"; terminalId: string; sessionId?: string | null }
   /** CT-01, CT-02: a container, image or volume on a container host, or the engine itself (pull, prune). */
-  | { kind: "container"; host: ContainerHost; engine: EngineKind; object: ContainerObject };
+  | { kind: "container"; host: ContainerHost; engine: EngineKind; object: ContainerObject }
+  /** VM-21, VM-10: a VM a deploy makes, by the name and label it will have. */
+  | { kind: "newVm"; hypervisor: Hypervisor; name: string; environment: Environment };
 
 export interface Target {
   target: TargetRef;
@@ -266,7 +268,9 @@ export type Command =
   /** SS-07: a saved port forward opened on a terminal. Never submitted by the UI: `terminalTunnelStart` builds it. */
   | { type: "openTunnel"; targets: TargetRef[]; forward: PortForward }
   /** CT-01, CT-02: every target a container target whose object fits the op. */
-  | { type: "container"; targets: TargetRef[]; op: ContainerOp };
+  | { type: "container"; targets: TargetRef[]; op: ContainerOp }
+  /** VM-21, VM-10: new VMs. Never submitted by the UI: `deploySubmit` and `deployCloneSubmit` build it in the core. */
+  | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> };
 
 /** SS-08: one file of an upload. */
 export interface UploadFile {
@@ -386,6 +390,8 @@ export interface ApprovalRequest {
   upload: UploadDetails | null;
   /** SS-07: for a tunnel, where it listens, where it leads and who can use it. */
   tunnel: TunnelDetails | null;
+  /** VM-21: for a deploy, each VM it makes, where, and the disk space it may take. */
+  deploy: DeployPreview | null;
 }
 
 /** SS-07: a tunnel as the approval dialog shows it. */
@@ -437,6 +443,8 @@ export type JobEvent =
       durationMs: number;
       /** VM-05: the safety snapshot taken on this target first. */
       safetySnapshot: string | null;
+      /** VM-21: what the job says about a target that ended well (a new VM's folder, IP, session...). */
+      note?: string | null;
     }
   /** H9: the canary host finished well; `rest` hosts wait until `until` for the go-ahead (`bulkGoOn`). */
   | { event: "canaryWaiting"; jobId: string; target: string; name: string; rest: number; until: string }
@@ -640,7 +648,7 @@ export interface JobSummary {
 
 /** One target of a job and how it went. */
 export interface JobTarget {
-  targetKind: "vm" | "session" | "app";
+  targetKind: "vm" | "session" | "app" | "terminal" | "container" | "new_vm";
   targetKey: string;
   targetName: string;
   status: TargetStatus;
@@ -722,6 +730,8 @@ export type ActionKind =
   | "pruneImages"
   | "pruneBuildCache"
   | "pruneVolumes"
+  /** VM-21, VM-10: make new VMs. */
+  | "vmDeploy"
   | "appUpdate";
 
 export interface TierRule {
@@ -741,6 +751,8 @@ export interface PolicyRules {
   bulkThreshold: number;
   /** BX-06: hosts from which the bulk tier of commands on hosts (Compare, MultiExec) applies. */
   execBulkThreshold: number;
+  /** VM-21: new VMs from which a deploy's bulk tier applies (5 by default). */
+  deployBulkThreshold: number;
   /** A Prod-labelled target raises the tier by one. */
   prodBump: boolean;
   dangerousCommands: DangerousPattern[];
@@ -1734,7 +1746,15 @@ export interface TemplateInput {
   environment: Environment;
   tags: string[];
   afterDeploy: AfterDeploy;
+  /** VM-22: the user cloud-init makes, with sudo and the SSH key; null: the image's default user. */
+  guestUser: string | null;
+  /** VM-22: packages cloud-init installs on first boot. */
+  packages: string[];
+  /** VM-21: how a golden VM image is cloned. */
+  cloneMode: CloneMode;
 }
+
+export type CloneMode = "full" | "linked";
 
 export type ProblemCode =
   | "imageGone"
@@ -1773,6 +1793,89 @@ export interface PlannedVm {
 export interface TemplatePreview {
   problems: TemplateProblem[];
   vms: PlannedVm[];
+}
+
+// ---- VM-21, VM-22, VM-10: deploy ----
+
+export type DeployFrom = { kind: "template"; id: string } | { kind: "custom"; input: TemplateInput };
+
+export interface DeployRequest {
+  from: DeployFrom;
+  count: number;
+  /** The dialog's naming pattern, when it isn't the template's. */
+  namingPattern?: string | null;
+  /** VirtualBox's host-only or bridged adapter; null: the first. */
+  hostAdapter?: string | null;
+}
+
+/** VM-10: one full clone of each picked VM. */
+export interface CloneRequest {
+  vmKeys: string[];
+  /** `{template}` is each VM's name. */
+  namingPattern: string;
+  /** null: the hypervisor's default folder. */
+  folder?: string | null;
+  /** null: the strictest of the VMs' labels. */
+  environment?: Environment | null;
+}
+
+export type DeployOrigin =
+  { kind: "template"; id: string; name: string } | { kind: "custom"; name: string } | { kind: "bulkClone" };
+
+export interface DeployDisk {
+  sizeGb: number;
+  provisioning: Provisioning;
+  controller: DiskController;
+  controllerModel: string;
+}
+
+export interface DeploySize {
+  id: string;
+  name: string;
+  sockets: number;
+  coresPerSocket: number;
+  memoryMb: number;
+  disks: DeployDisk[];
+}
+
+export interface DeployPreviewVm {
+  name: string;
+  hostname: string;
+  folder: string;
+  cloneOf: string | null;
+  /** Thin disks at their full size; null when it isn't known. */
+  diskBytes: number | null;
+  thickBytes: number;
+  problem: string | null;
+}
+
+/** AP-02 for a deploy. */
+export interface DeployPreview {
+  summary: string;
+  origin: DeployOrigin;
+  hypervisor: Hypervisor;
+  source: string;
+  folder: string;
+  size: DeploySize | null;
+  network: string | null;
+  hostAdapter: string | null;
+  environment: Environment;
+  tags: string[];
+  firstBoot: { user: string | null; keyFingerprint: string | null; packages: string[] } | null;
+  afterDeploy: AfterDeploy;
+  vms: DeployPreviewVm[];
+  diskBytes: number;
+  thickBytes: number;
+  freeBytes: number | null;
+  notes: string[];
+  warnings: string[];
+  /** Why it can't run as it is. */
+  refusals: string[];
+}
+
+export interface DeployCheck {
+  problems: TemplateProblem[];
+  preview: DeployPreview | null;
 }
 
 /** BX-01: what is picked: tabs and tree sessions for Compare, sessions, VMs, tags and filters for a key push. */
@@ -3269,4 +3372,11 @@ export const api = {
   catalogTemplateDelete: (id: string) => invoke<void>("catalog_template_delete", { id }),
   /** Opens an official cloud image page; the core refuses any other address. */
   catalogOpenSite: (url: string) => invoke<void>("catalog_open_site", { url }),
+  // VM-21, VM-22, VM-10: deploy. A check is a read; a submit goes through the bus (approval, then one job).
+  deployCheck: (request: DeployRequest) => invoke<DeployCheck>("deploy_check", { request }),
+  deploySubmit: (request: DeployRequest) => invoke<SubmitOutcome>("deploy_submit", { request }),
+  deployCloneCheck: (request: CloneRequest) => invoke<DeployCheck>("deploy_clone_check", { request }),
+  deployCloneSubmit: (request: CloneRequest) => invoke<SubmitOutcome>("deploy_clone_submit", { request }),
+  deployHostAdapters: (bridged: boolean) => invoke<string[]>("deploy_host_adapters", { bridged }),
+  deployDefaultFolder: (hypervisor: Hypervisor) => invoke<string>("deploy_default_folder", { hypervisor }),
 };

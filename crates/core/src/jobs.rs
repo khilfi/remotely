@@ -252,6 +252,10 @@ pub enum JobEvent {
         duration_ms: u64,
         /// VM-05: the safety snapshot taken on this target first, if one was.
         safety_snapshot: Option<String>,
+        /// What the job says about this target when it ends well (VM-21: where the new VM is, its IP, what the
+        /// after-deploy steps did).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
     },
     /// H9: the canary host finished well and the others wait until `until` (RFC 3339) for the user to
     /// say go on ([`JobRunner::go_on`]) or cancel the job.
@@ -1159,6 +1163,7 @@ impl JobRunner {
             }
             Err(Stop::Error(err)) => Finished::failed(&err),
         };
+        let event_note = note.clone();
         if let Some(note) = note {
             tally.notes.push(note);
         }
@@ -1215,6 +1220,7 @@ impl JobRunner {
             exit_code: done.exit_code,
             duration_ms,
             safety_snapshot,
+            note: event_note,
         });
         // H9: decided before this target's slot is given back, so no other target starts in between.
         if let Some(n) = run.rollout.stop_after_failures.map(|n| n as usize) {
@@ -1500,8 +1506,11 @@ impl JobRunner {
                     .vm(name)
                     .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
                 let note = deployer.deploy_vm(&spec.ctx, job_id, deploy, vm, token).await?;
+                // Activity shows each VM's result as its output.
+                let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
                 Ok(TargetOutcome {
-                    note: Some(note),
+                    output: Some(output),
+                    note: Some(format!("{}: {note}", vm.name)),
                     ..TargetOutcome::done()
                 })
             }

@@ -30,13 +30,14 @@ import { withVaultPassword } from "@/lib/reauth-prompt";
 const TIERS: Tier[] = ["low", "medium", "high", "critical"];
 
 // `exec`: the bulk tier applies from the threshold for commands on hosts (Compare and MultiExec, BX-06).
-const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean }[] = [
+const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean; deploy?: boolean }[] = [
   {
     title: "VM power",
     kinds: ["vmStart", "vmUnpause", "vmPause", "vmSuspend", "vmResetSoft", "vmStopSoft", "vmResetHard", "vmStopHard"],
   },
   { title: "Snapshots", kinds: ["snapshotTake", "snapshotRevert", "snapshotDelete"] },
   { title: "Do not touch", kinds: ["vmProtect", "vmUnprotect"] },
+  { title: "Deploy", kinds: ["vmDeploy"], deploy: true },
   { title: "Commands on hosts", kinds: ["execReadOnly", "execOther", "execDangerous"], exec: true },
   { title: "SSH keys", kinds: ["sshKeyPush", "sshKeyRemove"] },
   { title: "Files", kinds: ["fileUpload", "fileReplace"] },
@@ -182,7 +183,9 @@ export function PolicyRulesEditor() {
               {GROUPS.map((group) => {
                 const bulkFrom = group.exec
                   ? `${draft.execBulkThreshold} or more hosts`
-                  : `${draft.bulkThreshold} or more targets`;
+                  : group.deploy
+                    ? `${draft.deployBulkThreshold} or more VMs`
+                    : `${draft.bulkThreshold} or more targets`;
                 return (
                   <GroupRows key={group.title} title={group.title} bulkFrom={bulkFrom}>
                     {group.kinds.map((kind) => {
@@ -244,6 +247,21 @@ export function PolicyRulesEditor() {
                 onChange={(e) => update({ execBulkThreshold: Number(e.currentTarget.value) })}
               />
               <span className="text-sm text-muted-foreground">hosts (Compare and MultiExec)</span>
+            </div>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="deploy-bulk-threshold">Bulk tier for deploys applies from</Label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="deploy-bulk-threshold"
+                type="number"
+                min={2}
+                max={catalog.maxBulkThreshold}
+                className="w-24"
+                value={draft.deployBulkThreshold}
+                onChange={(e) => update({ deployBulkThreshold: Number(e.currentTarget.value) })}
+              />
+              <span className="text-sm text-muted-foreground">new VMs (deploys and bulk clones)</span>
             </div>
           </div>
           <div className="grid gap-2">

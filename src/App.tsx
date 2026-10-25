@@ -31,6 +31,7 @@ import {
   HistoryIcon,
   KeyRoundIcon,
   LayersIcon,
+  RocketIcon,
   LayoutDashboardIcon,
   ListTreeIcon,
   LockIcon,
@@ -71,6 +72,7 @@ import { Switch } from "@/components/ui/switch";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
+import { DeployDialog } from "@/components/DeployDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReauthDialog } from "@/components/ReauthDialog";
@@ -201,6 +203,10 @@ export default function App() {
   const [templatesRequest, setTemplatesRequest] = useState<{ tab: TemplatesTab; create?: boolean; n: number } | null>(
     null,
   );
+  // VM-21: the Deploy dialog, on a template (its row's Deploy) or on none (the VMs page, the palette).
+  const [deploying, setDeploying] = useState<{ templateId: string | null } | null>(null);
+  const openDeploy = useCallback((templateId?: string) => setDeploying({ templateId: templateId ?? null }), []);
+  const openDeployBlank = useCallback(() => setDeploying({ templateId: null }), []);
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
   const [terminalOpen, setTerminalOpen] = useState<{
     sessionId: string;
@@ -526,6 +532,13 @@ export default function App() {
       run: () => openVms([], "snapshots"),
     },
     {
+      id: "deploy",
+      label: "Deploy VMs from a launch template…",
+      icon: RocketIcon,
+      keywords: "vm template create clone cloud-init iso ova new virtual machine",
+      run: () => openDeployBlank(),
+    },
+    {
       id: "new-template",
       label: "New launch template…",
       icon: LayersIcon,
@@ -830,6 +843,7 @@ export default function App() {
                 <Vms
                   active={page === "vms"}
                   onSubmitted={submitted}
+                  onDeploy={openDeployBlank}
                   onOpenSettings={show.settings}
                   onActions={openPalette}
                   request={vmRequest}
@@ -839,7 +853,7 @@ export default function App() {
             </section>
             <section hidden={page !== "templates"}>
               <ErrorBoundary name="Templates">
-                <Templates active={page === "templates"} request={templatesRequest} />
+                <Templates active={page === "templates"} request={templatesRequest} onDeploy={openDeploy} />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "dashboard"}>
@@ -927,6 +941,9 @@ export default function App() {
         </SidebarInset>
       </SidebarProvider>
 
+      {deploying && (
+        <DeployDialog templateId={deploying.templateId} onSubmitted={submitted} onClose={() => setDeploying(null)} />
+      )}
       {approval && (
         <ApprovalDialog
           request={approval.request}

@@ -3,6 +3,7 @@
 //! [`files`] and [`clipboard`], never vmrun or SSH directly.
 
 mod catalog;
+mod deploy;
 mod clipboard;
 mod command_panel;
 mod containers;
@@ -577,6 +578,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         catalog::catalog_template_update,
         catalog::catalog_template_delete,
         catalog::catalog_open_site,
+        deploy::deploy_check,
+        deploy::deploy_submit,
+        deploy::deploy_clone_check,
+        deploy::deploy_clone_submit,
+        deploy::deploy_host_adapters,
+        deploy::deploy_default_folder,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,
