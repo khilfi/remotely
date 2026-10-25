@@ -30,6 +30,7 @@ import { BulkResultsView } from "@/components/BulkResultsView";
 import { RecordedLinesView } from "@/components/RecordedLinesView";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { usePresentation } from "@/components/Presentation";
+import { useDebounced } from "@/hooks/use-debounced";
 import {
   api,
   errorMessage,
@@ -196,7 +197,8 @@ export function ComparePanel({
     };
   }, [commandKey, script]);
 
-  // Earlier runs; again whenever a run ends.
+  // Earlier runs; again whenever a run ends, once per burst of job events (BX-03).
+  const settledRuns = useDebounced(runsVersion);
   useEffect(() => {
     if (!active) return;
     let stale = false;
@@ -209,7 +211,7 @@ export function ComparePanel({
     return () => {
       stale = true;
     };
-  }, [active, runsVersion, jobId]);
+  }, [active, settledRuns, jobId]);
 
   useEffect(() => {
     const unlisten = api.onJobEvent((event) => {

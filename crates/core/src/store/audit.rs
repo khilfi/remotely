@@ -3,7 +3,12 @@
 //! Each entry's hash is SHA-256 over its content plus the previous entry's hash, so changing or
 //! removing any row breaks every hash after it. Triggers in the schema refuse UPDATE and DELETE;
 //! [`Store::verify_audit_chain`] catches edits made by going around them (e.g. editing the file).
+//!
+//! Entries are kept for good, so their free text (the action, result and detail) is redacted before it is
+//! hashed and stored ([`redact_secrets`]): a secret typed into a command never lands in the log. Verifying
+//! and exporting read the log row by row, however long it is.
 
+use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -13,12 +18,13 @@ use super::Store;
 use crate::command_bus::ApprovalRecord;
 use crate::domain::{now_rfc3339, Context, Target};
 use crate::error::Result;
+use crate::export::redact_secrets;
 use crate::policy::Tier;
 
 /// prev_hash of the first entry.
 pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// What a caller logs. Never put secrets in here.
+/// What a caller logs. Never put secrets in here; what looks like one in the text is redacted anyway.
 pub struct NewAuditEntry<'a> {
     /// approval_requested, approval_granted, approval_cancelled, job_started, job_finished, ...
     pub event: &'a str,
@@ -90,6 +96,8 @@ impl Store {
             .fetch_optional(&self.pool)
             .await?;
 
+        // AP-05: kept for good, so no secret typed into a command or a reason stays in it.
+        let clean = |text: &str| redact_secrets(text).0;
         let mut entry = AuditEntry {
             seq: 0,
             id: Uuid::new_v4().to_string(),
@@ -97,13 +105,13 @@ impl Store {
             user_id: ctx.user_id.to_string(),
             ts: now_rfc3339(),
             event: e.event.to_owned(),
-            action: e.action.to_owned(),
+            action: clean(e.action),
             tier: e.tier.map(|t| t.as_str().to_owned()),
             job_id: e.job_id.map(|j| j.to_string()),
             targets_json: serde_json::to_string(e.targets)?,
             approval_json: e.approval.map(serde_json::to_string).transpose()?,
-            result: e.result.map(str::to_owned),
-            detail: e.detail.map(str::to_owned),
+            result: e.result.map(clean),
+            detail: e.detail.map(clean),
             prev_hash: prev.unwrap_or_else(|| GENESIS_HASH.to_owned()),
             hash: String::new(),
         };
@@ -145,24 +153,28 @@ impl Store {
         rows.iter().map(row_to_entry).collect()
     }
 
-    /// AP-05: every entry of the workspace, oldest first, for an export.
+    /// AP-05: every entry of the workspace, oldest first. Use [`Store::audit_entries`] for a long log.
     pub async fn audit_for_export(&self, ctx: &Context) -> Result<Vec<AuditEntry>> {
-        let rows = sqlx::query("SELECT * FROM audit_log WHERE workspace_id = ? ORDER BY seq")
-            .bind(ctx.workspace_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter().map(row_to_entry).collect()
+        self.audit_entries(ctx).try_collect().await
     }
 
-    /// Walks the whole chain and recomputes every hash.
+    /// AP-05: every entry of the workspace, oldest first, read as they are taken (the export writes each one
+    /// as it comes, so a long log is never all in memory). It holds one of the database's connections until
+    /// it is dropped.
+    pub fn audit_entries(&self, ctx: &Context) -> impl Stream<Item = Result<AuditEntry>> + Send + '_ {
+        sqlx::query("SELECT * FROM audit_log WHERE workspace_id = ? ORDER BY seq")
+            .bind(ctx.workspace_id.to_string())
+            .fetch(&self.pool)
+            .map(|row| row.map_err(Into::into).and_then(|row| row_to_entry(&row)))
+    }
+
+    /// Walks the whole chain and recomputes every hash, one row at a time.
     pub async fn verify_audit_chain(&self) -> Result<ChainCheck> {
-        // TODO: stream rows instead of loading them all once the log gets large.
-        let rows = sqlx::query("SELECT * FROM audit_log ORDER BY seq")
-            .fetch_all(&self.pool)
-            .await?;
+        let mut rows = sqlx::query("SELECT * FROM audit_log ORDER BY seq").fetch(&self.pool);
         let mut expected_prev = GENESIS_HASH.to_owned();
-        for (i, row) in rows.iter().enumerate() {
-            let entry = row_to_entry(row)?;
+        let mut checked: u64 = 0;
+        while let Some(row) = rows.try_next().await? {
+            let entry = row_to_entry(&row)?;
             let problem = if entry.prev_hash != expected_prev {
                 Some("link to the previous entry is broken (an entry was removed or reordered)")
             } else if entry.compute_hash() != entry.hash {
@@ -172,16 +184,17 @@ impl Store {
             };
             if let Some(problem) = problem {
                 return Ok(ChainCheck {
-                    entries: i as u64,
+                    entries: checked,
                     ok: false,
                     first_bad_seq: Some(entry.seq),
                     problem: Some(problem.to_owned()),
                 });
             }
             expected_prev = entry.hash;
+            checked += 1;
         }
         Ok(ChainCheck {
-            entries: rows.len() as u64,
+            entries: checked,
             ok: true,
             first_bad_seq: None,
             problem: None,

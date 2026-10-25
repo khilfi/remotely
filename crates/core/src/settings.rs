@@ -16,6 +16,7 @@ use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::metrics::guest::WATCHED_KEY;
 use crate::policy::PolicyRules;
+use crate::retention::{Retention, RETENTION_KEY};
 use crate::store::{self, NewAuditEntry, Store};
 use crate::terminal::{TerminalSettings, TERMINAL_SETTINGS_KEY};
 use crate::updates::{UPDATE_TOKEN_EXPIRES_KEY, UPDATE_TOKEN_KEY};
@@ -61,6 +62,7 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
     )
     .await?;
     check::<bool>(store, ctx, store::UPDATE_CHECKS_KEY, "update checks", &mut reset).await?;
+    check::<Retention>(store, ctx, RETENTION_KEY, "how long job outputs are kept", &mut reset).await?;
     check::<Option<SecretId>>(
         store,
         ctx,

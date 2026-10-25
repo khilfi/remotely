@@ -36,6 +36,8 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc", "zero
 # SysRng: the random source for generating SSH keys (SS-09).
 getrandom = { version = "0.4", features = ["sys_rng"] }
 futures = { version = "0.3", optional = true }
+# AP-05: the audit log is verified and exported row by row (sqlx's row streams). The version sqlx already pulls in.
+futures-util = { version = "0.3", default-features = false }
 zeroize = "1"
 # SS-02: session lists imported from CSV.
 csv = "1"

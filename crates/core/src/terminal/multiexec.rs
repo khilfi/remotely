@@ -28,11 +28,17 @@
 //!   their sessions, the tier, and the approval. Never the output. An empty line (Enter alone) is sent
 //!   at once and not audited: it runs nothing.
 //! * Two cases pass keys straight through, unrated and never logged or audited:
-//!   - a password prompt: when a line starts while the terminal typed into shows a password or
-//!     passphrase prompt, its keys and its Enter go only to the targets that show one too. So a
-//!     password never lands in a shell, and a command never at a password prompt.
+//!   - a password prompt: when a line starts while the terminal typed into shows a password,
+//!     passphrase or one-time code prompt ([`super::activity::is_secret_prompt`]: sudo, su, ssh, PAM's
+//!     two-factor modules, in English and translated), its keys and its Enter go only to the targets that
+//!     show one too. So a password never lands in a shell, the journal or the audit log, and a command
+//!     never at a password prompt.
 //!   - a full-screen program (xterm's alternate screen buffer: vim, less, top): keys go only to the
 //!     targets that have one open too. What is typed there (vim's `:!command`) is not rated.
+//! * A password typed ahead of its prompt (a slow host showed the prompt only after the line started):
+//!   at Enter the terminal typed into shows a password or code prompt and not what was typed, so the keys
+//!   went into the prompt. The line is not rated, journaled or audited, and its Enter is not sent: Ctrl+C
+//!   clears it in every terminal ([`InputOutcome::Refused`] says to type it again at the prompt).
 //! * A target is left out of a line when it is not connected, its session is protected (AP-04), its
 //!   screen is in another state than the terminal typed into, or it was added while the line was
 //!   being typed (it joins at the next line).
@@ -49,7 +55,7 @@ use serde::Serialize;
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
-use super::activity::FinishedHow;
+use super::activity::{is_secret_prompt, FinishedHow};
 use super::record::{RecordLimits, RecordedResults, Recorder, Recordings};
 use super::Terminals;
 use crate::bulk::{GroupOptions, HostOutput, OutputDiff, RecordedRun};
@@ -230,6 +236,13 @@ impl RunKey {
         };
         Some(note)
     }
+}
+
+/// SS-10: at Enter, the terminal typed into shows a password or code prompt (`screen`, its cursor's line)
+/// that does not end with what was typed: the keys went into the prompt, unseen, so `typed` is a secret.
+fn typed_into_secret_prompt(screen: &str, typed: &str) -> bool {
+    let typed = typed.trim_end();
+    !typed.trim().is_empty() && is_secret_prompt(screen) && !screen.trim_end().ends_with(typed)
 }
 
 /// The line as the shells run it with `run`: a comment toggle takes away the `#` each line starts with
@@ -733,7 +746,7 @@ pub(crate) fn check_keys(line: &str, keys: &[u8], unreliable: bool) -> std::resu
 pub enum LineMode {
     /// A shell (or a program reading lines): Enter is held and the line rated.
     Command,
-    /// A password or passphrase prompt: keys pass straight through, unrated and unlogged.
+    /// A password, passphrase or one-time code prompt: keys pass straight through, unrated and unlogged.
     Password,
     /// A full-screen program: keys pass straight through.
     FullScreen,
@@ -1198,7 +1211,7 @@ impl MultiExec {
             name: target.as_ref().map_or_else(|| info.name.clone(), |t| t.name.clone()),
             connected: info.screen.connected,
             protected: target.is_some_and(|t| t.protected),
-            password: info.screen.at_password_prompt(),
+            password: info.screen.at_secret_prompt(),
             alternate: info.screen.alternate,
             dirty: info.dirty,
         })
@@ -1439,6 +1452,19 @@ impl MultiExec {
                 left_out,
             });
         }
+        let screen = self.shared.terminals.pane_info(from).map(|i| i.screen.line);
+        let typed = script.lines().next().unwrap_or_default();
+        if screen.is_some_and(|screen| typed_into_secret_prompt(&screen, typed)) {
+            // A password typed ahead of its prompt: never rated, journaled or audited, and not sent.
+            self.interrupt(&to).await;
+            return Ok(InputOutcome::Refused {
+                reason: "A password prompt came up while you typed, so what you typed went into it and was not \
+                         sent. Type it again at the prompt."
+                    .into(),
+                reached,
+                left_out,
+            });
+        }
         if script.trim().is_empty() && !unreliable && keys.iter().all(|b| matches!(*b, b'\r' | b'\n')) {
             // Enter on an empty line runs nothing: no rating, no audit.
             let mut left_out = left_out;
@@ -1521,6 +1547,30 @@ impl MultiExec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_typed_into_a_prompt_that_came_up_late_is_a_secret() {
+        for (screen, typed) in [
+            ("[sudo] password for alice: ", "hunter2"),
+            ("Password: ", "correct horse"),
+            ("Verification code: ", "123456"),
+            ("Enter passphrase for key '/home/alice/.ssh/id_ed25519': ", "x y z"),
+        ] {
+            assert!(typed_into_secret_prompt(screen, typed), "{screen:?} {typed:?}");
+        }
+        for (screen, typed) in [
+            // Echoed: the shell has the line, whatever it says.
+            ("alice@web01:~$ echo Password:", "echo Password:"),
+            ("alice@web01:~$ uptime", "uptime"),
+            ("alice@web01:~$ ", "uptime"),
+            // Nothing typed: Enter alone at the prompt.
+            ("[sudo] password for alice: ", ""),
+            ("[sudo] password for alice: ", "  "),
+            ("Do you want to continue? [Y/n] ", "y"),
+        ] {
+            assert!(!typed_into_secret_prompt(screen, typed), "{screen:?} {typed:?}");
+        }
+    }
 
     /// Feeds `keys`, returning the line, whether it is unreliable, and the steps that were not keys.
     fn typed(keys: &[u8]) -> (String, bool, Vec<Step>) {
