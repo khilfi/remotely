@@ -196,6 +196,9 @@ pub struct TerminalSettings {
     /// SS-08: type the folder prompt hook into bash and zsh. A session can say otherwise, and a
     /// Prod-labelled session has it off unless it says so.
     pub prompt_hook: bool,
+    /// QL-05: the UI asks before pasting text that holds a line break (each one presses Enter). On
+    /// for settings saved before it.
+    pub confirm_multiline_paste: bool,
 }
 
 impl Default for TerminalSettings {
@@ -213,6 +216,7 @@ impl Default for TerminalSettings {
             notify_after_secs: 30,
             notify_quiet_secs: 30,
             prompt_hook: true,
+            confirm_multiline_paste: true,
         }
     }
 }
@@ -286,8 +290,13 @@ impl TerminalSettings {
         } else {
             ", folder prompt hook off"
         };
+        let paste = if self.confirm_multiline_paste {
+            ""
+        } else {
+            ", multi-line pastes without asking"
+        };
         format!(
-            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}",
+            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}{paste}",
             on(self.auto_reconnect),
             on(self.copy_on_select),
             self.font_size,
@@ -3016,6 +3025,22 @@ mod tests {
             NotifyWhen::Long,
             "QL-07's choice: long commands, as before"
         );
+        assert!(old.confirm_multiline_paste, "QL-05: a multi-line paste asks first");
+    }
+
+    #[test]
+    fn a_multiline_paste_asks_unless_turned_off() {
+        let saved: TerminalSettings = serde_json::from_str(r#"{"promptHook":false}"#).unwrap();
+        assert!(saved.confirm_multiline_paste, "on for settings saved before it");
+        let off = TerminalSettings {
+            confirm_multiline_paste: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains(r#""confirmMultilinePaste":false"#), "{json}");
+        assert_eq!(serde_json::from_str::<TerminalSettings>(&json).unwrap(), off);
+        assert!(off.describe().ends_with(", multi-line pastes without asking"));
+        assert!(!TerminalSettings::default().describe().contains("paste"));
     }
 
     #[test]

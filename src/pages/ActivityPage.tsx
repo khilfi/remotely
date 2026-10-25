@@ -390,7 +390,9 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
                         <div className="mt-1 text-xs text-muted-foreground">exit code {t.exitCode}</div>
                       )}
                     </TableCell>
-                    <TableCell className="capitalize">{t.status}</TableCell>
+                    <TableCell className="capitalize">
+                      {t.status === "unknown" ? "Outcome unknown" : t.status}
+                    </TableCell>
                     <TableCell className="text-right text-muted-foreground tabular-nums">
                       {t.durationMs != null ? `${(t.durationMs / 1000).toFixed(1)} s` : "—"}
                     </TableCell>

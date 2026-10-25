@@ -1,6 +1,7 @@
 // Asks "are you sure?" before deleting the app's own data (a secret, a session, a folder) or taking the
 // Prod label off VMs. Actions on VMs and hosts never use this: they go through the command bus and the
-// approval dialog.
+// approval dialog. The one exception warns before a retry that may run a command twice (H9), which then goes
+// through the bus and its approval like any run.
 
 import { useState } from "react";
 import {

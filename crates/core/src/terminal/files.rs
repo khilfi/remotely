@@ -32,13 +32,14 @@ use uuid::Uuid;
 
 use super::folder::FolderInfo;
 use super::{audit, quoted_name, Control, Terminals};
-use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles};
+use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles, RemoteWrite, Written};
 use crate::command_bus::{human_size, Command, CommandBus, SubmitOutcome, UploadFile, MAX_UPLOAD_FILES};
 use crate::domain::{Context, Target};
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::policy::Tier;
 use crate::store::NewAuditEntry;
+use crate::untrusted::{is_device_name, is_format_char};
 
 /// Bytes read or written at a time.
 const CHUNK: usize = 256 * 1024;
@@ -262,6 +263,9 @@ pub struct FolderListing {
     /// QL-09: where Back goes: the folder that opened before this one, or the last one that opened when
     /// this one could not.
     pub back: Option<String>,
+    /// A9: the folder holds more than [`MAX_LISTING`](crate::adapters::remote::MAX_LISTING) entries,
+    /// and only that many are listed.
+    pub more: bool,
 }
 
 /// QL-09: a folder the drawer could not open.
@@ -386,12 +390,16 @@ pub fn resolve(base: &str, home: &str, path: &str) -> String {
 
 /// A file name for this PC: what Windows can't hold in a name becomes `_`, and a device name gets a `_`
 /// in front, so a host file named `nul` or `com1.txt` is saved as a file instead of going to a device.
+/// A8: Unicode format characters (Cf: U+202E RIGHT-TO-LEFT OVERRIDE, zero-width spaces and joiners,
+/// bidi isolates, U+FEFF, the soft hyphen...) and the line and paragraph separators become `_` too, so
+/// `invoice\u{202E}fdp.exe` is saved as `invoice_fdp.exe`, not shown as `invoiceexe.pdf`.
 fn local_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| match c {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            c if c.is_control() => '_',
+            '\u{2028}' | '\u{2029}' => '_',
+            c if c.is_control() || is_format_char(c) => '_',
             c => c,
         })
         .collect();
@@ -405,22 +413,35 @@ fn local_name(name: &str) -> String {
     }
 }
 
-/// Windows opens a device for these names, with or without an extension (`nul`, `nul.txt`, `Com1`),
-/// on Windows 10 and 11 alike: CON, PRN, AUX, NUL, CONIN$, CONOUT$, and COM or LPT with one digit,
-/// superscript ¹ ² ³ included. Only the part before the first `.` counts, its trailing spaces and dots
-/// dropped; names that only start with one (`console.log`, `nullable.txt`) are files.
-fn is_device_name(name: &str) -> bool {
-    let base = name.split('.').next().unwrap_or(name).trim_end_matches([' ', '.']);
-    let upper = base.to_uppercase();
-    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
-        return true;
+/// A8: what Windows' own browsers write for a file from the internet (zone 3), so SmartScreen and
+/// Office's Protected View treat a downloaded file as one. No `HostUrl`: the host's name stays off disk.
+#[cfg(windows)]
+const ZONE_IDENTIFIER: &str = "[ZoneTransfer]\r\nZoneId=3\r\n";
+
+/// A8: writes the Mark of the Web, the `Zone.Identifier` stream, on a downloaded file. `None` when it
+/// is written; otherwise what to tell the user (the folder's file system may have no alternate data
+/// streams, as FAT and exFAT drives don't), and the download still counts. Windows only.
+async fn mark_downloaded(path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        match tokio::fs::write(PathBuf::from(stream), ZONE_IDENTIFIER).await {
+            Ok(()) => None,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "could not mark a download as from the internet");
+                Some(
+                    "Windows could not mark this file as downloaded from the internet (the folder's drive may be FAT or exFAT), so open it with care"
+                        .to_owned(),
+                )
+            }
+        }
     }
-    ["COM", "LPT"].iter().any(|port| {
-        upper.strip_prefix(port).is_some_and(|rest| {
-            let mut chars = rest.chars();
-            matches!((chars.next(), chars.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
-        })
-    })
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Creates a new file in `folder` named `name`, or `name (1)`, `name (2)`... when that is taken, so a
@@ -516,13 +537,15 @@ impl Terminals {
 
     /// Lists `path` (absolute), remembering it for Back when it opened.
     async fn listing(&self, control: &Control, files: &Arc<dyn RemoteFiles>, path: String) -> FolderListing {
-        let (entries, error) = match files.list(&path).await {
-            Ok(mut entries) => {
+        let (entries, more, error) = match files.list(&path).await {
+            Ok(listing) => {
+                let mut entries = listing.entries;
                 entries.sort_by(|a, b| a.name.cmp(&b.name));
-                (entries, None)
+                (entries, listing.more, None)
             }
             Err(err) => (
                 Vec::new(),
+                false,
                 Some(FolderError {
                     code: err.code(),
                     message: err.to_string(),
@@ -545,6 +568,7 @@ impl Terminals {
             entries,
             error,
             back,
+            more,
         }
     }
 
@@ -698,7 +722,7 @@ impl Terminals {
             result = self.copy_down(files, &info, dest) => result.map_err(Some),
         };
         match result {
-            Ok((local, sha)) => {
+            Ok((local, sha, note)) => {
                 let shown = local.display().to_string();
                 transfers.change(transfer, |i| i.local_path = Some(shown.clone()));
                 let action = format!("Downloaded '{}' from {}", info.name, quoted_name(control));
@@ -718,20 +742,22 @@ impl Terminals {
                 {
                     tracing::error!(error = %err, "could not audit a download");
                 }
-                transfers.finish(transfer, TransferState::Done, None, Some(sha));
+                transfers.finish(transfer, TransferState::Done, note, Some(sha));
             }
             Err(None) => transfers.finish(transfer, TransferState::Cancelled, Some("cancelled".into()), None),
             Err(Some(err)) => transfers.finish(transfer, TransferState::Failed, Some(err.to_string()), None),
         }
     }
 
-    /// Copies one host file to a new file in `dest`. A file left half written is deleted.
+    /// Copies one host file to a new file in `dest`, then marks it as from the internet (A8); returns
+    /// where it went, its SHA-256 and a note when the mark could not be written. A file left half
+    /// written (or not yet marked) is deleted.
     async fn copy_down(
         &self,
         files: &Arc<dyn RemoteFiles>,
         info: &TransferInfo,
         dest: &Path,
-    ) -> Result<(PathBuf, String)> {
+    ) -> Result<(PathBuf, String, Option<String>)> {
         let mut reader = files.read(&info.remote_path).await?;
         let (path, mut file) = claim_file(dest, &info.name).await?;
         let mut cleanup = RemoveOnDrop(Some(path.clone()));
@@ -751,8 +777,10 @@ impl Terminals {
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
+        // A8: before the download counts as done.
+        let note = mark_downloaded(&path).await;
         cleanup.0 = None;
-        Ok((path, hex::encode(hasher.finalize())))
+        Ok((path, hex::encode(hasher.finalize()), note))
     }
 
     /// SS-08: the job runner's half of [`Command::FileUpload`]: each file in turn over the terminal's
@@ -797,15 +825,14 @@ impl Terminals {
                 continue;
             }
             transfers.start(info.id);
-            let result = tokio::select! {
-                biased;
-                () = cancel.cancelled() => Err(None),
-                () = token.cancelled() => Err(None),
-                result = self.copy_up(&files, &info, file) => result.map_err(Some),
-            };
-            match result {
-                Ok((size, sha)) => {
-                    let replaced = if file.replace { ", replacing the file there" } else { "" };
+            match self.copy_up(&files, &info, file, cancel, &token).await {
+                Ok((size, sha, written)) => {
+                    let note = written.note();
+                    let replaced = match (file.replace, note.is_empty()) {
+                        (false, _) => String::new(),
+                        (true, true) => ", replacing the file there".to_owned(),
+                        (true, false) => format!(", replacing the file there: {note}"),
+                    };
                     let action = format!(
                         "Uploaded '{}' to {} on {}",
                         file.name,
@@ -816,20 +843,30 @@ impl Terminals {
                     run.ctx_audit(&self.inner.store, "file_uploaded", &action, &detail)
                         .await?;
                     transfers.change(info.id, |i| i.size = size);
-                    transfers.finish(info.id, TransferState::Done, None, Some(sha));
-                    report.uploaded.push(format!("{} ({})", file.name, human_size(size)));
+                    // H8: a kept backup or a write in place is worth a line in the panel.
+                    let shown = match &written {
+                        Written::ReplacedKeepingBackup { .. } | Written::InPlace { .. } => Some(note.clone()),
+                        Written::Created | Written::Replaced => None,
+                    };
+                    transfers.finish(info.id, TransferState::Done, shown.clone(), Some(sha));
+                    report.uploaded.push(match shown {
+                        Some(note) => format!("{} ({}; {note})", file.name, human_size(size)),
+                        None => format!("{} ({})", file.name, human_size(size)),
+                    });
                 }
-                Err(None) => {
-                    let message = self.undo(&files, &info, file).await;
-                    transfers.finish(info.id, TransferState::Cancelled, Some(message), None);
+                Err(Stopped::Cancelled { left }) => {
+                    transfers.finish(
+                        info.id,
+                        TransferState::Cancelled,
+                        Some(format!("cancelled; {left}")),
+                        None,
+                    );
                     report.cancelled += 1;
                 }
-                Err(Some(err)) => {
-                    let left = self.undo(&files, &info, file).await;
-                    let message = if file.replace {
-                        format!("{err}. {left}")
-                    } else {
-                        err.to_string()
+                Err(Stopped::Failed { err, left }) => {
+                    let message = match left {
+                        Some(left) => format!("{err}; {left}"),
+                        None => err.to_string(),
                     };
                     transfers.finish(info.id, TransferState::Failed, Some(message.clone()), None);
                     report.failed.push(format!("{}: {message}", file.name));
@@ -839,19 +876,62 @@ impl Terminals {
         Ok(report)
     }
 
-    /// Sends one local file to the host. Returns its size and SHA-256.
+    /// Sends one local file to the host. Returns its size, SHA-256 and how it landed. The writer is
+    /// opened and finished outside the cancel race, so a cancel never cuts a replacement's last step
+    /// short; a cancel or failure while the bytes go up aborts it (H8: the old file stays as it was).
     async fn copy_up(
         &self,
         files: &Arc<dyn RemoteFiles>,
         info: &TransferInfo,
         file: &UploadFile,
-    ) -> Result<(u64, String)> {
-        let mut local = tokio::fs::File::open(&file.local_path)
-            .await
-            .map_err(|err| CoreError::InvalidInput(format!("'{}' can't be read on this PC: {err}", file.local_path)))?;
-        let size = local.metadata().await?.len();
+        cancel: &CancellationToken,
+        token: &CancellationToken,
+    ) -> std::result::Result<(u64, String, Written), Stopped> {
+        let mut local = tokio::fs::File::open(&file.local_path).await.map_err(|err| {
+            Stopped::failed(CoreError::InvalidInput(format!(
+                "'{}' can't be read on this PC: {err}",
+                file.local_path
+            )))
+        })?;
+        let size = local.metadata().await.map_err(|err| Stopped::failed(err.into()))?.len();
         self.inner.transfers.change(info.id, |i| i.size = size);
-        let mut writer = files.write(&info.remote_path, file.replace).await?;
+        if cancel.is_cancelled() || token.is_cancelled() {
+            return Err(Stopped::Cancelled {
+                left: "nothing was left on the host".into(),
+            });
+        }
+        let mut writer = files
+            .write(&info.remote_path, file.replace)
+            .await
+            .map_err(Stopped::failed)?;
+        let pumped = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            () = token.cancelled() => None,
+            result = self.pump(&mut local, writer.as_mut(), info) => Some(result),
+        };
+        match pumped {
+            None => Err(Stopped::Cancelled {
+                left: writer.abort().await,
+            }),
+            Some(Err(err)) => Err(Stopped::Failed {
+                err,
+                left: Some(writer.abort().await),
+            }),
+            Some(Ok((done, sha))) => match writer.finish().await {
+                Ok(written) => Ok((done, sha, written)),
+                Err(err) => Err(Stopped::Failed { err, left: None }),
+            },
+        }
+    }
+
+    /// The local file's bytes into the writer, with progress. Returns how many and their SHA-256.
+    async fn pump(
+        &self,
+        local: &mut tokio::fs::File,
+        writer: &mut dyn RemoteWrite,
+        info: &TransferInfo,
+    ) -> Result<(u64, String)> {
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; CHUNK];
         let mut done = 0u64;
@@ -865,23 +945,25 @@ impl Terminals {
             done += n as u64;
             self.inner.transfers.progress(info.id, done);
         }
-        writer.finish().await?;
         Ok((done, hex::encode(hasher.finalize())))
     }
+}
 
-    /// After a failed or cancelled upload: a new file is deleted again; a replaced one stays as far as
-    /// it got. Says which.
-    async fn undo(&self, files: &Arc<dyn RemoteFiles>, info: &TransferInfo, file: &UploadFile) -> String {
-        if file.replace {
-            return format!(
-                "{} on the host is incomplete now; upload it again to replace it",
-                info.remote_path
-            );
-        }
-        match files.remove(&info.remote_path).await {
-            Ok(()) | Err(CoreError::RemoteNotFound { .. }) => "cancelled; nothing was left on the host".to_owned(),
-            Err(err) => format!("cancelled, but the partial file could not be deleted: {err}"),
-        }
+/// Why an upload did not finish, and what it left on the host.
+enum Stopped {
+    Cancelled {
+        left: String,
+    },
+    /// `left`: what the aborted write left, when the error came before it finished.
+    Failed {
+        err: CoreError,
+        left: Option<String>,
+    },
+}
+
+impl Stopped {
+    fn failed(err: CoreError) -> Self {
+        Self::Failed { err, left: None }
     }
 }
 
@@ -1187,6 +1269,21 @@ mod tests {
         assert_eq!(local_name("a:b*c?.txt"), "a_b_c_.txt");
         assert_eq!(local_name("trailing. "), "trailing");
         assert_eq!(local_name("..."), "download");
+    }
+
+    #[test]
+    fn format_characters_never_reach_a_saved_name() {
+        assert_eq!(local_name("invoice\u{202E}fdp.exe"), "invoice_fdp.exe");
+        for c in [
+            '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+            '\u{FEFF}', '\u{00AD}', '\u{202A}', '\u{061C}', '\u{2028}', '\u{2029}',
+        ] {
+            let name = format!("report{c}.pdf");
+            assert_eq!(local_name(&name), "report_.pdf", "U+{:04X}", u32::from(c));
+        }
+        // Letters of other scripts and ordinary spaces stay.
+        assert_eq!(local_name("отчёт 2026 é.pdf"), "отчёт 2026 é.pdf");
+        assert_eq!(local_name("\u{FEFF}"), "_");
     }
 
     #[test]

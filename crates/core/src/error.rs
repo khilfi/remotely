@@ -229,6 +229,11 @@ pub enum CoreError {
     #[error("cancelled while the command was running; it may still finish on the host")]
     CancelledRemote,
 
+    /// H9: a bulk run's host did not finish within the run's time limit. The connection is closed, but
+    /// the command may have started and may still finish, so its outcome is unknown.
+    #[error("the command did not finish within {seconds} s; it may have run, or may still finish, on the host")]
+    CommandTimedOut { seconds: u64 },
+
     /// SS-07: a session's jump hosts lead back to one of them, or go on for too many hops.
     #[error("{0}")]
     JumpChain(String),
@@ -383,6 +388,7 @@ impl CoreError {
             CoreError::LoginParked { .. } => "login_parked",
             CoreError::LoginsCapped { .. } => "logins_capped",
             CoreError::CancelledRemote => "cancelled_remote",
+            CoreError::CommandTimedOut { .. } => "command_timed_out",
             CoreError::JumpChain(_) => "jump_chain",
             CoreError::Tunnel(_) => "tunnel",
             CoreError::NoPasswordPrompt => "no_password_prompt",

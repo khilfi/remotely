@@ -23,6 +23,7 @@ use super::vm_hardware::VmHardware;
 use crate::command_bus::{PowerOp, SnapshotOp, StopMode};
 use crate::error::{CoreError, Result};
 use crate::locks;
+use crate::untrusted::{read_capped, MAX_VM_CONFIG_BYTES};
 
 /// Settings read from a .vmx file.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -496,8 +497,9 @@ fn pretty_name(detailed: &str) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+/// A9: at most [`MAX_VM_CONFIG_BYTES`]; a larger .vmx is an error, never read in part.
 async fn read_vmx_file(vmx: &Path) -> Result<VmxInfo> {
-    let bytes = tokio::fs::read(vmx).await?;
+    let bytes = read_capped(vmx, MAX_VM_CONFIG_BYTES).await?;
     Ok(parse_vmx(&String::from_utf8_lossy(&bytes)))
 }
 
@@ -559,10 +561,10 @@ async fn read_library() -> Result<Vec<LibraryVm>> {
     let Some(path) = default_library_path() else {
         return Ok(Vec::new());
     };
-    match tokio::fs::read(&path).await {
+    match read_capped(&path, MAX_VM_CONFIG_BYTES).await {
         Ok(bytes) => Ok(parse_vmls(&String::from_utf8_lossy(&bytes))),
         // No library yet: Workstation was never opened by this Windows user.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(err) if err.is_not_found() => Ok(Vec::new()),
         Err(err) => Err(err.into()),
     }
 }
@@ -649,12 +651,12 @@ fn snapshot_time(high: i64, low: i64) -> Option<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp_nanos(i128::from(micros) * 1000).ok()
 }
 
-/// The .vmsd sits next to the .vmx and has the same name.
+/// The .vmsd sits next to the .vmx and has the same name. A9: at most [`MAX_VM_CONFIG_BYTES`].
 async fn read_vmsd_file(vmx: &Path) -> Result<SnapshotTree> {
-    match tokio::fs::read(vmx.with_extension("vmsd")).await {
+    match read_capped(&vmx.with_extension("vmsd"), MAX_VM_CONFIG_BYTES).await {
         Ok(bytes) => Ok(parse_vmsd(&String::from_utf8_lossy(&bytes))),
         // Never had a snapshot.
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(SnapshotTree::default()),
+        Err(err) if err.is_not_found() => Ok(SnapshotTree::default()),
         Err(err) => Err(err.into()),
     }
 }

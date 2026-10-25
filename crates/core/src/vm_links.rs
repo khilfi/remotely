@@ -8,7 +8,15 @@
 //! leaves a session alone when:
 //! * the user chose, confirmed or removed its link (`manual`): a manual link is never overwritten;
 //! * several VMs have the matching address: the user picks one ([`VmLinks::ambiguous`]);
-//! * nothing matches now, while its VM has no address (stopped, or Tools not running).
+//! * nothing matches now, while its VM has no address (stopped, or Tools not running);
+//! * A4: it is reached through a jump host (its address belongs to another network than this PC's
+//!   VMs), or its environment label is not the VM's (both unlabelled counts as the same). An
+//!   automatic link that breaks one of these goes.
+//!
+//! A4, H11: an automatic link rests on the address the guest reports about itself, which a hostile
+//! VM can make up. So it only shows on the dashboard and in the lists; a bulk run or key push
+//! reaches a VM through it only once the user confirmed it ([`VmLinks::confirm`],
+//! `bulk::ResolvedTargets::vms_unconfirmed`).
 //!
 //! An automatic link follows the addresses: it moves when another VM now has the session's address,
 //! and goes when its VM has another address now. Linking is the app's own data: it skips the command
@@ -160,6 +168,33 @@ pub(crate) fn decide(
     }
 }
 
+/// A4: why a session may not be linked automatically (to `vm`, its linked VM if any), if it may not.
+pub(crate) fn not_linkable(session: &SessionRecord, vm: Option<&VmRecord>) -> Option<String> {
+    if session.jump_session_id.is_some() {
+        return Some(format!(
+            "{} is reached through a jump host, so its address is not one of this PC's VMs'",
+            quoted(&session.name)
+        ));
+    }
+    let vm = vm?;
+    (vm.environment != session.environment).then(|| {
+        format!(
+            "the session is labelled {} and the VM {}",
+            label(session.environment),
+            label(vm.environment)
+        )
+    })
+}
+
+fn label(environment: crate::domain::Environment) -> &'static str {
+    match environment {
+        crate::domain::Environment::None => "nothing",
+        crate::domain::Environment::Lab => "Lab",
+        crate::domain::Environment::Staging => "Staging",
+        crate::domain::Environment::Prod => "Prod",
+    }
+}
+
 /// A host's addresses, as last resolved. `None`: it did not resolve.
 struct Resolved {
     at: Instant,
@@ -265,8 +300,28 @@ impl VmLinks {
         let mut report = AutoLinkReport::default();
         let mut ambiguous: HashMap<Uuid, Vec<String>> = HashMap::new();
         for session in &sessions {
+            // A4: never through a jump host, and only to a VM with the session's own label.
+            let linked_vm = session.vm_id.as_deref().and_then(|id| by_id.get(id)).copied();
+            if let Some(why) = not_linkable(session, linked_vm) {
+                if session.vm_link == Some(VmLink::Auto) && linked_vm.is_some() {
+                    self.unlink(ctx, session, &by_id, &mut report, &why).await?;
+                    continue;
+                }
+                if session.jump_session_id.is_some() {
+                    continue;
+                }
+            }
+            let eligible: Vec<VmAddress> = addresses
+                .iter()
+                .filter(|a| {
+                    by_id
+                        .get(a.vm_id.as_str())
+                        .is_some_and(|vm| vm.environment == session.environment)
+                })
+                .cloned()
+                .collect();
             let found = resolved.get(&session.host).and_then(|a| a.as_deref());
-            let decision = decide(session.vm_id.as_deref(), session.vm_link, found, &addresses);
+            let decision = decide(session.vm_id.as_deref(), session.vm_link, found, &eligible);
             match decision {
                 Decision::Keep => {}
                 Decision::Link { vm_id, ip } => {
@@ -326,14 +381,29 @@ impl VmLinks {
         let Some(vm) = session.vm_id.as_deref().and_then(|id| by_id.get(id)).copied() else {
             return Ok(());
         };
-        if !self.store.set_auto_vm_link(ctx, session.id, Some(&vm.id), None).await? {
-            return Ok(());
-        }
         let detail = format!(
             "the VM's IP address is now {}, and {} does not reach it",
             vm.ip_address.as_deref().unwrap_or("unknown"),
             session.host
         );
+        self.unlink(ctx, session, by_id, report, &detail).await
+    }
+
+    /// Removes a session's automatic link, saying why.
+    async fn unlink(
+        &self,
+        ctx: &Context,
+        session: &SessionRecord,
+        by_id: &HashMap<&str, &VmRecord>,
+        report: &mut AutoLinkReport,
+        detail: &str,
+    ) -> Result<()> {
+        let Some(vm) = session.vm_id.as_deref().and_then(|id| by_id.get(id)).copied() else {
+            return Ok(());
+        };
+        if !self.store.set_auto_vm_link(ctx, session.id, Some(&vm.id), None).await? {
+            return Ok(());
+        }
         self.audit(
             ctx,
             &format!(
@@ -343,7 +413,7 @@ impl VmLinks {
             ),
             session,
             Some(vm),
-            &detail,
+            detail,
         )
         .await?;
         report.unlinked.push(change(session, vm));

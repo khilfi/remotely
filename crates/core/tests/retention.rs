@@ -61,6 +61,7 @@ fn exec(script: &str, sessions: &[Uuid]) -> Command {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     }
 }
 
@@ -146,8 +147,15 @@ async fn a_run_keeps_no_secret_and_loses_its_outputs_after_the_retention_period(
     assert_eq!(script, "df -h --password=[redacted]");
     let all_audit = core.store.audit_for_export(&core.ctx).await.unwrap();
     assert!(all_audit.iter().all(|e| !format!("{e:?}").contains("hunter2")));
-    let err = core.bus.retry_failed(&core.ctx, old).await.unwrap_err();
-    assert!(err.to_string().contains("looked like a secret"), "{err}");
+    // Refused whether or not the retry takes hosts whose outcome is unknown (H9).
+    for include_unknown in [false, true] {
+        let err = core
+            .bus
+            .retry_failed(&core.ctx, old, include_unknown)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("looked like a secret"), "{err}");
+    }
 
     // The default keeps 90 days: the purge at start (here, scheduled) removes the old run's outputs and script.
     assert_eq!(core.retention.retention().await.unwrap(), Retention::Days90);
@@ -182,8 +190,15 @@ async fn a_run_keeps_no_secret_and_loses_its_outputs_after_the_retention_period(
     assert!(results.job.bodies_removed);
     assert_eq!(results.run.as_ref().unwrap().script, "");
     assert_eq!(results.counts.failed, 1);
-    let err = core.bus.retry_failed(&core.ctx, old).await.unwrap_err();
-    assert!(err.to_string().contains("retention period"), "{err}");
+    // Refused whether or not the retry takes hosts whose outcome is unknown (H9).
+    for include_unknown in [false, true] {
+        let err = core
+            .bus
+            .retry_failed(&core.ctx, old, include_unknown)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("retention period"), "{err}");
+    }
 
     // Audited with what went; the chain still verifies.
     let last = &core.store.recent_audit(&core.ctx, 1).await.unwrap()[0];

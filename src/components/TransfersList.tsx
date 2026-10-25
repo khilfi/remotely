@@ -142,6 +142,8 @@ function TransferRow({ transfer: t, onRetry }: { transfer: TransferInfo; onRetry
       >
         {line}
       </p>
+      {/* A8: a finished download that could not be marked as from the internet says so. */}
+      {t.state === "done" && t.message && <p className="whitespace-normal text-tier-medium">{t.message}</p>}
       <p className="truncate text-[11px] text-muted-foreground/80">
         {where} · {t.terminal}
       </p>

@@ -114,6 +114,13 @@ pub trait HostCounters: Send + Sync {
         Err(CoreError::NotImplemented("paging files"))
     }
 
+    /// SS-07: how many other users are signed in to this PC (Windows sessions that are active or
+    /// disconnected, the app's own user left out). Loopback is shared by all of them, so a SOCKS tunnel
+    /// on 127.0.0.1 is theirs to use too.
+    async fn other_users_signed_in(&self) -> Result<usize> {
+        Ok(0)
+    }
+
     /// VM-07: free space on the drive holding `path`, as a percentage.
     async fn free_disk_pct(&self, path: &Path) -> Result<f64> {
         let space = self.disk_space(path).await?;
@@ -181,6 +188,11 @@ impl HostCounters for WindowsCounters {
     async fn paging(&self) -> Result<super::paging::PagingInfo> {
         // Two system calls of a few microseconds: not worth a blocking thread.
         super::paging::read()
+    }
+
+    async fn other_users_signed_in(&self) -> Result<usize> {
+        // A few local calls to the session manager.
+        blocking(win::other_users_signed_in).await
     }
 }
 
@@ -438,6 +450,83 @@ mod win {
         CoreError::Io(std::io::Error::other(format!("{call}: {}", err.message())))
     }
 
+    /// SS-07: users other than the app's own with a Windows session on this PC, active or disconnected.
+    pub fn other_users_signed_in() -> Result<usize> {
+        use windows::Win32::System::RemoteDesktop::{
+            ProcessIdToSessionId, WTSActive, WTSDisconnected, WTSEnumerateSessionsW, WTSFreeMemory,
+            WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
+        };
+        use windows::Win32::System::Threading::GetCurrentProcessId;
+
+        let mut mine = 0u32;
+        // SAFETY: an out pointer to a local.
+        unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut mine) }
+            .map_err(|e| os_error("ProcessIdToSessionId", e))?;
+        let me = session_user(mine);
+        let mut list: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
+        let mut count = 0u32;
+        // SAFETY: out pointers to locals; the list is freed below with WTSFreeMemory.
+        unsafe { WTSEnumerateSessionsW(Some(WTS_CURRENT_SERVER_HANDLE), 0, 1, &mut list, &mut count) }
+            .map_err(|e| os_error("WTSEnumerateSessionsW", e))?;
+        let sessions: Vec<(u32, bool)> = if list.is_null() {
+            Vec::new()
+        } else {
+            // SAFETY: WTSEnumerateSessionsW returned `count` entries at `list`.
+            let entries = unsafe { std::slice::from_raw_parts(list, count as usize) };
+            let out = entries
+                .iter()
+                .map(|s| (s.SessionId, s.State == WTSActive || s.State == WTSDisconnected))
+                .collect();
+            // SAFETY: allocated by WTSEnumerateSessionsW, not used after this.
+            unsafe { WTSFreeMemory(list.cast()) };
+            out
+        };
+        let mut others = std::collections::HashSet::new();
+        for (id, signed_in) in sessions {
+            if !signed_in || id == mine {
+                continue;
+            }
+            if let Some(user) = session_user(id) {
+                if Some(&user) != me.as_ref() {
+                    others.insert(user);
+                }
+            }
+        }
+        Ok(others.len())
+    }
+
+    /// `domain\user` of a Windows session, lower case; `None` for one nobody is signed in to.
+    fn session_user(session: u32) -> Option<String> {
+        use windows::Win32::System::RemoteDesktop::{WTSDomainName, WTSUserName};
+        let user = session_text(session, WTSUserName)?;
+        if user.is_empty() {
+            return None;
+        }
+        let domain = session_text(session, WTSDomainName).unwrap_or_default();
+        Some(format!("{domain}\\{user}").to_lowercase())
+    }
+
+    fn session_text(session: u32, class: windows::Win32::System::RemoteDesktop::WTS_INFO_CLASS) -> Option<String> {
+        use windows::Win32::System::RemoteDesktop::{
+            WTSFreeMemory, WTSQuerySessionInformationW, WTS_CURRENT_SERVER_HANDLE,
+        };
+        let mut buffer = windows::core::PWSTR::null();
+        let mut bytes = 0u32;
+        // SAFETY: out pointers to locals; the buffer is freed below with WTSFreeMemory.
+        unsafe {
+            WTSQuerySessionInformationW(Some(WTS_CURRENT_SERVER_HANDLE), session, class, &mut buffer, &mut bytes)
+        }
+        .ok()?;
+        if buffer.is_null() {
+            return None;
+        }
+        // SAFETY: a NUL-terminated string from WTSQuerySessionInformationW.
+        let text = unsafe { buffer.to_string() }.ok();
+        // SAFETY: allocated by WTSQuerySessionInformationW, not used after this.
+        unsafe { WTSFreeMemory(buffer.0.cast()) };
+        text
+    }
+
     /// Closes the handle when dropped.
     struct Owned(HANDLE);
 
@@ -675,6 +764,10 @@ mod win {
 
     pub fn read_processes(_exes: &[VmExecutable], _tracker: &ProcessTracker) -> Result<Vec<RawProcess>> {
         Err(CoreError::NotImplemented("VM processes outside Windows"))
+    }
+
+    pub fn other_users_signed_in() -> Result<usize> {
+        Ok(0)
     }
 }
 

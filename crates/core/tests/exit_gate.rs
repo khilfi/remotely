@@ -308,6 +308,7 @@ async fn every_high_and_critical_action_is_logged_from_approval_to_finish() {
         sudo_password_id: None,
         trust_new_host_keys: true,
         timeout_secs: None,
+        rollout: Default::default(),
     };
     let (tier, status) = approve_and_wait(&core, &mut events, dangerous, answers(2)).await;
     assert_eq!((tier, status), (Tier::High, JobStatus::Succeeded));

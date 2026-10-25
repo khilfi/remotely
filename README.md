@@ -17,13 +17,16 @@ snapshot tree with creation times (read from its `.vmsd`) in a panel beside the 
 days, and takes, reverts and deletes snapshots on one VM or in bulk on the selection (see
 [Virtual machines and snapshots](#virtual-machines-and-snapshots)); high-risk VM actions take a named safety snapshot
 first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
-and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
+and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV. In
+every CSV Remotely writes (the audit log, Compare and MultiExec exports) a cell that a spreadsheet could run as a
+formula (starting with `=`, `+`, `-` or `@`, also after spaces, or with a tab) gets a `'` in front, and cells with `,`,
+`;`, quotes, tabs or line breaks are quoted.
 Auto-update checks this repo's public GitHub Releases without a token (an optional read-only GitHub token can be kept in
 the vault, see [GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
 (AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
 or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
-tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs work in Compare runs and guest metrics without linking by hand. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
 encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
@@ -118,6 +121,47 @@ closes it at once: no SSH handshake, no login, nothing audited.
   It blocks like a changed key and is audited. An import from another laptop shows such a key as a conflict, skipped
   unless you pick it. Connections ask the host for the key types already trusted for it first, so a host with several
   keys presents the one you trusted. A terminal still asks you, and says another kind of key is trusted.
+
+### Safer operations on hosts
+
+0.4.3: how far a change on hosts can spread before you see it, and what the audit trail keeps.
+
+- **Replacing a file** (SS-08): an upload that replaces a file writes a hidden temporary file beside it
+  (`.<name>.remotely-<id>.part`), gives it the old file's permissions and owner, and puts it in place in one step
+  (OpenSSH's `posix-rename`), so a dropped VPN never leaves `nginx.conf` half written: the old file stays as it was and
+  the temporary one is deleted. Through a link, the file it points to is replaced. A server without `posix-rename` keeps
+  the old file as `<name>.<time>.bak` and the transfers list says so. Only when the folder takes no new file, or the
+  old file belongs to another user whose ownership the login can't keep, is the file written over in place as before,
+  and the list says why. Extended attributes, ACLs and other hard links of the old file are not carried over. A folder
+  listing stops at 20,000 entries and says so.
+- **Rolling out a command** (BX-02, Compare output): "Run on one host first" runs the first host alone; you see its
+  result and press **Run on the rest** or **Stop here** (the rest wait up to 15 minutes, then the run stops); a canary
+  that fails stops the run. "Stop after N failures" starts no more hosts once N failed or timed out; hosts already
+  running finish. Both are off by default: a non-zero exit is normal for read-only checks (`grep`, `test`), and the
+  approval tier already rises with the number of hosts. The approval dialog says what was chosen; going on after the
+  canary is in the audit log.
+- **Outcome unknown** (BX-04): a host that ran past the time limit, or was cancelled while its command ran (or a VM
+  whose vmrun or VBoxManage call was cancelled), may have run it, so it is "outcome unknown", not failed. **Retry
+  failed** leaves it out; a separate button retries it too, after a warning that the command may run twice.
+- **Which host was reached** (AP-05): each remote target of a job is journaled with the address this PC connected to
+  (none behind jump hosts) and the host key it accepted (`ssh-ed25519 SHA256:...`), and the job's end in the audit log
+  lists them. The results' host view shows them.
+- **Automatic VM links** (QL-01): they follow the IP address each guest reports about itself, which a guest can make up
+  (a lab VM claiming a production server's address). So they only show on the dashboard and in lists; a bulk run or
+  key push picked by VM, tag or filter reaches the VM through one only after you press **Confirm link**. Auto-linking
+  also skips sessions behind a jump host and sessions whose environment label is not the VM's (both unlabelled counts
+  as the same), and removes an automatic link that breaks either rule.
+- **Tunnels** (SS-07): the dialog says that a tunnel on 127.0.0.1 is open to every user signed in to this PC, not only
+  you, and that a remote tunnel on localhost listens on every address when the host's sshd has `GatewayPorts yes`.
+  A SOCKS tunnel on loopback is Medium (one confirm) while other users are signed in to this PC (a shared jump server);
+  otherwise it stays Low.
+- **SSH keys** (SS-09): a push can give the key an expiry day (`expiry-time`, at 00:00 UTC; needs OpenSSH 8.2 or later,
+  an older sshd refuses the key) and the hosts or networks it may log in from (`from`). A host that has the key already
+  is left as it is and fails with why (remove it there first). **Remove from hosts** takes a key off hosts'
+  `authorized_keys` (every line holding it, the file replaced in one step): Medium, audited, like a push.
+- **Starting several VMs** (VM-02): the approval names the VMs with a bridged network adapter plugged in at power-on,
+  which join the network this PC is on, so a clone with a fixed IP address can't take a customer machine's address
+  unnoticed. Starting is still Low; the warning adds one confirm.
 
 ### What Remotely keeps on this PC
 
@@ -253,6 +297,11 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **Notifications** (QL-07): Settings, Terminal, chooses between commands longer than N seconds (5 to 3600) and any
   command that finishes while you're away (the tab isn't on screen or Remotely isn't the window in front), whatever its
   length. A line sent with MultiExec gives one notification once all its terminals are done, never one per terminal.
+- **Pasting and links** (QL-05, SS-10, SS-03): a paste loses its control characters (tabs and line breaks aside) and any
+  bracketed-paste markers, and text with a line break asks first, showing its first lines and, with MultiExec on, how
+  many terminals get it (Settings, Terminal can turn the question off). The terminal's own answers to a host's queries
+  (cursor position, colours, focus) go to that host only, never through MultiExec. Links a host prints are never
+  opened: a click shows the address, to copy.
 
 ### File transfer in the terminal
 
@@ -282,6 +331,11 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   gets a number. Right-click a file name in the terminal's output (`ls`, an error message) to download it; elsewhere
   right-click pastes as before. "Open folder" in the transfers list shows a finished download in Explorer. Each download
   is in the audit log with the file's name, size, host path, where it was saved and its SHA-256, never its content.
+  Names are made safe here: what Windows can't hold in a name and invisible Unicode format characters (such as U+202E,
+  which makes `invoice[U+202E]fdp.exe` look like `invoiceexe.pdf`) become `_`, and a device name (`nul`, `com1.txt`)
+  gets a `_` in front. Each download is marked as from the internet, with the `Zone.Identifier` stream browsers write
+  (ZoneId=3, without the host's name), so SmartScreen and Office's Protected View treat it as one; on a FAT or exFAT
+  drive, which can't hold the mark, the transfers list says so.
 - **Upload**: drop files on a terminal, or use the upload button (toolbar or drawer). They go into the terminal's
   folder (the drawer's upload goes into the folder it shows). Uploads are changes, so they go through the command bus:
   Low, a Prod session raises it one tier, and a file that is there already is replaced only after you say so and
@@ -290,7 +344,7 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   size, destination and SHA-256. Folders aren't uploaded or downloaded (zip them, or pick their files).
 - **Transfers**: the list under the drawer shows each file's progress, speed and time left, with cancel and retry (a
   retried upload asks again if it now replaces a file). A new file that fails or is cancelled part way is deleted from
-  the host; a replaced one is left as far as it got, and the message says so.
+  the host; a file being replaced stays as it was (see [Safer operations on hosts](#safer-operations-on-hosts)).
 - With MultiExec on, uploads and downloads still go through one terminal: the current one. ZMODEM (`sz`/`rz`) is not
   supported.
 
@@ -318,8 +372,9 @@ on its jump host.
   connections, waiting for a reconnect, failed and why) and starts or stops them. A tunnel rides the terminal's
   connection: behind jump hosts it starts from the session's host, it opens again by itself after a reconnect, and it
   closes with the terminal.
-- **Approvals**: opening a tunnel is a command on the bus. A local or SOCKS tunnel only this PC can use is Low (so
-  Medium on a Prod host, as the PRD's tier table says). A remote tunnel is Medium: the host listens, and whatever
+- **Approvals**: opening a tunnel is a command on the bus. A local or SOCKS tunnel on loopback is Low (so Medium on a
+  Prod host, as the PRD's tier table says); loopback is every user signed in to this PC, so a SOCKS one is Medium
+  while others are. A remote tunnel is Medium: the host listens, and whatever
   reaches that port gets into the network this PC is on. A tunnel that listens on a network address (0.0.0.0, a LAN
   IP), on either side, is Medium and never lower: other computers can use it without logging in, and the dialog says
   so. Forwards that start with the terminal go through the same approval. Opening and closing are audited with the
@@ -399,7 +454,9 @@ approval, nothing audited, nothing changed on the host, and the read-only lock d
   delta disk counts its parents down to the base), and each network adapter with its connection, card and MAC. The
   guest OS comes from VMware Tools (`guestInfo.detailed.data`: the distribution and kernel) or the Guest Additions.
   What was read is kept, so the tab still shows it (with why) when the files can't be read. **From the guest** shows
-  a linked session's own facts.
+  a linked session's own facts. A disk, extent or parent disk named on a network share or a device path is never
+  opened (Windows would send your sign-in there): it shows its path with a note and no sizes, so a VM kept on a share
+  shows its disks as not read. A .vmx over 4 MB or a disk descriptor over 1 MB is reported, never read in part.
 - **Dashboard**: each row says "4 vCPU · 8 GB · Ubuntu 24.04" under its address (a host's from its stored facts).
 - **Memory charts (MO-15)**: the drill-down's memory chart draws what there is as a dashed line next to what is in
   use: a VM's configured RAM next to its process's working set (and the guest's own use when watched), a host's total

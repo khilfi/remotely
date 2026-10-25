@@ -88,6 +88,8 @@ pub enum ActionKind {
     AppUpdate,
     /// Add a public key to hosts' `~/.ssh/authorized_keys` (SS-09): it grants a login.
     SshKeyPush,
+    /// SS-09: remove a public key from hosts' `authorized_keys`.
+    SshKeyRemove,
     /// Upload files into a folder on a terminal's host (SS-08), adding new files only.
     FileUpload,
     /// Upload files that replace files on the host (SS-08). Never below Medium: replacing asks.
@@ -130,7 +132,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 36] = [
+    pub const ALL: [ActionKind; 37] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -148,6 +150,7 @@ impl ActionKind {
         ActionKind::ExecOther,
         ActionKind::ExecDangerous,
         ActionKind::SshKeyPush,
+        ActionKind::SshKeyRemove,
         ActionKind::FileUpload,
         ActionKind::FileReplace,
         ActionKind::TunnelLocal,
@@ -190,6 +193,7 @@ impl ActionKind {
             ActionKind::ExecDangerous => "Run a dangerous command",
             ActionKind::AppUpdate => "Install an app update",
             ActionKind::SshKeyPush => "Add an SSH key to hosts",
+            ActionKind::SshKeyRemove => "Remove an SSH key from hosts",
             ActionKind::FileUpload => "Upload files",
             ActionKind::FileReplace => "Upload files that replace files on the host",
             ActionKind::TunnelLocal => "Open a tunnel for this PC only",
@@ -577,6 +581,8 @@ impl Default for PolicyRules {
             (AppUpdate, TierRule::same(Medium)),
             // A key in authorized_keys lets its holder log in: a change like any other command.
             (SshKeyPush, TierRule::same(Medium)),
+            // Taking a key away can lock its holder out of a host: a change like adding one.
+            (SshKeyRemove, TierRule::same(Medium)),
             // SS-08: a new file in a folder the user can write to anyway; replacing one asks first.
             (FileUpload, TierRule::same(Low)),
             (FileReplace, TierRule::same(Medium)),
@@ -681,6 +687,8 @@ impl Decision {
 pub struct PolicyEngine {
     rules: PolicyRules,
     dangerous: Vec<(String, Regex)>,
+    /// SS-07: other users signed in to this PC, as last read ([`PolicyEngine::set_other_users`]).
+    other_users: usize,
 }
 
 impl PolicyEngine {
@@ -699,7 +707,17 @@ impl PolicyEngine {
                     })
             })
             .collect::<Result<Vec<_>>>()?;
-        Ok(Self { rules, dangerous })
+        Ok(Self {
+            rules,
+            dangerous,
+            other_users: 0,
+        })
+    }
+
+    /// SS-07: how many other users are signed in to this PC; the bus reads it just before it rates a
+    /// SOCKS tunnel on loopback, which they could all use.
+    pub fn set_other_users(&mut self, count: usize) {
+        self.other_users = count;
     }
 
     pub fn rules(&self) -> &PolicyRules {
@@ -783,6 +801,7 @@ impl PolicyEngine {
             Command::RemoteExec { script, .. } => self.classify_script(script),
             Command::AppUpdate { .. } => ActionKind::AppUpdate,
             Command::PushSshKey { .. } => ActionKind::SshKeyPush,
+            Command::RemoveSshKey { .. } => ActionKind::SshKeyRemove,
             // SS-10: a MultiExec line is rated like a bulk run's command. When Remotely could not follow
             // what was typed, the shells may run something else, so it is never read-only; nor is a
             // pager or editor, which stays open in every terminal and runs `!command` typed into it.
@@ -944,6 +963,24 @@ impl PolicyEngine {
             }
         }
 
+        // SS-07: loopback belongs to everyone signed in to this PC, so on a shared jump server a SOCKS tunnel on
+        // 127.0.0.1 lets any of them reach whatever the host reaches. At least Medium while others are signed in.
+        if let Command::OpenTunnel { forward, .. } = command {
+            if forward.spec.kind == ForwardKind::Dynamic && forward.spec.loopback_only() && self.other_users > 0 {
+                let who = match self.other_users {
+                    1 => "1 other user is".to_owned(),
+                    n => format!("{n} other users are"),
+                };
+                reasons.push(format!(
+                    "{who} signed in to this PC, and a SOCKS tunnel on its loopback is theirs to use too"
+                ));
+                if tier < Tier::Medium {
+                    reasons.push(format!("{} -> {}", tier.as_str(), Tier::Medium.as_str()));
+                    tier = Tier::Medium;
+                }
+            }
+        }
+
         if self.rules.prod_bump && active.iter().any(|t| t.environment == Environment::Prod) {
             let bumped = tier.bump();
             if bumped != tier {
@@ -1034,6 +1071,7 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::RemoteExec { .. }
         | Command::AppUpdate { .. }
         | Command::PushSshKey { .. }
+        | Command::RemoveSshKey { .. }
         | Command::TerminalLine { .. }
         | Command::FileUpload { .. }
         | Command::OpenTunnel { .. }
