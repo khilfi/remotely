@@ -243,7 +243,8 @@ crates/core/          remotely-core: all app logic
                       as the grid shows them, rule edits and acknowledge audited and locked (Change::Alerts), the
                       alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
     schedules/        VM-14, VM-27 (migration 0025, Core.schedules, Change::Schedules): spec.rs ScheduleSpec (action:
-                      snapshot keep N, start, stop, suspend, resume; targets: VMs, tags, stacks once R6 adds them;
+                      snapshot keep N, start, stop, suspend, resume; targets: VMs, tags, VM-08 stacks (every VM of every
+                      instance, via_stack for the ask-again message);
                       content_hash; snapshot_name `Remotely schedule '<name>' <local time> (run <id>)`), timing.rs
                       (hourly, daily, weekly in local time, idle; next_after: a time the clocks jump over runs at the
                       first minute after, a repeated one once, both noted; due_between for missed runs), clock.rs

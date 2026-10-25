@@ -233,7 +233,8 @@ and a VM's **Schedules** tab open it too) runs actions on VMs on a timetable, or
 - **What**: take a snapshot of each VM, optionally keeping only the last N it took; start; shut down (through the
   guest); suspend; or resume (only the suspended VMs: the ones that are off stay off). A power action leaves alone the
   VMs already in that state, and says so.
-- **On**: VMs by name, and tags (every VM with the tag when it runs).
+- **On**: VMs by name, tags (every VM with the tag when it runs), and stacks (every VM of every instance of the stack
+  when it runs; a VM that joins an instance later asks again first, like a newly tagged one).
 - **When**: every hour at a minute, every day at a time, or on chosen days at a time, in local time; or **when idle**
   (auto-suspend): a running VM whose own CPU stayed under a limit for a set time (10 minutes to 24 hours), measured
   from the dashboard's history and its live readings. A VM Remotely didn't watch for the whole time (closed, asleep,
