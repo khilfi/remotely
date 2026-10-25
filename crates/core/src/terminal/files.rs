@@ -39,6 +39,7 @@ use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::policy::Tier;
 use crate::store::NewAuditEntry;
+use crate::untrusted::{is_device_name, is_format_char};
 
 /// Bytes read or written at a time.
 const CHUNK: usize = 256 * 1024;
@@ -386,12 +387,16 @@ pub fn resolve(base: &str, home: &str, path: &str) -> String {
 
 /// A file name for this PC: what Windows can't hold in a name becomes `_`, and a device name gets a `_`
 /// in front, so a host file named `nul` or `com1.txt` is saved as a file instead of going to a device.
+/// A8: Unicode format characters (Cf: U+202E RIGHT-TO-LEFT OVERRIDE, zero-width spaces and joiners,
+/// bidi isolates, U+FEFF, the soft hyphen...) and the line and paragraph separators become `_` too, so
+/// `invoice\u{202E}fdp.exe` is saved as `invoice_fdp.exe`, not shown as `invoiceexe.pdf`.
 fn local_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| match c {
             '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            c if c.is_control() => '_',
+            '\u{2028}' | '\u{2029}' => '_',
+            c if c.is_control() || is_format_char(c) => '_',
             c => c,
         })
         .collect();
@@ -405,22 +410,35 @@ fn local_name(name: &str) -> String {
     }
 }
 
-/// Windows opens a device for these names, with or without an extension (`nul`, `nul.txt`, `Com1`),
-/// on Windows 10 and 11 alike: CON, PRN, AUX, NUL, CONIN$, CONOUT$, and COM or LPT with one digit,
-/// superscript ¹ ² ³ included. Only the part before the first `.` counts, its trailing spaces and dots
-/// dropped; names that only start with one (`console.log`, `nullable.txt`) are files.
-fn is_device_name(name: &str) -> bool {
-    let base = name.split('.').next().unwrap_or(name).trim_end_matches([' ', '.']);
-    let upper = base.to_uppercase();
-    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") {
-        return true;
+/// A8: what Windows' own browsers write for a file from the internet (zone 3), so SmartScreen and
+/// Office's Protected View treat a downloaded file as one. No `HostUrl`: the host's name stays off disk.
+#[cfg(windows)]
+const ZONE_IDENTIFIER: &str = "[ZoneTransfer]\r\nZoneId=3\r\n";
+
+/// A8: writes the Mark of the Web, the `Zone.Identifier` stream, on a downloaded file. `None` when it
+/// is written; otherwise what to tell the user (the folder's file system may have no alternate data
+/// streams, as FAT and exFAT drives don't), and the download still counts. Windows only.
+async fn mark_downloaded(path: &Path) -> Option<String> {
+    #[cfg(windows)]
+    {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        match tokio::fs::write(PathBuf::from(stream), ZONE_IDENTIFIER).await {
+            Ok(()) => None,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), error = %err, "could not mark a download as from the internet");
+                Some(
+                    "Windows could not mark this file as downloaded from the internet (the folder's drive may be FAT or exFAT), so open it with care"
+                        .to_owned(),
+                )
+            }
+        }
     }
-    ["COM", "LPT"].iter().any(|port| {
-        upper.strip_prefix(port).is_some_and(|rest| {
-            let mut chars = rest.chars();
-            matches!((chars.next(), chars.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
-        })
-    })
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        None
+    }
 }
 
 /// Creates a new file in `folder` named `name`, or `name (1)`, `name (2)`... when that is taken, so a
@@ -696,7 +714,7 @@ impl Terminals {
             result = self.copy_down(files, &info, dest) => result.map_err(Some),
         };
         match result {
-            Ok((local, sha)) => {
+            Ok((local, sha, note)) => {
                 let shown = local.display().to_string();
                 transfers.change(transfer, |i| i.local_path = Some(shown.clone()));
                 let action = format!("Downloaded '{}' from {}", info.name, quoted_name(control));
@@ -716,20 +734,22 @@ impl Terminals {
                 {
                     tracing::error!(error = %err, "could not audit a download");
                 }
-                transfers.finish(transfer, TransferState::Done, None, Some(sha));
+                transfers.finish(transfer, TransferState::Done, note, Some(sha));
             }
             Err(None) => transfers.finish(transfer, TransferState::Cancelled, Some("cancelled".into()), None),
             Err(Some(err)) => transfers.finish(transfer, TransferState::Failed, Some(err.to_string()), None),
         }
     }
 
-    /// Copies one host file to a new file in `dest`. A file left half written is deleted.
+    /// Copies one host file to a new file in `dest`, then marks it as from the internet (A8); returns
+    /// where it went, its SHA-256 and a note when the mark could not be written. A file left half
+    /// written (or not yet marked) is deleted.
     async fn copy_down(
         &self,
         files: &Arc<dyn RemoteFiles>,
         info: &TransferInfo,
         dest: &Path,
-    ) -> Result<(PathBuf, String)> {
+    ) -> Result<(PathBuf, String, Option<String>)> {
         let mut reader = files.read(&info.remote_path).await?;
         let (path, mut file) = claim_file(dest, &info.name).await?;
         let mut cleanup = RemoveOnDrop(Some(path.clone()));
@@ -749,8 +769,10 @@ impl Terminals {
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
+        // A8: before the download counts as done.
+        let note = mark_downloaded(&path).await;
         cleanup.0 = None;
-        Ok((path, hex::encode(hasher.finalize())))
+        Ok((path, hex::encode(hasher.finalize()), note))
     }
 
     /// SS-08: the job runner's half of [`Command::FileUpload`]: each file in turn over the terminal's
@@ -1185,6 +1207,21 @@ mod tests {
         assert_eq!(local_name("a:b*c?.txt"), "a_b_c_.txt");
         assert_eq!(local_name("trailing. "), "trailing");
         assert_eq!(local_name("..."), "download");
+    }
+
+    #[test]
+    fn format_characters_never_reach_a_saved_name() {
+        assert_eq!(local_name("invoice\u{202E}fdp.exe"), "invoice_fdp.exe");
+        for c in [
+            '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+            '\u{FEFF}', '\u{00AD}', '\u{202A}', '\u{061C}', '\u{2028}', '\u{2029}',
+        ] {
+            let name = format!("report{c}.pdf");
+            assert_eq!(local_name(&name), "report_.pdf", "U+{:04X}", u32::from(c));
+        }
+        // Letters of other scripts and ordinary spaces stay.
+        assert_eq!(local_name("отчёт 2026 é.pdf"), "отчёт 2026 é.pdf");
+        assert_eq!(local_name("\u{FEFF}"), "_");
     }
 
     #[test]
