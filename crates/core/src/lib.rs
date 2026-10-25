@@ -57,6 +57,7 @@ pub mod capacity;
 pub mod catalog;
 pub mod command_bus;
 pub mod containers;
+pub mod convert;
 pub mod dashboard;
 pub mod deploy;
 pub mod domain;

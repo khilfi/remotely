@@ -671,6 +671,15 @@ impl TargetDirectory for StoreDirectory {
                 environment: *environment,
                 protected: false,
             }),
+            // CV-03: a new file on this PC: named by its file name; no label, never protected.
+            TargetRef::DiskImage { path } => Ok(Target {
+                target: target.clone(),
+                name: std::path::Path::new(path)
+                    .file_name()
+                    .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned()),
+                environment: Environment::None,
+                protected: false,
+            }),
         }
     }
 }

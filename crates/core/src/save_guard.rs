@@ -24,6 +24,10 @@ pub enum Saved {
     SessionLog,
     /// SS-08: files downloaded from a host.
     Download,
+    /// CV-03: a converted disk image.
+    Image,
+    /// VM-17, CV-02: an exported VM (its disks, descriptors and README).
+    Export,
 }
 
 impl Saved {
@@ -35,6 +39,8 @@ impl Saved {
             Saved::Output => "Saved output holds what the terminal showed,",
             Saved::SessionLog => "A session log holds everything the terminal shows,",
             Saved::Download => "A downloaded file holds the host's data,",
+            Saved::Image => "A disk image holds everything on the disk it came from,",
+            Saved::Export => "An exported VM holds its disks and everything on them,",
         }
     }
 }

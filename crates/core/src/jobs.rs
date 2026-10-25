@@ -268,6 +268,14 @@ pub enum JobEvent {
         rest: usize,
         until: String,
     },
+    /// CV-03, VM-17: how far a conversion or export is (0 to 100), and what it does now ("qemu-img (qcow2 to
+    /// VMDK...)", "disk 1 of 2: ..."). A few a second at most.
+    TargetProgress {
+        job_id: Uuid,
+        target: String,
+        percent: f64,
+        step: String,
+    },
     /// VM-03: these VMs did not shut down. Sent before `Finished`, so the UI can offer to force
     /// them off (a separate, Critical command).
     StillRunning {
@@ -550,6 +558,8 @@ pub struct JobRunner {
     containers: RwLock<Option<Arc<dyn ContainerActions>>>,
     /// VM-21, VM-22, VM-10: what makes each new VM of a deploy (set once the core is put together).
     deployer: RwLock<Option<Arc<dyn crate::deploy::DeployActions>>>,
+    /// CV-03, VM-17: what converts images and exports VMs (set once the core is put together).
+    converter: RwLock<Option<Arc<dyn crate::convert::runner::ConvertActions>>>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -590,6 +600,7 @@ impl JobRunner {
             terminals,
             containers: RwLock::new(None),
             deployer: RwLock::new(None),
+            converter: RwLock::new(None),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -627,6 +638,11 @@ impl JobRunner {
     /// VM-21, VM-22, VM-10: what makes a deploy's VMs.
     pub fn set_deployer(&self, deployer: Arc<dyn crate::deploy::DeployActions>) {
         *locks::write(&self.deployer) = Some(deployer);
+    }
+
+    /// CV-03, VM-17: what converts images and exports VMs.
+    pub fn set_converter(&self, converter: Arc<dyn crate::convert::runner::ConvertActions>) {
+        *locks::write(&self.converter) = Some(converter);
     }
 
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
@@ -1543,10 +1559,65 @@ impl JobRunner {
                     ..TargetOutcome::done()
                 })
             }
+            // CV-03, VM-17: a conversion or an export, with the tools' progress. Cancel kills the running tool and
+            // removes what the job made.
+            (Command::ImageConvert { spec: convert, .. }, TargetRef::DiskImage { .. }) => {
+                let converter = self.converter()?;
+                let progress = self.progress_for(job_id, target);
+                let note = converter.convert(&spec.ctx, job_id, convert, &progress, token).await?;
+                Ok(TargetOutcome {
+                    output: Some(OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM)),
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
+            }
+            (Command::VmExport { spec: export, .. }, TargetRef::Vm { .. }) => {
+                let converter = self.converter()?;
+                let progress = self.progress_for(job_id, target);
+                let note = converter.export(&spec.ctx, job_id, export, &progress, token).await?;
+                Ok(TargetOutcome {
+                    output: Some(OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM)),
+                    note: Some(format!("{}: {note}", target.name)),
+                    ..TargetOutcome::done()
+                })
+            }
             (command, other) => Err(CoreError::WrongTargetKind {
                 action: command.summary(1),
                 target: format!("a {} target", other.kind()),
             }),
+        }
+    }
+
+    fn converter(&self) -> Result<Arc<dyn crate::convert::runner::ConvertActions>> {
+        locks::read(&self.converter)
+            .clone()
+            .ok_or(CoreError::NotImplemented("conversions"))
+    }
+
+    /// CV-03, VM-17: a target's progress as [`JobEvent::TargetProgress`], at most a few a second.
+    fn progress_for(&self, job_id: Uuid, target: &Target) -> impl Fn(f64, &str) + Send + Sync + '_ {
+        let key = target.target.key();
+        let last: Mutex<Option<(Instant, u32, String)>> = Mutex::new(None);
+        move |percent: f64, step: &str| {
+            let percent = percent.clamp(0.0, 100.0);
+            let tenths = (percent * 10.0).round() as u32;
+            let now = Instant::now();
+            {
+                let mut last = locks::lock(&last);
+                if let Some((at, shown, shown_step)) = last.as_ref() {
+                    let same_step = shown_step == step;
+                    if same_step && (*shown == tenths || now.duration_since(*at) < PROGRESS_EVERY) {
+                        return;
+                    }
+                }
+                *last = Some((now, tenths, step.to_owned()));
+            }
+            self.emit(JobEvent::TargetProgress {
+                job_id,
+                target: key.clone(),
+                percent: f64::from(tenths) / 10.0,
+                step: step.to_owned(),
+            });
         }
     }
 
@@ -1835,6 +1906,8 @@ impl JobRunner {
             Command::FileUpload { .. } | Command::OpenTunnel { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
+            // CV-03, VM-17: one image or one VM.
+            Command::ImageConvert { .. } | Command::VmExport { .. } => 1,
         };
         n.max(1)
     }
@@ -1910,8 +1983,13 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::VmDevice { .. } => "tools install",
         Command::VmDisk { .. } => "disk change",
         Command::VmLifecycle { .. } => "delete",
+        Command::ImageConvert { .. } => "conversion",
+        Command::VmExport { .. } => "export",
     }
 }
+
+/// CV-03, VM-17: how often a target's progress may be sent while its step goes on.
+const PROGRESS_EVERY: Duration = Duration::from_millis(400);
 
 /// The power state a VM is in once `op` has succeeded.
 fn state_after(op: PowerOp) -> PowerState {
