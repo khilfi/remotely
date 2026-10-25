@@ -597,7 +597,12 @@ impl Converter {
             targets::readme(spec.target, &vm, &written, &extra, &made_on),
         )
         .await?;
-        let files = written.len() + extra.len() + 1;
+        // Every file (a flat VMDK is two).
+        let mut files = 0usize;
+        let mut entries = tokio::fs::read_dir(folder).await?;
+        while entries.next_entry().await?.is_some() {
+            files += 1;
+        }
         Ok(format!(
             "exported to {} ({files} files, README.md says how to import it)",
             folder.display()
@@ -753,18 +758,26 @@ impl ConvertActions for Converter {
             }
             Err(err) => return Err(err.into()),
         }
-        let before = if spec.hypervisor == Hypervisor::VirtualBox || tools.has(Tool::VBoxManage) {
+        let before = if tools.has(Tool::VBoxManage) {
             self.vbox_media(&tools).await.ok()
         } else {
             None
         };
+        // A Workstation VM's disks that VBoxManage reads get registered too (hand check): they are closed after.
+        let sources: Vec<PathBuf> = self
+            .hypervisors
+            .hardware(&spec.vm_key)
+            .await
+            .map(|h| h.disks.iter().map(|d| PathBuf::from(&d.path)).collect())
+            .unwrap_or_default();
         let ran = tokio::select! {
             biased;
             _ = token.cancelled() => Err(CoreError::Cancelled),
             ran = self.export_into(spec, &folder, &tools, progress) => ran,
         };
         if let Some(before) = &before {
-            self.release_media(&tools, before, &[&folder], &[]).await;
+            let files: Vec<&Path> = sources.iter().map(PathBuf::as_path).collect();
+            self.release_media(&tools, before, &[&folder], &files).await;
         }
         match ran {
             Ok(note) => Ok(note),

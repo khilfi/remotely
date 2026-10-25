@@ -33,7 +33,9 @@ pub fn qemu_convert(source: &Path, from: DiskFormat, target: &Path, out: OutputK
         OutputKind::VhdFixed => Some("subformat=fixed,force_size=on"),
         OutputKind::VhdxDynamic => Some("subformat=dynamic"),
         OutputKind::VhdxFixed => Some("subformat=fixed"),
-        OutputKind::Qcow2Thick => Some("preallocation=full"),
+        // qemu-img's Windows file driver takes neither `full` nor `falloc`; `metadata` makes the file its full size
+        // there (NTFS allocates it).
+        OutputKind::Qcow2Thick => Some("preallocation=metadata"),
         OutputKind::VmdkEsx | OutputKind::VdiDynamic | OutputKind::Qcow2 | OutputKind::Raw => None,
     };
     if let Some(options) = options {

@@ -729,7 +729,7 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
 - qemu-img (QEMU for Windows, `C:\Program Files\qemu\qemu-img.exe` by default; GPL, never shipped): `convert -p -f <in>
   -O <out> [-o ...]` prints `    (NN.NN/100%)\r`; `-O vpc -o subformat=fixed,force_size=on` keeps a VHD's exact size
   (without force_size it rounds to a CHS geometry), `-O vhdx -o subformat=dynamic|fixed`, `-O vdi -o static=on`,
-  `-O qcow2 -o preallocation=full`, `-O vmdk -o subformat=monolithicSparse|monolithicFlat|streamOptimized` (no
+  `-O qcow2 -o preallocation=metadata` (on Windows its file driver refuses `full` and `falloc`, and `metadata` makes the file its full size), `-O vmdk -o subformat=monolithicSparse|monolithicFlat|streamOptimized` (no
   `vmfs`). A failure prints `C:\...\qemu-img.exe: <message>` and exits 1. `compare -f A -F B a b` exits 0 ("Images
   are identical."), 1 when they differ ("Content mismatch at offset N!"), 2 on an error. Remotely always passes `-f`
   (and `-F`), so it never probes, and never gives it a disk with a parent or a backing file.

@@ -154,7 +154,8 @@ impl ExportTarget {
         match self {
             ExportTarget::Appliance { ova: true, .. } => "ova",
             ExportTarget::Appliance { ova: false, .. } => "ovf",
-            ExportTarget::Esxi { .. } => "esxi",
+            ExportTarget::Esxi { thick: false } => "esxi",
+            ExportTarget::Esxi { thick: true } => "esxi-thick",
             ExportTarget::HyperV => "hyperv",
             ExportTarget::Azure => "azure",
             ExportTarget::Kvm => "kvm",

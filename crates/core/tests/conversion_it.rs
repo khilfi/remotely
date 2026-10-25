@@ -69,7 +69,10 @@ async fn media(converter: &Converter) -> Vec<String> {
     let Some(vbox) = paths.vboxmanage.clone() else {
         return Vec::new();
     };
-    let out = std::process::Command::new(vbox).args(["list", "hdds"]).output().unwrap();
+    let out = std::process::Command::new(vbox)
+        .args(["list", "hdds"])
+        .output()
+        .unwrap();
     remotely_core::convert::args::parse_hdd_locations(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -166,9 +169,15 @@ async fn real_tools_convert_small_images_and_leave_virtualbox_as_it_was() {
                     assert_eq!(&back[4096..4100], b"R5IT", "{kind:?}: the data came through");
                 }
                 if tools.qemu_img().is_some() {
-                    let report = verify(tools.as_ref(), &raw, Some(&target), CancellationToken::new(), Arc::new(|_| {}))
-                        .await
-                        .unwrap();
+                    let report = verify(
+                        tools.as_ref(),
+                        &raw,
+                        Some(&target),
+                        CancellationToken::new(),
+                        Arc::new(|_| {}),
+                    )
+                    .await
+                    .unwrap();
                     assert_eq!(report.same_size, Some(true));
                     if let Some(c) = report.comparison {
                         assert!(c.identical, "{kind:?}: {}", c.said);
@@ -181,7 +190,14 @@ async fn real_tools_convert_small_images_and_leave_virtualbox_as_it_was() {
     // Azure: a size that isn't whole megabytes is rounded up on the way.
     let odd = dir.0.join("odd.raw");
     std::fs::write(&odd, vec![0u8; (8 * MB + 512) as usize]).unwrap();
-    if plan(Source::file(DiskFormat::Raw), OutputKind::VhdFixed, Some(9 * MB), &paths).is_ok() {
+    if plan(
+        Source::file(DiskFormat::Raw),
+        OutputKind::VhdFixed,
+        Some(9 * MB),
+        &paths,
+    )
+    .is_ok()
+    {
         let target = dir.0.join("azure.vhd");
         let spec = ConvertSpec {
             source: odd.display().to_string(),
@@ -197,7 +213,11 @@ async fn real_tools_convert_small_images_and_leave_virtualbox_as_it_was() {
         let info = inspect(&target).await.unwrap();
         assert_eq!(info.virtual_bytes, Some(9 * MB), "rounded up to whole MB: {info:?}");
     }
-    assert_eq!(media(&converter).await, media_before, "VirtualBox's media list is as it was");
+    assert_eq!(
+        media(&converter).await,
+        media_before,
+        "VirtualBox's media list is as it was"
+    );
     // Nothing of the jobs' own is left beside the outputs.
     let leftovers: Vec<String> = std::fs::read_dir(&dir.0)
         .unwrap()
@@ -235,6 +255,7 @@ async fn an_it_workstation_vm_exports_to_each_target() {
     let out = dir.0.join("exports");
     std::fs::create_dir_all(&out).unwrap();
     let qemu = paths.has(Tool::QemuImg);
+    let media_before = media(&converter).await;
     for target in [
         ExportTarget::Appliance {
             ova: true,
@@ -277,8 +298,13 @@ async fn an_it_workstation_vm_exports_to_each_target() {
                 }
                 eprintln!("{target:?}: {files:?}; {note}");
             }
-            Err(err) => eprintln!("{target:?}: not here ({err})"),
+            Err(err) => panic!("{target:?}: {err}"),
         }
+        assert_eq!(
+            media(&converter).await,
+            media_before,
+            "{target:?}: VirtualBox's media list is as it was"
+        );
     }
     let _ = Path::new(&out);
 }

@@ -469,6 +469,55 @@ async fn proxmox_takes_a_vmdk_without_qemu_img_and_an_ova_comes_from_ovftool() {
 }
 
 #[tokio::test]
+async fn an_export_through_virtualbox_leaves_its_media_list_as_it_was() {
+    // A Workstation VM's disk read by VBoxManage (Azure's fixed VHD without qemu-img) is registered by clonemedium;
+    // the export closes it again (found by the hand check with the real VBoxManage).
+    let dir = temp_folder("export-media");
+    let (fake, vmx) = workstation_vm(&dir, false);
+    let (core, tools) = export_core(fake, FakeDiskTools::new()).await;
+    let out = dir.join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let job = queued(
+        core.convert
+            .submit_export(&core.ctx, &vmx, ExportTarget::Azure, &out)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        wait(&core, job).await,
+        JobStatus::Succeeded,
+        "{:?}",
+        outputs(&core, job).await
+    );
+    assert!(
+        tools
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("VBoxManage clonemedium disk")),
+        "{:?}",
+        tools.calls()
+    );
+    assert!(tools.registered().is_empty(), "{:?}", tools.registered());
+    // Both ESXi layouts have folders of their own.
+    for thick in [false, true] {
+        let job = queued(
+            core.convert
+                .submit_export(&core.ctx, &vmx, ExportTarget::Esxi { thick }, &out)
+                .await
+                .unwrap(),
+        );
+        assert_eq!(
+            wait(&core, job).await,
+            JobStatus::Succeeded,
+            "{:?}",
+            outputs(&core, job).await
+        );
+    }
+    assert_eq!(names_in(&out), ["web01-azure", "web01-esxi", "web01-esxi-thick"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn a_running_vm_isnt_exported_and_a_prod_vms_export_asks() {
     let dir = temp_folder("export-refused");
     let (fake, vmx) = workstation_vm(&dir, true);

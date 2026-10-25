@@ -160,7 +160,7 @@ fn qemu_kind(format: &str, options: Option<&str>) -> Option<OutputKind> {
         "vpc" => OutputKind::VhdDynamic,
         "vhdx" if options.contains("subformat=fixed") => OutputKind::VhdxFixed,
         "vhdx" => OutputKind::VhdxDynamic,
-        "qcow2" if options.contains("preallocation=full") => OutputKind::Qcow2Thick,
+        "qcow2" if options.contains("preallocation=metadata") => OutputKind::Qcow2Thick,
         "qcow2" => OutputKind::Qcow2,
         "raw" => OutputKind::Raw,
         _ => return None,
