@@ -238,7 +238,9 @@ src/                  React + TypeScript UI
   hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
                       each timed from when the last one finished; useVisibility); use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
-                      masker), theme.ts, utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
+                      masker), theme.ts, utils.ts, terminal-input.ts (SS-10 input told from xterm.js's replies to the
+                      host, which skip MultiExec: xterm's internal onUserInput, checked by a test), multiexec.ts,
+                      recordings.ts (QL-12 view texts, QL-07 notify choice
                       and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts

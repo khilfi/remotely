@@ -10,9 +10,11 @@
 // right-click paste, and the font size, scrollback and copy-on-select settings, applied live. SS-11:
 // the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if typed;
 // QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
-// command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's keys go
-// to `inputRouter` instead (see multiexec.ts). SS-08: the core says which folder the shell is in (`folder`), and a
-// right-click on a file name in the output goes to `onFileWord` (the page offers to download it) instead of pasting.
+// command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's input
+// (keys, pastes, mouse reports) goes to `inputRouter` instead (see multiexec.ts); xterm.js's replies to the host's
+// queries go to this pane's own connection only (terminal-input.ts tells them apart). SS-08: the core says which
+// folder the shell is in (`folder`), and a right-click on a file name in the output goes to `onFileWord` (the page
+// offers to download it) instead of pasting.
 // SS-07: the core reports the session's tunnels (`tunnels`); one that waits for approval (e.g. one that starts with
 // a Prod session's terminal) goes to `onTunnelAsking`, so the page can show the dialog. Host key questions name the
 // jump host that asks.
@@ -49,6 +51,7 @@ import {
   type TunnelInfo,
   type TunnelStart,
 } from "@/lib/api";
+import { InputOrigin } from "@/lib/terminal-input";
 import type { ResolvedTheme } from "@/lib/theme";
 import { fileWordAt } from "@/lib/transfers";
 
@@ -194,6 +197,8 @@ export class PaneSession {
   private readonly listeners = new Set<() => void>();
   private pending: Uint8Array[] = [];
   private writing = false;
+  /** SS-10: each terminal's input told from its replies (the real one, and the masked one while presenting). */
+  private readonly origins = new WeakMap<Terminal, InputOrigin>();
   copyOnSelect = true;
   /** QL-07: called when the core reports a long command that finished here. */
   onCommandFinished: ((finished: CommandFinished) => void) | null = null;
@@ -286,12 +291,21 @@ export class PaneSession {
     return search;
   }
 
-  /** Keys, pastes, the host's queries and size changes come from the terminal on screen only. */
+  /**
+   * Keys, pastes, the host's queries and size changes come from the terminal on screen only. SS-10: input goes
+   * through `send` (MultiExec, when it has this pane); xterm.js's replies to the host go to this pane alone.
+   */
   private wire(term: Terminal) {
+    const origin = new InputOrigin(term);
+    this.origins.set(term, origin);
     term.onData((data) => {
-      if (term === this.screen) this.send(encoder.encode(data));
+      // Asked for every event, in order, so a mark never outlives its own data.
+      const input = origin.isInput(data);
+      if (term !== this.screen) return;
+      if (input) this.send(encoder.encode(data));
+      else this.reply(encoder.encode(data));
     });
-    // Binary data (some mouse reports) is one byte per character.
+    // Binary data (mouse reports in the default encoding) is one byte per character: input, like other mouse reports.
     term.onBinary((data) => {
       if (term === this.screen) this.send(Uint8Array.from(data, (c) => c.charCodeAt(0) & 0xff));
     });
@@ -663,6 +677,7 @@ export class PaneSession {
 
   // ---- input ----
 
+  /** The user's input: keys, pastes, mouse reports. */
   private send(bytes: Uint8Array) {
     // Always, so no key typed with MultiExec on skips its checks (one typed just before may still be writing; the
     // core then knows that terminal's line holds text it did not see).
@@ -670,6 +685,15 @@ export class PaneSession {
       this.inputRouter(this, bytes);
       return;
     }
+    this.pending.push(bytes);
+    this.flush();
+  }
+
+  /**
+   * SS-10: xterm.js's reply to the host's query (cursor position, device attributes, colours, focus): to this pane's
+   * own connection only, never through MultiExec. The core still counts it as text MultiExec did not see on the line.
+   */
+  private reply(bytes: Uint8Array) {
     this.pending.push(bytes);
     this.flush();
   }
@@ -724,7 +748,17 @@ export class PaneSession {
    * for Enter even when the command has several lines). See `sendCommand` in command-send.ts.
    */
   pasteCommand(command: string) {
-    this.screen.paste(command);
+    this.pasteText(command);
+  }
+
+  /**
+   * Into the terminal on screen, as the user's input: xterm.js turns each CRLF or LF into CR and brackets the text
+   * when the shell asked for bracketed paste.
+   */
+  private pasteText(text: string) {
+    const term = this.screen;
+    this.origins.get(term)?.mark();
+    term.paste(text);
   }
 
   /** BX-08 Shift+click: runs what was pasted. */
@@ -749,7 +783,7 @@ export class PaneSession {
   async pasteFromClipboard() {
     try {
       const text = await api.clipboardReadText();
-      if (text) this.screen.paste(text);
+      if (text) this.pasteText(text);
     } catch {
       this.say("\r\n\x1b[2m[Paste with Ctrl+V]\x1b[0m\r\n");
     }
