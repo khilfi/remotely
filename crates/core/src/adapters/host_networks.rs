@@ -607,6 +607,46 @@ pub fn vm_paths(pairs: &[(String, String)]) -> VboxVmPaths {
     }
 }
 
+/// VirtualBox's answer when another client holds or is taking a VM's session lock (a second `showvminfo` on the same
+/// VM at the same moment fails with one of these): worth asking again in a moment.
+pub fn vbox_busy(err: &CoreError) -> bool {
+    let CoreError::VboxManage { message, .. } = err else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    ["lock request pending", "session is not locked", "object is not ready"]
+        .iter()
+        .any(|m| message.contains(m))
+}
+
+/// Waits before asking a busy VirtualBox again.
+const BUSY_RETRIES: [std::time::Duration; 3] = [
+    std::time::Duration::from_millis(300),
+    std::time::Duration::from_millis(800),
+    std::time::Duration::from_millis(1500),
+];
+
+/// `showvminfo <uuid> --machinereadable` as `key=value` pairs, asked again (up to three times) while VirtualBox says
+/// another client has the VM's session lock.
+pub async fn showvminfo_pairs(
+    vbox: &dyn crate::adapters::virtualbox::VirtualBoxAdapter,
+    uuid: &str,
+    timeout: std::time::Duration,
+) -> Result<Vec<(String, String)>> {
+    let args = || vec!["showvminfo".to_owned(), uuid.to_owned(), "--machinereadable".to_owned()];
+    let mut waits = BUSY_RETRIES.iter();
+    loop {
+        match vbox.vboxmanage_host(args(), timeout).await {
+            Ok(out) => return Ok(crate::adapters::virtualbox::parse_machine_readable(&out)),
+            Err(err) if vbox_busy(&err) => match waits.next() {
+                Some(wait) => tokio::time::sleep(*wait).await,
+                None => return Err(err),
+            },
+            Err(err) => return Err(err),
+        }
+    }
+}
+
 /// `list systemproperties`: `Default machine folder:   C:\Users\alice\VirtualBox VMs`.
 pub fn default_machine_folder(out: &str) -> Option<PathBuf> {
     out.lines().find_map(|line| {
@@ -1044,6 +1084,85 @@ mod tests {
             Some(PathBuf::from(r"C:\Users\alice\VirtualBox VMs"))
         );
         assert_eq!(default_machine_folder("Default machine folder:\n"), None);
+    }
+
+    fn vbox_error(message: &str) -> CoreError {
+        CoreError::VboxManage {
+            command: "showvminfo".into(),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn a_vm_locked_by_another_client_is_busy_and_other_errors_are_not() {
+        assert!(vbox_busy(&vbox_error(
+            "The machine 'lab01' already has a lock request pending"
+        )));
+        assert!(vbox_busy(&vbox_error(
+            "The session is not locked (session state: Unlocked)"
+        )));
+        assert!(vbox_busy(&vbox_error("The object is not ready")));
+        assert!(!vbox_busy(&vbox_error("Could not find a registered machine named 'x'")));
+        assert!(!vbox_busy(&CoreError::VboxManageNotFound));
+    }
+
+    /// VirtualBox that is busy for the first `busy` calls, then answers.
+    struct BusyThenReady {
+        busy: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::adapters::virtualbox::VirtualBoxAdapter for BusyThenReady {
+        fn tool_path(&self) -> Option<PathBuf> {
+            None
+        }
+        async fn list_vms(&self) -> Result<Vec<crate::adapters::virtualbox::VboxListedVm>> {
+            Err(CoreError::VboxManageNotFound)
+        }
+        async fn list_running(&self) -> Result<Vec<String>> {
+            Err(CoreError::VboxManageNotFound)
+        }
+        async fn vm_info(&self, _: &str) -> Result<crate::adapters::virtualbox::VboxVmInfo> {
+            Err(CoreError::VboxManageNotFound)
+        }
+        async fn guest_properties(&self, _: &str) -> Result<crate::adapters::virtualbox::GuestProperties> {
+            Err(CoreError::VboxManageNotFound)
+        }
+        async fn power(&self, _: &str, _: crate::command_bus::PowerOp) -> Result<()> {
+            Err(CoreError::VboxManageNotFound)
+        }
+        async fn snapshot(&self, _: &str, _: &crate::command_bus::SnapshotOp) -> Result<()> {
+            Err(CoreError::VboxManageNotFound)
+        }
+        async fn snapshots(&self, _: &str) -> Result<crate::adapters::vmware::SnapshotTree> {
+            Err(CoreError::VboxManageNotFound)
+        }
+        async fn vboxmanage_host(&self, _: Vec<String>, _: std::time::Duration) -> Result<String> {
+            let left = self.busy.load(std::sync::atomic::Ordering::SeqCst);
+            if left > 0 {
+                self.busy.store(left - 1, std::sync::atomic::Ordering::SeqCst);
+                return Err(vbox_error("The machine 'lab01' already has a lock request pending"));
+            }
+            Ok("LogFldr=\"C:\\\\VMs\\\\lab01\\\\Logs\"\n".into())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn showvminfo_is_asked_again_while_virtualbox_is_busy() {
+        let twice = BusyThenReady {
+            busy: std::sync::atomic::AtomicUsize::new(2),
+        };
+        let pairs = showvminfo_pairs(&twice, "u-1", std::time::Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(vm_paths(&pairs).log_folder, Some(PathBuf::from(r"C:\VMs\lab01\Logs")));
+        let always = BusyThenReady {
+            busy: std::sync::atomic::AtomicUsize::new(10),
+        };
+        let err = showvminfo_pairs(&always, "u-1", std::time::Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(vbox_busy(&err), "gives up after three more tries");
     }
 
     #[test]

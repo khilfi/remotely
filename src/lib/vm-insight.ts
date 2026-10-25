@@ -88,7 +88,9 @@ export function logMatches(text: string, query: string, max = MAX_MATCHES): LogM
   const out: LogMatch[] = [];
   const lines = text.split("\n");
   for (let i = 0; i < lines.length && out.length < max; i++) {
-    if (lines[i].toLowerCase().includes(needle)) out.push({ line: i + 1, text: lines[i] });
+    // Workstation's logs end their lines with CRLF.
+    const line = lines[i].replace(/\r$/, "");
+    if (line.toLowerCase().includes(needle)) out.push({ line: i + 1, text: line });
   }
   return out;
 }

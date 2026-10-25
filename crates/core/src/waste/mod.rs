@@ -21,9 +21,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::adapters::host_networks::{default_machine_folder, vm_paths};
+use crate::adapters::host_networks::{default_machine_folder, showvminfo_pairs, vm_paths};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
-use crate::adapters::virtualbox::parse_machine_readable;
 use crate::adapters::vmware::path_key;
 use crate::domain::{now_rfc3339, Context, Environment, PowerState};
 use crate::error::{CoreError, Result};
@@ -36,6 +35,9 @@ pub use rules::{IdleVerdict, WasteOptions};
 
 const VBOX_TIMEOUT: Duration = Duration::from_secs(30);
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Each VirtualBox VM's files, read once per report.
+type VboxPaths = std::collections::HashMap<String, crate::adapters::host_networks::VboxVmPaths>;
 
 /// A VM as each section of the report names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -178,14 +180,26 @@ impl WasteFinder {
                 retention.label()
             ));
         }
+        // VirtualBox refuses a second session lock on a VM while one is pending, so its VMs are asked one at a time:
+        // their files first (once each), then their snapshots while nothing else asks.
+        let mut problems = Vec::new();
+        let mut paths = VboxPaths::new();
+        for vm in vms.iter().filter(|v| v.hypervisor == Hypervisor::VirtualBox) {
+            match self.vbox_paths(&vm.vmx_path).await {
+                Ok(found) => {
+                    paths.insert(vm.vmx_path.clone(), found);
+                }
+                Err(CoreError::VboxManageNotFound) => break,
+                Err(err) => problems.push(format!("{}: {err}", vm.display_name)),
+            }
+        }
         let (idle, suspended, chains, searched) = tokio::join!(
             self.idle(&vms, idle_days),
-            self.suspended(&vms),
-            self.chains(&vms, options),
+            self.suspended(&vms, &paths),
+            self.chains(&vms, options, &paths),
             self.orphans(&vms),
         );
         let idle = idle?;
-        let (suspended, mut problems) = suspended;
         let (chains, chain_problems) = chains;
         problems.extend(chain_problems);
         let (orphans, searched, skipped) = searched?;
@@ -265,20 +279,12 @@ impl WasteFinder {
 
     /// A VirtualBox VM's files as `showvminfo` names them.
     async fn vbox_paths(&self, key: &str) -> Result<crate::adapters::host_networks::VboxVmPaths> {
-        let out = self
-            .hypervisors
-            .virtualbox()
-            .vboxmanage_host(
-                vec!["showvminfo".into(), key.to_owned(), "--machinereadable".into()],
-                VBOX_TIMEOUT,
-            )
-            .await?;
-        Ok(vm_paths(&parse_machine_readable(&out)))
+        let pairs = showvminfo_pairs(self.hypervisors.virtualbox().as_ref(), key, VBOX_TIMEOUT).await?;
+        Ok(vm_paths(&pairs))
     }
 
-    async fn suspended(&self, vms: &[VmRecord]) -> (Vec<SuspendedVm>, Vec<String>) {
+    async fn suspended(&self, vms: &[VmRecord], paths: &VboxPaths) -> Vec<SuspendedVm> {
         let mut out = Vec::new();
-        let mut problems = Vec::new();
         for vm in vms.iter().filter(|v| v.power_state == PowerState::Suspended) {
             let mut row = SuspendedVm {
                 vm: WasteVm::of(vm),
@@ -297,19 +303,19 @@ impl WasteFinder {
                         }
                     }
                 }
-                Hypervisor::VirtualBox => match self.vbox_paths(&vm.vmx_path).await {
-                    Ok(paths) => {
-                        // A3: a state file on a share or a device path is never opened.
-                        let state = paths.state_file.filter(|p| crate::untrusted::path_refusal(p).is_none());
-                        if let Some(state) = state {
-                            if let Ok(meta) = tokio::fs::metadata(&state).await {
-                                row.state_bytes = Some(meta.len());
-                                row.since = meta.modified().ok().and_then(folders::rfc3339);
-                            }
+                Hypervisor::VirtualBox => {
+                    // A3: a state file on a share or a device path is never opened.
+                    let state = paths
+                        .get(&vm.vmx_path)
+                        .and_then(|p| p.state_file.clone())
+                        .filter(|p| crate::untrusted::path_refusal(p).is_none());
+                    if let Some(state) = state {
+                        if let Ok(meta) = tokio::fs::metadata(&state).await {
+                            row.state_bytes = Some(meta.len());
+                            row.since = meta.modified().ok().and_then(folders::rfc3339);
                         }
                     }
-                    Err(err) => problems.push(format!("{}: {err}", vm.display_name)),
-                },
+                }
             }
             if let Some(folder) = folder {
                 row.folder_bytes = blocking(move || folders::folder_size(&folder, &HashSet::new()).bytes)
@@ -319,10 +325,15 @@ impl WasteFinder {
             out.push(row);
         }
         out.sort_by_key(|s| std::cmp::Reverse(s.state_bytes));
-        (out, problems)
+        out
     }
 
-    async fn chains(&self, vms: &[VmRecord], options: WasteOptions) -> (Vec<SnapshotChain>, Vec<String>) {
+    async fn chains(
+        &self,
+        vms: &[VmRecord],
+        options: WasteOptions,
+        paths: &VboxPaths,
+    ) -> (Vec<SnapshotChain>, Vec<String>) {
         let mut out = Vec::new();
         let mut problems = Vec::new();
         let limit = options.chain_gb.saturating_mul(1_000_000_000);
@@ -343,7 +354,7 @@ impl WasteFinder {
                 continue;
             }
             let depth = rules::chain_depth(&tree);
-            let bytes = self.snapshot_bytes(vm).await;
+            let bytes = self.snapshot_bytes(vm, paths).await;
             let mut why = Vec::new();
             if depth >= options.chain_depth as usize {
                 why.push(format!("{depth} snapshots deep"));
@@ -374,16 +385,16 @@ impl WasteFinder {
     }
 
     /// What a VM's snapshot files take.
-    async fn snapshot_bytes(&self, vm: &VmRecord) -> Option<u64> {
+    async fn snapshot_bytes(&self, vm: &VmRecord, paths: &VboxPaths) -> Option<u64> {
         match vm.hypervisor {
             Hypervisor::Vmware => {
                 let folder = vm_folder(vm)?;
                 blocking(move || snapshot_files(&folder)).await.ok().flatten()
             }
             Hypervisor::VirtualBox => {
-                let paths = self.vbox_paths(&vm.vmx_path).await.ok()?;
-                let folder = paths.snapshot_folder?;
-                let state = paths.state_file.clone();
+                let found = paths.get(&vm.vmx_path)?;
+                let folder = found.snapshot_folder.clone()?;
+                let state = found.state_file.clone();
                 blocking(move || {
                     if folders::refusal(&folder).is_some() {
                         return None;
@@ -444,6 +455,10 @@ impl WasteFinder {
             let mut searched = Vec::new();
             let mut skipped = Vec::new();
             for root in roots {
+                // A folder that isn't there (a default folder never made) has nothing to search; a refused one is named.
+                if crate::untrusted::path_refusal(&root).is_none() && !root.is_dir() {
+                    continue;
+                }
                 if let Some(reason) = folders::refusal(&root) {
                     skipped.push(SkippedFolder {
                         path: root.display().to_string(),

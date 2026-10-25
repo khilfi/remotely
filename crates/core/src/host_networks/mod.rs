@@ -27,7 +27,6 @@ use crate::adapters::host_networks::{
     self as net, ForwardProtocol, VboxHostOnlyIf, VboxNatNetwork, VboxRule, Vmnet, VmnetForward, VmnetKind,
 };
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
-use crate::adapters::virtualbox::parse_machine_readable;
 use crate::adapters::vm_hardware::{VirtualNic, VmHardware};
 use crate::command_bus::Command;
 use crate::domain::{now_rfc3339, Context, Environment, PowerState, Target, TargetRef};
@@ -375,6 +374,39 @@ fn adapters_from(vm: VmRecord, hardware: VmHardware, stale: bool) -> VmAdapters 
     }
 }
 
+/// Workstation's lists, read before the VMs' adapters are known.
+struct VmwareLists {
+    side: VmwareNetworks,
+    vmnets: Vec<Vmnet>,
+    /// Each NAT vmnet's forwards, and why they could not all be read.
+    forwards: BTreeMap<String, (Vec<VmnetForward>, Option<String>)>,
+}
+
+impl VmwareLists {
+    fn with_vms(self, vms: &[VmAdapters]) -> VmwareNetworks {
+        let mut side = self.side;
+        if !side.available {
+            return side;
+        }
+        let mut forwards = self.forwards;
+        side.networks = vmware_views(self.vmnets, vms);
+        for view in side.networks.iter_mut() {
+            if let Some((list, problem)) = forwards.remove(&view.network.name) {
+                view.forwards = list;
+                view.forwards_problem = problem;
+            }
+        }
+        side
+    }
+}
+
+/// VirtualBox's lists, read before the VMs' adapters are known.
+struct VirtualBoxLists {
+    side: VirtualBoxNetworks,
+    host_only: Vec<VboxHostOnlyIf>,
+    nat_networks: Vec<VboxNatNetwork>,
+}
+
 /// VM-11: host networks, read on demand; changes through the bus.
 #[derive(Clone)]
 pub struct HostNetworks {
@@ -390,87 +422,95 @@ impl HostNetworks {
     /// VM-11: both hypervisors' networks, the VMs on each and their forwards, read now. A hypervisor that isn't
     /// installed has nothing; one that fails says why, and the other is still read.
     pub async fn report(&self, ctx: &Context) -> Result<HostNetworksReport> {
-        let vms = self.read_adapters(ctx).await?;
+        // The VMs' adapters and the tools' lists don't depend on each other: read them at once (vmrun alone takes
+        // seconds a call).
+        let (vms, vmware, virtualbox) =
+            tokio::join!(self.read_adapters(ctx), self.vmware_lists(), self.virtualbox_lists());
+        let vms = vms?;
         let stale_vms = vms
             .iter()
             .filter(|e| e.stale)
             .map(|e| e.vm.display_name.clone())
             .collect();
-        let (vmware, virtualbox) = tokio::join!(self.vmware_side(&vms), self.virtualbox_side(&vms));
         Ok(HostNetworksReport {
-            vmware,
-            virtualbox,
+            vmware: vmware.with_vms(&vms),
+            virtualbox: self.virtualbox_side(virtualbox, &vms).await,
             stale_vms,
             read_at: now_rfc3339(),
         })
     }
 
-    async fn vmware_side(&self, vms: &[VmAdapters]) -> VmwareNetworks {
+    /// Workstation's vmnets and each NAT vmnet's forwards.
+    async fn vmware_lists(&self) -> VmwareLists {
         let vmware = self.hypervisors.vmware();
         let listed = vmware
             .vmrun_host(vec!["listHostNetworks".into()], READ_TIMEOUT)
             .await
             .and_then(|out| net::parse_host_networks(&out));
-        let mut side = VmwareNetworks {
-            available: true,
-            forwards_refused: vmware.nat_refusal(),
-            ..Default::default()
+        let mut lists = VmwareLists {
+            side: VmwareNetworks {
+                available: true,
+                forwards_refused: vmware.nat_refusal(),
+                ..Default::default()
+            },
+            vmnets: Vec::new(),
+            forwards: BTreeMap::new(),
         };
-        let vmnets = match listed {
-            Ok(vmnets) => vmnets,
-            Err(CoreError::VmrunNotFound) => {
-                side.available = false;
-                return side;
-            }
-            Err(err) => {
-                side.problem = Some(err.to_string());
-                Vec::new()
-            }
-        };
-        side.networks = vmware_views(vmnets, vms);
-        for view in side.networks.iter_mut().filter(|v| v.network.kind == VmnetKind::Nat) {
-            match vmnet_forwards(&self.hypervisors, &view.network.name).await {
-                Ok((forwards, problem)) => {
-                    view.forwards = forwards;
-                    view.forwards_problem = problem;
-                }
-                Err(err) => view.forwards_problem = Some(err.to_string()),
-            }
+        match listed {
+            Ok(vmnets) => lists.vmnets = vmnets,
+            Err(CoreError::VmrunNotFound) => lists.side.available = false,
+            Err(err) => lists.side.problem = Some(err.to_string()),
         }
-        side
+        for vmnet in lists.vmnets.iter().filter(|n| n.kind == VmnetKind::Nat) {
+            let read = vmnet_forwards(&self.hypervisors, &vmnet.name)
+                .await
+                .unwrap_or_else(|err| (Vec::new(), Some(err.to_string())));
+            lists.forwards.insert(vmnet.name.clone(), read);
+        }
+        lists
     }
 
-    async fn virtualbox_side(&self, vms: &[VmAdapters]) -> VirtualBoxNetworks {
+    /// VirtualBox's host-only interfaces and NAT networks.
+    async fn virtualbox_lists(&self) -> VirtualBoxLists {
         let vbox = self.hypervisors.virtualbox();
-        let mut side = VirtualBoxNetworks {
-            available: true,
-            ..Default::default()
+        let mut lists = VirtualBoxLists {
+            side: VirtualBoxNetworks {
+                available: true,
+                ..Default::default()
+            },
+            host_only: Vec::new(),
+            nat_networks: Vec::new(),
         };
-        let host_only = vbox
+        match vbox
             .vboxmanage_host(vec!["list".into(), "hostonlyifs".into()], READ_TIMEOUT)
-            .await;
-        let host_only = match host_only {
-            Ok(out) => net::parse_hostonly_ifs(&out),
+            .await
+        {
+            Ok(out) => lists.host_only = net::parse_hostonly_ifs(&out),
             Err(CoreError::VboxManageNotFound) => {
-                side.available = false;
-                return side;
+                lists.side.available = false;
+                return lists;
             }
-            Err(err) => {
-                side.problem = Some(err.to_string());
-                Vec::new()
-            }
-        };
-        let nat_networks = match vbox
+            Err(err) => lists.side.problem = Some(err.to_string()),
+        }
+        match vbox
             .vboxmanage_host(vec!["list".into(), "--long".into(), "natnets".into()], READ_TIMEOUT)
             .await
         {
-            Ok(out) => net::parse_natnets(&out),
+            Ok(out) => lists.nat_networks = net::parse_natnets(&out),
             Err(err) => {
-                side.problem.get_or_insert(err.to_string());
-                Vec::new()
+                lists.side.problem.get_or_insert(err.to_string());
             }
-        };
-        let (host_only, nat, other) = virtualbox_views(host_only, nat_networks, vms);
+        }
+        lists
+    }
+
+    /// VirtualBox's side: its networks with their VMs, and each VM's NAT adapter rules.
+    async fn virtualbox_side(&self, lists: VirtualBoxLists, vms: &[VmAdapters]) -> VirtualBoxNetworks {
+        let mut side = lists.side;
+        if !side.available {
+            return side;
+        }
+        let (host_only, nat, other) = virtualbox_views(lists.host_only, lists.nat_networks, vms);
         side.host_only = host_only;
         side.nat_networks = nat;
         side.other = other;
@@ -744,14 +784,8 @@ async fn vmnet_forwards(hypervisors: &Hypervisors, vmnet: &str) -> Result<(Vec<V
 
 /// A VirtualBox VM's NAT rules, by adapter.
 async fn vm_rules(hypervisors: &Hypervisors, uuid: &str) -> Result<Vec<net::VboxVmRule>> {
-    let out = hypervisors
-        .virtualbox()
-        .vboxmanage_host(
-            vec!["showvminfo".into(), uuid.to_owned(), "--machinereadable".into()],
-            READ_TIMEOUT,
-        )
-        .await?;
-    Ok(net::vm_rules(&parse_machine_readable(&out)))
+    let pairs = net::showvminfo_pairs(hypervisors.virtualbox().as_ref(), uuid, READ_TIMEOUT).await?;
+    Ok(net::vm_rules(&pairs))
 }
 
 fn refused(message: String) -> CoreError {

@@ -76,6 +76,7 @@ test("search finds lines in any letter case and splits them for highlighting", (
     [2, 4],
   );
   assert.deepEqual(logMatches(text, "  "), []);
+  assert.deepEqual(logMatches("one\r\nTwo error\r\n", "error"), [{ line: 2, text: "Two error" }], "CRLF lines");
   assert.equal(logMatches(text, "a", 2).length, 2, "capped");
   assert.deepEqual(splitMatches("Beta error here", "ERROR"), [
     { text: "Beta ", match: false },

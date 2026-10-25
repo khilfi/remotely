@@ -16,9 +16,8 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::adapters::host_networks::vm_paths;
+use crate::adapters::host_networks::{showvminfo_pairs, vm_paths};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
-use crate::adapters::virtualbox::parse_machine_readable;
 use crate::command_bus::ApprovalRecord;
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
@@ -113,16 +112,10 @@ impl VmInsight {
                         return Some(folder.clone());
                     }
                 }
-                let read = self
-                    .hypervisors
-                    .virtualbox()
-                    .vboxmanage_host(
-                        vec!["showvminfo".into(), vm.vmx_path.clone(), "--machinereadable".into()],
-                        SHOWVMINFO_TIMEOUT,
-                    )
-                    .await;
+                let read =
+                    showvminfo_pairs(self.hypervisors.virtualbox().as_ref(), &vm.vmx_path, SHOWVMINFO_TIMEOUT).await;
                 let folder = match read {
-                    Ok(out) => vm_paths(&parse_machine_readable(&out)).log_folder,
+                    Ok(pairs) => vm_paths(&pairs).log_folder,
                     Err(err) => {
                         tracing::debug!(error = %err, "could not ask VirtualBox for a VM's log folder");
                         None

@@ -66,7 +66,7 @@ impl Store {
         }
         let rows = sqlx::query(
             "SELECT job_id, status, error, duration_ms, safety_snapshot, finished_at FROM job_targets
-             WHERE workspace_id = ? AND target_key = ? COLLATE NOCASE AND job_id IN (SELECT value FROM json_each(?))",
+             WHERE workspace_id = ? AND target_key = ? AND job_id IN (SELECT value FROM json_each(?))",
         )
         .bind(ctx.workspace_id.to_string())
         .bind(key)

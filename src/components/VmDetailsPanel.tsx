@@ -144,7 +144,8 @@ export function VmDetailsPanel(props: Props) {
         aria-label={`${vm.displayName}'s details`}
       >
         <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
-          <TabsList>
+          {/* Six tabs wrap in a narrow panel rather than widen it. */}
+          <TabsList className="h-auto! max-w-full flex-wrap justify-start *:flex-none">
             <TabsTrigger value="details">Details</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
             <TabsTrigger value="system">System</TabsTrigger>
