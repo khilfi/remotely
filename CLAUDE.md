@@ -190,7 +190,13 @@ crates/core/          remotely-core: all app logic
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
                       command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
-                      or label) for the Terminal page
+                      or label) for the Terminal page; sessions/defaults.rs QL-16 folder defaults (user, login, jump
+                      host, label, tags; migration 0021) and Folders::resolve, the one resolver: a session's own
+                      value, then the nearest folder up the path, then the app's default (tags add up; labels only
+                      add; a folder's jump host never applies to itself). The store resolves every session it reads
+                      (SessionRecord's fields are what applies, `own` what the editor edits, `inherited` the folders),
+                      so every consumer gets it; set_folder_defaults, move_to, move_folder, delete_folder and restore
+                      check SecretBindings like a session edit (confirm_folder_change, SecretPlaces read once)
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited);
@@ -249,7 +255,15 @@ crates/core/          remotely-core: all app logic
                       FileTransfers (Core.files: staged files, uploads, retries);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
-                      closed with the terminal, audited tunnel_opened and tunnel_closed
+                      closed with the terminal, audited tunnel_opened and tunnel_closed;
+                      rules.rs QL-17 highlight and alert rules: built-ins (Error, Fatal, Panic, Python traceback,
+                      Warning; alerts off by default), the user's own (at most 50, audited terminal_rule_changed
+                      without the pattern, read-only lock Change::TerminalRules), check_pattern (a subset Rust regex
+                      and JS with the u flag read alike; \d \w \s \b . compiled with their JS meaning; nested
+                      repeats refused), RuleBook on a watch channel; alerts.rs per-pane AlertWatch: completed lines
+                      (log.rs ScrubbedLines, secrets scrubbed) matched on 2,000 characters, never full-screen,
+                      secret-prompt or typed lines; one TerminalEvent::Alert per 2 s burst, then a 60 s cooldown per
+                      rule per pane
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
                       library (library.rs: ~525 Linux commands in 30 area groups plus TROUBLESHOOT symptom runbooks
                       that reference them; two LibrarySections), {{variables}} (variables.rs); classified by the bus's
@@ -267,6 +281,11 @@ crates/core/          remotely-core: all app logic
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
+    multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
+                      characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
+                      sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
+                      leaves its groups; open_terminals lists a group's open terminals. Groups only choose MultiExec's
+                      targets
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited; a new key type for a host
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
@@ -274,11 +293,15 @@ crates/core/          remotely-core: all app logic
                       authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
                       and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
-                      format version; new exports use file::KDF, 256 MiB and 3 passes, and a file opens with the
-                      parameters in its header, so older 64 MiB files still import), preview with conflicts (skip,
-                      replace, keep both), commit; audited; an export refuses the vault password as its passphrase;
-                      catalog.rs VM-19 to VM-21 own sizes, images by path (a note when the file isn't here; a refused
-                      path can only be skipped) and templates mapped to this laptop's images, sizes and keys
+                      format version 2 for an export that uses QL-16 folder defaults, else 1, which 0.4.x reads; new
+                      exports use file::KDF, 256 MiB and 3 passes, and a file opens with the parameters in its header,
+                      so older 64 MiB files still import), preview with conflicts (skip, replace, keep both), commit;
+                      audited; an export refuses the vault password as its passphrase; catalog.rs VM-19 to VM-21 own
+                      sizes, images by path (a note when the file isn't here; a refused path can only be skipped) and
+                      templates mapped to this laptop's images, sizes and keys; QL-16 sessions travel with what they
+                      set themselves and folders with their defaults (a folder here with other defaults: keep or
+                      replace); groups.rs QL-19 MultiExec groups by name with their sessions' ids (members become the
+                      sessions imported or matched here, the rest left out with a note)
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -292,7 +315,8 @@ crates/core/          remotely-core: all app logic
                       vault password may go without asking (a saved session at that host, port and jump host logs in
                       with it, gives it to sudo, or a session_secret_grants row from an earlier answer, migration
                       0016; one added since the unlock goes to its first place free; keys and key passphrases never
-                      ask; a right answer covers REAUTH_GRACE, 5 min, ended by a lock);
+                      ask; a right answer covers REAUTH_GRACE, 5 min, ended by a lock; QL-16 SecretPlaces: every
+                      session's place and what it sends, its folders' login included, read once per change);
                       Core::spawn_lock_watch closes kept connections, forgets typed logins and an open FD-07 file;
                       strength.rs (a new vault password or FD-07 export passphrase: 10 to 1024 characters and a
                       zxcvbn-style score of at least 3 of 4: common passwords and words, repeats, sequences,
@@ -301,7 +325,8 @@ crates/core/          remotely-core: all app logic
     store/            jobs.rs: the journal stores Command::for_journal (scripts and lines redacted), command_type
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
-                      and verifies and exports with row streams
+                      and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
+                      terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021)
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -315,12 +340,13 @@ crates/core/          remotely-core: all app logic
                       (private or public, rate limits), throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
-  tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; alerts.rs and
-                      dashboard.rs: MO-06, MO-07, MO-16); opt-in
+  tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
+                      QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16); opt-in
                       workstation_it.rs and virtualbox_it.rs
-src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
+src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
+                      QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
-                      (command_panel.rs), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
+                      (command_panel.rs; QL-17 notify_terminal_alert), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
                       copies: selections through terminal_copy_selection, Copy output through terminal_output_copy,
                       scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
                       formats), SS-08 file
@@ -360,7 +386,10 @@ src/                  React + TypeScript UI
                       MetricChartWidget, DashboardHistoryCard; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
                       presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; VM-19 to
-                      VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check))
+                      VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check);
+                      QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
+                      MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
+                      (Ctrl+Shift+G); TerminalRulesCard for QL-17)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
@@ -382,7 +411,14 @@ src/                  React + TypeScript UI
                       through paste.ts, every selection copy scrubbed by the core, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
-                      xterm's internal onUserInput, checked by a test), multiexec.ts, recordings.ts (QL-12 view texts,
+                      xterm's internal onUserInput, checked by a test), multiexec.ts, multiexec-groups.ts (QL-19 which
+                      tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
+                      logical lines, matching, caps, grouping by tab), scrollback-xterm.ts (QL-18 reading a pane's
+                      buffer, showing a match with a decoration), highlight-rules.ts (QL-17 scope, compile, match a
+                      logical line to cells, colours per theme, time budget), terminal-highlights.ts (QL-17 xterm
+                      decorations for lines the cursor passed, from a marker; CSI J/K recheck; hidden on the alternate
+                      screen; one per terminal including the FD-03 masked twin), terminal-alerts.ts (QL-17 recent
+                      alerts with subscribe, for QL-25; notification text), recordings.ts (QL-12 view texts,
                       QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
                       transfers-store.ts (SS-08, P6 every transfer outside React state), job-events.ts (P6, VM-01
                       which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest

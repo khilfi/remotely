@@ -460,6 +460,7 @@ async fn auto_linking_never_overwrites_the_users_choice() {
         username: None,
         auth: SessionAuth::Agent,
         jump_session_id: None,
+        jump_direct: false,
         startup_command: None,
         startup_on_reconnect: false,
         prompt_hook: None,

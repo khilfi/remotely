@@ -25,6 +25,9 @@ tracing.workspace = true
 uuid.workspace = true
 hex = "0.4"
 regex = "1"
+# QL-17: a highlight or alert rule's pattern is checked on its syntax tree (what Rust and JavaScript read alike).
+# The version regex already pulls in.
+regex-syntax = "0.8"
 sha2 = "0.11"
 # `local-offset`: local time in session log lines (SS-11) and in FD-07 export file names.
 time = { version = "0.3", features = ["formatting", "parsing", "macros", "serde", "local-offset"] }

@@ -1,13 +1,17 @@
 //! Vault rows (SS-04): `vault_meta` holds the wrapped data key, `vault_items` the ciphertext of each
 //! secret. Nothing here ever sees a plaintext secret or an unwrapped key.
 
+use std::collections::HashMap;
+
 use sqlx::Row;
 use uuid::Uuid;
 
 use super::Store;
 use crate::domain::{now_rfc3339, Context};
 use crate::error::{CoreError, Result};
-use crate::vault::{KdfParams, SecretId, SecretKind, SecretMeta};
+use crate::sessions::Folders;
+use crate::vault::bindings::SecretPlaces;
+use crate::vault::{Destination, KdfParams, SecretId, SecretKind, SecretMeta};
 
 /// The workspace's vault, as stored.
 pub(crate) struct VaultMetaRow {
@@ -200,7 +204,7 @@ impl Store {
 
     /// SS-04, AP-06: whether `secret` already goes to the place `host`, `port` and `jump` describe: a saved
     /// session there (other than `except`) logs in with it, gives it to sudo as a container host, or was
-    /// allowed to use it.
+    /// allowed to use it. QL-16: a login a session has from its folders counts, and so does a jump host.
     pub(crate) async fn secret_allowed_at(
         &self,
         ctx: &Context,
@@ -210,52 +214,58 @@ impl Store {
         jump: Option<Uuid>,
         except: Option<Uuid>,
     ) -> Result<bool> {
-        let secret = secret.0.to_string();
-        let found: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM sessions s
-             WHERE s.workspace_id = ? AND s.host = ? COLLATE NOCASE AND s.port = ? AND s.jump_session_id IS ?
-               AND s.id != ?
-               AND ((s.auth_method = 'password' AND s.credential_id = ?)
-                    OR EXISTS (SELECT 1 FROM container_hosts c
-                               WHERE c.session_id = s.id AND c.sudo = 'password' AND c.sudo_password_id = ?)
-                    OR EXISTS (SELECT 1 FROM session_secret_grants g WHERE g.session_id = s.id AND g.secret_id = ?))
-             LIMIT 1",
-        )
-        .bind(ctx.workspace_id.to_string())
-        .bind(host)
-        .bind(i64::from(port))
-        .bind(jump.map(|j| j.to_string()))
-        .bind(except.map(|id| id.to_string()).unwrap_or_default())
-        .bind(&secret)
-        .bind(&secret)
-        .bind(&secret)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(found.is_some())
+        let places = self.secret_places(ctx).await?;
+        Ok(places.allowed(secret, &Destination::new(host, port, jump), except))
     }
 
-    /// SS-04, AP-06: the vault passwords a saved session sends to its host: its login password, its
-    /// container marks' sudo passwords and the ones it was allowed to use.
+    /// SS-04, AP-06: the vault passwords a saved session sends to its host: its login password (QL-16: its own
+    /// or its folders'), its container marks' sudo passwords and the ones it was allowed to use.
     pub(crate) async fn session_sent_secrets(&self, ctx: &Context, session_id: Uuid) -> Result<Vec<SecretId>> {
-        let session = session_id.to_string();
-        let ids: Vec<String> = sqlx::query_scalar(
-            "SELECT credential_id FROM sessions
-             WHERE workspace_id = ? AND id = ? AND auth_method = 'password' AND credential_id IS NOT NULL
+        Ok(self.secret_places(ctx).await?.sent_by(session_id))
+    }
+
+    /// SS-04, AP-06: where each vault password goes now, as the folders are.
+    pub(crate) async fn secret_places(&self, ctx: &Context) -> Result<SecretPlaces> {
+        let folders = self.session_folders(ctx).await?;
+        self.secret_places_in(ctx, &folders).await
+    }
+
+    /// [`Self::secret_places`] with the folders as `folders` says (QL-16: before or after a change).
+    pub(crate) async fn secret_places_in(&self, ctx: &Context, folders: &Folders) -> Result<SecretPlaces> {
+        let sessions = self.list_sessions_in(ctx, folders).await?;
+        let mut extra: HashMap<Uuid, Vec<SecretId>> = HashMap::new();
+        let rows = sqlx::query(
+            "SELECT session_id, sudo_password_id AS secret_id FROM container_hosts
+             WHERE workspace_id = ? AND sudo = 'password' AND sudo_password_id IS NOT NULL
              UNION
-             SELECT sudo_password_id FROM container_hosts
-             WHERE workspace_id = ? AND session_id = ? AND sudo = 'password' AND sudo_password_id IS NOT NULL
-             UNION
-             SELECT secret_id FROM session_secret_grants WHERE workspace_id = ? AND session_id = ?",
+             SELECT session_id, secret_id FROM session_secret_grants WHERE workspace_id = ?",
         )
         .bind(ctx.workspace_id.to_string())
-        .bind(&session)
         .bind(ctx.workspace_id.to_string())
-        .bind(&session)
-        .bind(ctx.workspace_id.to_string())
-        .bind(&session)
         .fetch_all(&self.pool)
         .await?;
-        ids.iter().map(|id| Ok(SecretId(super::parse_uuid(id)?))).collect()
+        for row in &rows {
+            let session: String = row.try_get("session_id")?;
+            let secret: String = row.try_get("secret_id")?;
+            extra
+                .entry(super::parse_uuid(&session)?)
+                .or_default()
+                .push(SecretId(super::parse_uuid(&secret)?));
+        }
+        Ok(SecretPlaces::new(
+            sessions
+                .iter()
+                .map(|s| {
+                    let mut sends: Vec<SecretId> = s.auth.sent_secret().into_iter().collect();
+                    for secret in extra.remove(&s.id).unwrap_or_default() {
+                        if !sends.contains(&secret) {
+                            sends.push(secret);
+                        }
+                    }
+                    (s.id, Destination::new(&s.host, s.port, s.jump_session_id), sends)
+                })
+                .collect(),
+        ))
     }
 
     /// SS-04, AP-06: lets a saved session use a vault password from now on. False when it already could.
@@ -276,28 +286,37 @@ impl Store {
 
     /// Every secret's label and kind, by label, with the number of sessions using it (logging in with it,
     /// giving it to sudo, or allowed to use it).
+    ///
+    /// QL-16: a session uses the login that applies to it, so one it has from its folders counts.
     pub async fn vault_items(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {
         let rows = sqlx::query(
-            "SELECT v.id, v.kind, v.label, v.created_at, v.updated_at,
-                    (SELECT COUNT(*) FROM sessions s
-                     WHERE s.credential_id = v.id OR s.key_passphrase_id = v.id
-                        OR EXISTS (SELECT 1 FROM container_hosts c
-                                   WHERE c.session_id = s.id AND c.sudo_password_id = v.id)
-                        OR EXISTS (SELECT 1 FROM session_secret_grants g
-                                   WHERE g.session_id = s.id AND g.secret_id = v.id)) AS used_by
+            "SELECT v.id, v.kind, v.label, v.created_at, v.updated_at
              FROM vault_items v WHERE v.workspace_id = ? ORDER BY v.label COLLATE NOCASE",
         )
         .bind(ctx.workspace_id.to_string())
         .fetch_all(&self.pool)
         .await?;
+        let places = self.secret_places(ctx).await?;
+        let mut used: HashMap<SecretId, i64> = HashMap::new();
+        for session in self.list_sessions(ctx).await? {
+            let mut secrets: Vec<SecretId> = places.sent_by(session.id);
+            secrets.extend(session.auth.credential_id());
+            secrets.extend(session.auth.passphrase_id());
+            secrets.sort_by_key(|s| s.0);
+            secrets.dedup();
+            for secret in secrets {
+                *used.entry(secret).or_default() += 1;
+            }
+        }
         rows.iter()
             .map(|r| {
                 let id: String = r.try_get("id")?;
+                let id = SecretId(super::parse_uuid(&id)?);
                 Ok(SecretMeta {
-                    id: SecretId(super::parse_uuid(&id)?),
+                    id,
                     kind: kind_of(r)?,
                     label: r.try_get("label")?,
-                    used_by: r.try_get("used_by")?,
+                    used_by: used.get(&id).copied().unwrap_or(0),
                     created_at: r.try_get("created_at")?,
                     updated_at: r.try_get("updated_at")?,
                 })

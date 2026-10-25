@@ -143,6 +143,7 @@ impl QuickConnect {
             username,
             auth: self.auth.clone(),
             jump_session_id: None,
+            jump_direct: false,
             startup_command: None,
             startup_on_reconnect: false,
             prompt_hook: None,

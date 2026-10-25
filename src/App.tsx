@@ -47,6 +47,7 @@ import {
   ShieldCheckIcon,
   SunIcon,
   TerminalIcon,
+  TextSearchIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -214,6 +215,8 @@ export default function App() {
   // BX-03, SS-10: Compare output and MultiExec, opened from the palette.
   const [terminalCompare, setTerminalCompare] = useState(0);
   const [terminalMultiExec, setTerminalMultiExec] = useState(0);
+  // QL-18: Search all terminals, opened from the palette.
+  const [terminalSearch, setTerminalSearch] = useState(0);
   // SS-10: MultiExec lines are jobs too; their terminals show what happened, so they get no toasts.
   const quietJobs = useRef(new Set<string>());
   // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
@@ -609,6 +612,16 @@ export default function App() {
         setPage("terminal");
       },
     },
+    {
+      id: "search-terminals",
+      label: "Search all terminals (Ctrl+Shift+G)",
+      icon: TextSearchIcon,
+      keywords: "find scrollback output grep every tab",
+      run: () => {
+        setTerminalSearch((n) => n + 1);
+        setPage("terminal");
+      },
+    },
     vault?.status === "unlocked"
       ? {
           id: "lock",
@@ -903,6 +916,7 @@ export default function App() {
                   newRequest={terminalNew}
                   compareRequest={terminalCompare}
                   multiExecRequest={terminalMultiExec}
+                  searchRequest={terminalSearch}
                   vault={vault}
                   onSubmitted={submitted}
                   onOpenVault={show.vault}

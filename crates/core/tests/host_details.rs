@@ -128,6 +128,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str, vm_id: Opt
                 username: Some("alice".into()),
                 auth: SessionAuth::Password { password_id: Some(id) },
                 jump_session_id: None,
+                jump_direct: false,
                 startup_command: None,
                 startup_on_reconnect: false,
                 prompt_hook: None,

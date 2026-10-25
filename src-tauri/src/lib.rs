@@ -10,10 +10,12 @@ mod dashboard;
 pub mod data_dirs;
 pub mod diagnostics;
 mod files;
+mod groups;
 mod host_details;
 mod ipc;
 mod multiexec;
 mod terminal;
+mod terminal_rules;
 mod tunnels;
 pub mod updater;
 mod vm_settings;
@@ -471,6 +473,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::folder_rename,
         ipc::folder_move,
         ipc::folder_delete,
+        ipc::folder_set_defaults,
+        ipc::session_inherited,
         ipc::import_preview,
         ipc::import_guide,
         ipc::import_save_sample,
@@ -590,6 +594,10 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         multiexec::multiexec_recorded_output,
         multiexec::multiexec_recorded_diff,
         multiexec::multiexec_export,
+        groups::multiexec_groups_list,
+        groups::multiexec_group_create,
+        groups::multiexec_group_update,
+        groups::multiexec_group_delete,
         command_panel::favourites_list,
         command_panel::favourite_add,
         command_panel::favourite_update,
@@ -600,7 +608,15 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         command_panel::command_fill,
         command_panel::terminal_type_secret,
         command_panel::notify_command_finished,
+        command_panel::notify_terminal_alert,
         command_panel::open_manual,
+        terminal_rules::terminal_rules_list,
+        terminal_rules::terminal_rule_validate,
+        terminal_rules::terminal_rule_add,
+        terminal_rules::terminal_rule_update,
+        terminal_rules::terminal_rule_delete,
+        terminal_rules::terminal_rules_reorder,
+        terminal_rules::terminal_rule_set_builtin,
         catalog::catalog_profiles,
         catalog::catalog_sites,
         catalog::catalog_sizes,

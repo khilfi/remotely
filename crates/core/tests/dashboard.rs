@@ -605,6 +605,7 @@ async fn the_services_widget_reads_on_the_dashboards_connection_and_never_logs_i
                     password_id: Some(password_id),
                 },
                 jump_session_id: None,
+                jump_direct: false,
                 startup_command: None,
                 startup_on_reconnect: false,
                 prompt_hook: None,

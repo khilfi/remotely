@@ -1,9 +1,10 @@
 //! FD-07: encrypted export and import of the session library, so sessions move between the owner's
 //! laptops (and, later, to a teammate).
 //!
-//! * Export writes one file (see [`file`]) with the session folders, the sessions (with their tags,
-//!   environment labels and colours), the trusted host keys, the favourite commands (BX-08), the spec catalogue
-//!   (VM-19 to VM-21: own sizes, images by path, launch templates; [`catalog`]) and, only
+//! * Export writes one file (see [`file`]) with the session folders (QL-16: with their defaults), the sessions
+//!   (with their tags, environment labels and colours: what each sets itself, so it takes the rest from its folders
+//!   again), the trusted host keys, the favourite commands (BX-08), the spec catalogue (VM-19 to VM-21: own sizes,
+//!   images by path, launch templates; [`catalog`]), the saved MultiExec groups (QL-19) and, only
 //!   when the user ticks it, the vault's secrets with their values. The user chooses the passphrase; Argon2id turns it into the
 //!   AES-256-GCM key. The passphrase passes the same strength check as a new vault password (SS-04) and
 //!   may not be the vault password itself. The vault's labels always go along (they are not secret), so
@@ -24,15 +25,22 @@
 //! * SS-04, AP-06: an import whose sessions would send passwords already in this vault (found by label,
 //!   for a file without values or a secret skipped), or that moves a session that sends vault passwords
 //!   to another host, asks for the vault password once: otherwise a crafted file could point a session
-//!   at a server of someone's choosing with a customer's password. When the vault locks, an opened file
-//!   (which may hold secret values) is closed.
+//!   at a server of someone's choosing with a customer's password. QL-16: so does one whose sessions would
+//!   log in with a folder's password already here, or whose folder defaults give one to sessions, or change
+//!   the jump host or login of a folder here whose sessions send vault passwords. When the vault locks, an
+//!   opened file (which may hold secret values) is closed.
+//! * QL-16: a folder's defaults come along with it. A folder new here gets the file's; one here already with
+//!   other defaults is a choice (keep this laptop's, the default, or take the file's).
 //! * An export is never written into a Git working tree (the default folder is Documents), so it can't
 //!   end up in a commit by mistake.
 //!
 //! Nothing here touches a VM or a remote host, so it skips the command bus, like the session library.
+//!
+//! QL-19: saved MultiExec groups go along with their member sessions ([`groups`]).
 
 mod catalog;
 pub mod file;
+mod groups;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -53,8 +61,8 @@ use crate::locks;
 use crate::policy::PolicyEngine;
 use crate::presentation::Change;
 use crate::sessions::{
-    rate_startup, Reauth, SessionAuth, SessionColor, SessionFolder, SessionInput, SessionLibrary, SessionRecord,
-    StartupRating,
+    rate_startup, FolderDefaults, Folders, OwnValues, Reauth, SessionAuth, SessionColor, SessionFolder, SessionInput,
+    SessionLibrary, SessionRecord, StartupRating,
 };
 use crate::snippets::{FavouriteInput, Snippets};
 use crate::ssh_keys::PublicKeyInfo;
@@ -66,7 +74,7 @@ use crate::vault::{
 use crate::vm_links::VmLink;
 
 pub use catalog::{CatalogChoices, CatalogCounts, CatalogPreview, CatalogReport};
-pub use file::{FORMAT, FORMAT_VERSION, MAX_FILE_BYTES};
+pub use file::{FORMAT, FORMAT_VERSION, FORMAT_VERSION_PLAIN, MAX_FILE_BYTES};
 
 /// The export file's extension.
 pub const FILE_EXTENSION: &str = "remotely";
@@ -105,6 +113,9 @@ struct Payload {
     /// BX-08, in the order the panel shows them.
     #[serde(default)]
     favourites: Vec<FavouriteEntry>,
+    /// QL-19 saved MultiExec groups, by name. Files from before 0.5.0 have none.
+    #[serde(default)]
+    groups: Vec<groups::GroupEntry>,
     /// VM-19 to VM-21. Files from before 0.5.0 have none.
     #[serde(default)]
     catalog: catalog::CatalogEntries,
@@ -129,6 +140,10 @@ struct FolderEntry {
     #[serde(default)]
     parent_id: Option<Uuid>,
     name: String,
+    /// QL-16: what it sets for its sessions, with vault items and the jump host by their ids in this file. Files
+    /// from before 0.5.0 have none.
+    #[serde(default, skip_serializing_if = "FolderDefaults::is_empty")]
+    defaults: FolderDefaults,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -145,6 +160,9 @@ struct SessionEntry {
     auth: SessionAuth,
     #[serde(default)]
     jump_session_id: Option<Uuid>,
+    /// QL-16: no jump host, whatever its folders set. Files from before 0.5.0 have none.
+    #[serde(default)]
+    jump_direct: bool,
     #[serde(default)]
     startup_command: Option<String>,
     #[serde(default)]
@@ -164,6 +182,45 @@ struct SessionEntry {
     /// CT-01: the container engines it is marked with. Files from before 0.4.0 have none.
     #[serde(default)]
     containers: Vec<ContainerEntry>,
+}
+
+impl Payload {
+    /// QL-16: format 2 when a folder sets defaults or a session takes its login from its folders, which 0.4.x would
+    /// drop (a session would lose its folder's user, login or Prod label there); otherwise format 1, which 0.4.x imports.
+    fn format_version(&self) -> u32 {
+        let uses_folder_defaults = self.folders.iter().any(|f| !f.defaults.is_empty())
+            || self.sessions.iter().any(|s| s.auth == SessionAuth::Folder);
+        if uses_folder_defaults {
+            file::FORMAT_VERSION
+        } else {
+            file::FORMAT_VERSION_PLAIN
+        }
+    }
+}
+
+impl SessionEntry {
+    /// QL-16: what it sets itself, as in the file.
+    fn own(&self) -> OwnValues {
+        OwnValues {
+            username: self.username.clone(),
+            auth: self.auth.clone(),
+            jump_session_id: self.jump_session_id,
+            jump_direct: self.jump_direct,
+            environment: self.environment,
+            tags: self.tags.clone(),
+        }
+    }
+}
+
+/// QL-16: the file's folders with their defaults (ids as in the file), to see what applies to its sessions.
+fn file_folders(payload: &Payload) -> Folders {
+    Folders::new(payload.folders.iter().map(|f| SessionFolder {
+        id: f.id,
+        parent_id: f.parent_id,
+        name: f.name.clone(),
+        sort_order: 0,
+        defaults: f.defaults.clone(),
+    }))
 }
 
 /// CT-01: one engine of a session marked as a container host.
@@ -323,6 +380,10 @@ pub struct ExportReport {
     pub forwards: usize,
     /// CT-01 sessions marked as container hosts.
     pub container_hosts: usize,
+    /// QL-16 folders with defaults.
+    pub folder_defaults: usize,
+    /// QL-19 saved MultiExec groups.
+    pub groups: usize,
     /// VM-19 to VM-21: own sizes, images and launch templates.
     pub catalog: CatalogCounts,
 }
@@ -406,6 +467,10 @@ pub struct TransferPreview {
     pub secret_values: bool,
     /// BX-08 favourite commands.
     pub favourites: Vec<PreviewItem>,
+    /// QL-16: the file's folders that set defaults, compared with the folder at the same place here.
+    pub folder_defaults: Vec<PreviewItem>,
+    /// QL-19 saved MultiExec groups.
+    pub groups: Vec<PreviewItem>,
     /// VM-19 to VM-21: sizes, images and launch templates.
     pub catalog: CatalogPreview,
     pub warnings: Vec<String>,
@@ -432,6 +497,9 @@ pub struct TransferCommit {
     pub secrets: Vec<ItemChoice>,
     #[serde(default)]
     pub favourites: Vec<ItemChoice>,
+    /// QL-19 saved MultiExec groups.
+    #[serde(default)]
+    pub groups: Vec<ItemChoice>,
     /// VM-19 to VM-21.
     #[serde(default)]
     pub catalog: CatalogChoices,
@@ -447,6 +515,9 @@ pub struct TransferCommit {
     /// to the file's hosts (the core asks with `reauth_required`).
     #[serde(default)]
     pub vault_password: Option<SecretString>,
+    /// QL-16: what to do with each folder's defaults (by its index in `folder_defaults`).
+    #[serde(default)]
+    pub folder_defaults: Vec<ItemChoice>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -495,6 +566,8 @@ pub struct TransferReport {
     pub known_hosts: Counts,
     pub secrets: Counts,
     pub favourites: Counts,
+    /// QL-19 saved MultiExec groups.
+    pub groups: Counts,
     /// VM-19 to VM-21.
     pub catalog: CatalogReport,
     /// SS-07: port forwards saved with the imported sessions.
@@ -506,6 +579,8 @@ pub struct TransferReport {
     /// CT-01: imported sessions marked as container hosts.
     pub container_hosts: usize,
     pub folders_added: usize,
+    /// QL-16: folder defaults taken from the file.
+    pub folder_defaults: Counts,
     /// Sessions imported without the password or key they used (not in the file, not here).
     pub without_credentials: usize,
     pub problems: Vec<ItemProblem>,
@@ -650,6 +725,7 @@ const CONFLICT_CHOICES: [ItemAction; 3] = [ItemAction::Skip, ItemAction::Replace
 
 fn plan_sessions(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
     let file_paths = paths(payload.folders.iter().map(|f| (f.id, f.parent_id, f.name.as_str())));
+    let tree = file_folders(payload);
     let no_path = Vec::new();
     payload
         .sessions
@@ -657,19 +733,21 @@ fn plan_sessions(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
         .enumerate()
         .map(|(index, s)| {
             let path = s.folder_id.and_then(|f| file_paths.get(&f)).unwrap_or(&no_path);
+            // QL-16: what each sets itself (both take the rest from their folders).
             let same = |l: &SessionRecord| {
                 let mut a: Vec<String> = s.tags.iter().map(|t| t.to_lowercase()).collect();
-                let mut b: Vec<String> = l.tags.iter().map(|t| t.to_lowercase()).collect();
+                let mut b: Vec<String> = l.own.tags.iter().map(|t| t.to_lowercase()).collect();
                 a.sort();
                 b.sort();
                 let local_path = l.folder_id.and_then(|f| local.folder_paths.get(&f)).unwrap_or(&no_path);
                 s.name == l.name
                     && s.host.eq_ignore_ascii_case(&l.host)
                     && s.port == l.port
-                    && s.username == l.username
-                    && s.auth.method() == l.auth.method()
+                    && s.username == l.own.username
+                    && s.auth.method() == l.own.auth.method()
+                    && s.jump_direct == l.own.jump_direct
                     && s.startup_command == l.startup_command
-                    && s.environment == l.environment
+                    && s.environment == l.own.environment
                     && s.color == l.color
                     && a == b
                     && same_path(path, local_path)
@@ -689,9 +767,10 @@ fn plan_sessions(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
                     )
                 };
             }
-            let same_address = |l: &&SessionRecord| {
-                l.host.eq_ignore_ascii_case(&s.host) && l.port == s.port && l.username == s.username
-            };
+            // QL-16: the user that applies on each side, its folders' included.
+            let user = tree.resolve(Some(s.id), &s.own(), s.folder_id).username;
+            let same_address =
+                |l: &&SessionRecord| l.host.eq_ignore_ascii_case(&s.host) && l.port == s.port && l.username == user;
             if let Some(l) = local.sessions.iter().find(same_address) {
                 return if same(l) {
                     RowPlan::same(index, l.id, format!("Already here as '{}'.", l.name))
@@ -716,6 +795,142 @@ fn plan_sessions(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
             RowPlan::new(index)
         })
         .collect()
+}
+
+/// QL-16: a folder's defaults in words, with vault items by label and the jump host by name, so the file's and this
+/// laptop's compare without their ids.
+fn describe_defaults(
+    d: &FolderDefaults,
+    secret_label: impl Fn(SecretId) -> Option<String>,
+    session_name: impl Fn(Uuid) -> Option<String>,
+) -> String {
+    let mut parts = Vec::new();
+    if let Some(user) = &d.username {
+        parts.push(format!("user {user}"));
+    }
+    let label = |id: Option<SecretId>| {
+        id.map(|id| secret_label(id).map_or_else(|| "a vault item not here".to_owned(), |l| format!("'{l}'")))
+    };
+    match &d.auth {
+        Some(SessionAuth::Password { password_id }) => parts.push(match label(*password_id) {
+            Some(l) => format!("password {l}"),
+            None => "password asked when connecting".to_owned(),
+        }),
+        Some(SessionAuth::Key { key_id, .. }) => parts.push(match label(*key_id) {
+            Some(l) => format!("key {l}"),
+            None => "key (none chosen)".to_owned(),
+        }),
+        Some(SessionAuth::Agent) => parts.push("SSH agent".to_owned()),
+        Some(SessionAuth::Folder) | None => {}
+    }
+    if d.jump_direct {
+        parts.push("no jump host".to_owned());
+    } else if let Some(jump) = d.jump_session_id {
+        parts.push(format!(
+            "via '{}'",
+            session_name(jump).unwrap_or_else(|| "a session not in the file".to_owned())
+        ));
+    }
+    if let Some(env) = d.environment {
+        parts.push(format!("label {}", env.as_str()));
+    }
+    if !d.tags.is_empty() {
+        parts.push(format!("tags {}", d.tags.join(", ")));
+    }
+    if parts.is_empty() {
+        "no defaults".to_owned()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// QL-16: the file's folders that set defaults, against the folder at the same place here.
+fn plan_folder_defaults(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
+    let file_paths = paths(payload.folders.iter().map(|f| (f.id, f.parent_id, f.name.as_str())));
+    payload
+        .folders
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| !f.defaults.is_empty())
+        .map(|(index, f)| {
+            let path = file_paths.get(&f.id).cloned().unwrap_or_default();
+            let here = local
+                .folder_paths
+                .iter()
+                .find(|(_, p)| same_path(p, &path))
+                .and_then(|(id, _)| local.folders.iter().find(|l| l.id == *id));
+            let Some(here) = here else {
+                return RowPlan::new(index);
+            };
+            let theirs = file_defaults_text(&f.defaults, payload);
+            let ours = local_defaults_text(&here.defaults, local);
+            if theirs == ours {
+                RowPlan::same(index, here.id, "The folder here has the same defaults.".to_owned())
+            } else {
+                RowPlan::conflict(
+                    index,
+                    here.id,
+                    format!("The folder here has other defaults: {ours}."),
+                    vec![ItemAction::Skip, ItemAction::Replace],
+                )
+            }
+        })
+        .collect()
+}
+
+fn file_defaults_text(d: &FolderDefaults, payload: &Payload) -> String {
+    describe_defaults(
+        d,
+        |id| payload.secrets.iter().find(|e| e.id == id).map(|e| e.label.clone()),
+        |id| payload.sessions.iter().find(|e| e.id == id).map(|e| e.name.clone()),
+    )
+}
+
+fn local_defaults_text(d: &FolderDefaults, local: &Local) -> String {
+    describe_defaults(
+        d,
+        |id| local.secrets.iter().find(|m| m.id == id).map(|m| m.label.clone()),
+        |id| local.sessions.iter().find(|s| s.id == id).map(|s| s.name.clone()),
+    )
+}
+
+/// QL-16: the folder here a file folder's sessions land in: the one at the same place, else the nearest one above
+/// that is here (new folders are made under it). `None`: the top level.
+fn landing_folder(path: &[String], local: &Local) -> Option<Uuid> {
+    (1..=path.len()).rev().find_map(|len| {
+        local
+            .folder_paths
+            .iter()
+            .find(|(_, p)| same_path(p, &path[..len]))
+            .map(|(id, _)| *id)
+    })
+}
+
+/// A login with the file's vault items mapped to the ones here; `true` when it named one that is not here.
+fn map_auth(auth: &SessionAuth, secrets: &HashMap<SecretId, SecretId>) -> (SessionAuth, bool) {
+    let map_secret = |id: Option<SecretId>| id.and_then(|id| secrets.get(&id).copied());
+    match *auth {
+        SessionAuth::Password { password_id } => {
+            let mapped = map_secret(password_id);
+            (
+                SessionAuth::Password { password_id: mapped },
+                password_id.is_some() && mapped.is_none(),
+            )
+        }
+        SessionAuth::Key { key_id, passphrase_id } => {
+            let key = map_secret(key_id);
+            let passphrase = key.and(map_secret(passphrase_id));
+            (
+                SessionAuth::Key {
+                    key_id: key,
+                    passphrase_id: passphrase,
+                },
+                key_id.is_some() && key.is_none(),
+            )
+        }
+        SessionAuth::Agent => (SessionAuth::Agent, false),
+        SessionAuth::Folder => (SessionAuth::Folder, false),
+    }
 }
 
 fn plan_known_hosts(payload: &Payload, local: &Local) -> Vec<RowPlan<Uuid>> {
@@ -966,6 +1181,12 @@ struct Decided {
     host_actions: Vec<ItemAction>,
     favourite_rows: Vec<RowPlan<Uuid>>,
     favourite_actions: Vec<ItemAction>,
+    /// QL-16.
+    folder_rows: Vec<RowPlan<Uuid>>,
+    folder_actions: Vec<ItemAction>,
+    /// QL-19.
+    group_rows: Vec<RowPlan<Uuid>>,
+    group_actions: Vec<ItemAction>,
     catalog: catalog::CatalogDecided,
 }
 
@@ -1161,13 +1382,15 @@ impl Transfer {
                 name: s.name,
                 host: s.host,
                 port: s.port,
-                username: s.username,
-                auth: s.auth,
-                jump_session_id: s.jump_session_id,
+                // QL-16: what it sets itself; the rest comes from its folders again on the other laptop.
+                username: s.own.username,
+                auth: s.own.auth,
+                jump_session_id: s.own.jump_session_id,
+                jump_direct: s.own.jump_direct,
                 startup_command: s.startup_command,
-                environment: s.environment,
+                environment: s.own.environment,
                 color: s.color,
-                tags: s.tags,
+                tags: s.own.tags,
                 vm,
                 imported_from: s.imported_from,
                 forwards: forwards
@@ -1204,6 +1427,7 @@ impl Transfer {
                     id: f.id,
                     parent_id: f.parent_id,
                     name: f.name.clone(),
+                    defaults: f.defaults.clone(),
                 })
                 .collect(),
             sessions: entries,
@@ -1227,6 +1451,8 @@ impl Transfer {
                     description: f.description,
                 })
                 .collect(),
+            // QL-19.
+            groups: groups::entries(&self.store, ctx).await?,
             catalog: catalog::export(&self.store, ctx).await?,
         };
         let report = ExportReport {
@@ -1239,12 +1465,15 @@ impl Transfer {
             favourites: payload.favourites.len(),
             forwards: payload.sessions.iter().map(|s| s.forwards.len()).sum(),
             container_hosts: payload.sessions.iter().filter(|s| !s.containers.is_empty()).count(),
+            folder_defaults: payload.folders.iter().filter(|f| !f.defaults.is_empty()).count(),
+            groups: payload.groups.len(),
             catalog: payload.catalog.counts(),
         };
+        let version = payload.format_version();
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
         drop(payload);
         let kdf = *locks::lock(&self.kdf);
-        let sealed = blocking(move || file::seal(&plain, &passphrase, &kdf)).await?;
+        let sealed = blocking(move || file::seal_as(version, &plain, &passphrase, &kdf)).await?;
         write_atomically(path, &sealed).await?;
 
         let secrets = if include_secrets {
@@ -1253,13 +1482,14 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, {}, {}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, {}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
             plural(report.favourites, "favourite command"),
             plural(report.forwards, "port forward"),
             plural(report.container_hosts, "container host"),
+            plural(report.groups, "MultiExec group"),
             report.catalog.describe(),
             report.path
         );
@@ -1365,6 +1595,10 @@ impl Transfer {
                 }
             }
         }
+        // QL-16: the file's folders and this laptop's, to see which login a session gets from its folders.
+        let tree = file_folders(payload);
+        let file_paths = paths(payload.folders.iter().map(|f| (f.id, f.parent_id, f.name.as_str())));
+        let local_tree = Folders::new(local.folders.clone());
         let mut sessions = Vec::new();
         for (index, entry) in payload.sessions.iter().enumerate() {
             let action = decided.session_actions[index];
@@ -1374,6 +1608,24 @@ impl Transfer {
             let mut sends: Vec<SecretId> = Vec::new();
             if let SessionAuth::Password { password_id: Some(id) } = entry.auth {
                 sends.extend(here_ids.get(&id));
+            }
+            if entry.auth == SessionAuth::Folder {
+                let in_file = tree.resolve(Some(entry.id), &entry.own(), entry.folder_id);
+                if in_file.inherited.auth.is_some() {
+                    // The file's folders set its login: a password of theirs that is here already.
+                    if let SessionAuth::Password { password_id: Some(id) } = in_file.auth {
+                        sends.extend(here_ids.get(&id));
+                    }
+                } else {
+                    // Otherwise the folders here where it lands decide: their password goes to the file's host.
+                    let path = entry
+                        .folder_id
+                        .and_then(|f| file_paths.get(&f))
+                        .cloned()
+                        .unwrap_or_default();
+                    let here = local_tree.resolve(None, &OwnValues::from_folders(), landing_folder(&path, local));
+                    sends.extend(here.auth.sent_secret());
+                }
             }
             for c in &entry.containers {
                 if let SudoMode::Password { password_id: Some(id) } = c.sudo {
@@ -1399,6 +1651,38 @@ impl Transfer {
             }
             if reaches {
                 sessions.push(entry.name.clone());
+            }
+        }
+        // QL-16: folder defaults that give their sessions a password already here, or that change the login or
+        // jump host of a folder here whose sessions send vault passwords.
+        let places = bindings.places_in(ctx, &local_tree).await?;
+        for (row, action) in decided.folder_rows.iter().zip(&decided.folder_actions) {
+            if !matches!(action, ItemAction::Import | ItemAction::Replace) {
+                continue;
+            }
+            let f = &payload.folders[row.index];
+            let mut reaches = false;
+            if let Some(SessionAuth::Password { password_id: Some(id) }) = f.defaults.auth {
+                if let Some(here) = here_ids.get(&id) {
+                    reaches = bindings.reaches_hosts(ctx, *here).await?;
+                }
+            }
+            // Taking the file's defaults for a folder here may change the jump host or login of its sessions.
+            if let (ItemAction::Replace, Some(here), false) = (action, row.local, reaches) {
+                for s in local
+                    .sessions
+                    .iter()
+                    .filter(|s| local_tree.is_within(s.folder_id, here))
+                {
+                    for secret in places.sent_by(s.id) {
+                        if bindings.reaches_hosts(ctx, secret).await? {
+                            reaches = true;
+                        }
+                    }
+                }
+            }
+            if reaches {
+                sessions.push(format!("folder {}", f.name));
             }
         }
         if sessions.is_empty() {
@@ -1447,28 +1731,37 @@ impl Transfer {
             .filter(|p| !local_paths.iter().any(|l| same_path(l, p)))
             .count();
         let no_path = Vec::new();
+        // QL-16: what applies to each of the file's sessions, its folders' values included.
+        let tree = file_folders(payload);
 
         let sessions = plan_sessions(payload, &local)
             .into_iter()
             .map(|row| {
                 let s = &payload.sessions[row.index];
                 let path = s.folder_id.and_then(|f| file_paths.get(&f)).unwrap_or(&no_path);
+                let effective = tree.resolve(Some(s.id), &s.own(), s.folder_id);
                 let mut detail = format!(
                     "{}, in {}",
-                    session_address(s.username.as_deref(), &s.host, s.port),
+                    session_address(effective.username.as_deref(), &s.host, s.port),
                     shown_path(path)
                 );
-                if s.environment != Environment::None {
-                    detail.push_str(&format!(", {}", s.environment.as_str()));
+                if effective.environment != Environment::None {
+                    detail.push_str(&format!(", {}", effective.environment.as_str()));
                 }
                 let mut notes: Vec<String> = credential_note(s, payload, &local).into_iter().collect();
-                if s.jump_session_id.is_some() {
+                if effective.jump_session_id.is_some() {
                     notes.push("Connects through a jump host.".into());
+                }
+                let inherited = effective.inherited.describe();
+                if !inherited.is_empty() {
+                    notes.push(format!("From its folders: {inherited}."));
                 }
                 let mut shown = item(row, s.name.clone(), detail, notes);
                 shown.startup_command.clone_from(&s.startup_command);
                 shown.startup_rating = match (&self.policy, &s.startup_command) {
-                    (Some(policy), Some(command)) => Some(rate_startup(&locks::read(policy), command, s.environment)),
+                    (Some(policy), Some(command)) => {
+                        Some(rate_startup(&locks::read(policy), command, effective.environment))
+                    }
                     _ => None,
                 };
                 shown.forwards = s.forwards.iter().map(ForwardEntry::describe).collect();
@@ -1495,7 +1788,8 @@ impl Transfer {
                 let used = payload
                     .sessions
                     .iter()
-                    .filter(|s| s.auth.credential_id() == Some(e.id) || s.auth.passphrase_id() == Some(e.id))
+                    .map(|s| tree.resolve(Some(s.id), &s.own(), s.folder_id).auth)
+                    .filter(|auth| auth.credential_id() == Some(e.id) || auth.passphrase_id() == Some(e.id))
                     .count();
                 let detail = match used {
                     0 => e.kind.label().to_owned(),
@@ -1510,6 +1804,27 @@ impl Transfer {
                 let f = &payload.favourites[row.index];
                 let detail = format!("in {}: {}", favourite_place(&f.folder), command_preview(&f.command));
                 item(row, f.name.clone(), detail, Vec::new())
+            })
+            .collect();
+        // QL-19: groups by name, their members as the default choices would leave them.
+        let groups = {
+            let mapped = groups::matched_here(payload, &plan_sessions(payload, &local));
+            let ids_here: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
+            let rows = groups::plan(payload, &groups::here(&self.store, ctx).await?, &mapped, &ids_here);
+            groups::preview(payload, rows, &local.sessions, &mapped)
+        };
+
+        let folder_defaults = plan_folder_defaults(payload, &local)
+            .into_iter()
+            .map(|row| {
+                let f = &payload.folders[row.index];
+                let path = file_paths.get(&f.id).unwrap_or(&no_path);
+                let detail = file_defaults_text(&f.defaults, payload);
+                let notes = match row.status {
+                    ItemStatus::Conflict => vec!["Replacing them changes the sessions in that folder here too.".into()],
+                    _ => Vec::new(),
+                };
+                item(row, shown_path(path), detail, notes)
             })
             .collect();
 
@@ -1549,6 +1864,8 @@ impl Transfer {
             secrets,
             secret_values,
             favourites,
+            folder_defaults,
+            groups,
             catalog,
             warnings,
         })
@@ -1621,6 +1938,10 @@ impl Transfer {
             host_actions,
             favourite_rows,
             favourite_actions,
+            folder_rows,
+            folder_actions,
+            group_rows,
+            group_actions,
             catalog: catalog_decided,
         } = decided;
         let mut report = TransferReport::default();
@@ -1723,8 +2044,8 @@ impl Transfer {
             let result = match (action, here) {
                 (ItemAction::Replace, Some(here)) => {
                     // A credential that did not come along doesn't wipe a working one here.
-                    if missing && input.auth.method() == here.auth.method() {
-                        input.auth = here.auth.clone();
+                    if missing && input.auth.method() == here.own.auth.method() {
+                        input.auth = here.own.auth.clone();
                     }
                     input.vm_id = input.vm_id.or_else(|| here.vm_id.clone());
                     let reauth = if confirmed { Reauth::Given } else { Reauth::Ask(None) };
@@ -1734,8 +2055,9 @@ impl Transfer {
                     if taken_names.contains(&input.name.to_lowercase()) {
                         input.name = free_name(&input.name, &taken_names, crate::sessions::MAX_SESSION_NAME);
                     }
+                    let reauth = if confirmed { Reauth::Given } else { Reauth::Ask(None) };
                     library
-                        .restore(ctx, Uuid::new_v4(), input, imported_from(entry), link, SOURCE)
+                        .restore(ctx, Uuid::new_v4(), input, imported_from(entry), link, SOURCE, reauth)
                         .await
                 }
                 _ => {
@@ -1744,8 +2066,9 @@ impl Transfer {
                     } else {
                         entry.id
                     };
+                    let reauth = if confirmed { Reauth::Given } else { Reauth::Ask(None) };
                     library
-                        .restore(ctx, id, input, imported_from(entry), link, SOURCE)
+                        .restore(ctx, id, input, imported_from(entry), link, SOURCE, reauth)
                         .await
                 }
             };
@@ -1757,7 +2080,7 @@ impl Transfer {
                     let still_missing = match &saved.auth {
                         SessionAuth::Password { password_id } => password_id.is_none(),
                         SessionAuth::Key { key_id, .. } => key_id.is_none(),
-                        SessionAuth::Agent => false,
+                        SessionAuth::Agent | SessionAuth::Folder => false,
                     };
                     if missing && still_missing {
                         report.without_credentials += 1;
@@ -1789,6 +2112,50 @@ impl Transfer {
                 }
                 Err(err) => report.problems.push(ItemProblem {
                     name: entry.name.clone(),
+                    reason: err.to_string(),
+                }),
+            }
+        }
+
+        // 3b. QL-16: folder defaults, once the sessions they name as jump host are here. Each is set, checked and
+        // audited by the session library, as if the user had set it.
+        for (row, action) in folder_rows.iter().zip(&folder_actions) {
+            let f = &payload.folders[row.index];
+            let target = match action {
+                ItemAction::Import => folder_map.get(&f.id).copied(),
+                ItemAction::Replace => row.local,
+                _ => None,
+            };
+            let Some(target) = target else {
+                report.folder_defaults.count(ItemAction::Skip);
+                continue;
+            };
+            let (auth, _) = match &f.defaults.auth {
+                Some(auth) => {
+                    let (auth, missing) = map_auth(auth, &secret_map);
+                    (Some(auth), missing)
+                }
+                None => (None, false),
+            };
+            let jump = f.defaults.jump_session_id.and_then(|j| {
+                session_map
+                    .get(&j)
+                    .copied()
+                    .or_else(|| local.sessions.iter().find(|s| s.id == j).map(|s| s.id))
+            });
+            let defaults = FolderDefaults {
+                username: f.defaults.username.clone(),
+                auth,
+                jump_session_id: jump,
+                jump_direct: f.defaults.jump_direct,
+                environment: f.defaults.environment,
+                tags: f.defaults.tags.clone(),
+            };
+            let reauth = if confirmed { Reauth::Given } else { Reauth::Ask(None) };
+            match library.set_folder_defaults_checked(ctx, target, defaults, reauth).await {
+                Ok(_) => report.folder_defaults.count(*action),
+                Err(err) => report.problems.push(ItemProblem {
+                    name: format!("defaults of folder '{}'", f.name),
                     reason: err.to_string(),
                 }),
             }
@@ -1875,17 +2242,37 @@ impl Transfer {
         )
         .await?;
 
+        // 7. QL-19 saved MultiExec groups, each saved and audited by the groups module, with the sessions
+        // their members became here.
+        let here_before: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
+        groups::commit(
+            ctx,
+            &self.store,
+            &payload,
+            (&group_rows, &group_actions),
+            groups::Landed {
+                imported: &session_map,
+                here_before: &here_before,
+            },
+            &mut report,
+        )
+        .await?;
+
         let mut detail = format!(
-            "from {}: sessions {}; folders {} added; known host keys {}; vault secrets {}; favourite commands {}",
+            "from {}: sessions {}; folders {} added; folder defaults {}; known host keys {}; vault secrets {}; favourite commands {}",
             path.display(),
             report.sessions.describe(),
             report.folders_added,
+            report.folder_defaults.describe(),
             report.known_hosts.describe(),
             report.secrets.describe(),
             report.favourites.describe()
         );
         if !report.catalog.is_empty() {
             detail.push_str(&format!("; {}", report.catalog.describe()));
+        }
+        if !payload.groups.is_empty() {
+            detail.push_str(&format!("; MultiExec groups {}", report.groups.describe()));
         }
         if report.forwards > 0 {
             detail.push_str(&format!(
@@ -1967,6 +2354,21 @@ impl Transfer {
         for row in &favourite_rows {
             favourite_actions.push(row.action(&favourite_choices, &payload.favourites[row.index].name)?);
         }
+        let folder_rows = plan_folder_defaults(payload, &local);
+        let folder_choices = chosen(&request.folder_defaults);
+        let mut folder_actions = Vec::with_capacity(folder_rows.len());
+        for row in &folder_rows {
+            folder_actions.push(row.action(&folder_choices, &payload.folders[row.index].name)?);
+        }
+        // QL-19.
+        let mapped = groups::matched_here(payload, &session_rows);
+        let ids_here: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
+        let group_rows = groups::plan(payload, &groups::here(&self.store, ctx).await?, &mapped, &ids_here);
+        let group_choices = chosen(&request.groups);
+        let mut group_actions = Vec::with_capacity(group_rows.len());
+        for row in &group_rows {
+            group_actions.push(row.action(&group_choices, &payload.groups[row.index].name)?);
+        }
         let catalog = catalog::decide(&payload.catalog, &local.catalog, &request.catalog)?;
         if secret_actions.iter().any(|a| *a != ItemAction::Skip) {
             match local.vault {
@@ -1985,6 +2387,10 @@ impl Transfer {
             host_actions,
             favourite_rows,
             favourite_actions,
+            folder_rows,
+            folder_actions,
+            group_rows,
+            group_actions,
             catalog,
         })
     }
@@ -2086,28 +2492,7 @@ impl Transfer {
         sessions: &HashMap<Uuid, Uuid>,
         local: &Local,
     ) -> Result<(SessionInput, bool)> {
-        let map_secret = |id: Option<SecretId>| id.and_then(|id| secrets.get(&id).copied());
-        let (auth, missing) = match entry.auth {
-            SessionAuth::Password { password_id } => {
-                let mapped = map_secret(password_id);
-                (
-                    SessionAuth::Password { password_id: mapped },
-                    password_id.is_some() && mapped.is_none(),
-                )
-            }
-            SessionAuth::Key { key_id, passphrase_id } => {
-                let key = map_secret(key_id);
-                let passphrase = key.and(map_secret(passphrase_id));
-                (
-                    SessionAuth::Key {
-                        key_id: key,
-                        passphrase_id: passphrase,
-                    },
-                    key_id.is_some() && key.is_none(),
-                )
-            }
-            SessionAuth::Agent => (SessionAuth::Agent, false),
-        };
+        let (auth, missing) = map_auth(&entry.auth, secrets);
         let jump = entry.jump_session_id.and_then(|j| {
             sessions
                 .get(&j)
@@ -2127,6 +2512,7 @@ impl Transfer {
                 username: entry.username.clone(),
                 auth,
                 jump_session_id: jump,
+                jump_direct: entry.jump_direct,
                 startup_command: entry.startup_command.clone(),
                 startup_on_reconnect: false,
                 prompt_hook: None,
@@ -2259,6 +2645,7 @@ mod tests {
             username: Some("alice".into()),
             auth: SessionAuth::Agent,
             jump_session_id: jump,
+            jump_direct: false,
             startup_command: None,
             environment: Environment::None,
             color: None,

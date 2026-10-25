@@ -3,6 +3,8 @@
 // (BX-01), a startup command, saved port forwards (SS-07), folder, tags, colour and environment label. Saving
 // changes only the app's own data: the core checks it and audits it, with no approval step. Taking the
 // Prod label off asks first, since it lowers the tier of later actions on the session.
+// QL-16: the user, login, jump host, label and tags a session leaves empty come from its folders; the editor shows
+// each as "from folder X" (asked from the core for the folder chosen), and setting a value overrides it.
 
 import { useEffect, useMemo, useState } from "react";
 import { PlusIcon } from "lucide-react";
@@ -26,6 +28,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   api,
   errorMessage,
+  type Effective,
   type Environment,
   type ForwardInput,
   type SecretKind,
@@ -52,6 +55,8 @@ import { WhyDisabled } from "./WhyDisabled";
 
 /** Radix Select can't hold an empty value, so "none" stands for no choice. */
 const NONE = "none";
+/** QL-16: the jump host choice "no jump host, whatever the folders set". */
+const DIRECT = "direct";
 
 const ENVIRONMENTS: { value: Environment; label: string; className?: string }[] = [
   { value: "none", label: "None" },
@@ -110,16 +115,18 @@ export function SessionDialog({
 }: Props) {
   // FD-03: saving is blocked by the read-only lock (the core refuses it too).
   const readOnly = useReadOnlyReason();
+  // QL-16: what the session sets itself; what it has from its folders is `inherited`.
+  const own = session?.own;
   const [name, setName] = useState(session?.name ?? "");
   const [folder, setFolder] = useState<string>(session ? (session.folderId ?? NONE) : (folderId ?? NONE));
   const [host, setHost] = useState(session?.host ?? "");
   const [port, setPort] = useState(String(session?.port ?? 22));
-  const [username, setUsername] = useState(session?.username ?? "");
-  const [method, setMethod] = useState<Method>(session?.auth.method ?? "password");
-  const [password, setPassword] = useState(session ? (idOf(session.auth, "credential") ?? NONE) : NONE);
-  const [key, setKey] = useState(session?.auth.method === "key" ? (session.auth.keyId ?? NONE) : NONE);
-  const [passphrase, setPassphrase] = useState(session ? (idOf(session.auth, "passphrase") ?? NONE) : NONE);
-  const [jump, setJump] = useState(session?.jumpSessionId ?? NONE);
+  const [username, setUsername] = useState(own?.username ?? "");
+  const [method, setMethod] = useState<Method>(own?.auth.method ?? (folderId ? "folder" : "password"));
+  const [password, setPassword] = useState(own ? (idOf(own.auth, "credential") ?? NONE) : NONE);
+  const [key, setKey] = useState(own?.auth.method === "key" ? (own.auth.keyId ?? NONE) : NONE);
+  const [passphrase, setPassphrase] = useState(own ? (idOf(own.auth, "passphrase") ?? NONE) : NONE);
+  const [jump, setJump] = useState(own?.jumpSessionId ?? (own?.jumpDirect ? DIRECT : NONE));
   const [startup, setStartup] = useState(session?.startupCommand ?? "");
   /** SS-01: typed again after an automatic reconnect. */
   const [startupAgain, setStartupAgain] = useState(session?.startupOnReconnect ?? false);
@@ -127,9 +134,11 @@ export function SessionDialog({
   const [rated, setRated] = useState<{ command: string; environment: Environment; rating: StartupRating | null }>();
   /** SS-08: the folder prompt hook: as Settings say, on, or off. */
   const [hook, setHook] = useState<string>(session?.promptHook == null ? NONE : session.promptHook ? "on" : "off");
-  const [environment, setEnvironment] = useState<Environment>(session?.environment ?? "none");
+  const [environment, setEnvironment] = useState<Environment>(own?.environment ?? "none");
   const [color, setColor] = useState<SessionColor | null>(session?.color ?? null);
-  const [tags, setTags] = useState((session?.tags ?? []).join(", "));
+  const [tags, setTags] = useState((own?.tags ?? []).join(", "));
+  /** QL-16: what a session in the chosen folder gets when it sets nothing itself, for the folder it was asked for. */
+  const [inheritedFor, setInheritedFor] = useState<{ folder: string; values: Effective | null } | null>(null);
   const [vm, setVm] = useState(session ? (session.vmId ?? NONE) : (presetVm ?? NONE));
   const [vms, setVms] = useState<VmRecord[]>([]);
   /** SS-07: the saved port forwards; null while an edited session's are loading. */
@@ -147,6 +156,23 @@ export function SessionDialog({
     api.vmList().then(setVms, () => setVms([]));
   }, []);
 
+  // QL-16: asked again whenever the folder changes; a stale answer is dropped.
+  const editedSession = session?.id ?? null;
+  useEffect(() => {
+    let stale = false;
+    api.sessionInherited(folder === NONE ? null : folder, editedSession).then(
+      (values) => !stale && setInheritedFor({ folder, values }),
+      () => !stale && setInheritedFor({ folder, values: null }),
+    );
+    return () => {
+      stale = true;
+    };
+  }, [folder, editedSession]);
+  const inherited = inheritedFor?.folder === folder ? inheritedFor.values : null;
+  /** The label that will apply: its own, else its folders'. */
+  const effectiveEnvironment: Environment =
+    environment !== "none" ? environment : (inherited?.environment ?? session?.environment ?? "none");
+
   // Loaded once per session edited, so a refreshed session list never resets what is being typed.
   const editedId = session?.id ?? null;
   useEffect(() => {
@@ -157,24 +183,24 @@ export function SessionDialog({
     );
   }, [editedId]);
 
-  // SS-01: the startup command rated as it is typed, for this session's label.
+  // SS-01: the startup command rated as it is typed, for this session's label (QL-16: its folders' included).
   useEffect(() => {
     const command = startup.trim();
     if (!command) return;
     let stale = false;
     const timer = window.setTimeout(() => {
-      api.sessionStartupRating(command, environment).then(
-        (rating) => !stale && setRated({ command, environment, rating }),
-        () => !stale && setRated({ command, environment, rating: null }),
+      api.sessionStartupRating(command, effectiveEnvironment).then(
+        (rating) => !stale && setRated({ command, environment: effectiveEnvironment, rating }),
+        () => !stale && setRated({ command, environment: effectiveEnvironment, rating: null }),
       );
     }, 250);
     return () => {
       stale = true;
       window.clearTimeout(timer);
     };
-  }, [startup, environment]);
+  }, [startup, effectiveEnvironment]);
   const startupRating =
-    rated && rated.command === startup.trim() && rated.environment === environment ? rated.rating : null;
+    rated && rated.command === startup.trim() && rated.environment === effectiveEnvironment ? rated.rating : null;
 
   const of = (kind: SecretKind) => secrets.filter((s) => s.kind === kind);
   const portNumber = Number(port);
@@ -185,23 +211,42 @@ export function SessionDialog({
     .filter(Boolean);
   const jumpChoices = sessions.filter((s) => s.id !== session?.id);
   const vaultReady = vault !== null && vault.status !== "notSetUp";
-  /** SS-07: the chosen jump host and the ones before it, in the order they are connected. */
+  /** QL-16: the jump host that will apply: the one chosen, none, or the folders'. */
+  const jumpApplied = jump === DIRECT ? null : jump === NONE ? (inherited?.jumpSessionId ?? null) : jump;
+  /** SS-07: the jump host that applies and the ones before it, in the order they are connected. */
   const chain = useMemo(() => {
-    if (jump === NONE) return null;
+    if (!jumpApplied) return null;
     const byId = new Map(sessions.map((s) => [s.id, s]));
-    const chosen = byId.get(jump);
+    const chosen = byId.get(jumpApplied);
     if (!chosen) return null;
     // As if saved: this session goes through the chosen one.
-    if (session) byId.set(session.id, { ...session, jumpSessionId: jump });
-    const before = jumpChain(jump, byId);
+    if (session) byId.set(session.id, { ...session, jumpSessionId: jumpApplied });
+    const before = jumpChain(jumpApplied, byId);
     return { names: [...before.names, chosen.name], loops: before.loop };
-  }, [jump, sessions, session]);
+  }, [jumpApplied, sessions, session]);
+  /** QL-16: "password 'web root'" for a login a folder gives. */
+  const loginText = (login: SessionAuth | null | undefined) => {
+    const label = (id: string | null) => (id ? secrets.find((x) => x.id === id)?.label : undefined);
+    if (!login || login.method === "folder") return "a password asked when connecting";
+    if (login.method === "agent") return "the SSH agent";
+    if (login.method === "key") {
+      const name = label(login.keyId);
+      return name ? `the key '${name}'` : "a key (none chosen)";
+    }
+    const name = label(login.passwordId);
+    return name ? `the password '${name}'` : "a password asked when connecting";
+  };
+  /** The folders' own tags, which the session has on top of its own. */
+  const folderTags = (inherited?.inherited.tags ?? []).filter(
+    (t) => !tags.split(",").some((x) => x.trim().toLowerCase() === t.tag.toLowerCase()),
+  );
   const forwardsIssue = forwards ? forwardsProblem(forwards) : null;
 
   function auth(): SessionAuth {
     const pick = (v: string) => (v === NONE ? null : v);
     if (method === "password") return { method, passwordId: pick(password) };
     if (method === "key") return { method, keyId: pick(key), passphraseId: pick(key) ? pick(passphrase) : null };
+    if (method === "folder") return { method: "folder" };
     return { method: "agent" };
   }
 
@@ -227,7 +272,8 @@ export function SessionDialog({
       port: portNumber,
       username: username.trim() || null,
       auth: auth(),
-      jumpSessionId: jump === NONE ? null : jump,
+      jumpSessionId: jump === NONE || jump === DIRECT ? null : jump,
+      jumpDirect: jump === DIRECT,
       startupCommand: startup.trim() || null,
       startupOnReconnect: startupAgain,
       promptHook: hook === NONE ? null : hook === "on",
@@ -266,9 +312,9 @@ export function SessionDialog({
     }
   }
 
-  /** SS-06: saves at once, unless the edit takes the Prod label off. */
+  /** SS-06: saves at once, unless the edit takes the Prod label off (QL-16: the label that applies). */
   function submit() {
-    if (session?.environment === "prod" && environment !== "prod") {
+    if (session?.environment === "prod" && effectiveEnvironment !== "prod") {
       setLowerProd(true);
       return;
     }
@@ -366,10 +412,17 @@ export function SessionDialog({
                   data-mask="user"
                   autoComplete="off"
                   spellCheck={false}
-                  placeholder="alice"
+                  placeholder={inherited?.username ? "From its folder" : "alice"}
                   value={username}
                   onChange={(e) => setUsername(e.currentTarget.value)}
                 />
+                {inherited?.username && inherited.inherited.username && (
+                  <p className="text-xs text-muted-foreground">
+                    {username.trim() ? "Overrides " : "Empty: "}
+                    <span data-mask="user">{inherited.username}</span> from folder &apos;
+                    {inherited.inherited.username.name}&apos;
+                  </p>
+                )}
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="session-name">Name</Label>
@@ -393,10 +446,20 @@ export function SessionDialog({
                 value={method}
                 onValueChange={(v) => v && setMethod(v as Method)}
               >
+                {(folder !== NONE || method === "folder") && (
+                  <ToggleGroupItem value="folder">From folder</ToggleGroupItem>
+                )}
                 <ToggleGroupItem value="password">Password</ToggleGroupItem>
                 <ToggleGroupItem value="key">Private key</ToggleGroupItem>
                 <ToggleGroupItem value="agent">SSH agent</ToggleGroupItem>
               </ToggleGroup>
+              {method === "folder" && (
+                <p className="text-sm text-muted-foreground">
+                  {inherited?.inherited.auth
+                    ? `Logs in with ${loginText(inherited.auth)}, as folder '${inherited.inherited.auth.name}' says. Choosing a login here overrides it.`
+                    : "No folder above sets a login yet: a password is asked when connecting, until one does."}
+                </p>
+              )}
               {method === "password" && (
                 <div className="grid gap-2">
                   <Label htmlFor="session-password" className="font-normal text-muted-foreground">
@@ -436,7 +499,16 @@ export function SessionDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value={NONE}>None: connect directly</SelectItem>
+                    <SelectItem value={NONE}>
+                      {inherited?.inherited.jump
+                        ? inherited.jumpSessionId
+                          ? `From folder '${inherited.inherited.jump.name}': ${sessions.find((x) => x.id === inherited.jumpSessionId)?.name ?? "a session"}`
+                          : `From folder '${inherited.inherited.jump.name}': connect directly`
+                        : "None: connect directly"}
+                    </SelectItem>
+                    {(inherited?.jumpSessionId || jump === DIRECT) && (
+                      <SelectItem value={DIRECT}>No jump host (overrides the folder)</SelectItem>
+                    )}
                     {jumpChoices.length > 0 && <SelectSeparator />}
                     {jumpChoices.map((s) => (
                       <SelectItem key={s.id} value={s.id}>
@@ -545,7 +617,9 @@ export function SessionDialog({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value={NONE}>As in Settings{environment === "prod" ? " (off for Prod)" : ""}</SelectItem>
+                  <SelectItem value={NONE}>
+                    As in Settings{effectiveEnvironment === "prod" ? " (off for Prod)" : ""}
+                  </SelectItem>
                   <SelectItem value="on">On</SelectItem>
                   <SelectItem value="off">Off</SelectItem>
                 </SelectContent>
@@ -581,12 +655,19 @@ export function SessionDialog({
               >
                 {ENVIRONMENTS.map((e) => (
                   <ToggleGroupItem key={e.value} value={e.value} className={cn("font-medium", e.className)}>
-                    {e.label}
+                    {e.value === "none" && inherited?.inherited.environment ? "From folder" : e.label}
                   </ToggleGroupItem>
                 ))}
               </ToggleGroup>
+              {inherited?.inherited.environment && (
+                <p className="text-xs text-muted-foreground">
+                  {environment === "none"
+                    ? `Labelled ${labelName(inherited.environment)} by folder '${inherited.inherited.environment.name}'.`
+                    : `Overrides ${labelName(inherited.environment)} from folder '${inherited.inherited.environment.name}'.`}
+                </p>
+              )}
               <p className="text-xs text-muted-foreground">
-                {environment === "prod"
+                {effectiveEnvironment === "prod"
                   ? "Prod raises the approval tier of every action on this session by one."
                   : "Shown on the session's tab. Prod raises the approval tier of actions on it."}
               </p>
@@ -622,6 +703,21 @@ export function SessionDialog({
                   value={tags}
                   onChange={(e) => setTags(e.currentTarget.value)}
                 />
+                {folderTags.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                    <span>Also from its folders:</span>
+                    {folderTags.map((t) => (
+                      <Badge
+                        key={t.tag}
+                        variant="secondary"
+                        className="font-normal"
+                        title={`From folder '${t.folder.name}'`}
+                      >
+                        {t.tag}
+                      </Badge>
+                    ))}
+                  </div>
+                )}
                 {tagSuggestions.filter((t) => !tagList.some((x) => x.toLowerCase() === t.toLowerCase())).length > 0 && (
                   <div className="flex flex-wrap gap-1">
                     {tagSuggestions
