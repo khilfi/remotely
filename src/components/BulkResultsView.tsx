@@ -197,6 +197,12 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
   const canRetry = !open && retries.failed > 0;
   // H9: the event may have come before this view opened; the results say whether the rest still wait.
   const waiting = canary ?? shown.canary;
+  // BX-02, BX-04: the journal no longer holds the script as it ran (the core refuses the retry too).
+  const retryBlocked = job.bodiesRemoved
+    ? "Its script was removed after the retention period. Run it again from Compare."
+    : job.commandRedacted
+      ? "Its script had something that looked like a secret, which the journal doesn't keep. Run it again from Compare."
+      : null;
 
   return (
     <div className="grid gap-4">
@@ -219,16 +225,21 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
             </Button>
           )}
           {canRetry && (
-            <WhyDisabled reason={busy ? "Submitting the retry…" : null}>
-              <Button variant="outline" size="sm" onClick={() => void retry()} disabled={busy}>
+            <WhyDisabled reason={busy ? "Submitting the retry…" : retryBlocked}>
+              <Button variant="outline" size="sm" onClick={() => void retry()} disabled={busy || retryBlocked !== null}>
                 <RotateCcwIcon data-icon="inline-start" />
                 Retry {plural(counts.failed, "failed host")}
               </Button>
             </WhyDisabled>
           )}
           {!open && retries.withUnknown !== null && (
-            <WhyDisabled reason={busy ? "Submitting the retry…" : null}>
-              <Button variant="outline" size="sm" onClick={() => setConfirmUnknown(true)} disabled={busy}>
+            <WhyDisabled reason={busy ? "Submitting the retry…" : retryBlocked}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmUnknown(true)}
+                disabled={busy || retryBlocked !== null}
+              >
                 <RotateCcwIcon data-icon="inline-start" />
                 Retry {retries.failed > 0 ? "them and " : ""}
                 {plural(counts.unknown, "host")} with the outcome unknown
@@ -314,7 +325,14 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
         </div>
       </div>
 
-      {run && (
+      {job.bodiesRemoved && (
+        <p className="text-sm text-muted-foreground" role="note">
+          This run is older than the retention period set in Settings, General, so its script and the hosts&apos; output
+          were removed. Its results and groups are kept.
+        </p>
+      )}
+
+      {run && !job.bodiesRemoved && (
         <pre className="max-h-24 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
           {run.script}
         </pre>

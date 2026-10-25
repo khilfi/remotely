@@ -520,6 +520,9 @@ pub struct JobRunner {
     idle: Notify,
     /// H9: jobs whose canary host finished, waiting for the go-ahead.
     waiting: Mutex<HashMap<Uuid, (tokio::sync::oneshot::Sender<Context>, CanaryWait)>>,
+    /// BX-02: a job is enqueued under the read side; the journal's compaction (VACUUM) holds the write side, so no
+    /// job starts while it runs ([`JobRunner::when_idle`]).
+    maintenance: tokio::sync::RwLock<()>,
 }
 
 impl JobRunner {
@@ -551,6 +554,7 @@ impl JobRunner {
             running: Mutex::new(HashMap::new()),
             idle: Notify::new(),
             waiting: Mutex::new(HashMap::new()),
+            maintenance: tokio::sync::RwLock::new(()),
         })
     }
 
@@ -586,6 +590,16 @@ impl JobRunner {
     /// Number of open jobs.
     pub fn open_jobs(&self) -> usize {
         locks::lock(&self.running).len()
+    }
+
+    /// BX-02: runs `work` while no job is open, and holds back new ones until it is done (a submit waits for it, so
+    /// it never meets a database busy compacting). `None`, without running it, when a job is open.
+    pub async fn when_idle<T>(&self, work: impl std::future::Future<Output = T>) -> Option<T> {
+        let _quiet = self.maintenance.write().await;
+        if self.open_jobs() > 0 {
+            return None;
+        }
+        Some(work.await)
     }
 
     /// Waits until `job_id` is the only open job. Cancelling the job stops the wait.
@@ -664,6 +678,8 @@ impl JobRunner {
 
     /// Only the command bus calls this, after policy and approval.
     pub(crate) async fn enqueue(self: &Arc<Self>, spec: JobSpec) -> Result<Uuid> {
+        // Until the job is in `running`: compaction then waits for it to end.
+        let _not_compacting = self.maintenance.read().await;
         let id = Uuid::new_v4();
         let summary = spec.command.summary(spec.decision.targets.len());
         let countdown = spec.decision.steps.iter().find_map(|s| match s {

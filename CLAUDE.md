@@ -76,12 +76,19 @@ crates/core/          remotely-core: all app logic
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     jobs.rs           QL-15: a failing journal or audit write is logged and the job goes on to its real result
-                      (job_finished always tried); the update install races the job's cancel token. H9 `Rollout` of
+                      (job_finished always tried); the update install races the job's cancel token; BX-02 when_idle:
+                      compaction holds new jobs back and runs only while none is open. H9 `Rollout` of
                       a RemoteExec: canary (first host alone, then JobEvent::CanaryWaiting until CommandBus::go_on,
                       CANARY_WAIT 15 min, audited canary_go_on) and stop_after_failures (no new hosts; running ones
                       finish; skipped); TargetStatus::Unknown for CommandTimedOut and in-flight cancels (retry_failed
-                      leaves them out unless include_unknown); each remote target journals peer_ip and the accepted
-                      host_key (BulkVerifier; migration 0018), listed at job_finished
+                      leaves them out unless include_unknown, and refuses redacted or purged runs); each remote target
+                      journals peer_ip and the accepted host_key (BulkVerifier; migration 0018), listed at job_finished
+    retention.rs      BX-02 how long the job journal keeps outputs and command text (Settings: 30 days, 90 by default,
+                      1 year, forever; `jobs.retention`): the purge at start and daily (JournalRetention::run, wall
+                      clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
+                      purge; the read-only lock refuses the setting and Purge now, never the schedule
+    save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
+                      output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
     adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec, A9 at most
@@ -164,7 +171,8 @@ crates/core/          remotely-core: all app logic
                       log.rs and output.rs SS-11 session logs (one that can't be written stops: LogStopped, audited;
                       stopping waits for the last lines) and saved, printed or copied output (secrets scrubbed);
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
-                      detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
+                      detection (prompt back, or quiet); password prompts (QL-06) and, wider, secret prompts (SS-10:
+                      passwords, passphrases, PINs, one-time codes and tokens, in English and translated); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
                       a line buffer, Enter and every other key that runs a line in bash or zsh held (RunKey: Ctrl+O,
                       Esc then Enter...; a lone Esc waits for its next key; the table of bindings is in the file) and
                       the line rated on the bus (Command::TerminalLine; the bus and the job runner send only the held
@@ -224,7 +232,10 @@ crates/core/          remotely-core: all app logic
                       out); A9 the source up to 10 MB, included files 1 MB each and 4 MB and 256 files in all
                       (openssh.rs IncludeFiles: DiskIncludes, or memory in tests)
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
-    store/
+    store/            jobs.rs: the journal stores Command::for_journal (scripts and lines redacted), command_type
+                      (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
+                      purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
+                      and verifies and exports with row streams
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
                       subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
@@ -267,7 +278,8 @@ src/                  React + TypeScript UI
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3)
   hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
-                      each timed from when the last one finished; useVisibility); use-mobile.ts is shadcn's
+                      each timed from when the last one finished; useVisibility); use-debounced.ts (Activity and
+                      Compare reload once per burst of job events); use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), theme.ts, utils.ts, terminal-session.ts (SS-03 a pane: its xterm.js, its connection,
                       every paste through paste.ts, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
@@ -283,6 +295,8 @@ src/                  React + TypeScript UI
                       delay, longer after failures), host-details.ts
                       (MO-13, MO-14 summaries, wording and the commands offered to copy),
                       ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
+                      debounce.ts (when a reload after job events runs), retention.ts (BX-02 the retention choices
+                      and a purge's summary for Settings' DataRetentionCard),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
                       addresses as `mac-N`), rollout.ts (H9 canary, stop after failures, retry choices),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
@@ -458,4 +472,7 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   notifications) goes through `maskedOutside`. A new IPC field holding a host, IP or user should use one of the names
   `learnFields` knows (`host`, `hostname`, `ip`, `username`, ...). A new state-changing core method that skips the bus
   starts with `store.read_only().check(Change::…)`.
+- A new path that saves a file the user chose calls `save_guard::refuse_repository` (or `_folder`) first, so customer
+  data never lands in a Git working tree. Free text kept in the journal or the audit log goes through
+  `export::redact_secrets` (the audit store and `Command::for_journal` already do it).
 - Commit messages start with the requirement ID where one applies, e.g. `VM-02: bulk suspend and resume`.

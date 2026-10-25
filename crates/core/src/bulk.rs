@@ -1575,7 +1575,8 @@ impl BulkRuns {
         Ok((text, r.changed, targets.len()))
     }
 
-    /// BX-05: writes the export to `path` (chosen by the user in a save dialog) and logs that it did.
+    /// BX-05: writes the export to `path` (chosen by the user in a save dialog) and logs that it did. Never into a
+    /// Git working tree ([`crate::save_guard`]).
     pub async fn export(
         &self,
         ctx: &Context,
@@ -1584,6 +1585,7 @@ impl BulkRuns {
         opts: GroupOptions,
         path: &Path,
     ) -> Result<BulkExport> {
+        crate::save_guard::refuse_repository(path, crate::save_guard::Saved::Results)?;
         let (text, redacted, hosts_count) = self.render(ctx, job_id, format, opts).await?;
         tokio::fs::write(path, text).await?;
         let file = path
@@ -1613,7 +1615,8 @@ impl BulkRuns {
     }
 
     /// QL-12, BX-05: writes recorded MultiExec lines to `path` (chosen in a save dialog) and logs that
-    /// it did: how many lines and terminals, the format and the file. Never the output.
+    /// it did: how many lines and terminals, the format and the file. Never the output. Never into a Git
+    /// working tree ([`crate::save_guard`]).
     pub async fn export_recorded(
         &self,
         ctx: &Context,
@@ -1625,6 +1628,7 @@ impl BulkRuns {
         if runs.is_empty() {
             return Err(CoreError::InvalidInput("There is no recorded line to export.".into()));
         }
+        crate::save_guard::refuse_repository(path, crate::save_guard::Saved::Results)?;
         let (text, redacted, outputs) = render_recorded(runs, format, opts)?;
         tokio::fs::write(path, text).await?;
         let file = path

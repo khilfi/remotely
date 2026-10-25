@@ -20,6 +20,7 @@ use remotely_core::jobs::JobLimits;
 use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHostUsage};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::presentation::Presentation;
+use remotely_core::retention::{PurgeReport, Retention, RetentionInfo};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord, StartupRating};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
@@ -316,6 +317,24 @@ pub async fn audit_recent(state: State<'_, AppState>, limit: Option<u32>) -> Ipc
 #[tauri::command]
 pub async fn audit_verify(state: State<'_, AppState>) -> IpcResult<ChainCheck> {
     Ok(state.core.store.verify_audit_chain().await?)
+}
+
+/// BX-02: how long job outputs and command text are kept, and the last purge since the app started.
+#[tauri::command]
+pub async fn journal_retention(state: State<'_, AppState>) -> IpcResult<RetentionInfo> {
+    Ok(state.core.retention.info().await?)
+}
+
+/// BX-02: applies at the next purge (daily, or Purge now). Audited.
+#[tauri::command]
+pub async fn journal_retention_set(state: State<'_, AppState>, retention: Retention) -> IpcResult<RetentionInfo> {
+    Ok(state.core.retention.set_retention(retention).await?)
+}
+
+/// BX-02: Settings' "Purge now". Audited.
+#[tauri::command]
+pub async fn journal_purge_now(state: State<'_, AppState>) -> IpcResult<PurgeReport> {
+    Ok(state.core.retention.purge_now().await?)
 }
 
 /// AP-05: asks where to save, then writes the whole audit log there as CSV. The save dialog opens

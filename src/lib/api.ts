@@ -628,6 +628,10 @@ export interface JobSummary {
   countdownUntil: string | null;
   /** BX-04: the job whose failed targets this one retries. */
   retryOf: string | null;
+  /** BX-02: the retention purge removed its outputs and its script or line text (Settings, General). */
+  bodiesRemoved: boolean;
+  /** BX-04: its script or line had something that looked like a secret, now [redacted], so it can't be retried. */
+  commandRedacted: boolean;
 }
 
 /** One target of a job and how it went. */
@@ -752,6 +756,29 @@ export interface PolicySaved {
   rules: PolicyRules;
   /** What changed, as written to the audit log. Empty: nothing was saved. */
   changes: string[];
+}
+
+/** BX-02: how long the job journal keeps job outputs and command text. */
+export type Retention = "days30" | "days90" | "year" | "forever";
+
+/** BX-02: what a retention purge removed. */
+export interface PurgeReport {
+  at: string;
+  retention: Retention;
+  /** Jobs created before this lost their outputs and command text; null when kept forever. */
+  before: string | null;
+  removed: { jobs: number; outputs: number; commands: number; bytes: number };
+  /** Older commands that had something that looked like a secret, now [redacted]. */
+  redacted: number;
+  /** The database file was compacted afterwards. */
+  compacted: boolean;
+  byHand: boolean;
+}
+
+export interface RetentionInfo {
+  retention: Retention;
+  /** The last purge since Remotely started (one runs at start and daily). */
+  lastPurge: PurgeReport | null;
 }
 
 /** AP-05: what an audit export wrote. */
@@ -2511,6 +2538,13 @@ export const api = {
   verifyAudit: () => invoke<ChainCheck>("audit_verify"),
   /** AP-05: asks where to save, then writes the audit log there as CSV. null when the user cancels. */
   exportAudit: () => invoke<AuditExport | null>("audit_export_csv"),
+
+  /** BX-02: how long job outputs and command text are kept, and the last purge. */
+  retention: () => invoke<RetentionInfo>("journal_retention"),
+  /** BX-02: applies at the next purge (daily, or Purge now). Audited; refused while presenting. */
+  setRetention: (retention: Retention) => invoke<RetentionInfo>("journal_retention_set", { retention }),
+  /** BX-02: purges now with the setting. Audited; refused while presenting. */
+  purgeNow: () => invoke<PurgeReport>("journal_purge_now"),
 
   /** VM-04: snapshot trees read from each VM's .vmsd (no vmrun call; VirtualBox: showvminfo). Changes go through `submit`. */
   snapshots: (vmxPaths?: string[]) => invoke<VmSnapshots[]>("snapshots_list", { vmxPaths: vmxPaths ?? null }),

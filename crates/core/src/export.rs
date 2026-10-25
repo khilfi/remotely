@@ -116,64 +116,79 @@ pub const AUDIT_CSV_COLUMNS: [&str; 23] = [
 ];
 
 /// The audit entries as CSV (RFC 4180, CRLF line ends, UTF-8 with a byte-order mark so Excel reads
-/// it as UTF-8). Returns the text and how many rows had something redacted.
+/// it as UTF-8). Returns the text and how many rows had something redacted. The app writes a long log
+/// row by row instead ([`audit_csv_header`], [`audit_csv_row`]).
 pub fn audit_csv(entries: &[AuditEntry]) -> (String, usize) {
-    let mut out = String::from("\u{FEFF}");
-    push_row(&mut out, AUDIT_CSV_COLUMNS.iter().map(|c| (*c).to_owned()));
+    let mut out = audit_csv_header();
     let mut redacted_rows = 0;
     for e in entries {
-        let mut redacted = false;
-        let mut clean = |text: &str| {
-            let (text, changed) = redact_secrets(text);
-            redacted |= changed;
-            text
-        };
-        let targets: Vec<Value> = serde_json::from_str(&e.targets_json).unwrap_or_default();
-        let names: Vec<&str> = targets
-            .iter()
-            .filter_map(|t| t.get("name").and_then(Value::as_str))
-            .collect();
-        let approval: Option<Value> = e.approval_json.as_deref().and_then(|a| serde_json::from_str(a).ok());
-        let field = |key: &str| -> String {
-            match approval.as_ref().and_then(|a| a.get(key)) {
-                None | Some(Value::Null) => String::new(),
-                Some(Value::String(s)) => s.clone(),
-                Some(other) => other.to_string(),
-            }
-        };
-        let mut row = vec![
-            e.seq.to_string(),
-            e.id.clone(),
-            e.ts.clone(),
-            e.event.clone(),
-            clean(&e.action),
-            e.tier.clone().unwrap_or_default(),
-            e.job_id.clone().unwrap_or_default(),
-            names.join("; "),
-            targets.len().to_string(),
-            field("typedTargetCount"),
-            clean(&field("reason")),
-            field("safetySnapshot"),
-            field("vaultReauth"),
-            field("approvedAt"),
-            clean(e.result.as_deref().unwrap_or_default()),
-            clean(e.detail.as_deref().unwrap_or_default()),
-            e.workspace_id.clone(),
-            e.user_id.clone(),
-            e.targets_json.clone(),
-            {
-                let (json, changed) = redact_json(e.approval_json.as_deref().unwrap_or_default());
-                redacted |= changed;
-                json
-            },
-            e.prev_hash.clone(),
-            e.hash.clone(),
-        ];
-        row.push(redacted.to_string());
+        let (row, redacted) = audit_csv_row(e);
+        out.push_str(&row);
         redacted_rows += usize::from(redacted);
-        push_row(&mut out, row.into_iter());
     }
     (out, redacted_rows)
+}
+
+/// The start of the CSV file: the byte-order mark and the header row.
+pub fn audit_csv_header() -> String {
+    let mut out = String::from("\u{FEFF}");
+    push_row(&mut out, AUDIT_CSV_COLUMNS.iter().map(|c| (*c).to_owned()));
+    out
+}
+
+/// One entry's CSV row, with its line end, and whether something in it was redacted.
+pub fn audit_csv_row(e: &AuditEntry) -> (String, bool) {
+    let mut out = String::new();
+    let mut redacted = false;
+    let mut clean = |text: &str| {
+        let (text, changed) = redact_secrets(text);
+        redacted |= changed;
+        text
+    };
+    let targets: Vec<Value> = serde_json::from_str(&e.targets_json).unwrap_or_default();
+    let names: Vec<&str> = targets
+        .iter()
+        .filter_map(|t| t.get("name").and_then(Value::as_str))
+        .collect();
+    let approval: Option<Value> = e.approval_json.as_deref().and_then(|a| serde_json::from_str(a).ok());
+    let field = |key: &str| -> String {
+        match approval.as_ref().and_then(|a| a.get(key)) {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        }
+    };
+    let mut row = vec![
+        e.seq.to_string(),
+        e.id.clone(),
+        e.ts.clone(),
+        e.event.clone(),
+        clean(&e.action),
+        e.tier.clone().unwrap_or_default(),
+        e.job_id.clone().unwrap_or_default(),
+        names.join("; "),
+        targets.len().to_string(),
+        field("typedTargetCount"),
+        clean(&field("reason")),
+        field("safetySnapshot"),
+        field("vaultReauth"),
+        field("approvedAt"),
+        clean(e.result.as_deref().unwrap_or_default()),
+        clean(e.detail.as_deref().unwrap_or_default()),
+        e.workspace_id.clone(),
+        e.user_id.clone(),
+        e.targets_json.clone(),
+        {
+            let (json, changed) = redact_json(e.approval_json.as_deref().unwrap_or_default());
+            redacted |= changed;
+            json
+        },
+        e.prev_hash.clone(),
+        e.hash.clone(),
+    ];
+    row.push(redacted.to_string());
+    push_row(&mut out, row.into_iter());
+    (out, redacted)
 }
 
 pub(crate) fn push_row(out: &mut String, cells: impl Iterator<Item = String>) {

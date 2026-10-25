@@ -33,7 +33,7 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::activity::{is_password_prompt, prompt_came_back, FinishedHow};
+use super::activity::{is_secret_prompt, prompt_came_back, FinishedHow};
 use super::multiexec::MultiExecEvent;
 use crate::adapters::exec_output::{CollectedOutput, OutputCollector, Scrubber};
 use crate::bulk::{self, Counts, DiffLine, GroupOptions, HostOutput, HostResult, OutputDiff, OutputGroup, RecordedRun};
@@ -572,7 +572,7 @@ impl RecordSlot {
         let capture = inner.capture.as_ref()?;
         let cap = inner.started.map(|s| s + inner.limits.line_time);
         let quiet = match (capture.quiet, capture.last_output) {
-            (Some(quiet), Some(last)) if !is_password_prompt(line) => Some(last + quiet),
+            (Some(quiet), Some(last)) if !is_secret_prompt(line) => Some(last + quiet),
             _ => None,
         };
         [cap, quiet].into_iter().flatten().min()

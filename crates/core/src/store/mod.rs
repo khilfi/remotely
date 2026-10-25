@@ -13,6 +13,8 @@ mod jobs;
 mod known_hosts;
 mod metrics;
 mod quick_connect;
+#[cfg(test)]
+mod retention_tests;
 mod sessions;
 mod ssh_keys;
 mod tags;
@@ -41,7 +43,7 @@ pub(crate) use favourites::{FavouriteFields, FavouriteRow};
 pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
-pub use jobs::{JobSummary, JobTargetRecord, TargetResult};
+pub use jobs::{JobSummary, JobTargetRecord, PurgedBodies, TargetResult};
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
@@ -84,7 +86,10 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5));
+            .busy_timeout(Duration::from_secs(5))
+            // BX-02: text the retention purge removes (job outputs, scripts) is overwritten on disk, not left in
+            // free pages.
+            .pragma("secure_delete", "ON");
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(options)
@@ -94,7 +99,9 @@ impl Store {
 
     /// A private in-memory database, for tests. One connection, so every query sees the same data.
     pub async fn open_in_memory() -> Result<Self> {
-        let options = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")?
+            .foreign_keys(true)
+            .pragma("secure_delete", "ON");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .idle_timeout(None)

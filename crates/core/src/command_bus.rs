@@ -641,6 +641,44 @@ impl Command {
         }
     }
 
+    /// The command's type as the journal names it (serde's `type` tag): `remoteExec`, `terminalLine`...
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Command::VmPower { .. } => "vmPower",
+            Command::VmSnapshot { .. } => "vmSnapshot",
+            Command::VmProtect { .. } => "vmProtect",
+            Command::RemoteExec { .. } => "remoteExec",
+            Command::AppUpdate { .. } => "appUpdate",
+            Command::PushSshKey { .. } => "pushSshKey",
+            Command::RemoveSshKey { .. } => "removeSshKey",
+            Command::TerminalLine { .. } => "terminalLine",
+            Command::FileUpload { .. } => "fileUpload",
+            Command::OpenTunnel { .. } => "openTunnel",
+            Command::Container { .. } => "container",
+        }
+    }
+
+    /// BX-02, SS-10: the command as the job journal keeps it. What looks like a secret in a script or a typed line
+    /// (`--password=...`, a token, a password in a URL) is `[redacted]`, as in the audit export
+    /// ([`redact_secrets`]). Returns whether anything was. The job itself runs the command as it was given.
+    pub fn for_journal(&self) -> (Command, bool) {
+        fn clean(text: &mut String) -> bool {
+            let (redacted, changed) = redact_secrets(text);
+            if changed {
+                *text = redacted;
+            }
+            changed
+        }
+        let mut kept = self.clone();
+        let changed = match &mut kept {
+            Command::RemoteExec { script, .. } => clean(script),
+            // The keys hold a paste's later lines too.
+            Command::TerminalLine { line, keys, .. } => clean(line) | clean(keys),
+            _ => false,
+        };
+        (kept, changed)
+    }
+
     /// Short human summary for dialogs, job lists and the audit log.
     pub fn summary(&self, target_count: usize) -> String {
         let noun = |kind: &str| {
@@ -1183,6 +1221,17 @@ impl CommandBus {
         if job.is_open() {
             return Err(CoreError::InvalidInput(
                 "That job is still running. Retry its failed targets once it has ended.".into(),
+            ));
+        }
+        // BX-02: what the journal no longer holds can't run again as it ran.
+        if job.bodies_removed && matches!(command, Command::RemoteExec { .. }) {
+            return Err(CoreError::InvalidInput(
+                "That run's script was removed from the journal when it got older than the retention period (Settings, General), so it can't be retried. Run it again from Compare.".into(),
+            ));
+        }
+        if job.command_redacted {
+            return Err(CoreError::InvalidInput(
+                "That run's script had something that looked like a secret, which the journal doesn't keep, so it can't be retried as it ran. Run it again from Compare.".into(),
             ));
         }
         let targets = self.store.job_targets(ctx, job_id).await?;
@@ -1816,5 +1865,138 @@ impl CommandBus {
             vault_reauth,
             approved_at: now_rfc3339(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::remote::forward::ForwardSpec;
+
+    fn every_kind() -> Vec<Command> {
+        let terminal = TargetRef::Terminal {
+            terminal_id: Uuid::nil(),
+            session_id: None,
+        };
+        vec![
+            Command::VmPower {
+                targets: vec![],
+                op: PowerOp::Suspend,
+            },
+            Command::VmSnapshot {
+                targets: vec![],
+                op: SnapshotOp::Take { name: "base".into() },
+            },
+            Command::VmProtect {
+                targets: vec![],
+                protected: true,
+            },
+            Command::RemoteExec {
+                targets: vec![],
+                script: "uptime".into(),
+                sudo: false,
+                sudo_password_id: None,
+                trust_new_host_keys: false,
+                timeout_secs: None,
+                rollout: Rollout {
+                    canary: true,
+                    stop_after_failures: Some(2),
+                },
+            },
+            Command::AppUpdate {
+                version: "1.0.0".into(),
+            },
+            Command::PushSshKey {
+                targets: vec![],
+                public_key: "ssh-ed25519 AAAA alice@example.com".into(),
+                trust_new_host_keys: false,
+                timeout_secs: None,
+                options: ssh_keys::KeyOptions::default(),
+            },
+            Command::RemoveSshKey {
+                targets: vec![],
+                public_key: "ssh-ed25519 AAAA alice@example.com".into(),
+                trust_new_host_keys: false,
+                timeout_secs: None,
+            },
+            Command::TerminalLine {
+                targets: vec![terminal.clone()],
+                line: "uptime".into(),
+                unreliable: false,
+                keys: "\r".into(),
+            },
+            Command::FileUpload {
+                targets: vec![terminal.clone()],
+                folder: "/tmp".into(),
+                files: vec![],
+            },
+            Command::OpenTunnel {
+                targets: vec![terminal],
+                forward: PortForward {
+                    id: Uuid::nil(),
+                    session_id: Uuid::nil(),
+                    label: None,
+                    spec: ForwardSpec {
+                        kind: ForwardKind::Local,
+                        bind_address: "127.0.0.1".into(),
+                        bind_port: 0,
+                        dest_host: "db01.example.com".into(),
+                        dest_port: 5432,
+                    },
+                    auto_start: false,
+                },
+            },
+            Command::Container {
+                targets: vec![],
+                op: ContainerOp::Start,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_type_name_is_serdes_tag() {
+        for command in every_kind() {
+            let value = serde_json::to_value(&command).unwrap();
+            assert_eq!(value["type"], command.type_name(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn the_journal_keeps_scripts_and_lines_without_their_secrets() {
+        let exec = Command::RemoteExec {
+            targets: vec![],
+            script: "mysql --password=hunter2 -e 'select 1'\ncurl https://alice:s3cret@example.com/x".into(),
+            sudo: false,
+            sudo_password_id: None,
+            trust_new_host_keys: false,
+            timeout_secs: None,
+            rollout: Rollout::default(),
+        };
+        let (kept, redacted) = exec.for_journal();
+        assert!(redacted);
+        let Command::RemoteExec { script, .. } = &kept else {
+            panic!("{kept:?}")
+        };
+        assert_eq!(
+            script,
+            "mysql --password=[redacted] -e 'select 1'\ncurl https://alice:[redacted]@example.com/x"
+        );
+        // Every line, not just the first one the summary shows.
+        assert!(!script.contains("s3cret"));
+
+        let line = Command::TerminalLine {
+            targets: vec![],
+            line: "export TOKEN=abc123\nrun --api-key xyz".into(),
+            unreliable: false,
+            keys: "\rrun --api-key xyz\r".into(),
+        };
+        let (kept, redacted) = line.for_journal();
+        assert!(redacted);
+        let text = serde_json::to_string(&kept).unwrap();
+        assert!(!text.contains("abc123") && !text.contains("xyz"), "{text}");
+
+        for plain in every_kind() {
+            assert_eq!(plain.for_journal(), (plain.clone(), false), "{plain:?}");
+        }
     }
 }

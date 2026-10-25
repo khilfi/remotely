@@ -343,6 +343,10 @@ fn forward_events(app: &App, core: &Arc<Core>) {
             }
         });
 
+        // BX-02: the job journal's retention purge, at start and daily.
+        let retention = Arc::clone(&core.retention);
+        tauri::async_runtime::spawn(async move { retention.run(CancellationToken::new()).await });
+
         // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
         let reachability = Arc::clone(&core.reachability);
         tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -392,6 +396,9 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::policy_set_rules,
         ipc::audit_recent,
         ipc::audit_verify,
+        ipc::journal_retention,
+        ipc::journal_retention_set,
+        ipc::journal_purge_now,
         ipc::audit_export_csv,
         ipc::settings_get,
         ipc::settings_set_vmrun_path,
