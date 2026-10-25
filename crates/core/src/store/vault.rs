@@ -92,29 +92,6 @@ impl Store {
         Ok(())
     }
 
-    /// A new master password: the same data key, wrapped by the new master key.
-    pub(crate) async fn set_vault_password(
-        &self,
-        ctx: &Context,
-        kdf_salt: &[u8],
-        kdf_params: &KdfParams,
-        wrapped_key: &[u8],
-    ) -> Result<()> {
-        sqlx::query(
-            "UPDATE vault_meta SET kdf_salt = ?, kdf_params = ?, wrapped_key = ?, user_id = ?, updated_at = ?
-             WHERE workspace_id = ?",
-        )
-        .bind(kdf_salt)
-        .bind(serde_json::to_string(kdf_params)?)
-        .bind(wrapped_key)
-        .bind(ctx.user_id.to_string())
-        .bind(now_rfc3339())
-        .bind(ctx.workspace_id.to_string())
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
     /// `None` stops the Windows login from unlocking the vault.
     pub(crate) async fn set_vault_dpapi_key(&self, ctx: &Context, dpapi_key: Option<&[u8]>) -> Result<()> {
         sqlx::query(
@@ -131,12 +108,183 @@ impl Store {
         Ok(())
     }
 
-    /// Every secret's label and kind, by label, with the number of sessions using it.
+    /// SS-04: a new data key. The master-password copy, the DPAPI copy (`None` leaves the vault
+    /// without one) and every item's ciphertext change in one transaction, so the vault is never half
+    /// under one key and half under the other. `items` must hold every item: a count that differs (an
+    /// item added since they were read) rolls everything back.
+    pub(crate) async fn rotate_vault_key(
+        &self,
+        ctx: &Context,
+        kdf_salt: &[u8],
+        kdf_params: &KdfParams,
+        wrapped_key: &[u8],
+        dpapi_key: Option<&[u8]>,
+        items: &[(SecretId, [u8; 12], Vec<u8>)],
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vault_items WHERE workspace_id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .fetch_one(&mut *tx)
+            .await?;
+        if usize::try_from(count).ok() != Some(items.len()) {
+            return Err(CoreError::Vault(
+                "the vault changed while its key was being replaced; nothing was changed, try again".into(),
+            ));
+        }
+        let now = now_rfc3339();
+        sqlx::query(
+            "UPDATE vault_meta SET kdf_salt = ?, kdf_params = ?, wrapped_key = ?, unlock_method = ?, dpapi_key = ?,
+                                   user_id = ?, updated_at = ?
+             WHERE workspace_id = ?",
+        )
+        .bind(kdf_salt)
+        .bind(serde_json::to_string(kdf_params)?)
+        .bind(wrapped_key)
+        .bind(unlock_method(dpapi_key))
+        .bind(dpapi_key)
+        .bind(ctx.user_id.to_string())
+        .bind(&now)
+        .bind(ctx.workspace_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        for (id, nonce, ciphertext) in items {
+            // `updated_at` stays: the secret's value did not change, only the key it is sealed with.
+            let done =
+                sqlx::query("UPDATE vault_items SET nonce = ?, ciphertext = ? WHERE workspace_id = ? AND id = ?")
+                    .bind(&nonce[..])
+                    .bind(ciphertext)
+                    .bind(ctx.workspace_id.to_string())
+                    .bind(id.0.to_string())
+                    .execute(&mut *tx)
+                    .await?;
+            if done.rows_affected() != 1 {
+                return Err(CoreError::Vault(
+                    "the vault changed while its key was being replaced; nothing was changed, try again".into(),
+                ));
+            }
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Every item's ciphertext, for a new data key.
+    pub(crate) async fn vault_ciphers(&self, ctx: &Context) -> Result<Vec<(SecretId, VaultCipher)>> {
+        let rows = sqlx::query("SELECT id, kind, label, nonce, ciphertext FROM vault_items WHERE workspace_id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|r| {
+                let id: String = r.try_get("id")?;
+                Ok((
+                    SecretId(super::parse_uuid(&id)?),
+                    VaultCipher {
+                        kind: kind_of(r)?,
+                        label: r.try_get("label")?,
+                        nonce: r.try_get("nonce")?,
+                        ciphertext: r.try_get("ciphertext")?,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// SS-04: after a vault change, the write-ahead log is folded into the database file and emptied, so
+    /// an old wrapped key or ciphertext does not linger in `-wal` (secure_delete overwrites the pages in
+    /// the file itself). Best effort: a busy reader only delays it.
+    pub(crate) async fn checkpoint(&self) {
+        if let Err(err) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&self.pool).await {
+            tracing::warn!(error = %err, "could not checkpoint the database after a vault change");
+        }
+    }
+
+    /// SS-04, AP-06: whether `secret` already goes to the place `host`, `port` and `jump` describe: a saved
+    /// session there (other than `except`) logs in with it, gives it to sudo as a container host, or was
+    /// allowed to use it.
+    pub(crate) async fn secret_allowed_at(
+        &self,
+        ctx: &Context,
+        secret: SecretId,
+        host: &str,
+        port: u16,
+        jump: Option<Uuid>,
+        except: Option<Uuid>,
+    ) -> Result<bool> {
+        let secret = secret.0.to_string();
+        let found: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM sessions s
+             WHERE s.workspace_id = ? AND s.host = ? COLLATE NOCASE AND s.port = ? AND s.jump_session_id IS ?
+               AND s.id != ?
+               AND ((s.auth_method = 'password' AND s.credential_id = ?)
+                    OR EXISTS (SELECT 1 FROM container_hosts c
+                               WHERE c.session_id = s.id AND c.sudo = 'password' AND c.sudo_password_id = ?)
+                    OR EXISTS (SELECT 1 FROM session_secret_grants g WHERE g.session_id = s.id AND g.secret_id = ?))
+             LIMIT 1",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(host)
+        .bind(i64::from(port))
+        .bind(jump.map(|j| j.to_string()))
+        .bind(except.map(|id| id.to_string()).unwrap_or_default())
+        .bind(&secret)
+        .bind(&secret)
+        .bind(&secret)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(found.is_some())
+    }
+
+    /// SS-04, AP-06: the vault passwords a saved session sends to its host: its login password, its
+    /// container marks' sudo passwords and the ones it was allowed to use.
+    pub(crate) async fn session_sent_secrets(&self, ctx: &Context, session_id: Uuid) -> Result<Vec<SecretId>> {
+        let session = session_id.to_string();
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT credential_id FROM sessions
+             WHERE workspace_id = ? AND id = ? AND auth_method = 'password' AND credential_id IS NOT NULL
+             UNION
+             SELECT sudo_password_id FROM container_hosts
+             WHERE workspace_id = ? AND session_id = ? AND sudo = 'password' AND sudo_password_id IS NOT NULL
+             UNION
+             SELECT secret_id FROM session_secret_grants WHERE workspace_id = ? AND session_id = ?",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(&session)
+        .bind(ctx.workspace_id.to_string())
+        .bind(&session)
+        .bind(ctx.workspace_id.to_string())
+        .bind(&session)
+        .fetch_all(&self.pool)
+        .await?;
+        ids.iter().map(|id| Ok(SecretId(super::parse_uuid(id)?))).collect()
+    }
+
+    /// SS-04, AP-06: lets a saved session use a vault password from now on. False when it already could.
+    pub(crate) async fn grant_secret(&self, ctx: &Context, session_id: Uuid, secret: SecretId) -> Result<bool> {
+        let done = sqlx::query(
+            "INSERT OR IGNORE INTO session_secret_grants (workspace_id, user_id, session_id, secret_id, granted_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(ctx.user_id.to_string())
+        .bind(session_id.to_string())
+        .bind(secret.0.to_string())
+        .bind(now_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// Every secret's label and kind, by label, with the number of sessions using it (logging in with it,
+    /// giving it to sudo, or allowed to use it).
     pub async fn vault_items(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {
         let rows = sqlx::query(
             "SELECT v.id, v.kind, v.label, v.created_at, v.updated_at,
                     (SELECT COUNT(*) FROM sessions s
-                     WHERE s.credential_id = v.id OR s.key_passphrase_id = v.id) AS used_by
+                     WHERE s.credential_id = v.id OR s.key_passphrase_id = v.id
+                        OR EXISTS (SELECT 1 FROM container_hosts c
+                                   WHERE c.session_id = s.id AND c.sudo_password_id = v.id)
+                        OR EXISTS (SELECT 1 FROM session_secret_grants g
+                                   WHERE g.session_id = s.id AND g.secret_id = v.id)) AS used_by
              FROM vault_items v WHERE v.workspace_id = ? ORDER BY v.label COLLATE NOCASE",
         )
         .bind(ctx.workspace_id.to_string())

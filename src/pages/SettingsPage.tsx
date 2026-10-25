@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
+import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
 import { PresentationCard } from "@/components/Presentation";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
@@ -455,6 +456,21 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
             </Button>
           </CardFooter>
         </Card>
+
+        {vault && vault.status !== "notSetUp" && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Vault</CardTitle>
+              <CardDescription>
+                How the vault unlocks. It locks itself after {vault.idleLockMinutes} minutes without you typing or
+                clicking in Remotely.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <WindowsLoginNotice vault={vault} onVaultChanged={onVaultChanged} showWhenOff />
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardHeader>

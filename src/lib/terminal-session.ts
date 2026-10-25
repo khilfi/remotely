@@ -31,6 +31,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { masker, TerminalMasker } from "@/lib/presentation";
 import { presentationView, subscribePresentation } from "@/lib/presentation-state";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 import {
   api,
   errorCode,
@@ -529,7 +530,10 @@ export class PaneSession {
       if (opener.kind === "session") {
         id = await api.terminalOpen(opener.sessionId, cols, rows, this.onOutput, this.onEvent);
       } else if (opener.kind === "quick") {
-        const opened = await api.terminalQuickConnect(opener.request, cols, rows, this.onOutput, this.onEvent);
+        // SS-04, AP-06: a vault password for a host where no saved session sends it yet asks for the vault password.
+        const opened = await withVaultPassword((vaultPassword) =>
+          api.terminalQuickConnect({ ...opener.request, vaultPassword }, cols, rows, this.onOutput, this.onEvent),
+        );
         id = opened.id;
         // A saved quick connection is a session from now on: reconnects and splits follow it.
         this.opener = opened.session ? { kind: "session", sessionId: opened.session.id } : null;
@@ -734,11 +738,11 @@ export class PaneSession {
 
   /**
    * QL-06: the core types a vault password or passphrase into this terminal, then Enter, if it shows a password
-   * prompt (or `force`). The value never comes here.
+   * prompt (or `force`). The value never comes here. SS-04, AP-06: `vaultPassword` when the core asked for it.
    */
-  async typeSecret(secretId: string, force: boolean) {
+  async typeSecret(secretId: string, force: boolean, vaultPassword?: string) {
     if (!this.coreId) throw new Error("This terminal has not connected yet.");
-    await api.terminalTypeSecret(this.coreId, secretId, force);
+    await api.terminalTypeSecret(this.coreId, secretId, force, vaultPassword);
     this.focus();
   }
 

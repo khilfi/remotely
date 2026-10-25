@@ -25,7 +25,7 @@
 pub mod marks;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -51,7 +51,7 @@ use crate::locks;
 use crate::login_guard::{self, LoginGuard, ParkReason, ParkScope, Parked};
 use crate::metrics::guest::{spec_key, GuestVerifier};
 use crate::store::Store;
-use crate::vault::{Vault, VaultStatus};
+use crate::vault::{Destination, SecretBindings, SecretString, Vault, VaultStatus};
 
 /// CT-02: Settings key for the docker.exe path (`None`: find it).
 pub const DOCKER_PATH_KEY: &str = "containers.dockerPath";
@@ -191,6 +191,8 @@ struct Inner {
     kept: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<Kept>>>>,
     seen: Mutex<HashMap<(ContainerHost, EngineKind), Seen>>,
     tuning: RwLock<ContainerTuning>,
+    /// SS-04, AP-06: a sudo password tried on a host that doesn't get it yet asks first.
+    bindings: OnceLock<SecretBindings>,
 }
 
 /// The containers service. Cloning gives another handle to the same one.
@@ -219,6 +221,7 @@ impl Containers {
             kept: Mutex::default(),
             seen: Mutex::default(),
             tuning: RwLock::new(ContainerTuning::default()),
+            bindings: OnceLock::new(),
         });
         // Idle connections close on their own, without anyone reading.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -242,6 +245,25 @@ impl Containers {
 
     pub fn marks(&self) -> &ContainerMarks {
         &self.inner.marks
+    }
+
+    /// SS-04, AP-06: the checks before a sudo password goes to a host it doesn't go to yet.
+    pub fn set_bindings(&self, bindings: SecretBindings) {
+        self.inner.marks.set_bindings(bindings.clone());
+        let _ = self.inner.bindings.set(bindings);
+    }
+
+    /// SS-04: the vault locked: every kept connection closes (they logged in with vault secrets, and
+    /// keep the login password to scrub output). The next read connects again once it is unlocked.
+    pub async fn close_all(&self) {
+        let slots: Vec<Arc<tokio::sync::Mutex<Kept>>> =
+            locks::lock(&self.inner.kept).drain().map(|(_, slot)| slot).collect();
+        for slot in slots {
+            let mut kept = slot.lock().await;
+            if let Some(connection) = kept.connection.take() {
+                connection.close().await;
+            }
+        }
     }
 
     /// The user pressed Retry: a parked host logs in (and runs sudo) again on the next read, once past
@@ -328,7 +350,35 @@ impl Containers {
         session_id: Uuid,
         sudo_password: Option<crate::vault::SecretId>,
     ) -> Result<Detection> {
+        self.detect_with(ctx, session_id, sudo_password, None).await
+    }
+
+    /// [`Self::detect`], with the master password for a sudo password the host doesn't get yet (SS-04,
+    /// AP-06). Given, the session may use it from now on, so marking it right after doesn't ask again.
+    pub async fn detect_with(
+        &self,
+        ctx: &Context,
+        session_id: Uuid,
+        sudo_password: Option<crate::vault::SecretId>,
+        vault_password: Option<&SecretString>,
+    ) -> Result<Detection> {
         let spec = self.spec(ctx, session_id).await?;
+        if let (Some(bindings), Some(secret)) = (self.inner.bindings.get(), sudo_password) {
+            let place = Destination::new(&spec.host, spec.port, spec.jump.as_ref().map(|j| j.id));
+            let already = bindings.sent_by(ctx, session_id).await?;
+            if !already.contains(&secret) && !bindings.may_go(ctx, secret, &place, None).await? {
+                let reason = format!(
+                    "Trying sudo on '{}' would send it the {}, which no saved session sends to {}:{} yet",
+                    spec.name,
+                    bindings.describe(ctx, secret).await?,
+                    place.host,
+                    place.port
+                );
+                let action = format!("Failed to look for container engines on '{}'", spec.name);
+                bindings.confirm(ctx, vault_password, &action, &reason).await?;
+                bindings.allow(ctx, session_id, &spec.name, secret).await?;
+            }
+        }
         // The user's own click, like Retry.
         self.inner.guard.retry(session_id);
         let connection = self.connection(ctx, &spec).await?;

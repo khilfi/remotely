@@ -3864,3 +3864,152 @@ fn container_tiers_are_editable_like_any_other() {
     assert_eq!(old.tiers[&ActionKind::VolumeRemove], TierRule::same(Tier::Critical));
     assert!(PolicyEngine::new(old).is_ok());
 }
+
+// ---- AP-01, AP-06: read-only entries that run anything; what loosens the rules --------------------------
+
+#[test]
+fn shells_interpreters_and_command_runners_cant_be_read_only() {
+    for entry in [
+        "sh",
+        "bash",
+        "/bin/bash",
+        "zsh",
+        "python",
+        "python3",
+        "python3.12",
+        "perl",
+        "ruby",
+        "node",
+        "awk",
+        "gawk",
+        "xargs",
+        "sudo",
+        "sudo -l",
+        "su",
+        "env bash",
+        "env -i sh",
+        "busybox",
+        "pwsh",
+        "nohup",
+        "timeout 5",
+        "watch",
+        "lua5.4",
+    ] {
+        let mut rules = PolicyRules::default();
+        rules.read_only_commands.push(entry.into());
+        let Err(CoreError::InvalidRule { name, message }) = rules.validate() else {
+            panic!("'{entry}' was taken as read-only");
+        };
+        assert_eq!(name, "Read-only commands");
+        assert!(message.contains(entry), "{message}");
+    }
+    // `env` alone prints the environment, and commands that merely start like an interpreter stay fine.
+    for entry in ["env", "env -0", "shasum", "nodetool status", "awkward-report"] {
+        let mut rules = PolicyRules::default();
+        rules.read_only_commands.retain(|e| e != entry);
+        rules.read_only_commands.push(entry.into());
+        assert!(rules.validate().is_ok(), "{entry}");
+    }
+    assert!(PolicyRules::default().validate().is_ok(), "the default list has none");
+}
+
+#[test]
+fn what_loosens_the_rules_is_named_and_tightening_is_not() {
+    let base = PolicyRules::default();
+    assert!(base.loosened(&base).is_empty());
+
+    let mut tighter = base.clone();
+    tighter.countdown_seconds += 10;
+    tighter.bulk_threshold = 2;
+    tighter.exec_bulk_threshold = 2;
+    tighter.dangerous_commands.push(DangerousPattern {
+        name: "zfs destroy".into(),
+        pattern: r"zfs\s+destroy".into(),
+    });
+    tighter.read_only_commands.retain(|e| e != "lsof");
+    if let Some(rule) = tighter.tiers.get_mut(&ActionKind::VmStart) {
+        rule.single = Tier::Critical;
+        rule.bulk = Tier::Critical;
+    }
+    assert!(base.loosened(&tighter).is_empty(), "{:?}", base.loosened(&tighter));
+
+    let lower = |kind: ActionKind| {
+        let mut rules = base.clone();
+        let rule = rules.tiers.get_mut(&kind).unwrap();
+        rule.single = Tier::Low;
+        rule.bulk = Tier::Low;
+        rules
+    };
+    let cases: Vec<(PolicyRules, &str)> = vec![
+        (lower(ActionKind::SnapshotDelete), "asks less"),
+        (
+            PolicyRules {
+                prod_bump: false,
+                ..base.clone()
+            },
+            "Prod no longer raises the tier",
+        ),
+        (
+            PolicyRules {
+                dangerous_commands: base.dangerous_commands[1..].to_vec(),
+                ..base.clone()
+            },
+            "removed",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.dangerous_commands[0].pattern = "never-matches-anything".into();
+                r
+            },
+            "changed",
+        ),
+        (
+            {
+                let mut r = base.clone();
+                r.read_only_commands.push("lsattr".into());
+                r
+            },
+            "'lsattr' counts as read-only",
+        ),
+        (
+            PolicyRules {
+                bulk_threshold: base.bulk_threshold + 5,
+                ..base.clone()
+            },
+            "a higher bulk threshold",
+        ),
+        (
+            PolicyRules {
+                exec_bulk_threshold: base.exec_bulk_threshold + 5,
+                ..base.clone()
+            },
+            "commands on hosts",
+        ),
+        (
+            PolicyRules {
+                countdown_seconds: 0,
+                ..base.clone()
+            },
+            "a shorter countdown",
+        ),
+        (
+            PolicyRules {
+                safety_snapshot_default: false,
+                ..base.clone()
+            },
+            "no safety snapshot by default",
+        ),
+    ];
+    for (new, expected) in cases {
+        let loosened = base.loosened(&new);
+        assert!(
+            loosened.iter().any(|l| l.contains(expected)),
+            "{expected}: {loosened:?}"
+        );
+    }
+    // The same read-only entry typed with other spacing is no new entry.
+    let mut spaced = base.clone();
+    spaced.read_only_commands = spaced.read_only_commands.iter().map(|e| e.replace(' ', "  ")).collect();
+    assert!(base.loosened(&spaced).is_empty());
+}

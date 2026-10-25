@@ -746,3 +746,26 @@ async fn refused_sudo_logins_and_changed_keys_are_not_retried_at_every_poll() {
         .count();
     assert_eq!(blocked, 1, "audited once per park");
 }
+
+#[tokio::test]
+async fn locking_the_vault_closes_the_kept_connection_that_logged_in_with_its_secrets() {
+    let core = core().await;
+    let ctx = &core.ctx;
+    let (server, web, _password) = container_host(&core, DOCKER, Fixture::sample(), SudoMode::Off, |s| s).await;
+    core.containers.containers(ctx, host(web), DOCKER).await.unwrap();
+    core.containers.containers(ctx, host(web), DOCKER).await.unwrap();
+    assert_eq!(server.connections(), 1, "kept between reads");
+
+    // SS-04: the kept connection holds the login password (to scrub output); locking closes it.
+    core.vault.lock(ctx).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    core.vault
+        .unlock(
+            ctx,
+            remotely_core::vault::UnlockMethod::MasterPassword(SecretString::new(VAULT_PASSWORD)),
+        )
+        .await
+        .unwrap();
+    core.containers.containers(ctx, host(web), DOCKER).await.unwrap();
+    assert_eq!(server.connections(), 2, "logged in again after the lock");
+}

@@ -230,6 +230,7 @@ fn quick(server: &TestSshServer, password: Option<&str>, save: Option<SaveAs>) -
         auth: SessionAuth::Password { password_id: None },
         password: password.map(SecretString::new),
         save,
+        vault_password: None,
     }
 }
 
@@ -425,6 +426,7 @@ async fn quick_connect_checks_what_was_typed_before_opening_anything() {
             auth: SessionAuth::Agent,
             password: None,
             save: None,
+            vault_password: None,
         },
         QuickConnect {
             host: "web01.example.com:0".into(),
@@ -433,6 +435,7 @@ async fn quick_connect_checks_what_was_typed_before_opening_anything() {
             auth: SessionAuth::Agent,
             password: None,
             save: None,
+            vault_password: None,
         },
         QuickConnect {
             host: "web01.example.com".into(),
@@ -444,6 +447,7 @@ async fn quick_connect_checks_what_was_typed_before_opening_anything() {
             },
             password: None,
             save: None,
+            vault_password: None,
         },
         QuickConnect {
             host: "web01.example.com".into(),
@@ -454,6 +458,7 @@ async fn quick_connect_checks_what_was_typed_before_opening_anything() {
             },
             password: None,
             save: None,
+            vault_password: None,
         },
     ];
     for request in bad {
@@ -1352,4 +1357,30 @@ async fn a_session_log_stamps_each_line_and_is_audited_with_its_path() {
     assert_audit_clean(&core, &[&password, "logged line"]).await;
     let _ = std::fs::remove_dir_all(&folder);
     core.terminals.close_all().await;
+}
+
+#[tokio::test]
+async fn locking_the_vault_forgets_a_typed_login_password_but_keeps_the_open_shell() {
+    let password = new_password();
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let (core, _) = core_with(FakeNetwork::default()).await;
+    trust_server(&core, &server).await;
+    let opened = core
+        .terminals
+        .quick_connect(&core.ctx, quick(&server, Some(&password), None), SIZE)
+        .await
+        .unwrap();
+    let mut pane = Pane::new(opened.handle);
+    pane.connected().await;
+
+    // SS-04: the vault locks; the shell stays open, but a new login asks for the password again.
+    core.vault.lock(&core.ctx).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    pane.type_text(&core, "whoami\r").await;
+    pane.expect_output("alice\r\n$ ").await;
+    let mut second = Pane::new(core.terminals.open_like(&core.ctx, pane.id, SIZE).await.unwrap());
+    second.expect_output("alice's password: ").await;
+    assert_eq!(server.log().iter().filter(|l| *l == "password alice ok").count(), 1);
+    core.terminals.close(second.id).await;
+    core.terminals.close(pane.id).await;
 }

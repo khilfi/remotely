@@ -528,6 +528,17 @@ impl HostDetails {
         }
     }
 
+    /// SS-04: the vault locked: Remotely's own connections close (they logged in with vault secrets).
+    pub async fn close_all(&self) {
+        let slots: Vec<Arc<tokio::sync::Mutex<Kept>>> =
+            locks::lock(&self.inner.kept).drain().map(|(_, slot)| slot).collect();
+        for slot in slots {
+            if let Some(connection) = slot.lock().await.connection.take() {
+                connection.close().await;
+            }
+        }
+    }
+
     /// MO-13: a VM's hardware, read from its files now; what was read before when they can't be read.
     pub async fn vm_specs(&self, ctx: &Context, vmx_path: &str) -> Result<VmSpecs> {
         let vm = self

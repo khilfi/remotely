@@ -33,7 +33,7 @@ use crate::locks;
 use crate::policy::{ActionKind, PolicyEngine, Tier};
 use crate::presentation::Change;
 use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
-use crate::vault::{SecretId, SecretKind, SecretString, Vault};
+use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
 use crate::vm_links::{AutoLinkReport, VmLink, VmLinks};
 use tree::{SessionTree, TreeGrouping};
 
@@ -243,7 +243,7 @@ impl SessionRecord {
     }
 
     /// The editor's view of this session, to start a copy or compare an edit.
-    pub(crate) fn input(&self) -> SessionInput {
+    pub fn input(&self) -> SessionInput {
         SessionInput {
             name: self.name.clone(),
             folder_id: self.folder_id,
@@ -535,6 +535,9 @@ pub struct SessionLibrary {
     links: Arc<VmLinks>,
     /// SS-01: the bus's engine, to rate startup commands in the audit log.
     policy: Option<Arc<RwLock<PolicyEngine>>>,
+    /// SS-04, AP-06: a session that would send a vault password somewhere it doesn't go yet asks for
+    /// the master password first.
+    bindings: Option<SecretBindings>,
 }
 
 impl SessionLibrary {
@@ -543,6 +546,59 @@ impl SessionLibrary {
             store,
             links,
             policy: None,
+            bindings: None,
+        }
+    }
+
+    /// SS-04, AP-06: the checks before a session sends a vault password to a new place.
+    pub fn with_bindings(mut self, bindings: SecretBindings) -> Self {
+        self.bindings = Some(bindings);
+        self
+    }
+
+    /// AP-06: the vault passwords in `secrets` may go to `place` (through this session, `except` when it is
+    /// an edit), or the master password must come with the request. True when it was asked and given.
+    #[allow(clippy::too_many_arguments)]
+    async fn confirm_place(
+        &self,
+        ctx: &Context,
+        place: &Destination,
+        secrets: &[SecretId],
+        except: Option<Uuid>,
+        already: &[SecretId],
+        reauth: Reauth<'_>,
+        action: &str,
+    ) -> Result<bool> {
+        let Some(bindings) = &self.bindings else {
+            return Ok(false);
+        };
+        let mut new = Vec::new();
+        for secret in secrets {
+            if already.contains(secret) || bindings.may_go(ctx, *secret, place, except).await? {
+                continue;
+            }
+            new.push(bindings.describe(ctx, *secret).await?);
+        }
+        if new.is_empty() {
+            return Ok(false);
+        }
+        let vault_password = match reauth {
+            Reauth::Given => return Ok(true),
+            Reauth::Ask(password) => password,
+        };
+        let reason = format!(
+            "This would send the {} to {}:{}, where no saved session sends it yet",
+            new.join(" and the "),
+            place.host,
+            place.port
+        );
+        bindings.confirm(ctx, vault_password, action, &reason).await?;
+        Ok(true)
+    }
+
+    fn settle(&self, secrets: &[SecretId]) {
+        if let Some(bindings) = &self.bindings {
+            bindings.settle(secrets);
         }
     }
 
@@ -615,15 +671,36 @@ impl SessionLibrary {
     /// Saves a new session. Without a VM chosen, it is linked automatically when its host is a VM's
     /// IP address (QL-01).
     pub async fn create(&self, ctx: &Context, input: SessionInput) -> Result<SessionRecord> {
+        self.create_with(ctx, input, None).await
+    }
+
+    /// [`Self::create`], with the master password for a login password that goes nowhere near this host
+    /// yet (SS-04, AP-06: otherwise it fails with [`CoreError::ReauthRequired`]).
+    pub async fn create_with(
+        &self,
+        ctx: &Context,
+        input: SessionInput,
+        vault_password: Option<&SecretString>,
+    ) -> Result<SessionRecord> {
         self.store.read_only().check(Change::Sessions)?;
         let input = self.check(ctx, None, input).await?;
+        let place = Destination::new(&input.host, input.port, input.jump_session_id);
+        let sent = input.sent_secret().into_iter().collect::<Vec<_>>();
+        let action = format!("Failed to create session {}", quoted(&display_name(&input)));
+        let asked = self
+            .confirm_place(ctx, &place, &sent, None, &[], Reauth::Ask(vault_password), &action)
+            .await?;
         let id = Uuid::new_v4();
         self.store.insert_session(ctx, id, &input, None).await?;
+        self.settle(&sent);
         if input.vm_id.is_some() {
             self.store.set_vm_link_kind(ctx, id, Some(VmLink::Manual)).await?;
         }
         let session = self.get(ctx, id).await?;
-        let detail = self.describe(ctx, &session).await?;
+        let mut detail = self.describe(ctx, &session).await?;
+        if asked {
+            detail.push_str("; the vault password was asked again (AP-06)");
+        }
         self.audit(
             ctx,
             &format!("Created session {}", quoted(&session.name)),
@@ -701,12 +778,62 @@ impl SessionLibrary {
     /// changes. A new host makes an automatic link, or the removal of one, out of date: the session
     /// is linked again by its new address.
     pub async fn update(&self, ctx: &Context, id: Uuid, input: SessionInput) -> Result<SessionRecord> {
+        self.update_with(ctx, id, input, None).await
+    }
+
+    /// [`Self::update`], with the master password for an edit that sends a vault password somewhere it
+    /// doesn't go yet: another login password, or a new host, port or jump host for a session that sends
+    /// vault passwords (its login, its container hosts' sudo, the ones it was allowed). SS-04, AP-06.
+    pub async fn update_with(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        input: SessionInput,
+        vault_password: Option<&SecretString>,
+    ) -> Result<SessionRecord> {
+        self.update_checked(ctx, id, input, Reauth::Ask(vault_password)).await
+    }
+
+    /// FD-07: an import replacing a session, after it asked for the master password itself (or not).
+    pub(crate) async fn update_checked(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        input: SessionInput,
+        reauth: Reauth<'_>,
+    ) -> Result<SessionRecord> {
         self.store.read_only().check(Change::Sessions)?;
         let before = self.get(ctx, id).await?;
         let mut input = self.check(ctx, Some(id), input).await?;
         if input == before.input() {
             return Ok(before);
         }
+        let place = Destination::new(&input.host, input.port, input.jump_session_id);
+        let moved = !place.same(&Destination::new(&before.host, before.port, before.jump_session_id));
+        let (sent, already) = match &self.bindings {
+            Some(bindings) => {
+                let now = bindings.sent_by(ctx, id).await?;
+                let old_login = before.input().sent_secret();
+                let mut sent: Vec<SecretId> = if moved {
+                    now.iter().copied().filter(|s| Some(*s) != old_login).collect()
+                } else {
+                    Vec::new()
+                };
+                if let Some(login) = input.sent_secret() {
+                    if !sent.contains(&login) {
+                        sent.push(login);
+                    }
+                }
+                // Without a move, what the session sends already may stay.
+                let already = if moved { Vec::new() } else { now };
+                (sent, already)
+            }
+            None => (Vec::new(), Vec::new()),
+        };
+        let action = format!("Failed to change session {}", quoted(&before.name));
+        let asked = self
+            .confirm_place(ctx, &place, &sent, Some(id), &already, reauth, &action)
+            .await?;
         let host_changed = !input.host.eq_ignore_ascii_case(&before.host);
         let decided_without_vm = before.vm_link == Some(VmLink::Manual) && before.vm_id.is_none();
         let link = if input.vm_id != before.vm_id {
@@ -723,8 +850,12 @@ impl SessionLibrary {
         if link != before.vm_link {
             self.store.set_vm_link_kind(ctx, id, link).await?;
         }
+        self.settle(&sent);
         let after = self.get(ctx, id).await?;
-        let changes = self.changes(ctx, &before, &after).await?;
+        let mut changes = self.changes(ctx, &before, &after).await?;
+        if asked {
+            changes.push("the vault password was asked again (AP-06)".into());
+        }
         self.audit(
             ctx,
             &format!("Changed session {}", quoted(&after.name)),
@@ -1195,7 +1326,33 @@ impl SessionLibrary {
     }
 }
 
+/// SS-04, AP-06: how an edit that sends a vault password to a new place is confirmed.
+#[derive(Clone, Copy)]
+pub(crate) enum Reauth<'a> {
+    /// With this master password, or by asking for it (`None`).
+    Ask(Option<&'a SecretString>),
+    /// The caller asked for it already (FD-07, once for a whole import).
+    Given,
+}
+
+/// The name a session will have: its own, or the host's.
+fn display_name(input: &SessionInput) -> String {
+    if input.name.trim().is_empty() {
+        input.host.clone()
+    } else {
+        input.name.clone()
+    }
+}
+
 impl SessionInput {
+    /// SS-04: the vault password the host receives when the session logs in (keys never leave this PC).
+    pub(crate) fn sent_secret(&self) -> Option<SecretId> {
+        match self.auth {
+            SessionAuth::Password { password_id } => password_id,
+            _ => None,
+        }
+    }
+
     /// The vault kind the credential must have.
     fn auth_kind(&self) -> Option<SecretKind> {
         match self.auth {

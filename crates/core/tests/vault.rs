@@ -278,10 +278,11 @@ async fn it_locks_after_the_idle_time_without_use() {
 
     tokio::time::sleep(idle / 2).await;
     assert_eq!(vault.status(), VaultStatus::Unlocked);
-    // Use resets the clock.
+    // The user's activity resets the clock.
+    vault.note_activity();
     assert_eq!(vault.get(&ctx, id).await.unwrap().expose(), "s3cret");
     tokio::time::sleep(idle / 2).await;
-    assert_eq!(vault.status(), VaultStatus::Unlocked, "used half the idle time ago");
+    assert_eq!(vault.status(), VaultStatus::Unlocked, "active half the idle time ago");
 
     // Listing labels is not use: it needs no key.
     vault.list(&ctx).await.unwrap();
@@ -584,4 +585,184 @@ async fn a_locked_vault_still_lets_a_critical_action_through_with_the_password()
         .unwrap();
     assert_eq!(common::wait_finished(&mut events, job).await, JobStatus::Succeeded);
     assert_eq!(core.vault.info().status, VaultStatus::Locked);
+}
+
+#[tokio::test]
+async fn background_reads_do_not_keep_the_vault_open() {
+    // The dashboard re-reads credentials before each reconnect and the Containers page reads its sudo
+    // password on every poll: none of that is the user, so the idle lock still fires.
+    let idle = Duration::from_millis(800);
+    let (ctx, vault) = quick_to_lock(idle).await;
+    let id = vault
+        .put(&ctx, SecretKind::Password, "web", pw("s3cret"))
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let mut locked = false;
+    while started.elapsed() < idle * 4 {
+        match vault.get(&ctx, id).await {
+            Ok(value) => assert_eq!(value.expose(), "s3cret"),
+            Err(CoreError::VaultLocked) => {
+                locked = true;
+                break;
+            }
+            Err(err) => panic!("{err}"),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(locked, "reads every 50 ms kept the vault open");
+    assert_eq!(vault.status(), VaultStatus::Locked);
+}
+
+#[tokio::test]
+async fn activity_keeps_the_vault_open_and_stopping_lets_it_lock() {
+    let idle = Duration::from_millis(800);
+    let (_ctx, vault) = quick_to_lock(idle).await;
+    let started = std::time::Instant::now();
+    while started.elapsed() < idle * 2 {
+        vault.note_activity();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(vault.status(), VaultStatus::Unlocked, "the user kept working");
+    tokio::time::sleep(idle + Duration::from_millis(400)).await;
+    assert_eq!(vault.status(), VaultStatus::Locked);
+}
+
+async fn meta_row(store: &Store) -> (Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
+    sqlx::query_as("SELECT kdf_salt, wrapped_key, dpapi_key FROM vault_meta")
+        .fetch_one(store.pool())
+        .await
+        .unwrap()
+}
+
+async fn ciphertexts(store: &Store) -> Vec<(String, Vec<u8>)> {
+    sqlx::query_as("SELECT id, ciphertext FROM vault_items ORDER BY id")
+        .fetch_all(store.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn changing_the_master_password_makes_a_new_data_key_and_seals_every_item_again() {
+    let (store, ctx, protector, vault) = ready().await;
+    let mut ids = Vec::new();
+    for (kind, label, value) in [
+        (SecretKind::Password, "web01 root", "s3cret-1".to_owned()),
+        (SecretKind::Passphrase, "deploy key passphrase", "phrase two".to_owned()),
+        (SecretKind::PrivateKey, "deploy key", fake_private_key()),
+    ] {
+        ids.push((vault.put(&ctx, kind, label, pw(&value)).await.unwrap(), value));
+    }
+    let (old_salt, old_wrapped, old_dpapi) = meta_row(&store).await;
+    let old_items = ciphertexts(&store).await;
+    let new_password = "plum-crater-velvet-orbit-29";
+
+    vault.change_password(&pw(PASSWORD), pw(new_password)).await.unwrap();
+    let (salt, wrapped, dpapi) = meta_row(&store).await;
+    assert_ne!(salt, old_salt);
+    assert_ne!(wrapped, old_wrapped);
+    assert!(dpapi.is_some(), "the Windows login still unlocks it");
+    assert_ne!(dpapi, old_dpapi, "the DPAPI copy holds the new key");
+    let items = ciphertexts(&store).await;
+    assert_eq!(items.len(), old_items.len());
+    for ((id, after), (old_id, before)) in items.iter().zip(&old_items) {
+        assert_eq!(id, old_id);
+        assert_ne!(after, before, "every item is sealed with the new key");
+    }
+    // The open vault reads every secret under the new key straight away.
+    for (id, value) in &ids {
+        assert_eq!(vault.get(&ctx, *id).await.unwrap().expose(), value);
+    }
+    // So do a restart with the new password and the Windows login.
+    let restarted = open(&store, ctx, protector.clone()).await;
+    restarted.unlock(UnlockMethod::WindowsLogin).await.unwrap();
+    for (id, value) in &ids {
+        assert_eq!(restarted.get(&ctx, *id).await.unwrap().expose(), value);
+    }
+
+    // An old copy of the wrapped key (and the old password) opens nothing written since.
+    sqlx::query("UPDATE vault_meta SET kdf_salt = ?, wrapped_key = ?, dpapi_key = NULL")
+        .bind(&old_salt)
+        .bind(&old_wrapped)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    let old = open(&store, ctx, protector).await;
+    old.unlock(UnlockMethod::MasterPassword(pw(PASSWORD))).await.unwrap();
+    for (id, _) in &ids {
+        assert!(
+            matches!(old.get(&ctx, *id).await, Err(CoreError::Vault(_))),
+            "the old data key still opened an item"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_windows_login_turns_off_in_one_click_without_the_password() {
+    let (store, ctx, protector, vault) = ready().await;
+    let service = VaultService::new(Arc::new(vault), store.clone());
+    assert!(service.info().windows_login);
+    let info = service.turn_off_windows_login(&ctx).await.unwrap();
+    assert!(!info.windows_login);
+    assert_eq!(
+        info.status,
+        VaultStatus::Unlocked,
+        "turning it off doesn't lock the vault"
+    );
+    let (_, _, dpapi) = meta_row(&store).await;
+    assert!(dpapi.is_none(), "the Windows-protected key is gone");
+    let audit = store.recent_audit(&ctx, 5).await.unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.event == "vault_changed" && e.action.contains("Stopped the Windows login")),
+        "{audit:?}"
+    );
+    // Again: nothing to do, nothing audited.
+    let before = store.recent_audit(&ctx, 50).await.unwrap().len();
+    service.turn_off_windows_login(&ctx).await.unwrap();
+    assert_eq!(store.recent_audit(&ctx, 50).await.unwrap().len(), before);
+
+    let restarted = open(&store, ctx, protector).await;
+    assert!(!restarted.info().windows_login);
+    assert!(matches!(
+        restarted.unlock(UnlockMethod::WindowsLogin).await,
+        Err(CoreError::InvalidInput(_))
+    ));
+    restarted
+        .unlock(UnlockMethod::MasterPassword(pw(PASSWORD)))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_new_vault_set_up_without_the_windows_login_keeps_no_dpapi_copy() {
+    let (store, ctx) = store().await;
+    let vault = open(&store, ctx, Arc::new(FakeKeyProtector::new())).await;
+    let service = VaultService::new(Arc::new(vault), store.clone());
+    let info = service.setup(&ctx, pw(PASSWORD), false).await.unwrap();
+    assert!(!info.windows_login);
+    assert!(
+        info.windows_login_available,
+        "available, but off unless the user turns it on"
+    );
+    let (_, _, dpapi) = meta_row(&store).await;
+    assert!(dpapi.is_none());
+    let audit = store.recent_audit(&ctx, 5).await.unwrap();
+    assert!(audit
+        .iter()
+        .any(|e| e.detail.as_deref() == Some("unlocks with the vault password only")));
+}
+
+#[tokio::test]
+async fn deleted_vault_rows_are_overwritten_on_disk() {
+    let dir = temp_folder("vault-secure-delete");
+    let store = Store::open(&dir.join("remotely.db")).await.unwrap();
+    let on: i64 = sqlx::query_scalar("PRAGMA secure_delete")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(on, 1, "secure_delete is on for the app's database");
+    drop(store);
+    let _ = std::fs::remove_dir_all(dir);
 }

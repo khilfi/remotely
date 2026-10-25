@@ -6,7 +6,7 @@
 //! [`JobRunner`]. Nothing else can enqueue a job, so approvals and audit cannot be skipped.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -30,7 +30,7 @@ use crate::snapshots::{is_safety_name, SAFETY_PREFIX};
 use crate::ssh_keys;
 use crate::store::{NewAuditEntry, Store};
 use crate::terminal::multiexec::{self, RunKey};
-use crate::vault::{SecretId, SecretKind, SecretString, Vault};
+use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
 
 /// A state-changing request. Reads (inventory, metrics) do not go through the bus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -900,6 +900,9 @@ pub struct CommandBus {
     pending: Mutex<HashMap<Uuid, Pending>>,
     /// [`APPROVAL_TTL`]; tests shorten it.
     approval_ttl: RwLock<Duration>,
+    /// SS-04, AP-06: where vault passwords already go (BX-07's sudo password), shared with the rest of the
+    /// core once it is put together.
+    bindings: OnceLock<SecretBindings>,
 }
 
 impl CommandBus {
@@ -922,7 +925,100 @@ impl CommandBus {
             impact,
             pending: Mutex::new(HashMap::new()),
             approval_ttl: RwLock::new(APPROVAL_TTL),
+            bindings: OnceLock::new(),
         }
+    }
+
+    /// SS-04, AP-06: the core's checks of where vault passwords go.
+    pub fn set_bindings(&self, bindings: SecretBindings) {
+        let _ = self.bindings.set(bindings);
+    }
+
+    fn bindings(&self) -> SecretBindings {
+        self.bindings
+            .get()
+            .cloned()
+            .unwrap_or_else(|| SecretBindings::new(self.store.clone(), Arc::clone(&self.vault)))
+    }
+
+    /// SS-04, AP-06 (BX-07): the sessions among `targets` that sudo would give the vault password
+    /// `secret` to for the first time: no saved session at their host logs in with it, gives it to sudo
+    /// or was allowed to use it.
+    async fn new_sudo_places(
+        &self,
+        ctx: &Context,
+        secret: SecretId,
+        targets: &[Target],
+    ) -> Result<Vec<(Uuid, String)>> {
+        let bindings = self.bindings();
+        let mut new = Vec::new();
+        for target in targets {
+            let TargetRef::Session { session_id } = target.target else {
+                continue;
+            };
+            let Some(spec) = self.store.session_spec(ctx, session_id).await? else {
+                continue;
+            };
+            let place = Destination::new(&spec.host, spec.port, spec.jump.as_ref().map(|j| j.id));
+            if bindings.sent_by(ctx, session_id).await?.contains(&secret)
+                || bindings.goes_to(ctx, secret, &place, None).await?
+            {
+                continue;
+            }
+            new.push((session_id, target.name.clone()));
+        }
+        Ok(new)
+    }
+
+    /// SS-04, AP-06: a run whose sudo would send a vault password to hosts that don't get it yet asks for
+    /// the vault password in its approval (one confirm and the password, even for a Low command), and
+    /// says so. Approved, those sessions may use it from now on.
+    async fn ask_for_sudo_places(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Result<()> {
+        let Command::RemoteExec {
+            sudo: true,
+            sudo_password_id: Some(secret),
+            ..
+        } = command
+        else {
+            return Ok(());
+        };
+        let new = self.new_sudo_places(ctx, *secret, &decision.targets).await?;
+        if new.is_empty() {
+            return Ok(());
+        }
+        let what = self.bindings().describe(ctx, *secret).await?;
+        let names: Vec<String> = new.iter().take(5).map(|(_, name)| format!("'{name}'")).collect();
+        let more = new.len().saturating_sub(names.len());
+        let names = if more > 0 {
+            format!("{} and {more} more", names.join(", "))
+        } else {
+            names.join(", ")
+        };
+        decision.add_warnings(vec![format!(
+            "sudo would get the {what} on {names}, where no saved session sends it yet. Approving asks for the vault password, and lets them use it from now on"
+        )]);
+        if !decision.steps.contains(&ApprovalStep::VaultReauth) {
+            decision.steps.push(ApprovalStep::VaultReauth);
+        }
+        Ok(())
+    }
+
+    /// SS-04, AP-06: after an approval that asked for the vault password, the sessions the run's sudo
+    /// password was new to may use it from now on (audited `vault_secret_allowed`).
+    async fn allow_sudo_places(&self, ctx: &Context, command: &Command, targets: &[Target]) -> Result<()> {
+        let Command::RemoteExec {
+            sudo: true,
+            sudo_password_id: Some(secret),
+            ..
+        } = command
+        else {
+            return Ok(());
+        };
+        let bindings = self.bindings();
+        for (session_id, name) in self.new_sudo_places(ctx, *secret, targets).await? {
+            bindings.allow(ctx, session_id, &name, *secret).await?;
+        }
+        Ok(())
     }
 
     /// AP-01: how long approvals wait (tests shorten it). Applies to the ones open now too.
@@ -1033,18 +1129,51 @@ impl CommandBus {
     /// returns those changes (none: nothing saved or logged). Approvals already open keep the steps
     /// they were asked with.
     pub async fn set_rules(&self, ctx: &Context, rules: PolicyRules) -> Result<Vec<String>> {
+        self.set_rules_with(ctx, rules, None).await
+    }
+
+    /// [`Self::set_rules`], with the vault password: AP-06 asks for it before any change that loosens
+    /// the rules (a lower tier, the Prod rule off, a dangerous-command rule removed or changed, a new
+    /// read-only command, a higher bulk threshold, a shorter countdown, safety snapshots off by
+    /// default), so whoever sits at an unlocked PC can't wave risky actions through. Tightening never asks.
+    pub async fn set_rules_with(
+        &self,
+        ctx: &Context,
+        rules: PolicyRules,
+        vault_password: Option<&SecretString>,
+    ) -> Result<Vec<String>> {
         self.store.read_only().check(Change::ApprovalRules)?;
         let rules = rules.normalized();
         let engine = PolicyEngine::new(rules.clone())?;
-        let changes = self.rules().changes(&rules);
+        let before = self.rules();
+        let changes = before.changes(&rules);
         if changes.is_empty() {
             return Ok(changes);
+        }
+        let loosened = before.loosened(&rules);
+        if !loosened.is_empty() {
+            let shown: Vec<&str> = loosened.iter().take(3).map(String::as_str).collect();
+            let more = loosened.len().saturating_sub(shown.len());
+            let reason = if more > 0 {
+                format!(
+                    "This loosens the approval rules ({}, and {more} more)",
+                    shown.join("; ")
+                )
+            } else {
+                format!("This loosens the approval rules ({})", shown.join("; "))
+            };
+            self.bindings()
+                .confirm(ctx, vault_password, "Failed to change the approval rules", &reason)
+                .await?;
         }
         self.store
             .put_setting(ctx, crate::store::POLICY_RULES_KEY, &rules)
             .await?;
         *locks::write(&self.policy) = engine;
-        let detail = changes.join("; ");
+        let mut detail = changes.join("; ");
+        if !loosened.is_empty() {
+            detail.push_str("; looser, so the vault password was asked again (AP-06)");
+        }
         self.store
             .append_audit(
                 ctx,
@@ -1243,6 +1372,7 @@ impl CommandBus {
             return Err(CoreError::AllTargetsProtected);
         }
         let impact = self.add_warnings(ctx, &command, &mut decision).await;
+        self.ask_for_sudo_places(ctx, &command, &mut decision).await?;
         let summary = command.summary(decision.targets.len());
 
         if decision.steps.is_empty() {
@@ -1452,6 +1582,9 @@ impl CommandBus {
             return CoreError::AllTargetsProtected;
         }
         let impact = self.add_warnings(&ctx, &pending.command, &mut decision).await;
+        if let Err(err) = self.ask_for_sudo_places(&ctx, &pending.command, &mut decision).await {
+            return err;
+        }
         let request = match self
             .request_for(&ctx, request_id, &pending.command, &decision, impact, pending.retry_of)
             .await
@@ -1536,6 +1669,10 @@ impl CommandBus {
                         },
                     )
                     .await?;
+                if record.vault_reauth {
+                    self.allow_sudo_places(&pending.ctx, &pending.command, &pending.decision.targets)
+                        .await?;
+                }
                 let safety_snapshot = record.safety_snapshot;
                 self.jobs
                     .enqueue(JobSpec {

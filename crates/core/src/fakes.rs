@@ -1507,6 +1507,10 @@ impl Vault for FakeVault {
         Err(CoreError::NotImplemented("FakeVault Windows login"))
     }
 
+    async fn turn_off_windows_login(&self) -> Result<bool> {
+        Ok(false)
+    }
+
     async fn list(&self, _: &Context) -> Result<Vec<SecretMeta>> {
         let mut items: Vec<SecretMeta> = locks::lock(&self.items).values().map(|(m, _)| m.clone()).collect();
         items.sort_by(|a, b| a.label.cmp(&b.label));

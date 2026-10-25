@@ -1239,6 +1239,8 @@ export interface QuickConnectRequest {
   auth: SessionAuth;
   password: string | null;
   save: { name: string; folderId: string | null; environment: Environment; color: SessionColor | null } | null;
+  /** SS-04, AP-06: the vault password, when the core asked for it (`reauth_required`). */
+  vaultPassword?: string;
 }
 
 /** QL-02: a quick connection that was not saved. Never holds a password. */
@@ -2448,8 +2450,12 @@ export const api = {
   /** AP-01: the approval rules in force, and what the editor needs to change them. */
   policyRules: () => invoke<PolicyRules>("policy_rules"),
   policyCatalog: () => invoke<PolicyCatalog>("policy_catalog"),
-  /** Checked by the core (an invalid rule fails with code "invalid_rule") and audited. */
-  setPolicyRules: (rules: PolicyRules) => invoke<PolicySaved>("policy_set_rules", { rules }),
+  /**
+   * Checked by the core (an invalid rule fails with code "invalid_rule") and audited. AP-06: a change that loosens
+   * the rules fails with `reauth_required` until it comes with the vault password.
+   */
+  setPolicyRules: (rules: PolicyRules, vaultPassword?: string) =>
+    invoke<PolicySaved>("policy_set_rules", { rules, vaultPassword: vaultPassword ?? null }),
   onJobEvent: (handler: (event: JobEvent) => void): Promise<UnlistenFn> =>
     listen<JobEvent>("job://event", (e) => handler(e.payload)),
 
@@ -2524,6 +2530,10 @@ export const api = {
     invoke<VaultInfo>("vault_change_password", { current, new: next }),
   vaultSetWindowsLogin: (password: string, enabled: boolean) =>
     invoke<VaultInfo>("vault_set_windows_login", { password, enabled }),
+  /** SS-04: one click, no password: the Windows login stops unlocking the vault. */
+  vaultTurnOffWindowsLogin: () => invoke<VaultInfo>("vault_turn_off_windows_login"),
+  /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). */
+  vaultActivity: () => invoke<void>("vault_activity"),
   /** Status changes, including the lock after the idle time. */
   onVaultStatus: (handler: (status: VaultStatus) => void): Promise<UnlistenFn> =>
     listen<VaultStatus>("vault://status", (e) => handler(e.payload)),
@@ -2539,8 +2549,14 @@ export const api = {
   /** SS-01, SS-06 session library. Changes are the app's own data: audited, no approval. */
   sessions: (filter?: SessionFilter) => invoke<SessionRecord[]>("sessions_list", { filter: filter ?? null }),
   sessionFolders: () => invoke<SessionFolder[]>("session_folders"),
-  createSession: (input: SessionInput) => invoke<SessionRecord>("session_create", { input }),
-  updateSession: (id: string, input: SessionInput) => invoke<SessionRecord>("session_update", { id, input }),
+  /**
+   * SS-04, AP-06: a session that would send a vault password to a host where no saved session sends it yet fails with
+   * `reauth_required` until it comes with the vault password.
+   */
+  createSession: (input: SessionInput, vaultPassword?: string) =>
+    invoke<SessionRecord>("session_create", { input, vaultPassword: vaultPassword ?? null }),
+  updateSession: (id: string, input: SessionInput, vaultPassword?: string) =>
+    invoke<SessionRecord>("session_update", { id, input, vaultPassword: vaultPassword ?? null }),
   duplicateSession: (id: string) => invoke<SessionRecord>("session_duplicate", { id }),
   deleteSession: (id: string) => invoke<void>("session_delete", { id }),
   /** QL-01: links a session to a VM by hand (vmId null removes the link); auto-linking leaves it alone. Audited. */
@@ -2623,6 +2639,8 @@ export const api = {
     /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
     keepStartup: number[];
     keepForwards: number[];
+    /** SS-04, AP-06: the vault password, when the core asked for it (`reauth_required`). */
+    vaultPassword?: string;
   }) => invoke<TransferReport>("transfer_commit", { request }),
 
   /** SS-09 SSH keys in the vault. Pushing one is `submit` with a pushSshKey command. */
@@ -2791,8 +2809,8 @@ export const api = {
    * QL-06: types a vault password or passphrase, then Enter, into the terminal when it shows a password prompt (or
    * with `force`). The value never reaches the UI. Fails with `no_password_prompt` at a shell prompt.
    */
-  terminalTypeSecret: (id: string, secretId: string, force: boolean) =>
-    invoke<void>("terminal_type_secret", { id, secretId, force }),
+  terminalTypeSecret: (id: string, secretId: string, force: boolean, vaultPassword?: string) =>
+    invoke<void>("terminal_type_secret", { id, secretId, force, vaultPassword: vaultPassword ?? null }),
   /** QL-07: a Windows notification that a long command finished in a background tab. */
   notifyCommandFinished: (title: string, body: string) => invoke<void>("notify_command_finished", { title, body }),
 
@@ -2833,11 +2851,11 @@ export const api = {
   containerHosts: () => invoke<ContainerHostInfo[]>("containers_hosts"),
   containerMarks: (sessionId: string) => invoke<ContainerMark[]>("containers_marks", { sessionId }),
   /** Replaces a session's engines (empty: no container host any more). Audited like a session edit. */
-  setContainerMarks: (sessionId: string, marks: MarkInput[]) =>
-    invoke<ContainerMark[]>("containers_set_marks", { sessionId, marks }),
+  setContainerMarks: (sessionId: string, marks: MarkInput[], vaultPassword?: string) =>
+    invoke<ContainerMark[]>("containers_set_marks", { sessionId, marks, vaultPassword: vaultPassword ?? null }),
   /** Which CLIs the host has and whether they need sudo. A read: nothing is marked. */
-  detectContainers: (sessionId: string, sudoPasswordId: string | null = null) =>
-    invoke<Detection>("containers_detect", { sessionId, sudoPasswordId }),
+  detectContainers: (sessionId: string, sudoPasswordId: string | null = null, vaultPassword?: string) =>
+    invoke<Detection>("containers_detect", { sessionId, sudoPasswordId, vaultPassword: vaultPassword ?? null }),
   containerVersion: (host: ContainerHost, engine: EngineKind) =>
     invoke<EngineVersion>("containers_version", { host, engine }),
   containers: (host: ContainerHost, engine: EngineKind) => invoke<ContainerList>("containers_list", { host, engine }),

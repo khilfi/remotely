@@ -50,6 +50,7 @@ import { NameDialog } from "@/components/NameDialog";
 import { SecretDialog } from "@/components/SecretDialog";
 import { SshKeysCard } from "@/components/SshKeysCard";
 import { VaultUnlock } from "@/components/VaultUnlock";
+import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
 import { api, errorMessage, type SecretKind, type SecretMeta, type SubmitOutcome, type VaultInfo } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 
@@ -106,6 +107,7 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
 
   return (
     <div className="flex max-w-3xl flex-col gap-6">
+      <WindowsLoginNotice vault={vault} onVaultChanged={onVaultChanged} />
       <StatusCard vault={vault} onVaultChanged={onVaultChanged} />
 
       <Card>
@@ -227,7 +229,18 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
       <PasswordCard
         vault={vault}
         onVaultChanged={onVaultChanged}
-        onWindowsLogin={(enable) => setDialog({ kind: "windowsLogin", enable })}
+        onWindowsLogin={(enable) => {
+          // SS-04: turning it off removes a way in, so it needs no password; turning it on does.
+          if (enable) setDialog({ kind: "windowsLogin", enable });
+          else
+            api.vaultTurnOffWindowsLogin().then(
+              (info) => {
+                onVaultChanged(info);
+                toast.success("The Windows login no longer unlocks the vault");
+              },
+              (err) => toast.error(errorMessage(err)),
+            );
+        }}
       />
 
       {(dialog?.kind === "add" || dialog?.kind === "replace") && (
@@ -279,7 +292,7 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
           title={dialog.enable ? "Unlock with the Windows login" : "Stop unlocking with the Windows login"}
           description={
             dialog.enable
-              ? "Anyone signed in to this Windows account can then unlock the vault with one click. Critical actions still ask for the vault password."
+              ? "Anyone signed in to this Windows account can then unlock the vault with one click, and so can any program running under it, even from a copy of Remotely's database, without the vault password. Critical actions still ask for the vault password. Leave it off on a shared PC or one you don't manage."
               : "Only the vault password will unlock the vault."
           }
           submitLabel={dialog.enable ? "Turn on" : "Turn off"}
@@ -294,7 +307,8 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
 function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultInfo) => void }) {
   const [password, setPassword] = useState("");
   const [repeat, setRepeat] = useState("");
-  const [windowsLogin, setWindowsLogin] = useState(vault.windowsLoginAvailable);
+  // SS-04: off unless the user turns it on (the trade-off is spelt out next to the switch).
+  const [windowsLogin, setWindowsLogin] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const tooShort = password.length > 0 && password.length < MIN_PASSWORD;
@@ -373,10 +387,10 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
               disabled={!vault.windowsLoginAvailable}
             />
             <div className="grid gap-1">
-              <Label htmlFor="vault-windows-login">Unlock with my Windows login</Label>
+              <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
               <p className="text-sm text-muted-foreground">
                 {vault.windowsLoginAvailable
-                  ? "One click unlocks the vault while you are signed in to Windows (DPAPI). Recommended."
+                  ? "Off by default. One click would then unlock the vault while you are signed in to Windows (DPAPI), but so could any program running under your Windows account, even from a copy of Remotely's database, without the vault password. Turn it on only on a PC that is yours alone."
                   : "Not available on this PC; the vault password unlocks it."}
               </p>
             </div>
@@ -418,7 +432,7 @@ function StatusCard({ vault, onVaultChanged }: { vault: VaultInfo; onVaultChange
         </CardTitle>
         <CardDescription>
           {unlocked
-            ? `Locks itself after ${vault.idleLockMinutes} minutes without use, and whenever you lock it.`
+            ? `Locks itself after ${vault.idleLockMinutes} minutes without you typing or clicking in Remotely (background reads don't count), and whenever you lock it.`
             : vault.windowsLogin
               ? "Unlock it with your Windows login or the vault password."
               : "Unlock it with the vault password."}
@@ -550,7 +564,7 @@ function PasswordCard({
             <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
             <p className="text-sm text-muted-foreground">
               {vault.windowsLoginAvailable
-                ? "One click unlocks the vault while you are signed in to this Windows account. Asks for the vault password to change."
+                ? "One click unlocks the vault while you are signed in to this Windows account, and any program running under it could too, without the vault password. Turning it on asks for the vault password; turning it off doesn't."
                 : "Not available on this PC."}
             </p>
           </div>

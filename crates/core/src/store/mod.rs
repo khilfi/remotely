@@ -84,6 +84,9 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
+            // SS-04: a deleted or rewritten row (an old wrapped key, a secret's old ciphertext) is overwritten
+            // on disk, not left in a free page for a copy of the file to give back.
+            .pragma("secure_delete", "ON")
             .busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
@@ -94,7 +97,9 @@ impl Store {
 
     /// A private in-memory database, for tests. One connection, so every query sees the same data.
     pub async fn open_in_memory() -> Result<Self> {
-        let options = SqliteConnectOptions::from_str("sqlite::memory:")?.foreign_keys(true);
+        let options = SqliteConnectOptions::from_str("sqlite::memory:")?
+            .foreign_keys(true)
+            .pragma("secure_delete", "ON");
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .idle_timeout(None)

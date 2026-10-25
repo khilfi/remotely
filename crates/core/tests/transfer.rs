@@ -192,6 +192,7 @@ async fn commit(core: &Core, preview: &TransferPreview, sessions: &[(usize, Item
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: choices(sessions),
                 known_hosts: vec![],
@@ -220,6 +221,7 @@ async fn commit_keeping(
                 preview_id: preview.id,
                 keep_startup: keep_startup.to_vec(),
                 keep_forwards: keep_forwards.to_vec(),
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
@@ -596,6 +598,7 @@ async fn a_closed_preview_can_not_be_imported() {
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
@@ -747,6 +750,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![ItemChoice {
@@ -776,6 +780,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![
                     ItemChoice {
@@ -968,6 +973,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
                 preview_id: preview.id,
                 keep_startup: vec![],
                 keep_forwards: vec![],
+                vault_password: None,
                 favourites: vec![],
                 sessions: vec![],
                 known_hosts: vec![],

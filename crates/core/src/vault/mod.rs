@@ -10,16 +10,26 @@
 //! ```
 //!
 //! * The data key is random and never stored in the clear. `vault_meta` keeps it wrapped by the
-//!   master key, and, when the Windows login unlocks the vault (the default), wrapped by DPAPI too.
+//!   master key, and, when the Windows login also unlocks the vault, wrapped by DPAPI too. New vaults
+//!   leave that off unless the user turns it on: any program running as the Windows user can unwrap a
+//!   DPAPI copy, from a copy of the database too, without the master password. Turning it off needs no
+//!   password.
+//! * Changing the master password makes a new data key and seals every item with it again, in one
+//!   transaction, so an old copy of the wrapped key opens nothing written since.
 //! * The master password is what Critical actions ask for again (AP-06), whichever way the vault is
 //!   unlocked. It is checked by unwrapping the data key with it, so nothing that could be compared
 //!   against is stored besides the wrapped key itself.
-//! * The vault locks after 15 minutes without use ([`IDLE_TIMEOUT`]) and on demand. Locking drops
-//!   the data key, which zeroizes it.
+//! * The vault locks after 15 minutes without the user doing anything ([`IDLE_TIMEOUT`]) and on
+//!   demand. Only the user's own input and the actions they start count ([`Vault::note_activity`]):
+//!   background reads (the dashboard's logins, the Containers page's sudo) don't keep it open. Locking
+//!   drops the data key, which zeroizes it, and the core closes what holds decrypted secrets.
+//! * [`bindings`]: a vault password goes, without the master password being asked again, only where
+//!   it already goes.
 //! * Secrets never reach logs, the audit log, job output, error messages, exports or the UI. The UI
 //!   holds secret IDs and labels only; values go one way, into the vault, and only adapters read them
 //!   back ([`Vault::get`]).
 
+pub mod bindings;
 /// Also seals FD-07 export files (`crate::transfer`), with a key from the user's passphrase.
 pub(crate) mod crypto;
 mod local;
@@ -38,6 +48,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
 
+pub use bindings::{Destination, SecretBindings};
 pub use crypto::KdfParams;
 pub use local::{LocalVault, VaultOptions, IDLE_TIMEOUT};
 pub use protector::{Dpapi, KeyProtector};
@@ -215,6 +226,14 @@ pub trait Vault: Send + Sync {
 
     /// Lets the Windows login unlock the vault, or stops it. Needs the master password.
     async fn set_windows_login(&self, password: &SecretString, enabled: bool) -> Result<()>;
+
+    /// SS-04: stops the Windows login from unlocking the vault: the DPAPI copy of the key is deleted
+    /// (overwritten on disk). Needs no password, since it only removes a way in. True when there was one.
+    async fn turn_off_windows_login(&self) -> Result<bool>;
+
+    /// SS-04: the user did something (typed, clicked, started an action), so the idle lock starts again.
+    /// Reading a secret ([`Vault::get`]) doesn't count: background reads must not keep the vault open.
+    fn note_activity(&self) {}
 
     /// Labels and kinds only. Works while locked, so sessions can name their credentials.
     async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>>;

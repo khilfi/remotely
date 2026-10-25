@@ -29,6 +29,10 @@ pub struct QuickConnect {
     /// Also save the connection as a session.
     #[serde(default)]
     pub save: Option<SaveAs>,
+    /// SS-04, AP-06: the master password, when a vault password would go to a host no saved session
+    /// sends it to (the core asks with `reauth_required`).
+    #[serde(default)]
+    pub vault_password: Option<SecretString>,
 }
 
 /// "Save as session": where it goes and how it is labelled.
@@ -192,6 +196,7 @@ mod tests {
             auth,
             password: password.map(SecretString::new),
             save: None,
+            vault_password: None,
         }
     }
 

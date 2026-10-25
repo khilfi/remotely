@@ -2,6 +2,8 @@
 //! (as the login user, or under sudo). The app's own data: edits are audited like session edits, the
 //! read-only lock refuses them, and FD-07 carries them between laptops.
 
+use std::sync::{Arc, OnceLock};
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -10,7 +12,7 @@ use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
-use crate::vault::{SecretId, SecretKind};
+use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString};
 
 /// How sudo runs a host's engine (BX-07's sudo, as Compare uses it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -57,11 +59,20 @@ pub struct MarkInput {
 #[derive(Clone)]
 pub struct ContainerMarks {
     store: Store,
+    /// SS-04, AP-06: a sudo password the host doesn't get yet asks for the master password.
+    bindings: Arc<OnceLock<SecretBindings>>,
 }
 
 impl ContainerMarks {
     pub fn new(store: Store) -> Self {
-        Self { store }
+        Self {
+            store,
+            bindings: Arc::default(),
+        }
+    }
+
+    pub(crate) fn set_bindings(&self, bindings: SecretBindings) {
+        let _ = self.bindings.set(bindings);
     }
 
     pub async fn list(&self, ctx: &Context, session_id: Option<Uuid>) -> Result<Vec<ContainerMark>> {
@@ -71,7 +82,19 @@ impl ContainerMarks {
     /// Replaces a session's engines (none: it is no container host any more). Each engine once; a chosen
     /// sudo password must be a password in the vault. Audited with what changed; no change, no entry.
     pub async fn set(&self, ctx: &Context, session_id: Uuid, inputs: &[MarkInput]) -> Result<Vec<ContainerMark>> {
-        self.save(ctx, session_id, inputs, None).await
+        self.save(ctx, session_id, inputs, None, None).await
+    }
+
+    /// [`Self::set`], with the master password for a sudo password the host doesn't get yet (SS-04,
+    /// AP-06: no saved session there logs in with it, gives it to sudo or was allowed to use it).
+    pub async fn set_with(
+        &self,
+        ctx: &Context,
+        session_id: Uuid,
+        inputs: &[MarkInput],
+        vault_password: Option<&SecretString>,
+    ) -> Result<Vec<ContainerMark>> {
+        self.save(ctx, session_id, inputs, None, vault_password).await
     }
 
     /// FD-07: the marks of a session imported from another laptop. `source` names where they came from.
@@ -82,7 +105,7 @@ impl ContainerMarks {
         inputs: &[MarkInput],
         source: &str,
     ) -> Result<Vec<ContainerMark>> {
-        self.save(ctx, session_id, inputs, Some(source)).await
+        self.save(ctx, session_id, inputs, Some(source), None).await
     }
 
     async fn save(
@@ -91,6 +114,7 @@ impl ContainerMarks {
         session_id: Uuid,
         inputs: &[MarkInput],
         source: Option<&str>,
+        vault_password: Option<&SecretString>,
     ) -> Result<Vec<ContainerMark>> {
         self.store.read_only().check(Change::ContainerHosts)?;
         let session = self
@@ -127,11 +151,44 @@ impl ContainerMarks {
         }
         after.sort_by_key(|m| m.engine);
         let before = self.list(ctx, Some(session_id)).await?;
-        let changed = self.changes(ctx, &before, &after).await?;
+        let mut changed = self.changes(ctx, &before, &after).await?;
         if changed.is_empty() {
             return Ok(before);
         }
+        // FD-07 checks what it imports itself (`source`).
+        let sent: Vec<SecretId> = after
+            .iter()
+            .filter_map(|m| match m.sudo {
+                SudoMode::Password { password_id } => password_id,
+                _ => None,
+            })
+            .collect();
+        if let (Some(bindings), None) = (self.bindings.get(), source) {
+            let already = bindings.sent_by(ctx, session_id).await?;
+            let place = Destination::new(&session.host, session.port, session.jump_session_id);
+            let mut new = Vec::new();
+            for secret in &sent {
+                if !already.contains(secret) && !bindings.may_go(ctx, *secret, &place, None).await? {
+                    new.push(bindings.describe(ctx, *secret).await?);
+                }
+            }
+            if !new.is_empty() {
+                let reason = format!(
+                    "sudo on '{}' would get the {}, which no saved session sends to {}:{} yet",
+                    session.name,
+                    new.join(" and the "),
+                    place.host,
+                    place.port
+                );
+                let action = format!("Failed to change the container engines of '{}'", session.name);
+                bindings.confirm(ctx, vault_password, &action, &reason).await?;
+                changed.push("the vault password was asked again (AP-06)".into());
+            }
+        }
         self.store.replace_container_marks(ctx, session_id, &after).await?;
+        if let Some(bindings) = self.bindings.get() {
+            bindings.settle(&sent);
+        }
         let action = match (source, before.is_empty(), after.is_empty()) {
             (Some(_), _, _) => format!("Imported the container engines of '{}'", session.name),
             (None, true, false) => format!("Marked '{}' as a container host", session.name),

@@ -448,7 +448,9 @@ export function ApprovalDialog({
                 autoFocus={firstField === "password"}
               />
               <p className="text-xs text-muted-foreground">
-                Critical actions ask for it again (AP-06), even when your Windows login unlocked the vault.
+                {request.tier === "critical"
+                  ? "Critical actions ask for it again (AP-06), even when your Windows login unlocked the vault."
+                  : "Asked because a vault password would go to hosts that don't get it yet (see above). Once approved, they may use it."}
               </p>
             </div>
           )}

@@ -29,6 +29,10 @@
 //!   prompt. The value goes from the vault to the shell only (never the UI or the clipboard), only
 //!   while the terminal shows a password prompt unless the user insists, and is scrubbed from saved
 //!   output and logs like the login's. Audited with the secret's label and the session, never the value.
+//!   SS-04, AP-06: a password typed where it doesn't go yet (no saved session there uses it), or typed
+//!   with no prompt showing, needs the master password ([`crate::vault::bindings`]).
+//! * SS-04: when the vault locks, passwords typed for logins are forgotten ([`Terminals::forget_logins`]):
+//!   open shells stay open, and the next login asks again.
 //! * QL-07: each pane watches its shell ([`activity::RunWatch`]) and reports a command that ran long
 //!   when its prompt comes back or its output stops ([`TerminalEvent::CommandFinished`]); the UI shows a
 //!   Windows notification when that tab is in the background.
@@ -103,7 +107,7 @@ use crate::policy::Tier;
 use crate::presentation::Change;
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
-use crate::vault::{SecretId, SecretKind, SecretString, Vault};
+use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
 use crate::vm_links::VmLinks;
 
 /// The terminal settings (JSON) in the settings table.
@@ -365,6 +369,9 @@ pub enum TerminalInput {
         reply: oneshot::Sender<Result<bool>>,
         /// Not typed after this: the caller stopped waiting.
         until: Instant,
+        /// SS-07: the jump host whose login prompt it was checked for; `None` for the session itself.
+        /// Typed only while that login is the one asking.
+        hop: Option<Uuid>,
     },
 }
 
@@ -610,6 +617,8 @@ struct Control {
     container: Option<ContainerShell>,
     /// MO-13, MO-14: exec channels on the live connection, while connected.
     commands: Mutex<Option<Arc<dyn ExecSession>>>,
+    /// SS-07: the jump host logging in while a login asks something; `None` for the session itself.
+    hop: Mutex<Option<Uuid>>,
 }
 
 impl Control {
@@ -667,6 +676,8 @@ struct Inner {
     bus: OnceLock<Weak<CommandBus>>,
     /// MO-13: reads a saved session's facts when one of its terminals connects.
     specs: OnceLock<SpecsCollector>,
+    /// SS-04, AP-06: where vault passwords may be typed and quick connections may send them.
+    bindings: OnceLock<SecretBindings>,
 }
 
 /// A pane about to open.
@@ -714,7 +725,24 @@ impl Terminals {
                 transfers: Transfers::default(),
                 bus: OnceLock::new(),
                 specs: OnceLock::new(),
+                bindings: OnceLock::new(),
             }),
+        }
+    }
+
+    /// SS-04, AP-06: the checks before a vault password goes to a terminal's host.
+    pub fn set_bindings(&self, bindings: SecretBindings) {
+        let _ = self.inner.bindings.set(bindings);
+    }
+
+    /// SS-04: the vault locked. Passwords typed for logins (in a terminal or the quick-connect form, for
+    /// the session or a jump host) are forgotten, so a reconnect asks again; open shells stay open, and
+    /// what was logged in with stays known only to scrub it from saved output and logs.
+    pub fn forget_logins(&self) {
+        let open: Vec<Arc<Control>> = locks::lock(&self.inner.open).values().cloned().collect();
+        for control in open {
+            locks::lock(&control.remembered).take();
+            locks::lock(&control.jump_passwords).clear();
         }
     }
 
@@ -753,6 +781,7 @@ impl Terminals {
     /// (SS-07). Fails at once, opening nothing, for a key login with no key chosen or jump hosts that
     /// go round in a loop.
     pub async fn open(&self, ctx: &Context, session_id: Uuid, size: PtySize) -> Result<TerminalHandle> {
+        self.inner.vault.note_activity();
         self.open_saved(
             ctx,
             session_id,
@@ -848,11 +877,15 @@ impl Terminals {
     /// the connection lives only as long as the pane, and the history keeps where it went. A typed
     /// password is used for this pane's logins only.
     pub async fn quick_connect(&self, ctx: &Context, request: QuickConnect, size: PtySize) -> Result<QuickOpened> {
+        self.inner.vault.note_activity();
         let input = request.input()?;
         let typed = request.typed_password();
-        let library = SessionLibrary::new(self.inner.store.clone(), Arc::clone(&self.inner.links));
+        let mut library = SessionLibrary::new(self.inner.store.clone(), Arc::clone(&self.inner.links));
+        if let Some(bindings) = self.inner.bindings.get() {
+            library = library.with_bindings(bindings.clone());
+        }
         if request.save.is_some() {
-            let session = library.create(ctx, input).await?;
+            let session = library.create_with(ctx, input, request.vault_password.as_ref()).await?;
             let handle = self
                 .open_saved(
                     ctx,
@@ -872,9 +905,32 @@ impl Terminals {
         }
         let input = library.check(ctx, None, input).await?;
         let spec = crate::store::unsaved_spec(&input)?;
+        // SS-04, AP-06: a vault password sent to a host no saved session sends it to asks first.
+        let mut asked = false;
+        if let (Some(bindings), Some(secret)) = (self.inner.bindings.get(), input.sent_secret()) {
+            let place = Destination::new(&input.host, input.port, None);
+            if !bindings.may_go(ctx, secret, &place, None).await? {
+                let what = bindings.describe(ctx, secret).await?;
+                let reason = format!(
+                    "This would send the {what} to {}:{}, where no saved session sends it yet",
+                    place.host, place.port
+                );
+                let action = format!("Failed to open a quick-connect terminal to {}", spec.address());
+                bindings
+                    .confirm(ctx, request.vault_password.as_ref(), &action, &reason)
+                    .await?;
+                asked = true;
+            }
+            bindings.settle(&[secret]);
+        }
         let auth = match (&spec.auth, &typed) {
             (AuthMethod::Password(None), Some(_)) => "password typed in the quick-connect form",
             (auth, _) => describe_auth(auth),
+        };
+        let auth = if asked {
+            format!("{auth} (the vault password was asked again, AP-06)")
+        } else {
+            auth.to_owned()
         };
         let address = spec.address();
         let pane = NewPane {
@@ -898,6 +954,7 @@ impl Terminals {
     /// A second pane like an open one (a split): the same session or quick connection, and a password
     /// typed for the first one, so it is not asked again.
     pub async fn open_like(&self, ctx: &Context, id: Uuid, size: PtySize) -> Result<TerminalHandle> {
+        self.inner.vault.note_activity();
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;
@@ -1003,6 +1060,7 @@ impl Terminals {
             events: events_tx.clone(),
             container: pane.container,
             commands: Mutex::default(),
+            hop: Mutex::default(),
         });
         audit(
             &self.inner.store,
@@ -1423,7 +1481,20 @@ impl Terminals {
     /// it would run as a command and stay in the shell's history. The value goes from the vault to the
     /// shell only, and from now on is scrubbed from this terminal's saved output and log. Audited with
     /// the secret's label and the session, never the value.
-    pub async fn type_secret(&self, ctx: &Context, id: Uuid, secret_id: SecretId, force: bool) -> Result<()> {
+    ///
+    /// SS-04, AP-06: typed where it already goes (a saved session at this host logs in with it, gives it
+    /// to sudo, or was allowed to use it), it needs nothing more. Anywhere else, or with `force`, the
+    /// master password must come along ([`CoreError::ReauthRequired`] asks for it); for a saved session
+    /// it then may be typed there from now on.
+    pub async fn type_secret(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        secret_id: SecretId,
+        force: bool,
+        vault_password: Option<&SecretString>,
+    ) -> Result<()> {
+        self.inner.vault.note_activity();
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;
@@ -1439,6 +1510,31 @@ impl Terminals {
             return Err(CoreError::InvalidInput(
                 "Only passwords and passphrases can be typed into a terminal, not private keys.".into(),
             ));
+        }
+        // SS-07: a jump host's login asking now gets it, so that is where it would go.
+        let hop = *locks::lock(&control.hop);
+        let (place, session) = self.place_of(ctx, &control, hop).await?;
+        let what = format!("the {} '{}'", meta.kind.label(), meta.label);
+        let mut asked = false;
+        let mut allow = false;
+        if let Some(bindings) = self.inner.bindings.get() {
+            let goes = bindings.goes_to(ctx, secret_id, &place, None).await?;
+            let new_place = !goes && !bindings.may_go(ctx, secret_id, &place, None).await?;
+            if force || new_place {
+                let reason = if new_place {
+                    format!(
+                        "Typing {what} here would send it to {}:{}, where no saved session sends it yet",
+                        place.host, place.port
+                    )
+                } else {
+                    format!("No password prompt is showing, so {what} would be typed at the command line")
+                };
+                let action = format!("Failed to type {what} into the terminal to {}", quoted_name(&control));
+                bindings.confirm(ctx, vault_password, &action, &reason).await?;
+                asked = true;
+            }
+            // Typed into a saved session's terminal for the first time: from now on it may be again.
+            allow = !goes;
         }
         let secret = self.inner.vault.get(ctx, secret_id).await?;
         if secret.expose().contains(['\r', '\n']) {
@@ -1456,6 +1552,7 @@ impl Terminals {
             force,
             reply,
             until: Instant::now() + TYPE_SECRET_WAIT,
+            hop,
         };
         let closed = || CoreError::InvalidInput("That terminal has closed.".into());
         let outcome = match control.input.send(input).await {
@@ -1478,25 +1575,62 @@ impl Terminals {
                 return Err(err);
             }
         };
-        let detail = if prompt {
-            "at a password prompt"
+        let mut detail = if prompt {
+            "at a password prompt".to_owned()
         } else {
-            "no password prompt was showing; typed at the user's request"
+            "no password prompt was showing; typed at the user's request".to_owned()
         };
+        if let Some((_, name)) = session.as_ref().filter(|(s, _)| hop == Some(*s)) {
+            detail.push_str(&format!("; for the login to the jump host '{name}'"));
+        }
+        if asked {
+            detail.push_str("; the vault password was asked again (AP-06)");
+        }
         audit(
             &self.inner.store,
             ctx,
             "vault_secret_typed",
-            &format!(
-                "Typed the {} '{}' into the terminal to {}",
-                meta.kind.label(),
-                meta.label,
-                quoted_name(&control)
-            ),
+            &format!("Typed {what} into the terminal to {}", quoted_name(&control)),
             control.targets(),
-            detail,
+            &detail,
         )
-        .await
+        .await?;
+        if let Some(bindings) = self.inner.bindings.get() {
+            bindings.settle(&[secret_id]);
+            if let (true, Some((session_id, name))) = (allow, &session) {
+                bindings.allow(ctx, *session_id, name, secret_id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// SS-04: where a password typed into the terminal now goes: the jump host whose login is asking,
+    /// else the session (as saved now) or the quick connection; with the saved session it belongs to.
+    async fn place_of(
+        &self,
+        ctx: &Context,
+        control: &Control,
+        hop: Option<Uuid>,
+    ) -> Result<(Destination, Option<(Uuid, String)>)> {
+        match hop.or(control.session_id()) {
+            Some(session_id) => {
+                let spec = self
+                    .inner
+                    .store
+                    .session_spec(ctx, session_id)
+                    .await?
+                    .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
+                let place = Destination::new(&spec.host, spec.port, spec.jump.as_ref().map(|j| j.id));
+                Ok((place, Some((session_id, spec.name))))
+            }
+            None => match &control.source {
+                Source::Unsaved(spec) => Ok((
+                    Destination::new(&spec.host, spec.port, spec.jump.as_ref().map(|j| j.id)),
+                    None,
+                )),
+                Source::Saved(_) => Err(CoreError::UnknownTarget("the session was deleted".into())),
+            },
+        }
     }
 }
 
@@ -2111,6 +2245,7 @@ impl Pane {
             remembered: &self.control.remembered,
             jump_passwords: &self.control.jump_passwords,
             jump: None,
+            hop: &self.control.hop,
         };
         let shell = remote
             .open_shell(
@@ -2124,7 +2259,9 @@ impl Pane {
                 },
                 &mut prompter,
             )
-            .await?;
+            .await;
+        *locks::lock(&self.control.hop) = None;
+        let shell = shell?;
         if self.size != size {
             let _ = shell
                 .input
@@ -2570,8 +2707,19 @@ impl Pane {
                                 old.not_sent("another line came before its Enter");
                             }
                         }
-                        Some(TerminalInput::TypeSecret { secret, force, reply, until }) => {
+                        Some(TerminalInput::TypeSecret {
+                            secret,
+                            force,
+                            reply,
+                            until,
+                            hop,
+                        }) => {
                             if Instant::now() > until {
+                                continue;
+                            }
+                            // Checked for a jump host's login, which is over: not typed into the shell.
+                            if hop.is_some() {
+                                let _ = reply.send(Err(login_moved_on()));
                                 continue;
                             }
                             // Checked here, where the output arrives, so the prompt can't change in between.
@@ -2799,6 +2947,15 @@ struct PanePrompter<'a> {
     jump_passwords: &'a Mutex<HashMap<Uuid, SecretString>>,
     /// SS-07: the jump host logging in now, or `None` for the session itself.
     jump: Option<Uuid>,
+    /// The same, shared with [`Terminals::type_secret`] so it knows whose login a password would answer.
+    hop: &'a Mutex<Option<Uuid>>,
+}
+
+/// SS-04: a vault password checked for one login came when another one was asking.
+fn login_moved_on() -> CoreError {
+    CoreError::InvalidInput(
+        "The login moved on to another host, so nothing was typed. Choose the password again.".into(),
+    )
 }
 
 /// Where the line reader is in an escape sequence (arrow keys and the like), which it skips.
@@ -2835,8 +2992,13 @@ impl Prompter for PanePrompter<'_> {
                     force,
                     reply,
                     until,
+                    hop,
                 }) => {
                     if Instant::now() > until {
+                        continue;
+                    }
+                    if hop != self.jump {
+                        let _ = reply.send(Err(login_moved_on()));
                         continue;
                     }
                     let shown = is_password_prompt(prompt);
@@ -2901,6 +3063,7 @@ impl Prompter for PanePrompter<'_> {
 
     fn hop(&mut self, session: &SessionSpec, jump: bool) {
         self.jump = jump.then_some(session.id);
+        *locks::lock(self.hop) = self.jump;
     }
 
     fn password_accepted(&mut self, password: &SecretString) {

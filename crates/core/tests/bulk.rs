@@ -1005,6 +1005,7 @@ async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cann
                 auth: SessionAuth::Password { password_id: None },
                 password: Some(SecretString::new(password.as_str())),
                 save: None,
+                vault_password: None,
             },
             size,
         )

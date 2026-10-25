@@ -10,7 +10,7 @@ use remotely_core::adapters::remote::PtySize;
 use remotely_core::containers::{ContainerHostInfo, ContainerList, ContainerMark, Detection, MarkInput};
 use remotely_core::domain::ContainerHost;
 use remotely_core::terminal::TerminalEvent;
-use remotely_core::vault::SecretId;
+use remotely_core::vault::{SecretId, SecretString};
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
@@ -35,29 +35,40 @@ pub async fn containers_marks(state: State<'_, AppState>, session_id: Uuid) -> I
     Ok(core.containers.marks().list(&core.ctx, Some(session_id)).await?)
 }
 
-/// Replaces a session's engines (an empty list: no container host any more). Audited.
+/// Replaces a session's engines (an empty list: no container host any more). Audited. SS-04, AP-06:
+/// a sudo password the host doesn't get yet needs the vault password (`reauth_required`).
 #[tauri::command]
 pub async fn containers_set_marks(
     state: State<'_, AppState>,
     session_id: Uuid,
     marks: Vec<MarkInput>,
+    vault_password: Option<SecretString>,
 ) -> IpcResult<Vec<ContainerMark>> {
     let core = &state.core;
-    let saved = core.containers.marks().set(&core.ctx, session_id, &marks).await?;
+    let saved = core
+        .containers
+        .marks()
+        .set_with(&core.ctx, session_id, &marks, vault_password.as_ref())
+        .await?;
     // How the engines run may have changed: the next read connects afresh.
     core.containers.release(session_id).await;
     Ok(saved)
 }
 
-/// Which CLIs the session's host has, and whether they need sudo. A read: nothing is marked.
+/// Which CLIs the session's host has, and whether they need sudo. A read: nothing is marked. SS-04,
+/// AP-06: a sudo password the host doesn't get yet needs the vault password (`reauth_required`).
 #[tauri::command]
 pub async fn containers_detect(
     state: State<'_, AppState>,
     session_id: Uuid,
     sudo_password_id: Option<SecretId>,
+    vault_password: Option<SecretString>,
 ) -> IpcResult<Detection> {
     let core = &state.core;
-    Ok(core.containers.detect(&core.ctx, session_id, sudo_password_id).await?)
+    Ok(core
+        .containers
+        .detect_with(&core.ctx, session_id, sudo_password_id, vault_password.as_ref())
+        .await?)
 }
 
 #[tauri::command]

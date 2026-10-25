@@ -1289,7 +1289,7 @@ async fn a_vault_password_typed_while_a_line_records_is_scrubbed() {
         fleet
             .core
             .terminals
-            .type_secret(&fleet.core.ctx, fleet.id(i), secret, false)
+            .type_secret(&fleet.core.ctx, fleet.id(i), secret, false, None)
             .await
             .unwrap();
     }

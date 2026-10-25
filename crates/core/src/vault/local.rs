@@ -19,7 +19,7 @@ use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::store::{Store, VaultMetaRow};
 
-/// SS-04: the vault locks after this long without use.
+/// SS-04: the vault locks after this long without the user doing anything ([`Vault::note_activity`]).
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 pub struct VaultOptions {
@@ -52,6 +52,8 @@ impl VaultOptions {
 /// The data key while the vault is unlocked.
 struct OpenKey {
     key: Key,
+    /// The user's last input or action. Reads of secrets don't move it: the dashboard's and the
+    /// Containers page's background logins must not keep the vault open.
     last_used: Instant,
 }
 
@@ -68,6 +70,9 @@ struct Inner {
     options: VaultOptions,
     state: Mutex<State>,
     status: watch::Sender<VaultStatus>,
+    /// One change of the stored key or items at a time, so an item sealed under the old key can't land
+    /// after the key was replaced.
+    writes: tokio::sync::Mutex<()>,
 }
 
 /// AAD of the master-key copy of the data key: it belongs to this workspace's vault.
@@ -127,16 +132,24 @@ impl Inner {
         self.expire_if_idle(&mut state);
     }
 
-    /// Runs `f` with the data key, counting as use. Short and synchronous: no await under the lock.
+    /// Runs `f` with the data key. Short and synchronous: no await under the lock. Not activity: the
+    /// idle lock counts from the user's last input ([`Vault::note_activity`]), not from reads.
     fn with_key<T>(&self, f: impl FnOnce(&Key) -> Result<T>) -> Result<T> {
         let mut state = locks::lock(&self.state);
         self.expire_if_idle(&mut state);
         if state.windows_login.is_none() {
             return Err(CoreError::VaultNotSetUp);
         }
-        let open = state.open.as_mut().ok_or(CoreError::VaultLocked)?;
-        open.last_used = Instant::now();
+        let open = state.open.as_ref().ok_or(CoreError::VaultLocked)?;
         f(&open.key)
+    }
+
+    fn touch(&self) {
+        let mut state = locks::lock(&self.state);
+        self.expire_if_idle(&mut state);
+        if let Some(open) = state.open.as_mut() {
+            open.last_used = Instant::now();
+        }
     }
 
     fn open_with(&self, key: Key, windows_login: bool) {
@@ -238,6 +251,7 @@ impl LocalVault {
             options,
             state: Mutex::new(state),
             status: watch::channel(initial).0,
+            writes: tokio::sync::Mutex::new(()),
         });
         spawn_idle_check(Arc::downgrade(&inner), inner.options.idle_timeout);
         Ok(Self { inner })
@@ -297,6 +311,7 @@ impl Vault for LocalVault {
             .insert_vault_meta(ctx, &salt, &inner.options.kdf, &wrapped, dpapi_key.as_deref())
             .await?;
         inner.open_with(key, windows_login);
+        inner.store.checkpoint().await;
         Ok(())
     }
 
@@ -344,23 +359,55 @@ impl Vault for LocalVault {
         Ok(inner.unwrap_with_password(&meta, password).await?.is_some())
     }
 
+    /// SS-04: a new data key, not the old one wrapped again: every item is sealed with it again and the
+    /// DPAPI copy (if any) replaced, all in one transaction. An old copy of the database, or of its
+    /// wrapped key, then opens nothing written since.
     async fn change_password(&self, current: &SecretString, new: SecretString) -> Result<()> {
         let inner = &self.inner;
         check_master_password(&new)?;
+        let _writes = inner.writes.lock().await;
         let meta = inner.meta().await?;
-        let key = inner
+        let old = inner
             .unwrap_with_password(&meta, current)
             .await?
             .ok_or(CoreError::WrongVaultPassword)?;
+        let key = Key::generate()?;
+        let ctx = inner.ctx;
+        let mut items = Vec::new();
+        for (id, item) in inner.store.vault_ciphers(&ctx).await? {
+            let aad = item_aad(&ctx, id, item.kind);
+            let plain = crypto::open(&old, &item.nonce, &item.ciphertext, &aad)?.ok_or_else(|| {
+                CoreError::Vault(format!(
+                    "the {} '{}' could not be decrypted, so the password was not changed: the vault data was changed or damaged",
+                    item.kind.label(),
+                    item.label
+                ))
+            })?;
+            let (nonce, ciphertext) = crypto::seal(&key, &plain, &aad)?;
+            items.push((id, nonce, ciphertext));
+        }
+        let dpapi_key = match meta.dpapi_key {
+            Some(_) => Some(inner.protect_with_dpapi(&key).await?),
+            None => None,
+        };
         let (salt, wrapped) = inner.wrap_with_password(&key, new).await?;
         inner
             .store
-            .set_vault_password(&inner.ctx, &salt, &inner.options.kdf, &wrapped)
-            .await
+            .rotate_vault_key(&ctx, &salt, &inner.options.kdf, &wrapped, dpapi_key.as_deref(), &items)
+            .await?;
+        {
+            let mut state = locks::lock(&inner.state);
+            if let Some(open) = state.open.as_mut() {
+                open.key = key;
+            }
+        }
+        inner.store.checkpoint().await;
+        Ok(())
     }
 
     async fn set_windows_login(&self, password: &SecretString, enabled: bool) -> Result<()> {
         let inner = &self.inner;
+        let _writes = inner.writes.lock().await;
         let meta = inner.meta().await?;
         let key = inner
             .unwrap_with_password(&meta, password)
@@ -372,9 +419,26 @@ impl Vault for LocalVault {
             None
         };
         inner.store.set_vault_dpapi_key(&inner.ctx, blob.as_deref()).await?;
-        let mut state = locks::lock(&inner.state);
-        state.windows_login = Some(enabled);
+        locks::lock(&inner.state).windows_login = Some(enabled);
+        inner.store.checkpoint().await;
         Ok(())
+    }
+
+    async fn turn_off_windows_login(&self) -> Result<bool> {
+        let inner = &self.inner;
+        let _writes = inner.writes.lock().await;
+        let meta = inner.meta().await?;
+        if meta.dpapi_key.is_none() {
+            return Ok(false);
+        }
+        inner.store.set_vault_dpapi_key(&inner.ctx, None).await?;
+        locks::lock(&inner.state).windows_login = Some(false);
+        inner.store.checkpoint().await;
+        Ok(true)
+    }
+
+    fn note_activity(&self) {
+        self.inner.touch();
     }
 
     async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {
@@ -386,6 +450,7 @@ impl Vault for LocalVault {
         let inner = &self.inner;
         inner.check_ctx(ctx)?;
         inner.with_key(|_| Ok(()))?;
+        let _writes = inner.writes.lock().await;
         let label = clean_label(label)?;
         check_secret(kind, &secret)?;
         if inner.store.vault_label_taken(ctx, &label, None).await? {
@@ -400,6 +465,7 @@ impl Vault for LocalVault {
             .store
             .insert_vault_item(ctx, id.0, kind, &label, &nonce, &ciphertext)
             .await?;
+        inner.store.checkpoint().await;
         Ok(id)
     }
 
@@ -407,6 +473,7 @@ impl Vault for LocalVault {
         let inner = &self.inner;
         inner.check_ctx(ctx)?;
         inner.with_key(|_| Ok(()))?;
+        let _writes = inner.writes.lock().await;
         let kind = inner
             .store
             .vault_item_kind(ctx, id)
@@ -422,6 +489,7 @@ impl Vault for LocalVault {
         {
             return Err(CoreError::UnknownTarget(format!("secret {id}")));
         }
+        inner.store.checkpoint().await;
         Ok(())
     }
 
@@ -445,9 +513,11 @@ impl Vault for LocalVault {
         let inner = &self.inner;
         inner.check_ctx(ctx)?;
         inner.with_key(|_| Ok(()))?;
+        let _writes = inner.writes.lock().await;
         if !inner.store.delete_vault_item(ctx, id).await? {
             return Err(CoreError::UnknownTarget(format!("secret {id}")));
         }
+        inner.store.checkpoint().await;
         Ok(())
     }
 
