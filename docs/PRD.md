@@ -107,6 +107,19 @@ Every action that changes something gets one of four risk tiers, and the tier de
 | High | Stop, reset or suspend 2 or more VMs; revert or delete snapshots; any command flagged dangerous | Impact preview, safety snapshot (on by default), type the number of targets, give a reason or ticket number, 10-second countdown with cancel |
 | Critical | Hard power-off, bulk network disconnect, deleting VMs or disks, any High action on Prod | All High steps, then the vault password again |
 
+VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-labelled VM moves each up one tier, and protected VMs are skipped):
+
+| Action | Tier |
+| --- | --- |
+| Edit CPU, RAM, network cards, firmware, shared folders, the guest OS type or the name (VM off); a bulk resize is one approval | Medium |
+| Attach or eject an ISO; connect a network card | Low |
+| Disconnect a network card (2 or more VMs: Critical, the bulk network disconnect above) | Medium |
+| Add a disk; compact or defragment a disk; install or upgrade Tools | Medium |
+| Expand a disk (can't be shrunk back); upgrade the hardware version (can't be undone) | High |
+| Remove a disk (deletes its files); delete a VM | Critical |
+| Add an existing VM (a `.vmx` to the list, a `.vbox` to VirtualBox) | Low |
+| Open a VM's console (the hypervisor's own window; it changes nothing) | No tier; audited |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |

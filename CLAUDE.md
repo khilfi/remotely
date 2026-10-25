@@ -92,8 +92,12 @@ crates/core/          remotely-core: all app logic
                       purge; the read-only lock refuses the setting and Purge now, never the schedule
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
                       output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
-    adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
-                      snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
+    adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
+                      found beside vmrun, vmrun_change), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
+                      comments and line endings kept; |XX escapes; non-UTF-8 refused), virtualbox.rs (VM-18
+                      VBoxManage: list, showvminfo, guest properties, power,
+                      snapshots; SwitchableVirtualBox for the Settings path; VM-23 change(), list ostypes,
+                      screenshotpng, VirtualBoxVM --separate, the .vbox's extras), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec;
                       keyboard-interactive answers are SecretStrings until russh's respond call; A9 at most 16 login
                       banners and 64 KB per connection, then one note; every path through the SS-07 jump host
@@ -173,6 +177,16 @@ crates/core/          remotely-core: all app logic
                       P3 a name looked up once at a time and cached, lookups done by the deadline kept and the rest
                       finished in the background, sessions behind a jump host never looked up; A4 never linked
                       behind a jump host or across environment labels (not_linkable)
+    vm_settings/      VM-11, VM-12, VM-15, VM-16, VM-23, VM-24: ops.rs the typed edits (Command::VmConfig, VmDevice,
+                      VmDisk, VmLifecycle), their checks and summaries; vmware.rs each edit as changes to a VmxFile, new
+                      disk slots and vdiskmanager arguments, what deleteVM deletes; virtualbox.rs each edit as VBoxManage
+                      calls; mod.rs VmEditor: plans from the VM's state (refused while running, suspended, with
+                      snapshots under a disk change, a disk outside its folder), the approval preview (VmChangePreview:
+                      before and after, every file deleted) and the job's work (.vmx backup beside it, atomic write,
+                      restored on failure, deleted once it went well; vmware.addedVms for Add existing VM); service.rs
+                      Core.vm_settings: ISOs, shared folders and existing VMs from the shell's dialogs and drops (never
+                      from the UI: check_from_ui), guest OS types, VirtualBox screenshots, Open console (audited
+                      vm_console_opened, no tier, refused by the read-only lock)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:
                       R9 TerminalTuning::retry_delay, 10 fast tries then 12 slow ones, each spread at random;
                       Terminals::wake_reconnects on a resume or a new address, from the shell's wake.rs,
@@ -298,7 +312,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       the installer exits the app; SS-03 (R9) wake.rs: Windows resume
                       (PowerRegisterSuspendResumeNotification) and new-address (NotifyUnicastIpAddressChange)
                       notifications wake terminals waiting to reconnect; P10 heavy commands (terminal output scrub,
-                      the command library) run on spawn_blocking, never on the window's thread
+                      the command library) run on spawn_blocking, never on the window's thread; VM-23, VM-24
+                      vm_settings.rs (ISO, shared folder and existing VM dialogs opened here, ISO drops taken from the
+                      staged drop, Open console, screenshots, guest OS types)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -307,6 +323,8 @@ src/                  React + TypeScript UI
                       FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
+                      VmSettingsTab and VmSettingsDialogs for VM-23: the Settings tab and its edit dialogs (bulk
+                      resize too, VM-12);
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
@@ -339,7 +357,9 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
+                      Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints),
+                      vm-settings.ts (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs,
+                      networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
                       delay, longer after failures), host-details.ts
@@ -383,6 +403,29 @@ src/                  React + TypeScript UI
   `parentFileNameHint`) or a sparse file starting with `KDMV` (capacity in sectors at byte 12, the embedded
   descriptor's offset and size in sectors at 28 and 36). A snapshot's delta disk names its parent; the chain's files
   together are what the disk takes on this PC.
+- VM-23 more .vmx keys: `vhv.enable` (nested virtualization), `uefi.secureBoot.enabled`, `vtpm.present` (a vTPM needs
+  the VM encrypted: Remotely only reads it), CD/DVD drives are `<slot>.deviceType` `cdrom-image` (an ISO in
+  `.fileName`) or `atapi-cdrom`/`cdrom-raw` (a host drive), `usb.present`, `ehci.present`, `usb_xhci.present`,
+  `sound.present` and `.virtualDev` (`hdaudio`), `svga.graphicsMemoryKB`, `mks.enable3d`, `serialN.present` with
+  `.fileType` and `.fileName`, shared folders `sharedFolderN.present`, `.enabled`, `.readAccess`, `.writeAccess`,
+  `.hostPath`, `.guestName`, `.expiration`, `sharedFolder.maxNum`, and `isolation.tools.hgfs.disable = "FALSE"`.
+  Workstation itself reorders keys when it writes a .vmx (`upgradevm` moved `config.version` and `virtualHW.version`);
+  Remotely's own edits keep the order (`adapters::vmx_file`). A minimal .vmx with `scsi0.virtualDev = "lsisas1068"`
+  needs `pciBridge0` and `pciBridge4` to `pciBridge7` (`pcieRootPort`, 8 functions), else power-on fails with "No PCIe
+  slot available for SCSI0"; a stale `*.pciSlotNumber` gives the same error.
+- `vmware-vdiskmanager.exe` sits beside vmrun (`adapters::vmware::locate_vdiskmanager`, `REMOTELY_VDISKMANAGER`):
+  `-c -s <n>MB -a lsilogic|buslogic|ide -t 0` (thin) or `-t 2` (thick), `-x <n>MB` (expand; it says to grow the
+  partition in the guest), `-k` (shrink), `-d` (defragment). It reports failures on stdout with a non-zero exit code.
+  `vmware.exe <vmx>` opens Workstation's window on the VM (a tab, not powered on); Workstation adds the VM to its library.
+- vmrun (Workstation 26): `upgradevm <vmx>` (VM off; 19 went to 22), `installTools <vmx>` (VM running; "No VMware Tools
+  image exists for the guest operating system" for a guest type without one), `connectNamedDevice` /
+  `disconnectNamedDevice <vmx> <ethernet0|sata0:1>` on a running VM. vmrun answers 0 even for a device the VM doesn't
+  have (only `vmware.log` warns), so Remotely checks the .vmx first. A running VM's ISO changes with `writeVariable
+  <vmx> runtimeConfig <slot>.fileName <iso>` then `connectNamedDevice <vmx> <slot>`; runtime changes are not written to
+  the .vmx and are gone at the next power-on. `readVariable runtimeConfig ethernet0.connected` returns nothing, so a
+  running Workstation VM's cable state can't be read. `deleteVM <vmx>` deletes the VM's own files (the .vmx, .vmxf,
+  .vmsd, snapshot states, NVRAM, logs, its disks and their snapshot deltas, which sit in the VM's folder even for a disk
+  outside it) and the folder when it is then empty; a disk outside the folder and files of other kinds stay.
 
 ## VirtualBox facts
 
@@ -444,10 +487,38 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   `cableconnectedN` (`on`/`off`); the storage key (`"SATA-0-0"`) is the disk's slot. A VDI's header has the signature
   0xbeda107f at 0x40, its type at 0x4c (4 is a snapshot's differencing image) and the disk size at 0x170; a VHD's
   footer (`conectix`, big-endian) has the size at 48, at the start of a dynamic one and the end of a fixed one.
+- VM-23 (checked on 7.2.22): `showvminfo` also gives `nested-hw-virt`, `SecureBoot` (only once the VM has a UEFI
+  variable store), `vram`, `accelerate3d`, `monitorcount`, `graphicscontroller`, `usb`/`ehci`/`xhci` (`on`/`off`),
+  `audio` (the host driver, `none` for no sound card), `uartN` (`off` or `0x03f8,4`) with `uartmodeN` (`file,<path>`,
+  its path not escaped), `storagecontrollernameN`/`typeN`/`portcountN`, `SharedFolderNameMachineMappingN` and
+  `...PathMachineMappingN`, and `bridgeadapterN`, `hostonlyadapterN`, `nat-networkN`, `intnetN`. A DVD drive is a slot
+  with a `"<ctl>-IsEjected-<port>-<dev>"` key; its value is an image, `emptydrive`, or `host:<drive>`. It doesn't print the
+  TPM, the shared folders' flags or the sound card: the .vbox has `<TrustedPlatformModule type="v2_0"/>`, `<SharedFolder
+  writable=... autoMount=...>` and `<AudioAdapter controller="HDA">`. `list ostypes` prints `ID / Description: <id> --
+  <description>` (7.1+). VBoxManage writes its `0%...100%` progress to stderr.
+- Changes (VM off unless said): `modifyvm` (`--cpus`, `--memory`, `--nested-hw-virt`, `--firmware bios|efi`, `--tpm-type
+  none|2.0`, `--name` (renames the folder and files too), `--ostype <id>`, `--nicN`, `--nictypeN`, `--macaddressN
+  auto|<hex>`, `--cableconnectedN`, `--bridgeadapterN`...), Secure Boot through `modifynvram <uuid> inituefivarstore`,
+  `enrollmssignatures`, `enrollorclpk`, `secureboot --enable|--disable`; `sharedfolder add|remove`; `storagectl
+  --portcount`; `storageattach ... --type dvddrive|hdd --medium <file>|emptydrive|none` (a DVD's medium changes on a
+  running VM too); `createmedium disk --filename --size <MB> --format VDI [--variant Fixed]`; `modifymedium disk <file>
+  --resize <MB>|--compact`; `closemedium disk <file> --delete`; `controlvm <uuid> setlinkstateN on|off` (running).
+  `modifymedium --resize` on a base disk under a snapshot resizes the base while the guest keeps seeing the
+  differencing image's old size, so Remotely refuses disk changes on a VM with snapshots. `unregistervm <uuid>` keeps
+  the files; `--delete` removes the .vbox, .vbox-prev, .nvram, attached disks (snapshot ones too), Logs and Snapshots,
+  and keeps other files and the folder. `registervm <file.vbox>` refuses a VM whose UUID is registered already.
+  `controlvm <uuid> screenshotpng <file>` (running), `VirtualBoxVM.exe --startvm <uuid> --separate` (a window on a
+  running VM), `VBoxGuestAdditions.iso` beside VBoxManage.
 
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
+- VM settings (VM-23 and on): never edit, resize, delete or register a real VM in a test. `FakeVmware::with_vmx_text`,
+  `with_disk` and `with_file` hold a VM's .vmx, disks and files in memory, and the fake applies every edit, vdiskmanager
+  call and vmrun verb to them (`vmx_text`, `backups`, `disk_size_mb`, `calls`); `FakeVirtualBox` interprets the
+  VBoxManage calls (`change ...` in `calls`, `info`, `disk_size_mb`, `registerable`). Adapter tests run the real
+  `VmrunAdapter` against a stand-in `vmware-vdiskmanager.cmd` written at run time in the system temp folder
+  (`tests/vm_settings.rs`, `adapters/vmware.rs`).
 - Never let a `\\server\share`, `//server/share`, `\\?\` or `\\.\` path reach the real file system in a test, not
   even a made-up one (Windows would send the sign-in to it). Tests of refused paths (A3) go through in-memory fakes
   that fail when asked for one (`import::openssh::IncludeFiles`, `adapters::vm_hardware::VmFiles`) or an injected
