@@ -138,6 +138,15 @@ pub enum Command {
     /// [`TargetRef::Container`] whose object fits the op: containers for the container ops, images,
     /// volumes, or the engine itself for a pull or a prune (one per host).
     Container { targets: Vec<TargetRef>, op: ContainerOp },
+    /// VM-21, VM-22, VM-10: make new VMs, from a launch template or the Deploy dialog's own values (a clone of a
+    /// golden VM, a cloud image with cloud-init, an ISO install or an OVA/OVF import), or clones of the VMs
+    /// picked on the VMs page. Every target is one of the spec's [`TargetRef::NewVm`]s. Never built by the UI:
+    /// the deploy service ([`crate::deploy`]) builds it from the catalogue, so what is approved is what was
+    /// resolved there.
+    Deploy {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::deploy::DeploySpec>,
+    },
 }
 
 /// CT-01, CT-02: what a [`Command::Container`] does.
@@ -550,6 +559,8 @@ impl Command {
             Command::TerminalLine { .. } => {
                 "MultiExec lines start from what is typed into a terminal with MultiExec on, which holds and rates them."
             }
+            // VM-21: the paths and values a deploy uses come from the catalogue.
+            Command::Deploy { .. } => "Deploys start from the Deploy dialog, a launch template or Clone on the VMs page.",
             _ => return Ok(()),
         };
         Err(CoreError::InvalidInput(refused.into()))
@@ -602,6 +613,15 @@ impl Command {
             Command::FileUpload { targets, folder, files } => validate_upload(targets, folder, files),
             Command::OpenTunnel { targets, .. } => validate_tunnel(targets),
             Command::Container { targets, op } => validate_container(targets, op),
+            Command::Deploy { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput(
+                        "A deploy's targets are the VMs it makes.".into(),
+                    ));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -618,6 +638,11 @@ impl Command {
             | Command::RemoveSshKey { targets, .. }
             | Command::FileUpload { targets, .. }
             | Command::Container { targets, .. } => *targets = new,
+            // VM-21: the VMs that failed, made again with the labels the deploy gives them.
+            Command::Deploy { targets, spec } => {
+                **spec = spec.only(&new);
+                *targets = spec.targets();
+            }
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal.
             Command::AppUpdate { .. } | Command::TerminalLine { .. } | Command::OpenTunnel { .. } => return None,
@@ -636,7 +661,8 @@ impl Command {
             | Command::TerminalLine { targets, .. }
             | Command::FileUpload { targets, .. }
             | Command::OpenTunnel { targets, .. }
-            | Command::Container { targets, .. } => targets,
+            | Command::Container { targets, .. }
+            | Command::Deploy { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -655,6 +681,7 @@ impl Command {
             Command::FileUpload { .. } => "fileUpload",
             Command::OpenTunnel { .. } => "openTunnel",
             Command::Container { .. } => "container",
+            Command::Deploy { .. } => "deploy",
         }
     }
 
@@ -779,6 +806,7 @@ impl Command {
                 }
                 other => format!("{} {}", other.label(), noun("container")),
             },
+            Command::Deploy { spec, .. } => spec.summary(),
         }
     }
 }

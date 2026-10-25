@@ -292,6 +292,8 @@ impl JobScope {
     pub fn of(command: &Command) -> Self {
         match command {
             Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => JobScope::Vms,
+            // VM-21: the new VMs show in the list.
+            Command::Deploy { .. } => JobScope::Vms,
             Command::Container { .. } => JobScope::Containers,
             _ => JobScope::Other,
         }
@@ -533,6 +535,8 @@ pub struct JobRunner {
     terminals: Arc<dyn TerminalActions>,
     /// CT-01, CT-02: container hosts (set once the core is put together).
     containers: RwLock<Option<Arc<dyn ContainerActions>>>,
+    /// VM-21, VM-22, VM-10: what makes each new VM of a deploy (set once the core is put together).
+    deployer: RwLock<Option<Arc<dyn crate::deploy::DeployActions>>>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -571,6 +575,7 @@ impl JobRunner {
             known_hosts,
             terminals,
             containers: RwLock::new(None),
+            deployer: RwLock::new(None),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -603,6 +608,11 @@ impl JobRunner {
     /// CT-01, CT-02: where container changes go.
     pub fn set_containers(&self, containers: Arc<dyn ContainerActions>) {
         *locks::write(&self.containers) = Some(containers);
+    }
+
+    /// VM-21, VM-22, VM-10: what makes a deploy's VMs.
+    pub fn set_deployer(&self, deployer: Arc<dyn crate::deploy::DeployActions>) {
+        *locks::write(&self.deployer) = Some(deployer);
     }
 
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
@@ -1477,6 +1487,24 @@ impl JobRunner {
                     ..TargetOutcome::done()
                 })
             }
+            // VM-21, VM-22, VM-10: one new VM, with its after-deploy steps. Cancel stops it and removes what this job
+            // made for it; VMs already made stay.
+            (Command::Deploy { spec: deploy, .. }, TargetRef::NewVm { name, .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let deployer = locks::read(&self.deployer)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("deploys"))?;
+                let vm = deploy
+                    .vm(name)
+                    .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
+                let note = deployer.deploy_vm(&spec.ctx, job_id, deploy, vm, token).await?;
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
+            }
             (command, other) => Err(CoreError::WrongTargetKind {
                 action: command.summary(1),
                 target: format!("a {} target", other.kind()),
@@ -1761,6 +1789,8 @@ impl JobRunner {
             Command::TerminalLine { targets, .. } => targets.len(),
             // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal.
             Command::FileUpload { .. } | Command::OpenTunnel { .. } => 1,
+            // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
+            Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
         };
         n.max(1)
     }
@@ -1827,6 +1857,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::OpenTunnel { .. } => "tunnel",
         Command::Container { .. } => "container",
         Command::AppUpdate { .. } => "update",
+        Command::Deploy { .. } => "deploy",
     }
 }
 
