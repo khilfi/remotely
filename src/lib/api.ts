@@ -984,6 +984,8 @@ export interface VaultInfo {
   windowsLoginAvailable: boolean;
   /** The vault locks itself after this many minutes without use. */
   idleLockMinutes: number;
+  /** QL-22: seconds until it does, while unlocked (moves on with each activity ping). */
+  locksInSecs: number | null;
 }
 
 /** SS-04, FD-07: how hard a new vault password or export passphrase is to guess. The core checks again on submit. */
@@ -3341,8 +3343,9 @@ export const api = {
     invoke<VaultInfo>("vault_set_windows_login", { password, enabled }),
   /** SS-04: one click, no password: the Windows login stops unlocking the vault. */
   vaultTurnOffWindowsLogin: () => invoke<VaultInfo>("vault_turn_off_windows_login"),
-  /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). */
-  vaultActivity: () => invoke<void>("vault_activity"),
+  /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). QL-22: the
+   * answer carries the new countdown. */
+  vaultActivity: () => invoke<VaultInfo>("vault_activity"),
   /** SS-04, FD-07: scores a candidate vault password or export passphrase for the meter. Never logged. */
   passwordStrength: (text: string) => invoke<PasswordStrength>("password_strength", { text }),
   /** SS-04, FD-07: six random words joined by "-", for the Generate button. */

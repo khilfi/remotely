@@ -122,6 +122,8 @@ import {
 } from "@/lib/api";
 import { rulesForPane } from "@/lib/highlight-rules";
 import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
+import { fromCommandFinished, fromTerminalAlert } from "@/lib/notifications";
+import { notify as keepNotification } from "@/lib/notifications-store";
 import { sendCommand } from "@/lib/command-send";
 import { connectedReason, multiExecReason, READ_ONLY_REASON, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
@@ -201,6 +203,10 @@ interface Props {
   multiExecRequest: number;
   /** QL-18: opens Search all terminals when it changes (the command palette). */
   searchRequest?: number;
+  /** R10: shows the tab of this terminal (a notification, the map, the status bar), with its tunnels panel. */
+  focusRequest?: { terminalId: string; tunnels?: boolean; n: number } | null;
+  /** QL-20: opens the command panel on this command (the palette's search). */
+  snippetRequest?: { command: string; n: number } | null;
   vault: VaultInfo | null;
   /** Compare runs go through the app, which opens the approval dialog; `onJob` gets the job once queued. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
@@ -317,6 +323,8 @@ export function TerminalPage({
   compareRequest,
   multiExecRequest,
   searchRequest = 0,
+  focusRequest = null,
+  snippetRequest = null,
   vault,
   onSubmitted,
   onOpenVault,
@@ -687,6 +695,8 @@ export function TerminalPage({
       api
         .notifyCommandFinished(maskedOutside(title), maskedOutside(body))
         .catch((err) => console.warn("notification failed", err));
+      // QL-25: kept in the notification centre (the core redacts it).
+      keepNotification(fromCommandFinished(title, body, pane.terminalId));
       if (tab.key !== activeTab || !active)
         setAttention((prev) => (prev.includes(tab.key) ? prev : [...prev, tab.key]));
     };
@@ -698,6 +708,8 @@ export function TerminalPage({
     alertRef.current = (pane, alert) => {
       const name = nameOf(pane);
       recordAlert(alert, name);
+      // QL-25: every alert is kept in the notification centre, whether or not Windows is told.
+      keepNotification(fromTerminalAlert(alert, name));
       const tab = tabs.find((t) => allPanes(t.layout).includes(pane));
       if (!tab || !tab.notify || !inBackground(tab.key, activeTab, active)) return;
       const { title, body } = alertNotification(alert, name);
@@ -740,6 +752,7 @@ export function TerminalPage({
       api
         .notifyCommandFinished(maskedOutside(title), maskedOutside(body))
         .catch((err) => console.warn("notification failed", err));
+      keepNotification(fromCommandFinished(title, body, event.terminalIds[0] ?? null));
       const behind = lineTabs.filter((t) => t.key !== activeTab || !active).map((t) => t.key);
       if (behind.length > 0) setAttention((prev) => [...new Set([...prev, ...behind])]);
     };
@@ -1059,6 +1072,30 @@ export function TerminalPage({
   if (searchRequest !== searchHandled) {
     setSearchHandled(searchRequest);
     openSearchAll();
+  }
+  // R10: a link to one terminal (a notification, the map, the status bar's tunnels): its tab and pane in front.
+  const [focusHandled, setFocusHandled] = useState(focusRequest?.n ?? 0);
+  const [tunnelsOpen, setTunnelsOpen] = useState(0);
+  if (focusRequest && focusRequest.n !== focusHandled) {
+    setFocusHandled(focusRequest.n);
+    const tab = tabs.find((t) => allPanes(t.layout).some((p) => p.terminalId === focusRequest.terminalId));
+    const pane = tab && allPanes(tab.layout).find((p) => p.terminalId === focusRequest.terminalId);
+    if (tab && pane) {
+      setActiveTab(tab.key);
+      setTabs((prev) => prev.map((t) => (t.key === tab.key ? { ...t, activePane: pane.key } : t)));
+      if (focusRequest.tunnels) setTunnelsOpen((n) => n + 1);
+    } else {
+      toast.info("That terminal has closed");
+    }
+  }
+  // QL-20: a command found in the palette: the command panel shows it.
+  const [snippetHandled, setSnippetHandled] = useState(snippetRequest?.n ?? 0);
+  const [panelQuery, setPanelQuery] = useState<{ text: string; n: number } | null>(null);
+  if (snippetRequest && snippetRequest.n !== snippetHandled) {
+    setSnippetHandled(snippetRequest.n);
+    setPanelQuery({ text: snippetRequest.command, n: snippetRequest.n });
+    // Shown for now; whether it shows next time stays the user's own choice.
+    if (!commandsShown) setCommandsShown(true);
   }
   // Ctrl+Shift+G, caught before a focused terminal sees it (Ctrl+Shift+F searches that terminal alone).
   const hasTabs = tabs.length > 0;
@@ -1647,6 +1684,7 @@ export function TerminalPage({
           snapshot={currentSnapshot}
           name={currentPane ? nameOf(currentPane) : ""}
           onApproval={askTunnel}
+          openRequest={tunnelsOpen}
         />
         <IconButton
           label={filesShown ? "Hide the files" : "Files here: the terminal's folder, downloads and uploads"}
@@ -1802,6 +1840,7 @@ export function TerminalPage({
                     }
                     onSend={sendToCurrent}
                     onClose={() => showCommands(false)}
+                    query={panelQuery}
                   />
                 </div>
               </ResizablePanel>

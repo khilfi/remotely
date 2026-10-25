@@ -121,6 +121,26 @@ impl Store {
         Ok(())
     }
 
+    /// QL-21: every VM's stored reading, by VM id, in one query (the topology map).
+    pub(crate) async fn all_vm_specs(&self, ctx: &Context) -> Result<HashMap<String, StoredSpecs>> {
+        let rows = sqlx::query("SELECT vm_id, specs, collected_at FROM vm_specs WHERE workspace_id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get("vm_id")?,
+                    StoredSpecs {
+                        specs: row.try_get("specs")?,
+                        collected_at: row.try_get("collected_at")?,
+                        collected_by: None,
+                    },
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) async fn vm_specs(&self, ctx: &Context, vm_id: &str) -> Result<Option<StoredSpecs>> {
         let row = sqlx::query("SELECT specs, collected_at FROM vm_specs WHERE workspace_id = ? AND vm_id = ?")
             .bind(ctx.workspace_id.to_string())
