@@ -153,7 +153,11 @@ pub fn render(vmx: &NewVmx) -> String {
         set(&format!("{slot}.fileName"), disk.file_name.clone());
     }
     if let Some(iso) = &vmx.iso {
-        let next = vmx.disks.iter().filter(|d| d.controller == DiskController::Sata).count();
+        let next = vmx
+            .disks
+            .iter()
+            .filter(|d| d.controller == DiskController::Sata)
+            .count();
         let slot = format!("sata0:{next}");
         set(&format!("{slot}.present"), "TRUE".into());
         set(&format!("{slot}.deviceType"), "cdrom-image".into());
@@ -302,7 +306,11 @@ mod tests {
         assert_eq!(get(&k, "bios.bootOrder"), Some("cdrom,hdd"));
         assert_eq!(get(&k, "firmware"), None);
         assert_eq!(get(&k, "sata0:0.fileName"), Some("x.vmdk"));
-        assert_eq!(get(&k, "sata0:1.deviceType"), Some("cdrom-image"), "the CD after the SATA disk");
+        assert_eq!(
+            get(&k, "sata0:1.deviceType"),
+            Some("cdrom-image"),
+            "the CD after the SATA disk"
+        );
     }
 
     #[test]
@@ -320,7 +328,11 @@ mod tests {
         );
         let ide: Vec<VmxDisk> = (0..3).map(|_| disk(DiskController::Ide)).collect();
         assert_eq!(disk_slots(&ide), ["ide0:0", "ide0:1", "ide1:0"]);
-        let mixed = vec![disk(DiskController::Nvme), disk(DiskController::Sata), disk(DiskController::Nvme)];
+        let mixed = vec![
+            disk(DiskController::Nvme),
+            disk(DiskController::Sata),
+            disk(DiskController::Nvme),
+        ];
         assert_eq!(disk_slots(&mixed), ["nvme0:0", "sata0:0", "nvme0:1"]);
     }
 

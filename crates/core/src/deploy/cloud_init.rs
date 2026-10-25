@@ -46,7 +46,8 @@ impl FirstBoot {
 
     /// The `#cloud-config` user data.
     pub fn user_data(&self) -> String {
-        let mut out = String::from("#cloud-config\n# Written by Remotely for this VM's first boot. It holds no password.\n");
+        let mut out =
+            String::from("#cloud-config\n# Written by Remotely for this VM's first boot. It holds no password.\n");
         out.push_str(&format!("hostname: {}\n", quoted(&self.hostname)));
         out.push_str("preserve_hostname: false\n");
         match &self.user {
@@ -126,7 +127,13 @@ mod tests {
             assert!(text.lines().any(|l| l == line), "{line} in\n{text}");
         }
         // No password of any kind: only the locked one.
-        for key in ["plain_text_passwd", "hashed_passwd", "chpasswd", "password:", " passwd:"] {
+        for key in [
+            "plain_text_passwd",
+            "hashed_passwd",
+            "chpasswd",
+            "password:",
+            " passwd:",
+        ] {
             assert!(!text.contains(key), "{key}");
         }
     }
@@ -186,12 +193,14 @@ mod tests {
                 "guestinfo.userdata.encoding"
             ]
         );
-        let decode = |text: &str| {
-            String::from_utf8(base64::engine::general_purpose::STANDARD.decode(text).unwrap()).unwrap()
-        };
+        let decode =
+            |text: &str| String::from_utf8(base64::engine::general_purpose::STANDARD.decode(text).unwrap()).unwrap();
         assert_eq!(decode(&keys[0].1), first_boot().meta_data());
         assert_eq!(keys[1].1, "base64");
         assert_eq!(decode(&keys[2].1), first_boot().user_data());
-        assert!(keys[2].1.chars().all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)));
+        assert!(keys[2]
+            .1
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+/=".contains(c)));
     }
 }

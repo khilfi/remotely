@@ -40,7 +40,11 @@ fn unit_bytes(units: Option<&str>) -> Option<u64> {
     let Some(units) = units else {
         return Some(1);
     };
-    let squeezed: String = units.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    let squeezed: String = units
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
     match squeezed.as_str() {
         "byte" | "bytes" => Some(1),
         "kilobytes" => Some(1 << 10),
@@ -63,7 +67,9 @@ pub fn disk_capacities(descriptor: &str) -> Vec<u64> {
     };
     while let Some(at) = next(rest) {
         let tag = &rest[at..];
-        let name_end = tag[1..].find(|c: char| c.is_whitespace() || c == '>' || c == '/').map_or(tag.len(), |i| i + 1);
+        let name_end = tag[1..]
+            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+            .map_or(tag.len(), |i| i + 1);
         let end = tag.find('>').map_or(tag.len(), |i| i + 1);
         let name = &tag[1..name_end];
         if name == "Disk" || name == "ovf:Disk" {
@@ -96,11 +102,17 @@ fn read_tar_descriptor(file: &mut std::fs::File) -> Result<Option<String>> {
         if file.read_exact(&mut header).is_err() || header.iter().all(|b| *b == 0) {
             return Ok(None);
         }
-        let name: String = header[..100].iter().take_while(|b| **b != 0).map(|b| *b as char).collect();
+        let name: String = header[..100]
+            .iter()
+            .take_while(|b| **b != 0)
+            .map(|b| *b as char)
+            .collect();
         let size = octal(&header[124..136]).unwrap_or(0);
         if name.to_ascii_lowercase().ends_with(".ovf") {
             if size > MAX_DESCRIPTOR_BYTES {
-                return Err(CoreError::InvalidInput("The appliance's OVF descriptor is too large.".into()));
+                return Err(CoreError::InvalidInput(
+                    "The appliance's OVF descriptor is too large.".into(),
+                ));
             }
             let mut text = vec![0u8; size as usize];
             file.read_exact(&mut text)?;
@@ -114,7 +126,11 @@ fn read_tar_descriptor(file: &mut std::fs::File) -> Result<Option<String>> {
 
 fn read_descriptor_blocking(path: &Path, format: ImageFormat) -> Result<Option<String>> {
     if let Some(refusal) = untrusted::path_refusal(path) {
-        return Err(CoreError::InvalidInput(format!("{} {}.", path.display(), refusal.describe())));
+        return Err(CoreError::InvalidInput(format!(
+            "{} {}.",
+            path.display(),
+            refusal.describe()
+        )));
     }
     match format {
         ImageFormat::Ovf => {
@@ -184,18 +200,26 @@ mod tests {
         ova.extend([0u8; 1024]);
         let path = dir.join("appliance.ova");
         std::fs::write(&path, &ova).unwrap();
-        let disks = appliance_disks(&path.display().to_string(), ImageFormat::Ova).await.unwrap();
+        let disks = appliance_disks(&path.display().to_string(), ImageFormat::Ova)
+            .await
+            .unwrap();
         assert_eq!(disks, [10 << 30, 40 << 30, 512 << 20]);
         let ovf = dir.join("appliance.ovf");
         std::fs::write(&ovf, OVF).unwrap();
         assert_eq!(
-            appliance_disks(&ovf.display().to_string(), ImageFormat::Ovf).await.unwrap().len(),
+            appliance_disks(&ovf.display().to_string(), ImageFormat::Ovf)
+                .await
+                .unwrap()
+                .len(),
             3
         );
         // Not a tar at all: no disks known, no error.
         let junk = dir.join("junk.ova");
         std::fs::write(&junk, b"not a tar").unwrap();
-        assert!(appliance_disks(&junk.display().to_string(), ImageFormat::Ova).await.unwrap().is_empty());
+        assert!(appliance_disks(&junk.display().to_string(), ImageFormat::Ova)
+            .await
+            .unwrap()
+            .is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

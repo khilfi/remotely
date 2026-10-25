@@ -85,9 +85,9 @@ impl DeploySource {
     /// The file it reads, for the kinds that are one.
     pub fn path(&self) -> Option<&str> {
         match self {
-            DeploySource::CloudImage { path, .. } | DeploySource::Iso { path } | DeploySource::Appliance { path, .. } => {
-                Some(path)
-            }
+            DeploySource::CloudImage { path, .. }
+            | DeploySource::Iso { path }
+            | DeploySource::Appliance { path, .. } => Some(path),
             DeploySource::GoldenVm { .. } | DeploySource::BulkClone => None,
         }
     }
@@ -254,13 +254,12 @@ impl DeploySpec {
         };
         let family = crate::catalog::profiles::profile(plan.profile.id).map_or(GuestFamily::Linux, |p| p.family);
         // VM-22: cloud-init is a Linux guest's, and an ISO install has no guest yet.
-        let first_boot = (family == GuestFamily::Linux && !matches!(source, DeploySource::Iso { .. })).then(|| {
-            FirstBootSpec {
+        let first_boot =
+            (family == GuestFamily::Linux && !matches!(source, DeploySource::Iso { .. })).then(|| FirstBootSpec {
                 user: plan.guest_user.clone(),
                 public_key: plan.ssh_key.as_ref().map(|k| k.public_key.clone()),
                 packages: plan.packages.clone(),
-            }
-        });
+            });
         Self {
             origin,
             hypervisor: plan.hypervisor,
@@ -568,7 +567,10 @@ pub(crate) mod tests {
     #[test]
     fn a_plan_becomes_a_spec_with_its_first_boot_setup() {
         let spec = make(cloud(), "ubuntu");
-        assert_eq!(spec.vms.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["web-1", "web-2"]);
+        assert_eq!(
+            spec.vms.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+            ["web-1", "web-2"]
+        );
         let first_boot = spec.first_boot.as_ref().unwrap();
         assert_eq!(first_boot.user.as_deref(), Some("alice"));
         assert!(first_boot.public_key.as_deref().unwrap().starts_with("ssh-ed25519 "));
@@ -579,16 +581,26 @@ pub(crate) mod tests {
         spec.validate().unwrap();
         assert_eq!(spec.summary(), "Deploy 2 VMs from 'web'");
         let text = spec.describe();
-        assert!(text.contains("cloud-init: alice with the SSH key, packages nginx"), "{text}");
-        assert!(!text.contains("AAAA"), "the audit log names the key, not its data: {text}");
+        assert!(
+            text.contains("cloud-init: alice with the SSH key, packages nginx"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("AAAA"),
+            "the audit log names the key, not its data: {text}"
+        );
 
         // Windows has no cloud-init; neither has an ISO install.
-        assert_eq!(super::DeploySpec::from_plan(
-            &plan(cloud(), "windows-server", Hypervisor::Vmware, 1),
-            DeployOrigin::Custom { name: "w".into() },
-            r"C:\VMs".into(),
+        assert_eq!(
+            super::DeploySpec::from_plan(
+                &plan(cloud(), "windows-server", Hypervisor::Vmware, 1),
+                DeployOrigin::Custom { name: "w".into() },
+                r"C:\VMs".into(),
+                None
+            )
+            .first_boot,
             None
-        ).first_boot, None);
+        );
         let iso = spec_iso();
         assert_eq!(iso.first_boot, None);
         // A golden VM's clone mode.
@@ -601,7 +613,10 @@ pub(crate) mod tests {
             "ubuntu",
         );
         assert!(golden.source.is_linked());
-        assert!(golden.source.describe().contains("a linked clone of 'golden' at its snapshot 'base'"));
+        assert!(golden
+            .source
+            .describe()
+            .contains("a linked clone of 'golden' at its snapshot 'base'"));
     }
 
     fn spec_iso() -> DeploySpec {
@@ -656,7 +671,10 @@ pub(crate) mod tests {
             },
             "The image",
         );
-        bad(&|s| s.network = Some(Network::Internal { name: "lab".into() }), "isn't Workstation's");
+        bad(
+            &|s| s.network = Some(Network::Internal { name: "lab".into() }),
+            "isn't Workstation's",
+        );
         bad(&|s| s.size = None, "needs a size");
         bad(
             &|s| s.first_boot.as_mut().unwrap().packages = vec!["x;reboot".into()],

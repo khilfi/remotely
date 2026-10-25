@@ -34,7 +34,8 @@ pub use self::images::{
 pub use self::profiles::{profiles, Firmware, OsProfile};
 pub use self::sizes::{built_in_sizes, DiskController, DiskSpec, Provisioning, Size, SizeInput};
 pub use self::templates::{
-    AfterDeploy, CloneMode, DeployPlan, KeyState, LaunchTemplate, Network, PlannedVm, Problem, ProblemCode, TemplateInput,
+    AfterDeploy, CloneMode, DeployPlan, KeyState, LaunchTemplate, Network, PlannedVm, Problem, ProblemCode,
+    TemplateInput,
 };
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::domain::Context;

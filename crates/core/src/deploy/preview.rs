@@ -138,7 +138,10 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
         }
         (DeploySource::Appliance { path, format }, Some(size)) => {
             let disks = super::ovf::appliance_disks(path, *format).await.unwrap_or_default();
-            let thick = size.disks.first().is_some_and(|d| d.provisioning == Provisioning::Thick);
+            let thick = size
+                .disks
+                .first()
+                .is_some_and(|d| d.provisioning == Provisioning::Thick);
             match disks.split_first() {
                 Some((boot, rest)) => {
                     let boot = (*boot).max(boot_bytes.unwrap_or(0));
@@ -146,7 +149,9 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
                     (Some(all), if thick { all } else { 0 })
                 }
                 None => {
-                    notes.push("The appliance's disks couldn't be read, so its size counts as the size's boot disk.".into());
+                    notes.push(
+                        "The appliance's disks couldn't be read, so its size counts as the size's boot disk.".into(),
+                    );
                     let boot = boot_bytes.unwrap_or(0);
                     (Some(boot), if thick { boot } else { 0 })
                 }
@@ -357,7 +362,14 @@ mod tests {
         assert!(p.refusals.is_empty(), "{:?}", p.refusals);
         assert!(p.notes.iter().any(|n| n.contains("growpart")), "{:?}", p.notes);
         assert_eq!(p.first_boot.as_ref().unwrap().user.as_deref(), Some("alice"));
-        assert!(p.first_boot.as_ref().unwrap().key_fingerprint.as_deref().unwrap().starts_with("SHA256:"));
+        assert!(p
+            .first_boot
+            .as_ref()
+            .unwrap()
+            .key_fingerprint
+            .as_deref()
+            .unwrap()
+            .starts_with("SHA256:"));
         assert_eq!(p.network.as_deref(), Some("host-only"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -375,7 +387,11 @@ mod tests {
         spec.size.as_mut().unwrap().disks[0].provisioning = Provisioning::Thick;
         let p = preview(&spec, &hypervisors(), &host).await;
         assert_eq!(p.thick_bytes, 2 * 40 * GIB);
-        assert!(p.refusals.iter().any(|r| r.contains("The thick disks need")), "{:?}", p.refusals);
+        assert!(
+            p.refusals.iter().any(|r| r.contains("The thick disks need")),
+            "{:?}",
+            p.refusals
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -402,7 +418,11 @@ mod tests {
             1,
         );
         let p = preview(&iso, &hypervisors(), &FakeHostCounters::default()).await;
-        assert!(p.notes.iter().any(|n| n.contains("An ISO install starts with no OS")), "{:?}", p.notes);
+        assert!(
+            p.notes.iter().any(|n| n.contains("An ISO install starts with no OS")),
+            "{:?}",
+            p.notes
+        );
         assert_eq!(p.first_boot, None);
         let golden = spec_in(
             &dir,
@@ -414,7 +434,11 @@ mod tests {
             1,
         );
         let p = preview(&golden, &hypervisors(), &FakeHostCounters::default()).await;
-        assert!(p.notes.iter().any(|n| n.contains("Linked clones need 'golden'")), "{:?}", p.notes);
+        assert!(
+            p.notes.iter().any(|n| n.contains("Linked clones need 'golden'")),
+            "{:?}",
+            p.notes
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

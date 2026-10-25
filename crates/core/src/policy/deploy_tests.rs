@@ -77,7 +77,9 @@ fn deploying_five_or_more_vms_is_high_without_a_safety_snapshot() {
             "nothing to snapshot: the VMs don't exist yet"
         );
         assert!(
-            d.reasons.iter().any(|r| r == "5 or more new VMs: the bulk tier for deploys applies"),
+            d.reasons
+                .iter()
+                .any(|r| r == "5 or more new VMs: the bulk tier for deploys applies"),
             "{:?}",
             d.reasons
         );
@@ -90,7 +92,10 @@ fn deploying_five_or_more_vms_is_high_without_a_safety_snapshot() {
 fn a_prod_label_raises_a_deploy_one_tier() {
     let d = decide(1, Environment::Prod);
     assert_eq!(d.tier, Tier::High);
-    assert!(d.reasons.iter().any(|r| r == "a target is labelled Prod: medium -> high"));
+    assert!(d
+        .reasons
+        .iter()
+        .any(|r| r == "a target is labelled Prod: medium -> high"));
     // Five Prod VMs: High, and Prod moves it up to Critical with the vault password.
     let d = decide(5, Environment::Prod);
     assert_eq!(d.tier, Tier::Critical);
@@ -131,7 +136,10 @@ fn the_deploy_threshold_has_bounds_and_saved_rules_without_it_load() {
         .validate()
         .unwrap_err()
         .to_string();
-        assert!(err.contains("'Bulk threshold for deploys': must be 2 to 1000 VMs"), "{threshold}: {err}");
+        assert!(
+            err.contains("'Bulk threshold for deploys': must be 2 to 1000 VMs"),
+            "{threshold}: {err}"
+        );
     }
     // 0.4.x saved neither the threshold nor a tier for deploys.
     let mut json = serde_json::to_value(PolicyRules::default()).unwrap();
@@ -166,7 +174,10 @@ fn a_higher_deploy_threshold_loosens_the_rules_and_is_named() {
     assert!(base.loosened(&lower).is_empty(), "a lower one only tightens");
     let mut low_tier = base.clone();
     low_tier.tiers.insert(ActionKind::VmDeploy, TierRule::same(Tier::Low));
-    assert_eq!(base.loosened(&low_tier), ["Deploy VMs (create, clone or import) asks less"]);
+    assert_eq!(
+        base.loosened(&low_tier),
+        ["Deploy VMs (create, clone or import) asks less"]
+    );
 }
 
 #[test]
@@ -174,5 +185,8 @@ fn the_read_only_lock_refuses_a_deploy() {
     let (command, _) = deploy(1, Environment::Lab);
     let err = engine().check_read_only(true, &command).unwrap_err();
     assert_eq!(err.code(), "read_only_lock");
-    assert!(err.to_string().contains("Deploy VMs (create, clone or import)"), "{err}");
+    assert!(
+        err.to_string().contains("Deploy VMs (create, clone or import)"),
+        "{err}"
+    );
 }

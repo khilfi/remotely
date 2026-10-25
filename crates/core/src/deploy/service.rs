@@ -121,7 +121,11 @@ impl Deploys {
     }
 
     /// The spec a request makes, or why it can't make one.
-    async fn spec_for(&self, ctx: &Context, request: &DeployRequest) -> Result<std::result::Result<DeploySpec, Vec<Problem>>> {
+    async fn spec_for(
+        &self,
+        ctx: &Context,
+        request: &DeployRequest,
+    ) -> Result<std::result::Result<DeploySpec, Vec<Problem>>> {
         if !(1..=MAX_DEPLOY_COUNT).contains(&request.count) {
             return Ok(Err(vec![Problem {
                 code: ProblemCode::CountOutOfRange,
@@ -145,7 +149,12 @@ impl Deploys {
                 (**input).clone(),
             ),
         };
-        if let Some(pattern) = request.naming_pattern.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+        if let Some(pattern) = request
+            .naming_pattern
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
             input.naming_pattern = pattern.to_owned();
         }
         // The template's own default count is checked only as the template's.
@@ -231,7 +240,11 @@ impl Deploys {
 
     /// VM-10: the bulk clone's spec: one full clone of each picked VM (powered off, one hypervisor), named by the
     /// pattern with `{template}` as the source's name.
-    async fn clone_spec(&self, ctx: &Context, request: &CloneRequest) -> Result<std::result::Result<DeploySpec, Vec<Problem>>> {
+    async fn clone_spec(
+        &self,
+        ctx: &Context,
+        request: &CloneRequest,
+    ) -> Result<std::result::Result<DeploySpec, Vec<Problem>>> {
         let mut problems = Vec::new();
         if request.vm_keys.is_empty() || request.vm_keys.len() > MAX_DEPLOY_COUNT as usize {
             return Err(CoreError::InvalidInput(format!(

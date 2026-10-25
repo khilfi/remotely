@@ -201,7 +201,9 @@ async fn read_default_vm_folder() -> Result<PathBuf> {
     }
     documents_folder()
         .map(|docs| docs.join("Virtual Machines"))
-        .ok_or_else(|| CoreError::InvalidInput("Workstation's default VM folder isn't known: choose a VM folder.".into()))
+        .ok_or_else(|| {
+            CoreError::InvalidInput("Workstation's default VM folder isn't known: choose a VM folder.".into())
+        })
 }
 
 /// Builds the adapter for this machine. When vmrun cannot be found the app still starts: the library,
@@ -1226,7 +1228,10 @@ snapshot2.disk0.node = "scsi0:0"
         let prefs = ".encoding = \"windows-1252\"\nprefvmx.defaultVMPath = \"D:\\Labs\\VMs\"\npref.lastUpdateCheckSec = \"1\"\n";
         assert_eq!(parse_default_vm_path(prefs), Some(PathBuf::from(r"D:\Labs\VMs")));
         assert_eq!(parse_default_vm_path("prefvmx.defaultVMPath = \"\"\n"), None);
-        assert_eq!(parse_default_vm_path("pref.keyboardAndMouse.maxProfiles = \"4\"\n"), None);
+        assert_eq!(
+            parse_default_vm_path("pref.keyboardAndMouse.maxProfiles = \"4\"\n"),
+            None
+        );
     }
 
     #[test]

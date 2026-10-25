@@ -1188,7 +1188,10 @@ mod tests {
         for bad in ["Alice", "1bob", "bob smith", "bob;id", "b\u{202e}ob", &"a".repeat(33)] {
             assert!(check_guest_user(Some(bad)).is_err(), "{bad}");
         }
-        assert!(check_guest_user(Some("root")).unwrap_err().to_string().contains("can't be root"));
+        assert!(check_guest_user(Some("root"))
+            .unwrap_err()
+            .to_string()
+            .contains("can't be root"));
 
         let packages = |list: &[&str]| check_packages(&list.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>());
         assert_eq!(

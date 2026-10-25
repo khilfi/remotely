@@ -60,7 +60,15 @@ fn descriptor_date(at: OffsetDateTime) -> [u8; 17] {
 fn record_date(at: OffsetDateTime) -> [u8; 7] {
     let at = at.to_offset(time::UtcOffset::UTC);
     let years = u8::try_from(at.year() - 1900).unwrap_or(0);
-    [years, u8::from(at.month()), at.day(), at.hour(), at.minute(), at.second(), 0]
+    [
+        years,
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute(),
+        at.second(),
+        0,
+    ]
 }
 
 fn ucs2(text: &str) -> Vec<u8> {
@@ -70,7 +78,7 @@ fn ucs2(text: &str) -> Vec<u8> {
 /// A directory record for `id` (already encoded), padded to an even length.
 fn record(id: &[u8], extent: u32, length: u32, directory: bool, at: OffsetDateTime) -> Vec<u8> {
     let id_len = id.len();
-    let len = 33 + id_len + usize::from(id_len % 2 == 0);
+    let len = 33 + id_len + usize::from(id_len.is_multiple_of(2));
     let mut out = vec![0u8; len];
     out[0] = u8::try_from(len).unwrap_or(u8::MAX);
     both_u32(&mut out[2..10], extent);
@@ -102,7 +110,13 @@ fn level1_name(name: &str) -> String {
     let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
     let clean = |s: &str, max: usize| -> String {
         s.chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
             .take(max)
             .collect()
     };
@@ -123,7 +137,11 @@ fn volume_descriptor(
     d[1..6].copy_from_slice(b"CD001");
     d[6] = 1;
     d[8..40].copy_from_slice(&padded("", 32, joliet));
-    let label = if joliet { LABEL.to_owned() } else { LABEL.to_ascii_uppercase() };
+    let label = if joliet {
+        LABEL.to_owned()
+    } else {
+        LABEL.to_ascii_uppercase()
+    };
     d[40..72].copy_from_slice(&padded(&label, 32, joliet));
     both_u32(&mut d[80..88], total);
     if joliet {
@@ -181,8 +199,7 @@ fn directory(own: u32, entries: &[(Vec<u8>, u32, u32)], at: OffsetDateTime) -> V
 /// the files together are at most [`MAX_SEED_BYTES`] and fit one directory sector.
 pub fn write_seed(files: &[(&str, &[u8])], at: OffsetDateTime) -> crate::error::Result<Vec<u8>> {
     let total_bytes: usize = files.iter().map(|(_, data)| data.len()).sum();
-    if total_bytes > MAX_SEED_BYTES || files.len() > 16 || files.iter().any(|(n, _)| n.is_empty() || !n.is_ascii())
-    {
+    if total_bytes > MAX_SEED_BYTES || files.len() > 16 || files.iter().any(|(n, _)| n.is_empty() || !n.is_ascii()) {
         return Err(crate::error::CoreError::InvalidInput(
             "The cloud-init seed is too large.".into(),
         ));
@@ -277,7 +294,9 @@ fn root_files(image: &[u8], descriptor: &[u8], joliet: bool) -> Option<Vec<(Stri
             };
             let file_extent = u32::from_le_bytes(rec.get(2..6)?.try_into().ok()?) as usize;
             let file_len = u32::from_le_bytes(rec.get(10..14)?.try_into().ok()?) as usize;
-            let data = image.get(file_extent * SECTOR..file_extent * SECTOR + file_len)?.to_vec();
+            let data = image
+                .get(file_extent * SECTOR..file_extent * SECTOR + file_len)?
+                .to_vec();
             out.push((name, data));
         }
         at += len;

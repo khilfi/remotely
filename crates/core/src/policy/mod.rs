@@ -14,9 +14,9 @@
 
 mod commands;
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod deploy_tests;
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeMap;
 

@@ -17,7 +17,9 @@ pub mod preview;
 pub mod seed;
 pub mod service;
 pub mod spec;
+pub mod virtualbox;
 pub mod vmx;
+pub mod workstation;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
