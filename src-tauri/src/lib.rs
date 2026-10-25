@@ -21,6 +21,7 @@ mod terminal;
 mod terminal_rules;
 mod tunnels;
 pub mod updater;
+mod vm_insight;
 mod vm_settings;
 mod wake;
 
@@ -530,6 +531,13 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         vm_settings::vm_screenshot,
         vm_settings::vm_guest_os_types,
         vm_settings::vm_workstation_open,
+        vm_insight::vm_logs,
+        vm_insight::vm_log_read,
+        vm_insight::vm_timeline,
+        vm_insight::host_networks,
+        vm_insight::host_network_list,
+        vm_insight::waste_report,
+        vm_insight::waste_open_folder,
         dashboard::metrics_history,
         dashboard::history_info,
         dashboard::history_retention_set,

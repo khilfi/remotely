@@ -4,8 +4,8 @@
 // terminals. Read only: every node links to the item's own page, and nothing here changes anything. The layout is
 // topology-layout.ts.
 //
-// R4 adds host networks: `hostNetworks` gives a network its name and details by the same key (`networkKey`), and adds
-// those no VM is on yet.
+// R4 adds host networks: `hostNetworks` (vm-insight.ts `topologyHostNetworks`, from VM-11's networks-only read) gives a
+// network its name, details and link by the same key (`networkKey`), and adds those no VM is on yet.
 
 import type { Hypervisor, SessionRecord, VirtualNic, VmRecord } from "./api.ts";
 import type { AppLink } from "./links.ts";
@@ -25,7 +25,7 @@ export interface TopoNode {
   /** FD-03: the second line holds one host, IP, user or address, masked as one while presenting. */
   subMask?: DetailMask;
   state?: TopoState;
-  /** Where a click goes; a network has none until R4's host networks. */
+  /** Where a click goes; a network only when the hypervisor listed it (R4's host networks). */
   link?: AppLink;
   /** The column: this PC 0, networks 1, VMs 2, sessions 3 and on (one more per jump host), tunnels after them. */
   layer: number;
@@ -56,6 +56,8 @@ export interface HostNetwork {
   key: string;
   label: string;
   detail?: string;
+  /** VM-11: the host networks view. */
+  link?: AppLink;
 }
 
 export interface TopologyInput {
@@ -169,7 +171,7 @@ export function buildTopology(input: TopologyInput): Topology {
 
   const named = new Map((input.hostNetworks ?? []).map((n) => [n.key, n]));
   for (const n of input.hostNetworks ?? []) {
-    add({ id: `net:${n.key}`, kind: "network", label: n.label, sub: n.detail, layer: 1 });
+    add({ id: `net:${n.key}`, kind: "network", label: n.label, sub: n.detail, link: n.link, layer: 1 });
   }
 
   // VMs and their networks.

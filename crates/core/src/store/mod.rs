@@ -25,6 +25,7 @@ mod tags;
 mod terminal_rules;
 #[cfg(test)]
 mod tests;
+mod timeline;
 #[cfg(test)]
 mod upgrade_tests;
 mod vault;
@@ -59,6 +60,7 @@ pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
 pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};
+pub use timeline::{vm_needle, JobTargetBrief};
 pub(crate) use vault::VaultMetaRow;
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";

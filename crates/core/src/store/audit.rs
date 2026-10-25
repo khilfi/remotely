@@ -202,7 +202,7 @@ impl Store {
     }
 }
 
-fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {
+pub(super) fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {
     Ok(AuditEntry {
         seq: row.try_get("seq")?,
         id: row.try_get("id")?,

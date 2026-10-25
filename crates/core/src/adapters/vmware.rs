@@ -234,8 +234,34 @@ pub trait VmwareAdapter: Send + Sync {
         false
     }
 
+    // VM-11, VM-14, VM-16 (R4): host networks.
+
+    /// VM-11: `vmrun -T ws` with these arguments: `listHostNetworks` and `listPortForwardings <vmnet>` (reads), and
+    /// from the job runner only `setPortForwarding` and `deletePortForwarding`, built by [`crate::host_networks`].
+    async fn vmrun_host(&self, _args: Vec<OsString>, _timeout: Duration) -> Result<String> {
+        Err(CoreError::VmrunNotFound)
+    }
+
+    /// VM-11: Workstation's NAT settings file ([`super::host_networks::VMNET_NAT_CONF`]), whole up to its cap;
+    /// `None` when there is none.
+    async fn nat_conf(&self) -> Result<Option<String>> {
+        let path = Path::new(super::host_networks::VMNET_NAT_CONF);
+        match read_capped(path, super::host_networks::MAX_NAT_CONF_BYTES).await {
+            Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            Err(err) if err.is_not_found() => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// VM-11: why Workstation's NAT port forwards can't be changed from this app (it isn't running as
+    /// administrator), or `None` when they can.
+    fn nat_refusal(&self) -> Option<String> {
+        super::host_networks::nat_refusal(super::host_networks::process_elevated())
+    }
+
     /// VM-21: where Workstation puts new VMs: its preference `prefvmx.defaultVMPath`
-    /// (`%APPDATA%\VMware\preferences.ini`), else `Virtual Machines` in the user's Documents. A read.
+    /// (`%APPDATA%\VMware\preferences.ini`), else `Virtual Machines` in the user's Documents. A read. VM-16's waste
+    /// finder looks for orphans there too.
     async fn default_vm_folder(&self) -> Result<PathBuf> {
         read_default_vm_folder().await
     }
@@ -807,6 +833,10 @@ impl VmwareAdapter for VmrunAdapter {
     async fn workstation_window_open(&self) -> bool {
         super::host_counters::process_running(WORKSTATION_WINDOW).await
     }
+
+    async fn vmrun_host(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.run(args, timeout).await
+    }
 }
 
 /// How a vdiskmanager call is named in errors: `-c` is "create", `-x` "expand", `-k` "shrink", `-d`
@@ -1354,6 +1384,15 @@ impl VmwareAdapter for SwitchableVmware {
     }
     async fn workstation_window_open(&self) -> bool {
         self.current().workstation_window_open().await
+    }
+    async fn vmrun_host(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.current().vmrun_host(args, timeout).await
+    }
+    async fn nat_conf(&self) -> Result<Option<String>> {
+        self.current().nat_conf().await
+    }
+    fn nat_refusal(&self) -> Option<String> {
+        self.current().nat_refusal()
     }
 }
 
