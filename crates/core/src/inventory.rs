@@ -664,6 +664,13 @@ impl TargetDirectory for StoreDirectory {
                 Some(containers) => containers.target(ctx, target).await,
                 None => Err(CoreError::UnknownTarget(target.key())),
             },
+            // VM-21: not made yet, so nothing to look up: the name and label it will have; never protected.
+            TargetRef::NewVm { name, environment, .. } => Ok(Target {
+                target: target.clone(),
+                name: name.clone(),
+                environment: *environment,
+                protected: false,
+            }),
         }
     }
 }

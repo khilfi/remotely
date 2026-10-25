@@ -15,9 +15,6 @@ import type {
   TemplateNetwork,
 } from "./api.ts";
 
-/** QL-08: why the VMs page's Deploy button is off until the deploy package (R2) wires it up. */
-export const DEPLOY_REASON = "Deploy arrives with the deploy package";
-
 /** The core's limits, for the forms' hints (it checks them again). */
 export const MAX_VCPUS = 32;
 export const MAX_SIZE_NAME = 40;

@@ -120,6 +120,14 @@ VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-la
 | Add an existing VM (a `.vmx` to the list, a `.vbox` to VirtualBox) | Low |
 | Open a VM's console (the hypervisor's own window; it changes nothing) | No tier; audited |
 
+Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM is a target, labelled as the deploy labels it, so a Prod label moves the tier up one; a new VM is never protected:
+
+| Action | Tier |
+| --- | --- |
+| Deploy 1 to 4 VMs: create, clone (a VM-10 bulk clone too) or import | Medium |
+| Deploy 5 or more VMs (the bulk tier for deploys, from 5 VMs by default), or VMs labelled Prod | High |
+| Deploy 5 or more VMs labelled Prod | Critical |
+
 Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 
 | Action | Tier |

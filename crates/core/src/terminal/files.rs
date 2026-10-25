@@ -1057,13 +1057,9 @@ pub enum UploadStart {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Retried {
-    /// Boxed: an upload's start holds a whole approval request.
-    Upload {
-        start: Box<UploadStart>,
-    },
-    Download {
-        transfers: Vec<TransferInfo>,
-    },
+    // Boxed: an upload's start may hold a whole approval request.
+    Upload { start: Box<UploadStart> },
+    Download { transfers: Vec<TransferInfo> },
 }
 
 /// SS-08: the bus-facing side of file transfers (`Core.files`): files staged for upload, uploads

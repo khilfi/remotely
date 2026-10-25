@@ -136,7 +136,18 @@ pub enum TargetRef {
         engine: EngineKind,
         object: ContainerObject,
     },
+    /// VM-21, VM-10: a VM a deploy makes, by the name it will have; one job step each. `environment` is the label
+    /// it will get, which the policy engine reads like any target's.
+    NewVm {
+        hypervisor: crate::adapters::hypervisor::Hypervisor,
+        name: String,
+        #[serde(default)]
+        environment: Environment,
+    },
 }
+
+/// VM-21: [`TargetRef::NewVm`]'s key prefix.
+pub const NEW_VM_KEY: &str = "new-vm";
 
 /// CT-01, CT-02: where containers run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -233,6 +244,7 @@ impl TargetRef {
             TargetRef::App => "app",
             TargetRef::Terminal { .. } => "terminal",
             TargetRef::Container { .. } => "container",
+            TargetRef::NewVm { .. } => "new_vm",
         }
     }
 
@@ -247,7 +259,25 @@ impl TargetRef {
             TargetRef::Container { host, engine, object } => {
                 format!("{}/{}/{}", host.key(), engine.as_str(), object.key())
             }
+            // VM-21: `new-vm/vmware/web-1`. Names are unique (any letter case) within a deploy.
+            TargetRef::NewVm { hypervisor, name, .. } => format!("{NEW_VM_KEY}/{}/{name}", hypervisor.as_str()),
         }
+    }
+
+    /// VM-21: a new VM target from its [`TargetRef::key`] (the label is the deploy's, not in the key).
+    pub fn new_vm_from_key(key: &str) -> Option<TargetRef> {
+        let rest = key.strip_prefix(NEW_VM_KEY)?.strip_prefix('/')?;
+        let (hypervisor, name) = rest.split_once('/')?;
+        let hypervisor = match hypervisor {
+            "vmware" => crate::adapters::hypervisor::Hypervisor::Vmware,
+            "virtualbox" => crate::adapters::hypervisor::Hypervisor::VirtualBox,
+            _ => return None,
+        };
+        Some(TargetRef::NewVm {
+            hypervisor,
+            name: name.to_owned(),
+            environment: Environment::None,
+        })
     }
 
     /// CT-01: a container target from its [`TargetRef::key`] (BX-04 retry).

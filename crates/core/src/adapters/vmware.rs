@@ -233,6 +233,68 @@ pub trait VmwareAdapter: Send + Sync {
     async fn workstation_window_open(&self) -> bool {
         false
     }
+
+    /// VM-21: where Workstation puts new VMs: its preference `prefvmx.defaultVMPath`
+    /// (`%APPDATA%\VMware\preferences.ini`), else `Virtual Machines` in the user's Documents. A read.
+    async fn default_vm_folder(&self) -> Result<PathBuf> {
+        read_default_vm_folder().await
+    }
+
+    /// VM-21: runs `ovftool` with these arguments (an OVA or OVF into a new `.vmx`), built by [`crate::deploy`].
+    /// Only the job runner calls it.
+    async fn ovftool(&self, _args: Vec<OsString>, _timeout: Duration) -> Result<String> {
+        Err(CoreError::OvftoolNotFound)
+    }
+
+    /// VM-21: the ovftool.exe in use, for Settings.
+    fn ovftool_path(&self) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// VM-21: `prefvmx.defaultVMPath` from Workstation's `preferences.ini`, when it names a folder.
+pub fn parse_default_vm_path(text: &str) -> Option<PathBuf> {
+    text.lines()
+        .filter_map(config_line)
+        .find(|(key, value)| key == "prefvmx.defaultvmpath" && !value.trim().is_empty())
+        .map(|(_, value)| PathBuf::from(value.trim()))
+}
+
+/// The user's Documents folder (it may be moved, e.g. into OneDrive), else `%USERPROFILE%\Documents`.
+fn documents_folder() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let moved = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+            .and_then(|key| key.get_value::<String, _>("Personal"))
+            .ok()
+            .filter(|p| !p.trim().is_empty());
+        if let Some(path) = moved {
+            return Some(PathBuf::from(path));
+        }
+    }
+    std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Documents"))
+}
+
+async fn read_default_vm_folder() -> Result<PathBuf> {
+    if let Some(prefs) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("VMware").join("preferences.ini")) {
+        match read_capped(&prefs, MAX_VM_CONFIG_BYTES).await {
+            Ok(bytes) => {
+                if let Some(path) = parse_default_vm_path(&String::from_utf8_lossy(&bytes)) {
+                    return Ok(path);
+                }
+            }
+            Err(err) if err.is_not_found() => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    documents_folder()
+        .map(|docs| docs.join("Virtual Machines"))
+        .ok_or_else(|| {
+            CoreError::InvalidInput("Workstation's default VM folder isn't known: choose a VM folder.".into())
+        })
 }
 
 /// VM-23, VM-16: file operations on this PC for the .vmx and disk changes.
@@ -327,10 +389,16 @@ pub mod files {
 /// folders and .vmx files are still read, and every vmrun call returns [`CoreError::VmrunNotFound`],
 /// which the UI shows.
 pub fn connect(vmrun_override: Option<PathBuf>) -> Box<dyn VmwareAdapter> {
+    connect_with(vmrun_override, None)
+}
+
+/// [`connect`], with the ovftool.exe saved in Settings (VM-21).
+pub fn connect_with(vmrun_override: Option<PathBuf>, ovftool_override: Option<PathBuf>) -> Box<dyn VmwareAdapter> {
     match locate_vmrun(vmrun_override) {
         Some(path) => {
             tracing::info!(vmrun = %path.display(), "using vmrun");
-            Box::new(VmrunAdapter::new(path))
+            let ovftool = locate_ovftool(ovftool_override, Some(&path));
+            Box::new(VmrunAdapter::new(path).with_ovftool(ovftool))
         }
         None => {
             tracing::warn!("vmrun.exe not found; VMware features are unavailable");
@@ -366,6 +434,68 @@ pub const WORKSTATION_WINDOW: &str = "vmware.exe";
 
 pub fn locate_vmware_exe(vmrun: Option<&Path>) -> Option<PathBuf> {
     locate_beside(vmrun, WORKSTATION_WINDOW, None)
+}
+
+/// VM-21: ovftool.exe: the path saved in Settings, then `REMOTELY_OVFTOOL`, then the `OVFTool` folder next to the
+/// vmrun.exe in use, then in Workstation's install folder in the registry and the default install folders.
+pub fn locate_ovftool(override_path: Option<PathBuf>, vmrun: Option<&Path>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.extend(override_path);
+    candidates.extend(std::env::var_os("REMOTELY_OVFTOOL").map(PathBuf::from));
+    candidates.extend(
+        vmrun
+            .and_then(Path::parent)
+            .map(|dir| dir.join("OVFTool").join("ovftool.exe")),
+    );
+    candidates.extend(
+        registry_install_dirs()
+            .into_iter()
+            .map(|d| d.join("OVFTool").join("ovftool.exe")),
+    );
+    for root in [
+        r"C:\Program Files (x86)\VMware\VMware Workstation",
+        r"C:\Program Files\VMware\VMware Workstation",
+    ] {
+        candidates.push(PathBuf::from(root).join("OVFTool").join("ovftool.exe"));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// VM-21: a user-chosen ovftool path must be an existing file named ovftool.exe.
+pub fn validate_ovftool_path(path: &Path) -> Result<()> {
+    let named = path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("ovftool.exe"));
+    if !named {
+        return Err(CoreError::InvalidSetting(format!(
+            "{} is not ovftool.exe",
+            path.display()
+        )));
+    }
+    if !path.is_file() {
+        return Err(CoreError::InvalidSetting(format!("{} does not exist", path.display())));
+    }
+    Ok(())
+}
+
+/// ovftool's own words from a failed run: its `Error:` lines, else its last line.
+pub fn ovftool_message(stdout: &str, stderr: &str) -> String {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with("Disk progress") && !l.contains("% "))
+        .collect();
+    let errors: Vec<&str> = lines
+        .iter()
+        .filter_map(|l| l.strip_prefix("Error:").map(str::trim))
+        .filter(|l| !l.is_empty())
+        .collect();
+    if errors.is_empty() {
+        lines.last().copied().unwrap_or("it gave no reason").to_owned()
+    } else {
+        errors.join(" ")
+    }
 }
 
 fn locate_beside(vmrun: Option<&Path>, file: &str, env: Option<&str>) -> Option<PathBuf> {
@@ -411,6 +541,8 @@ pub struct VmrunAdapter {
     vdiskmanager: Option<PathBuf>,
     /// VM-24: Workstation's window ([`locate_vmware_exe`]).
     vmware_exe: Option<PathBuf>,
+    /// VM-21: ovftool.exe ([`locate_ovftool`]).
+    ovftool: Option<PathBuf>,
 }
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -426,10 +558,48 @@ impl VmrunAdapter {
     pub fn new(vmrun: PathBuf) -> Self {
         let vdiskmanager = locate_vdiskmanager(Some(&vmrun));
         let vmware_exe = locate_vmware_exe(Some(&vmrun));
+        let ovftool = locate_ovftool(None, Some(&vmrun));
         Self {
             vmrun,
             vdiskmanager,
             vmware_exe,
+            ovftool,
+        }
+    }
+
+    /// VM-21: this ovftool.exe (`None`: none to use).
+    pub fn with_ovftool(mut self, ovftool: Option<PathBuf>) -> Self {
+        self.ovftool = ovftool;
+        self
+    }
+
+    /// VM-21: runs ovftool without a console window. It writes its progress and errors to stdout.
+    async fn run_ovftool(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        let tool = self.ovftool.as_ref().ok_or(CoreError::OvftoolNotFound)?;
+        let mut cmd = tokio::process::Command::new(tool);
+        cmd.args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| CoreError::Timeout {
+                command: "ovftool".into(),
+                seconds: timeout.as_secs(),
+            })??;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if output.status.success() {
+            Ok(stdout)
+        } else {
+            Err(CoreError::Ovftool {
+                message: ovftool_message(&stdout, &String::from_utf8_lossy(&output.stderr)),
+            })
         }
     }
 
@@ -439,6 +609,7 @@ impl VmrunAdapter {
             vmrun,
             vdiskmanager,
             vmware_exe,
+            ovftool: None,
         }
     }
 
@@ -606,6 +777,14 @@ impl VmwareAdapter for VmrunAdapter {
 
     async fn vmrun_change(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
         self.run(args, timeout).await
+    }
+
+    async fn ovftool(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.run_ovftool(args, timeout).await
+    }
+
+    fn ovftool_path(&self) -> Option<PathBuf> {
+        self.ovftool.clone()
     }
 
     async fn open_console(&self, vmx: &Path) -> Result<()> {
@@ -1128,6 +1307,15 @@ impl VmwareAdapter for SwitchableVmware {
     async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
         self.current().hardware(vmx).await
     }
+    async fn default_vm_folder(&self) -> Result<PathBuf> {
+        self.current().default_vm_folder().await
+    }
+    async fn ovftool(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.current().ovftool(args, timeout).await
+    }
+    fn ovftool_path(&self) -> Option<PathBuf> {
+        self.current().ovftool_path()
+    }
     async fn vmx_bytes(&self, vmx: &Path) -> Result<Vec<u8>> {
         self.current().vmx_bytes(vmx).await
     }
@@ -1619,6 +1807,116 @@ snapshot2.disk0.node = "scsi0:0"
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// VM-21: the real adapter against a stand-in ovftool and vmrun (batch files made at run time): each writes its
+    /// arguments to a file; ovftool fails like ovftool on `bad.ova`, and the clone's arguments arrive whole.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn ovftool_and_vmrun_clone_run_with_their_arguments() {
+        let dir = std::env::temp_dir().join(format!("remotely-ovftool-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ovftool = dir.join("ovftool.cmd");
+        let ovf_args = dir.join("ovftool-args.txt");
+        std::fs::write(
+            &ovftool,
+            format!(
+                "@echo off\r\necho %*> \"{}\"\r\necho %* | findstr /c:\"bad.ova\" >nul && (echo Opening OVA source: bad.ova\r\necho Error: Failed to open file: bad.ova\r\necho Completed with errors\r\nexit /b 1)\r\necho Completed successfully\r\nexit /b 0\r\n",
+                ovf_args.display()
+            ),
+        )
+        .unwrap();
+        let vmrun = dir.join("vmrun.cmd");
+        let vmrun_args = dir.join("vmrun-args.txt");
+        std::fs::write(
+            &vmrun,
+            format!("@echo off\r\necho %*> \"{}\"\r\nexit /b 0\r\n", vmrun_args.display()),
+        )
+        .unwrap();
+        let adapter = VmrunAdapter::with_tools(vmrun, None, None).with_ovftool(Some(ovftool));
+        let target = dir.join("app-1").join("app-1.vmx");
+        let out = adapter
+            .ovftool(
+                crate::deploy::workstation::ovftool_args(
+                    &dir.join("app.ova"),
+                    &target,
+                    "app-1",
+                    crate::catalog::sizes::Provisioning::Thin,
+                ),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("Completed successfully"));
+        // A batch file gets `=` arguments quoted; ovftool.exe gets them as they are.
+        let args = std::fs::read_to_string(&ovf_args).unwrap().replace('"', "");
+        assert!(
+            args.starts_with("--name=app-1 --diskMode=monolithicSparse --noSSLVerify "),
+            "{args}"
+        );
+        assert!(args.contains("app-1.vmx"), "{args}");
+        let err = adapter
+            .ovftool(
+                crate::deploy::workstation::ovftool_args(
+                    &dir.join("bad.ova"),
+                    &target,
+                    "app-1",
+                    crate::catalog::sizes::Provisioning::Thin,
+                ),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "ovftool_failed");
+        assert_eq!(err.to_string(), "ovftool failed: Failed to open file: bad.ova");
+        adapter
+            .vmrun_change(
+                crate::deploy::workstation::clone_args(
+                    &dir.join("golden.vmx"),
+                    &dir.join("web-1.vmx"),
+                    true,
+                    Some("base"),
+                    "web-1",
+                ),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let args = std::fs::read_to_string(&vmrun_args).unwrap().replace('"', "");
+        assert!(args.starts_with("-T ws clone "), "{args}");
+        assert!(args.contains("golden.vmx") && args.contains("web-1.vmx"), "{args}");
+        assert!(args.contains("linked -snapshot=base -cloneName=web-1"), "{args}");
+        let missing = VmrunAdapter::with_tools(dir.join("vmrun.exe"), None, None);
+        assert_eq!(
+            missing
+                .ovftool(Vec::new(), Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .code(),
+            "ovftool_not_found"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn ovftool_is_found_in_the_ovftool_folder_beside_vmrun() {
+        let dir = std::env::temp_dir().join(format!("remotely-ovf-find-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("OVFTool")).unwrap();
+        std::fs::write(dir.join("vmrun.exe"), b"").unwrap();
+        std::fs::write(dir.join("OVFTool").join("ovftool.exe"), b"").unwrap();
+        assert_eq!(
+            locate_ovftool(None, Some(&dir.join("vmrun.exe"))),
+            Some(dir.join("OVFTool").join("ovftool.exe"))
+        );
+        let chosen = dir.join("chosen").join("ovftool.exe");
+        std::fs::create_dir_all(chosen.parent().unwrap()).unwrap();
+        std::fs::write(&chosen, b"").unwrap();
+        assert_eq!(
+            locate_ovftool(Some(chosen.clone()), Some(&dir.join("vmrun.exe"))),
+            Some(chosen),
+            "the Settings path comes first"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn tools_beside_vmrun_are_found_in_its_folder() {
         let dir = std::env::temp_dir().join(format!("remotely-tools-{}", uuid::Uuid::new_v4()));
@@ -1637,6 +1935,31 @@ snapshot2.disk0.node = "scsi0:0"
         assert_eq!(
             vdisk_message("  Grow: 100% done.\nFailed: no space", ""),
             "Failed: no space"
+        );
+    }
+
+    #[test]
+    fn ovftool_says_why_it_failed_and_its_path_is_checked() {
+        let out = "Opening OVA source: C:\\Images\\app.ova\nError: Failed to open file: C:\\Images\\app.ova\nCompleted with errors\n";
+        assert_eq!(ovftool_message(out, ""), "Failed to open file: C:\\Images\\app.ova");
+        assert_eq!(
+            ovftool_message("Disk progress: 50%\nSomething odd\n", ""),
+            "Something odd"
+        );
+        assert_eq!(ovftool_message("", ""), "it gave no reason");
+        let err = validate_ovftool_path(Path::new(r"C:\Windows\System32\notepad.exe")).unwrap_err();
+        assert!(matches!(err, CoreError::InvalidSetting(_)));
+        assert!(validate_ovftool_path(Path::new(r"C:\does-not-exist\ovftool.exe")).is_err());
+    }
+
+    #[test]
+    fn the_default_vm_folder_is_workstations_preference() {
+        let prefs = ".encoding = \"windows-1252\"\nprefvmx.defaultVMPath = \"D:\\Labs\\VMs\"\npref.lastUpdateCheckSec = \"1\"\n";
+        assert_eq!(parse_default_vm_path(prefs), Some(PathBuf::from(r"D:\Labs\VMs")));
+        assert_eq!(parse_default_vm_path("prefvmx.defaultVMPath = \"\"\n"), None);
+        assert_eq!(
+            parse_default_vm_path("pref.keyboardAndMouse.maxProfiles = \"4\"\n"),
+            None
         );
     }
 
