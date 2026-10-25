@@ -614,7 +614,7 @@ async fn a_closed_preview_can_not_be_imported() {
 }
 
 #[tokio::test]
-async fn an_export_is_never_written_into_a_git_repository_or_with_a_short_passphrase() {
+async fn an_export_is_never_written_into_a_git_repository_or_with_a_weak_passphrase() {
     let dir = temp_folder("transfer");
     std::fs::create_dir_all(dir.join("repo").join(".git")).unwrap();
     let a = laptop().await;
@@ -638,7 +638,73 @@ async fn an_export_is_never_written_into_a_git_repository_or_with_a_short_passph
         .unwrap_err();
     assert!(err.to_string().contains("at least 10 characters"), "{err}");
     assert!(!outside.exists());
+
+    // FD-07: as hard to guess as a new vault password (SS-04), and never quoted back.
+    for weak in ["Password123!", "qwertyuiop12", "aaaaaaaaaaaa"] {
+        let mut guessable = request(false);
+        guessable.passphrase = SecretString::new(weak);
+        let err = a
+            .transfer
+            .export(&a.ctx, &outside, guessable, &a.vault, "Remotely test")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().starts_with("The passphrase is too easy to guess."),
+            "{err}"
+        );
+        assert!(!err.to_string().contains(weak), "{err}");
+        assert!(!outside.exists());
+    }
+
+    // Not the vault password, with or without secrets, locked or unlocked.
+    for include_secrets in [false, true] {
+        let mut same = request(include_secrets);
+        same.passphrase = SecretString::new(VAULT_PASSWORD);
+        let err = a
+            .transfer
+            .export(&a.ctx, &outside, same, &a.vault, "Remotely test")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not your vault password"), "{err}");
+        assert!(!err.to_string().contains(VAULT_PASSWORD), "{err}");
+        assert!(!outside.exists());
+    }
+    a.vault.lock(&a.ctx).await.unwrap();
+    let mut same = request(false);
+    same.passphrase = SecretString::new(VAULT_PASSWORD);
+    let err = a
+        .transfer
+        .export(&a.ctx, &outside, same, &a.vault, "Remotely test")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("not your vault password"), "{err}");
+    assert!(!outside.exists());
     assert!(!audit(&a).await.iter().any(|e| e.event == "data_exported"));
+
+    // Any other good passphrase still exports, the vault locked or not.
+    a.transfer
+        .export(&a.ctx, &outside, request(false), &a.vault, "Remotely test")
+        .await
+        .unwrap();
+    assert!(outside.exists());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn exports_derive_their_key_with_256_mib_and_still_open_elsewhere() {
+    // The app's own key derivation, not the tests' fast one: slow on purpose (about two seconds each way).
+    let dir = temp_folder("transfer");
+    let a = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    fill(&a).await;
+    let path = export(&a, &dir, false).await;
+    let envelope: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(envelope["kdf"]["algorithm"], "argon2id");
+    assert_eq!(envelope["kdf"]["memoryKib"], 256 * 1024);
+    assert_eq!(envelope["kdf"]["iterations"], 3);
+
+    let b = laptop().await;
+    let preview = open(&b, &path).await;
+    assert_eq!(preview.sessions.len(), sessions(&a).await.len());
     let _ = std::fs::remove_dir_all(dir);
 }
 

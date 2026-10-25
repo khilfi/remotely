@@ -1,7 +1,8 @@
 // FD-07: export the session library to one encrypted file, to import it on another laptop. The core asks
 // where to save (Documents by default, never a Git repository), encrypts the file with the passphrase
-// typed here (Argon2id, AES-256-GCM) and audits the export. Vault secrets go along only when ticked, and
-// that needs the vault password. Passphrase and password are sent once, then cleared.
+// typed or generated here (Argon2id, AES-256-GCM) and audits the export. The passphrase must be hard to guess
+// (SS-04's strength check, shown as a meter) and not the vault password. Vault secrets go along only when ticked,
+// and that needs the vault password. Passphrase and password are sent once, then cleared.
 
 import { useState } from "react";
 import { FileLockIcon, TriangleAlertIcon } from "lucide-react";
@@ -20,9 +21,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api, errorMessage, type ExportReport, type VaultInfo } from "@/lib/api";
 import { plural } from "@/lib/format";
+import { usePasswordStrength } from "@/hooks/use-password-strength";
+import { NewPasswordField } from "./NewPasswordField";
 import { VaultUnlock } from "./VaultUnlock";
 
-/** The passphrase's minimum length, as the core checks it. */
+/** The passphrase's minimum length, as the core checks it (with how hard it is to guess). */
 const MIN_PASSPHRASE = 10;
 
 interface Props {
@@ -43,10 +46,10 @@ export function ExportDialog({ sessions, folders, vault, onVaultChanged, onExpor
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const unlocked = vault?.status === "unlocked";
-  const tooShort = passphrase.length > 0 && passphrase.length < MIN_PASSPHRASE;
+  const strength = usePasswordStrength(passphrase);
   const mismatch = repeat.length > 0 && repeat !== passphrase;
   const ready =
-    passphrase.length >= MIN_PASSPHRASE && repeat === passphrase && (!secrets || (unlocked && vaultPassword !== ""));
+    strength?.acceptable === true && repeat === passphrase && (!secrets || (unlocked && vaultPassword !== ""));
 
   async function exportFile() {
     setBusy(true);
@@ -161,20 +164,16 @@ export function ExportDialog({ sessions, folders, vault, onVaultChanged, onExpor
             </>
           )}
 
-          <div className="grid gap-2">
-            <Label htmlFor="export-passphrase">Passphrase for the file</Label>
-            <Input
-              id="export-passphrase"
-              type="password"
-              autoComplete="new-password"
-              value={passphrase}
-              onChange={(e) => setPassphrase(e.currentTarget.value)}
-              aria-invalid={tooShort || undefined}
-            />
-            <p className={tooShort ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
-              At least {MIN_PASSPHRASE} characters; a few unrelated words make a good one. It can&apos;t be recovered.
-            </p>
-          </div>
+          <NewPasswordField
+            id="export-passphrase"
+            label="Passphrase for the file"
+            noun="passphrase"
+            value={passphrase}
+            onChange={setPassphrase}
+            onGenerated={setRepeat}
+            strength={strength}
+            description={`At least ${MIN_PASSPHRASE} characters, hard to guess and not your vault password. A few unrelated words make a good one. It can't be recovered.`}
+          />
           <div className="grid gap-2">
             <Label htmlFor="export-repeat">Type it again</Label>
             <Input

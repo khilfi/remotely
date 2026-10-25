@@ -4,8 +4,9 @@
 //! * Export writes one file (see [`file`]) with the session folders, the sessions (with their tags,
 //!   environment labels and colours), the trusted host keys, the favourite commands (BX-08) and, only
 //!   when the user ticks it, the vault's secrets with their values. The user chooses the passphrase; Argon2id turns it into the
-//!   AES-256-GCM key. The vault's labels always go along (they are not secret), so on the other laptop
-//!   sessions find secrets with the same label even when the values stayed behind. Exporting secret
+//!   AES-256-GCM key. The passphrase passes the same strength check as a new vault password (SS-04) and
+//!   may not be the vault password itself. The vault's labels always go along (they are not secret), so
+//!   on the other laptop sessions find secrets with the same label even when the values stayed behind. Exporting secret
 //!   values asks for the vault password again, as Critical actions do (AP-06): otherwise anyone at an
 //!   unlocked laptop could carry every secret away under a passphrase of their own.
 //! * Import opens the file with its passphrase, compares it with this laptop's library and shows a
@@ -51,7 +52,7 @@ use crate::snippets::{FavouriteInput, Snippets};
 use crate::ssh_keys::PublicKeyInfo;
 use crate::store::{FavouriteRow, NewAuditEntry, Store};
 use crate::vault::{
-    check_master_password, KdfParams, SecretId, SecretKind, SecretMeta, SecretString, VaultService, VaultStatus,
+    check_new_password, KdfParams, SecretId, SecretKind, SecretMeta, SecretString, VaultService, VaultStatus,
     MAX_LABEL_LEN,
 };
 use crate::vm_links::VmLink;
@@ -873,12 +874,10 @@ fn credential_note(entry: &SessionEntry, payload: &Payload, local: &Local) -> Op
     })
 }
 
+/// FD-07: as long and as hard to guess as a new vault password (SS-04): the file can be attacked offline
+/// by anyone who gets a copy.
 fn check_passphrase(passphrase: &SecretString) -> Result<()> {
-    check_master_password(passphrase).map_err(|_| {
-        CoreError::InvalidInput(
-            "The passphrase needs at least 10 characters. A few unrelated words make a good one.".into(),
-        )
-    })
+    check_new_password(passphrase, "passphrase")
 }
 
 /// FD-07: an export is never written into a Git working tree, where it could be committed by mistake.
@@ -977,7 +976,7 @@ impl Transfer {
         Self {
             store,
             policy: None,
-            kdf: Mutex::new(KdfParams::DEFAULT),
+            kdf: Mutex::new(file::KDF),
             chosen: Mutex::new(None),
             opened: Mutex::new(None),
         }
@@ -1037,6 +1036,13 @@ impl Transfer {
         check_passphrase(&passphrase)?;
         refuse_repository(path)?;
         let status = vault.info().status;
+        // Not the vault password: whoever gets the file and learns its passphrase would then also know the
+        // password that unlocks this vault and confirms Critical actions (AP-06). One Argon2id run.
+        if status != VaultStatus::NotSetUp && vault.vault().verify_password(&passphrase).await? {
+            return Err(CoreError::InvalidInput(
+                "Choose a passphrase that is not your vault password: anyone who learns it from the file would then know your vault password too.".into(),
+            ));
+        }
         if include_secrets {
             match status {
                 VaultStatus::Unlocked => {}
