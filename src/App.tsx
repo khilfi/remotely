@@ -91,6 +91,7 @@ import {
   type VaultInfo,
 } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
+import { checkMessage, isNotice, recheckDelayMs, UPDATE_CHECK_INTERVAL_MS } from "@/lib/updates";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { ContainersPage, type ContainerShellRequest } from "@/pages/ContainersPage";
@@ -106,8 +107,6 @@ import type { VmView } from "@/lib/vm-snapshots";
 
 type PageId =
   "vms" | "dashboard" | "containers" | "sessions" | "terminal" | "knownHosts" | "vault" | "activity" | "settings";
-
-const UPDATE_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /** In sidebar order, each with its own shortcut. Ctrl+3 is Containers (Q6); the old Snapshots alias stops. */
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
@@ -137,12 +136,13 @@ export default function App() {
   const [jobsFinished, setJobsFinished] = useState(0);
   const [settingsVersion, setSettingsVersion] = useState(0);
   // FD-14: the last update check, a problem with the GitHub update token it ran into, and the banner
-  // put off with "Later" (an update's version, or "noToken" / the problem's code).
+  // put off with "Later" (an update's version, or "tokenNeeded" / the problem's code).
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
   const [updateProblem, setUpdateProblem] = useState<{ code: string; message: string } | null>(null);
   const [laterFor, setLaterFor] = useState<string | null>(null);
   const [updateRun, setUpdateRun] = useState(0);
   const lastUpdateStatus = useRef<UpdateCheck["status"] | null>(null);
+  const updateRetry = useRef<number | undefined>(undefined);
   const offered = updateCheck?.status === "available" ? updateCheck.update : null;
   // QL-14: a VM (or the snapshot view) to show on the Virtual machines page.
   const [vmRequest, setVmRequest] = useState<VmPageRequest | null>(null);
@@ -231,8 +231,11 @@ export default function App() {
     api.vaultInfo().then(
       (info) => {
         setVault(info);
-        // FD-14: a check that found the vault locked runs again once the update token can be read.
-        if (info.status === "unlocked" && lastUpdateStatus.current === "vaultLocked") setUpdateRun((n) => n + 1);
+        // FD-14: a check that needed the update token from the locked vault, or ran into GitHub's limit for
+        // checks without one, runs again once the token can be read.
+        const last = lastUpdateStatus.current;
+        if (info.status === "unlocked" && (last === "vaultLocked" || last === "rateLimited"))
+          setUpdateRun((n) => n + 1);
       },
       () => setVault(null),
     );
@@ -254,8 +257,13 @@ export default function App() {
   const applyUpdateCheck = useCallback((result: UpdateCheck) => {
     lastUpdateStatus.current = result.status;
     setUpdateProblem(null);
-    // A locked vault says nothing new: keep showing an update found earlier.
-    setUpdateCheck((prev) => (result.status === "vaultLocked" && prev?.status === "available" ? prev : result));
+    // A locked vault or a used-up GitHub limit says nothing new: keep showing an update found earlier.
+    const nothingNew = result.status === "vaultLocked" || result.status === "rateLimited";
+    setUpdateCheck((prev) => (nothingNew && prev?.status === "available" ? prev : result));
+    // GitHub's limit was used up: one more check just after the time it named (the core makes no call before).
+    window.clearTimeout(updateRetry.current);
+    const delay = recheckDelayMs(result, Date.now());
+    updateRetry.current = delay === null ? undefined : window.setTimeout(() => setUpdateRun((n) => n + 1), delay);
   }, []);
 
   const applyUpdateError = useCallback((err: unknown) => {
@@ -271,8 +279,9 @@ export default function App() {
   }, []);
 
   // FD-14: check for a newer release at start and every 24 hours, again when settings change, and
-  // once the vault is unlocked if it was locked. The core makes no network call when update checks
-  // are off, there is no GitHub update token or the vault is locked.
+  // once the vault is unlocked if the check needed it. The releases are public, so the core checks
+  // without a token unless the vault can give it one. It makes no network call when update checks
+  // are off, or while GitHub's API limit is used up; then one more check runs just after the limit resets.
   useEffect(() => {
     let stopped = false;
     const check = () =>
@@ -291,6 +300,11 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [settingsVersion, updateRun, applyUpdateCheck, applyUpdateError]);
+
+  useEffect(() => {
+    const retry = updateRetry;
+    return () => window.clearTimeout(retry.current);
+  }, []);
 
   async function installUpdate(version: string) {
     try {
@@ -516,8 +530,7 @@ export default function App() {
           applyUpdateCheck(result);
           if (result.status === "upToDate") toast.info("Remotely is up to date");
           if (result.status === "off") toast.info("Update checks are off in Settings");
-          if (result.status === "vaultLocked")
-            toast.info("Unlock the vault first: the GitHub update token is kept there");
+          if (isNotice(result)) toast.info(checkMessage(result));
         } catch (err) {
           applyUpdateError(err);
           toast.error(errorMessage(err));
@@ -671,12 +684,12 @@ export default function App() {
                 onLater={() => setLaterFor(updateProblem.code)}
               />
             )}
-            {!offered && !updateProblem && updateCheck?.status === "noToken" && laterFor !== "noToken" && (
+            {!offered && !updateProblem && updateCheck?.status === "tokenNeeded" && laterFor !== "tokenNeeded" && (
               <UpdateNotice
                 title="Updates need a GitHub update token"
-                description="Remotely's releases are in a private GitHub repository. Add a read-only token in Settings, under Updates, to get new versions, or turn update checks off there."
+                description={`GitHub doesn't show the releases of ${updateCheck.repository} without a token, so the repository may be private again. Add a read-only token in Settings, under Updates, to get new versions, or turn update checks off there.`}
                 onOpenSettings={() => setPage("settings")}
-                onLater={() => setLaterFor("noToken")}
+                onLater={() => setLaterFor("tokenNeeded")}
               />
             )}
             <section hidden={page !== "vms"} className="h-full">

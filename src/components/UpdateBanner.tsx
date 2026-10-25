@@ -1,7 +1,9 @@
 // FD-14: shows a newer signed release with its notes. Installing submits the `appUpdate` command, so
 // it goes through the approval dialog (Medium tier) and waits until no other job is running.
-// `UpdateNotice` says when updates can't be checked because of the GitHub update token (none yet,
-// expired, revoked, or without access), so checks never fail quietly.
+// `UpdateNotice` says when updates can't be checked because of the GitHub update token (the repository
+// went private again and there is none, or it expired, was revoked or has no access), so checks never
+// fail quietly. Checks need no token while the repository is public; a used-up GitHub limit shows no
+// notice, since the app checks again by itself once it resets.
 
 import { DownloadIcon, KeyRoundIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";

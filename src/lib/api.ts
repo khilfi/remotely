@@ -2094,13 +2094,18 @@ export interface UpdateInfo {
   pubDate: string | null;
 }
 
-/** FD-14: what an update check found, or why it did not ask GitHub. */
+/**
+ * FD-14: what an update check found, or why it found nothing. The releases are public, so checks run
+ * without a token; the GitHub update token goes along when the vault can give it.
+ */
 export type UpdateCheck =
   | { status: "off" }
-  /** No GitHub update token in the vault: the private repository's releases can't be read. */
-  | { status: "noToken" }
-  /** The token is in the vault, which is locked. Check again once it is unlocked. */
+  /** GitHub doesn't show the releases without a token (the repository is private again), and there is none. */
+  | { status: "tokenNeeded"; repository: string }
+  /** Same, with the token in the vault, which is locked. Check again once it is unlocked. */
   | { status: "vaultLocked" }
+  /** GitHub's API limit is used up; no call goes to GitHub before `until` (RFC 3339). */
+  | { status: "rateLimited"; until: string; withToken: boolean }
   | { status: "upToDate" }
   | { status: "available"; update: UpdateInfo };
 
@@ -2121,7 +2126,12 @@ export interface TokenReport {
 }
 
 /** FD-14: error codes that mean the token needs attention in Settings. */
-export const UPDATE_TOKEN_ERRORS = ["update_token_refused", "update_token_no_access", "update_token_missing"];
+export const UPDATE_TOKEN_ERRORS = [
+  "update_token_refused",
+  "update_token_no_access",
+  "update_token_missing",
+  "update_token_needed",
+];
 
 export interface AppInfo {
   version: string;

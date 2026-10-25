@@ -1,6 +1,8 @@
-//! FD-14: updates from the private repository's GitHub Releases with a read-only token from the
-//! vault. The GitHub client runs against `fakes::github_server::FakeGithub` on 127.0.0.1, and the
-//! core's token handling against `FakeUpdater`; tokens are made up at run time and never committed.
+//! FD-14: updates from the repository's GitHub Releases, which are public, so checks and installs need
+//! no token; the read-only token from the vault is optional (a higher API limit, and a repository
+//! that went private again). The GitHub client runs against `fakes::github_server::FakeGithub` on
+//! 127.0.0.1, and the core's token handling against `FakeUpdater`; tokens are made up at run time
+//! and never committed.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -9,14 +11,14 @@ mod common;
 use std::io;
 use std::sync::{Arc, Mutex};
 
-use common::{wait_finished, Setup};
+use common::{wait_finished, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::github::{GithubReleases, GithubRepo};
 use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
 use remotely_core::fakes::github_server::{FakeGithub, TokenAccess};
 use remotely_core::fakes::{FakeUpdater, FakeVmware};
 use remotely_core::jobs::JobStatus;
 use remotely_core::updates::{UpdateCheck, UpdateTokenInfo, UPDATE_TOKEN_LABEL};
-use remotely_core::vault::{SecretKind, SecretString, VaultStatus};
+use remotely_core::vault::{SecretKind, SecretString, UnlockMethod, VaultStatus};
 use remotely_core::{Core, CoreError};
 use sqlx::{Column, Row};
 use time::{Duration, OffsetDateTime};
@@ -35,6 +37,7 @@ fn secret(token: &str) -> SecretString {
     SecretString::new(token)
 }
 
+/// A private repository with a release, as from 0.2.0 to 0.4.0; `set_public(true)` for today's.
 async fn github() -> (FakeGithub, GithubReleases) {
     let fake = FakeGithub::start("alice", "remotely").await;
     fake.publish(
@@ -45,7 +48,9 @@ async fn github() -> (FakeGithub, GithubReleases) {
             ("Remotely_0.9.0_x64-setup.exe", b"installer".to_vec()),
         ],
     );
-    let client = GithubReleases::new(fake.api_url(), fake.repo()).unwrap();
+    let client = GithubReleases::new(fake.api_url(), fake.repo())
+        .unwrap()
+        .with_web(fake.web_url());
     (fake, client)
 }
 
@@ -77,7 +82,131 @@ async fn database_text(core: &Core) -> String {
     out
 }
 
-// ---- The GitHub client against the fake API -------------------------------------------------------
+// ---- The GitHub client without a token -----------------------------------------------------------------
+
+#[tokio::test]
+async fn a_public_repository_is_read_without_a_token() {
+    let (fake, client) = github().await;
+    fake.set_public(true);
+
+    let lookup = client.latest_release(None).await.unwrap();
+    let release = lookup.release.unwrap();
+    assert_eq!(release.tag_name, "v0.9.0");
+    assert_eq!(lookup.token_expires_on, None);
+    let installer = release.asset("Remotely_0.9.0_x64-setup.exe").unwrap();
+    let link = client.public_url(&release, &installer.url).unwrap();
+    assert_eq!(link, fake.download_link("v0.9.0", "Remotely_0.9.0_x64-setup.exe"));
+
+    // What tauri-plugin-updater does without a token: the download link redirects to the storage.
+    let http = reqwest::Client::builder()
+        .user_agent("tauri-plugin-updater")
+        .build()
+        .unwrap();
+    let response = http
+        .get(link)
+        .headers(client.download_headers(None).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"installer");
+
+    let requests = fake.requests();
+    let servers: Vec<&str> = requests.iter().map(|r| r.server).collect();
+    assert_eq!(servers, ["api", "web", "storage"], "{requests:?}");
+    for r in &requests {
+        assert_eq!(r.authorization(), None, "{r:?}");
+    }
+    assert_eq!(requests[0].headers["x-github-api-version"], "2022-11-28");
+    assert!(requests[0].headers["user-agent"].starts_with("Remotely/"));
+}
+
+#[tokio::test]
+async fn without_a_token_a_public_repository_with_no_release_yet_is_not_an_error() {
+    let fake = FakeGithub::start("alice", "remotely").await;
+    fake.set_public(true);
+    let client = GithubReleases::new(fake.api_url(), fake.repo()).unwrap();
+    let lookup = client.latest_release(None).await.unwrap();
+    assert!(lookup.release.is_none());
+}
+
+#[tokio::test]
+async fn without_a_token_a_private_repository_needs_one() {
+    let (fake, client) = github().await;
+    let err = client.latest_release(None).await.unwrap_err();
+    assert!(
+        matches!(&err, CoreError::UpdateTokenNeeded { repo } if repo == "alice/remotely"),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("private again"), "{err}");
+    // GitHub answers 404 to both the latest release and the list, as for a repository that doesn't exist.
+    let paths: Vec<String> = fake.requests().into_iter().map(|r| r.path).collect();
+    assert_eq!(
+        paths,
+        [
+            "/repos/alice/remotely/releases/latest",
+            "/repos/alice/remotely/releases?per_page=1"
+        ]
+    );
+    // Its download links are 404 too.
+    let link = fake.download_link("v0.9.0", "latest.json");
+    let http = reqwest::Client::builder().user_agent("test").build().unwrap();
+    assert_eq!(http.get(link).send().await.unwrap().status(), 404);
+}
+
+#[tokio::test]
+async fn without_a_token_a_used_up_limit_waits_for_githubs_reset() {
+    let (fake, client) = github().await;
+    fake.set_public(true);
+    fake.set_anonymous_rate_limited(true);
+
+    let err = client.latest_release(None).await.unwrap_err();
+    assert_eq!(err.code(), "update_rate_limited");
+    let CoreError::UpdateRateLimited { until, with_token } = &err else {
+        panic!("{err:?}");
+    };
+    assert!(!with_token);
+    let until = OffsetDateTime::parse(until, &time::format_description::well_known::Rfc3339).unwrap();
+    assert!(until > OffsetDateTime::now_utc() + Duration::minutes(55), "{until}");
+    assert!(err.to_string().contains("60 an hour"), "{err}");
+
+    // No call until the reset, even though GitHub would answer again.
+    fake.set_anonymous_rate_limited(false);
+    assert_eq!(
+        client.latest_release(None).await.unwrap_err().code(),
+        "update_rate_limited"
+    );
+    assert_eq!(fake.requests().len(), 1, "no call during the backoff");
+
+    // A token has a limit of its own.
+    let token = new_token();
+    fake.add_token(&token, TokenAccess::Releases, None);
+    assert!(client
+        .latest_release(Some(&secret(&token)))
+        .await
+        .unwrap()
+        .release
+        .is_some());
+}
+
+#[tokio::test]
+async fn a_secondary_limit_waits_for_retry_after() {
+    let (fake, client) = github().await;
+    fake.set_public(true);
+    fake.set_secondary_limit(Some(90));
+    let err = client.latest_release(None).await.unwrap_err();
+    let CoreError::UpdateRateLimited { until, .. } = &err else {
+        panic!("{err:?}");
+    };
+    let until = OffsetDateTime::parse(until, &time::format_description::well_known::Rfc3339).unwrap();
+    let wait = until - OffsetDateTime::now_utc();
+    assert!(wait > Duration::seconds(80) && wait <= Duration::seconds(90), "{wait}");
+    fake.set_secondary_limit(None);
+    assert!(client.latest_release(None).await.is_err(), "still backing off");
+    assert_eq!(fake.requests().len(), 1);
+}
+
+// ---- The GitHub client with a token ----------------------------------------------------------------------
 
 #[tokio::test]
 async fn the_private_repository_is_invisible_without_a_token() {
@@ -93,7 +222,7 @@ async fn a_good_token_finds_the_latest_release_and_its_expiry() {
     let token = new_token();
     fake.add_token(&token, TokenAccess::Releases, Some("2027-01-17 00:00:00 UTC"));
 
-    let lookup = client.latest_release(&secret(&token)).await.unwrap();
+    let lookup = client.latest_release(Some(&secret(&token))).await.unwrap();
     let release = lookup.release.unwrap();
     assert_eq!(release.tag_name, "v0.9.0");
     assert_eq!(lookup.token_expires_on.as_deref(), Some("2027-01-17"));
@@ -116,7 +245,7 @@ async fn a_token_without_an_expiry_reports_none() {
     let (fake, client) = github().await;
     let token = new_token();
     fake.add_token(&token, TokenAccess::Releases, None);
-    let lookup = client.latest_release(&secret(&token)).await.unwrap();
+    let lookup = client.latest_release(Some(&secret(&token))).await.unwrap();
     assert!(lookup.release.is_some());
     assert_eq!(lookup.token_expires_on, None);
 }
@@ -126,13 +255,14 @@ async fn an_unknown_token_is_refused() {
     let (fake, client) = github().await;
     fake.add_token(&new_token(), TokenAccess::Releases, None);
     let bad = new_token();
-    let err = client.latest_release(&secret(&bad)).await.unwrap_err();
+    let err = client.latest_release(Some(&secret(&bad))).await.unwrap_err();
     assert!(
         matches!(err, CoreError::UpdateTokenRefused { expired_on: None }),
         "{err:?}"
     );
     assert_eq!(err.code(), "update_token_refused");
     assert!(!format!("{err} {err:?}").contains(&bad));
+    assert!(err.to_string().contains("remove it"), "{err}");
 }
 
 #[tokio::test]
@@ -140,11 +270,11 @@ async fn a_revoked_or_expired_token_is_refused() {
     let (fake, client) = github().await;
     let token = new_token();
     fake.add_token(&token, TokenAccess::Releases, Some("2027-01-17 00:00:00 UTC"));
-    client.latest_release(&secret(&token)).await.unwrap();
+    client.latest_release(Some(&secret(&token))).await.unwrap();
 
     // GitHub answers 401 "Bad credentials" for both.
     fake.revoke(&token);
-    let err = client.latest_release(&secret(&token)).await.unwrap_err();
+    let err = client.latest_release(Some(&secret(&token))).await.unwrap_err();
     assert!(matches!(err, CoreError::UpdateTokenRefused { .. }), "{err:?}");
     assert!(!format!("{err} {err:?}").contains(&token));
 }
@@ -159,7 +289,7 @@ async fn a_token_for_other_repositories_or_without_contents_has_no_access() {
     ] {
         let token = new_token();
         fake.add_token(&token, access, None);
-        let err = client.latest_release(&secret(&token)).await.unwrap_err();
+        let err = client.latest_release(Some(&secret(&token))).await.unwrap_err();
         assert!(
             matches!(&err, CoreError::UpdateTokenNoAccess { repo } if repo == "alice/remotely"),
             "{access:?}: {err:?}"
@@ -174,20 +304,26 @@ async fn a_repository_with_no_release_yet_is_not_an_error() {
     let client = GithubReleases::new(fake.api_url(), fake.repo()).unwrap();
     let token = new_token();
     fake.add_token(&token, TokenAccess::Releases, Some("2027-01-17 00:00:00 UTC"));
-    let lookup = client.latest_release(&secret(&token)).await.unwrap();
+    let lookup = client.latest_release(Some(&secret(&token))).await.unwrap();
     assert!(lookup.release.is_none());
     assert_eq!(lookup.token_expires_on.as_deref(), Some("2027-01-17"));
 }
 
 #[tokio::test]
-async fn a_used_up_rate_limit_says_so() {
+async fn a_used_up_token_limit_says_so_and_waits() {
     let (fake, client) = github().await;
     let token = new_token();
     fake.add_token(&token, TokenAccess::Releases, None);
     fake.set_rate_limited(true);
-    let err = client.latest_release(&secret(&token)).await.unwrap_err();
-    assert_eq!(err.code(), "update_failed");
-    assert!(err.to_string().contains("limit"), "{err}");
+    let err = client.latest_release(Some(&secret(&token))).await.unwrap_err();
+    assert!(
+        matches!(err, CoreError::UpdateRateLimited { with_token: true, .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("limit for the update token"), "{err}");
+    fake.set_rate_limited(false);
+    assert!(client.latest_release(Some(&secret(&token))).await.is_err());
+    assert_eq!(fake.requests().len(), 1, "no call during the backoff");
 }
 
 #[tokio::test]
@@ -199,9 +335,12 @@ async fn an_unreachable_api_fails_without_the_token() {
         GithubRepo::new("alice", "remotely"),
     )
     .unwrap();
-    let err = client.latest_release(&secret(&token)).await.unwrap_err();
-    assert_eq!(err.code(), "update_failed");
-    assert!(err.to_string().contains("could not reach GitHub"), "{err}");
+    for auth in [Some(secret(&token)), None] {
+        let err = client.latest_release(auth.as_ref()).await.unwrap_err();
+        assert_eq!(err.code(), "update_failed");
+        assert!(err.to_string().contains("could not reach GitHub"), "{err}");
+    }
+    let err = client.latest_release(Some(&secret(&token))).await.unwrap_err();
     assert!(!format!("{err} {err:?}").contains(&token));
 }
 
@@ -212,7 +351,12 @@ async fn release_files_download_through_the_api_and_the_storage_never_sees_the_t
     let (fake, client) = github().await;
     let token = new_token();
     fake.add_token(&token, TokenAccess::Releases, None);
-    let release = client.latest_release(&secret(&token)).await.unwrap().release.unwrap();
+    let release = client
+        .latest_release(Some(&secret(&token)))
+        .await
+        .unwrap()
+        .release
+        .unwrap();
     let installer = release.asset("Remotely_0.9.0_x64-setup.exe").unwrap();
     fake.clear_requests();
 
@@ -222,7 +366,7 @@ async fn release_files_download_through_the_api_and_the_storage_never_sees_the_t
         .unwrap();
     let response = http
         .get(installer.url.clone())
-        .headers(client.download_headers(&secret(&token)).unwrap())
+        .headers(client.download_headers(Some(&secret(&token))).unwrap())
         .send()
         .await
         .unwrap();
@@ -242,7 +386,7 @@ async fn release_files_download_through_the_api_and_the_storage_never_sees_the_t
     assert_eq!(client.asset_url(&release, &link).unwrap(), installer.url);
 }
 
-// ---- The core: token in the vault, statuses, audit --------------------------------------------------
+// ---- The core: checks without a token, the optional token in the vault, statuses, audit -------------------
 
 async fn core_with(updater: Arc<FakeUpdater>) -> Core {
     Setup::new(FakeVmware::default())
@@ -262,6 +406,16 @@ async fn token_count(core: &Core) -> usize {
         .count()
 }
 
+async fn unlock(core: &Core) {
+    core.vault
+        .unlock(
+            &core.ctx,
+            UnlockMethod::MasterPassword(SecretString::new(VAULT_PASSWORD)),
+        )
+        .await
+        .unwrap();
+}
+
 /// Submits and approves installing `version` (Medium: one confirm). Returns the job.
 async fn install(core: &Core, version: &str) -> Uuid {
     let command = Command::AppUpdate {
@@ -278,11 +432,16 @@ async fn install(core: &Core, version: &str) -> Uuid {
 }
 
 #[tokio::test]
-async fn without_a_token_checks_say_so_and_make_no_call() {
+async fn without_a_token_checks_read_the_public_releases() {
     let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0"));
     let core = core_with(Arc::clone(&updater)).await;
 
-    assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::NoToken);
+    let check = core.check_for_update().await.unwrap();
+    let UpdateCheck::Available { update } = &check else {
+        panic!("0.3.0 is offered: {check:?}");
+    };
+    assert_eq!(update.version, "0.3.0");
+    assert_eq!((updater.calls(), updater.anonymous_calls()), (1, 1));
     assert_eq!(
         core.update_token_info().await.unwrap(),
         UpdateTokenInfo {
@@ -290,11 +449,64 @@ async fn without_a_token_checks_say_so_and_make_no_call() {
             expires_on: None
         }
     );
+    // Settings' Test has nothing to test, and makes no call.
     let err = core.test_update_token().await.unwrap_err();
     assert_eq!(err.code(), "update_token_missing");
-    assert_eq!(updater.calls(), 0);
-    let json = serde_json::to_string(&UpdateCheck::NoToken).unwrap();
-    assert_eq!(json, r#"{"status":"noToken"}"#);
+    assert_eq!(updater.calls(), 1);
+}
+
+#[tokio::test]
+async fn a_private_again_repository_asks_for_a_token() {
+    let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0"));
+    updater.set_private(true);
+    let core = core_with(Arc::clone(&updater)).await;
+
+    let check = core.check_for_update().await.unwrap();
+    assert_eq!(
+        check,
+        UpdateCheck::TokenNeeded {
+            repository: "alice/remotely".into()
+        }
+    );
+    assert_eq!(
+        serde_json::to_string(&check).unwrap(),
+        r#"{"status":"tokenNeeded","repository":"alice/remotely"}"#
+    );
+
+    // With a token it reads them as before.
+    let token = new_token();
+    core.set_update_token(secret(&token)).await.unwrap();
+    assert!(matches!(
+        core.check_for_update().await.unwrap(),
+        UpdateCheck::Available { .. }
+    ));
+    assert_eq!(updater.anonymous_calls(), 1);
+}
+
+#[tokio::test]
+async fn a_used_up_limit_is_a_state_and_the_token_has_its_own() {
+    let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0"));
+    updater.rate_limit_anonymous(Some("2026-10-25T15:00:00Z"));
+    let core = core_with(Arc::clone(&updater)).await;
+
+    let check = core.check_for_update().await.unwrap();
+    assert_eq!(
+        check,
+        UpdateCheck::RateLimited {
+            until: "2026-10-25T15:00:00Z".into(),
+            with_token: false
+        }
+    );
+    assert_eq!(
+        serde_json::to_string(&check).unwrap(),
+        r#"{"status":"rateLimited","until":"2026-10-25T15:00:00Z","withToken":false}"#
+    );
+
+    core.set_update_token(secret(&new_token())).await.unwrap();
+    assert!(matches!(
+        core.check_for_update().await.unwrap(),
+        UpdateCheck::Available { .. }
+    ));
 }
 
 #[tokio::test]
@@ -313,6 +525,7 @@ async fn a_good_token_is_stored_in_the_vault_and_finds_the_update() {
         panic!("0.3.0 is offered: {check:?}");
     };
     assert_eq!(update.version, "0.3.0");
+    assert_eq!(updater.anonymous_calls(), 0, "the token goes along when there is one");
     let json = serde_json::to_value(&check).unwrap();
     assert_eq!(json["status"], "available");
     assert_eq!(json["update"]["version"], "0.3.0");
@@ -354,14 +567,8 @@ async fn a_wrong_token_is_refused() {
 /// nothing is installed.
 #[tokio::test]
 async fn cancelling_a_stalled_update_ends_the_job_and_installs_nothing() {
-    let token = new_token();
-    let updater = Arc::new(
-        FakeUpdater::offering("0.2.1", "0.3.0")
-            .accepting(&token, None)
-            .stalling(),
-    );
+    let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0").stalling());
     let core = core_with(Arc::clone(&updater)).await;
-    core.set_update_token(secret(&token)).await.unwrap();
     let mut events = core.jobs.subscribe();
     let job = install(&core, "0.3.0").await;
     // The download has started (the fake was reached) and hangs.
@@ -396,6 +603,7 @@ async fn an_expired_token_says_when_it_expired() {
         "{err:?}"
     );
     assert!(err.to_string().contains(&format!("expired on {yesterday}")), "{err}");
+    assert!(err.to_string().contains("remove it"), "{err}");
 }
 
 #[tokio::test]
@@ -415,23 +623,62 @@ async fn a_revoked_token_that_has_not_expired_says_revoked() {
 }
 
 #[tokio::test]
-async fn a_locked_vault_holds_the_check_until_it_is_unlocked() {
+async fn a_locked_vault_checks_without_the_token_and_keeps_its_expiry() {
     let token = new_token();
-    let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0").accepting(&token, None));
+    let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0").accepting(&token, Some("2027-01-17")));
     let core = core_with(Arc::clone(&updater)).await;
     core.set_update_token(secret(&token)).await.unwrap();
+    core.check_for_update().await.unwrap();
 
     core.vault.lock(&core.ctx).await.unwrap();
     assert_eq!(core.vault.info().status, VaultStatus::Locked);
-    assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::VaultLocked);
-    assert!(core.update_token_info().await.unwrap().stored, "known while locked");
-    assert_eq!(updater.calls(), 0);
+    assert!(matches!(
+        core.check_for_update().await.unwrap(),
+        UpdateCheck::Available { .. }
+    ));
+    assert_eq!(updater.anonymous_calls(), 1);
+    let info = core.update_token_info().await.unwrap();
+    assert!(info.stored, "known while locked");
+    assert_eq!(
+        info.expires_on.as_deref(),
+        Some("2027-01-17"),
+        "an answer without the token doesn't forget its expiry"
+    );
     assert_eq!(core.test_update_token().await.unwrap_err().code(), "vault_locked");
     // Saving one needs the vault unlocked too.
     assert_eq!(
         core.set_update_token(secret(&new_token())).await.unwrap_err().code(),
         "vault_locked"
     );
+}
+
+#[tokio::test]
+async fn a_private_again_repository_with_the_token_locked_away_asks_to_unlock() {
+    let token = new_token();
+    let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0").accepting(&token, None));
+    updater.set_private(true);
+    let core = core_with(Arc::clone(&updater)).await;
+    core.set_update_token(secret(&token)).await.unwrap();
+
+    core.vault.lock(&core.ctx).await.unwrap();
+    assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::VaultLocked);
+    assert_eq!(
+        serde_json::to_string(&UpdateCheck::VaultLocked).unwrap(),
+        r#"{"status":"vaultLocked"}"#
+    );
+    // An install fails the same way, and says so.
+    let mut events = core.jobs.subscribe();
+    let job = install(&core, "0.3.0").await;
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Failed);
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    assert_eq!(targets[0].error_code.as_deref(), Some("vault_locked"));
+
+    // Unlocked, the token reads the releases.
+    unlock(&core).await;
+    assert!(matches!(
+        core.check_for_update().await.unwrap(),
+        UpdateCheck::Available { .. }
+    ));
 }
 
 #[tokio::test]
@@ -462,7 +709,12 @@ async fn replacing_keeps_one_vault_secret_and_removing_deletes_it() {
         }
     );
     assert_eq!(token_count(&core).await, 0);
-    assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::NoToken);
+    // Checks go on without one.
+    assert!(matches!(
+        core.check_for_update().await.unwrap(),
+        UpdateCheck::Available { .. }
+    ));
+    assert_eq!(updater.anonymous_calls(), 1);
 
     let audit = core.store.recent_audit(&core.ctx, 10).await.unwrap();
     let actions: Vec<&str> = audit.iter().map(|e| e.action.as_str()).collect();
@@ -484,7 +736,8 @@ async fn replacing_keeps_one_vault_secret_and_removing_deletes_it() {
 
 #[tokio::test]
 async fn a_token_deleted_on_the_vault_page_counts_as_none() {
-    let core = core_with(Arc::new(FakeUpdater::offering("0.2.1", "0.3.0"))).await;
+    let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0"));
+    let core = core_with(Arc::clone(&updater)).await;
     core.set_update_token(secret(&new_token())).await.unwrap();
     let id = core
         .vault
@@ -497,7 +750,11 @@ async fn a_token_deleted_on_the_vault_page_counts_as_none() {
         .id;
     core.vault.delete(&core.ctx, id).await.unwrap();
     assert!(!core.update_token_info().await.unwrap().stored);
-    assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::NoToken);
+    assert!(matches!(
+        core.check_for_update().await.unwrap(),
+        UpdateCheck::Available { .. }
+    ));
+    assert_eq!(updater.anonymous_calls(), 1);
     // Saving again makes a new one.
     core.set_update_token(secret(&new_token())).await.unwrap();
     assert!(core.update_token_info().await.unwrap().stored);
@@ -514,22 +771,31 @@ async fn tokens_that_are_not_tokens_are_refused_before_the_vault() {
 }
 
 #[tokio::test]
-async fn installing_an_update_uses_the_token_and_needs_one() {
+async fn installing_needs_no_token_and_uses_one_when_there_is_one() {
     let token = new_token();
     let updater = Arc::new(FakeUpdater::offering("0.2.1", "0.3.0").accepting(&token, None));
     let core = core_with(Arc::clone(&updater)).await;
     let mut events = core.jobs.subscribe();
-    // No token: the job fails and says why.
-    let job = install(&core, "0.3.0").await;
-    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Failed);
-    assert!(updater.installed().is_empty());
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
-    assert_eq!(targets[0].error_code.as_deref(), Some("update_token_missing"));
 
-    core.set_update_token(secret(&token)).await.unwrap();
+    // No token: installed from the public release.
     let job = install(&core, "0.3.0").await;
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
     assert_eq!(updater.installed(), ["0.3.0"]);
+    assert_eq!(updater.anonymous_calls(), 1);
+
+    // A private repository without a token: the job fails and says why.
+    updater.set_private(true);
+    let job = install(&core, "0.3.0").await;
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Failed);
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    assert_eq!(targets[0].error_code.as_deref(), Some("update_token_needed"));
+
+    // With the token it installs.
+    core.set_update_token(secret(&token)).await.unwrap();
+    let job = install(&core, "0.3.0").await;
+    assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
+    assert_eq!(updater.installed(), ["0.3.0", "0.3.0"]);
+    assert_eq!(updater.anonymous_calls(), 2, "the token went along");
 }
 
 /// Appends every log line to a shared buffer.
@@ -577,14 +843,20 @@ async fn the_token_never_leaks() {
     let report = core.test_update_token().await.unwrap();
     shown.push_str(&serde_json::to_string(&report).unwrap());
 
-    // The real GitHub client too, against the fake API, failing and succeeding.
+    // The real GitHub client too, against the fake API, failing and succeeding, with and without the token.
     let (fake, client) = github().await;
     fake.add_token(&token, TokenAccess::Releases, Some("2027-01-17 00:00:00 UTC"));
-    client.latest_release(&secret(&token)).await.unwrap();
-    let err = client.latest_release(&secret(&wrong)).await.unwrap_err();
+    client.latest_release(Some(&secret(&token))).await.unwrap();
+    let err = client.latest_release(Some(&secret(&wrong))).await.unwrap_err();
     shown.push_str(&format!("{err} {err:?}"));
     fake.revoke(&token);
-    let err = client.latest_release(&secret(&token)).await.unwrap_err();
+    let err = client.latest_release(Some(&secret(&token))).await.unwrap_err();
+    shown.push_str(&format!("{err} {err:?}"));
+    fake.set_public(true);
+    client.latest_release(None).await.unwrap();
+    fake.set_rate_limited(true);
+    fake.add_token(&wrong, TokenAccess::Releases, None);
+    let err = client.latest_release(Some(&secret(&wrong))).await.unwrap_err();
     shown.push_str(&format!("{err} {err:?}"));
 
     core.remove_update_token().await.unwrap();
@@ -594,6 +866,7 @@ async fn the_token_never_leaks() {
         logs.contains("hyper"),
         "the HTTP client's own trace lines are captured too"
     );
+    assert!(logs.contains("GitHub's API limit is used up"), "the backoff is logged");
     let audit = core.store.recent_audit(&core.ctx, 100).await.unwrap();
     let audit = format!("{audit:?}");
     let database = database_text(&core).await;

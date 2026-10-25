@@ -18,8 +18,8 @@ days, and takes, reverts and deletes snapshots on one VM or in bulk on the selec
 [Virtual machines and snapshots](#virtual-machines-and-snapshots)); high-risk VM actions take a named safety snapshot
 first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
 and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
-Auto-update checks this repo's GitHub Releases, with a read-only GitHub token kept in the vault (see
-[GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
+Auto-update checks this repo's public GitHub Releases without a token (an optional read-only GitHub token can be kept in
+the vault, see [GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
 (AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
 or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
@@ -602,11 +602,22 @@ signing key, that the publish job waits for your approval, and that the draft ho
 
 ### GitHub update token
 
-The updater was built while the repository was private, so it still reads releases with a read-only GitHub token,
-although the repository and its releases are public now. Each machine keeps the token in its vault, and update checks
-and installs use it; without one, the app doesn't check for updates. Copies on 0.2.0 or older don't know about the
-token: install 0.2.1 or later by hand once on each machine (download the installer from the release page), then add
-the token.
+The repository and its releases are public, so Remotely checks for and installs updates **without a token**. The token
+is optional. It is worth having when:
+
+- **Many machines share one internet address** (an office or a customer site behind one NAT). GitHub allows 60 API
+  calls an hour from one address without a token, and each check makes one. When that limit is used up, Remotely waits
+  until GitHub's reset, checks once more, and Settings and **Check for updates** say until when. A token has a limit
+  of its own (5,000 an hour).
+- **The repository goes private again.** GitHub then hides its releases from checks without a token, and the banner
+  says "Updates need a GitHub update token".
+
+Each machine keeps its token in its vault. While the vault is unlocked, checks and installs use it; while it is locked,
+they go without it (and ask you to unlock it only if GitHub doesn't show the releases without a token).
+
+Older copies: 0.2.1 to 0.4.2 still need a token to update, so keep theirs valid until they have installed a version
+that reads releases without one. Copies on 0.2.0 or older don't know about the token: install a newer version by hand
+once on each machine (download the installer from the release page).
 
 **Create the token** (on GitHub, signed in as the repository owner):
 
@@ -632,8 +643,9 @@ code. Treat the token like a password: one per machine, with an expiry, never in
    **Test** repeats that check at any time.
 4. Clear the clipboard (`Win+V` keeps a history: delete the entry there).
 
-Without a token, update checks don't fail quietly: the banner and Settings say a token is needed. When the vault is
-locked, the check waits and runs once the vault is unlocked.
+Without a token, update checks read the public releases. If GitHub doesn't show them (the repository went private
+again), checks don't fail quietly: the banner and Settings say a token is needed, or, with a token in the locked vault,
+the check runs again once the vault is unlocked.
 
 **Replace it** before it expires, or at once if it may have leaked:
 
@@ -643,12 +655,15 @@ locked, the check waits and runs once the vault is unlocked.
 3. If you made a new token, delete the old one on GitHub.
 
 Once a token has expired or been revoked, the banner says so ("The GitHub update token expired on …") until it is
-replaced. **Remove** deletes the token from the vault; delete it on GitHub as well.
+replaced or removed. **Remove** deletes the token from the vault, and checks go on without one; delete it on GitHub as
+well.
 
-What the app does with the token: it sends it only to `api.github.com`, to find the latest published release, then to
-fetch that release's `latest.json` and installer from their API download URLs. GitHub answers those with a redirect to
-its file storage, and the token is not sent there. Every update is still checked against the signing public key before
-it installs. The token never appears in logs, error messages, the audit log, exports or the UI.
+What the app sends: without a token, nothing but the release lookup goes to `api.github.com`, with no `Authorization`
+header; `latest.json` and the installer come from the release's public download links on `github.com`. With a token,
+it sends the token only to `api.github.com`, to find the latest published release, then to fetch that release's
+`latest.json` and installer from their API download URLs. GitHub answers those with a redirect to its file storage,
+and the token is not sent there, nor ever to `github.com`. Either way, every update is checked against the signing
+public key before it installs. The token never appears in logs, error messages, the audit log, exports or the UI.
 
 ### CI minutes
 
@@ -760,7 +775,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Remote adapter     | `crates/core/src/adapters/remote.rs`, `remote/`                   | SS-03, SS-05, SS-07, SS-08, BX-02, BX-07, MO-02                                                                                                     | Working: jump host chains, terminal shells, SFTP and port forwards (local, remote, SOCKS) on a terminal's connection, bulk exec with sudo, kept connections for guest metrics                                               |
 | Host counters      | `crates/core/src/adapters/host_counters.rs`, `paging.rs`          | MO-01, MO-04, MO-15, VM-07                                                                                                                          | Working: host RAM, CPUs, CPU times, free disk, paging files and commit charge, and each VM process's (`vmware-vmx.exe`, `VirtualBoxVM.exe`, `VBoxHeadless.exe`) CPU, working set and I/O                                    |
 | Host details       | `crates/core/src/host_details/`, `adapters/vm_hardware.rs`        | MO-13, MO-14                                                                                                                                        | Working: SSH hosts' OS and specs (terminal, dashboard, Refresh; stored), admin reads on demand, VMs' virtual hardware from their files (stored)                                                                             |
-| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's GitHub Releases, read with the token from the vault; install is a Medium-tier job that runs alone                                                                                                  |
+| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's public GitHub Releases, without a token or with the optional one from the vault; install is a Medium-tier job that runs alone                                                                      |
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; filters; audited environment labels                                                                                            |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                   |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side and SSH guest sources every 5 s, 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                                                        |
