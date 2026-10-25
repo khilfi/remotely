@@ -1,16 +1,17 @@
-//! VM-11, VM-16, VM-25 (R4): the fakes' host networks and the VirtualBox paths the insight and waste finder read.
+//! VM-11, VM-16, VM-25 (R4): the fakes' host networks and the VirtualBox paths the insight and waste finder read
+//! (the default VM folders are R2's: `with_default_folder` on both fakes).
 //!
 //! [`VmwareNetworks`] answers `vmrun listHostNetworks`, `listPortForwardings`, `setPortForwarding` and
 //! `deletePortForwarding` the way vmrun does (errors included), and can print forwards in a form the parser can't
 //! read, so the `vmnetnat.conf` fallback is used. Changing forwards needs [`VmwareNetworks::set_admin`], as on a PC
-//! where Remotely isn't elevated. [`VboxNetworks`] answers `list hostonlyifs`, `list --long natnets`, `list
-//! systemproperties`, `showvminfo --machinereadable` (adapters, NAT rules, files) and the NAT rule changes, with
+//! where Remotely isn't elevated. [`VboxNetworks`] answers `list hostonlyifs`, `list --long natnets`,
+//! `showvminfo --machinereadable` (adapters, NAT rules, files) and the NAT rule changes, with
 //! VirtualBox's own refusals (a name taken or missing, `modifyvm` on a running VM, `controlvm` on one that isn't).
 //! Both record each call in their fake's calls as `host <args>`.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
@@ -31,7 +32,6 @@ pub struct VmwareNetworks {
     admin: AtomicBool,
     /// `listPortForwardings` prints lines the parser can't read; `vmnetnat.conf` has the forwards.
     conf_only: AtomicBool,
-    default_folder: Mutex<Option<PathBuf>>,
 }
 
 fn vmrun_failed(command: &str, message: &str) -> CoreError {
@@ -69,14 +69,6 @@ impl VmwareNetworks {
 
     pub(super) fn set_conf_only(&self, on: bool) {
         self.conf_only.store(on, Ordering::SeqCst);
-    }
-
-    pub(super) fn set_default_folder(&self, folder: PathBuf) {
-        *locks::lock(&self.default_folder) = Some(folder);
-    }
-
-    pub(super) fn default_folder(&self) -> Option<PathBuf> {
-        locks::lock(&self.default_folder).clone()
     }
 
     /// A vmnet's forwards now.
@@ -218,7 +210,6 @@ pub struct VboxNetworks {
     host_only: Mutex<Vec<VboxHostOnlyIf>>,
     nat_networks: Mutex<Vec<VboxNatNetwork>>,
     vm_rules: Mutex<HashMap<String, Vec<VboxVmRule>>>,
-    machine_folder: Mutex<Option<PathBuf>>,
 }
 
 fn vbox_failed(command: &str, message: &str) -> CoreError {
@@ -247,10 +238,6 @@ impl VboxNetworks {
             .entry(uuid.to_owned())
             .or_default()
             .push(VboxVmRule { slot, rule });
-    }
-
-    pub(super) fn set_machine_folder(&self, folder: PathBuf) {
-        *locks::lock(&self.machine_folder) = Some(folder);
     }
 
     /// A NAT network's rules now.
@@ -383,10 +370,6 @@ impl VboxNetworks {
                     block
                 })
                 .collect()),
-            ["list", "systemproperties"] => Ok(match &*locks::lock(&self.machine_folder) {
-                Some(folder) => format!("API version:  7_2\nDefault machine folder:          {}\n", folder.display()),
-                None => "API version:  7_2\nDefault machine folder:\n".to_owned(),
-            }),
             ["showvminfo", uuid, "--machinereadable"] => self.showvminfo(fake, uuid),
             ["natnetwork", "modify", "--netname", network, "--port-forward-4", rest @ ..] => {
                 let mut nets = locks::lock(&self.nat_networks);
@@ -479,12 +462,6 @@ impl FakeVmware {
         self
     }
 
-    /// VM-16: Workstation's default VM folder (`prefvmx.defaultVMPath`).
-    pub fn with_default_vm_folder(self, folder: impl Into<PathBuf>) -> Self {
-        self.networks.set_default_folder(folder.into());
-        self
-    }
-
     /// VM-11: the fake's vmnets and forwards.
     pub fn networks(&self) -> &VmwareNetworks {
         &self.networks
@@ -531,12 +508,6 @@ impl FakeVirtualBox {
     /// VM-11: a NAT rule on a VM's adapter.
     pub fn with_vm_rule(self, uuid: &str, slot: u32, rule: VboxRule) -> Self {
         self.networks.add_vm_rule(uuid, slot, rule);
-        self
-    }
-
-    /// VM-16: VirtualBox's default machine folder (`list systemproperties`).
-    pub fn with_machine_folder(self, folder: impl Into<PathBuf>) -> Self {
-        self.networks.set_machine_folder(folder.into());
         self
     }
 

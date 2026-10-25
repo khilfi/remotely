@@ -647,15 +647,6 @@ pub async fn showvminfo_pairs(
     }
 }
 
-/// `list systemproperties`: `Default machine folder:   C:\Users\alice\VirtualBox VMs`.
-pub fn default_machine_folder(out: &str) -> Option<PathBuf> {
-    out.lines().find_map(|line| {
-        let (key, value) = line.split_once(':')?;
-        (key.trim().eq_ignore_ascii_case("Default machine folder") && !value.trim().is_empty())
-            .then(|| PathBuf::from(value.trim()))
-    })
-}
-
 /// `natnetwork modify --netname <name> --port-forward-4 <rule>` (or `delete <rule name>`).
 pub fn natnet_rule_args(network: &str, rule: &VboxRule, delete: bool) -> Vec<String> {
     let mut args = vec![
@@ -1074,16 +1065,6 @@ mod tests {
             vm_rule_args("u-1", 2, &rule, true, true),
             ["controlvm", "u-1", "natpf2", "delete", "ssh"]
         );
-    }
-
-    #[test]
-    fn reads_the_default_machine_folder() {
-        let out = "API version:                     7_2\r\nDefault machine folder:          C:\\Users\\alice\\VirtualBox VMs\r\n";
-        assert_eq!(
-            default_machine_folder(out),
-            Some(PathBuf::from(r"C:\Users\alice\VirtualBox VMs"))
-        );
-        assert_eq!(default_machine_folder("Default machine folder:\n"), None);
     }
 
     fn vbox_error(message: &str) -> CoreError {

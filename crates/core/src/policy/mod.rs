@@ -14,6 +14,8 @@
 
 mod commands;
 #[cfg(test)]
+mod deploy_tests;
+#[cfg(test)]
 mod host_networks_tests;
 #[cfg(test)]
 mod tests;
@@ -165,11 +167,14 @@ pub enum ActionKind {
     NatForwardAdd,
     /// Remove a NAT port forward: connections through it stop (VM-11).
     NatForwardRemove,
+    /// VM-21, VM-10 (docs/plan-0.5.md, "Approval tiers"): make new VMs (create, clone, import). Its bulk tier
+    /// applies from [`PolicyRules::deploy_bulk_threshold`] VMs.
+    VmDeploy,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 51] = [
+    pub const ALL: [ActionKind; 52] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -197,6 +202,7 @@ impl ActionKind {
         ActionKind::VmDelete,
         ActionKind::NatForwardAdd,
         ActionKind::NatForwardRemove,
+        ActionKind::VmDeploy,
         ActionKind::ExecReadOnly,
         ActionKind::ExecOther,
         ActionKind::ExecDangerous,
@@ -277,6 +283,7 @@ impl ActionKind {
             ActionKind::VmRegister => "Add an existing VM",
             ActionKind::NatForwardAdd => "Add a NAT port forward",
             ActionKind::NatForwardRemove => "Remove a NAT port forward",
+            ActionKind::VmDeploy => "Deploy VMs (create, clone or import)",
         }
     }
 
@@ -339,6 +346,10 @@ pub struct PolicyRules {
     /// once. Rules saved before it existed get the default.
     #[serde(default = "default_exec_bulk_threshold")]
     pub exec_bulk_threshold: usize,
+    /// VM-21: VM count from which a deploy's bulk tier applies (the plan: 5 or more VMs are High). Rules saved
+    /// before it existed get the default.
+    #[serde(default = "default_deploy_bulk_threshold")]
+    pub deploy_bulk_threshold: usize,
     /// A target labelled Prod moves the action up one tier.
     pub prod_bump: bool,
     /// BX-06: editable list of dangerous-command patterns.
@@ -364,6 +375,14 @@ pub const DEFAULT_EXEC_BULK_THRESHOLD: usize = 5;
 
 fn default_exec_bulk_threshold() -> usize {
     DEFAULT_EXEC_BULK_THRESHOLD
+}
+
+/// VM-21: the default [`PolicyRules::deploy_bulk_threshold`]: 1 to 4 new VMs are one confirm, 5 or more the
+/// full approval (`docs/plan-0.5.md`, "Approval tiers").
+pub const DEFAULT_DEPLOY_BULK_THRESHOLD: usize = 5;
+
+fn default_deploy_bulk_threshold() -> usize {
+    DEFAULT_DEPLOY_BULK_THRESHOLD
 }
 
 /// Characters that join or redirect shell commands. A read-only entry holding one would let a
@@ -470,6 +489,8 @@ impl PolicyRules {
     pub fn threshold(&self, kind: ActionKind) -> usize {
         if kind.is_exec() {
             self.exec_bulk_threshold
+        } else if kind == ActionKind::VmDeploy {
+            self.deploy_bulk_threshold
         } else {
             self.bulk_threshold
         }
@@ -548,6 +569,12 @@ impl PolicyRules {
             return invalid(
                 "Bulk threshold for commands on hosts",
                 format!("must be 2 to {MAX_BULK_THRESHOLD} hosts"),
+            );
+        }
+        if !(2..=MAX_BULK_THRESHOLD).contains(&self.deploy_bulk_threshold) {
+            return invalid(
+                "Bulk threshold for deploys",
+                format!("must be 2 to {MAX_BULK_THRESHOLD} VMs"),
             );
         }
         if self.countdown_seconds > MAX_COUNTDOWN_SECONDS {
@@ -637,6 +664,9 @@ impl PolicyRules {
         if new.exec_bulk_threshold > self.exec_bulk_threshold {
             out.push("a higher bulk threshold for commands on hosts".into());
         }
+        if new.deploy_bulk_threshold > self.deploy_bulk_threshold {
+            out.push("a higher bulk threshold for deploys".into());
+        }
         if new.countdown_seconds < self.countdown_seconds {
             out.push("a shorter countdown".into());
         }
@@ -672,6 +702,12 @@ impl PolicyRules {
             out.push(format!(
                 "Bulk threshold for commands on hosts: {} -> {} hosts",
                 self.exec_bulk_threshold, new.exec_bulk_threshold
+            ));
+        }
+        if self.deploy_bulk_threshold != new.deploy_bulk_threshold {
+            out.push(format!(
+                "Bulk threshold for deploys: {} -> {} VMs",
+                self.deploy_bulk_threshold, new.deploy_bulk_threshold
             ));
         }
         if self.prod_bump != new.prod_bump {
@@ -861,11 +897,21 @@ impl Default for PolicyRules {
             // VM-11: a forward opens a port of this PC to a guest, or closes one, for the whole network.
             (NatForwardAdd, TierRule::same(High)),
             (NatForwardRemove, TierRule::same(High)),
+            // VM-21, VM-10 (docs/plan-0.5.md): 1 to 4 VMs are one confirm, 5 or more (deploy_bulk_threshold) the
+            // full approval; a Prod label moves it up one, as for every action.
+            (
+                VmDeploy,
+                TierRule {
+                    single: Medium,
+                    bulk: High,
+                },
+            ),
         ]);
         Self {
             tiers,
             bulk_threshold: 2,
             exec_bulk_threshold: DEFAULT_EXEC_BULK_THRESHOLD,
+            deploy_bulk_threshold: DEFAULT_DEPLOY_BULK_THRESHOLD,
             prod_bump: true,
             dangerous_commands: default_dangerous_patterns(),
             read_only_commands: default_read_only_commands(),
@@ -1095,6 +1141,7 @@ impl PolicyEngine {
                 HostNetworkOp::AddForward { .. } => ActionKind::NatForwardAdd,
                 HostNetworkOp::RemoveForward { .. } => ActionKind::NatForwardRemove,
             },
+            Command::Deploy { .. } => ActionKind::VmDeploy,
         }
     }
 
@@ -1137,6 +1184,17 @@ impl PolicyEngine {
                 reasons.push(format!(
                     "{} or more hosts: the bulk tier for commands on hosts applies",
                     self.rules.exec_bulk_threshold
+                ));
+            }
+        }
+
+        // VM-21: the same for a deploy, whose bulk tier has its own threshold.
+        if action == ActionKind::VmDeploy && active.len() >= self.rules.deploy_bulk_threshold {
+            let rule = self.rules.tiers[&action];
+            if rule.bulk != rule.single {
+                reasons.push(format!(
+                    "{} or more new VMs: the bulk tier for deploys applies",
+                    self.rules.deploy_bulk_threshold
                 ));
             }
         }
@@ -1368,7 +1426,9 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::OpenTunnel { .. }
         | Command::Container { .. }
         // VM-11: a forward is the network's (or a NAT adapter's) setting; a snapshot of the guest wouldn't undo it.
-        | Command::HostNetwork { .. } => false,
+        | Command::HostNetwork { .. }
+        // VM-21: the VMs don't exist yet, and a clone's source is only read.
+        | Command::Deploy { .. } => false,
     };
     on_vms && can_lose_state
 }

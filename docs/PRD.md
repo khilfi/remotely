@@ -122,6 +122,14 @@ VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-la
 | Add or remove a NAT port forward: a Workstation vmnet's, a VirtualBox NAT network's, or a VirtualBox VM's NAT adapter rule (it reaches every VM on the network; a network counts as Prod when a VM on it is) | High |
 | Read a VM's logs and timeline, the host networks, the waste finder's report | No tier; not audited (reads) |
 
+Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM is a target, labelled as the deploy labels it, so a Prod label moves the tier up one; a new VM is never protected:
+
+| Action | Tier |
+| --- | --- |
+| Deploy 1 to 4 VMs: create, clone (a VM-10 bulk clone too) or import | Medium |
+| Deploy 5 or more VMs (the bulk tier for deploys, from 5 VMs by default), or VMs labelled Prod | High |
+| Deploy 5 or more VMs labelled Prod | Critical |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |

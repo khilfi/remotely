@@ -28,6 +28,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Mouse
 import {
   CameraIcon,
   ChevronDownIcon,
+  CopyIcon,
   CpuIcon,
   EllipsisIcon,
   FilePlusIcon,
@@ -113,7 +114,7 @@ import {
   type VmSnapshots,
 } from "@/lib/api";
 import { useVisibility } from "@/hooks/use-poll";
-import { DEPLOY_REASON } from "@/lib/catalog";
+import { CloneDialog } from "@/components/CloneDialog";
 import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { refreshDue } from "@/lib/job-events";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
@@ -149,8 +150,10 @@ export interface VmPageRequest {
 interface Props {
   /** True while the page is shown: the host shares (MO-01) follow the metrics rounds, and refreshes run, only then. */
   active: boolean;
-  /** Shows the approval dialog for commands the policy engine says need one. */
-  onSubmitted: (outcome: SubmitOutcome) => void;
+  /** Shows the approval dialog for commands the policy engine says need one; `onJob` gets the job once queued. */
+  onSubmitted: (outcome: SubmitOutcome, onJob?: (jobId: string) => void) => void;
+  /** VM-21: opens the Deploy dialog. */
+  onDeploy: () => void;
   onOpenSettings: () => void;
   /** FD-01: the command palette on one VM's actions. */
   onActions: (vmxPath: string) => void;
@@ -240,6 +243,8 @@ type Dialog =
   | { kind: "lowerProd"; vmxPaths: string[]; environment: Environment; prodNames: string[] }
   /** VM-04: selects the shown VMs that have a snapshot with this name. */
   | { kind: "snapshotName" }
+  /** VM-10: clones the selected VMs. */
+  | { kind: "clone" }
   /** VM-12: CPU and memory of the selected VMs that are off, one approval. */
   | { kind: "resize" }
   | null;
@@ -282,7 +287,7 @@ interface Column {
   ownClicks?: boolean;
 }
 
-export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, request, refreshKey }: Props) {
+export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActions, request, refreshKey }: Props) {
   // FD-03: power actions, snapshots, protection, tags and labels are off while the read-only lock applies (the core
   // refuses them too); the page's notice says so.
   const readOnly = useReadOnlyReason();
@@ -923,9 +928,9 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
             Add VM…
           </Button>
         </WhyDisabled>
-        {/* VM-21: deploying a launch template (Templates page) arrives with the deploy package (R2). */}
-        <WhyDisabled reason={DEPLOY_REASON}>
-          <Button variant="outline" disabled>
+        {/* VM-21: new VMs from a launch template or Custom (the Deploy dialog). */}
+        <WhyDisabled reason={readOnly}>
+          <Button variant="outline" disabled={readOnly !== null} onClick={onDeploy}>
             <RocketIcon data-icon="inline-start" />
             Deploy
           </Button>
@@ -1198,6 +1203,12 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
                 />
               </div>
               <DropdownMenuShortcut>{deletable.length || ""}</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            {/* VM-10: a full clone of each selected VM, as one job. */}
+            <DropdownMenuItem onSelect={() => setDialog({ kind: "clone" })}>
+              <CopyIcon />
+              Clone…
+              <DropdownMenuShortcut>{selectedVms.length || ""}</DropdownMenuShortcut>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuLabel>Tags</DropdownMenuLabel>
@@ -1520,6 +1531,9 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
           onSubmit={submit}
           onClose={() => setDialog(null)}
         />
+      )}
+      {dialog?.kind === "clone" && (
+        <CloneDialog vms={selectedVms} onSubmitted={onSubmitted} onClose={() => setDialog(null)} />
       )}
       {dialog?.kind === "lowerProd" && (
         <ConfirmDialog

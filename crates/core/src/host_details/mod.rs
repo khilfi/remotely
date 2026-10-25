@@ -26,6 +26,7 @@
 
 pub mod admin;
 pub mod linux;
+pub mod networks;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};

@@ -123,11 +123,13 @@ async fn lab() -> Lab {
         )
         .with_vmx(&chained, running(&chained, "chained"))
         // A share as Workstation's default VM folder: refused, never opened.
-        .with_default_vm_folder(r"\\server\vms");
+        .with_default_folder(r"\\server\vms");
     for n in 1..=5 {
         fake = fake.with_snapshot(&chained, &format!("step {n}"), at + time::Duration::days(n));
     }
+    // VirtualBox's default machine folder is the scan folder: searched once.
     let vbox = FakeVirtualBox::new()
+        .with_default_folder(&root.0)
         .with_vm(SAVED, "saved", PowerState::Suspended)
         .with_info(SAVED, |vm| vm.config_file = Some(PathBuf::from(&vbox_file)));
     let core = Setup::new(fake).with_virtualbox(vbox).build().await;

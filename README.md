@@ -29,7 +29,7 @@ password again, and so does sending a vault password to a host that doesn't get 
 [The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
 tier); a folder can set the user, login, jump host, label and tags for the sessions in it (see
-[Folder defaults](#folder-defaults)). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+[Folder defaults](#folder-defaults)). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette that searches VMs, sessions, containers, templates, commands and settings, and runs actions (see [Search, map, status bar and notifications](#search-map-status-bar-and-notifications)). The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders (with their defaults), tags, labels, trusted host keys, VM sizes, images (by path) and launch
 templates, saved MultiExec groups, and (only when ticked) vault secrets move to another laptop in one encrypted file
 (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
@@ -140,8 +140,8 @@ through the bus and its approvals like anywhere else.
 
 ### VM templates: sizes, images and launch templates
 
-VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does. Deploying from it
-arrives with the deploy package; until then the VMs page's **Deploy** button says so.
+VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does, and **Deploy**
+makes VMs from it (see "Deploy" below).
 
 - **Sizes**: CPU (sockets × cores per socket), RAM and disks (the first boots; each thin, taking only what the guest
   writes, or thick). Twelve built-ins, read only: `gp.nano` (1 vCPU, 512 MB, 8 GB), `gp.micro`, `gp.small`,
@@ -163,11 +163,45 @@ arrives with the deploy package; until then the VMs page's **Deploy** button say
   host-only, bridged, a custom vmnet, or a VirtualBox NAT or internal network), an SSH key (only its public half goes to
   the VMs), a naming pattern (`{n}` the VM's number, `{template}` its name, `{date}` today: `web-{n}`), a default count,
   an environment label and tags, and what happens after each VM is deployed (save an SSH session to its IP, link it to
-  the VM, take a "clean" snapshot, open the console). The editor shows the names a deploy would give (VMs already here
-  are skipped) and why it couldn't deploy; a template whose image, size or key was deleted later stays and says so.
+  the VM, take a "clean" snapshot, open the console). For a cloud image's first boot (cloud-init) a template can name a
+  guest user (made with sudo and the SSH key; without one the image's own user, such as `ubuntu`, gets the key) and
+  packages to install; for a golden VM it says full clone (the default: a copy that stands alone) or linked clone
+  (quicker and smaller, but it needs the golden VM's snapshot, and its disk can't grow). The editor shows the names a
+  deploy would give (VMs already here are skipped) and why it couldn't deploy; a template whose image, size or key was
+  deleted later stays and says so.
 - Every change is in the audit log (no approval: it is the app's own data, like the session library) and is refused
   while presenting with the read-only lock on. Exports to another laptop carry your own sizes, the images by path (the
   import says when a file isn't on that laptop) and the templates, pointed at that laptop's images, sizes and keys.
+
+### Deploy
+
+VM-21, VM-22, VM-10 (0.5.0): **Deploy** on the VMs page, the command palette or a template's row makes VMs from a
+launch template, or from **Custom** values typed in the dialog.
+
+- Pick the template (or Custom), how many VMs and their names (from the naming pattern; you can change each). The
+  preview says, per VM and in all, the name, hypervisor, folder, size, network and disk space (thin disks counted at
+  full size, since they can grow to it). A thick disk that doesn't fit on the drive, or a VM folder that is there
+  already, stops the deploy; thin disks that might not fit only warn.
+- It goes through the approval like every change: **Medium** for 1 to 4 VMs, **High** for 5 or more (Policy rules:
+  "Bulk threshold for deploys") or for Prod. The job has one step per VM, two at a time, and can be cancelled. When a
+  VM fails or the job is cancelled, Remotely removes what it made for that VM (never a folder that was there before);
+  VMs already made stay. The audit log has the deploy's start and each VM's result.
+- **Golden VM**: a full or linked clone of the snapshot the image names. **Cloud image**: a copy of the image (the
+  file itself never changes) as the boot disk, grown to the size's disk; its first boot (cloud-init) sets the hostname,
+  the guest user, the SSH key's public half and the packages, through the `.vmx`'s `guestinfo` keys on Workstation and
+  a small `cidata` disc on VirtualBox, taken out after the first boot. A password never goes into these: they are
+  readable on this PC. **ISO**: a blank VM from the size and the OS profile that boots the ISO first; on VirtualBox,
+  an ISO it can install unattended can do so with a guest password from the vault (asked for again in the approval,
+  and given to VirtualBox only as a file only you can read, deleted at once). **OVA/OVF**: imported (on Workstation
+  with VMware's `ovftool.exe`, which Workstation installs; Settings has its path), then given the size's CPU and
+  memory.
+- After each VM: the size's CPU and memory, the boot disk grown when the size's is larger (never shrunk; not for a
+  linked clone, and the job says so), the "clean" snapshot before the first boot, power on, then up to 5 minutes for
+  its IP (a VM without VMware Tools or Guest Additions may not report one: the job says so and goes on), its SSH
+  session saved and linked to it, and its console, as the template says.
+- **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
+  job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
+  VMs they copy: started as they are, they would use their source's name and addresses.
 
 ### Reachability dots
 
@@ -690,6 +724,40 @@ compose stacks as a whole (the Compose project shows on each container), creatin
   that isn't watched shows nothing until you watch it. Widgets read only while the dashboard shows and the window is
   visible, and none while you customize.
 
+### Search, map, status bar and notifications
+
+0.5.0 (QL-20 to QL-25):
+
+- **Search** (QL-20): type in the Ctrl+K palette to find VMs (by name, IP, tag, guest OS), sessions (name, host, the
+  address and name they last reached, user, tag), containers, launch templates, sizes, images, commands (favourites and
+  the library) and settings (by their cards' names and what they cover, such as "vmrun" or "idle lock"), with the pages
+  and actions. Every word has to match; names count most, then addresses, tags and details, and the best match is first,
+  so Enter takes it. Choosing a VM or session shows its actions as before; anything else opens where it lives. Search
+  reads only what Remotely already has, once per opening of the palette: containers are the ones the Containers page
+  read last (listing them logs in, and search never does), and it polls nothing.
+- **Map** (QL-21, Ctrl+0): this PC, the networks its VMs are on (Workstation's VMnets and VirtualBox's NAT, bridged,
+  host-only, NAT and internal networks, from each VM's settings), the VMs, the sessions that reach them, the jump hosts
+  on the way and the tunnels open on their terminals, in columns from left to right. Read only: click a node to open
+  it; pointing at one lights up what it connects to. Sessions show when they reach a VM, go through or are a jump host,
+  or have a tunnel open; a switch shows the rest. Opening the map reads no VM file it has read before; **Read the VMs
+  again** reads every one. Presentation mode masks the map like every other page.
+- **Status bar** (QL-22): along the bottom, the vault's lock countdown, the jobs running, the tunnels open, the open
+  alerts and the update state; each opens what it is about. It reads nothing on its own: the countdown starts again
+  each time you type or click.
+- **Notification centre** (QL-25): the bell at the right of the status bar lists what notified since Remotely started:
+  metric alerts (fired and resolved), terminal alert rules, long commands that finished, jobs that finished or failed,
+  an update, and toasts worth keeping (protected targets skipped, a VM still running after its shutdown, a canary
+  waiting). Each entry opens what it is about; read and unread, Mark all read, Clear. The list is kept in memory, not
+  on disk: jobs and alerts stay in Activity and on the dashboard with their own retention, and a terminal's lines are
+  written to disk only by a session log you turn on. Its text is redacted like the audit log's.
+- **First-run wizard** (QL-23): on a PC with no vault and no session, Remotely offers to find Workstation and
+  VirtualBox, create the vault (Windows unlock off unless you turn it on), add folders of VMs and import sessions.
+  Each step is optional and saves exactly what Settings, the Vault page and the Sessions page would. **Skip for now**
+  remembers it on this PC; Settings, General, **Setup guide** opens it again.
+- **Density and shortcuts** (QL-24): Settings, General, **Appearance** has Comfortable (the default) and Compact
+  spacing, kept on this PC like the theme. Ctrl+/ (Ctrl+Shift+/ inside a terminal, where Ctrl+/ is the shell's) lists
+  every keyboard shortcut, with a filter.
+
 ### Host details
 
 MO-13, MO-14 and MO-15 (0.4.0): what a VM or an SSH host is, and what an admin checks first. All of it reads only: no
@@ -830,7 +898,8 @@ so the migrations it applies never reach the installed app's database and the tw
 process. To use another folder, set `REMOTELY_DATA_DIR` to an absolute path outside the repository. The app finds
 `vmrun.exe` from Settings, then the `REMOTELY_VMRUN` environment variable, then the registry, then the default install
 folders, and `VBoxManage.exe` the same way (Settings, `REMOTELY_VBOXMANAGE`, the registry's `InstallDir`, then
-`C:\Program Files\Oracle\VirtualBox`).
+`C:\Program Files\Oracle\VirtualBox`). `ovftool.exe`, for OVA and OVF deploys on Workstation, comes from Settings,
+then `REMOTELY_OVFTOOL`, then the `OVFTool` folder beside `vmrun.exe`.
 
 Logs and crash reports are in the `logs` folder of the same data folder (`%LOCALAPPDATA%\com.remotely.desktop\logs`,
 `...desktop.dev\logs` for a development build, or `logs` under `REMOTELY_DATA_DIR`); Settings, About opens it:
@@ -1140,6 +1209,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                            |
 | Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                               | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                   |
 | Alerts             | `crates/core/src/alerts/`, `store/alerts.rs`                      | MO-07                                                                                                                                               | Working: rules (threshold and duration, unreachable, stopped outside the app) run each round; alert list with acknowledge; Windows notifications with a cooldown; built-in rules; audited edits                                                                |
+| Notifications      | `crates/core/src/notifications.rs`, `src/lib/notifications*.ts`   | QL-25                                                                                                                                               | Working: the notification centre's history in memory, redacted, per workspace; read, unread and clear                                                                                                                                                          |
 | Dashboard layout   | `crates/core/src/dashboard.rs`, `src/components/Dashboard*.tsx`   | MO-16                                                                                                                                               | Working: widgets on a four-column grid, saved per workspace and audited; drag, keyboard and size menu; services widget on the kept connection                                                                                                                  |
 | Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                                 |
 | Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                              |
@@ -1147,6 +1217,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                        | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each                                                       |
 | Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                               | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                          |
 | Spec catalogue     | `crates/core/src/catalog/`                                        | VM-19, VM-20, VM-21, FD-07                                                                                                                          | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                          |
+| Deploy             | `crates/core/src/deploy/`                                         | VM-10, VM-21, VM-22, AP-02                                                                                                                          | Working: deploys from a template or Custom values (golden VM clone, cloud image with cloud-init, ISO, OVA/OVF) and bulk clones, one job step per VM with cleanup after a failure or cancel; preview with disk space; Medium, High from 5 VMs                   |
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                               | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                      |
 | Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                       | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec    |
 | MultiExec          | `crates/core/src/terminal/multiexec.rs`                           | SS-10, QL-07, QL-12                                                                                                                                 | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                    |

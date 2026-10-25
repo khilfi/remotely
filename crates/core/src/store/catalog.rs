@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::{parse_uuid, Store};
 use crate::adapters::hypervisor::Hypervisor;
 use crate::catalog::{
-    AfterDeploy, DiskSpec, Image, ImageEdit, ImageFormat, ImageKind, ImageSource, Network, Size, SizeInput,
+    AfterDeploy, CloneMode, DiskSpec, Image, ImageEdit, ImageFormat, ImageKind, ImageSource, Network, Size, SizeInput,
     TemplateInput,
 };
 use crate::domain::{now_rfc3339, Context, Environment};
@@ -130,6 +130,8 @@ fn row_to_template(row: &sqlx::sqlite::SqliteRow) -> Result<TemplateRow> {
     let environment: String = row.try_get("environment")?;
     let tags: String = row.try_get("tags")?;
     let after_deploy: String = row.try_get("after_deploy")?;
+    let packages: String = row.try_get("packages")?;
+    let clone_mode: String = row.try_get("clone_mode")?;
     Ok(TemplateRow {
         id: parse_uuid(&id)?,
         spec: TemplateInput {
@@ -145,6 +147,9 @@ fn row_to_template(row: &sqlx::sqlite::SqliteRow) -> Result<TemplateRow> {
             environment: Environment::parse(&environment),
             tags: serde_json::from_str(&tags)?,
             after_deploy: serde_json::from_str::<AfterDeploy>(&after_deploy)?,
+            guest_user: row.try_get("guest_user")?,
+            packages: serde_json::from_str(&packages)?,
+            clone_mode: CloneMode::parse(&clone_mode),
         },
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -167,7 +172,7 @@ macro_rules! image_columns {
 macro_rules! template_columns {
     () => {
         "id, name, image_id, size_id, hypervisor, vm_folder, network, ssh_key_id, naming_pattern, default_count,
-         environment, tags, after_deploy, created_at, updated_at"
+         environment, tags, after_deploy, guest_user, packages, clone_mode, created_at, updated_at"
     };
 }
 
@@ -384,8 +389,8 @@ impl Store {
         sqlx::query(
             "INSERT INTO catalog_templates (id, workspace_id, user_id, name, image_id, size_id, hypervisor, vm_folder,
                                             network, ssh_key_id, naming_pattern, default_count, environment, tags,
-                                            after_deploy, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                            after_deploy, guest_user, packages, clone_mode, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(ctx.workspace_id.to_string())
@@ -402,6 +407,9 @@ impl Store {
         .bind(t.environment.as_str())
         .bind(serde_json::to_string(&t.tags)?)
         .bind(serde_json::to_string(&t.after_deploy)?)
+        .bind(t.guest_user.as_deref())
+        .bind(serde_json::to_string(&t.packages)?)
+        .bind(t.clone_mode.as_str())
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -413,7 +421,7 @@ impl Store {
         sqlx::query(
             "UPDATE catalog_templates SET name = ?, image_id = ?, size_id = ?, hypervisor = ?, vm_folder = ?,
                  network = ?, ssh_key_id = ?, naming_pattern = ?, default_count = ?, environment = ?, tags = ?,
-                 after_deploy = ?, user_id = ?, updated_at = ?
+                 after_deploy = ?, guest_user = ?, packages = ?, clone_mode = ?, user_id = ?, updated_at = ?
              WHERE workspace_id = ? AND id = ?",
         )
         .bind(&t.name)
@@ -428,6 +436,9 @@ impl Store {
         .bind(t.environment.as_str())
         .bind(serde_json::to_string(&t.tags)?)
         .bind(serde_json::to_string(&t.after_deploy)?)
+        .bind(t.guest_user.as_deref())
+        .bind(serde_json::to_string(&t.packages)?)
+        .bind(t.clone_mode.as_str())
         .bind(ctx.user_id.to_string())
         .bind(now_rfc3339())
         .bind(ctx.workspace_id.to_string())

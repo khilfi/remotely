@@ -183,6 +183,9 @@ pub struct VaultInfo {
     pub windows_login_available: bool,
     /// Minutes without use before the vault locks itself.
     pub idle_lock_minutes: u64,
+    /// QL-22: seconds until the idle lock, while unlocked (the status bar's countdown). Moves on with each
+    /// [`Vault::note_activity`]; None while locked or not set up.
+    pub locks_in_secs: Option<u64>,
 }
 
 /// A secret as the UI sees it: never its value.

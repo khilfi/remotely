@@ -38,6 +38,7 @@ export function TunnelsButton({
   snapshot,
   name,
   onApproval,
+  openRequest = 0,
 }: {
   pane: PaneSession | undefined;
   snapshot: PaneSnapshot;
@@ -45,8 +46,15 @@ export function TunnelsButton({
   name: string;
   /** A tunnel needs the approval dialog. */
   onApproval: (pane: PaneSession, forwardId: string, request: ApprovalRequest) => void;
+  /** QL-22: opens the panel when it changes (the status bar's tunnel list). */
+  openRequest?: number;
 }) {
   const [open, setOpen] = useState(false);
+  const [openHandled, setOpenHandled] = useState(openRequest);
+  if (openRequest !== openHandled) {
+    setOpenHandled(openRequest);
+    setOpen(true);
+  }
   const live = liveTunnels(snapshot.tunnels);
   const label = live > 0 ? `Tunnels: ${live} open on this terminal` : "Tunnels: this session's port forwards";
   const disabledReason = !pane

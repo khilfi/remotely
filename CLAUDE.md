@@ -93,11 +93,13 @@ crates/core/          remotely-core: all app logic
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
                       output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
     adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
-                      found beside vmrun, vmrun_change), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
+                      found beside vmrun, vmrun_change; VM-21 ovftool found like vmrun, Workstation's default VM
+                      folder), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
                       comments and line endings kept; |XX escapes; non-UTF-8 refused), virtualbox.rs (VM-18
                       VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path; VM-23 change(), list ostypes,
-                      screenshotpng, VirtualBoxVM --separate, the .vbox's extras), hypervisor.rs (VM-18 Hypervisor, and
+                      screenshotpng, VirtualBoxVM --separate, the .vbox's extras; VM-21 the default machine folder,
+                      host-only and bridged adapters, unattended detect), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec;
                       keyboard-interactive answers are SecretStrings until russh's respond call; A9 at most 16 login
                       banners and 64 KB per connection, then one note; every path through the SS-07 jump host
@@ -155,8 +157,34 @@ crates/core/          remotely-core: all app logic
                       OVA/OVF; format by extension checked against the first bytes; SHA-256 on a blocking thread with
                       progress and cancel; untrusted::path_refusal first; IMAGE_SITES and checked_site, the cloud
                       image pages allow-list), templates.rs (check_template, problems, naming {n} {template} {date},
-                      resolve: a template and a count into a DeployPlan per VM, pure); mod.rs the Catalog service
-                      (Core.catalog; `plan` is R2's entry)
+                      resolve: a template and a count into a DeployPlan per VM, pure; VM-22 the guest user,
+                      packages and full or linked clone, migration 0023); mod.rs the Catalog service (Core.catalog;
+                      `plan`, and `plan_input` for the Deploy dialog's Custom, are the deploy's entry)
+    deploy/           VM-21, VM-22, VM-10 deploy. spec.rs DeploySpec: what is approved is what runs (Command::Deploy,
+                      built only by Core.deploy, never from the UI: check_from_ui); one job step per new VM
+                      (TargetRef::NewVm, `new-vm/<hypervisor>/<name>`, target kind `new_vm`, migration 0023);
+                      ActionKind::VmDeploy is Medium, High from PolicyRules.deploy_bulk_threshold VMs (5) or for Prod
+                      (policy/deploy_tests.rs). preview.rs the AP-02 preview: names, hypervisor, folder, size, disk
+                      space per VM and in all (thin disks at full size), network; a thick disk that doesn't fit or a
+                      VM folder that is there already refuses, thin disks that may not fit warn; a Workstation linked
+                      clone is refused while Workstation holds the golden VM (`vm_settings::workstation_lock`, VM-23's
+                      rule: the clone writes the golden VM's .vmsd), checked again by the runner, and warned about
+                      while Workstation's window is open; a full clone only reads the golden VM. service.rs Deploys
+                      (Core.deploy: check and submit, check_clone and submit_clone for VM-10's bulk clone; a VirtualBox
+                      unattended install's vault password adds VaultReauth). runner.rs Deployer, the job runner's
+                      DeployActions (PARALLEL_VMS, 2, at a time): each VM made by clone, cloud image, ISO or OVA/OVF;
+                      the size's CPU and memory, the boot disk grown to the size's (never shrunk; not for a linked
+                      clone); its folder joins the scanned folders; the clean snapshot before the first boot; power on
+                      (a bulk clone's copy stays off, like its source);
+                      the IP waited for (300 s; a report, not a failure); its SSH session saved and linked by hand
+                      (QL-01); the console. A failure or a cancel removes only what that VM's step made (`Made`:
+                      deleteVM, or unregistervm --delete, retried, and closemedium for its seed; then its folder;
+                      never a folder that was there);
+                      VMs already made stay. workstation.rs and virtualbox.rs the command lines, pure; vmx.rs a new
+                      VM's .vmx; cloud_init.rs VM-22 meta-data and user-data (hostname, guest user with sudo, SSH
+                      public key, packages; never a password) and Workstation's guestinfo keys; seed.rs the NoCloud
+                      seed (ISO 9660 with Joliet, label `cidata`) and its reader for tests; ovf.rs an OVF's or OVA's
+                      disk capacities for the preview (an OVA's first tar members only)
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
                       Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
@@ -182,7 +210,9 @@ crates/core/          remotely-core: all app logic
                       session and VM, migration 0014), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
-                      apt or dnf; every command checked read-only by `classify_script` in tests)
+                      apt or dnf; every command checked read-only by `classify_script` in tests), networks.rs (QL-21
+                      every VM's adapters for the map from the stored hardware; only VMs never read are read, `fresh`
+                      reads all, NETWORK_READS_AT_ONCE)
     alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
@@ -190,6 +220,10 @@ crates/core/          remotely-core: all app logic
                       alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
     dashboard.rs      MO-16 the layout (`dashboard.layout`, per workspace, null is the default): widgets on 4 columns
                       and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout
+    notifications.rs  QL-25 the notification centre's history in memory (no migration; the module says why): the UI
+                      adds entries, titles and bodies through export::redact_secrets and without control or Cf
+                      characters, MAX_NOTIFICATIONS 500, per workspace, read, unread, clear, `once` keys; links are the
+                      UI's AppLink JSON, kept as given; not audited, not locked
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
                       command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
@@ -383,7 +417,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
                       (host_details.rs), MO-06, MO-07, MO-16 the dashboard's history, alerts, layout and
-                      services widget, and the alerts' Windows notification (dashboard.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
+                      services widget, and the alerts' Windows notification (dashboard.rs); R10 navigation.rs (QL-25
+                      notifications_*, QL-21 topology_vm_networks, QL-23 vm_folder_pick); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
                       startup message boxes, setting an unopenable database aside, Settings About's logs folder, UI
                       crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
                       instance (release builds), closes what a reloaded page had open (on_page_load), and turns
@@ -393,8 +428,10 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       notifications wake terminals waiting to reconnect; P10 heavy commands (terminal output scrub,
                       the command library) run on spawn_blocking, never on the window's thread; VM-23, VM-24
                       vm_settings.rs (ISO, shared folder and existing VM dialogs opened here, ISO drops taken from the
-                      staged drop, Open console, screenshots, guest OS types); R4 vm_insight.rs (VM-25 logs and the
-                      timeline, VM-11 host networks, VM-16 the waste report and Explorer at a folder the core names)
+                      staged drop, Open console, screenshots, guest OS types); VM-21, VM-10 deploy.rs (the Deploy and
+                      Clone dialogs' checks and submits, host adapters, the default VM folder); R4 vm_insight.rs (VM-25
+                      logs and the timeline, VM-11 host networks, VM-16 the waste report and Explorer at a folder the
+                      core names)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -417,13 +454,24 @@ src/                  React + TypeScript UI
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
                       presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; VM-19 to
                       VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check);
+                      VM-21, VM-22, VM-10: TemplateFields (the template editor's fields, also the Deploy dialog's
+                      Custom), DeployDialog (a template or Custom, count, names, the preview, then the job's step per
+                      VM: DeployProgressView, useDeployProgress), DeployPreviewView (also in the approval dialog),
+                      CloneDialog;
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
-                      (Ctrl+Shift+G); TerminalRulesCard for QL-17)
+                      (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
+                      NotificationSources (QL-25: jobs and MO-07 alerts kept whatever page shows), ShortcutSheet
+                      (QL-24, Ctrl+/), FirstRunWizard (QL-23: the Vault page's SetupCard, the import dialog))
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
-                      templates; the VMs page's Deploy button waits for R2). P6: App memoises every page and passes
+                      templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
+                      VM-21 and VM-10; MapPage at Ctrl+0: QL-21 HTML nodes over an SVG of lines only, so FD-03's
+                      DOM masking covers it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
+                      take a request to show one item (Sessions `focus`, Activity `focusJob`, Settings `focus` by
+                      settings-index.ts, Containers `request`, Terminal `focusRequest` and `snippetRequest`,
+                      Templates `request.id`). P6: App memoises every page and passes
                       stable callbacks, and renders
                       only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
                       shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
@@ -456,9 +504,10 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form,
-                      DEPLOY_REASON), vm-insight-api.ts and vm-insight.ts (R4 wrappers; a followed log, search,
-                      timeline groups, the forward form and its command, the waste rows' QL-08 reasons),
+                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0), catalog.ts (VM-19 to VM-21 texts, the
+                      size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and packages, a job's steps
+                      from its events and targets), vm-insight-api.ts and vm-insight.ts (R4 wrappers; a followed log,
+                      search, timeline groups, the forward form and its command, the waste rows' QL-08 reasons),
                       vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
@@ -476,7 +525,17 @@ src/                  React + TypeScript UI
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
-                      mentions it, presentation-rescan.ts), presentation-state.ts; pure helpers with
+                      mentions it, presentation-rescan.ts), presentation-state.ts; R10: links.ts (AppLink, isAppLink:
+                      every search result, map node, status bar item and notification), search.ts (QL-20 ranking:
+                      every word matches a field, name > address > tag > detail), search-sources.ts (each kind's
+                      items), search-providers.ts (SEARCH_PROVIDERS: later packages add theirs), settings-index.ts
+                      (Settings cards by label), container-cache.ts (what the Containers page read last; search
+                      makes no logins), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's host
+                      networks, layered layout), open-tunnels.ts (every pane's tunnels, from their events),
+                      status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs), notifications.ts and
+                      notifications-store.ts (QL-25 entries per source, JobNotes, grouping), navigation-api.ts,
+                      density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
+                      shortcut), first-run.ts (QL-23); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```
@@ -551,6 +610,26 @@ src/                  React + TypeScript UI
   address of this PC.
 - VM-25: Workstation writes `vmware.log` in the VM's folder and keeps the older ones as `vmware-0.log` to
   `vmware-2.log`.
+- VM-21, VM-10 deploy (`deploy::workstation`): `vmrun -T ws clone <vmx> <new vmx> full|linked [-snapshot=<path>]
+  -cloneName=<name>` (a linked clone needs the golden VM's snapshot and shares its disk, so its disk can't grow). A
+  cloud image is copied, never changed, by `vmware-vdiskmanager -r <image> -t 0|2 <new disk>` (0 growable, 2
+  preallocated); a raw image goes through a flat-extent VMDK descriptor Remotely writes beside the new disk and deletes
+  after; qcow2 needs converting first. A new VM is a written .vmx (with `pciBridge` entries) plus `vdiskmanager -c`.
+  `ovftool --name=<name> --diskMode=monolithicSparse|monolithicFlat --noSSLVerify <ova|ovf> <new vmx>` imports an
+  appliance; without `--acceptAllEulas` one with a licence fails, and the job says so. ovftool.exe is in `OVFTool\`
+  beside vmrun (`adapters::vmware::locate_ovftool`: the Settings path, `REMOTELY_OVFTOOL`, then that folder).
+  Workstation 26 (hand check): a full clone's disk keeps the source's name with `-cl1` (`golden-cl1.vmdk`), and a
+  linked clone's is a delta whose `parentFileNameHint` is the golden VM's disk by absolute path. A full clone writes
+  nothing of the golden VM's; a linked clone adds `snapshotN.cloneM = "<clone's .vmx>"` and `snapshotN.numClones` to
+  its .vmsd, yet `vmrun deleteSnapshot` deletes that snapshot without a word (the linked clone breaks). Both clone a
+  running golden VM from its snapshot, and the golden VM runs on; a VM started with `vmrun start ... nogui` has
+  `<disk>.vmdk.lck` folders (and a `.vmem.lck`) but no `.vmx.lck`; and vmrun ignores a `.vmx.lck` (an open tab's): it
+  clones beside one and writes the linked clone's record anyway, so only Remotely's own check stops it; ovftool writes .vmx
+  keys in lower case (`displayname`, `virtualhw.version`; keys match without case, and `VmxFile` keeps one) and names
+  an import's disk `<name>-disk1.vmdk`; a truncated OVA fails with "Disk (...) could not be found".
+  cloud-init's VMware datasource reads `guestinfo.metadata` and `guestinfo.userdata` from the .vmx, each with
+  `.encoding = "base64"`. Workstation's default VM folder is `prefvmx.defaultVMPath` in
+  `%APPDATA%\VMware\preferences.ini`, else Documents\Virtual Machines.
 
 ## VirtualBox facts
 
@@ -608,6 +687,24 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 - VBoxManage writes errors to stderr as `VBoxManage.exe: error: <message>` lines, then `Details:` and `Context:` lines;
   the app keeps the first kind. Guest control (`guestcontrol`) would put guest credentials on the command line: the app
   never uses it.
+- VM-21, VM-10 deploy (`deploy::virtualbox`): a new VM is `createvm --name --uuid --ostype --basefolder --register`,
+  then `modifyvm`, `storagectl`, `createmedium disk --format VDI --variant Standard|Fixed` (thin or thick) and
+  `storageattach`. A cloud image becomes the boot disk with `clonemedium disk` (VMDK) or `convertfromraw` (raw),
+  grown with `modifymedium disk --resize <MB>` (it never shrinks). `clonevm <uuid> [--snapshot <uuid>]
+  [--options=Link] --name --uuid --basefolder --register`; `import <ova|ovf> --vsys 0 --vmname --basefolder --cpus
+  --memory`. `unattended detect --iso` says whether VirtualBox can install an ISO; `unattended install <uuid> --iso
+  --user --password-file <file> --hostname <name>.localdomain --install-additions` prepares it (VirtualBox wants a
+  domain in the name). The password goes only into a file this Windows user alone can read, deleted at once. A cloud
+  image's first boot reads a NoCloud seed: an ISO labelled `cidata` with `user-data` and `meta-data`, attached as a
+  DVD, then ejected (`storageattach --medium emptydrive`) and closed after the first boot. `list systemproperties`
+  gives `Default machine folder:`; `list hostonlyifs` and `list bridgedifs` the adapters a network can use. A cancelled
+  `clonevm` may hold the VM for a moment, so cleanup tries `unregistervm --delete` again a few times. VirtualBox 7.2
+  (hand check): `unregistervm --delete` deletes a VM's disks but leaves its DVD images in the media list, so cleanup
+  closes the seed with `closemedium dvd`; it refuses to delete a golden VM while a linked clone uses its snapshot;
+  `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing `IsInstallSupported="off"`, and
+  Remotely takes any failure as "can't install it by itself"; `import` takes an OVA that ovftool made, and a truncated
+  one fails with VERR_EOF. Windows' own `tar.exe` (libarchive) lists a seed's Joliet names, a check that doesn't use
+  Remotely's reader.
 - MO-13: `showvminfo` also gives `firmware` (`BIOS`, `EFI`...), `nictypeN` (the card, e.g. `82540EM`, `virtio`) and
   `cableconnectedN` (`on`/`off`); the storage key (`"SATA-0-0"`) is the disk's slot. A VDI's header has the signature
   0xbeda107f at 0x40, its type at 0x4c (4 is a snapshot's differencing image) and the disk size at 0x170; a VHD's
@@ -694,6 +791,11 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
   resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on
   127.0.0.1. Tunnel tests bind loopback with port 0; never a network address.
+- Deploy (VM-21, VM-22, VM-10): never create, clone, import or delete real VMs in tests. `tests/deploy.rs` runs
+  deploys through the bus and the job runner on `FakeVmware` and `FakeVirtualBox` (clone, import, create, media copies,
+  `set_failing` for cleanup, `with_clone_delay` to cancel mid-way) in temp folders; the real adapters' command lines
+  are checked against stand-in vmrun, ovftool and VBoxManage `.cmd` files made at run time (a batch file gets an
+  argument with `=` quoted).
 - Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use
   `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).

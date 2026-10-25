@@ -48,6 +48,7 @@
 //!   host_networks (VM-11): the hypervisors' networks, the VMs on each and their NAT port forwards ──►
 //!     adapters::host_networks; changing a forward is a command on the bus. vm_insight (VM-25): a VM's logs and
 //!     timeline; waste (VM-16, VM-14): the waste finder's report. Reads only
+//!   notifications (QL-25): the notification centre's history, in memory and redacted
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -61,6 +62,7 @@ pub mod catalog;
 pub mod command_bus;
 pub mod containers;
 pub mod dashboard;
+pub mod deploy;
 pub mod domain;
 pub mod error;
 pub mod export;
@@ -78,6 +80,7 @@ pub mod locks;
 pub mod login_guard;
 pub mod metrics;
 pub mod multiexec_groups;
+pub mod notifications;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
@@ -131,6 +134,7 @@ use login_guard::LoginGuard;
 use metrics::history::MetricsHistory;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use multiexec_groups::MultiExecGroups;
+use notifications::Notifications;
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
@@ -215,12 +219,16 @@ impl UiSnapshot {
 pub struct Core {
     pub ctx: Context,
     pub store: Store,
-    pub inventory: Inventory,
+    /// Shared with the deploy runner, which lists the VMs it makes (VM-21).
+    pub inventory: Arc<Inventory>,
     /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
     /// through [`Core::bus`].
     pub snapshots: SnapshotReader,
-    /// VM-19 to VM-21: sizes, images and launch templates (the app's own data, audited). Deploying is R2's.
+    /// VM-19 to VM-21: sizes, images and launch templates (the app's own data, audited).
     pub catalog: Catalog,
+    /// VM-21, VM-22, VM-10: deploys from launch templates or the Deploy dialog, and bulk clones; each is a
+    /// command on [`Core::bus`].
+    pub deploy: deploy::service::Deploys,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
     /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
@@ -273,6 +281,8 @@ pub struct Core {
     pub alerts: Arc<Alerts>,
     /// MO-16: the dashboard's layout of this workspace.
     pub layouts: Layouts,
+    /// QL-25: the notification centre's history, in memory (the module says why not on disk).
+    pub notifications: Notifications,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
@@ -296,6 +306,8 @@ pub struct Core {
     virtualbox: Arc<SwitchableVirtualBox>,
     /// SS-04, AP-06: where vault passwords may go without the vault password (shared by every module).
     bindings: SecretBindings,
+    /// VM-21: what the job runner makes new VMs with; tests shorten its waits.
+    deployer: Arc<deploy::runner::Deployer>,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -347,7 +359,9 @@ impl Core {
         // QL-15: before the saved paths are read below; `assemble` checks again, which then finds nothing.
         settings::repair(&store, &ctx).await?;
         let saved = saved_vmrun_path(&store, &ctx).await?;
-        let vmware: Arc<dyn VmwareAdapter> = Arc::from(adapters::vmware::connect(config.vmrun_path.or(saved)));
+        let ovftool = saved_ovftool_path(&store, &ctx).await?;
+        let vmware: Arc<dyn VmwareAdapter> =
+            Arc::from(adapters::vmware::connect_with(config.vmrun_path.or(saved), ovftool));
         let docker = saved_docker_path(&store, &ctx).await?;
         let saved_vbox = saved_vboxmanage_path(&store, &ctx).await?;
         let virtualbox: Arc<dyn VirtualBoxAdapter> =
@@ -517,6 +531,28 @@ impl Core {
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
+        let catalog = Catalog::new(store.clone()).with_hypervisors(hypervisors.clone());
+        let inventory = Arc::new(Inventory::new(store.clone(), hypervisors.clone(), Arc::clone(&links)));
+        // VM-21, VM-22, VM-10: the job runner makes each new VM through the deploy runner.
+        let deployer = Arc::new(deploy::runner::Deployer::new(
+            store.clone(),
+            hypervisors.clone(),
+            Arc::clone(&inventory),
+            Arc::new(
+                SessionLibrary::new(store.clone(), Arc::clone(&links))
+                    .with_policy(bus.policy())
+                    .with_bindings(bindings.clone()),
+            ),
+            Arc::clone(&adapters.vault),
+        ));
+        jobs.set_deployer(deployer.clone());
+        let deploy = deploy::service::Deploys::new(
+            store.clone(),
+            catalog.clone(),
+            hypervisors.clone(),
+            Arc::clone(&adapters.host_counters),
+            Arc::clone(&bus),
+        );
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
         let insight = vm_insight::VmInsight::new(ctx, store.clone(), hypervisors.clone());
         let waste = waste::WasteFinder::new(ctx, store.clone(), hypervisors.clone());
@@ -527,8 +563,10 @@ impl Core {
             waste,
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
-            catalog: Catalog::new(store.clone()).with_hypervisors(hypervisors.clone()),
-            inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
+            catalog,
+            deploy,
+            inventory,
+            deployer,
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())
                 .with_bindings(bindings.clone()),
@@ -557,6 +595,7 @@ impl Core {
             history,
             alerts,
             layouts: Layouts::new(store.clone(), ctx),
+            notifications: Notifications::new(),
             host_details,
             login_guard,
             presentation,
@@ -598,6 +637,11 @@ impl Core {
                 was = now;
             }
         });
+    }
+
+    /// VM-21: how the deploy runner waits for a guest's IP and for VirtualBox to let go of a VM; tests shorten it.
+    pub fn set_deploy_tuning(&self, tuning: deploy::runner::DeployTuning) {
+        self.deployer.set_tuning(tuning);
     }
 
     /// SS-04, AP-06: where vault passwords may go without asking; tests shorten its grace period.
@@ -671,7 +715,9 @@ impl Core {
         self.store
             .put_setting(&self.ctx, store::VMRUN_PATH_KEY, &as_text)
             .await?;
-        self.vmware.replace(Arc::from(adapters::vmware::connect(path)));
+        let ovftool = saved_ovftool_path(&self.store, &self.ctx).await?;
+        self.vmware
+            .replace(Arc::from(adapters::vmware::connect_with(path, ovftool)));
         let in_use = self.vmrun_path();
         let detail = format!(
             "saved: {}; in use: {}",
@@ -681,6 +727,43 @@ impl Core {
                 .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
         );
         self.audit_setting("Set the vmrun.exe path", &detail).await?;
+        Ok(in_use)
+    }
+
+    /// VM-21: the ovftool.exe in use (OVA and OVF imports into Workstation), or `None` when it was not found.
+    pub fn ovftool_path(&self) -> Option<PathBuf> {
+        self.vmware.ovftool_path()
+    }
+
+    /// VM-21: the ovftool.exe path saved in Settings, if any.
+    pub async fn saved_ovftool_path(&self) -> Result<Option<PathBuf>> {
+        saved_ovftool_path(&self.store, &self.ctx).await
+    }
+
+    /// VM-21: saves the ovftool.exe path (`None` = find it: `REMOTELY_OVFTOOL`, then the OVFTool folder next to
+    /// vmrun.exe) and looks for it again at once. The path must be an existing ovftool.exe. Audited, since it decides
+    /// which program imports appliances.
+    pub async fn set_ovftool_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::vmware::validate_ovftool_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx, store::OVFTOOL_PATH_KEY, &as_text)
+            .await?;
+        let vmrun = saved_vmrun_path(&self.store, &self.ctx).await?;
+        self.vmware
+            .replace(Arc::from(adapters::vmware::connect_with(vmrun, path)));
+        let in_use = self.ovftool_path();
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the ovftool.exe path", &detail).await?;
         Ok(in_use)
     }
 
@@ -1042,6 +1125,13 @@ async fn saved_docker_path(store: &Store, ctx: &Context) -> Result<Option<PathBu
 
 async fn saved_vmrun_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
     let saved = store.get_setting::<Option<String>>(ctx, store::VMRUN_PATH_KEY).await?;
+    Ok(saved.flatten().map(PathBuf::from))
+}
+
+async fn saved_ovftool_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
+    let saved = store
+        .get_setting::<Option<String>>(ctx, store::OVFTOOL_PATH_KEY)
+        .await?;
     Ok(saved.flatten().map(PathBuf::from))
 }
 

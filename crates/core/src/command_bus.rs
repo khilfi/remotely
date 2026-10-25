@@ -156,6 +156,15 @@ pub enum Command {
     /// ([`TargetRef::Network`]), or on a VirtualBox VM's NAT adapter ([`TargetRef::Vm`]); one target
     /// ([`crate::host_networks`]).
     HostNetwork { targets: Vec<TargetRef>, op: HostNetworkOp },
+    /// VM-21, VM-22, VM-10: make new VMs, from a launch template or the Deploy dialog's own values (a clone of a
+    /// golden VM, a cloud image with cloud-init, an ISO install or an OVA/OVF import), or clones of the VMs
+    /// picked on the VMs page. Every target is one of the spec's [`TargetRef::NewVm`]s. Never built by the UI:
+    /// the deploy service ([`crate::deploy`]) builds it from the catalogue, so what is approved is what was
+    /// resolved there.
+    Deploy {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::deploy::DeploySpec>,
+    },
 }
 
 /// CT-01, CT-02: what a [`Command::Container`] does.
@@ -568,6 +577,8 @@ impl Command {
             Command::TerminalLine { .. } => {
                 "MultiExec lines start from what is typed into a terminal with MultiExec on, which holds and rates them."
             }
+            // VM-21: the paths and values a deploy uses come from the catalogue.
+            Command::Deploy { .. } => "Deploys start from the Deploy dialog, a launch template or Clone on the VMs page.",
             // VM-23, VM-24: a file or folder of this PC the guest (or the VM list) gets comes from a dialog or a
             // drop in the shell, never from the UI: an attached file or a shared folder is the guest's to read.
             Command::VmDevice {
@@ -634,6 +645,15 @@ impl Command {
             Command::FileUpload { targets, folder, files } => validate_upload(targets, folder, files),
             Command::OpenTunnel { targets, .. } => validate_tunnel(targets),
             Command::Container { targets, op } => validate_container(targets, op),
+            Command::Deploy { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput(
+                        "A deploy's targets are the VMs it makes.".into(),
+                    ));
+                }
+                Ok(())
+            }
             Command::VmConfig { targets, edit } => vm_ops::validate_config(targets, edit),
             Command::VmDevice { targets, op } => vm_ops::validate_device(targets, op),
             Command::VmDisk { targets, op } => vm_ops::validate_disk(targets, op),
@@ -662,6 +682,11 @@ impl Command {
                 targets,
                 op: VmLifecycleOp::Delete,
             } => *targets = new,
+            // VM-21: the VMs that failed, made again with the labels the deploy gives them.
+            Command::Deploy { targets, spec } => {
+                **spec = spec.only(&new);
+                *targets = spec.targets();
+            }
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
             // VM-11: a forward belongs to its network or VM.
@@ -693,7 +718,8 @@ impl Command {
             | Command::VmDevice { targets, .. }
             | Command::VmDisk { targets, .. }
             | Command::VmLifecycle { targets, .. }
-            | Command::HostNetwork { targets, .. } => targets,
+            | Command::HostNetwork { targets, .. }
+            | Command::Deploy { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -712,6 +738,7 @@ impl Command {
             Command::FileUpload { .. } => "fileUpload",
             Command::OpenTunnel { .. } => "openTunnel",
             Command::Container { .. } => "container",
+            Command::Deploy { .. } => "deploy",
             Command::VmConfig { .. } => "vmConfig",
             Command::VmDevice { .. } => "vmDevice",
             Command::VmDisk { .. } => "vmDisk",
@@ -841,6 +868,7 @@ impl Command {
                 }
                 other => format!("{} {}", other.label(), noun("container")),
             },
+            Command::Deploy { spec, .. } => spec.summary(),
             Command::VmConfig { edit, .. } => edit.summary(target_count),
             Command::VmDevice { op, .. } => op.summary(target_count),
             Command::VmDisk { op, .. } => op.summary(target_count),
@@ -893,6 +921,8 @@ pub struct ApprovalRequest {
     pub upload: Option<Box<UploadDetails>>,
     /// SS-07: for a tunnel, where it listens, where it leads and who can use it.
     pub tunnel: Option<Box<TunnelDetails>>,
+    /// VM-21: for a deploy, each VM it makes, where, and the disk space it may take (AP-02).
+    pub deploy: Option<Box<crate::deploy::preview::DeployPreview>>,
     /// VM-23, VM-24: for a VM settings or lifecycle change, what changes on each VM, every file that is
     /// deleted, and why a VM would be refused.
     pub vm_change: Option<Box<VmChangePreview>>,
@@ -1205,6 +1235,30 @@ impl CommandBus {
         };
         decision.add_warnings(vec![format!(
             "sudo would get the {what} on {names}, where no saved session sends it yet. Approving asks for the vault password, and lets them use it from now on"
+        )]);
+        if !decision.steps.contains(&ApprovalStep::VaultReauth) {
+            decision.steps.push(ApprovalStep::VaultReauth);
+        }
+        Ok(())
+    }
+
+    /// SS-04, AP-06 (VM-21): an unattended install gives a vault password to new VMs, which no saved session reaches
+    /// yet, so the approval asks for the vault password, and says so.
+    async fn ask_for_guest_password(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Result<()> {
+        let Command::Deploy { spec, .. } = command else {
+            return Ok(());
+        };
+        let Some(unattended) = &spec.unattended else {
+            return Ok(());
+        };
+        let what = self.bindings().describe(ctx, unattended.password_id).await?;
+        let vms = match spec.vms.len() {
+            1 => "the new VM".to_owned(),
+            n => format!("{n} new VMs"),
+        };
+        decision.add_warnings(vec![format!(
+            "VirtualBox's unattended install gives the {what} to {vms} (user {}), and writes it into their install files in each VM's folder. Approving asks for the vault password",
+            unattended.user
         )]);
         if !decision.steps.contains(&ApprovalStep::VaultReauth) {
             decision.steps.push(ApprovalStep::VaultReauth);
@@ -1667,6 +1721,7 @@ impl CommandBus {
         }
         let impact = self.add_warnings(ctx, &command, &mut decision).await;
         self.ask_for_sudo_places(ctx, &command, &mut decision).await?;
+        self.ask_for_guest_password(ctx, &command, &mut decision).await?;
         let summary = command.summary(decision.targets.len());
 
         if decision.steps.is_empty() {
@@ -1752,6 +1807,11 @@ impl CommandBus {
         if let Command::TerminalLine { keys, .. } = command {
             decision.warnings.extend(run_key(keys).and_then(RunKey::note));
         }
+        // VM-21: thin disks that might not fit, and what changed since the deploy service checked it (a folder that
+        // is there now, thick disks that don't fit any more: those VMs fail when their turn comes).
+        if let Some(deploy) = self.impact.deploy(command, self.capacity.host().as_ref()).await {
+            decision.add_warnings(deploy.warnings.into_iter().chain(deploy.refusals).collect());
+        }
         if let Command::VmPower {
             op: PowerOp::Start { .. },
             ..
@@ -1809,6 +1869,11 @@ impl CommandBus {
             exec: self.exec_details(ctx, command, retry_of).await?,
             upload: UploadDetails::of(command),
             tunnel: TunnelDetails::of(command),
+            deploy: self
+                .impact
+                .deploy(command, self.capacity.host().as_ref())
+                .await
+                .map(Box::new),
             vm_change: vm_change.map(Box::new),
         })
     }
@@ -1904,6 +1969,9 @@ impl CommandBus {
         }
         let impact = self.add_warnings(&ctx, &pending.command, &mut decision).await;
         if let Err(err) = self.ask_for_sudo_places(&ctx, &pending.command, &mut decision).await {
+            return err;
+        }
+        if let Err(err) = self.ask_for_guest_password(&ctx, &pending.command, &mut decision).await {
             return err;
         }
         let request = match self

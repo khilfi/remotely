@@ -1,7 +1,8 @@
 // VM-19 to VM-21: the spec catalogue, like a cloud provider's. Sizes (twelve built-ins, read only, with Duplicate; the
 // owner's own beside them), images (golden VMs' snapshots, cloud images, ISOs, OVA/OVF appliances, each file checked
 // and hashed when added, with links to the official cloud image pages) and launch templates (an image and a size with
-// everything a deploy needs, each saying why it can't deploy when it can't). Deploying is the deploy package's (R2).
+// everything a deploy needs, each saying why it can't deploy when it can't). VM-21: Deploy on a template's row opens
+// the Deploy dialog on it.
 //
 // Edits are the app's own data: audited in the core with no approval tier, and refused by the read-only lock (FD-03).
 // P6: the page reads nothing while it is hidden.
@@ -10,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   CopyIcon,
+  RocketIcon,
   DiscIcon,
   ExternalLinkIcon,
   FileBoxIcon,
@@ -67,6 +69,8 @@ import {
   templateReason,
 } from "@/lib/catalog";
 import { plural } from "@/lib/format";
+import { reveal } from "@/lib/reveal";
+import { cn } from "@/lib/utils";
 
 export type TemplatesTab = "sizes" | "images" | "templates";
 
@@ -74,7 +78,10 @@ interface Props {
   /** True while the page is shown: it reads the catalogue again when the user comes back. */
   active: boolean;
   /** The palette asked for a tab, or for a new launch template. */
-  request: { tab: TemplatesTab; create?: boolean; n: number } | null;
+  /** R10 `id`: a size, image or template to show (a search result): scrolled to and lit. */
+  request: { tab: TemplatesTab; create?: boolean; id?: string; n: number } | null;
+  /** VM-21: opens the Deploy dialog on a template. */
+  onDeploy: (templateId: string) => void;
 }
 
 type Dialog =
@@ -85,7 +92,7 @@ type Dialog =
   | { kind: "deleteImage"; image: Image }
   | { kind: "deleteTemplate"; template: LaunchTemplate };
 
-export function TemplatesPage({ active, request }: Props) {
+export function TemplatesPage({ active, request, onDeploy }: Props) {
   const readOnly = useReadOnlyReason();
   const [tab, setTab] = useState<TemplatesTab>("templates");
   const [sizes, setSizes] = useState<Size[]>([]);
@@ -122,9 +129,19 @@ export function TemplatesPage({ active, request }: Props) {
 
   // A new request from the palette: its tab, and the new item's dialog when it asked for one.
   const [handled, setHandled] = useState(0);
+  // R10: the item a search result asked for, lit until it has been seen.
+  const [lit, setLit] = useState<string | null>(null);
+  const litShown = lit !== null && [...sizes, ...images, ...templates].some((item) => item.id === lit);
+  useEffect(() => {
+    if (!litShown || !lit) return;
+    reveal(document.querySelector(`[data-catalog-id="${CSS.escape(lit)}"]`));
+    const timer = window.setTimeout(() => setLit(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [litShown, lit]);
   if (request && request.n !== handled) {
     setHandled(request.n);
     setTab(request.tab);
+    setLit(request.id ?? null);
     if (request.create && !readOnly) {
       if (request.tab === "sizes") setDialog({ kind: "size" });
       else if (request.tab === "images") setDialog({ kind: "image" });
@@ -197,7 +214,7 @@ export function TemplatesPage({ active, request }: Props) {
               </TableHeader>
               <TableBody>
                 {sizes.map((s) => (
-                  <TableRow key={s.id}>
+                  <TableRow key={s.id} data-catalog-id={s.id} className={cn(lit === s.id && "bg-accent")}>
                     <TableCell className="font-mono font-medium">
                       <span className="flex items-center gap-2">
                         {s.name}
@@ -312,7 +329,11 @@ export function TemplatesPage({ active, request }: Props) {
                 </TableHeader>
                 <TableBody>
                   {images.map((i) => (
-                    <TableRow key={i.id} className="align-top">
+                    <TableRow
+                      key={i.id}
+                      data-catalog-id={i.id}
+                      className={cn("align-top", lit === i.id && "bg-accent")}
+                    >
                       <TableCell className="font-medium whitespace-normal">
                         {i.name}
                         {i.problem && <div className="text-xs font-normal text-destructive">{i.problem}</div>}
@@ -441,7 +462,11 @@ export function TemplatesPage({ active, request }: Props) {
                   {templates.map((t) => {
                     const why = templateReason(t);
                     return (
-                      <TableRow key={t.id} className="align-top">
+                      <TableRow
+                        key={t.id}
+                        data-catalog-id={t.id}
+                        className={cn("align-top", lit === t.id && "bg-accent")}
+                      >
                         <TableCell className="font-medium whitespace-normal">
                           <span className="flex flex-wrap items-center gap-2">
                             {t.name}
@@ -480,13 +505,34 @@ export function TemplatesPage({ active, request }: Props) {
                               )}
                             </>
                           ) : (
-                            <Badge variant="outline" className="border-success/40 text-success">
-                              Ready
-                            </Badge>
+                            <span className="flex flex-wrap items-center gap-2">
+                              <Badge variant="outline" className="border-success/40 text-success">
+                                Ready
+                              </Badge>
+                              <WhyDisabled reason={readOnly}>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={readOnly !== null}
+                                  onClick={() => onDeploy(t.id)}
+                                >
+                                  <RocketIcon data-icon="inline-start" />
+                                  Deploy
+                                </Button>
+                              </WhyDisabled>
+                            </span>
                           )}
                         </TableCell>
                         <TableCell>
                           <RowMenu label={t.name}>
+                            <DropdownMenuItem disabled={(readOnly ?? why) !== null} onSelect={() => onDeploy(t.id)}>
+                              <RocketIcon />
+                              <span>
+                                Deploy…
+                                <ReasonLine reason={readOnly ?? why} />
+                              </span>
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
                             <DropdownMenuItem
                               disabled={readOnly !== null}
                               onSelect={() => setDialog({ kind: "template", existing: t })}

@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex};
 use common::{temp_folder, vmx, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::catalog::{
-    AfterDeploy, DiskSpec, HashProgress, Image, ImageEdit, ImageFormat, ImageInput, ImageSource, Network, ProblemCode,
-    Provisioning, SizeInput, SourceInput, TemplateInput,
+    AfterDeploy, CloneMode, DiskSpec, HashProgress, Image, ImageEdit, ImageFormat, ImageInput, ImageSource, Network,
+    ProblemCode, Provisioning, SizeInput, SourceInput, TemplateInput,
 };
 use remotely_core::domain::{Environment, PowerState};
 use remotely_core::fakes::{FakeVirtualBox, FakeVmware};
@@ -107,6 +107,9 @@ fn template(name: &str, image: &Image, size_id: &str) -> TemplateInput {
         environment: Environment::Lab,
         tags: vec!["web".into()],
         after_deploy: AfterDeploy::default(),
+        guest_user: None,
+        packages: Vec::new(),
+        clone_mode: CloneMode::Full,
     }
 }
 
@@ -845,6 +848,10 @@ async fn the_catalogue_travels_to_another_laptop() {
         .unwrap();
     let mut web = template("web", &image, &size.id);
     web.ssh_key_id = Some(key.id);
+    // VM-21, VM-22: the first-boot settings and the clone mode travel with the template.
+    web.guest_user = Some("alice".into());
+    web.packages = vec!["nginx".into(), "htop".into()];
+    web.clone_mode = CloneMode::Linked;
     a.catalog.add_template(ctx, web).await.unwrap();
     a.catalog
         .add_template(ctx, template("web-medium", &image, "gp.medium"))
@@ -948,6 +955,9 @@ async fn the_catalogue_travels_to_another_laptop() {
         .find(|k| k.label == "deploy key")
         .unwrap();
     assert_eq!(b_web.spec.ssh_key_id, Some(b_key.id));
+    assert_eq!(b_web.spec.guest_user.as_deref(), Some("alice"));
+    assert_eq!(b_web.spec.packages, ["nginx", "htop"]);
+    assert_eq!(b_web.spec.clone_mode, CloneMode::Linked);
     assert!(b_web.problems.is_empty(), "{:?}", b_web.problems);
     let medium = b_templates.iter().find(|t| t.spec.name == "web-medium").unwrap();
     assert_eq!(medium.spec.size_id, "gp.medium");

@@ -1,5 +1,5 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
+//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`], [`navigation`],
 //! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
 mod catalog;
@@ -8,12 +8,14 @@ mod command_panel;
 mod containers;
 mod dashboard;
 pub mod data_dirs;
+mod deploy;
 pub mod diagnostics;
 mod files;
 mod groups;
 mod host_details;
 mod ipc;
 mod multiexec;
+mod navigation;
 mod terminal;
 mod terminal_rules;
 mod tunnels;
@@ -431,6 +433,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::audit_export_csv,
         ipc::settings_get,
         ipc::settings_set_vmrun_path,
+        ipc::settings_set_ovftool_path,
         ipc::settings_set_vboxmanage_path,
         ipc::settings_set_scan_folders,
         ipc::settings_set_power_on_limit,
@@ -545,6 +548,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         dashboard::dashboard_layout_set,
         dashboard::dashboard_layout_reset,
         dashboard::host_services,
+        navigation::notifications_list,
+        navigation::notifications_add,
+        navigation::notifications_mark_read,
+        navigation::notifications_clear,
+        navigation::topology_vm_networks,
+        navigation::vm_folder_pick,
         terminal::terminal_open,
         terminal::terminal_quick_connect,
         terminal::terminal_open_like,
@@ -644,6 +653,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         catalog::catalog_template_update,
         catalog::catalog_template_delete,
         catalog::catalog_open_site,
+        deploy::deploy_check,
+        deploy::deploy_submit,
+        deploy::deploy_clone_check,
+        deploy::deploy_clone_submit,
+        deploy::deploy_host_adapters,
+        deploy::deploy_default_folder,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,

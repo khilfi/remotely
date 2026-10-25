@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::adapters::host_networks::{default_machine_folder, showvminfo_pairs, vm_paths};
+use crate::adapters::host_networks::{showvminfo_pairs, vm_paths};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::vmware::path_key;
 use crate::domain::{now_rfc3339, Context, Environment, PowerState};
@@ -423,15 +423,9 @@ impl WasteFinder {
             .into_iter()
             .map(PathBuf::from)
             .collect();
-        roots.extend(self.hypervisors.vmware().default_vm_folder().await);
-        if let Ok(out) = self
-            .hypervisors
-            .virtualbox()
-            .vboxmanage_host(vec!["list".into(), "systemproperties".into()], VBOX_TIMEOUT)
-            .await
-        {
-            roots.extend(default_machine_folder(&out));
-        }
+        // R2's reads (VM-21): Workstation's preference or Documents, and VirtualBox's default machine folder.
+        roots.extend(self.hypervisors.vmware().default_vm_folder().await.ok());
+        roots.extend(self.hypervisors.virtualbox().default_machine_folder().await.ok());
         for template in self.store.list_catalog_templates(&self.ctx).await? {
             roots.extend(template.spec.vm_folder.map(PathBuf::from));
         }

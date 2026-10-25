@@ -135,6 +135,19 @@ impl ImpactPreviewer {
     }
 
     /// The preview for a command's targets: VMs here, container targets by the containers service.
+    /// VM-21: for a deploy, what it makes and the free-space check on its folder's drive. `None` for other
+    /// commands. Reads only.
+    pub async fn deploy(
+        &self,
+        command: &Command,
+        host: &dyn crate::adapters::host_counters::HostCounters,
+    ) -> Option<crate::deploy::preview::DeployPreview> {
+        let Command::Deploy { spec, .. } = command else {
+            return None;
+        };
+        Some(crate::deploy::preview::preview(spec, &self.hypervisors, host).await)
+    }
+
     pub async fn preview_for(&self, ctx: &Context, command: &Command, targets: &[Target]) -> Vec<TargetImpact> {
         let mut out = self.preview(ctx, targets).await;
         if let (Some(containers), Command::Container { op, .. }) = (&self.containers, command) {

@@ -31,6 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { DeployPreviewView } from "@/components/DeployPreviewView";
 import {
   api,
   changedRequest,
@@ -79,6 +80,7 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
   if (target.kind === "terminal") return target.terminalId;
   if (target.kind === "container") return containerTargetKey(target);
   if (target.kind === "network") return `${target.hypervisor}:${target.name}`;
+  if (target.kind === "newVm") return `new-vm/${target.hypervisor}/${target.name}`;
   return "app";
 }
 
@@ -244,9 +246,11 @@ export function ApprovalDialog({
         {request.exec && <ExecSummary exec={request.exec} targets={request.targets.length} />}
         {request.upload && <UploadSummary upload={request.upload} />}
         {request.tunnel && <TunnelSummary tunnel={request.tunnel} />}
+        {/* VM-21: the VMs a deploy makes, where, and the disk they may take; its warnings are listed below. */}
+        {request.deploy && <DeployPreviewView preview={request.deploy} showWarnings={false} />}
         {request.vmChange && <VmChangeSummary change={request.vmChange} />}
 
-        <div className="grid gap-1.5">
+        <div className="grid gap-1.5" hidden={request.deploy !== null}>
           <div className="max-h-64 overflow-auto rounded-md border">
             <Table>
               <TableHeader>
