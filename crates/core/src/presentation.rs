@@ -112,11 +112,15 @@ pub enum Change {
     MultiExec,
     /// CT-01: marking sessions as container hosts, and how their engines run.
     ContainerHosts,
+    /// QL-17: highlight and alert rules for terminal output.
+    TerminalRules,
+    /// QL-19: saved MultiExec groups.
+    MultiExecGroups,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 14] = [
+    pub const ALL: [Change; 16] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -131,6 +135,8 @@ impl Change {
         Change::ApprovalRules,
         Change::MultiExec,
         Change::ContainerHosts,
+        Change::TerminalRules,
+        Change::MultiExecGroups,
     ];
 
     pub fn label(self) -> &'static str {
@@ -149,6 +155,8 @@ impl Change {
             Change::ApprovalRules => "Change the approval rules",
             Change::MultiExec => "Turn MultiExec on",
             Change::ContainerHosts => "Mark container hosts",
+            Change::TerminalRules => "Edit highlight and alert rules",
+            Change::MultiExecGroups => "Edit saved MultiExec groups",
         }
     }
 }
