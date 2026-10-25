@@ -72,6 +72,7 @@ pub mod ssh_keys;
 pub mod store;
 pub mod terminal;
 pub mod transfer;
+pub mod untrusted;
 pub mod updates;
 pub mod vault;
 pub mod vm_links;
