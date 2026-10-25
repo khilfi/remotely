@@ -318,7 +318,7 @@ impl WasteFinder {
             }
             out.push(row);
         }
-        out.sort_by(|a, b| b.state_bytes.cmp(&a.state_bytes));
+        out.sort_by_key(|s| std::cmp::Reverse(s.state_bytes));
         (out, problems)
     }
 
@@ -454,7 +454,7 @@ impl WasteFinder {
                 found.extend(folders::orphans(&root, &known));
                 searched.push(root.display().to_string());
             }
-            found.sort_by(|a: &OrphanFolder, b| b.bytes.cmp(&a.bytes));
+            found.sort_by_key(|o: &OrphanFolder| std::cmp::Reverse(o.bytes));
             (found, searched, skipped)
         })
         .await

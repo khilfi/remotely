@@ -217,7 +217,7 @@ async fn the_timeline_lists_what_remotely_did_to_the_vm_newest_first_in_pages() 
         wait_finished(&mut rx, job_id).await;
     }
     core.inventory
-        .set_environment(&core.ctx, &[web.clone()], Environment::Lab)
+        .set_environment(&core.ctx, std::slice::from_ref(&web), Environment::Lab)
         .await
         .unwrap();
 

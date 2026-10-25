@@ -295,9 +295,8 @@ fn parse_forward_line(line: &str) -> Option<VmnetForward> {
     let mut host_port = None;
     let mut guest = None;
     let mut description: Vec<&str> = Vec::new();
-    let mut words = line.split_whitespace().peekable();
     let mut first = true;
-    while let Some(word) = words.next() {
+    for word in line.split_whitespace() {
         let bare = word.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | '"' | '\''));
         let index = first && word.ends_with(':') && word[..word.len() - 1].chars().all(|c| c.is_ascii_digit());
         first = false;

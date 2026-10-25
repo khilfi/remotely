@@ -131,7 +131,10 @@ fn the_tiers_can_be_edited_and_lowering_them_asks_for_the_vault_password() {
     );
     let engine = PolicyEngine::new(after.clone()).expect("valid");
     let target = network(Hypervisor::Vmware, "vmnet8", Environment::None);
-    assert_eq!(engine.evaluate(&add(&target), &[target.clone()]).tier, Tier::Medium);
+    assert_eq!(
+        engine.evaluate(&add(&target), std::slice::from_ref(&target)).tier,
+        Tier::Medium
+    );
     assert!(before
         .loosened(&after)
         .iter()
