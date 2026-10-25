@@ -24,6 +24,11 @@ updates:
     groups:
       npm:
         patterns: ["*"]
+    # TypeScript 7 is not yet in typescript-eslint's peer range (it stops at 6), so npm refuses the
+    # install. Take TypeScript's major versions on purpose, once typescript-eslint supports them.
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   # Workflows pin actions to full commit SHAs; Dependabot updates the SHA and the version comment.
   - package-ecosystem: github-actions
