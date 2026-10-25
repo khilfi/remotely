@@ -35,6 +35,8 @@
 //!     (the Terminal page's Compare output)
 //!   retention (BX-02): the job journal keeps outputs and command text for as long as Settings says, then
 //!     a daily purge removes them; save_guard: no save path writes into a Git working tree
+//!   catalog (VM-19 to VM-21): sizes, OS profiles, images and launch templates, what deploy (R2) runs; edits
+//!     are audited like the session library, and a template resolves into one plan per VM
 //!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
 //!     ──► adapters::containers (their CLIs, over adapters::remote or on this PC); reads skip the bus,
 //!     changes are commands on it that the job runner carries out there
@@ -46,6 +48,7 @@
 pub mod adapters;
 pub mod bulk;
 pub mod capacity;
+pub mod catalog;
 pub mod command_bus;
 pub mod containers;
 pub mod domain;
@@ -96,6 +99,7 @@ use adapters::virtualbox::{SwitchableVirtualBox, VirtualBoxAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
 use bulk::BulkRuns;
 use capacity::CapacityChecker;
+use catalog::Catalog;
 use command_bus::CommandBus;
 use containers::Containers;
 use domain::Context;
@@ -195,6 +199,8 @@ pub struct Core {
     /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
     /// through [`Core::bus`].
     pub snapshots: SnapshotReader,
+    /// VM-19 to VM-21: sizes, images and launch templates (the app's own data, audited). Deploying is R2's.
+    pub catalog: Catalog,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
     /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
@@ -458,6 +464,7 @@ impl Core {
         let core = Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
+            catalog: Catalog::new(store.clone()).with_hypervisors(hypervisors.clone()),
             inventory: Inventory::new(store.clone(), hypervisors, Arc::clone(&links)),
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())

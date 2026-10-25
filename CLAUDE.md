@@ -141,6 +141,15 @@ crates/core/          remotely-core: all app logic
                       adapters plugged in at power-on (one confirm)
     snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
                       names
+    catalog/          VM-19 to VM-21 the spec catalogue (migration 0019; audited `catalog_changed`, no tier,
+                      Change::Catalog): sizes.rs (the twelve built-ins, read only, named by their name; own sizes by
+                      UUID), profiles.rs (OS profiles: firmware, controller, NIC, guestOS / --ostype, hardware version
+                      20; Windows 11 on VirtualBox only), images.rs (golden VM + snapshot id, cloud image, ISO,
+                      OVA/OVF; format by extension checked against the first bytes; SHA-256 on a blocking thread with
+                      progress and cancel; untrusted::path_refusal first; IMAGE_SITES and checked_site, the cloud
+                      image pages allow-list), templates.rs (check_template, problems, naming {n} {template} {date},
+                      resolve: a template and a count into a DeployPlan per VM, pure); mod.rs the Catalog service
+                      (Core.catalog; `plan` is R2's entry)
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
                       Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
@@ -242,7 +251,9 @@ crates/core/          remotely-core: all app logic
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
                       format version; new exports use file::KDF, 256 MiB and 3 passes, and a file opens with the
                       parameters in its header, so older 64 MiB files still import), preview with conflicts (skip,
-                      replace, keep both), commit; audited; an export refuses the vault password as its passphrase
+                      replace, keep both), commit; audited; an export refuses the vault password as its passphrase;
+                      catalog.rs VM-19 to VM-21 own sizes, images by path (a note when the file isn't here; a refused
+                      path can only be skipped) and templates mapped to this laptop's images, sizes and keys
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -288,7 +299,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
                       formats), SS-08 file
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
-                      SS-07 port forwards and tunnels (tunnels.rs), CT-01 the Containers page's reads, marks and
+                      SS-07 port forwards and tunnels (tunnels.rs), VM-19 to VM-21 the Templates page (catalog.rs:
+                      image and folder dialogs, `catalog://hash` progress, cloud image pages after checked_site),
+                      CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
                       (host_details.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
                       startup message boxes, setting an unopenable database aside, Settings About's logs folder, UI
@@ -312,10 +325,13 @@ src/                  React + TypeScript UI
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
                       and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
-                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice)
+                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; VM-19 to
+                      VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check))
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
-                      ContainersPage at Ctrl+3). P6: App memoises every page and passes stable callbacks, and renders
+                      ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
+                      templates; the VMs page's Deploy button waits for R2). P6: App memoises every page and passes
+                      stable callbacks, and renders
                       only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
                       shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
   hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
@@ -339,7 +355,8 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
+                      Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form,
+                      DEPLOY_REASON), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
                       delay, longer after failures), host-details.ts

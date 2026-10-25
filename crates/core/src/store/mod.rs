@@ -4,6 +4,7 @@
 //! Queries are checked at runtime, not with `query!`, so building needs no `DATABASE_URL`.
 
 mod audit;
+mod catalog;
 mod containers;
 mod favourites;
 mod forwards;
@@ -39,6 +40,7 @@ use crate::error::Result;
 use crate::presentation::ReadOnlyLock;
 
 pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
+pub(crate) use catalog::{NewImage, TemplateRow};
 pub(crate) use favourites::{FavouriteFields, FavouriteRow};
 pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};
