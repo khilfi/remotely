@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use super::folder::FolderInfo;
 use super::{audit, quoted_name, Control, Terminals};
-use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles};
+use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles, RemoteWrite, Written};
 use crate::command_bus::{human_size, Command, CommandBus, SubmitOutcome, UploadFile, MAX_UPLOAD_FILES};
 use crate::domain::{Context, Target};
 use crate::error::{CoreError, Result};
@@ -262,6 +262,9 @@ pub struct FolderListing {
     /// QL-09: where Back goes: the folder that opened before this one, or the last one that opened when
     /// this one could not.
     pub back: Option<String>,
+    /// A9: the folder holds more than [`MAX_LISTING`](crate::adapters::remote::MAX_LISTING) entries,
+    /// and only that many are listed.
+    pub more: bool,
 }
 
 /// QL-09: a folder the drawer could not open.
@@ -516,13 +519,15 @@ impl Terminals {
 
     /// Lists `path` (absolute), remembering it for Back when it opened.
     async fn listing(&self, control: &Control, files: &Arc<dyn RemoteFiles>, path: String) -> FolderListing {
-        let (entries, error) = match files.list(&path).await {
-            Ok(mut entries) => {
+        let (entries, more, error) = match files.list(&path).await {
+            Ok(listing) => {
+                let mut entries = listing.entries;
                 entries.sort_by(|a, b| a.name.cmp(&b.name));
-                (entries, None)
+                (entries, listing.more, None)
             }
             Err(err) => (
                 Vec::new(),
+                false,
                 Some(FolderError {
                     code: err.code(),
                     message: err.to_string(),
@@ -545,6 +550,7 @@ impl Terminals {
             entries,
             error,
             back,
+            more,
         }
     }
 
@@ -795,15 +801,14 @@ impl Terminals {
                 continue;
             }
             transfers.start(info.id);
-            let result = tokio::select! {
-                biased;
-                () = cancel.cancelled() => Err(None),
-                () = token.cancelled() => Err(None),
-                result = self.copy_up(&files, &info, file) => result.map_err(Some),
-            };
-            match result {
-                Ok((size, sha)) => {
-                    let replaced = if file.replace { ", replacing the file there" } else { "" };
+            match self.copy_up(&files, &info, file, cancel, &token).await {
+                Ok((size, sha, written)) => {
+                    let note = written.note();
+                    let replaced = match (file.replace, note.is_empty()) {
+                        (false, _) => String::new(),
+                        (true, true) => ", replacing the file there".to_owned(),
+                        (true, false) => format!(", replacing the file there: {note}"),
+                    };
                     let action = format!(
                         "Uploaded '{}' to {} on {}",
                         file.name,
@@ -814,20 +819,30 @@ impl Terminals {
                     run.ctx_audit(&self.inner.store, "file_uploaded", &action, &detail)
                         .await?;
                     transfers.change(info.id, |i| i.size = size);
-                    transfers.finish(info.id, TransferState::Done, None, Some(sha));
-                    report.uploaded.push(format!("{} ({})", file.name, human_size(size)));
+                    // H8: a kept backup or a write in place is worth a line in the panel.
+                    let shown = match &written {
+                        Written::ReplacedKeepingBackup { .. } | Written::InPlace { .. } => Some(note.clone()),
+                        Written::Created | Written::Replaced => None,
+                    };
+                    transfers.finish(info.id, TransferState::Done, shown.clone(), Some(sha));
+                    report.uploaded.push(match shown {
+                        Some(note) => format!("{} ({}; {note})", file.name, human_size(size)),
+                        None => format!("{} ({})", file.name, human_size(size)),
+                    });
                 }
-                Err(None) => {
-                    let message = self.undo(&files, &info, file).await;
-                    transfers.finish(info.id, TransferState::Cancelled, Some(message), None);
+                Err(Stopped::Cancelled { left }) => {
+                    transfers.finish(
+                        info.id,
+                        TransferState::Cancelled,
+                        Some(format!("cancelled; {left}")),
+                        None,
+                    );
                     report.cancelled += 1;
                 }
-                Err(Some(err)) => {
-                    let left = self.undo(&files, &info, file).await;
-                    let message = if file.replace {
-                        format!("{err}. {left}")
-                    } else {
-                        err.to_string()
+                Err(Stopped::Failed { err, left }) => {
+                    let message = match left {
+                        Some(left) => format!("{err}; {left}"),
+                        None => err.to_string(),
                     };
                     transfers.finish(info.id, TransferState::Failed, Some(message.clone()), None);
                     report.failed.push(format!("{}: {message}", file.name));
@@ -837,19 +852,62 @@ impl Terminals {
         Ok(report)
     }
 
-    /// Sends one local file to the host. Returns its size and SHA-256.
+    /// Sends one local file to the host. Returns its size, SHA-256 and how it landed. The writer is
+    /// opened and finished outside the cancel race, so a cancel never cuts a replacement's last step
+    /// short; a cancel or failure while the bytes go up aborts it (H8: the old file stays as it was).
     async fn copy_up(
         &self,
         files: &Arc<dyn RemoteFiles>,
         info: &TransferInfo,
         file: &UploadFile,
-    ) -> Result<(u64, String)> {
-        let mut local = tokio::fs::File::open(&file.local_path)
-            .await
-            .map_err(|err| CoreError::InvalidInput(format!("'{}' can't be read on this PC: {err}", file.local_path)))?;
-        let size = local.metadata().await?.len();
+        cancel: &CancellationToken,
+        token: &CancellationToken,
+    ) -> std::result::Result<(u64, String, Written), Stopped> {
+        let mut local = tokio::fs::File::open(&file.local_path).await.map_err(|err| {
+            Stopped::failed(CoreError::InvalidInput(format!(
+                "'{}' can't be read on this PC: {err}",
+                file.local_path
+            )))
+        })?;
+        let size = local.metadata().await.map_err(|err| Stopped::failed(err.into()))?.len();
         self.inner.transfers.change(info.id, |i| i.size = size);
-        let mut writer = files.write(&info.remote_path, file.replace).await?;
+        if cancel.is_cancelled() || token.is_cancelled() {
+            return Err(Stopped::Cancelled {
+                left: "nothing was left on the host".into(),
+            });
+        }
+        let mut writer = files
+            .write(&info.remote_path, file.replace)
+            .await
+            .map_err(Stopped::failed)?;
+        let pumped = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            () = token.cancelled() => None,
+            result = self.pump(&mut local, writer.as_mut(), info) => Some(result),
+        };
+        match pumped {
+            None => Err(Stopped::Cancelled {
+                left: writer.abort().await,
+            }),
+            Some(Err(err)) => Err(Stopped::Failed {
+                err,
+                left: Some(writer.abort().await),
+            }),
+            Some(Ok((done, sha))) => match writer.finish().await {
+                Ok(written) => Ok((done, sha, written)),
+                Err(err) => Err(Stopped::Failed { err, left: None }),
+            },
+        }
+    }
+
+    /// The local file's bytes into the writer, with progress. Returns how many and their SHA-256.
+    async fn pump(
+        &self,
+        local: &mut tokio::fs::File,
+        writer: &mut dyn RemoteWrite,
+        info: &TransferInfo,
+    ) -> Result<(u64, String)> {
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; CHUNK];
         let mut done = 0u64;
@@ -863,23 +921,25 @@ impl Terminals {
             done += n as u64;
             self.inner.transfers.progress(info.id, done);
         }
-        writer.finish().await?;
         Ok((done, hex::encode(hasher.finalize())))
     }
+}
 
-    /// After a failed or cancelled upload: a new file is deleted again; a replaced one stays as far as
-    /// it got. Says which.
-    async fn undo(&self, files: &Arc<dyn RemoteFiles>, info: &TransferInfo, file: &UploadFile) -> String {
-        if file.replace {
-            return format!(
-                "{} on the host is incomplete now; upload it again to replace it",
-                info.remote_path
-            );
-        }
-        match files.remove(&info.remote_path).await {
-            Ok(()) | Err(CoreError::RemoteNotFound { .. }) => "cancelled; nothing was left on the host".to_owned(),
-            Err(err) => format!("cancelled, but the partial file could not be deleted: {err}"),
-        }
+/// Why an upload did not finish, and what it left on the host.
+enum Stopped {
+    Cancelled {
+        left: String,
+    },
+    /// `left`: what the aborted write left, when the error came before it finished.
+    Failed {
+        err: CoreError,
+        left: Option<String>,
+    },
+}
+
+impl Stopped {
+    fn failed(err: CoreError) -> Self {
+        Self::Failed { err, left: None }
     }
 }
 
