@@ -207,7 +207,11 @@ export function ImageToolsPage({ active, onSubmitted, onImport, onOpenSettings }
 
   async function chooseSource() {
     const path = await pickFile("image", setError);
-    if (!path) return;
+    if (path) await loadOptions(path);
+  }
+
+  /** The Convert tab's options for one image: picked there, or the one Inspect shows ("Convert it…"). */
+  async function loadOptions(path: string) {
     setError(null);
     try {
       const o = await convertApi.options(path);
@@ -308,7 +312,18 @@ export function ImageToolsPage({ active, onSubmitted, onImport, onOpenSettings }
             <>
               <InfoTable info={inspected} />
               <Problems info={inspected} />
-              <div>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setTab("convert");
+                    void loadOptions(inspected.path);
+                  }}
+                >
+                  <ArrowRightLeftIcon data-icon="inline-start" />
+                  Convert it…
+                </Button>
                 <WhyDisabled reason={readOnly}>
                   <Button
                     variant="outline"

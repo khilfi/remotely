@@ -221,7 +221,11 @@ export default function App() {
   const openDeployBlank = useCallback(() => setDeploying({ templateId: null }), []);
   // CV-01: the Import dialog (on a file Image tools inspected, or none); VM-17: the Export dialog on a VM.
   const [importing, setImporting] = useState<{ path: string | null } | null>(null);
-  const openImport = useCallback((path?: string) => setImporting({ path: path ?? null }), []);
+  // A path only when it is one (a click handler may pass its event).
+  const openImport = useCallback(
+    (path?: unknown) => setImporting({ path: typeof path === "string" ? path : null }),
+    [],
+  );
   const [exporting, setExporting] = useState<string | null>(null);
   const openExport = useCallback((vmKey: string) => setExporting(vmKey), []);
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.

@@ -638,6 +638,14 @@ async fn a_libvirt_vm_imports_into_workstation_as_a_deploy() {
         "{:?}",
         preview.notes
     );
+    assert!(
+        preview
+            .notes
+            .iter()
+            .any(|n| n.contains("a boot disk smaller than 1 GB grows to it")),
+        "the preview says the 64 MB disk grows to whole GB: {:?}",
+        preview.notes
+    );
 
     let SubmitOutcome::NeedsApproval { request: approval } =
         core.deploy.submit_import(&core.ctx, &request).await.unwrap()

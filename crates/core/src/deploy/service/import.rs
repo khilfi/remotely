@@ -378,9 +378,10 @@ impl Deploys {
         Ok(Ok((spec, analysis)))
     }
 
-    /// What the import's preview adds: how each disk is converted, and the analysis's notes.
-    fn import_notes(&self, spec: &DeploySpec, analysis: &ImportAnalysis) -> Vec<String> {
-        let mut notes = analysis.notes.clone();
+    /// What the import's preview adds: how each disk is converted. (The dialog shows the analysis's own notes above
+    /// the preview, so they aren't repeated here.)
+    fn import_notes(&self, spec: &DeploySpec) -> Vec<String> {
+        let mut notes = Vec::new();
         if let DeploySource::Import { disks, .. } = &spec.source {
             let tools = self.tool_paths().unwrap_or_default();
             for (i, disk) in disks.iter().enumerate() {
@@ -427,9 +428,9 @@ impl Deploys {
                 problems,
                 preview: None,
             }),
-            Ok((spec, analysis)) => {
+            Ok((spec, _)) => {
                 let mut checked = preview(&spec, &self.hypervisors, self.host.as_ref()).await;
-                let mut notes = self.import_notes(&spec, &analysis);
+                let mut notes = self.import_notes(&spec);
                 notes.append(&mut checked.notes);
                 checked.notes = notes;
                 Ok(DeployCheck {

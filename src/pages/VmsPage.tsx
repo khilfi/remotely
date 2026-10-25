@@ -940,7 +940,7 @@ export function VmsPage({
         {/* CV-01: a foreign VM or disk (OVA, VHD/VHDX, qcow2, raw, libvirt, Proxmox) as a new VM. */}
         {onImport && (
           <WhyDisabled reason={readOnly}>
-            <Button variant="outline" disabled={readOnly !== null} onClick={onImport}>
+            <Button variant="outline" disabled={readOnly !== null} onClick={() => onImport()}>
               <ImportIcon data-icon="inline-start" />
               Import…
             </Button>
