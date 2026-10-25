@@ -338,7 +338,9 @@ impl Core {
         // QL-15: before the saved paths are read below; `assemble` checks again, which then finds nothing.
         settings::repair(&store, &ctx).await?;
         let saved = saved_vmrun_path(&store, &ctx).await?;
-        let vmware: Arc<dyn VmwareAdapter> = Arc::from(adapters::vmware::connect(config.vmrun_path.or(saved)));
+        let ovftool = saved_ovftool_path(&store, &ctx).await?;
+        let vmware: Arc<dyn VmwareAdapter> =
+            Arc::from(adapters::vmware::connect_with(config.vmrun_path.or(saved), ovftool));
         let docker = saved_docker_path(&store, &ctx).await?;
         let saved_vbox = saved_vboxmanage_path(&store, &ctx).await?;
         let virtualbox: Arc<dyn VirtualBoxAdapter> =
@@ -661,7 +663,9 @@ impl Core {
         self.store
             .put_setting(&self.ctx, store::VMRUN_PATH_KEY, &as_text)
             .await?;
-        self.vmware.replace(Arc::from(adapters::vmware::connect(path)));
+        let ovftool = saved_ovftool_path(&self.store, &self.ctx).await?;
+        self.vmware
+            .replace(Arc::from(adapters::vmware::connect_with(path, ovftool)));
         let in_use = self.vmrun_path();
         let detail = format!(
             "saved: {}; in use: {}",
@@ -671,6 +675,43 @@ impl Core {
                 .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
         );
         self.audit_setting("Set the vmrun.exe path", &detail).await?;
+        Ok(in_use)
+    }
+
+    /// VM-21: the ovftool.exe in use (OVA and OVF imports into Workstation), or `None` when it was not found.
+    pub fn ovftool_path(&self) -> Option<PathBuf> {
+        self.vmware.ovftool_path()
+    }
+
+    /// VM-21: the ovftool.exe path saved in Settings, if any.
+    pub async fn saved_ovftool_path(&self) -> Result<Option<PathBuf>> {
+        saved_ovftool_path(&self.store, &self.ctx).await
+    }
+
+    /// VM-21: saves the ovftool.exe path (`None` = find it: `REMOTELY_OVFTOOL`, then the OVFTool folder next to
+    /// vmrun.exe) and looks for it again at once. The path must be an existing ovftool.exe. Audited, since it decides
+    /// which program imports appliances.
+    pub async fn set_ovftool_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::vmware::validate_ovftool_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx, store::OVFTOOL_PATH_KEY, &as_text)
+            .await?;
+        let vmrun = saved_vmrun_path(&self.store, &self.ctx).await?;
+        self.vmware
+            .replace(Arc::from(adapters::vmware::connect_with(vmrun, path)));
+        let in_use = self.ovftool_path();
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the ovftool.exe path", &detail).await?;
         Ok(in_use)
     }
 
@@ -1032,6 +1073,13 @@ async fn saved_docker_path(store: &Store, ctx: &Context) -> Result<Option<PathBu
 
 async fn saved_vmrun_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
     let saved = store.get_setting::<Option<String>>(ctx, store::VMRUN_PATH_KEY).await?;
+    Ok(saved.flatten().map(PathBuf::from))
+}
+
+async fn saved_ovftool_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
+    let saved = store
+        .get_setting::<Option<String>>(ctx, store::OVFTOOL_PATH_KEY)
+        .await?;
     Ok(saved.flatten().map(PathBuf::from))
 }
 

@@ -29,6 +29,7 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
     let mut reset = Vec::new();
     check::<PolicyRules>(store, ctx, store::POLICY_RULES_KEY, "the approval rules", &mut reset).await?;
     check::<Option<String>>(store, ctx, store::VMRUN_PATH_KEY, "the vmrun.exe path", &mut reset).await?;
+    check::<Option<String>>(store, ctx, store::OVFTOOL_PATH_KEY, "the ovftool.exe path", &mut reset).await?;
     check::<Option<String>>(
         store,
         ctx,
