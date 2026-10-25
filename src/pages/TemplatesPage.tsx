@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
+  BoxesIcon,
   CopyIcon,
   RocketIcon,
   DiscIcon,
@@ -42,6 +43,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ImageDialog } from "@/components/ImageDialog";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { SizeDialog } from "@/components/SizeDialog";
+import { StacksTab } from "@/components/StacksTab";
 import { TemplateDialog } from "@/components/TemplateDialog";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
@@ -53,6 +55,7 @@ import {
   type OsProfile,
   type Size,
   type SizeInput,
+  type SubmitOutcome,
   type TemplateInput,
 } from "@/lib/api";
 import {
@@ -72,7 +75,7 @@ import { plural } from "@/lib/format";
 import { reveal } from "@/lib/reveal";
 import { cn } from "@/lib/utils";
 
-export type TemplatesTab = "sizes" | "images" | "templates";
+export type TemplatesTab = "sizes" | "images" | "templates" | "stacks";
 
 interface Props {
   /** True while the page is shown: it reads the catalogue again when the user comes back. */
@@ -82,6 +85,10 @@ interface Props {
   request: { tab: TemplatesTab; create?: boolean; id?: string; n: number } | null;
   /** VM-21: opens the Deploy dialog on a template. */
   onDeploy: (templateId: string) => void;
+  /** VM-08: the approval dialog for a stack's deploy, an instance's power or a teardown. */
+  onSubmitted?: (outcome: SubmitOutcome) => void;
+  /** VM-08: changes when a VM job finished, so the instances' states are read again. */
+  refreshKey?: number;
 }
 
 type Dialog =
@@ -92,9 +99,10 @@ type Dialog =
   | { kind: "deleteImage"; image: Image }
   | { kind: "deleteTemplate"; template: LaunchTemplate };
 
-export function TemplatesPage({ active, request, onDeploy }: Props) {
+export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshKey }: Props) {
   const readOnly = useReadOnlyReason();
   const [tab, setTab] = useState<TemplatesTab>("templates");
+  const [stackCreate, setStackCreate] = useState(0);
   const [sizes, setSizes] = useState<Size[]>([]);
   const [images, setImages] = useState<Image[]>([]);
   const [templates, setTemplates] = useState<LaunchTemplate[]>([]);
@@ -145,6 +153,7 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
     if (request.create && !readOnly) {
       if (request.tab === "sizes") setDialog({ kind: "size" });
       else if (request.tab === "images") setDialog({ kind: "image" });
+      else if (request.tab === "stacks") setStackCreate((n) => n + 1);
       else if (images.length > 0) setDialog({ kind: "template" });
     }
   }
@@ -169,7 +178,8 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
         Describe VMs like a cloud provider does: a <span className="font-medium text-foreground">size</span> (CPU, RAM
         and disks), an <span className="font-medium text-foreground">image</span> (where the OS comes from) and a{" "}
         <span className="font-medium text-foreground">launch template</span> that puts them together with the network,
-        SSH key, names and what happens after deploy. Deploying arrives with the deploy package.
+        SSH key, names and what happens after deploy. A <span className="font-medium text-foreground">stack</span>{" "}
+        deploys several launch templates in boot order, as one.
       </p>
       <Tabs value={tab} onValueChange={(v) => setTab(v as TemplatesTab)}>
         <TabsList>
@@ -184,6 +194,10 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
           <TabsTrigger value="templates">
             <LayersIcon />
             Launch templates
+          </TabsTrigger>
+          <TabsTrigger value="stacks">
+            <BoxesIcon />
+            Stacks
           </TabsTrigger>
         </TabsList>
 
@@ -579,6 +593,18 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
               </Table>
             </div>
           )}
+        </TabsContent>
+
+        {/* VM-08: stacks of launch templates, and their instances on this PC. */}
+        <TabsContent value="stacks" className="flex min-w-0 flex-col gap-3">
+          <StacksTab
+            active={active && tab === "stacks"}
+            templates={templates}
+            readOnly={readOnly}
+            onSubmitted={(outcome) => onSubmitted?.(outcome)}
+            refreshKey={refreshKey}
+            createRequest={stackCreate}
+          />
         </TabsContent>
       </Tabs>
 

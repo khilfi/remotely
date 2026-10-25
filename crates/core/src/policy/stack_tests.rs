@@ -293,3 +293,12 @@ fn stack_commands_are_built_by_the_core_only() {
     let (command, _) = instance_power(PowerOp::Stop { mode: StopMode::Hard }, &["web-1"], Environment::Lab);
     assert!(command.validate().is_err());
 }
+
+/// FD-03: one stack command of each kind, for the read-only lock's test of every action.
+pub(super) fn every_stack_command() -> Vec<(Command, Vec<Target>)> {
+    vec![
+        stack_deploy(1, 1, Environment::Lab),
+        instance_power(PowerOp::Start { gui: false }, &["web-1"], Environment::Lab),
+        teardown(&["web-1"], Environment::Lab, 0),
+    ]
+}

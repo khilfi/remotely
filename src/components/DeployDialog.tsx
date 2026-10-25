@@ -20,6 +20,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { blankTemplate, effectiveInput, formOf, TemplateFields, type TemplateForm } from "@/components/TemplateFields";
@@ -450,6 +451,14 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
               </p>
             )}
             {current?.preview && <DeployPreviewView preview={current.preview} />}
+            {/* VM-26: this PC after it, and what to suspend when it won't fit. */}
+            {current?.capacity && (
+              <CapacityPlanView
+                capacity={current.capacity}
+                readOnly={readOnly}
+                onSubmitted={(outcome) => onSubmitted(outcome, () => {})}
+              />
+            )}
           </div>
         )}
 

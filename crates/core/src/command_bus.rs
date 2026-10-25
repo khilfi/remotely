@@ -1827,10 +1827,11 @@ impl CommandBus {
         let host = self.capacity.host().as_ref();
         let stack = self.impact.stack(command, &decision.targets, host).await;
         let demands = match (command, &stack) {
-            (Command::Deploy { spec, .. }, _) => match self.impact.deploy(command, host).await {
-                Some(preview) => Some(crate::capacity_plan::deploy_demands(spec, &preview)),
-                None => None,
-            },
+            (Command::Deploy { spec, .. }, _) => self
+                .impact
+                .deploy(command, host)
+                .await
+                .map(|preview| crate::capacity_plan::deploy_demands(spec, &preview)),
             (
                 Command::Stack {
                     op: crate::stacks::StackOp::Deploy { spec },

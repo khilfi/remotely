@@ -6,6 +6,7 @@
 import { Channel, invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tauri-apps/api/event";
 import { learnFields, masker } from "@/lib/presentation";
+import type { DeployCapacity, StackDetails, StackMembership } from "@/lib/stacks-api";
 
 // FD-03: every answer and event passes the host, IP and user fields it holds to the presentation masker, so those
 // values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored. Exported for
@@ -279,7 +280,9 @@ export type Command =
   /** VM-24: deleting VMs (an existing VM is added only through `vmPickExisting`). */
   | { type: "vmLifecycle"; targets: TargetRef[]; op: VmLifecycleOp }
   /** VM-21, VM-10: new VMs. Never submitted by the UI: `deploySubmit` and `deployCloneSubmit` build it in the core. */
-  | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> };
+  | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> }
+  /** VM-08: a stack instance's deploy, power or teardown. Never submitted by the UI: `stacksApi` builds it in the core. */
+  | { type: "stack"; targets: TargetRef[]; op: Record<string, unknown> };
 
 /** VM-11: what a network adapter is attached to. */
 export type NicNetwork =
@@ -396,6 +399,8 @@ export interface TargetImpact {
   notes: string[];
   /** CT-01, CT-02: a container target as it is now (the VM fields are empty then). */
   container?: ContainerImpact;
+  /** VM-08: the stack instance the VM belongs to, so its VMs show as a group. */
+  stack?: StackMembership;
 }
 
 /** CT-01, CT-02: one container, image or volume target now, or what a pull or prune does on a host. */
@@ -490,6 +495,10 @@ export interface ApprovalRequest {
   deploy: DeployPreview | null;
   /** VM-23, VM-24: what changes on each VM, the files that go, and why a VM would be refused. */
   vmChange: VmChangePreview | null;
+  /** VM-08: for a stack command, the instance and its steps in the order they run. */
+  stack?: StackDetails | null;
+  /** VM-26: for a deploy, RAM, CPU and disk on this PC after it, next to now. */
+  capacity?: DeployCapacity | null;
 }
 
 /** SS-07: a tunnel as the approval dialog shows it. */
@@ -546,6 +555,8 @@ export type JobEvent =
     }
   /** H9: the canary host finished well; `rest` hosts wait until `until` for the go-ahead (`bulkGoOn`). */
   | { event: "canaryWaiting"; jobId: string; target: string; name: string; rest: number; until: string }
+  /** VM-08: a stack job's step starts (`waiting` null), or waits for its readiness check or delay. */
+  | { event: "stackStep"; jobId: string; step: number; steps: number; label: string; waiting: string | null }
   /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
   | { event: "stillRunning"; jobId: string; targets: Target[] }
   /** VM-01: `scope` says what the job may have changed, so only that page reads it again. */
@@ -842,6 +853,8 @@ export type ActionKind =
   | "vmRegister"
   /** VM-21, VM-10: make new VMs. */
   | "vmDeploy"
+  /** VM-08: delete a stack instance's VMs. */
+  | "stackTeardown"
   | "appUpdate";
 
 export interface TierRule {
@@ -1807,7 +1820,7 @@ export interface ExportReport {
   /** QL-19 saved MultiExec groups. */
   groups: number;
   /** VM-19 to VM-21: own sizes, images and launch templates. */
-  catalog: { sizes: number; images: number; templates: number };
+  catalog: { sizes: number; images: number; templates: number; stacks: number };
 }
 
 export type TransferStatus = "new" | "same" | "conflict";
@@ -1849,7 +1862,7 @@ export interface TransferPreview {
   /** QL-19 saved MultiExec groups. */
   groups: TransferItem[];
   /** VM-19 to VM-21: own sizes, images (by path) and launch templates. */
-  catalog: { sizes: TransferItem[]; images: TransferItem[]; templates: TransferItem[] };
+  catalog: { sizes: TransferItem[]; images: TransferItem[]; templates: TransferItem[]; stacks: TransferItem[] };
   warnings: string[];
 }
 
@@ -1873,7 +1886,14 @@ export interface TransferReport {
   /** QL-19 saved MultiExec groups. */
   groups: TransferCounts;
   /** VM-19 to VM-21; imagesMissingHere: imported without their file (or golden VM) on this laptop. */
-  catalog: { sizes: TransferCounts; images: TransferCounts; templates: TransferCounts; imagesMissingHere: number };
+  catalog: {
+    sizes: TransferCounts;
+    images: TransferCounts;
+    templates: TransferCounts;
+    /** VM-08. */
+    stacks: TransferCounts;
+    imagesMissingHere: number;
+  };
   /** SS-07: port forwards saved with the imported sessions. */
   forwards: number;
   /** SS-01, SS-07: startup commands and port forwards in the file that were not ticked. */
@@ -2168,6 +2188,8 @@ export interface DeployPreview {
 export interface DeployCheck {
   problems: TemplateProblem[];
   preview: DeployPreview | null;
+  /** VM-26: this PC after the deploy, next to now. */
+  capacity?: DeployCapacity | null;
 }
 
 /** BX-01: what is picked: tabs and tree sessions for Compare, sessions, VMs, tags and filters for a key push. */
@@ -3454,7 +3476,12 @@ export const api = {
     /** QL-19 saved MultiExec groups. */
     groups?: TransferChoice[];
     /** VM-19 to VM-21. */
-    catalog?: { sizes: TransferChoice[]; images: TransferChoice[]; templates: TransferChoice[] };
+    catalog?: {
+      sizes: TransferChoice[];
+      images: TransferChoice[];
+      templates: TransferChoice[];
+      stacks?: TransferChoice[];
+    };
     /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
     keepStartup: number[];
     keepForwards: number[];

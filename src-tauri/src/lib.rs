@@ -16,6 +16,7 @@ mod host_details;
 mod ipc;
 mod multiexec;
 mod navigation;
+mod stacks;
 mod terminal;
 mod terminal_rules;
 mod tunnels;
@@ -652,6 +653,19 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         deploy::deploy_clone_submit,
         deploy::deploy_host_adapters,
         deploy::deploy_default_folder,
+        stacks::stacks_list,
+        stacks::stacks_check,
+        stacks::stacks_add,
+        stacks::stacks_update,
+        stacks::stacks_delete,
+        stacks::stacks_deploy_check,
+        stacks::stacks_deploy,
+        stacks::stacks_instances,
+        stacks::stacks_instance_power,
+        stacks::stacks_teardown,
+        stacks::stacks_add_vm,
+        stacks::stacks_remove_vm,
+        stacks::stacks_forget_instance,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,

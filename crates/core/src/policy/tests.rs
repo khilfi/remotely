@@ -3527,6 +3527,7 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
     .chain(every_container_command())
     .chain([super::deploy_tests::deploy(1, Environment::Lab)])
     .chain(super::vm_settings_tests::every_vm_settings_command())
+    .chain(super::stack_tests::every_stack_command())
     .collect()
 }
 

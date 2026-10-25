@@ -36,6 +36,7 @@ import {
   GitCompareArrowsIcon,
   HistoryIcon,
   BellIcon,
+  BoxesIcon,
   CompassIcon,
   KeyboardIcon,
   KeyRoundIcon,
@@ -731,6 +732,27 @@ export default function App() {
       },
     },
     {
+      // VM-08.
+      id: "stacks",
+      label: "Stacks: deploy, start, stop or tear down several VMs as one",
+      icon: BoxesIcon,
+      keywords: "stack lab blueprint boot order instance teardown templates group",
+      run: () => {
+        setTemplatesRequest((prev) => ({ tab: "stacks", n: (prev?.n ?? 0) + 1 }));
+        setPage("templates");
+      },
+    },
+    {
+      id: "new-stack",
+      label: "New stack of launch templates…",
+      icon: BoxesIcon,
+      keywords: "stack lab blueprint boot order readiness create",
+      run: () => {
+        setTemplatesRequest((prev) => ({ tab: "stacks", create: true, n: (prev?.n ?? 0) + 1 }));
+        setPage("templates");
+      },
+    },
+    {
       id: "watch",
       label: "Watch hosts on the dashboard",
       icon: GaugeIcon,
@@ -1053,7 +1075,13 @@ export default function App() {
             </section>
             <section hidden={page !== "templates"}>
               <ErrorBoundary name="Templates">
-                <Templates active={page === "templates"} request={templatesRequest} onDeploy={openDeploy} />
+                <Templates
+                  active={page === "templates"}
+                  request={templatesRequest}
+                  onDeploy={openDeploy}
+                  onSubmitted={submitted}
+                  refreshKey={vmJobs + inventoryVersion}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "map"} className="h-full">

@@ -81,6 +81,7 @@ import { MetricCell } from "@/components/MetricBits";
 import { NameDialog } from "@/components/NameDialog";
 import { SnapshotActionDialog, type SnapshotAction } from "@/components/SnapshotActionDialog";
 import { SortableHead } from "@/components/SortableHead";
+import { StackGroupRow } from "@/components/StackGroupRow";
 import { VmDetailsPanel } from "@/components/VmDetailsPanel";
 import { ResourcesDialog } from "@/components/VmSettingsDialogs";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
@@ -115,6 +116,8 @@ import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { refreshDue } from "@/lib/job-events";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
 import { shouldPoll } from "@/lib/polling";
+import { groupByInstance } from "@/lib/stacks";
+import { stacksApi, type StackInstance } from "@/lib/stacks-api";
 import { cn } from "@/lib/utils";
 import {
   bulkSnapshotReasons,
@@ -319,6 +322,20 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
   const [selectionError, setSelectionError] = useState<string | null>(null);
   const [limits, setLimits] = useState<SnapshotLimits | null>(null);
   const [snapshotDialog, setSnapshotDialog] = useState<SnapshotAction | null>(null);
+  // VM-08: the stack instances on this PC, read with the list.
+  const [instances, setInstances] = useState<StackInstance[]>([]);
+
+  useEffect(() => {
+    if (!active) return;
+    let stale = false;
+    stacksApi.instances().then(
+      (all) => !stale && setInstances(all),
+      () => !stale && setInstances([]),
+    );
+    return () => {
+      stale = true;
+    };
+  }, [active, key, listVersion]);
 
   useEffect(() => {
     api.snapshotLimits().then(setLimits, () => setLimits(null));
@@ -426,7 +443,7 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
 
   const usageOf = useCallback((vm: VmRecord) => usage.get(keyOf(vm.vmxPath)), [usage]);
   // The shown order. Selection and shift-click ranges follow it.
-  const vms = useMemo(() => {
+  const sorted = useMemo(() => {
     if (sort.key === "name" && sort.dir === 1) return listed;
     return [...listed].sort(
       (a, b) =>
@@ -434,6 +451,9 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
         a.displayName.localeCompare(b.displayName),
     );
   }, [listed, sort, usageOf]);
+  // VM-08: a stack instance's VMs as a group under its header row, the other VMs after them.
+  const groups = useMemo(() => groupByInstance(sorted, instances), [sorted, instances]);
+  const vms = useMemo(() => groups.flatMap((g) => g.vms), [groups]);
 
   const detailVm = detail ? listed.find((v) => v.vmxPath === detail) : undefined;
   const detailTree = detailVm ? trees.map.get(keyOf(detailVm.vmxPath)) : undefined;
@@ -1330,32 +1350,58 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {vms.map((vm, i) => (
-                    <TableRow
-                      key={vm.vmxPath}
-                      data-vm-drop={vm.vmxPath}
-                      data-state={selected.has(vm.vmxPath) ? "selected" : undefined}
-                      onClick={(e) => toggle(i, e)}
-                      className={cn(
-                        "select-none",
-                        detail === vm.vmxPath && "shadow-[inset_3px_0_0_var(--color-primary)]",
-                      )}
-                    >
-                      <TableCell>
-                        {/* The click (or Space) bubbles to the row, which does the selecting. */}
-                        <Checkbox aria-label={`Select ${vm.displayName}`} checked={selected.has(vm.vmxPath)} />
-                      </TableCell>
-                      {shownColumns.map((c) => (
-                        <TableCell
-                          key={c.id}
-                          className={c.className}
-                          onClick={c.ownClicks ? (e) => e.stopPropagation() : undefined}
-                        >
-                          {c.cell(vm)}
-                        </TableCell>
-                      ))}
-                    </TableRow>
-                  ))}
+                  {groups.map((group, g) => {
+                    // Row indexes run through the groups, so shift-click ranges follow the shown order.
+                    const offset = groups.slice(0, g).reduce((n, x) => n + x.vms.length, 0);
+                    return (
+                      <Fragment key={group.instance?.id ?? "rest"}>
+                        {group.instance && (
+                          <StackGroupRow
+                            instance={group.instance}
+                            colSpan={shownColumns.length + 1}
+                            readOnly={readOnly}
+                            onSubmitted={onSubmitted}
+                          />
+                        )}
+                        {!group.instance && groups.length > 1 && (
+                          <TableRow className="hover:bg-transparent">
+                            <TableCell colSpan={shownColumns.length + 1} className="py-1 text-xs text-muted-foreground">
+                              Not in a stack
+                            </TableCell>
+                          </TableRow>
+                        )}
+                        {group.vms.map((vm, j) => {
+                          const i = offset + j;
+                          return (
+                            <TableRow
+                              key={vm.vmxPath}
+                              data-vm-drop={vm.vmxPath}
+                              data-state={selected.has(vm.vmxPath) ? "selected" : undefined}
+                              onClick={(e) => toggle(i, e)}
+                              className={cn(
+                                "select-none",
+                                detail === vm.vmxPath && "shadow-[inset_3px_0_0_var(--color-primary)]",
+                              )}
+                            >
+                              <TableCell>
+                                {/* The click (or Space) bubbles to the row, which does the selecting. */}
+                                <Checkbox aria-label={`Select ${vm.displayName}`} checked={selected.has(vm.vmxPath)} />
+                              </TableCell>
+                              {shownColumns.map((c) => (
+                                <TableCell
+                                  key={c.id}
+                                  className={c.className}
+                                  onClick={c.ownClicks ? (e) => e.stopPropagation() : undefined}
+                                >
+                                  {c.cell(vm)}
+                                </TableCell>
+                              ))}
+                            </TableRow>
+                          );
+                        })}
+                      </Fragment>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>
