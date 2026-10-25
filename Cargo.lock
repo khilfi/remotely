@@ -4027,6 +4027,7 @@ dependencies = [
  "csv",
  "ed25519-dalek",
  "futures",
+ "futures-util",
  "getrandom 0.4.3",
  "hex",
  "regex",

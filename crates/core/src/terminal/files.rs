@@ -597,8 +597,10 @@ impl Terminals {
     }
 
     /// SS-08: downloads files from the terminal's host into `dest` on this PC, one after another; returns
-    /// them as queued. Each is audited when it is saved: name, size, host path, where it went, SHA-256.
+    /// them as queued. Each is audited when it is saved: name, size, host path, where it went, SHA-256. Never
+    /// into a Git working tree ([`crate::save_guard`]).
     pub async fn download(&self, ctx: &Context, id: Uuid, paths: &[String], dest: &Path) -> Result<Vec<TransferInfo>> {
+        crate::save_guard::refuse_repository_folder(dest, crate::save_guard::Saved::Download)?;
         let (control, files) = self.live(id)?;
         if !dest.is_dir() {
             return Err(CoreError::InvalidInput(format!("{} is not a folder.", dest.display())));

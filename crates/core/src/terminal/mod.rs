@@ -101,6 +101,7 @@ use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
 use crate::locks;
 use crate::policy::Tier;
 use crate::presentation::Change;
+use crate::save_guard::{self, Saved};
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
@@ -1265,7 +1266,7 @@ impl Terminals {
 
     /// Saves the terminals' text: one file at `dest` (a header per terminal when there are several),
     /// or with [`SaveLayout::FilePerTerminal`] one file each in the folder `dest`. Audited with the
-    /// sessions and the files, never the text.
+    /// sessions and the files, never the text. Never into a Git working tree ([`save_guard`]).
     pub async fn save_output(
         &self,
         ctx: &Context,
@@ -1274,6 +1275,10 @@ impl Terminals {
         dest: &Path,
     ) -> Result<SavedOutput> {
         output::check(&items)?;
+        match layout {
+            SaveLayout::OneFile => save_guard::refuse_repository(dest, Saved::Output)?,
+            SaveLayout::FilePerTerminal => save_guard::refuse_repository_folder(dest, Saved::Output)?,
+        }
         let items = self.scrub_output(items);
         let now = log::local_now();
         let mut files: Vec<PathBuf> = Vec::new();
@@ -1370,8 +1375,10 @@ impl Terminals {
         (targets, names)
     }
 
-    /// SS-11: starts logging the pane's output to `path` (appended), each line with the time. Audited.
+    /// SS-11: starts logging the pane's output to `path` (appended), each line with the time. Audited. Never into
+    /// a Git working tree ([`save_guard`]).
     pub async fn start_log(&self, ctx: &Context, id: Uuid, path: &Path) -> Result<()> {
+        save_guard::refuse_repository(path, Saved::SessionLog)?;
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;

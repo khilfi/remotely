@@ -64,6 +64,7 @@ pub mod metrics;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
+pub mod save_guard;
 pub mod sessions;
 pub mod settings;
 pub mod snapshots;
@@ -704,11 +705,12 @@ impl Core {
     }
 
     /// AP-05: writes the workspace's whole audit log to `path` as CSV (see [`export::audit_csv`]) and
-    /// logs that it did. A read, so it skips the bus.
+    /// logs that it did. A read, so it skips the bus. Never into a Git working tree ([`save_guard`]). The rows
+    /// are read and written one by one into a file next to `path`, which then takes its name, so a long log is
+    /// never all in memory and a failed export leaves no half file.
     pub async fn export_audit_csv(&self, path: &Path) -> Result<AuditExport> {
-        let entries = self.store.audit_for_export(&self.ctx).await?;
-        let (csv, redacted) = export::audit_csv(&entries);
-        tokio::fs::write(path, csv).await?;
+        save_guard::refuse_repository(path, save_guard::Saved::AuditLog)?;
+        let (entries, redacted) = save_guard::write_atomically(path, |file| self.write_audit_csv(file)).await?;
         let file = path
             .file_name()
             .map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
@@ -723,15 +725,36 @@ impl Core {
                     targets: &[],
                     approval: None,
                     result: None,
-                    detail: Some(&format!("{} entries to {file}", entries.len())),
+                    detail: Some(&format!("{entries} entries to {file}")),
                 },
             )
             .await?;
         Ok(AuditExport {
             path: path.display().to_string(),
-            entries: entries.len(),
+            entries,
             redacted,
         })
+    }
+
+    /// The audit log's CSV into `file`, row by row. Returns how many entries, and how many had something redacted.
+    async fn write_audit_csv(&self, file: tokio::fs::File) -> Result<(usize, usize)> {
+        use futures_util::TryStreamExt;
+        use tokio::io::AsyncWriteExt;
+        let mut out = tokio::io::BufWriter::new(file);
+        out.write_all(export::audit_csv_header().as_bytes()).await?;
+        let (mut entries, mut redacted) = (0, 0);
+        // Dropped before anything else reads the database: it holds a connection.
+        let mut rows = self.store.audit_entries(&self.ctx);
+        while let Some(entry) = rows.try_next().await? {
+            let (row, was) = export::audit_csv_row(&entry);
+            out.write_all(row.as_bytes()).await?;
+            entries += 1;
+            redacted += usize::from(was);
+        }
+        drop(rows);
+        out.flush().await?;
+        out.into_inner().sync_all().await?;
+        Ok((entries, redacted))
     }
 
     async fn audit_setting(&self, action: &str, detail: &str) -> Result<()> {
