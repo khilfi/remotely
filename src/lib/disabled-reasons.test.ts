@@ -43,6 +43,8 @@ test("Compare runs only once there is something to run on and something to run",
   );
   assert.equal(compareRunReason({ ...ready, script: "   " }), "Type a command first");
   assert.match(compareRunReason({ ...ready, timeoutOk: false }) ?? "", /^The time limit must be/);
+  assert.match(compareRunReason({ ...ready, stopAfterOk: false }) ?? "", /^Stop after must be/);
+  assert.equal(compareRunReason({ ...ready, stopAfterOk: true }), null);
   assert.equal(compareRunReason({ ...ready, submitting: true }), "Starting the run…");
 });
 

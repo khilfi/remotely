@@ -30,6 +30,7 @@ import { BulkResultsView } from "@/components/BulkResultsView";
 import { RecordedLinesView } from "@/components/RecordedLinesView";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { usePresentation } from "@/components/Presentation";
+import { useDebounced } from "@/hooks/use-debounced";
 import {
   api,
   errorMessage,
@@ -45,6 +46,7 @@ import {
 import { compareRunReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
 import { readOnlyLocked } from "@/lib/presentation-state";
+import { parseStopAfter } from "@/lib/rollout";
 
 /** QL-12: a one-shot run here, or the lines MultiExec recorded in the terminals. */
 export type CompareView = "run" | "multiExec";
@@ -107,6 +109,9 @@ export function ComparePanel({
   const [sudoPassword, setSudoPassword] = useState(LOGIN);
   const [trustNew, setTrustNew] = useState(false);
   const [timeout, setTimeoutText] = useState(DEFAULT_TIMEOUT);
+  // H9: blast radius. Both off by default: a non-zero exit is normal for read-only checks (grep, test).
+  const [canary, setCanary] = useState(false);
+  const [stopAfter, setStopAfter] = useState("");
   const [preview, setPreview] = useState<{ key: string; preview: CommandPreview } | null>(null);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [parallel, setParallel] = useState<number | null>(null);
@@ -122,6 +127,7 @@ export function ComparePanel({
   const timeoutSecs = timeout.trim() === "" ? null : Number(timeout);
   const timeoutOk =
     timeoutSecs === null || (Number.isInteger(timeoutSecs) && timeoutSecs >= 1 && timeoutSecs <= 86_400);
+  const stopAfterParsed = parseStopAfter(stopAfter);
   const command: Command = {
     type: "remoteExec",
     targets: hosts.map((h) => ({ kind: "session", sessionId: h.sessionId })),
@@ -130,6 +136,7 @@ export function ComparePanel({
     sudoPasswordId: sudo && sudoPassword !== LOGIN ? sudoPassword : null,
     trustNewHostKeys: trustNew,
     timeoutSecs: timeoutOk ? timeoutSecs : null,
+    rollout: { canary, stopAfterFailures: stopAfterParsed.value },
   };
   const commandKey = JSON.stringify(command);
   const shownPreview = script.trim() && preview?.key === commandKey ? preview.preview : null;
@@ -140,6 +147,7 @@ export function ComparePanel({
     unsavedTabs,
     script,
     timeoutOk,
+    stopAfterOk: stopAfterParsed.ok,
     submitting,
     readOnly: readOnlyLocked(presentation),
   });
@@ -196,7 +204,8 @@ export function ComparePanel({
     };
   }, [commandKey, script]);
 
-  // Earlier runs; again whenever a run ends.
+  // Earlier runs; again whenever a run ends, once per burst of job events (BX-03).
+  const settledRuns = useDebounced(runsVersion);
   useEffect(() => {
     if (!active) return;
     let stale = false;
@@ -209,7 +218,7 @@ export function ComparePanel({
     return () => {
       stale = true;
     };
-  }, [active, runsVersion, jobId]);
+  }, [active, settledRuns, jobId]);
 
   useEffect(() => {
     const unlisten = api.onJobEvent((event) => {
@@ -421,6 +430,43 @@ export function ComparePanel({
                       aria-invalid={!timeoutOk || undefined}
                     />
                     <span className="text-sm text-muted-foreground">seconds (empty: none)</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="compare-canary"
+                      className="mt-0.5"
+                      checked={canary}
+                      onCheckedChange={(v) => setCanary(v === true)}
+                    />
+                    <div className="grid min-w-0 gap-0.5">
+                      <Label htmlFor="compare-canary" className="font-normal">
+                        Run on one host first
+                      </Label>
+                      <p className="text-xs break-words text-muted-foreground">
+                        The first host runs alone. You see its result and choose whether the others run; if it fails,
+                        they don&apos;t.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid gap-0.5">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Label htmlFor="compare-stop-after" className="font-normal">
+                        Stop after
+                      </Label>
+                      <Input
+                        id="compare-stop-after"
+                        className="w-20"
+                        inputMode="numeric"
+                        placeholder="never"
+                        value={stopAfter}
+                        onChange={(e) => setStopAfter(e.currentTarget.value)}
+                        aria-invalid={!stopAfterParsed.ok || undefined}
+                      />
+                      <span className="text-sm text-muted-foreground">failures (empty: never)</span>
+                    </div>
+                    <p className="text-xs break-words text-muted-foreground">
+                      No more hosts start once that many failed or timed out; hosts already running finish.
+                    </p>
                   </div>
                 </div>
 

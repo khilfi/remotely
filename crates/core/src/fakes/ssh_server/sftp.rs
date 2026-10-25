@@ -5,6 +5,12 @@
 //! file answers "failure", as OpenSSH does. Unreadable folders (QL-09) can't be opened at all, nor
 //! anything in them looked at, like another user's private folder. A delay per read or write makes
 //! transfers slow enough to cancel. The log says what was opened and removed, never what was in a file.
+//!
+//! H8: renames work as OpenSSH's do: a plain rename refuses to replace a file, and
+//! `posix-rename@openssh.com` (announced unless [`super::TestSshServer::without_posix_rename`]) does.
+//! Modes and owners set through SFTP are kept in memory per host path (the temp folder has none), and
+//! the login user can't give a file another owner than 1000:1000. A9: an endless folder answers every
+//! read with another batch of names.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -12,7 +18,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use russh_sftp::protocol::{Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version};
+use std::sync::atomic::Ordering;
+
+use russh_sftp::protocol::{
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Packet, Status, StatusCode, Version,
+};
 
 use super::State;
 use crate::locks;
@@ -22,9 +32,21 @@ use crate::terminal::files::resolve;
 pub(super) const SFTP_DIRS: [&str; 7] = ["/home", "/root", "/tmp", "/etc", "/usr", "/srv", "/var/log"];
 
 enum Open {
-    File { file: std::fs::File, path: String },
-    Folder { entries: Option<Vec<File>> },
+    File {
+        file: std::fs::File,
+        path: String,
+    },
+    Folder {
+        entries: Option<Vec<File>>,
+    },
+    /// A9: an endless folder: how many names it sent so far.
+    Endless {
+        sent: u64,
+    },
 }
+
+/// The login user's uid and gid.
+const LOGIN_ID: u32 = 1000;
 
 pub(super) struct SftpServer {
     state: Arc<State>,
@@ -89,6 +111,60 @@ impl SftpServer {
         handle
     }
 
+    /// The attributes of host `path` (absolute), with what SFTP set for it.
+    fn attrs_of(&self, path: &str, meta: &std::fs::Metadata) -> FileAttributes {
+        attrs_with(meta, locks::lock(&self.state.sftp_meta).get(path).copied())
+    }
+
+    /// H8: sets a mode, or an owner the login user may give (its own).
+    fn apply(&self, path: &str, set: &FileAttributes) -> Result<(), StatusCode> {
+        let meta = std::fs::metadata(local(&self.root, path)).map_err(|e| io_status(&e))?;
+        let now = self.attrs_of(path, &meta);
+        let (mut mode, mut uid, mut gid) = (
+            now.permissions.unwrap_or(0o644) & 0o7777,
+            now.uid.unwrap_or(LOGIN_ID),
+            now.gid.unwrap_or(LOGIN_ID),
+        );
+        if let (Some(new_uid), Some(new_gid)) = (set.uid, set.gid) {
+            if (new_uid, new_gid) != (uid, gid) && (new_uid, new_gid) != (LOGIN_ID, LOGIN_ID) {
+                self.state.note(format!("sftp chown refused {path}"));
+                return Err(StatusCode::PermissionDenied);
+            }
+            (uid, gid) = (new_uid, new_gid);
+        }
+        if let Some(permissions) = set.permissions {
+            mode = permissions & 0o7777;
+        }
+        locks::lock(&self.state.sftp_meta).insert(path.to_owned(), (mode, uid, gid));
+        Ok(())
+    }
+
+    /// H8: moves `from` to `to`, and what SFTP kept for it.
+    fn move_file(&self, from: &str, to: &str, replace: bool) -> Result<(), StatusCode> {
+        if self.protected(from) || self.protected(to) {
+            return Err(StatusCode::PermissionDenied);
+        }
+        let (old, new) = (local(&self.root, from), local(&self.root, to));
+        if !replace && new.exists() {
+            // OpenSSH links the new name first, which fails when it is taken.
+            return Err(StatusCode::Failure);
+        }
+        std::fs::rename(&old, &new).map_err(|e| io_status(&e))?;
+        let mut meta = locks::lock(&self.state.sftp_meta);
+        meta.remove(to);
+        if let Some(kept) = meta.remove(from) {
+            meta.insert(to.to_owned(), kept);
+        }
+        Ok(())
+    }
+
+    fn open_path(&self, handle: &str) -> Result<String, StatusCode> {
+        match self.handles.get(handle) {
+            Some(Open::File { path, .. }) => Ok(path.clone()),
+            _ => Err(StatusCode::Failure),
+        }
+    }
+
     async fn pause(&self) {
         let delay = *locks::lock(&self.state.sftp_delay);
         if let Some(delay) = delay {
@@ -124,15 +200,21 @@ fn io_status(err: &std::io::Error) -> StatusCode {
 }
 
 fn attrs(meta: &std::fs::Metadata) -> FileAttributes {
+    attrs_with(meta, None)
+}
+
+/// `set`: the mode, uid and gid kept for the path, if any.
+fn attrs_with(meta: &std::fs::Metadata, set: Option<(u32, u32, u32)>) -> FileAttributes {
     let kind = if meta.is_dir() { 0o040_000 } else { 0o100_000 };
     let mode = if meta.is_dir() { 0o755 } else { 0o644 };
+    let (mode, uid, gid) = set.unwrap_or((mode, LOGIN_ID, LOGIN_ID));
     FileAttributes {
         size: Some(meta.len()),
-        uid: Some(1000),
+        uid: Some(uid),
         user: None,
-        gid: Some(1000),
+        gid: Some(gid),
         group: None,
-        permissions: Some(kind | mode),
+        permissions: Some(kind | (mode & 0o7777)),
         atime: None,
         mtime: meta
             .modified()
@@ -151,7 +233,11 @@ impl russh_sftp::server::Handler for SftpServer {
 
     async fn init(&mut self, _version: u32, _extensions: HashMap<String, String>) -> Result<Version, Self::Error> {
         self.state.note("sftp start");
-        Ok(Version::new())
+        let mut version = Version::new();
+        if !self.state.sftp_no_posix_rename.load(Ordering::SeqCst) {
+            version.extensions.insert("posix-rename@openssh.com".into(), "1".into());
+        }
+        Ok(version)
     }
 
     async fn realpath(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
@@ -168,8 +254,50 @@ impl russh_sftp::server::Handler for SftpServer {
         let meta = std::fs::metadata(self.local(&path)).map_err(|e| io_status(&e))?;
         Ok(Attrs {
             id,
-            attrs: attrs(&meta),
+            attrs: self.attrs_of(&self.path(&path), &meta),
         })
+    }
+
+    async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
+        let path = self.open_path(&handle)?;
+        let meta = std::fs::metadata(local(&self.root, &path)).map_err(|e| io_status(&e))?;
+        Ok(Attrs {
+            id,
+            attrs: self.attrs_of(&path, &meta),
+        })
+    }
+
+    async fn fsetstat(&mut self, id: u32, handle: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
+        let path = self.open_path(&handle)?;
+        self.apply(&path, &attrs)?;
+        Ok(ok(id))
+    }
+
+    async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
+        let path = self.path(&path);
+        if self.protected(&path) {
+            return Err(StatusCode::PermissionDenied);
+        }
+        self.apply(&path, &attrs)?;
+        Ok(ok(id))
+    }
+
+    async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
+        let (from, to) = (self.path(&oldpath), self.path(&newpath));
+        self.move_file(&from, &to, false)?;
+        self.state.note(format!("sftp rename {from} {to}"));
+        Ok(ok(id))
+    }
+
+    async fn extended(&mut self, id: u32, request: String, data: Vec<u8>) -> Result<Packet, Self::Error> {
+        if request != "posix-rename@openssh.com" || self.state.sftp_no_posix_rename.load(Ordering::SeqCst) {
+            return Err(StatusCode::OpUnsupported);
+        }
+        let (from, to) = two_strings(&data).ok_or(StatusCode::BadMessage)?;
+        let (from, to) = (self.path(&from), self.path(&to));
+        self.move_file(&from, &to, true)?;
+        self.state.note(format!("sftp posix-rename {from} {to}"));
+        Ok(Packet::Status(ok(id)))
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
@@ -188,6 +316,10 @@ impl russh_sftp::server::Handler for SftpServer {
             self.state.note(format!("sftp refused {}", self.path(&path)));
             return Err(StatusCode::PermissionDenied);
         }
+        if locks::lock(&self.state.sftp_endless).contains(&self.path(&path)) {
+            let handle = self.handle(Open::Endless { sent: 0 });
+            return Ok(Handle { id, handle });
+        }
         let mut entries = Vec::new();
         for entry in std::fs::read_dir(self.local(&path)).map_err(|e| io_status(&e))? {
             let entry = entry.map_err(|e| io_status(&e))?;
@@ -204,6 +336,18 @@ impl russh_sftp::server::Handler for SftpServer {
                 Some(files) => Ok(Name { id, files }),
                 None => Err(StatusCode::Eof),
             },
+            Some(Open::Endless { sent }) => {
+                let files = (0..100)
+                    .map(|n| {
+                        let mut attrs = FileAttributes::empty();
+                        attrs.permissions = Some(0o100_644);
+                        attrs.size = Some(0);
+                        File::new(format!("flood-{}", *sent + n), attrs)
+                    })
+                    .collect();
+                *sent += 100;
+                Ok(Name { id, files })
+            }
             _ => Err(StatusCode::Failure),
         }
     }
@@ -260,7 +404,7 @@ impl russh_sftp::server::Handler for SftpServer {
                 let _ = file.sync_all();
                 self.state.note(format!("sftp close {path}"));
             }
-            Some(Open::Folder { .. }) => {}
+            Some(Open::Folder { .. } | Open::Endless { .. }) => {}
             None => return Err(StatusCode::Failure),
         }
         Ok(ok(id))
@@ -272,7 +416,20 @@ impl russh_sftp::server::Handler for SftpServer {
             return Err(StatusCode::PermissionDenied);
         }
         std::fs::remove_file(local(&self.root, &path)).map_err(|e| io_status(&e))?;
+        locks::lock(&self.state.sftp_meta).remove(&path);
         self.state.note(format!("sftp remove {path}"));
         Ok(ok(id))
     }
+}
+
+/// Two SSH strings (a 32-bit length, then the bytes), as an extension's request holds them.
+fn two_strings(data: &[u8]) -> Option<(String, String)> {
+    fn one(data: &[u8]) -> Option<(String, &[u8])> {
+        let len = u32::from_be_bytes(data.get(..4)?.try_into().ok()?) as usize;
+        let text = data.get(4..4 + len)?;
+        Some((String::from_utf8(text.to_vec()).ok()?, &data[4 + len..]))
+    }
+    let (first, rest) = one(data)?;
+    let (second, _) = one(rest)?;
+    Some((first, second))
 }

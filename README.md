@@ -17,13 +17,16 @@ snapshot tree with creation times (read from its `.vmsd`) in a panel beside the 
 days, and takes, reverts and deletes snapshots on one VM or in bulk on the selection (see
 [Virtual machines and snapshots](#virtual-machines-and-snapshots)); high-risk VM actions take a named safety snapshot
 first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
-and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
-Auto-update checks this repo's GitHub Releases, with a read-only GitHub token kept in the vault (see
-[GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
+and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV. In
+every CSV Remotely writes (the audit log, Compare and MultiExec exports) a cell that a spreadsheet could run as a
+formula (starting with `=`, `+`, `-` or `@`, also after spaces, or with a tab) gets a `'` in front, and cells with `,`,
+`;`, quotes, tabs or line breaks are quoted.
+Auto-update checks this repo's public GitHub Releases without a token (an optional read-only GitHub token can be kept in
+the vault, see [GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
 (AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
 or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
-tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs work in Compare runs and guest metrics without linking by hand. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
 encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
@@ -150,6 +153,75 @@ What Remotely runs while you look at something else, and how it stays light on t
   network address, waiting terminals try within 3 seconds, and one that had given up starts its tries again.
 - **Reachability dots** read nothing while they are off or the session tree isn't shown.
 
+### Safer operations on hosts
+
+0.4.3: how far a change on hosts can spread before you see it, and what the audit trail keeps.
+
+- **Replacing a file** (SS-08): an upload that replaces a file writes a hidden temporary file beside it
+  (`.<name>.remotely-<id>.part`), gives it the old file's permissions and owner, and puts it in place in one step
+  (OpenSSH's `posix-rename`), so a dropped VPN never leaves `nginx.conf` half written: the old file stays as it was and
+  the temporary one is deleted. Through a link, the file it points to is replaced. A server without `posix-rename` keeps
+  the old file as `<name>.<time>.bak` and the transfers list says so. Only when the folder takes no new file, or the
+  old file belongs to another user whose ownership the login can't keep, is the file written over in place as before,
+  and the list says why. Extended attributes, ACLs and other hard links of the old file are not carried over. A folder
+  listing stops at 20,000 entries and says so.
+- **Rolling out a command** (BX-02, Compare output): "Run on one host first" runs the first host alone; you see its
+  result and press **Run on the rest** or **Stop here** (the rest wait up to 15 minutes, then the run stops); a canary
+  that fails stops the run. "Stop after N failures" starts no more hosts once N failed or timed out; hosts already
+  running finish. Both are off by default: a non-zero exit is normal for read-only checks (`grep`, `test`), and the
+  approval tier already rises with the number of hosts. The approval dialog says what was chosen; going on after the
+  canary is in the audit log.
+- **Outcome unknown** (BX-04): a host that ran past the time limit, or was cancelled while its command ran (or a VM
+  whose vmrun or VBoxManage call was cancelled), may have run it, so it is "outcome unknown", not failed. **Retry
+  failed** leaves it out; a separate button retries it too, after a warning that the command may run twice.
+- **Which host was reached** (AP-05): each remote target of a job is journaled with the address this PC connected to
+  (none behind jump hosts) and the host key it accepted (`ssh-ed25519 SHA256:...`), and the job's end in the audit log
+  lists them. The results' host view shows them.
+- **Automatic VM links** (QL-01): they follow the IP address each guest reports about itself, which a guest can make up
+  (a lab VM claiming a production server's address). So they only show on the dashboard and in lists; a bulk run or
+  key push picked by VM, tag or filter reaches the VM through one only after you press **Confirm link**. Auto-linking
+  also skips sessions behind a jump host and sessions whose environment label is not the VM's (both unlabelled counts
+  as the same), and removes an automatic link that breaks either rule.
+- **Tunnels** (SS-07): the dialog says that a tunnel on 127.0.0.1 is open to every user signed in to this PC, not only
+  you, and that a remote tunnel on localhost listens on every address when the host's sshd has `GatewayPorts yes`.
+  A SOCKS tunnel on loopback is Medium (one confirm) while other users are signed in to this PC (a shared jump server);
+  otherwise it stays Low.
+- **SSH keys** (SS-09): a push can give the key an expiry day (`expiry-time`, at 00:00 UTC; needs OpenSSH 8.2 or later,
+  an older sshd refuses the key) and the hosts or networks it may log in from (`from`). A host that has the key already
+  is left as it is and fails with why (remove it there first). **Remove from hosts** takes a key off hosts'
+  `authorized_keys` (every line holding it, the file replaced in one step): Medium, audited, like a push.
+- **Starting several VMs** (VM-02): the approval names the VMs with a bridged network adapter plugged in at power-on,
+  which join the network this PC is on, so a clone with a fixed IP address can't take a customer machine's address
+  unnoticed. Starting is still Low; the warning adds one confirm.
+
+### What Remotely keeps on this PC
+
+Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS-10, SS-11, AP-05).
+
+- **Job outputs and command text**: every job keeps what its hosts printed (stdout and stderr, up to 64 KB each per
+  host) and its command (a Compare run's whole script, a MultiExec line), so Activity and Compare can show them. Settings,
+  General, **Job outputs** says for how long: 30 days, **90 days** (the default), 1 year or forever. A purge runs at
+  start and once a day: older jobs lose their outputs and their script or line text, and keep their rows, summaries,
+  tiers, targets, results, exit codes and output hashes, so Activity still lists them and Compare still groups them
+  (retrying such a run needs it typed again). **Purge now** applies the setting at once. A purge that removed something
+  is in the audit log with what went (`journal_purged`), and so is every Purge now; changing the setting is audited too.
+  Presentation mode's read-only lock refuses changing the setting and Purge now, never the daily purge.
+- **No secrets in the journal or the audit log**: what looks like a password, token or key in a script, a MultiExec
+  line or any audit entry's text (`--password=...`, `TOKEN=...`, `Bearer ...`, a password in a URL) is stored as
+  `[redacted]`, as the CSV export always did; a run whose script had one can't be retried as it ran. Jobs from before
+  this are redacted once, at start. Keys typed at a password, passphrase or one-time code prompt (sudo, su, ssh, PAM's
+  two-factor codes, a cloud CLI's MFA code, in English and the languages Linux translates them into) never reach the
+  journal or the audit log at all.
+- **Deleted means gone**: the database overwrites what it deletes (`secure_delete`), empties its write-ahead log after a
+  purge, and compacts its file (`VACUUM`) after a purge that freed a lot of space, while no job runs (a job submitted
+  meanwhile waits for it).
+- **The audit log** is never purged: it is append-only and hash-chained. Verify and Export read it row by row, however
+  long it is, and the export is written next to the file you chose, then renamed, so a failed export leaves no half
+  file.
+- **Nothing lands in a Git repository by accident**: no save path writes into a Git working tree (a folder with a
+  `.git` folder or file in it or above it): the audit log CSV, Compare and MultiExec exports, saved terminal output,
+  session logs, downloads and exports to another laptop. The message names the repository; choose a folder outside it.
+
 ### Command panel
 
 BX-08, on the right of the Terminal page: a click pastes a command into the current terminal, Shift+click also presses
@@ -205,7 +277,8 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   there (Ctrl+X Ctrl+E, v after Esc in vi mode), replay a keyboard macro (Ctrl+X E) or run an editing command by name
   (Esc then x) are not sent, and the MultiExec bar says why. A lone Esc waits for the key after it. Every line sent is
   in the audit log with the command, the sessions and the tier, never the output. Two exceptions pass keys straight
-  through, unrated: at a password prompt (the keys go only to the tabs showing one, and are never kept or logged) and
+  through, unrated: at a password, passphrase or one-time code prompt (sudo, su, ssh, two-factor codes, in English and
+  translated; the keys go only to the tabs showing one, and are never kept, journaled or logged) and
   to a full-screen program such as vim, less or top (only to the tabs that have one open; what is typed there, like
   vim's `:!command`, is not rated). Protected sessions are left out.
 - **MultiExec recording** (QL-12): every line MultiExec sends is recorded in each of its terminals, from Enter until
@@ -255,6 +328,11 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **Notifications** (QL-07): Settings, Terminal, chooses between commands longer than N seconds (5 to 3600) and any
   command that finishes while you're away (the tab isn't on screen or Remotely isn't the window in front), whatever its
   length. A line sent with MultiExec gives one notification once all its terminals are done, never one per terminal.
+- **Pasting and links** (QL-05, SS-10, SS-03): a paste loses its control characters (tabs and line breaks aside) and any
+  bracketed-paste markers, and text with a line break asks first, showing its first lines and, with MultiExec on, how
+  many terminals get it (Settings, Terminal can turn the question off). The terminal's own answers to a host's queries
+  (cursor position, colours, focus) go to that host only, never through MultiExec. Links a host prints are never
+  opened: a click shows the address, to copy.
 
 ### File transfer in the terminal
 
@@ -284,6 +362,11 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   gets a number. Right-click a file name in the terminal's output (`ls`, an error message) to download it; elsewhere
   right-click pastes as before. "Open folder" in the transfers list shows a finished download in Explorer. Each download
   is in the audit log with the file's name, size, host path, where it was saved and its SHA-256, never its content.
+  Names are made safe here: what Windows can't hold in a name and invisible Unicode format characters (such as U+202E,
+  which makes `invoice[U+202E]fdp.exe` look like `invoiceexe.pdf`) become `_`, and a device name (`nul`, `com1.txt`)
+  gets a `_` in front. Each download is marked as from the internet, with the `Zone.Identifier` stream browsers write
+  (ZoneId=3, without the host's name), so SmartScreen and Office's Protected View treat it as one; on a FAT or exFAT
+  drive, which can't hold the mark, the transfers list says so.
 - **Upload**: drop files on a terminal, or use the upload button (toolbar or drawer). They go into the terminal's
   folder (the drawer's upload goes into the folder it shows). Uploads are changes, so they go through the command bus:
   Low, a Prod session raises it one tier, and a file that is there already is replaced only after you say so and
@@ -292,7 +375,7 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   size, destination and SHA-256. Folders aren't uploaded or downloaded (zip them, or pick their files).
 - **Transfers**: the list under the drawer shows each file's progress, speed and time left, with cancel and retry (a
   retried upload asks again if it now replaces a file). A new file that fails or is cancelled part way is deleted from
-  the host; a replaced one is left as far as it got, and the message says so.
+  the host; a file being replaced stays as it was (see [Safer operations on hosts](#safer-operations-on-hosts)).
 - With MultiExec on, uploads and downloads still go through one terminal: the current one. ZMODEM (`sz`/`rz`) is not
   supported.
 
@@ -320,8 +403,9 @@ on its jump host.
   connections, waiting for a reconnect, failed and why) and starts or stops them. A tunnel rides the terminal's
   connection: behind jump hosts it starts from the session's host, it opens again by itself after a reconnect, and it
   closes with the terminal.
-- **Approvals**: opening a tunnel is a command on the bus. A local or SOCKS tunnel only this PC can use is Low (so
-  Medium on a Prod host, as the PRD's tier table says). A remote tunnel is Medium: the host listens, and whatever
+- **Approvals**: opening a tunnel is a command on the bus. A local or SOCKS tunnel on loopback is Low (so Medium on a
+  Prod host, as the PRD's tier table says); loopback is every user signed in to this PC, so a SOCKS one is Medium
+  while others are. A remote tunnel is Medium: the host listens, and whatever
   reaches that port gets into the network this PC is on. A tunnel that listens on a network address (0.0.0.0, a LAN
   IP), on either side, is Medium and never lower: other computers can use it without logging in, and the dialog says
   so. Forwards that start with the terminal go through the same approval. Opening and closing are audited with the
@@ -401,7 +485,9 @@ approval, nothing audited, nothing changed on the host, and the read-only lock d
   delta disk counts its parents down to the base), and each network adapter with its connection, card and MAC. The
   guest OS comes from VMware Tools (`guestInfo.detailed.data`: the distribution and kernel) or the Guest Additions.
   What was read is kept, so the tab still shows it (with why) when the files can't be read. **From the guest** shows
-  a linked session's own facts.
+  a linked session's own facts. A disk, extent or parent disk named on a network share or a device path is never
+  opened (Windows would send your sign-in there): it shows its path with a note and no sizes, so a VM kept on a share
+  shows its disks as not read. A .vmx over 4 MB or a disk descriptor over 1 MB is reported, never read in part.
 - **Dashboard**: each row says "4 vCPU · 8 GB · Ubuntu 24.04" under its address (a host's from its stored facts).
 - **Memory charts (MO-15)**: the drill-down's memory chart draws what there is as a dashed line next to what is in
   use: a VM's configured RAM next to its process's working set (and the guest's own use when watched), a host's total
@@ -455,7 +541,8 @@ log.
   with it on, the core refuses every command on the bus, whatever its tier (VM power and snapshots, protection, remote
   commands including read-only ones, MultiExec lines, uploads, tunnels, SSH key pushes, updates), and every edit of the
   app's data (sessions, folders, labels, tags, saved filters, VM links, imports, the vault and SSH keys, favourites, port
-  forwards, settings, approval rules, replacing or removing trusted host keys, turning MultiExec on). An approval asked
+  forwards, settings, approval rules, how long job outputs are kept and Purge now, replacing or removing trusted host
+  keys, turning MultiExec on). The daily purge of old job outputs still runs. An approval asked
   before the lock came on waits until it is off. Still allowed, because they change nothing outside this PC or are part
   of connecting: reading everything, connecting, typing into one terminal (it is your own shell), trusting a new host's
   key on first use, downloads and saved or logged output (they only read from the host and write files on this PC),
@@ -633,11 +720,22 @@ signing key, that the publish job waits for your approval, and that the draft ho
 
 ### GitHub update token
 
-The updater was built while the repository was private, so it still reads releases with a read-only GitHub token,
-although the repository and its releases are public now. Each machine keeps the token in its vault, and update checks
-and installs use it; without one, the app doesn't check for updates. Copies on 0.2.0 or older don't know about the
-token: install 0.2.1 or later by hand once on each machine (download the installer from the release page), then add
-the token.
+The repository and its releases are public, so Remotely checks for and installs updates **without a token**. The token
+is optional. It is worth having when:
+
+- **Many machines share one internet address** (an office or a customer site behind one NAT). GitHub allows 60 API
+  calls an hour from one address without a token, and each check makes one. When that limit is used up, Remotely waits
+  until GitHub's reset, checks once more, and Settings and **Check for updates** say until when. A token has a limit
+  of its own (5,000 an hour).
+- **The repository goes private again.** GitHub then hides its releases from checks without a token, and the banner
+  says "Updates need a GitHub update token".
+
+Each machine keeps its token in its vault. While the vault is unlocked, checks and installs use it; while it is locked,
+they go without it (and ask you to unlock it only if GitHub doesn't show the releases without a token).
+
+Older copies: 0.2.1 to 0.4.2 still need a token to update, so keep theirs valid until they have installed a version
+that reads releases without one. Copies on 0.2.0 or older don't know about the token: install a newer version by hand
+once on each machine (download the installer from the release page).
 
 **Create the token** (on GitHub, signed in as the repository owner):
 
@@ -663,8 +761,9 @@ code. Treat the token like a password: one per machine, with an expiry, never in
    **Test** repeats that check at any time.
 4. Clear the clipboard (`Win+V` keeps a history: delete the entry there).
 
-Without a token, update checks don't fail quietly: the banner and Settings say a token is needed. When the vault is
-locked, the check waits and runs once the vault is unlocked.
+Without a token, update checks read the public releases. If GitHub doesn't show them (the repository went private
+again), checks don't fail quietly: the banner and Settings say a token is needed, or, with a token in the locked vault,
+the check runs again once the vault is unlocked.
 
 **Replace it** before it expires, or at once if it may have leaked:
 
@@ -674,12 +773,15 @@ locked, the check waits and runs once the vault is unlocked.
 3. If you made a new token, delete the old one on GitHub.
 
 Once a token has expired or been revoked, the banner says so ("The GitHub update token expired on …") until it is
-replaced. **Remove** deletes the token from the vault; delete it on GitHub as well.
+replaced or removed. **Remove** deletes the token from the vault, and checks go on without one; delete it on GitHub as
+well.
 
-What the app does with the token: it sends it only to `api.github.com`, to find the latest published release, then to
-fetch that release's `latest.json` and installer from their API download URLs. GitHub answers those with a redirect to
-its file storage, and the token is not sent there. Every update is still checked against the signing public key before
-it installs. The token never appears in logs, error messages, the audit log, exports or the UI.
+What the app sends: without a token, nothing but the release lookup goes to `api.github.com`, with no `Authorization`
+header; `latest.json` and the installer come from the release's public download links on `github.com`. With a token,
+it sends the token only to `api.github.com`, to find the latest published release, then to fetch that release's
+`latest.json` and installer from their API download URLs. GitHub answers those with a redirect to its file storage,
+and the token is not sent there, nor ever to `github.com`. Either way, every update is checked against the signing
+public key before it installs. The token never appears in logs, error messages, the audit log, exports or the UI.
 
 ### CI minutes
 
@@ -791,7 +893,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Remote adapter     | `crates/core/src/adapters/remote.rs`, `remote/`                   | SS-03, SS-05, SS-07, SS-08, BX-02, BX-07, MO-02                                                                                                     | Working: jump host chains, terminal shells, SFTP and port forwards (local, remote, SOCKS) on a terminal's connection, bulk exec with sudo, kept connections for guest metrics                                                                               |
 | Host counters      | `crates/core/src/adapters/host_counters.rs`, `paging.rs`          | MO-01, MO-04, MO-15, VM-07                                                                                                                          | Working: host RAM, CPUs, CPU times, free disk, paging files and commit charge, and each VM process's (`vmware-vmx.exe`, `VirtualBoxVM.exe`, `VBoxHeadless.exe`) CPU, working set and I/O                                                                    |
 | Host details       | `crates/core/src/host_details/`, `adapters/vm_hardware.rs`        | MO-13, MO-14                                                                                                                                        | Working: SSH hosts' OS and specs (terminal, dashboard, Refresh; stored), admin reads on demand, VMs' virtual hardware from their files (stored)                                                                                                             |
-| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's GitHub Releases, read with the token from the vault; install is a Medium-tier job that runs alone                                                                                                                                  |
+| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's public GitHub Releases, without a token or with the optional one from the vault; install is a Medium-tier job that runs alone                                                                                                      |
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; one refresh at a time, requests meanwhile share the next; filters; audited environment labels                                                                  |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                   |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                         |
@@ -810,7 +912,8 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                           | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one                                                           |
 | VM links           | `crates/core/src/vm_links.rs`                                     | QL-01, BX-01                                                                                                                                        | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept; names looked up once at a time, never behind a jump host                                                                                             |
 | Network adapter    | `crates/core/src/adapters/network.rs`                             | QL-01, QL-03, QL-04                                                                                                                                 | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                                                                                             |
-| Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                  | Working: hash-chained audit log, job journal, inventory, sessions, vault ciphertext, tags, saved filters                                                                                                                                                    |
+| Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                  | Working: hash-chained audit log (text redacted, streamed), job journal (scripts and lines redacted), inventory, sessions, vault ciphertext, tags, saved filters; secure delete                                                                              |
+| Retention          | `crates/core/src/retention.rs`, `save_guard.rs`                   | BX-02, BX-05, SS-10, SS-11, AP-05                                                                                                                   | Working: job outputs and command text kept 30 days, 90 days (default), 1 year or forever; a purge at start and daily, Purge now, audited; compacting while no job runs; no save path writes into a Git working tree                                         |
 | Fake adapters      | `crates/core/src/fakes.rs`                                        | Development safety                                                                                                                                  | One fake per outside system; the test SSH server has SFTP on a temp folder and forwards (direct-tcpip, tcpip-forward) with internal names                                                                                                                   |
 | Presentation mode  | `crates/core/src/presentation.rs`, `src/lib/presentation*.ts`     | FD-03                                                                                                                                               | Working: masking by field and pattern in the DOM and in terminal output (same width), stand-ins in memory, saved and audited, a read-only lock enforced by the policy engine                                                                                |
 | Tauri shell        | `src-tauri/src/`                                                  | All IPC                                                                                                                                             | Working; QL-15: daily log file, crash reports, startup message boxes, one instance, a reload closes what the page had open (`diagnostics.rs`, `lib.rs`); SS-03 resume and network notifications (`wake.rs`)                                                 |

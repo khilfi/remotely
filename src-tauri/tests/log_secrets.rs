@@ -189,6 +189,7 @@ async fn the_log_file_never_holds_a_secret() {
         sudo_password_id: Some(sudo_id),
         trust_new_host_keys: false,
         timeout_secs: Some(30),
+        rollout: Default::default(),
     };
     let SubmitOutcome::Queued { job_id: job, .. } = core.bus.submit(&core.ctx, command).await.unwrap() else {
         panic!("whoami, cat and echo only read");

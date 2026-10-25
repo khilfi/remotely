@@ -313,7 +313,8 @@ async fn a_file_that_is_there_is_replaced_only_after_asking() {
         .detail
         .as_deref()
         .unwrap()
-        .ends_with("replacing the file there"));
+        .ends_with("replacing the file there: replaced in one step, keeping its permissions and owner"));
+    assert_eq!(t.files.paths(), ["/srv/index.html"], "no temporary file is left");
 }
 
 #[tokio::test]
@@ -447,6 +448,20 @@ async fn downloads_are_audited_and_never_overwrite_a_file_here() {
     assert_eq!(std::fs::read(&saved).unwrap(), body);
     assert_eq!(std::fs::read(dest.join("report.pdf")).unwrap(), b"mine");
     assert_eq!(t.core.files.saved_at(done.id), Some(saved.clone()));
+    // A8: marked as from the internet, as a browser marks a download, with no host name in the mark.
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            zone_identifier(&saved).as_deref(),
+            Some("[ZoneTransfer]\r\nZoneId=3\r\n")
+        );
+        assert_eq!(done.message, None, "marked, so nothing to say");
+        assert_eq!(
+            zone_identifier(&dest.join("report.pdf")),
+            None,
+            "the file that was here is left alone"
+        );
+    }
 
     let entries = audit(&t.core).await;
     let entry = entries.iter().find(|e| e.event == "file_downloaded").expect("audited");
@@ -479,6 +494,48 @@ async fn downloads_are_audited_and_never_overwrite_a_file_here() {
     };
     let again = t.wait_transfer(transfers[0].id).await;
     assert_eq!(PathBuf::from(again.local_path.unwrap()), dest.join("report (2).pdf"));
+    std::fs::remove_dir_all(&dest).unwrap();
+}
+
+/// A8: the Mark of the Web a download got: its `Zone.Identifier` stream, if any.
+#[cfg(windows)]
+fn zone_identifier(path: &Path) -> Option<String> {
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    std::fs::read_to_string(PathBuf::from(stream)).ok()
+}
+
+#[tokio::test]
+async fn a_name_that_hides_its_real_extension_is_saved_plainly_and_marked() {
+    // U+202E RIGHT-TO-LEFT OVERRIDE shows this as "invoiceexe.pdf"; a zero-width space and a BOM
+    // hide in the other.
+    let files = FakeFiles::default()
+        .with_file("/home/alice/invoice\u{202E}fdp.exe", b"MZ")
+        .with_file("/home/alice/notes\u{200B}\u{FEFF}.txt", b"hi");
+    let (t, terminal) = fake(files, Environment::Lab).await;
+    let dest = temp_folder("download-names");
+    let queued = t
+        .core
+        .terminals
+        .download(
+            &t.core.ctx,
+            terminal,
+            &["invoice\u{202E}fdp.exe".into(), "notes\u{200B}\u{FEFF}.txt".into()],
+            &dest,
+        )
+        .await
+        .unwrap();
+    let first = t.wait_transfer(queued[0].id).await;
+    let second = t.wait_transfer(queued[1].id).await;
+    assert_eq!(first.state, TransferState::Done);
+    assert_eq!(PathBuf::from(first.local_path.unwrap()), dest.join("invoice_fdp.exe"));
+    assert_eq!(PathBuf::from(second.local_path.unwrap()), dest.join("notes__.txt"));
+    assert_eq!(std::fs::read(dest.join("invoice_fdp.exe")).unwrap(), b"MZ");
+    #[cfg(windows)]
+    assert_eq!(
+        zone_identifier(&dest.join("invoice_fdp.exe")).as_deref(),
+        Some("[ZoneTransfer]\r\nZoneId=3\r\n")
+    );
     std::fs::remove_dir_all(&dest).unwrap();
 }
 
@@ -1227,4 +1284,296 @@ async fn the_prompt_hook_is_off_for_prod_unless_the_session_says_and_audited_onc
     pane.settle(Duration::from_millis(600)).await;
     assert_eq!(typed(&server), 1, "no new hook");
     assert_eq!(hook_audits(&core).await, 1);
+}
+
+// ---- H8: a replaced file is never left half written; A9: listings stop ------------------------------
+
+/// No temporary file of a replacement is left in `folder`.
+fn no_temp_left(paths: &[String], folder: &str) {
+    let left: Vec<&String> = paths
+        .iter()
+        .filter(|p| p.starts_with(&format!("{folder}/.")) && p.ends_with(".part"))
+        .collect();
+    assert!(left.is_empty(), "left behind: {left:?}");
+}
+
+#[tokio::test]
+async fn a_replacement_that_breaks_leaves_the_old_file_and_nothing_temporary() {
+    let files = FakeFiles::default().with_file("/srv/app.conf", b"listen 80;");
+    let (t, terminal) = fake(files, Environment::Lab).await;
+    let path = local_file("app.conf", &content(300 * 1024));
+    t.files.fail_next_write_after(100 * 1024);
+    let start = t.start(terminal, &path, "/srv", Existing::Replace).await;
+    assert_eq!(t.finish(start).await, JobStatus::Failed);
+    let failed = t.transfer("app.conf");
+    assert_eq!(failed.state, TransferState::Failed);
+    let message = failed.message.unwrap();
+    assert!(message.contains("/srv/app.conf on the host is as it was"), "{message}");
+    assert_eq!(t.files.file("/srv/app.conf").unwrap(), b"listen 80;");
+    no_temp_left(&t.files.paths(), "/srv");
+}
+
+/// Approves a replacement that asks; returns its job.
+async fn approve_upload(core: &Core, start: UploadStart) -> Uuid {
+    let UploadStart::Submitted {
+        outcome: SubmitOutcome::NeedsApproval { request },
+    } = start
+    else {
+        panic!("replacing asks: {start:?}");
+    };
+    core.bus
+        .approve(
+            request.id,
+            ApprovalAnswers {
+                confirmed: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+}
+
+/// The transfer of `name` once some of it went.
+async fn started_transfer(core: &Core, name: &str) -> Uuid {
+    timeout(WAIT, async {
+        loop {
+            if let Some(found) = core.terminals.transfers().into_iter().find(|x| x.name == name) {
+                if found.done > 0 {
+                    return found.id;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the upload started")
+}
+
+#[tokio::test]
+async fn a_cancelled_replacement_leaves_the_old_file() {
+    let files = FakeFiles::default()
+        .with_file("/srv/app.conf", b"listen 80;")
+        .with_delay(Duration::from_millis(40));
+    let (t, terminal) = fake(files, Environment::Lab).await;
+    let path = local_file("app.conf", &content(4 * 1024 * 1024));
+    let start = t.start(terminal, &path, "/srv", Existing::Replace).await;
+    let core = &t.core;
+    let job = approve_upload(core, start).await;
+    let id = started_transfer(core, "app.conf").await;
+    assert!(core.terminals.cancel_transfer(id));
+    timeout(WAIT, core.jobs.wait(job)).await.unwrap().unwrap();
+    let transfer = t.wait_transfer(id).await;
+    assert_eq!(transfer.state, TransferState::Cancelled);
+    let message = transfer.message.unwrap();
+    assert!(message.contains("as it was"), "{message}");
+    assert_eq!(t.files.file("/srv/app.conf").unwrap(), b"listen 80;");
+    no_temp_left(&t.files.paths(), "/srv");
+}
+
+#[tokio::test]
+async fn without_an_atomic_rename_the_old_file_is_kept_and_the_panel_says_so() {
+    let files = FakeFiles::default()
+        .with_file("/srv/app.conf", b"listen 80;")
+        .without_atomic_rename();
+    let (t, terminal) = fake(files, Environment::Lab).await;
+    let path = local_file("app.conf", b"listen 8080;");
+    let start = t.start(terminal, &path, "/srv", Existing::Replace).await;
+    assert_eq!(t.finish(start).await, JobStatus::Succeeded);
+    assert_eq!(t.files.file("/srv/app.conf").unwrap(), b"listen 8080;");
+    let backup = t
+        .files
+        .paths()
+        .into_iter()
+        .find(|p| p.starts_with("/srv/app.conf.") && p.ends_with(".bak"))
+        .expect("a backup");
+    assert_eq!(t.files.file(&backup).unwrap(), b"listen 80;");
+    let done = t.transfer("app.conf");
+    assert_eq!(done.state, TransferState::Done);
+    let message = done.message.unwrap();
+    assert!(message.contains(&format!("kept as {backup}")), "{message}");
+    let entries = audit(&t.core).await;
+    let uploaded = entries.iter().find(|e| e.event == "file_uploaded").unwrap();
+    assert!(uploaded.detail.as_deref().unwrap().contains(&backup), "{uploaded:?}");
+}
+
+/// Replaces `folder/<name of local>` through the bus (confirming the approval); the job's end and
+/// the transfer.
+async fn ssh_replace(core: &Core, terminal: Uuid, local: &Path, folder: &str) -> (JobStatus, TransferInfo) {
+    let staged = core.files.stage(vec![local.to_owned()]).unwrap();
+    let start = core
+        .files
+        .upload(terminal, staged.id, folder, Existing::Replace)
+        .await
+        .unwrap();
+    let job = approve_upload(core, start).await;
+    let status = timeout(WAIT, core.jobs.wait(job)).await.unwrap().unwrap();
+    let name = local.file_name().unwrap().to_string_lossy().into_owned();
+    let transfer = core
+        .terminals
+        .transfers()
+        .into_iter()
+        .rev()
+        .find(|t| t.name == name)
+        .unwrap();
+    (status, transfer)
+}
+
+/// The names in a host folder of the test server.
+fn host_names(server: &TestSshServer, folder: &str) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(server.sftp_path(folder))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+async fn sftp_pane(server: &TestSshServer, password: &str) -> (Core, Pane) {
+    let core = ssh_core().await;
+    trust(&core, server).await;
+    let session = ssh_session(&core, server, password, None).await;
+    let mut pane = Pane::open(&core, session).await;
+    pane.until(|p| p.folder().is_some_and(|(_, t)| t != FolderTracking::Waiting))
+        .await;
+    (core, pane)
+}
+
+#[tokio::test]
+async fn sftp_replaces_a_file_in_one_step_keeping_its_mode_and_owner() {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_sftp_file("/srv/app.conf", b"listen 80;")
+        .with_sftp_owner("/srv/app.conf", 0o640, 1000, 1000);
+    let (core, pane) = sftp_pane(&server, &password).await;
+    let local = local_file("app.conf", b"listen 8080;");
+    let (status, transfer) = ssh_replace(&core, pane.id, &local, "/srv").await;
+    assert_eq!(status, JobStatus::Succeeded, "{:?}", transfer.message);
+    assert_eq!(server.sftp_file("/srv/app.conf").unwrap(), b"listen 8080;");
+    assert_eq!(
+        server.sftp_meta("/srv/app.conf"),
+        Some((0o640, 1000, 1000)),
+        "mode kept"
+    );
+    assert_eq!(host_names(&server, "/srv"), ["app.conf"], "nothing else is left");
+    let log = server.log();
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("sftp posix-rename /srv/.app.conf.remotely-") && l.ends_with(" /srv/app.conf")),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|l| l.starts_with("sftp open /srv/.app.conf.remotely-")),
+        "written to a temporary file: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|l| l == "sftp open /srv/app.conf for writing"),
+        "never opened for writing: {log:?}"
+    );
+    let entries = audit(&core).await;
+    let uploaded = entries.iter().find(|e| e.event == "file_uploaded").unwrap();
+    assert!(
+        uploaded
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("replaced in one step, keeping its permissions and owner"),
+        "{uploaded:?}"
+    );
+}
+
+#[tokio::test]
+async fn sftp_without_posix_rename_keeps_the_old_file_as_a_backup() {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_sftp_file("/srv/app.conf", b"listen 80;")
+        .without_posix_rename();
+    let (core, pane) = sftp_pane(&server, &password).await;
+    let local = local_file("app.conf", b"listen 8080;");
+    let (status, transfer) = ssh_replace(&core, pane.id, &local, "/srv").await;
+    assert_eq!(status, JobStatus::Succeeded, "{:?}", transfer.message);
+    assert_eq!(server.sftp_file("/srv/app.conf").unwrap(), b"listen 8080;");
+    let names = host_names(&server, "/srv");
+    assert_eq!(names.len(), 2, "{names:?}");
+    let backup = names.iter().find(|n| n.ends_with(".bak")).expect("a backup");
+    assert!(backup.starts_with("app.conf."), "{backup}");
+    assert_eq!(server.sftp_file(&format!("/srv/{backup}")).unwrap(), b"listen 80;");
+    let message = transfer.message.unwrap();
+    assert!(message.contains("can't replace a file in one step"), "{message}");
+    assert!(message.contains(&format!("/srv/{backup}")), "{message}");
+}
+
+#[tokio::test]
+async fn sftp_writes_in_place_and_says_why_when_the_owner_cant_be_kept() {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_sftp_file("/srv/app.conf", b"listen 80;")
+        .with_sftp_owner("/srv/app.conf", 0o664, 0, 33);
+    let (core, pane) = sftp_pane(&server, &password).await;
+    let local = local_file("app.conf", b"listen 8080;");
+    let (status, transfer) = ssh_replace(&core, pane.id, &local, "/srv").await;
+    assert_eq!(status, JobStatus::Succeeded, "{:?}", transfer.message);
+    assert_eq!(server.sftp_file("/srv/app.conf").unwrap(), b"listen 8080;");
+    assert_eq!(server.sftp_meta("/srv/app.conf"), Some((0o664, 0, 33)), "still root's");
+    assert_eq!(host_names(&server, "/srv"), ["app.conf"], "the temporary file went");
+    let message = transfer.message.unwrap();
+    assert!(message.contains("written over in place"), "{message}");
+    assert!(message.contains("uid 0, gid 33"), "{message}");
+    assert!(server.log().iter().any(|l| l.starts_with("sftp chown refused")));
+}
+
+#[tokio::test]
+async fn sftp_a_cancelled_replacement_leaves_the_old_file_and_no_temporary_one() {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_sftp_file("/srv/app.conf", b"listen 80;")
+        .with_sftp_delay(Duration::from_millis(30));
+    let (core, pane) = sftp_pane(&server, &password).await;
+    let local = local_file("app.conf", &content(8 * 1024 * 1024));
+    let staged = core.files.stage(vec![local]).unwrap();
+    let start = core
+        .files
+        .upload(pane.id, staged.id, "/srv", Existing::Replace)
+        .await
+        .unwrap();
+    let job = approve_upload(&core, start).await;
+    let id = started_transfer(&core, "app.conf").await;
+    assert!(core.terminals.cancel_transfer(id));
+    timeout(WAIT, core.jobs.wait(job)).await.unwrap().unwrap();
+    let transfer = core.terminals.transfers().into_iter().find(|t| t.id == id).unwrap();
+    assert_eq!(transfer.state, TransferState::Cancelled);
+    assert!(transfer.message.unwrap().contains("as it was"));
+    assert_eq!(server.sftp_file("/srv/app.conf").unwrap(), b"listen 80;");
+    assert_eq!(
+        host_names(&server, "/srv"),
+        ["app.conf"],
+        "the temporary file was deleted"
+    );
+}
+
+#[tokio::test]
+async fn sftp_a_folder_that_never_ends_is_listed_up_to_the_cap() {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_endless_folder("/srv/flood");
+    let (core, pane) = sftp_pane(&server, &password).await;
+    let listing = timeout(WAIT, core.terminals.list_folder(pane.id, Some("/srv/flood")))
+        .await
+        .expect("the listing stops")
+        .unwrap();
+    assert!(listing.error.is_none(), "{:?}", listing.error);
+    assert_eq!(listing.entries.len(), remotely_core::adapters::remote::MAX_LISTING);
+    assert!(listing.more);
+    // The connection still works.
+    let home = core.terminals.list_folder(pane.id, Some("/home/alice")).await.unwrap();
+    assert!(!home.more);
 }

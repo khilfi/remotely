@@ -1,6 +1,7 @@
 //! QL-15: databases with data in them, upgraded or partly unreadable.
 
 use super::*;
+use sqlx::Row;
 
 /// Every column of a `job_targets` row as it was at migration 0009.
 struct OldTarget {
@@ -280,6 +281,163 @@ async fn a_database_that_fails_to_migrate_is_closed_before_the_error() {
     std::fs::rename(&path, &aside).expect("nothing holds the file open any more");
     let _ = std::fs::remove_file(&aside);
     for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+}
+
+/// BX-02, AP-03, BX-03: a 0.4.2 database (migrations to 0015) with jobs in it gets each job's command type, the old
+/// scripts and lines to redact, and the new indexes; then the journal lists, redacts and purges as a new one does.
+#[tokio::test]
+async fn an_upgrade_from_0_4_2_backfills_the_command_types_and_redacts_old_scripts() {
+    let path = std::env::temp_dir().join(format!("remotely-upgrade-042-{}.db", Uuid::new_v4()));
+    let options = SqliteConnectOptions::new()
+        .filename(&path)
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .unwrap();
+    sqlx::migrate!("./migrations").run_to(15, &pool).await.unwrap();
+
+    let (user, workspace) = (Uuid::new_v4().to_string(), Uuid::new_v4().to_string());
+    let old = "2026-06-01T10:00:00Z";
+    let new = "2026-10-20T10:00:00Z";
+    sqlx::query("INSERT INTO users (id, account, display_name, created_at) VALUES (?, ?, 'Alice', ?)")
+        .bind(&user)
+        .bind(r"LAB\alice")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO workspaces (id, user_id, name, created_at) VALUES (?, ?, 'Default', ?)")
+        .bind(&workspace)
+        .bind(&user)
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let run = serde_json::json!({
+        "type": "remoteExec", "targets": [], "script": "mysql --password=hunter2 -e 'select 1'", "sudo": false,
+        "sudoPasswordId": null, "trustNewHostKeys": false, "timeoutSecs": null
+    });
+    let typed = serde_json::json!({
+        "type": "terminalLine", "targets": [], "line": "export TOKEN=abc123", "unreliable": false,
+        "keys": "\r"
+    });
+    let power = serde_json::json!({ "type": "vmPower", "targets": [], "op": { "kind": "suspend" } });
+    let power_json = power.to_string();
+    let jobs = [
+        (Uuid::new_v4(), "execOther", run.to_string(), old),
+        (Uuid::new_v4(), "execOther", typed.to_string(), new),
+        (Uuid::new_v4(), "vmSuspend", power.to_string(), old),
+        (Uuid::new_v4(), "execOther", "{damaged".to_owned(), old),
+    ];
+    for (id, action, json, at) in &jobs {
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, user_id, summary, action, tier, command_json, status, created_at)
+             VALUES (?, ?, ?, 'a job', ?, 'medium', ?, 'succeeded', ?)",
+        )
+        .bind(id.to_string())
+        .bind(&workspace)
+        .bind(&user)
+        .bind(action)
+        .bind(json)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO job_targets (job_id, workspace_id, user_id, target_kind, target_key, target_name, status,
+                                      output, stderr, output_hash)
+             VALUES (?, ?, ?, 'session', 's1', 'web01', 'succeeded', 'some output', 'some error', 'hash')",
+        )
+        .bind(id.to_string())
+        .bind(&workspace)
+        .bind(&user)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    pool.close().await;
+
+    let store = Store::open(&path).await.unwrap();
+    let ctx = store.ensure_identity(r"LAB\alice", "Alice").await.unwrap();
+    let rows = sqlx::query("SELECT id, command_type, command_redacted, bodies_removed_at FROM jobs ORDER BY rowid")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    let got: Vec<(String, Option<i64>, Option<String>)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.get("command_type"),
+                r.get("command_redacted"),
+                r.get("bodies_removed_at"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("remoteExec".to_owned(), None, None),
+            ("terminalLine".to_owned(), None, None),
+            ("vmPower".to_owned(), Some(0), None),
+            (String::new(), None, None),
+        ],
+        "types backfilled; scripts and lines still to check"
+    );
+    for index in ["jobs_by_type", "jobs_open", "jobs_to_purge", "jobs_unchecked"] {
+        let found: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?")
+            .bind(index)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(found, 1, "{index}");
+    }
+
+    assert_eq!(store.redact_old_commands().await.unwrap(), 2);
+    let all: Vec<String> = sqlx::query_scalar("SELECT command_json FROM jobs")
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+    assert!(
+        all.iter().all(|j| !j.contains("hunter2") && !j.contains("abc123")),
+        "{all:?}"
+    );
+    assert_eq!(store.recent_jobs(&ctx, 10).await.unwrap().len(), 4);
+    let runs = store.recent_exec_jobs(&ctx, 10).await.unwrap();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].id, jobs[0].0.to_string());
+    assert!(runs[0].command_redacted);
+
+    // Older than 90 days before the new job: the run, the VM job and the damaged one.
+    let purged = store.purge_job_bodies(&ctx, "2026-08-01T00:00:00Z").await.unwrap();
+    assert_eq!((purged.jobs, purged.outputs, purged.commands), (3, 3, 2));
+    let damaged: String = sqlx::query_scalar("SELECT command_json FROM jobs WHERE id = ?")
+        .bind(jobs[3].0.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        damaged, r#"{"type":""}"#,
+        "JSON that can't be read keeps none of its text"
+    );
+    let power: String = sqlx::query_scalar("SELECT command_json FROM jobs WHERE id = ?")
+        .bind(jobs[2].0.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(power, power_json, "a VM job's command has no script to remove");
+    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    store.close().await;
+    for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
 }

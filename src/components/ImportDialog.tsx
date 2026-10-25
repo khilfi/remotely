@@ -434,6 +434,18 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                                     <TooltipContent>{c.auth.path} is not on this computer</TooltipContent>
                                   </Tooltip>
                                 )}
+                                {/* A3: a key on a network share or a device path is not read; the notes say why. */}
+                                {!row.keyFile && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <AlertTriangleIcon className="size-3.5 text-tier-high" aria-label="Not read" />
+                                    </TooltipTrigger>
+                                    <TooltipContent className="max-w-xs">
+                                      Remotely didn&apos;t read {c.auth.path}: it is on a network share or a device
+                                      path. Copy the key to this PC, then choose it in the session editor.
+                                    </TooltipContent>
+                                  </Tooltip>
+                                )}
                               </span>
                             ) : c.auth.method === "agent" ? (
                               "SSH agent"

@@ -23,7 +23,10 @@ export function progressesJob(event: JobEvent): boolean {
   );
 }
 
-/** How long Activity waits after a job's progress before it reads the list again (more progress meanwhile joins in). */
+/**
+ * How long Activity waits after the first ask (a job queued or ended, or its progress while shown) before it reads its
+ * lists again; asks meanwhile join in, so it reads at most once a second.
+ */
 export const PROGRESS_READ_MS = 1000;
 
 /** VM-01: a finished job that may have changed VMs (power, snapshots, protection): the VM list is refreshed. */

@@ -170,6 +170,7 @@ async fn the_sudo_password_never_leaks() {
         sudo_password_id: Some(sudo_id),
         trust_new_host_keys: false,
         timeout_secs: Some(30),
+        rollout: Default::default(),
     };
     // Read-only commands, so Low: queued without a dialog. The approval path is in tests/bulk.rs.
     let SubmitOutcome::Queued { job_id: job, .. } = core.bus.submit(&core.ctx, command).await.unwrap() else {

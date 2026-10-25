@@ -6,6 +6,10 @@
 //! It only warns: the command bus shows the warnings and asks for a confirm (see
 //! [`crate::policy::Decision::add_warnings`]); the user decides. A check that cannot run is a
 //! warning too, so a failed read never passes silently.
+//!
+//! VM-02: starting several VMs also names the ones with a bridged network adapter that is plugged in
+//! at power-on ([`CapacityChecker::bridged`]): such a VM joins the network this PC is on, so a clone
+//! with a fixed IP address can take an address the customer's network already uses.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -21,6 +25,9 @@ use crate::store::{Store, VmRecord};
 
 /// A VM folder's drive with less free space than this is flagged.
 pub const MIN_FREE_DISK_PCT: f64 = 10.0;
+
+/// VM-02: how long reading the starting VMs' adapters may take before the rest are left unchecked.
+pub const BRIDGED_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -126,6 +133,11 @@ pub struct CapacityChecker {
 }
 
 impl CapacityChecker {
+    /// This PC's counters (SS-07: who else is signed in to it).
+    pub fn host(&self) -> &Arc<dyn HostCounters> {
+        &self.host
+    }
+
     pub fn new(store: Store, hypervisors: Hypervisors, host: Arc<dyn HostCounters>) -> Self {
         Self {
             store,
@@ -215,6 +227,62 @@ impl CapacityChecker {
 
         warnings.extend(power_on_warnings(running_mb, starting_mb, physical_mb, &drives));
         warnings
+    }
+
+    /// VM-02: for a start of two or more VMs, a warning for those with a bridged adapter plugged in at
+    /// power-on, which put them on this PC's own network. Read from each VM's .vmx or `showvminfo`
+    /// within [`BRIDGED_CHECK_BUDGET`]; VMs that can't be read in time are left out.
+    pub async fn bridged(&self, ctx: &Context, targets: &[Target]) -> Vec<String> {
+        let mut vms: Vec<(&str, &str)> = Vec::new();
+        for t in targets {
+            let TargetRef::Vm { vmx_path } = &t.target else {
+                continue;
+            };
+            // A VM that runs already is on its network; starting it changes nothing.
+            let running = matches!(
+                self.store.find_vm(ctx, vmx_path).await,
+                Ok(Some(vm)) if vm.power_state == crate::domain::PowerState::Running
+            );
+            if !running {
+                vms.push((vmx_path.as_str(), t.name.as_str()));
+            }
+        }
+        if vms.len() < 2 {
+            return Vec::new();
+        }
+        let started = std::time::Instant::now();
+        let mut bridged = Vec::new();
+        for (key, name) in vms {
+            let left = BRIDGED_CHECK_BUDGET.saturating_sub(started.elapsed());
+            match tokio::time::timeout(left, self.hypervisors.hardware(key)).await {
+                Ok(Ok(hardware)) => {
+                    let nics: Vec<&str> = hardware
+                        .nics
+                        .iter()
+                        .filter(|n| n.connection.as_deref() == Some("bridged") && n.connected != Some(false))
+                        .map(|n| n.slot.as_str())
+                        .collect();
+                    if !nics.is_empty() {
+                        bridged.push(format!("'{name}' ({})", nics.join(", ")));
+                    }
+                }
+                // Like the RAM check, a VM whose files can't be read is left out (its start fails anyway).
+                Ok(Err(err)) => tracing::debug!(vm = %name, error = %err, "could not read a VM's adapters"),
+                Err(_) => {
+                    tracing::debug!(vm = %name, "no time left to read a VM's adapters");
+                    break;
+                }
+            }
+        }
+        let joins = match bridged.len() {
+            0 => return Vec::new(),
+            1 => "joins",
+            _ => "join",
+        };
+        vec![format!(
+            "Bridged network adapter: {} {joins} the network this PC is on. A clone keeps the fixed IP address of the VM it was made from, which may clash with a machine on that network.",
+            bridged.join(", ")
+        )]
     }
 
     /// The VM's assigned RAM: from the inventory, else its .vmx; 0 when neither says.

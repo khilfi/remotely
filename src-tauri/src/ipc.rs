@@ -20,6 +20,7 @@ use remotely_core::jobs::JobLimits;
 use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHostUsage};
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::presentation::Presentation;
+use remotely_core::retention::{PurgeReport, Retention, RetentionInfo};
 use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord, StartupRating};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
@@ -316,6 +317,24 @@ pub async fn audit_recent(state: State<'_, AppState>, limit: Option<u32>) -> Ipc
 #[tauri::command]
 pub async fn audit_verify(state: State<'_, AppState>) -> IpcResult<ChainCheck> {
     Ok(state.core.store.verify_audit_chain().await?)
+}
+
+/// BX-02: how long job outputs and command text are kept, and the last purge since the app started.
+#[tauri::command]
+pub async fn journal_retention(state: State<'_, AppState>) -> IpcResult<RetentionInfo> {
+    Ok(state.core.retention.info().await?)
+}
+
+/// BX-02: applies at the next purge (daily, or Purge now). Audited.
+#[tauri::command]
+pub async fn journal_retention_set(state: State<'_, AppState>, retention: Retention) -> IpcResult<RetentionInfo> {
+    Ok(state.core.retention.set_retention(retention).await?)
+}
+
+/// BX-02: Settings' "Purge now". Audited.
+#[tauri::command]
+pub async fn journal_purge_now(state: State<'_, AppState>) -> IpcResult<PurgeReport> {
+    Ok(state.core.retention.purge_now().await?)
 }
 
 /// AP-05: asks where to save, then writes the whole audit log there as CSV. The save dialog opens
@@ -1090,10 +1109,12 @@ pub async fn bulk_results(
     options: Option<GroupOptions>,
 ) -> IpcResult<BulkResults> {
     let core = &state.core;
-    Ok(core
+    let mut results = core
         .bulk
         .results(&core.ctx, job_id, options.unwrap_or_default())
-        .await?)
+        .await?;
+    results.canary = core.jobs.canary_wait(job_id);
+    Ok(results)
 }
 
 /// One host's stored output.
@@ -1120,10 +1141,25 @@ pub async fn bulk_diff(
 }
 
 /// BX-04: the same command on the hosts that failed, as a new job through the bus (it may need approval).
+/// H9: hosts whose outcome is unknown (timed out, or cancelled while running) only with `include_unknown`.
 #[tauri::command]
-pub async fn bulk_retry_failed(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<SubmitOutcome> {
+pub async fn bulk_retry_failed(
+    state: State<'_, AppState>,
+    job_id: Uuid,
+    include_unknown: Option<bool>,
+) -> IpcResult<SubmitOutcome> {
     let core = &state.core;
-    Ok(core.bus.retry_failed(&core.ctx, job_id).await?)
+    Ok(core
+        .bus
+        .retry_failed(&core.ctx, job_id, include_unknown.unwrap_or(false))
+        .await?)
+}
+
+/// H9: the canary host of a bulk run finished well; run on the other hosts.
+#[tauri::command]
+pub async fn bulk_go_on(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<bool> {
+    let core = &state.core;
+    Ok(core.bus.go_on(&core.ctx, job_id).await?)
 }
 
 /// BX-05: asks where to save, then writes the run's results there. `None` when the user closed the

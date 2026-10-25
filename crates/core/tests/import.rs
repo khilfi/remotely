@@ -330,6 +330,84 @@ async fn adding_keys_needs_an_unlocked_vault_and_saves_nothing_otherwise() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A3: a key path Remotely refuses is left out of the preview with a note, and the commit never reads
+/// it. The unit tests (`import::importer`) show that shares and device paths are refused before any
+/// file system call; here a DOS device name, which is harmless to name in a test, shows the wiring.
+#[tokio::test]
+async fn a_refused_key_path_is_noted_in_the_preview_and_never_read() {
+    let core = core().await;
+    let ctx = &core.ctx;
+    let csv = "name,host,user,key_file\nlab01,192.0.2.31,alice,C:\\Users\\alice\\.ssh\\NUL\n";
+    let preview = core
+        .import
+        .preview(ctx, ImportSource::Csv, None, import::csv::parse(csv))
+        .await
+        .unwrap();
+    let row = &preview.rows[0];
+    assert_eq!(row.key_file, None, "no key file to read at commit");
+    assert!(
+        row.candidate
+            .notes
+            .iter()
+            .any(|n| n.contains("names a Windows device") && n.contains("copy the key to this PC")),
+        "{:?}",
+        row.candidate.notes
+    );
+    let report = core
+        .import
+        .commit(
+            ctx,
+            &ImportRequest {
+                preview_id: preview.id,
+                rows: vec![row.index],
+                folder_id: None,
+                add_keys: true,
+                keep_startup: vec![],
+            },
+            &core.sessions,
+            &core.vault,
+        )
+        .await
+        .unwrap();
+    assert_eq!((report.created, report.keys_added), (1, 0));
+    assert!(report.problems[0].reason.contains("choose one in the session editor"));
+    assert!(core.vault.list(ctx).await.unwrap().is_empty());
+}
+
+/// A3, A9: an included file over its cap is left out with a warning; the rest of the config is read.
+#[tokio::test]
+async fn an_oversized_include_is_left_out_with_a_warning() {
+    let core = core().await;
+    let ctx = &core.ctx;
+    let dir = temp_folder("import-include-cap");
+    let big = dir.join("big.conf");
+    std::fs::write(&big, "#".repeat(import::openssh::MAX_INCLUDE_BYTES as usize + 1)).unwrap();
+    let config_path = dir.join("config");
+    std::fs::write(
+        &config_path,
+        format!(
+            "Include \"{}\"\nHost web01\n  HostName web01.example.com\n",
+            big.display()
+        ),
+    )
+    .unwrap();
+    let preview = core
+        .import
+        .preview_file(ctx, ImportSource::Openssh, &config_path)
+        .await
+        .unwrap();
+    assert_eq!(preview.rows.len(), 1);
+    assert!(
+        preview
+            .warnings
+            .iter()
+            .any(|w| w.contains("big.conf: the file is larger than 1 MB, so Remotely didn't read it")),
+        "{:?}",
+        preview.warnings
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[tokio::test]
 async fn a_mobaxterm_export_keeps_its_folders_and_leaves_passwords_out() {
     let core = core().await;

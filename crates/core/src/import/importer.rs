@@ -24,6 +24,7 @@ use crate::sessions::{
     rate_startup, SessionAuth, SessionInput, SessionLibrary, SessionRecord, StartupRating, MAX_SESSION_NAME,
 };
 use crate::store::{NewAuditEntry, Store};
+use crate::untrusted::{path_refusal, read_capped, ReadError};
 use crate::vault::{SecretId, SecretKind, SecretString, VaultService, VaultStatus, MAX_SECRET_BYTES};
 
 /// Largest source file read: far more than any real session list.
@@ -246,18 +247,15 @@ impl Importer {
         if source == ImportSource::Putty {
             return self.preview_putty(ctx).await;
         }
-        let size = tokio::fs::metadata(path)
-            .await
-            .map_err(|err| CoreError::InvalidInput(format!("can't read {}: {err}", path.display())))?
-            .len();
-        if size > MAX_SOURCE_BYTES {
-            return Err(CoreError::InvalidInput(format!(
+        // A9: never more than the cap is read, even from a file that grows while it is read.
+        let bytes = read_capped(path, MAX_SOURCE_BYTES).await.map_err(|err| match err {
+            ReadError::TooLarge { .. } => CoreError::InvalidInput(format!(
                 "{} is larger than {} MB, too large for a session list.",
                 path.display(),
                 MAX_SOURCE_BYTES / 1024 / 1024
-            )));
-        }
-        let bytes = tokio::fs::read(path).await?;
+            )),
+            ReadError::Io(err) => CoreError::InvalidInput(format!("can't read {}: {err}", path.display())),
+        })?;
         let content = text::decode_text(&bytes);
         let home = home_dir();
         let parsed = match source {
@@ -269,8 +267,7 @@ impl Importer {
                     .or_else(|_| std::env::var("USER"))
                     .unwrap_or_default();
                 tokio::task::spawn_blocking(move || {
-                    let read = |p: &Path| std::fs::read(p).ok().map(|b| text::decode_text(&b));
-                    super::openssh::parse(&content, &home, &user, &read)
+                    super::openssh::parse(&content, &home, &user, &super::openssh::DiskIncludes)
                 })
                 .await
                 .map_err(|err| CoreError::Io(std::io::Error::other(err)))?
@@ -300,7 +297,7 @@ impl Importer {
         let mut taken: HashSet<String> = existing.iter().map(|s| s.name.to_lowercase()).collect();
         let mut seen: HashMap<(String, u16, Option<String>), usize> = HashMap::new();
         let mut rows = Vec::with_capacity(parsed.candidates.len());
-        for (index, candidate) in parsed.candidates.into_iter().enumerate() {
+        for (index, mut candidate) in parsed.candidates.into_iter().enumerate() {
             let key = address_key(&candidate.host, candidate.port, candidate.username.as_deref());
             let status = if let Some(s) = by_address.get(&key) {
                 RowStatus::Duplicate {
@@ -322,13 +319,13 @@ impl Importer {
             };
             seen.entry(key).or_insert(index);
             let key_file = match &candidate.auth {
-                CandidateAuth::KeyFile { path } => Some(KeyFile {
-                    path: path.clone(),
-                    label: Path::new(path)
-                        .file_name()
-                        .map_or_else(|| path.clone(), |f| f.to_string_lossy().into_owned()),
-                    exists: Path::new(path).is_file(),
-                }),
+                CandidateAuth::KeyFile { path } => match key_file(path, |p| p.is_file()) {
+                    Ok(file) => Some(file),
+                    Err(note) => {
+                        candidate.notes.push(note);
+                        None
+                    }
+                },
                 _ => None,
             };
             let startup_rating = match (&self.policy, &candidate.startup_command) {
@@ -742,8 +739,34 @@ fn refers_to_row(text: &str, unsaved: &[PreviewRow], row: &PreviewRow) -> bool {
     })
 }
 
+/// The key file a found session names, with whether it is on this PC (`is_file`). A3: a key path on a
+/// network share or a device path ([`path_refusal`]) is never looked at, since Windows would send the
+/// user's sign-in to that server: the row gets no key file (so the commit never reads it) and this
+/// note instead.
+fn key_file(path: &str, is_file: impl Fn(&Path) -> bool) -> std::result::Result<KeyFile, String> {
+    if let Some(refusal) = path_refusal(path) {
+        return Err(format!(
+            "the key file {path} {}, so Remotely didn't read it: copy the key to this PC, then choose it in the session editor",
+            refusal.describe()
+        ));
+    }
+    Ok(KeyFile {
+        path: path.to_owned(),
+        label: Path::new(path)
+            .file_name()
+            .map_or_else(|| path.to_owned(), |f| f.to_string_lossy().into_owned()),
+        exists: is_file(Path::new(path)),
+    })
+}
+
 /// Reads a key file of at most [`MAX_SECRET_BYTES`] into a zeroizing secret.
 async fn read_key_file(path: &Path) -> Result<SecretString> {
+    if let Some(refusal) = path_refusal(path) {
+        return Err(CoreError::InvalidInput(format!(
+            "it {}, so Remotely didn't read it",
+            refusal.describe()
+        )));
+    }
     let size = tokio::fs::metadata(path).await?.len();
     if size > MAX_SECRET_BYTES as u64 {
         return Err(CoreError::InvalidInput(format!(
@@ -773,6 +796,37 @@ mod tests {
         let renamed = free_name(&long, &HashSet::new());
         assert_eq!(renamed.chars().count(), MAX_SESSION_NAME);
         assert!(renamed.ends_with(" (2)"));
+    }
+
+    #[test]
+    fn key_paths_on_shares_or_device_paths_are_never_looked_at() {
+        let looked = std::cell::RefCell::new(Vec::new());
+        let is_file = |p: &Path| {
+            looked.borrow_mut().push(p.to_path_buf());
+            true
+        };
+        for path in [
+            r"\\nas.example.com\keys\id_ed25519",
+            "//nas.example.com/keys/id_rsa",
+            r"\/nas.example.com\keys\db01.ppk",
+            r"\\?\C:\Users\alice\.ssh\id_ed25519",
+            r"\\?\UNC\nas.example.com\keys\id_rsa",
+            r"\\.\pipe\openssh-ssh-agent",
+            r"\??\C:\Users\alice\.ssh\id_rsa",
+            r"C:\Users\alice\.ssh\NUL",
+        ] {
+            let note = key_file(path, is_file).unwrap_err();
+            assert!(note.starts_with(&format!("the key file {path} ")), "{note}");
+            assert!(
+                note.contains("so Remotely didn't read it: copy the key to this PC"),
+                "{note}"
+            );
+        }
+        assert!(looked.borrow().is_empty(), "{:?}", looked.borrow());
+
+        let local = key_file(r"C:\Users\alice\.ssh\id_ed25519", is_file).unwrap();
+        assert_eq!((local.label.as_str(), local.exists), ("id_ed25519", true));
+        assert_eq!(looked.borrow().len(), 1);
     }
 
     #[test]

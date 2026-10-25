@@ -671,6 +671,7 @@ async fn a_pager_is_not_read_only_in_multiexec_but_is_in_compare() {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     };
     let preview = fleet.core.bus.preview(&fleet.core.ctx, &compare).await.unwrap();
     assert_eq!(preview.action, ActionKind::ExecReadOnly);
@@ -712,6 +713,7 @@ async fn the_bus_refuses_a_line_whose_keys_are_not_what_was_rated() {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     };
     assert!(compare.check_from_ui().is_ok());
 

@@ -474,6 +474,7 @@ fn exec(script: &str, sessions: &[Uuid]) -> Command {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     }
 }
 

@@ -75,7 +75,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use self::activity::{is_password_prompt, FinishedHow, RunWatch, WatchConfig};
+use self::activity::{is_password_prompt, is_secret_prompt, FinishedHow, RunWatch, WatchConfig};
 use self::files::{Transfers, UploadReport, UploadRun};
 use self::folder::{FolderInfo, FolderTracking, FolderWatch, PromptHook};
 use self::log::{LogMessage, SessionLog};
@@ -101,6 +101,7 @@ use crate::known_hosts::{HostKey, HostKeyCheck, KnownHost, KnownHosts};
 use crate::locks;
 use crate::policy::Tier;
 use crate::presentation::Change;
+use crate::save_guard::{self, Saved};
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{SecretId, SecretKind, SecretString, Vault};
@@ -195,6 +196,9 @@ pub struct TerminalSettings {
     /// SS-08: type the folder prompt hook into bash and zsh. A session can say otherwise, and a
     /// Prod-labelled session has it off unless it says so.
     pub prompt_hook: bool,
+    /// QL-05: the UI asks before pasting text that holds a line break (each one presses Enter). On
+    /// for settings saved before it.
+    pub confirm_multiline_paste: bool,
 }
 
 impl Default for TerminalSettings {
@@ -212,6 +216,7 @@ impl Default for TerminalSettings {
             notify_after_secs: 30,
             notify_quiet_secs: 30,
             prompt_hook: true,
+            confirm_multiline_paste: true,
         }
     }
 }
@@ -285,8 +290,13 @@ impl TerminalSettings {
         } else {
             ", folder prompt hook off"
         };
+        let paste = if self.confirm_multiline_paste {
+            ""
+        } else {
+            ", multi-line pastes without asking"
+        };
         format!(
-            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}",
+            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}{paste}",
             on(self.auto_reconnect),
             on(self.copy_on_select),
             self.font_size,
@@ -590,8 +600,10 @@ pub struct PaneScreen {
 }
 
 impl PaneScreen {
-    pub fn at_password_prompt(&self) -> bool {
-        is_password_prompt(&self.line)
+    /// SS-10: the line asks for a password, passphrase or one-time code, so MultiExec passes keys straight
+    /// through and never rates, journals or audits them.
+    pub fn at_secret_prompt(&self) -> bool {
+        is_secret_prompt(&self.line)
     }
 }
 
@@ -1361,7 +1373,7 @@ impl Terminals {
 
     /// Saves the terminals' text: one file at `dest` (a header per terminal when there are several),
     /// or with [`SaveLayout::FilePerTerminal`] one file each in the folder `dest`. Audited with the
-    /// sessions and the files, never the text.
+    /// sessions and the files, never the text. Never into a Git working tree ([`save_guard`]).
     pub async fn save_output(
         &self,
         ctx: &Context,
@@ -1370,6 +1382,10 @@ impl Terminals {
         dest: &Path,
     ) -> Result<SavedOutput> {
         output::check(&items)?;
+        match layout {
+            SaveLayout::OneFile => save_guard::refuse_repository(dest, Saved::Output)?,
+            SaveLayout::FilePerTerminal => save_guard::refuse_repository_folder(dest, Saved::Output)?,
+        }
         let items = self.scrub_output(items);
         let now = log::local_now();
         let mut files: Vec<PathBuf> = Vec::new();
@@ -1466,8 +1482,10 @@ impl Terminals {
         (targets, names)
     }
 
-    /// SS-11: starts logging the pane's output to `path` (appended), each line with the time. Audited.
+    /// SS-11: starts logging the pane's output to `path` (appended), each line with the time. Audited. Never into
+    /// a Git working tree ([`save_guard`]).
     pub async fn start_log(&self, ctx: &Context, id: Uuid, path: &Path) -> Result<()> {
+        save_guard::refuse_repository(path, Saved::SessionLog)?;
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;
@@ -3194,6 +3212,22 @@ mod tests {
             NotifyWhen::Long,
             "QL-07's choice: long commands, as before"
         );
+        assert!(old.confirm_multiline_paste, "QL-05: a multi-line paste asks first");
+    }
+
+    #[test]
+    fn a_multiline_paste_asks_unless_turned_off() {
+        let saved: TerminalSettings = serde_json::from_str(r#"{"promptHook":false}"#).unwrap();
+        assert!(saved.confirm_multiline_paste, "on for settings saved before it");
+        let off = TerminalSettings {
+            confirm_multiline_paste: false,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&off).unwrap();
+        assert!(json.contains(r#""confirmMultilinePaste":false"#), "{json}");
+        assert_eq!(serde_json::from_str::<TerminalSettings>(&json).unwrap(), off);
+        assert!(off.describe().ends_with(", multi-line pastes without asking"));
+        assert!(!TerminalSettings::default().describe().contains("paste"));
     }
 
     #[test]

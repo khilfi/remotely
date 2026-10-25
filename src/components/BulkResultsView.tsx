@@ -10,11 +10,14 @@ import {
   ChevronRightIcon,
   DownloadIcon,
   GitCompareArrowsIcon,
+  HourglassIcon,
   LoaderCircleIcon,
+  PlayIcon,
   RotateCcwIcon,
   ScissorsIcon,
   SquareIcon,
 } from "lucide-react";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -44,6 +47,8 @@ import {
 import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { diffReason } from "@/lib/disabled-reasons";
+import { canaryPrompt, retryChoices, timeLeft } from "@/lib/rollout";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { StatusBadge, TierBadge } from "./Badges";
 import { OutputDiffDialog } from "./OutputDiffDialog";
 import { WhyDisabled } from "./WhyDisabled";
@@ -88,6 +93,9 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
   const [comparing, setComparing] = useState<{ left: string; right: string } | null>(null);
   const [viewing, setViewing] = useState<HostResult | null>(null);
   const [busy, setBusy] = useState(false);
+  // H9: the canary host finished; the rest wait for the go-ahead until `until`.
+  const [canary, setCanary] = useState<{ name: string; rest: number; until: string } | null>(null);
+  const [confirmUnknown, setConfirmUnknown] = useState(false);
   const shown = results?.job.id === jobId ? results : null;
   const open = shown ? OPEN.has(shown.job.status) : true;
 
@@ -95,7 +103,10 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
   useEffect(() => {
     let timer: number | undefined;
     const unlisten = api.onJobEvent((event) => {
-      if (event.jobId !== jobId || timer !== undefined) return;
+      if (event.jobId !== jobId) return;
+      if (event.event === "canaryWaiting") setCanary({ name: event.name, rest: event.rest, until: event.until });
+      else if (event.event === "targetStarted" || event.event === "finished") setCanary(null);
+      if (timer !== undefined) return;
       timer = window.setTimeout(() => {
         timer = undefined;
         setVersion((v) => v + 1);
@@ -124,7 +135,7 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
     };
   }, [jobId, ignoreWs, version]);
 
-  // Running hosts show how long they have been at it.
+  // Running hosts show how long they have been at it (and the canary's wait, how long is left).
   useEffect(() => {
     if (!open) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
@@ -135,10 +146,22 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
     if (!(await api.cancelJob(jobId))) toast.info("The run has already finished.");
   }
 
-  async function retry() {
+  async function retry(includeUnknown = false) {
     setBusy(true);
     try {
-      onRetry(await api.bulkRetryFailed(jobId));
+      onRetry(await api.bulkRetryFailed(jobId, includeUnknown));
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function goOn() {
+    setBusy(true);
+    try {
+      if (!(await api.bulkGoOn(jobId))) toast.info("The run is no longer waiting.");
+      setCanary(null);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -169,8 +192,17 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
 
   const { job, counts, groups, hosts, run } = shown;
   const names = new Map(hosts.map((h) => [h.targetKey, h.name]));
-  const done = counts.succeeded + counts.failed + counts.cancelled;
-  const canRetry = !open && counts.failed > 0;
+  const done = counts.succeeded + counts.failed + counts.cancelled + counts.unknown + counts.skipped;
+  const retries = retryChoices(counts);
+  const canRetry = !open && retries.failed > 0;
+  // H9: the event may have come before this view opened; the results say whether the rest still wait.
+  const waiting = canary ?? shown.canary;
+  // BX-02, BX-04: the journal no longer holds the script as it ran (the core refuses the retry too).
+  const retryBlocked = job.bodiesRemoved
+    ? "Its script was removed after the retention period. Run it again from Compare."
+    : job.commandRedacted
+      ? "Its script had something that looked like a secret, which the journal doesn't keep. Run it again from Compare."
+      : null;
 
   return (
     <div className="grid gap-4">
@@ -193,10 +225,24 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
             </Button>
           )}
           {canRetry && (
-            <WhyDisabled reason={busy ? "Submitting the retry…" : null}>
-              <Button variant="outline" size="sm" onClick={() => void retry()} disabled={busy}>
+            <WhyDisabled reason={busy ? "Submitting the retry…" : retryBlocked}>
+              <Button variant="outline" size="sm" onClick={() => void retry()} disabled={busy || retryBlocked !== null}>
                 <RotateCcwIcon data-icon="inline-start" />
                 Retry {plural(counts.failed, "failed host")}
+              </Button>
+            </WhyDisabled>
+          )}
+          {!open && retries.withUnknown !== null && (
+            <WhyDisabled reason={busy ? "Submitting the retry…" : retryBlocked}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setConfirmUnknown(true)}
+                disabled={busy || retryBlocked !== null}
+              >
+                <RotateCcwIcon data-icon="inline-start" />
+                Retry {retries.failed > 0 ? "them and " : ""}
+                {plural(counts.unknown, "host")} with the outcome unknown
               </Button>
             </WhyDisabled>
           )}
@@ -230,6 +276,26 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
         </div>
       </div>
 
+      {open && waiting && (
+        <Alert>
+          <HourglassIcon />
+          <AlertTitle>{canaryPrompt(waiting.name, waiting.rest)}</AlertTitle>
+          <AlertDescription>
+            Check its result below first. Nothing else has run yet.
+            {` The others wait ${timeLeft(waiting.until, now)} more, then the run stops.`}
+          </AlertDescription>
+          <AlertAction className="flex gap-2">
+            <Button size="sm" onClick={() => void goOn()} disabled={busy}>
+              <PlayIcon data-icon="inline-start" />
+              Run on the rest
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => void cancel()} disabled={busy}>
+              Stop here
+            </Button>
+          </AlertAction>
+        </Alert>
+      )}
+
       <div className="grid gap-2">
         <Progress
           value={counts.total ? (done / counts.total) * 100 : 0}
@@ -243,7 +309,13 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
           {counts.failed > 0 && <span className="text-destructive">{counts.failed} failed</span>}
           {counts.running > 0 && <span>{counts.running} running</span>}
           {counts.pending > 0 && <span>{counts.pending} waiting</span>}
+          {counts.unknown > 0 && (
+            <span className="text-tier-medium" title="Timed out, or cancelled while the command ran: it may have run">
+              {counts.unknown} outcome unknown
+            </span>
+          )}
           {counts.cancelled > 0 && <span>{counts.cancelled} cancelled</span>}
+          {counts.skipped > 0 && <span>{counts.skipped} not started</span>}
           <span className="ml-auto flex items-center gap-2">
             <Switch id={`ignore-ws-${jobId}`} checked={ignoreWs} onCheckedChange={setIgnoreWs} size="sm" />
             <Label htmlFor={`ignore-ws-${jobId}`} className="text-xs font-normal">
@@ -253,7 +325,14 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
         </div>
       </div>
 
-      {run && (
+      {job.bodiesRemoved && (
+        <p className="text-sm text-muted-foreground" role="note">
+          This run is older than the retention period set in Settings, General, so its script and the hosts&apos; output
+          were removed. Its results and groups are kept.
+        </p>
+      )}
+
+      {run && !job.bodiesRemoved && (
         <pre className="max-h-24 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
           {run.script}
         </pre>
@@ -337,9 +416,29 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
           onClose={() => setViewing(null)}
         />
       )}
+      {confirmUnknown && (
+        <ConfirmDialog
+          title="Run it again where the outcome is unknown?"
+          description="Those hosts timed out, or were cancelled while the command ran, so it may have run there already: running it again may run it twice. The retry still asks for its approval."
+          confirmLabel="Retry them"
+          onConfirm={() => retry(true)}
+          onClose={() => setConfirmUnknown(false)}
+        />
+      )}
     </div>
   );
 }
+
+/** Each host's state in a word or two. */
+const STATUS_LABEL: Record<HostResult["status"], string> = {
+  pending: "Waiting",
+  running: "Running",
+  succeeded: "Succeeded",
+  failed: "Failed",
+  cancelled: "Cancelled",
+  skipped: "Not started",
+  unknown: "Outcome unknown",
+};
 
 function HostStatus({ host, now }: { host: HostResult; now: number }) {
   if (host.status === "running") {
@@ -357,14 +456,9 @@ function HostStatus({ host, now }: { host: HostResult; now: number }) {
     failed: "text-destructive",
     cancelled: "text-muted-foreground",
     skipped: "text-muted-foreground",
+    unknown: "text-tier-medium",
   }[host.status];
-  const label = {
-    pending: "Waiting",
-    succeeded: "Succeeded",
-    failed: "Failed",
-    cancelled: "Cancelled",
-    skipped: "Skipped",
-  }[host.status];
+  const label = STATUS_LABEL[host.status];
   return <span className={cn("text-sm", className)}>{label}</span>;
 }
 
@@ -530,14 +624,29 @@ export function HostOutputDialog({
           <DialogDescription>
             {description ?? (
               <>
-                {host.status === "succeeded" ? "Succeeded" : host.status === "failed" ? "Failed" : "Cancelled"}
+                {STATUS_LABEL[host.status]}
                 {host.exitCode !== null && ` · exit code ${host.exitCode}`} · {seconds(host.durationMs)}
                 {sizes}
               </>
             )}
           </DialogDescription>
         </DialogHeader>
-        {host.error && <p className="text-sm text-destructive">{host.error}</p>}
+        {host.error && (
+          <p className={cn("text-sm", host.status === "unknown" ? "text-tier-medium" : "text-destructive")}>
+            {host.error}
+          </p>
+        )}
+        {(host.peerIp || host.hostKey) && (
+          <p className="text-xs text-muted-foreground">
+            {host.peerIp && (
+              <>
+                Reached <span data-mask="ip">{host.peerIp}</span>
+              </>
+            )}
+            {host.peerIp && host.hostKey && ", "}
+            {host.hostKey && <span className="font-mono">host key {host.hostKey}</span>}
+          </p>
+        )}
         {error && (
           <p className="text-sm text-destructive" role="alert">
             {error}

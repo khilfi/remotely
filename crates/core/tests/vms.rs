@@ -661,6 +661,86 @@ async fn a_capacity_check_that_cannot_run_is_a_warning_too() {
 }
 
 #[tokio::test]
+async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first() {
+    use remotely_core::adapters::vm_hardware::{VirtualNic, VmHardware};
+    let nic = |slot: &str, connection: &str, connected: bool| VirtualNic {
+        slot: slot.into(),
+        connection: Some(connection.into()),
+        model: Some("vmxnet3".into()),
+        mac: Some("00:0c:29:00:00:01".into()),
+        connected: Some(connected),
+    };
+    let hardware = |nics: Vec<VirtualNic>| VmHardware {
+        nics,
+        ..VmHardware::default()
+    };
+    let fake = FakeVmware::default()
+        .with_hardware(
+            &vmx("clone"),
+            hardware(vec![nic("ethernet0", "nat", true), nic("ethernet1", "bridged", true)]),
+        )
+        .with_hardware(&vmx("unplugged"), hardware(vec![nic("ethernet0", "bridged", false)]))
+        .with_hardware(&vmx("natted"), hardware(vec![nic("ethernet0", "nat", true)]));
+    let core = Setup::new(fake).build().await;
+
+    // Starting is Low, but the warning needs a confirm, and it names the VM and its adapter.
+    let SubmitOutcome::NeedsApproval { request } = core
+        .bus
+        .submit(&core.ctx, start(&["clone", "unplugged", "natted"]))
+        .await
+        .unwrap()
+    else {
+        panic!("a bridged clone: a confirm");
+    };
+    assert_eq!(request.tier, Tier::Low);
+    assert_eq!(request.steps, [ApprovalStep::Confirm]);
+    let bridged: Vec<&String> = request.warnings.iter().filter(|w| w.starts_with("Bridged")).collect();
+    assert_eq!(bridged.len(), 1, "{:?}", request.warnings);
+    assert!(
+        bridged[0].contains("'clone' (ethernet1) joins the network"),
+        "{}",
+        bridged[0]
+    );
+    assert!(
+        !bridged[0].contains("unplugged"),
+        "an adapter not plugged in at power-on joins nothing"
+    );
+    assert!(!bridged[0].contains("natted"));
+    core.bus.cancel_approval(request.id).await.unwrap();
+
+    // Without a bridged adapter, a start runs as before; one VM the user picked is not asked about.
+    assert!(matches!(
+        core.bus
+            .submit(&core.ctx, start(&["natted", "unplugged"]))
+            .await
+            .unwrap(),
+        SubmitOutcome::Queued { .. }
+    ));
+    assert!(matches!(
+        core.bus.submit(&core.ctx, start(&["clone"])).await.unwrap(),
+        SubmitOutcome::Queued { .. }
+    ));
+
+    // A bridged VM that runs already is on its network: starting the others is not asked about.
+    let fake = FakeVmware::with_running([vmx("clone")])
+        .in_library(&vmx("clone"), Some("clone"))
+        .in_library(&vmx("natted"), Some("natted"))
+        .in_library(&vmx("unplugged"), Some("unplugged"))
+        .with_hardware(&vmx("clone"), hardware(vec![nic("ethernet0", "bridged", true)]))
+        .with_hardware(&vmx("natted"), hardware(vec![nic("ethernet0", "nat", true)]))
+        .with_hardware(&vmx("unplugged"), hardware(vec![nic("ethernet0", "bridged", false)]));
+    let core = Setup::new(fake).build().await;
+    core.inventory.refresh(&core.ctx).await.unwrap();
+    assert!(matches!(
+        core.bus
+            .submit(&core.ctx, start(&["clone", "natted", "unplugged"]))
+            .await
+            .unwrap(),
+        SubmitOutcome::Queued { .. }
+    ));
+}
+
+#[tokio::test]
 async fn other_actions_skip_the_capacity_check() {
     let mut setup = Setup::new(FakeVmware::with_running([vmx("a")]));
     setup.host.free_disk_pct = 1.0;
@@ -1000,7 +1080,7 @@ async fn cancel_stops_waiting_for_a_vm_that_waits_for_an_answer_in_workstation()
             ("a", "succeeded", None),
             (
                 "b",
-                "cancelled",
+                "unknown",
                 Some("cancelled while vmrun was running; Workstation may still finish the action, so check the VM's state")
             ),
         ]

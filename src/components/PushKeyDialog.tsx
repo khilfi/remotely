@@ -1,7 +1,8 @@
-// SS-09: push a public key to many hosts. Picks hosts like a bulk run (BX-01), then submits a pushSshKey
-// command: the policy engine gives it its tier (Medium by default; Prod raises it), the app's approval
-// dialog asks what that tier needs, and each host appends the key to ~/.ssh/authorized_keys unless it is
-// there already. The results show live, grouped like a bulk run's.
+// SS-09: push a public key to many hosts, or take it off them. Picks hosts like a bulk run (BX-01), then submits a
+// pushSshKey (with optional expiry-time and from restrictions) or removeSshKey command: the policy engine gives it
+// its tier (Medium by default; Prod raises it), the app's approval dialog asks what that tier needs, and each host
+// appends the key to ~/.ssh/authorized_keys unless it is there already, or drops every line holding it. The results
+// show live, grouped like a bulk run's.
 
 import { useEffect, useState } from "react";
 import { UploadIcon } from "lucide-react";
@@ -17,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { TierBadge } from "@/components/Badges";
 import { BulkResultsView } from "@/components/BulkResultsView";
@@ -33,6 +35,7 @@ import {
   type TargetPicks,
 } from "@/lib/api";
 import { plural } from "@/lib/format";
+import { earliestExpiry, expiryProblem, keyOptions, optionsPrefix, parseFrom } from "@/lib/key-options";
 
 interface Props {
   /** The vault key to push; null: a public key pasted here (a colleague's, say). */
@@ -52,6 +55,9 @@ export function PushKeyDialog({ sshKey, onSubmit, onOpenSessions, onClose }: Pro
   const [resolved, setResolved] = useState<ResolvedTargets | null>(null);
   const [trustNew, setTrustNew] = useState(false);
   const [timeout, setTimeoutText] = useState(DEFAULT_TIMEOUT);
+  const [mode, setMode] = useState<"push" | "remove">("push");
+  const [expiresOn, setExpiresOn] = useState("");
+  const [fromText, setFromText] = useState("");
   const [preview, setPreview] = useState<{ key: string; preview: CommandPreview } | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -63,15 +69,29 @@ export function PushKeyDialog({ sshKey, onSubmit, onOpenSessions, onClose }: Pro
   const timeoutSecs = timeout.trim() === "" ? null : Number(timeout);
   const timeoutOk =
     timeoutSecs === null || (Number.isInteger(timeoutSecs) && timeoutSecs >= 1 && timeoutSecs <= 86_400);
-  const command: Command | null = publicKey
-    ? {
-        type: "pushSshKey",
-        targets: hosts.map((h) => ({ kind: "session", sessionId: h.sessionId })),
-        publicKey: publicKey.line,
-        trustNewHostKeys: trustNew,
-        timeoutSecs: timeoutOk ? timeoutSecs : null,
-      }
-    : null;
+  const fromProblem = parseFrom(fromText).problem;
+  const expiryWrong = expiryProblem(expiresOn, new Date());
+  const optionsProblem = mode === "push" ? (expiryWrong ?? fromProblem) : null;
+  const options = keyOptions(expiresOn, fromText);
+  const targets = hosts.map((h) => ({ kind: "session" as const, sessionId: h.sessionId }));
+  const command: Command | null = !publicKey
+    ? null
+    : mode === "push"
+      ? {
+          type: "pushSshKey",
+          targets,
+          publicKey: publicKey.line,
+          trustNewHostKeys: trustNew,
+          timeoutSecs: timeoutOk ? timeoutSecs : null,
+          options,
+        }
+      : {
+          type: "removeSshKey",
+          targets,
+          publicKey: publicKey.line,
+          trustNewHostKeys: trustNew,
+          timeoutSecs: timeoutOk ? timeoutSecs : null,
+        };
   const commandKey = JSON.stringify(command);
   const shownPreview = command && reach > 0 && preview?.key === commandKey ? preview.preview : null;
 
@@ -141,11 +161,19 @@ export function PushKeyDialog({ sshKey, onSubmit, onOpenSessions, onClose }: Pro
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <UploadIcon className="size-4" aria-hidden />
-            {sshKey ? `Push '${sshKey.label}' to hosts` : "Push a public key to hosts"}
+            {mode === "push"
+              ? sshKey
+                ? `Push '${sshKey.label}' to hosts`
+                : "Push a public key to hosts"
+              : sshKey
+                ? `Remove '${sshKey.label}' from hosts`
+                : "Remove a public key from hosts"}
           </DialogTitle>
           <DialogDescription>
-            Adds the public key to ~/.ssh/authorized_keys of the user each session logs in as, unless it is there
-            already, and makes ~/.ssh 700 and the file 600. Each host is reached with the session&apos;s own login.
+            {mode === "push"
+              ? "Adds the public key to ~/.ssh/authorized_keys of the user each session logs in as, unless it is there already, and makes ~/.ssh 700 and the file 600."
+              : "Removes every line holding the key from ~/.ssh/authorized_keys of the user each session logs in as, keeping the other keys; the file is replaced in one step."}{" "}
+            Each host is reached with the session&apos;s own login.
           </DialogDescription>
         </DialogHeader>
 
@@ -155,6 +183,12 @@ export function PushKeyDialog({ sshKey, onSubmit, onOpenSessions, onClose }: Pro
           </div>
         ) : (
           <div className="grid max-h-[60vh] gap-4 overflow-y-auto pr-1">
+            <Tabs value={mode} onValueChange={(v) => setMode(v === "remove" ? "remove" : "push")}>
+              <TabsList>
+                <TabsTrigger value="push">Add to hosts</TabsTrigger>
+                <TabsTrigger value="remove">Remove from hosts</TabsTrigger>
+              </TabsList>
+            </Tabs>
             {!sshKey && (
               <div className="grid gap-2">
                 <Label htmlFor="push-public-key">Public key</Label>
@@ -186,6 +220,54 @@ export function PushKeyDialog({ sshKey, onSubmit, onOpenSessions, onClose }: Pro
               resolved={resolved}
               onOpenSessions={onOpenSessions}
             />
+            {mode === "push" && (
+              <div className="grid gap-3 rounded-md border p-3">
+                <div className="flex flex-wrap items-center gap-3">
+                  <Label htmlFor="push-expires" className="font-normal">
+                    Stops working on
+                  </Label>
+                  <Input
+                    id="push-expires"
+                    type="date"
+                    className="w-44"
+                    min={earliestExpiry(new Date())}
+                    value={expiresOn}
+                    onChange={(e) => setExpiresOn(e.currentTarget.value)}
+                    aria-invalid={expiryWrong ? true : undefined}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    at 00:00 UTC (empty: never). Needs OpenSSH 8.2 or later: an older server refuses the key.
+                  </span>
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="push-from" className="font-normal">
+                    Only from
+                  </Label>
+                  <Input
+                    id="push-from"
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="192.0.2.0/24, *.example.com (empty: anywhere)"
+                    value={fromText}
+                    onChange={(e) => setFromText(e.currentTarget.value)}
+                    aria-invalid={fromProblem ? true : undefined}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    The hosts or networks the key may log in from; ! in front leaves one out.
+                  </p>
+                </div>
+                {optionsProblem ? (
+                  <p className="text-sm text-destructive">{optionsProblem}</p>
+                ) : (
+                  optionsPrefix(options) && (
+                    <p className="text-xs text-muted-foreground">
+                      Written before the key: <span className="font-mono">{optionsPrefix(options)}</span>. A host that
+                      has the key already is left as it is and says so: remove it there first.
+                    </p>
+                  )
+                )}
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-6">
               <div className="flex items-center gap-2">
                 <Checkbox id="push-trust" checked={trustNew} onCheckedChange={(v) => setTrustNew(v === true)} />
@@ -232,8 +314,19 @@ export function PushKeyDialog({ sshKey, onSubmit, onOpenSessions, onClose }: Pro
             {jobId ? "Close" : "Cancel"}
           </Button>
           {!jobId && (
-            <Button type="button" onClick={() => void push()} disabled={!command || reach === 0 || !timeoutOk || busy}>
-              {reach > 0 ? `Push to ${plural(reach, "host")}…` : "Push…"}
+            <Button
+              type="button"
+              variant={mode === "remove" ? "destructive" : "default"}
+              onClick={() => void push()}
+              disabled={!command || reach === 0 || !timeoutOk || optionsProblem !== null || busy}
+            >
+              {mode === "push"
+                ? reach > 0
+                  ? `Push to ${plural(reach, "host")}…`
+                  : "Push…"
+                : reach > 0
+                  ? `Remove from ${plural(reach, "host")}…`
+                  : "Remove…"}
             </Button>
           )}
         </DialogFooter>

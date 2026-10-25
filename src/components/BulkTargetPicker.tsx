@@ -2,10 +2,20 @@
 // (reached through the session linked to
 // each), tags and saved VM filters. The core turns the picks into hosts, each session once, and lists
 // the picked VMs no session reaches: commands reach a VM over SSH, and running them through VMware
-// Tools without SSH (VM-09) comes in a later version.
+// Tools without SSH (VM-09) comes in a later version. A4, H11: a VM linked only automatically (by the
+// address its guest reports, which a hostile guest can make up) is reached once the user confirms the link.
 
 import { useEffect, useMemo, useState } from "react";
-import { FilterIcon, ListTreeIcon, SearchIcon, ServerIcon, ShieldIcon, TagIcon, TriangleAlertIcon } from "lucide-react";
+import {
+  FilterIcon,
+  LinkIcon,
+  ListTreeIcon,
+  SearchIcon,
+  ServerIcon,
+  ShieldIcon,
+  TagIcon,
+  TriangleAlertIcon,
+} from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -60,6 +70,8 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
   const [filters, setFilters] = useState<SavedFilter[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
+  const [reload, setReload] = useState(0);
+  const [confirming, setConfirming] = useState<string | null>(null);
 
   useEffect(() => {
     if (!active) return;
@@ -80,16 +92,35 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
     return () => {
       stale = true;
     };
-  }, [active]);
+  }, [active, reload]);
 
-  // Which session each VM is reached through: the first linked one by name, as the core picks it.
-  const linked = useMemo(() => {
-    const byVm = new Map<string, SessionRecord[]>();
+  // Which session each VM is reached through: the first linked one by name, as the core picks it. A4, H11: only a
+  // link the user chose or confirmed; an automatic one waits for a confirm.
+  const [linked, autoLinked] = useMemo(() => {
+    const confirmed = new Map<string, SessionRecord[]>();
+    const automatic = new Map<string, SessionRecord[]>();
     for (const s of sessions) {
-      if (s.vmId) byVm.set(s.vmId, [...(byVm.get(s.vmId) ?? []), s]);
+      if (!s.vmId) continue;
+      const into = s.vmLink === "auto" ? automatic : confirmed;
+      into.set(s.vmId, [...(into.get(s.vmId) ?? []), s]);
     }
-    return byVm;
+    return [confirmed, automatic];
   }, [sessions]);
+
+  async function confirmLink(sessionId: string) {
+    setConfirming(sessionId);
+    try {
+      await api.confirmSessionVmLink(sessionId);
+      setError(null);
+      setReload((n) => n + 1);
+      // The core resolves the picks again, now through the confirmed link.
+      onPicksChange({ ...picks });
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setConfirming(null);
+    }
+  }
 
   const set = (kind: Kind, value: string, on: boolean) =>
     onPicksChange({ ...picks, [kind]: toggle(picks[kind], value, on) });
@@ -104,6 +135,7 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
   const skipped = hosts.filter((h) => h.protected);
   const prod = hosts.filter((h) => h.environment === "prod" && !h.protected);
   const without = resolved?.vmsWithoutSession ?? [];
+  const unconfirmed = resolved?.vmsUnconfirmed ?? [];
 
   function countBadge(kind: Kind) {
     const n = picked(kind);
@@ -177,6 +209,7 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
           <PickList empty={vms.length === 0 ? "No VMs found yet. Refresh the VM list." : "No VM matches."}>
             {shownVms.map((v) => {
               const via = linked.get(v.id);
+              const auto = autoLinked.get(v.id);
               return (
                 <PickRow
                   key={v.id}
@@ -187,6 +220,10 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
                   detail={
                     via ? (
                       `through ${via[0].name}${via.length > 1 ? ` (+${via.length - 1} more linked)` : ""}`
+                    ) : auto ? (
+                      <span className="text-tier-medium">
+                        Linked automatically to {auto[0].name}: confirm the link to run on it
+                      </span>
                     ) : (
                       <span className="text-tier-medium">No linked session: can&apos;t run commands yet</span>
                     )
@@ -277,6 +314,38 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
               Sessions
             </Button>
           </AlertAction>
+        </Alert>
+      )}
+      {unconfirmed.length > 0 && (
+        <Alert>
+          <LinkIcon className="text-tier-medium" />
+          <AlertTitle>{plural(unconfirmed.length, "VM")} linked only automatically, so not reached yet</AlertTitle>
+          <AlertDescription>
+            <p>
+              These links follow the IP address each guest reports about itself, and a guest can report any address,
+              even a production server&apos;s. Confirm a link once you know the session is that VM&apos;s own.
+            </p>
+            <ul className="mt-2 grid gap-1.5">
+              {unconfirmed.map((u) => (
+                <li key={u.vmxPath} className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{u.name}</span>
+                  <span className="text-muted-foreground">through {u.sessionName}</span>
+                  <span className="font-mono text-xs text-muted-foreground" data-mask="address">
+                    {u.address}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="ml-auto h-7"
+                    disabled={confirming !== null}
+                    onClick={() => void confirmLink(u.sessionId)}
+                  >
+                    Confirm link
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </AlertDescription>
         </Alert>
       )}
       {resolved?.notes.map((note) => (

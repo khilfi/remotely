@@ -20,7 +20,7 @@ use remotely_core::jobs::{ExecTuning, JobEvent, JobStatus};
 use remotely_core::known_hosts::HostKey;
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
 use remotely_core::sessions::{SessionAuth, SessionInput};
-use remotely_core::ssh_keys::{GenerateKey, KeyType, SshKey};
+use remotely_core::ssh_keys::{GenerateKey, KeyOptions, KeyType, SshKey};
 use remotely_core::store::AuditEntry;
 use remotely_core::vault::{SecretId, SecretKind, SecretString};
 use remotely_core::Core;
@@ -111,6 +111,27 @@ async fn host(core: &Core, server: &TestSshServer, name: &str, password: &str, e
 
 fn push(public_key: &str, sessions: &[Uuid]) -> Command {
     Command::PushSshKey {
+        targets: sessions
+            .iter()
+            .map(|id| TargetRef::Session { session_id: *id })
+            .collect(),
+        public_key: public_key.into(),
+        trust_new_host_keys: false,
+        timeout_secs: Some(20),
+        options: Default::default(),
+    }
+}
+
+fn push_with(public_key: &str, sessions: &[Uuid], options: KeyOptions) -> Command {
+    let mut command = push(public_key, sessions);
+    if let Command::PushSshKey { options: o, .. } = &mut command {
+        *o = options;
+    }
+    command
+}
+
+fn remove(public_key: &str, sessions: &[Uuid]) -> Command {
+    Command::RemoveSshKey {
         targets: sessions
             .iter()
             .map(|id| TargetRef::Session { session_id: *id })
@@ -490,6 +511,7 @@ async fn a_pushed_key_lands_once_with_the_right_permissions_and_then_logs_in() {
             sudo_password_id: None,
             trust_new_host_keys: false,
             timeout_secs: Some(20),
+            rollout: Default::default(),
         },
     )
     .await;
@@ -624,4 +646,165 @@ async fn a_push_with_something_that_is_not_a_public_key_is_refused_before_anythi
         assert_eq!(err.code(), "invalid_input", "{bad}");
     }
     assert!(core.jobs.open_jobs() == 0);
+}
+
+// ---- SS-09: restricted keys, and taking a key off hosts --------------------------------------------
+
+/// A day well after today, as `YYYY-MM-DD`, and how `expiry-time` writes it.
+fn next_year() -> (String, String) {
+    let day = time::OffsetDateTime::now_utc()
+        .date()
+        .replace_year(time::OffsetDateTime::now_utc().year() + 1)
+        .unwrap();
+    (
+        format!("{:04}-{:02}-{:02}", day.year(), u8::from(day.month()), day.day()),
+        format!("{:04}{:02}{:02}Z", day.year(), u8::from(day.month()), day.day()),
+    )
+}
+
+#[tokio::test]
+async fn a_key_can_be_pushed_with_an_expiry_and_the_networks_it_may_log_in_from() {
+    let core = core().await;
+    let password = new_password();
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let session = host(&core, &server, "web01", &password, Environment::Lab).await;
+    let key = generate(&core, "contractor key", KeyType::Ed25519).await;
+    let line = key.public.clone().unwrap().line;
+    let (day, stamp) = next_year();
+    let options = KeyOptions {
+        expires_on: Some(day.clone()),
+        from: vec!["192.0.2.0/24".into(), "*.example.com".into(), "!198.51.100.7".into()],
+    };
+    let mut events = core.jobs.subscribe();
+    let (job, tier) = run(&core, push_with(&line, &[session], options.clone())).await;
+    assert_eq!(tier, Tier::Medium);
+    assert_eq!(finished(&mut events, job).await, JobStatus::Succeeded);
+    assert_eq!(
+        server.file(AUTHORIZED_KEYS).unwrap(),
+        format!("expiry-time=\"{stamp}\",from=\"192.0.2.0/24,*.example.com,!198.51.100.7\" {line}\n")
+    );
+    // The audit log says how the key was restricted.
+    let entries = audit(&core).await;
+    let end = entries.iter().find(|e| e.event == "job_finished").unwrap();
+    assert!(
+        end.action.contains(&format!("stops working on {day} (UTC)")),
+        "{}",
+        end.action
+    );
+    assert!(end.action.contains("logs in only from 192.0.2.0/24"), "{}", end.action);
+
+    // Pushed again with options, a key already there is not changed, and the host says why.
+    let (again, _) = run(&core, push_with(&line, &[session], options)).await;
+    assert_eq!(finished(&mut events, again).await, JobStatus::Failed);
+    let targets = core.store.job_targets(&core.ctx, again).await.unwrap();
+    assert_eq!(targets[0].exit_code, Some(3));
+    assert!(
+        targets[0]
+            .stderr
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Remove it from the hosts first"),
+        "{:?}",
+        targets[0]
+    );
+    assert_eq!(server.file(AUTHORIZED_KEYS).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn options_that_could_break_out_of_the_line_or_make_no_sense_are_refused() {
+    let core = core().await;
+    let key = generate(&core, "laptop key", KeyType::Ed25519).await;
+    let line = key.public.unwrap().line;
+    let session = Uuid::new_v4();
+    let today = time::OffsetDateTime::now_utc().date();
+    let past = format!(
+        "{:04}-{:02}-{:02}",
+        today.year() - 1,
+        u8::from(today.month()),
+        today.day().min(28)
+    );
+    for options in [
+        KeyOptions {
+            expires_on: Some(past),
+            ..Default::default()
+        },
+        KeyOptions {
+            expires_on: Some("next week".into()),
+            ..Default::default()
+        },
+        KeyOptions {
+            from: vec!["192.0.2.0/24\" command=\"sh".into()],
+            ..Default::default()
+        },
+        KeyOptions {
+            from: vec!["a,b".into()],
+            ..Default::default()
+        },
+        KeyOptions {
+            from: vec!["192.0.2.1 198.51.100.1".into()],
+            ..Default::default()
+        },
+    ] {
+        let err = core
+            .bus
+            .submit(&core.ctx, push_with(&line, &[session], options.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_input", "{options:?}");
+    }
+    assert!(core.store.recent_jobs(&core.ctx, 5).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_key_is_removed_from_hosts_keeping_the_other_keys_and_audited() {
+    let core = core().await;
+    let password = new_password();
+    let key = generate(&core, "old laptop", KeyType::Ed25519).await;
+    let public = key.public.clone().unwrap();
+    let other = ssh_server::generate_key().public_key().to_openssh().unwrap();
+    let existing = format!(
+        "{other}\nfrom=\"192.0.2.0/24\" ssh-ed25519 {} old comment\n",
+        public.blob()
+    );
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_file(AUTHORIZED_KEYS, &existing)
+        .with_mode(AUTHORIZED_KEYS, 0o600);
+    let without = TestSshServer::start().await.with_password("alice", &password);
+    let sessions = [
+        host(&core, &server, "web01", &password, Environment::Lab).await,
+        host(&core, &without, "web02", &password, Environment::Lab).await,
+    ];
+    let mut events = core.jobs.subscribe();
+
+    let preview = core
+        .bus
+        .preview(&core.ctx, &remove(&public.line, &sessions))
+        .await
+        .unwrap();
+    assert_eq!((preview.action, preview.tier), (ActionKind::SshKeyRemove, Tier::Medium));
+    let (job, _) = run(&core, remove(&public.line, &sessions)).await;
+    assert_eq!(finished(&mut events, job).await, JobStatus::Succeeded);
+    assert_eq!(
+        server.file(AUTHORIZED_KEYS).unwrap(),
+        format!("{other}\n"),
+        "the other key stays"
+    );
+    assert_eq!(server.mode(AUTHORIZED_KEYS), Some(0o600));
+    assert!(
+        server.file("/home/alice/.ssh/.authorized_keys.remotely").is_none(),
+        "no file left beside it"
+    );
+    assert!(stdout(&core, job, sessions[0]).await.contains("Removed the key"));
+    assert!(stdout(&core, job, sessions[1]).await.contains("is not there"));
+
+    let summary = format!("Remove the SSH key 'old laptop' ({}) from 2 hosts", public.fingerprint);
+    let entries = audit(&core).await;
+    for event in ["approval_requested", "approval_granted", "job_started", "job_finished"] {
+        assert!(
+            entries.iter().any(|e| e.event == event && e.action == summary),
+            "{event}: {entries:#?}"
+        );
+    }
 }

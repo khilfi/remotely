@@ -1,6 +1,7 @@
-// FD-14: the GitHub update token in Settings. Remotely's releases are in a private GitHub repository,
-// so update checks need a read-only token. It is write-only like every vault secret: typed or pasted
-// here, sent to the core once, then cleared. Nothing can read it back, so it is never shown again.
+// FD-14: the optional GitHub update token in Settings. Remotely's releases are public, so update checks
+// work without one; a read-only token has a limit of its own and reads the releases if the repository
+// goes private again. It is write-only like every vault secret: typed or pasted here, sent to the core
+// once, then cleared. Nothing can read it back, so it is never shown again.
 
 import { useState } from "react";
 import { KeyRoundIcon } from "lucide-react";
@@ -179,20 +180,22 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
               In the vault
             </Badge>
           ) : (
-            <Badge variant="outline">Not set</Badge>
+            <Badge variant="outline">Optional</Badge>
           )}
         </div>
         <p className="text-sm text-muted-foreground">
-          Remotely&apos;s releases are in a private GitHub repository, so checking and installing updates need a
-          fine-grained token for that repository only, with Contents: Read-only and an expiry date (the README says how
-          to make one). It is kept in the vault and never shown again.
+          Remotely&apos;s releases are public, so updates work without a token. A token still helps when many machines
+          share one internet address (GitHub allows 60 checks an hour without one) or if the repository goes private
+          again: a fine-grained token for that repository only, with Contents: Read-only and an expiry date (the README
+          says how to make one). It is kept in the vault and never shown again.
         </p>
         {token?.stored ? (
           <p className="text-sm text-muted-foreground">
-            <Expiry expiresOn={token.expiresOn} />
+            <Expiry expiresOn={token.expiresOn} /> Checks use it while the vault is unlocked, and go without it while
+            the vault is locked.
           </p>
         ) : (
-          <p className="text-sm text-muted-foreground">No token yet, so Remotely can&apos;t check for updates.</p>
+          <p className="text-sm text-muted-foreground">No token: Remotely checks GitHub without one.</p>
         )}
       </div>
       {form}
@@ -231,7 +234,7 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
       {confirmRemove && (
         <ConfirmDialog
           title="Remove the GitHub update token?"
-          description="Update checks stop until you add a new token. The token still works on GitHub: delete it there too if nothing else uses it."
+          description="Update checks go on without a token, which works while the repository is public. The token still works on GitHub: delete it there too if nothing else uses it."
           confirmLabel="Remove"
           onConfirm={async () => {
             onSettings(await api.removeUpdateToken());

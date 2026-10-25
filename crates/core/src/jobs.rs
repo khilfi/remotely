@@ -31,6 +31,15 @@
 //! * CT-01, CT-02 container changes: through the containers service ([`ContainerActions`]), one target
 //!   (container, image, volume or a host's engine) at a time per slot. The CLI's output is kept with the
 //!   job; the audit entry at the end says only what each target did ("reclaimed 1.2GB").
+//! * H9 blast radius of bulk runs ([`Rollout`]): with a canary the first host runs alone and the job
+//!   waits ([`JobEvent::CanaryWaiting`], up to [`CANARY_WAIT`]) for the user to say go on
+//!   ([`JobRunner::go_on`]); a canary that fails, or no answer, stops the run and the rest are skipped.
+//!   A stop after N failures starts no more hosts once N failed or ended with their outcome unknown;
+//!   hosts already running finish. A host that timed out or was cancelled while its command (or a
+//!   vmrun/VBoxManage power call, or a container change) ran ends as [`TargetStatus::Unknown`]: it
+//!   may have run, so "retry failed" leaves it out unless asked.
+//! * Each remote target's journal row and the job's end in the audit log name the address this PC
+//!   reached and the host key the run accepted.
 //! * Every job and target is journaled in the store, and the audit log gets an entry when the job
 //!   starts and when it ends (NFR Audit, NFR Reliability).
 
@@ -41,7 +50,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde::Serialize;
-use tokio::sync::{broadcast, Notify, Semaphore};
+use tokio::sync::{broadcast, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -53,7 +62,7 @@ use crate::adapters::remote::{
 };
 use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::{path_key, ToolsState};
-use crate::command_bus::{ApprovalRecord, Command, PowerOp, SnapshotOp, StopMode};
+use crate::command_bus::{ApprovalRecord, Command, PowerOp, Rollout, SnapshotOp, StopMode};
 use crate::containers::ContainerActions;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -125,6 +134,8 @@ pub enum TargetStatus {
     Failed,
     Skipped,
     Cancelled,
+    /// H9: timed out, or cancelled while its command ran: it may have run, and may still finish.
+    Unknown,
 }
 
 impl TargetStatus {
@@ -136,6 +147,7 @@ impl TargetStatus {
             TargetStatus::Failed => "failed",
             TargetStatus::Skipped => "skipped",
             TargetStatus::Cancelled => "cancelled",
+            TargetStatus::Unknown => "unknown",
         }
     }
 }
@@ -241,6 +253,16 @@ pub enum JobEvent {
         /// VM-05: the safety snapshot taken on this target first, if one was.
         safety_snapshot: Option<String>,
     },
+    /// H9: the canary host finished well and the others wait until `until` (RFC 3339) for the user to
+    /// say go on ([`JobRunner::go_on`]) or cancel the job.
+    CanaryWaiting {
+        job_id: Uuid,
+        target: String,
+        name: String,
+        /// How many hosts wait.
+        rest: usize,
+        until: String,
+    },
     /// VM-03: these VMs did not shut down. Sent before `Finished`, so the UI can offer to force
     /// them off (a separate, Critical command).
     StillRunning {
@@ -284,6 +306,8 @@ struct TargetOutcome {
     failure: Option<String>,
     /// What the end of the job's audit entry says about this target (SS-08: the files uploaded).
     note: Option<String>,
+    /// The address this PC reached (a remote target reached directly).
+    peer_ip: Option<String>,
 }
 
 impl TargetOutcome {
@@ -294,8 +318,67 @@ impl TargetOutcome {
             output: None,
             failure: None,
             note: None,
+            peer_ip: None,
         }
     }
+}
+
+/// H9: how long the rest of a run waits for the go-ahead after its canary host.
+pub const CANARY_WAIT: Duration = Duration::from_secs(15 * 60);
+
+/// H9: a job that waits for the go-ahead after its canary host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanaryWait {
+    /// The canary host's name.
+    pub name: String,
+    /// How many hosts wait.
+    pub rest: usize,
+    /// Until when they wait (RFC 3339).
+    pub until: String,
+}
+
+/// Why a target did not run to an outcome of its own.
+enum Stop {
+    /// The job was cancelled before the target started.
+    Cancelled,
+    /// H9: the run stopped starting hosts (after its failures, or its canary).
+    Halted,
+    Error(CoreError),
+}
+
+/// What one target's task hands back.
+struct Ran {
+    target: Target,
+    outcome: std::result::Result<TargetOutcome, Stop>,
+    duration_ms: u64,
+    safety_snapshot: Option<String>,
+    note: Option<String>,
+    /// The host key its host presented and the run accepted.
+    host_key: Option<String>,
+    /// The target's parallel slot, given back only once its result is journaled, so the next target
+    /// starts after the run's stop after failures has seen this one (H9).
+    permit: Option<OwnedSemaphorePermit>,
+}
+
+/// What a job's targets came to, for its end.
+#[derive(Default)]
+struct Tally {
+    succeeded: usize,
+    failed: usize,
+    unknown: usize,
+    cancelled: usize,
+    skipped: usize,
+    still_running: Vec<Target>,
+    in_flight: Vec<Target>,
+    safety_snapshots: usize,
+    notes: Vec<String>,
+    /// QL-15: target results the journal could not keep.
+    unjournaled: usize,
+    /// H9: why the run stopped starting hosts, once it did.
+    halted: Option<String>,
+    /// Remote targets: `name at 192.0.2.10, key ssh-ed25519 SHA256:...`.
+    reached: Vec<String>,
 }
 
 /// What gets journaled for one finished target.
@@ -309,22 +392,36 @@ struct Finished {
 
 impl Finished {
     fn failed(err: &CoreError) -> Self {
-        Self {
-            status: TargetStatus::Failed,
-            exit_code: None,
-            output: None,
-            error: Some(err.to_string()),
-            error_code: Some(err.code()),
-        }
+        Self::with(TargetStatus::Failed, Some(err))
     }
 
     fn cancelled(err: Option<&CoreError>) -> Self {
+        Self::with(TargetStatus::Cancelled, err)
+    }
+
+    /// H9: it may have run.
+    fn unknown(err: &CoreError) -> Self {
+        Self::with(TargetStatus::Unknown, Some(err))
+    }
+
+    fn with(status: TargetStatus, err: Option<&CoreError>) -> Self {
         Self {
-            status: TargetStatus::Cancelled,
+            status,
             exit_code: None,
             output: None,
             error: err.map(ToString::to_string),
             error_code: err.map(CoreError::code),
+        }
+    }
+
+    /// H9: not started, and why.
+    fn skipped(why: &str) -> Self {
+        Self {
+            status: TargetStatus::Skipped,
+            exit_code: None,
+            output: None,
+            error: Some(why.to_owned()),
+            error_code: None,
         }
     }
 }
@@ -347,11 +444,38 @@ struct BulkVerifier {
     ctx: Context,
     target: Target,
     trust_new: bool,
+    /// The key the session's own host presented once it was accepted, for the journal.
+    accepted: Mutex<Option<String>>,
+}
+
+impl BulkVerifier {
+    fn accept(&self, key: &HostKey, jump: Option<&str>) {
+        if jump.is_none() {
+            *locks::lock(&self.accepted) = Some(format!("{} {}", key.key_type, key.fingerprint));
+        }
+    }
 }
 
 #[async_trait]
 impl HostKeyVerifier for BulkVerifier {
     async fn verify(&self, key: &HostKey, jump: Option<&str>) -> Result<()> {
+        let checked = self.check(key, jump).await;
+        if checked.is_ok() {
+            self.accept(key, jump);
+        }
+        checked
+    }
+
+    async fn known_key_types(&self, host: &str, port: u16) -> Vec<String> {
+        self.known_hosts
+            .key_types(&self.ctx, host, port)
+            .await
+            .unwrap_or_default()
+    }
+}
+
+impl BulkVerifier {
+    async fn check(&self, key: &HostKey, jump: Option<&str>) -> Result<()> {
         let jump = jump.map(str::to_owned);
         match self.known_hosts.check(&self.ctx, key).await? {
             HostKeyCheck::Trusted => Ok(()),
@@ -382,13 +506,17 @@ impl HostKeyVerifier for BulkVerifier {
             }),
         }
     }
+}
 
-    async fn known_key_types(&self, host: &str, port: u16) -> Vec<String> {
-        self.known_hosts
-            .key_types(&self.ctx, host, port)
-            .await
-            .unwrap_or_default()
-    }
+/// What every target of one job shares while it runs.
+struct TargetsRun<'a> {
+    id: Uuid,
+    spec: &'a Arc<JobSpec>,
+    semaphore: &'a Arc<Semaphore>,
+    token: &'a CancellationToken,
+    halt: &'a CancellationToken,
+    safety_name: &'a Option<Arc<str>>,
+    rollout: Rollout,
 }
 
 pub struct JobRunner {
@@ -413,6 +541,11 @@ pub struct JobRunner {
     running: Mutex<HashMap<Uuid, CancellationToken>>,
     /// Signalled whenever a job closes, for jobs waiting to run alone (FD-14).
     idle: Notify,
+    /// H9: jobs whose canary host finished, waiting for the go-ahead.
+    waiting: Mutex<HashMap<Uuid, (tokio::sync::oneshot::Sender<Context>, CanaryWait)>>,
+    /// BX-02: a job is enqueued under the read side; the journal's compaction (VACUUM) holds the write side, so no
+    /// job starts while it runs ([`JobRunner::when_idle`]).
+    maintenance: tokio::sync::RwLock<()>,
 }
 
 impl JobRunner {
@@ -443,6 +576,8 @@ impl JobRunner {
             events,
             running: Mutex::new(HashMap::new()),
             idle: Notify::new(),
+            waiting: Mutex::new(HashMap::new()),
+            maintenance: tokio::sync::RwLock::new(()),
         })
     }
 
@@ -478,6 +613,16 @@ impl JobRunner {
     /// Number of open jobs.
     pub fn open_jobs(&self) -> usize {
         locks::lock(&self.running).len()
+    }
+
+    /// BX-02: runs `work` while no job is open, and holds back new ones until it is done (a submit waits for it, so
+    /// it never meets a database busy compacting). `None`, without running it, when a job is open.
+    pub async fn when_idle<T>(&self, work: impl std::future::Future<Output = T>) -> Option<T> {
+        let _quiet = self.maintenance.write().await;
+        if self.open_jobs() > 0 {
+            return None;
+        }
+        Some(work.await)
     }
 
     /// Waits until `job_id` is the only open job. Cancelling the job stops the wait.
@@ -523,6 +668,25 @@ impl JobRunner {
         Ok(status.unwrap_or(JobStatus::Interrupted))
     }
 
+    /// H9: the rest of a job whose canary host finished may start. Only the command bus calls this
+    /// ([`crate::command_bus::CommandBus::go_on`]). False when the job is not waiting for it.
+    pub(crate) fn go_on(&self, ctx: &Context, job_id: Uuid) -> bool {
+        match locks::lock(&self.waiting).remove(&job_id) {
+            Some((go, _)) => go.send(*ctx).is_ok(),
+            None => false,
+        }
+    }
+
+    /// H9: the jobs waiting for the go-ahead after their canary host.
+    pub fn waiting_for_go_ahead(&self) -> Vec<Uuid> {
+        locks::lock(&self.waiting).keys().copied().collect()
+    }
+
+    /// H9: what a job waits for after its canary host, while it does.
+    pub fn canary_wait(&self, job_id: Uuid) -> Option<CanaryWait> {
+        locks::lock(&self.waiting).get(&job_id).map(|(_, wait)| wait.clone())
+    }
+
     /// Cancels a job in its countdown, or the targets of a running job that have not started yet.
     /// Returns false if the job is not open.
     pub fn cancel(&self, job_id: Uuid) -> bool {
@@ -537,6 +701,8 @@ impl JobRunner {
 
     /// Only the command bus calls this, after policy and approval.
     pub(crate) async fn enqueue(self: &Arc<Self>, spec: JobSpec) -> Result<Uuid> {
+        // Until the job is in `running`: compaction then waits for it to end.
+        let _not_compacting = self.maintenance.read().await;
         let id = Uuid::new_v4();
         let summary = spec.command.summary(spec.decision.targets.len());
         let countdown = spec.decision.steps.iter().find_map(|s| match s {
@@ -656,10 +822,19 @@ impl JobRunner {
         }
 
         self.store.set_job_status(id, JobStatus::Running).await?;
-        let retry = spec
+        // H9: how the run spreads is in the record from the start.
+        let rollout = match &spec.command {
+            Command::RemoteExec { rollout, .. } => rollout.describe(),
+            _ => None,
+        };
+        let started: Vec<String> = spec
             .retry_of
-            .map(|of| format!("retries the failed targets of job {of}"));
-        self.audit(&ctx, "job_started", &summary, &spec, id, None, retry.as_deref())
+            .map(|of| format!("retries the failed targets of job {of}"))
+            .into_iter()
+            .chain(rollout)
+            .collect();
+        let started = (!started.is_empty()).then(|| started.join("; "));
+        self.audit(&ctx, "job_started", &summary, &spec, id, None, started.as_deref())
             .await?;
         self.emit(JobEvent::Started { job_id: id });
 
@@ -667,149 +842,58 @@ impl JobRunner {
         // VM-05: named once, when the job starts, so every VM's safety snapshot has the same name.
         let safety_name: Option<Arc<str>> = (spec.safety_snapshot && safety_snapshot_applies(&spec.command))
             .then(|| safety_snapshot_name(safety_verb(&spec.command), time::OffsetDateTime::now_utc(), id).into());
-        let mut tasks = JoinSet::new();
-        for target in spec.decision.targets.clone() {
-            let this = Arc::clone(&self);
-            let spec = Arc::clone(&spec);
-            let semaphore = Arc::clone(&semaphore);
-            let token = token.clone();
-            let safety_name = safety_name.clone();
-            tasks.spawn(async move {
-                let permit = tokio::select! {
-                    permit = semaphore.acquire_owned() => permit.ok(),
-                    _ = token.cancelled() => None,
-                };
-                if permit.is_none() || token.is_cancelled() {
-                    return (target, Err(None), 0, None, None);
+        let rollout = match &spec.command {
+            Command::RemoteExec { rollout, .. } => *rollout,
+            _ => Rollout::default(),
+        };
+        // H9: no more targets start once this is cancelled; those running finish.
+        let halt = CancellationToken::new();
+        let mut tally = Tally::default();
+        let mut targets = spec.decision.targets.clone();
+        let rest = if rollout.canary && targets.len() > 1 {
+            targets.split_off(1)
+        } else {
+            Vec::new()
+        };
+        let run = TargetsRun {
+            id,
+            spec: &spec,
+            semaphore: &semaphore,
+            token: &token,
+            halt: &halt,
+            safety_name: &safety_name,
+            rollout,
+        };
+        Arc::clone(&self).run_targets(&run, targets, &mut tally).await;
+        if !rest.is_empty() {
+            let go = self.canary_answer(&run, &tally, rest.len()).await;
+            match go {
+                Ok(()) => Arc::clone(&self).run_targets(&run, rest, &mut tally).await,
+                Err(why) => {
+                    tally.halted.get_or_insert(why);
+                    halt.cancel();
+                    Arc::clone(&self).run_targets(&run, rest, &mut tally).await;
                 }
-                let key = target.target.key();
-                if let Err(err) = this.store.set_target_running(id, &key).await {
-                    tracing::warn!(%id, error = %err, "could not journal target start");
-                }
-                this.emit(JobEvent::TargetStarted {
-                    job_id: id,
-                    target: key,
-                    name: target.name.clone(),
-                });
-                let started = Instant::now();
-                let mut safety_taken = None;
-                if let (Some(name), TargetRef::Vm { vmx_path }) = (&safety_name, &target.target) {
-                    if let Err(err) = this.take_safety_snapshot(vmx_path, name).await {
-                        return (target, Err(Some(err)), started.elapsed().as_millis() as u64, None, None);
-                    }
-                    safety_taken = Some(name.to_string());
-                }
-                let mut outcome = this.execute(id, &spec, &target, &token).await;
-                let note = outcome.as_mut().ok().and_then(|o| o.note.take());
-                (
-                    target,
-                    outcome.map_err(Some),
-                    started.elapsed().as_millis() as u64,
-                    safety_taken,
-                    note,
-                )
-            });
+            }
         }
 
-        let (mut succeeded, mut failed, mut cancelled) = (0usize, 0usize, 0usize);
-        let mut still_running = Vec::new();
-        let mut cancelled_in_flight = Vec::new();
-        let mut safety_snapshots = 0usize;
-        let mut notes = Vec::new();
-        // QL-15: target results the journal could not keep. The other targets go on regardless.
-        let mut unjournaled = 0usize;
-        while let Some(joined) = tasks.join_next().await {
-            let (target, outcome, duration_ms, safety_snapshot, note) = match joined {
-                Ok(v) => v,
-                Err(err) => {
-                    tracing::error!(%id, error = %err, "target task panicked");
-                    failed += 1;
-                    continue;
-                }
-            };
-            let done = match outcome {
-                Ok(o) => Finished {
-                    status: if o.ok {
-                        TargetStatus::Succeeded
-                    } else {
-                        TargetStatus::Failed
-                    },
-                    exit_code: o.exit_code,
-                    output: o.output,
-                    error: if o.ok {
-                        None
-                    } else {
-                        Some(o.failure.unwrap_or_else(|| "non-zero exit code".to_owned()))
-                    },
-                    error_code: None,
-                },
-                Err(Some(CoreError::Cancelled)) | Err(None) => Finished::cancelled(None),
-                Err(Some(
-                    err
-                    @ (CoreError::CancelledInFlight | CoreError::VboxCancelledInFlight | CoreError::CancelledRemote),
-                )) => {
-                    cancelled_in_flight.push(target.clone());
-                    Finished::cancelled(Some(&err))
-                }
-                Err(Some(err @ CoreError::StillRunning { .. })) => {
-                    still_running.push(target.clone());
-                    Finished::failed(&err)
-                }
-                Err(Some(err)) => Finished::failed(&err),
-            };
-            if let Some(note) = note {
-                notes.push(note);
-            }
-            match done.status {
-                TargetStatus::Succeeded => succeeded += 1,
-                TargetStatus::Cancelled => cancelled += 1,
-                _ => failed += 1,
-            }
-            let key = target.target.key();
-            let out = done.output.as_ref();
-            let journaled = self
-                .store
-                .set_target_result(
-                    id,
-                    &key,
-                    TargetResult {
-                        status: Some(done.status),
-                        exit_code: done.exit_code,
-                        output: out.map(|o| o.stdout.as_str()),
-                        stderr: out.map(|o| o.stderr.as_str()),
-                        stdout_bytes: out.and_then(|o| i64::try_from(o.stdout_bytes).ok()),
-                        stderr_bytes: out.and_then(|o| i64::try_from(o.stderr_bytes).ok()),
-                        truncated: out.is_some_and(|o| o.truncated),
-                        output_hash: out.map(|o| o.hash.as_str()),
-                        output_hash_loose: out.map(|o| o.hash_loose.as_str()),
-                        error: done.error.as_deref(),
-                        error_code: done.error_code,
-                        duration_ms: i64::try_from(duration_ms).ok(),
-                        safety_snapshot: safety_snapshot.as_deref(),
-                    },
-                )
-                .await;
-            if let Err(err) = journaled {
-                // Returning here would drop the JoinSet and abort every target still running.
-                tracing::error!(%id, error = %err, "could not journal a target's result");
-                unjournaled += 1;
-            }
-            safety_snapshots += usize::from(safety_snapshot.is_some());
-            self.emit(JobEvent::TargetFinished {
-                job_id: id,
-                target: key,
-                name: target.name.clone(),
-                status: done.status,
-                message: done.error,
-                exit_code: done.exit_code,
-                duration_ms,
-                safety_snapshot,
-            });
-        }
-
+        let Tally {
+            succeeded,
+            failed,
+            unknown,
+            cancelled,
+            skipped,
+            still_running,
+            in_flight,
+            safety_snapshots,
+            notes,
+            unjournaled,
+            halted,
+            reached,
+        } = tally;
         let status = if token.is_cancelled() {
             JobStatus::Cancelled
-        } else if failed == 0 {
+        } else if failed == 0 && unknown == 0 && skipped == 0 {
             JobStatus::Succeeded
         } else if succeeded == 0 {
             JobStatus::Failed
@@ -820,6 +904,17 @@ impl JobRunner {
             tracing::error!(%id, error = %err, "could not journal how a job ended");
         }
         let mut detail = format!("{succeeded} succeeded, {failed} failed, {cancelled} cancelled");
+        if unknown > 0 {
+            detail.push_str(&format!(
+                "; {unknown} with the outcome unknown (timed out or cancelled while running: the command may have run there)"
+            ));
+        }
+        if skipped > 0 {
+            detail.push_str(&format!("; {skipped} not started"));
+        }
+        if let Some(why) = &halted {
+            detail.push_str(&format!("; {why}"));
+        }
         if unjournaled > 0 {
             detail.push_str(&format!(
                 "; the job journal could not keep the result of {unjournaled} target(s)"
@@ -831,16 +926,19 @@ impl JobRunner {
         for note in &notes {
             detail.push_str(&format!("; {note}"));
         }
-        if !cancelled_in_flight.is_empty() {
-            let virtualbox = cancelled_in_flight.iter().any(|t| {
+        if !in_flight.is_empty() {
+            let virtualbox = in_flight.iter().any(|t| {
                 matches!(&t.target, TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::VirtualBox)
             });
-            let vmware = cancelled_in_flight.iter().any(|t| {
+            let vmware = in_flight.iter().any(|t| {
                 matches!(&t.target, TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::Vmware)
             });
             let what = if matches!(
                 spec.command,
-                Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::Container { .. }
+                Command::RemoteExec { .. }
+                    | Command::PushSshKey { .. }
+                    | Command::RemoveSshKey { .. }
+                    | Command::Container { .. }
             ) {
                 "cancelled while the command was running, so the host may still finish it"
             } else if virtualbox && vmware {
@@ -850,8 +948,11 @@ impl JobRunner {
             } else {
                 "cancelled while vmrun was running, so Workstation may still finish it"
             };
-            let names: Vec<&str> = cancelled_in_flight.iter().map(|t| t.name.as_str()).collect();
+            let names: Vec<&str> = in_flight.iter().map(|t| t.name.as_str()).collect();
             detail.push_str(&format!("; {what}: {}", names.join(", ")));
+        }
+        if !reached.is_empty() {
+            detail.push_str(&format!("; reached {}", reached.join("; ")));
         }
         if !still_running.is_empty() {
             let names: Vec<&str> = still_running.iter().map(|t: &Target| t.name.as_str()).collect();
@@ -887,12 +988,302 @@ impl JobRunner {
         Ok(())
     }
 
+    /// Runs `targets` with the job's parallel limit and journals each as it ends, into `tally`. H9:
+    /// once the stop after failures is reached, the targets not started yet are skipped.
+    async fn run_targets(self: Arc<Self>, run: &TargetsRun<'_>, targets: Vec<Target>, tally: &mut Tally) {
+        let id = run.id;
+        let mut tasks = JoinSet::new();
+        for target in targets {
+            let this = Arc::clone(&self);
+            let spec = Arc::clone(run.spec);
+            let semaphore = Arc::clone(run.semaphore);
+            let token = run.token.clone();
+            let halt = run.halt.clone();
+            let safety_name = run.safety_name.clone();
+            tasks.spawn(async move {
+                this.run_target(id, spec, target, semaphore, token, halt, safety_name)
+                    .await
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            let ran = match joined {
+                Ok(ran) => ran,
+                Err(err) => {
+                    tracing::error!(%id, error = %err, "target task panicked");
+                    tally.failed += 1;
+                    continue;
+                }
+            };
+            self.record(run, ran, tally).await;
+        }
+    }
+
+    /// One target, once the parallel limit lets it.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_target(
+        self: Arc<Self>,
+        id: Uuid,
+        spec: Arc<JobSpec>,
+        target: Target,
+        semaphore: Arc<Semaphore>,
+        token: CancellationToken,
+        halt: CancellationToken,
+        safety_name: Option<Arc<str>>,
+    ) -> Ran {
+        let stopped = |target: Target, stop: Stop| Ran {
+            target,
+            outcome: Err(stop),
+            duration_ms: 0,
+            safety_snapshot: None,
+            note: None,
+            host_key: None,
+            permit: None,
+        };
+        let permit = tokio::select! {
+            permit = semaphore.acquire_owned() => permit.ok(),
+            _ = token.cancelled() => None,
+            _ = halt.cancelled() => None,
+        };
+        if permit.is_none() || token.is_cancelled() {
+            let stop = if token.is_cancelled() {
+                Stop::Cancelled
+            } else {
+                Stop::Halted
+            };
+            return stopped(target, stop);
+        }
+        if halt.is_cancelled() {
+            return stopped(target, Stop::Halted);
+        }
+        let key = target.target.key();
+        if let Err(err) = self.store.set_target_running(id, &key).await {
+            tracing::warn!(%id, error = %err, "could not journal target start");
+        }
+        self.emit(JobEvent::TargetStarted {
+            job_id: id,
+            target: key,
+            name: target.name.clone(),
+        });
+        let started = Instant::now();
+        let mut safety_taken = None;
+        if let (Some(name), TargetRef::Vm { vmx_path }) = (&safety_name, &target.target) {
+            if let Err(err) = self.take_safety_snapshot(vmx_path, name).await {
+                return Ran {
+                    target,
+                    outcome: Err(Stop::Error(err)),
+                    duration_ms: started.elapsed().as_millis() as u64,
+                    safety_snapshot: None,
+                    note: None,
+                    host_key: None,
+                    permit,
+                };
+            }
+            safety_taken = Some(name.to_string());
+        }
+        let accepted = Arc::new(Mutex::new(None));
+        let mut outcome = self.execute(id, &spec, &target, &token, &accepted).await;
+        let note = outcome.as_mut().ok().and_then(|o| o.note.take());
+        let host_key = locks::lock(&accepted).take();
+        Ran {
+            target,
+            outcome: outcome.map_err(Stop::Error),
+            duration_ms: started.elapsed().as_millis() as u64,
+            safety_snapshot: safety_taken,
+            note,
+            host_key,
+            permit,
+        }
+    }
+
+    /// Journals one finished target, tells the UI, and counts it.
+    async fn record(&self, run: &TargetsRun<'_>, ran: Ran, tally: &mut Tally) {
+        let id = run.id;
+        let Ran {
+            target,
+            outcome,
+            duration_ms,
+            safety_snapshot,
+            note,
+            host_key,
+            permit,
+        } = ran;
+        // Given back at the end, once this target counts.
+        let _slot = permit;
+        let mut peer_ip = None;
+        let done = match outcome {
+            Ok(o) => {
+                peer_ip = o.peer_ip;
+                Finished {
+                    status: if o.ok {
+                        TargetStatus::Succeeded
+                    } else {
+                        TargetStatus::Failed
+                    },
+                    exit_code: o.exit_code,
+                    output: o.output,
+                    error: if o.ok {
+                        None
+                    } else {
+                        Some(o.failure.unwrap_or_else(|| "non-zero exit code".to_owned()))
+                    },
+                    error_code: None,
+                }
+            }
+            Err(Stop::Cancelled | Stop::Error(CoreError::Cancelled)) => Finished::cancelled(None),
+            Err(Stop::Halted) => Finished::skipped(
+                tally
+                    .halted
+                    .as_deref()
+                    .unwrap_or("not started: the run stopped before this host"),
+            ),
+            Err(Stop::Error(
+                err @ (CoreError::CancelledInFlight | CoreError::VboxCancelledInFlight | CoreError::CancelledRemote),
+            )) => {
+                tally.in_flight.push(target.clone());
+                Finished::unknown(&err)
+            }
+            Err(Stop::Error(err @ CoreError::CommandTimedOut { .. })) => Finished::unknown(&err),
+            Err(Stop::Error(err @ CoreError::StillRunning { .. })) => {
+                tally.still_running.push(target.clone());
+                Finished::failed(&err)
+            }
+            Err(Stop::Error(err)) => Finished::failed(&err),
+        };
+        if let Some(note) = note {
+            tally.notes.push(note);
+        }
+        match done.status {
+            TargetStatus::Succeeded => tally.succeeded += 1,
+            TargetStatus::Cancelled => tally.cancelled += 1,
+            TargetStatus::Unknown => tally.unknown += 1,
+            TargetStatus::Skipped => tally.skipped += 1,
+            _ => tally.failed += 1,
+        }
+        if peer_ip.is_some() || host_key.is_some() {
+            let at = peer_ip.as_deref().map(|ip| format!(" at {ip}")).unwrap_or_default();
+            let key = host_key.as_deref().map(|k| format!(", key {k}")).unwrap_or_default();
+            tally.reached.push(format!("'{}'{at}{key}", target.name));
+        }
+        let key = target.target.key();
+        let out = done.output.as_ref();
+        let journaled = self
+            .store
+            .set_target_result(
+                id,
+                &key,
+                TargetResult {
+                    status: Some(done.status),
+                    exit_code: done.exit_code,
+                    output: out.map(|o| o.stdout.as_str()),
+                    stderr: out.map(|o| o.stderr.as_str()),
+                    stdout_bytes: out.and_then(|o| i64::try_from(o.stdout_bytes).ok()),
+                    stderr_bytes: out.and_then(|o| i64::try_from(o.stderr_bytes).ok()),
+                    truncated: out.is_some_and(|o| o.truncated),
+                    output_hash: out.map(|o| o.hash.as_str()),
+                    output_hash_loose: out.map(|o| o.hash_loose.as_str()),
+                    error: done.error.as_deref(),
+                    error_code: done.error_code,
+                    duration_ms: i64::try_from(duration_ms).ok(),
+                    safety_snapshot: safety_snapshot.as_deref(),
+                    peer_ip: peer_ip.as_deref(),
+                    host_key: host_key.as_deref(),
+                },
+            )
+            .await;
+        if let Err(err) = journaled {
+            // Returning here would drop the JoinSet and abort every target still running.
+            tracing::error!(%id, error = %err, "could not journal a target's result");
+            tally.unjournaled += 1;
+        }
+        tally.safety_snapshots += usize::from(safety_snapshot.is_some());
+        self.emit(JobEvent::TargetFinished {
+            job_id: id,
+            target: key,
+            name: target.name.clone(),
+            status: done.status,
+            message: done.error,
+            exit_code: done.exit_code,
+            duration_ms,
+            safety_snapshot,
+        });
+        // H9: decided before this target's slot is given back, so no other target starts in between.
+        if let Some(n) = run.rollout.stop_after_failures.map(|n| n as usize) {
+            if tally.failed + tally.unknown >= n && !run.halt.is_cancelled() {
+                tally.halted = Some(match n {
+                    1 => "the run stopped after its first failure, so the hosts not started yet did not run".to_owned(),
+                    n => format!("the run stopped after {n} failures, so the hosts not started yet did not run"),
+                });
+                run.halt.cancel();
+            }
+        }
+    }
+
+    /// H9: after the canary host: `Ok` once the user says go on; `Err` with why the rest won't run
+    /// (the canary did not succeed, the job was cancelled, or nobody answered within [`CANARY_WAIT`]).
+    async fn canary_answer(&self, run: &TargetsRun<'_>, tally: &Tally, rest: usize) -> std::result::Result<(), String> {
+        let id = run.id;
+        if run.token.is_cancelled() {
+            return Err("the job was cancelled after its canary host".into());
+        }
+        if tally.succeeded == 0 {
+            return Err("the canary host did not succeed, so the other hosts did not run".into());
+        }
+        let (go, answer) = tokio::sync::oneshot::channel();
+        let until = time::OffsetDateTime::now_utc() + time::Duration::seconds(CANARY_WAIT.as_secs() as i64);
+        let until = until
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        let canary = run.spec.decision.targets.first();
+        let name = canary.map(|t| t.name.clone()).unwrap_or_default();
+        let wait = CanaryWait {
+            name: name.clone(),
+            rest,
+            until: until.clone(),
+        };
+        locks::lock(&self.waiting).insert(id, (go, wait));
+        self.emit(JobEvent::CanaryWaiting {
+            job_id: id,
+            target: canary.map(|t| t.target.key()).unwrap_or_default(),
+            name,
+            rest,
+            until,
+        });
+        let answered = tokio::select! {
+            ctx = answer => ctx.ok(),
+            () = run.token.cancelled() => None,
+            () = tokio::time::sleep(CANARY_WAIT) => None,
+        };
+        locks::lock(&self.waiting).remove(&id);
+        let summary = run.spec.command.summary(run.spec.decision.targets.len());
+        match answered {
+            Some(ctx) => {
+                let detail = format!(
+                    "the canary host '{}' succeeded; the user said to run on the other {rest}",
+                    canary.map_or("", |t| t.name.as_str())
+                );
+                if let Err(err) = self
+                    .audit(&ctx, "canary_go_on", &summary, run.spec, id, None, Some(&detail))
+                    .await
+                {
+                    tracing::error!(%id, error = %err, "could not audit a canary's go-ahead");
+                }
+                Ok(())
+            }
+            None if run.token.is_cancelled() => Err("the job was cancelled after its canary host".into()),
+            None => Err(format!(
+                "nobody said to go on within {} minutes of the canary host, so the other hosts did not run",
+                CANARY_WAIT.as_secs() / 60
+            )),
+        }
+    }
+
     async fn execute(
         &self,
         job_id: Uuid,
         spec: &JobSpec,
         target: &Target,
         token: &CancellationToken,
+        accepted: &Arc<Mutex<Option<String>>>,
     ) -> Result<TargetOutcome> {
         match (&spec.command, &target.target) {
             (Command::VmPower { op, .. }, TargetRef::Vm { vmx_path }) => {
@@ -944,10 +1335,10 @@ impl JobRunner {
                     trust_new_host_keys: *trust_new_host_keys,
                     timeout_secs: *timeout_secs,
                 };
-                self.run_remote(spec, target, *session_id, run, token).await
+                self.run_remote(spec, target, *session_id, run, token, accepted).await
             }
             (
-                Command::PushSshKey {
+                Command::RemoveSshKey {
                     public_key,
                     trust_new_host_keys,
                     timeout_secs,
@@ -955,9 +1346,9 @@ impl JobRunner {
                 },
                 TargetRef::Session { session_id },
             ) => {
-                // SS-09: checked again here, so only Remotely's own form of the key reaches a host.
+                // SS-09: only the key's checked data is looked for on the host.
                 let key = ssh_keys::parse_public_key(public_key)?;
-                let script = ssh_keys::authorized_keys_script(&key);
+                let script = ssh_keys::remove_key_script(&key);
                 let run = RemoteRun {
                     script: &script,
                     sudo: false,
@@ -965,21 +1356,42 @@ impl JobRunner {
                     trust_new_host_keys: *trust_new_host_keys,
                     timeout_secs: *timeout_secs,
                 };
-                self.run_remote(spec, target, *session_id, run, token).await
+                self.run_remote(spec, target, *session_id, run, token, accepted).await
+            }
+            (
+                Command::PushSshKey {
+                    public_key,
+                    trust_new_host_keys,
+                    timeout_secs,
+                    options,
+                    ..
+                },
+                TargetRef::Session { session_id },
+            ) => {
+                // SS-09: checked again here, so only Remotely's own form of the key reaches a host.
+                let key = ssh_keys::parse_public_key(public_key)?;
+                options.validate(time::OffsetDateTime::now_utc().date())?;
+                let script = ssh_keys::authorized_keys_script(&key, options);
+                let run = RemoteRun {
+                    script: &script,
+                    sudo: false,
+                    sudo_password_id: None,
+                    trust_new_host_keys: *trust_new_host_keys,
+                    timeout_secs: *timeout_secs,
+                };
+                self.run_remote(spec, target, *session_id, run, token, accepted).await
             }
             (Command::AppUpdate { version }, TargetRef::App) => {
                 // FD-14: never update under a running job.
                 self.wait_to_run_alone(job_id, token).await?;
-                // The private repo's releases need the GitHub update token from the vault.
-                let github_token = crate::updates::stored_token(&self.store, self.vault.as_ref(), &spec.ctx)
-                    .await?
-                    .require()?;
+                // The public releases need no token; the GitHub update token goes along when the vault can give it.
+                let stored = crate::updates::stored_token(&self.store, self.vault.as_ref(), &spec.ctx).await?;
                 // Cancel stops the download (dropping it ends the request). The installer only starts after the
                 // job has ended, so nothing is half installed.
                 tokio::select! {
                     biased;
                     _ = token.cancelled() => return Err(CoreError::Cancelled),
-                    installed = self.updater.install(&github_token, version) => installed?,
+                    installed = self.updater.install(stored.usable(), version) => installed.map_err(|err| stored.explain(err))?,
                 }
                 Ok(TargetOutcome::done())
             }
@@ -1019,6 +1431,7 @@ impl JobRunner {
                     output: None,
                     failure: report.failure(),
                     note: Some(report.summary(folder)),
+                    peer_ip: None,
                 })
             }
             (Command::OpenTunnel { forward, .. }, TargetRef::Terminal { terminal_id, .. }) => {
@@ -1079,6 +1492,7 @@ impl JobRunner {
         session_id: Uuid,
         run: RemoteRun<'_>,
         token: &CancellationToken,
+        accepted: &Arc<Mutex<Option<String>>>,
     ) -> Result<TargetOutcome> {
         let session = self
             .store
@@ -1108,6 +1522,7 @@ impl JobRunner {
             ctx: spec.ctx,
             target: target.clone(),
             trust_new: run.trust_new_host_keys,
+            accepted: Mutex::new(None),
         });
         let exec = self.remote.exec(ExecRequest {
             session: &session,
@@ -1116,26 +1531,27 @@ impl JobRunner {
             script: run.script,
             sudo_password,
             options: &options,
-            verifier,
+            verifier: Arc::clone(&verifier) as Arc<dyn HostKeyVerifier>,
             max_output: tuning.max_output,
         });
         let limited = async {
             match run.timeout_secs {
+                // H9: the command may have started, so its outcome is unknown.
                 Some(secs) => tokio::time::timeout(Duration::from_secs(secs), exec)
                     .await
-                    .map_err(|_| CoreError::Timeout {
-                        command: "the command".into(),
-                        seconds: secs,
-                    })?,
+                    .map_err(|_| CoreError::CommandTimedOut { seconds: secs })?,
                 None => exec.await,
             }
         };
         // BX-04: cancel closes the connection; the host may still finish the command.
         let result = tokio::select! {
             biased;
-            _ = token.cancelled() => return Err(CoreError::CancelledRemote),
-            result = limited => result?,
+            _ = token.cancelled() => Err(CoreError::CancelledRemote),
+            result = limited => result,
         };
+        // Whatever came of it, the journal says which key the host presented.
+        *locks::lock(accepted) = locks::lock(&verifier.accepted).take();
+        let result = result?;
         let ok = result.exit_code == Some(0) && result.signal.is_none();
         let failure = match (&result.signal, result.exit_code) {
             (Some(signal), _) => Some(format!("ended by signal {signal}")),
@@ -1149,6 +1565,7 @@ impl JobRunner {
             output: Some(result.output),
             failure,
             note: None,
+            peer_ip: result.peer_ip.map(|ip| ip.to_string()),
         })
     }
 
@@ -1332,7 +1749,10 @@ impl JobRunner {
                 ..
             } => limits.power_on,
             Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => limits.vm_ops,
-            Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::Container { .. } => limits.remote,
+            Command::RemoteExec { .. }
+            | Command::PushSshKey { .. }
+            | Command::RemoveSshKey { .. }
+            | Command::Container { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
@@ -1396,7 +1816,10 @@ fn safety_verb(command: &Command) -> &'static str {
             SnapshotOp::Take { .. } => "snapshot",
         },
         Command::VmProtect { .. } => "protect",
-        Command::RemoteExec { .. } | Command::PushSshKey { .. } | Command::TerminalLine { .. } => "command",
+        Command::RemoteExec { .. }
+        | Command::PushSshKey { .. }
+        | Command::RemoveSshKey { .. }
+        | Command::TerminalLine { .. } => "command",
         Command::FileUpload { .. } => "upload",
         Command::OpenTunnel { .. } => "tunnel",
         Command::Container { .. } => "container",

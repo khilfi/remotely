@@ -1,5 +1,6 @@
 //! What a terminal is doing, read from its own traffic: the line the cursor is on (QL-06 checks it
-//! shows a password prompt before typing a vault password), whether a full-screen program is open
+//! shows a password prompt before typing a vault password; SS-10 MultiExec passes keys typed at a password
+//! or one-time code prompt straight through, never rated or journaled), whether a full-screen program is open
 //! (SS-10 MultiExec passes keys straight to it), and whether a command is running and has finished
 //! (QL-07 notifies when one in a background tab ends after a long run).
 //!
@@ -26,10 +27,39 @@ use serde::Serialize;
 const MAX_LINE_CHARS: usize = 512;
 
 // Constant patterns, compiled by the tests: `expect` cannot fire on input here.
+//
+// A password prompt names a password, passphrase or PIN, then ends with a colon (ASCII or full-width, as
+// Chinese and Japanese prompts do) where the cursor waits: sudo, su, ssh, a key's passphrase, openssl's "pass
+// phrase", PAM, databases and CLIs, in English and the languages Linux distributions translate sudo, su and PAM
+// into. Up to 200 characters may stand between the word and the colon (a key's path, `'alice@example.com'`).
 #[allow(clippy::expect_used)]
 static PASSWORD_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:password|passphrase|passwort|kennwort|mot de passe|contraseña|senha|\bpin\b)[^\n]{0,100}:\s*$")
-        .expect("valid password prompt regex")
+    Regex::new(concat!(
+        r"(?i)(?:password|passphrase|pass phrase|passcode|\bpin\b|",
+        // German, French, Spanish, Portuguese, Italian, Dutch, Swedish, Danish and Norwegian, Finnish
+        r"passwort|kennwort|mot de passe|phrase secrète|contraseña|\bclave\b|senha|parola d'ordine|wachtwoord|",
+        r"lösenord|adgangskode|passord|salasana|",
+        // Polish, Czech and Slovak, Hungarian, Romanian, Turkish, Russian and Ukrainian, Greek
+        r"hasło|heslo|jelsz[óa]|parolă|\bparola\b|şifre|şifresi|пароль|κωδικός|",
+        // Japanese, Chinese, Korean, Vietnamese, Indonesian and Malay, Hebrew, Arabic
+        r"パスワード|暗証番号|密码|密碼|口令|암호|비밀번호|mật khẩu|kata sandi|kata laluan|סיסמה|كلمة المرور|كلمة السر)",
+        r"[^\n]{0,200}[:：]\s*$"
+    ))
+    .expect("valid password prompt regex")
+});
+/// A one-time code prompt: two-factor PAM modules (Google Authenticator's "Verification code:", Duo's "Passcode
+/// or option", RSA SecurID's "PASSCODE:"), a cloud CLI's MFA code, an OTP or token. What is typed there doesn't
+/// echo either, and is a secret for a while. The words must come shortly before the colon.
+#[allow(clippy::expect_used)]
+static CODE_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"(?i)(?:\b(?:otp|totp|hotp|mfa|2fa|two[- ]factor|one[- ]time|token|verification|authenticator|",
+        r"authentication code|security code|sms code|auth code|\d-digit code|enter (?:the |your )?code)\b|",
+        // German, French, Spanish and Portuguese, Italian, Dutch
+        r"bestätigungscode|code de vérification|c[oó]digo de verifica|codice di verifica|verificatiecode)",
+        r"[^\n]{0,80}[:：]\s*$"
+    ))
+    .expect("valid code prompt regex")
 });
 /// A shell prompt: `alice@web01:~$ `, `[root@web01 ~]# `, `PS C:\> `, or just `$ `. `%` only alone, so a
 /// progress counter (`45% `) is not taken for zsh's prompt.
@@ -37,14 +67,22 @@ static PASSWORD_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
 static SHELL_PROMPT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(?:\S.{0,160}[$#>❯] |[$#%>❯] ?)$").expect("valid shell prompt regex"));
 
-/// QL-06: the line asks for a password or passphrase (sudo, su, ssh, a key, a PIN).
+/// QL-06: the line asks for a password or passphrase (sudo, su, ssh, a key, a PIN), so a vault password may
+/// be typed there.
 pub fn is_password_prompt(line: &str) -> bool {
     PASSWORD_PROMPT.is_match(line)
 }
 
+/// SS-10: the line asks for a secret: a password prompt, or a one-time code or token. MultiExec passes keys
+/// typed there straight through (never rated, journaled or audited), a run is not over while one shows (QL-07,
+/// QL-12), and it is never a shell prompt.
+pub fn is_secret_prompt(line: &str) -> bool {
+    is_password_prompt(line) || CODE_PROMPT.is_match(line)
+}
+
 /// QL-07: the line looks like a shell waiting for a command.
 pub fn is_shell_prompt(line: &str) -> bool {
-    !is_password_prompt(line) && SHELL_PROMPT.is_match(line)
+    !is_secret_prompt(line) && SHELL_PROMPT.is_match(line)
 }
 
 /// Where the line follower is in an escape sequence.
@@ -366,7 +404,7 @@ pub(crate) fn prompt_came_back(line: &str, typed_on: &str) -> bool {
     }
     let same_prompt = typed_on.starts_with(line)
         && shown.chars().last().is_some_and(|c| !c.is_alphanumeric())
-        && !is_password_prompt(line);
+        && !is_secret_prompt(line);
     same_prompt || is_shell_prompt(line)
 }
 
@@ -422,18 +460,93 @@ mod tests {
         assert!(!screen.alternate());
     }
 
+    /// Prompts as sudo, su, ssh, PAM and common CLIs print them, in English and translated.
+    const PASSWORD_PROMPTS: &[&str] = &[
+        "[sudo] password for alice: ",
+        "Password: ",
+        "password:",
+        "alice@web01.example.com's password: ",
+        "(alice@web01.example.com) Password: ",
+        "Enter passphrase for key '/home/alice/.ssh/id_ed25519': ",
+        "Enter passphrase for key '/home/alice/projects/customer-deployments/example-org/keys/deploy/production/id_ed25519_web01': ",
+        "Enter passphrase (empty for no passphrase): ",
+        "Enter same passphrase again: ",
+        "Enter pass phrase for /etc/ssl/private/web01.example.com.key:",
+        "Password for alice@EXAMPLE.ORG:",
+        "Password for 'https://alice@example.com': ",
+        "Password for user alice: ",
+        "Enter password: ",
+        "Vault password: ",
+        "Enter keystore password:  ",
+        "Enter PIN for 'PIV Card Holder pin': ",
+        "Enter PIN for alice: ",
+        "Passcode or option (1-3): ",
+        "Enter PASSCODE:",
+        "One-time password (OATH) for `alice': ",
+        "Passwort: ",
+        "[sudo] Passwort für alice: ",
+        "Kennwort: ",
+        "[sudo] Mot de passe de alice : ",
+        "[sudo] contraseña para alice: ",
+        "[sudo] senha para alice: ",
+        "Password per alice: ",
+        "[sudo] wachtwoord voor alice: ",
+        "[sudo] lösenord för alice: ",
+        "[sudo] adgangskode til alice: ",
+        "[sudo] passord for alice: ",
+        "[sudo] salasana käyttäjälle alice: ",
+        "[sudo] hasło użytkownika alice: ",
+        "[sudo] heslo pro alice: ",
+        "[sudo] alice jelszava: ",
+        "Jelszó: ",
+        "[sudo] parola pentru alice: ",
+        "[sudo] alice için parola: ",
+        "[sudo] пароль для alice: ",
+        "Пароль: ",
+        "[sudo] κωδικός πρόσβασης για alice: ",
+        "[sudo] alice のパスワード: ",
+        "パスワード：",
+        "[sudo] alice 的密码：",
+        "密碼：",
+        "[sudo] alice의 암호: ",
+        "비밀번호: ",
+        "[sudo] mật khẩu cho alice: ",
+        "[sudo] kata sandi untuk alice: ",
+        "Kata laluan: ",
+    ];
+
+    /// One-time code prompts: PAM's two-factor modules, cloud CLIs, VPN clients.
+    const CODE_PROMPTS: &[&str] = &[
+        "Verification code: ",
+        "Verification code for alice: ",
+        "Enter verification code: ",
+        "Token: ",
+        "Token code:",
+        "Enter your MFA token: ",
+        "Enter MFA code for arn:aws:iam::111111111111:mfa/alice: ",
+        "OTP: ",
+        "Enter OTP: ",
+        "TOTP code: ",
+        "2FA code: ",
+        "Two-factor code: ",
+        "Authenticator code: ",
+        "Security code: ",
+        "Enter the 6-digit code: ",
+        "Enter code: ",
+        "One-time code: ",
+        "Bestätigungscode: ",
+        "Code de vérification : ",
+        "Código de verificación: ",
+        "Código de verificação: ",
+        "Codice di verifica: ",
+        "Verificatiecode: ",
+    ];
+
     #[test]
     fn password_prompts_are_recognised() {
-        for prompt in [
-            "[sudo] password for alice: ",
-            "Password: ",
-            "alice@web01.example.com's password: ",
-            "Enter passphrase for key '/home/alice/.ssh/id_ed25519': ",
-            "Password for alice@EXAMPLE.ORG:",
-            "Passwort: ",
-            "Enter PIN for 'PIV Card Holder pin': ",
-        ] {
+        for prompt in PASSWORD_PROMPTS {
             assert!(is_password_prompt(prompt), "{prompt}");
+            assert!(is_secret_prompt(prompt), "{prompt}");
             assert!(!is_shell_prompt(prompt), "{prompt}");
         }
         for line in [
@@ -445,6 +558,48 @@ mod tests {
             "spinning",
         ] {
             assert!(!is_password_prompt(line), "{line}");
+        }
+    }
+
+    #[test]
+    fn one_time_code_prompts_are_secret_prompts_but_not_password_prompts() {
+        for prompt in CODE_PROMPTS {
+            assert!(is_secret_prompt(prompt), "{prompt}");
+            assert!(!is_password_prompt(prompt), "QL-06 types no vault password at {prompt}");
+            assert!(!is_shell_prompt(prompt), "{prompt}");
+        }
+    }
+
+    #[test]
+    fn shell_prompts_and_output_are_not_secret_prompts() {
+        for line in [
+            "alice@web01:~$ ",
+            "[root@web01 ~]# ",
+            "PS C:\\Users\\alice> ",
+            "$ ",
+            "# ",
+            "% ",
+            "❯ ",
+            "alice@token-server:~$ ",
+            "alice@otp-gw ~ % ",
+            "[bob@pin01 passwords]$ ",
+            "PS C:\\passwords> ",
+            "alice@web01:~/tokens$ ",
+            "Username: ",
+            "login: ",
+            "Username for 'https://example.com': ",
+            "Enter file in which to save the key (/home/alice/.ssh/id_ed25519): ",
+            "Do you want to continue? [Y/n] ",
+            "password changed",
+            "passwd: password updated successfully",
+            "Token: abc123 (expires in 1 h)",
+            "Verification succeeded.",
+            "Your verification code is 123456",
+            "45% ",
+            "Exit code: 2",
+            "",
+        ] {
+            assert!(!is_secret_prompt(line), "{line}");
         }
     }
 

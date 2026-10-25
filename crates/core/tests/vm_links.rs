@@ -131,7 +131,8 @@ async fn sessions_whose_host_is_or_resolves_to_a_vm_ip_are_linked_by_a_refresh()
         "no job: not a command"
     );
 
-    // VMs with linked sessions now work in bulk runs, without linking by hand.
+    // A4, H11: an automatic link rests on the address the guest reports, so a bulk run lists the VM
+    // for the user to confirm instead of reaching it.
     let resolved = core
         .bulk
         .resolve(
@@ -143,8 +144,9 @@ async fn sessions_whose_host_is_or_resolves_to_a_vm_ip_are_linked_by_a_refresh()
         )
         .await
         .unwrap();
-    let hosts: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
-    assert_eq!(hosts, ["db", "web"]);
+    assert!(resolved.hosts.is_empty(), "{:?}", resolved.hosts);
+    let unconfirmed: Vec<&str> = resolved.vms_unconfirmed.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(unconfirmed, ["web", "db"]);
     let without: Vec<&str> = resolved.vms_without_session.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(without, ["off"]);
 
@@ -494,8 +496,8 @@ async fn lookups_done_in_time_count_and_a_slow_one_is_kept_for_the_next_pass() {
 
 #[tokio::test]
 async fn a_session_behind_a_jump_host_is_never_looked_up() {
-    // SS-07: its name means something on the far side only; asking this PC's resolvers would send it
-    // out on the local network.
+    // SS-07, P3: its name means something on the far side only; asking this PC's resolvers would send it
+    // out on the local network. (A4: it isn't linked automatically either, by name or by address.)
     let network = FakeNetwork::default()
         .with_addresses("bastion.lab.test", &["203.0.113.5"])
         .with_addresses("db.internal.test", &["192.0.2.20"]);
@@ -512,19 +514,140 @@ async fn a_session_behind_a_jump_host_is_never_looked_up() {
         ..session("db behind bastion", "db.internal.test")
     };
     let db = core.sessions.create(ctx, behind).await.unwrap().id;
-    let by_ip = SessionInput {
-        jump_session_id: Some(bastion),
-        ..session("web behind bastion", "192.0.2.10")
-    };
-    let web = core.sessions.create(ctx, by_ip).await.unwrap().id;
 
     core.inventory.refresh(ctx).await.unwrap();
+    assert!(
+        network.lookups().iter().any(|h| h == "bastion.lab.test"),
+        "{:?}",
+        network.lookups()
+    );
     assert!(
         !network.lookups().iter().any(|h| h == "db.internal.test"),
         "{:?}",
         network.lookups()
     );
     assert_eq!(get(&core, db).await.vm_id, None);
-    // An IP address needs no lookup, so it still links.
-    assert_eq!(get(&core, web).await.vm_id, Some(vm_id(&core, "web").await));
+}
+
+// ---- A4, H11: automatic links are hints until confirmed ----------------------------------------
+
+#[tokio::test]
+async fn a_bulk_run_reaches_a_vm_through_an_automatic_link_only_once_it_is_confirmed() {
+    let (core, _network) = lab_core(FakeNetwork::default()).await;
+    let ctx = &core.ctx;
+    let web = core.sessions.create(ctx, session("web", "192.0.2.10")).await.unwrap();
+    core.inventory.refresh(ctx).await.unwrap();
+    assert_eq!(get(&core, web.id).await.vm_link, Some(VmLink::Auto));
+    let picks = TargetPicks {
+        vm_paths: vec![vmx("web")],
+        ..Default::default()
+    };
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    assert!(resolved.hosts.is_empty());
+    assert_eq!(resolved.vms_unconfirmed.len(), 1);
+    let u = &resolved.vms_unconfirmed[0];
+    assert_eq!((u.name.as_str(), u.session_id), ("web", web.id));
+    assert_eq!(u.address, "alice@192.0.2.10:22");
+    assert_eq!(u.via, ["VM 'web'"]);
+
+    // Confirmed, the link is the user's own: the run reaches the VM through it.
+    core.links.confirm(ctx, web.id).await.unwrap();
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    let hosts: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(hosts, ["web"]);
+    assert!(resolved.vms_unconfirmed.is_empty());
+
+    // A VM with a confirmed and an automatic link uses the confirmed one, and says so.
+    let other = core
+        .sessions
+        .create(ctx, session("web-again", "192.0.2.10"))
+        .await
+        .unwrap();
+    assert_eq!(get(&core, other.id).await.vm_link, Some(VmLink::Auto));
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    let hosts: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(hosts, ["web"]);
+    assert!(
+        resolved
+            .notes
+            .iter()
+            .any(|n| n.contains("linked automatically, which the run doesn't use")),
+        "{:?}",
+        resolved.notes
+    );
+}
+
+#[tokio::test]
+async fn sessions_behind_a_jump_host_or_with_another_label_are_never_linked_automatically() {
+    let (core, _network) = lab_core(FakeNetwork::default()).await;
+    let ctx = &core.ctx;
+    let bastion = core
+        .sessions
+        .create(ctx, session("bastion", "bastion.example.com"))
+        .await
+        .unwrap();
+    // Behind a jump host, 192.0.2.10 is an address of the network beyond it, not this PC's VM.
+    let inner = core
+        .sessions
+        .create(
+            ctx,
+            SessionInput {
+                jump_session_id: Some(bastion.id),
+                ..session("inner", "192.0.2.10")
+            },
+        )
+        .await
+        .unwrap();
+    // A Prod session never follows a VM that is not labelled Prod (or the other way round).
+    let prod = core
+        .sessions
+        .create(
+            ctx,
+            SessionInput {
+                environment: Environment::Prod,
+                ..session("db-prod", "192.0.2.20")
+            },
+        )
+        .await
+        .unwrap();
+    core.inventory.refresh(ctx).await.unwrap();
+    assert_eq!(get(&core, inner.id).await.vm_id, None, "behind a jump host");
+    assert_eq!(get(&core, prod.id).await.vm_id, None, "Prod session, unlabelled VM");
+
+    // Once both say Prod, it may link.
+    core.inventory
+        .set_environment(ctx, &[vmx("db")], Environment::Prod)
+        .await
+        .unwrap();
+    core.links.auto_link(ctx).await.unwrap();
+    let linked = get(&core, prod.id).await;
+    assert_eq!(linked.vm_id, Some(vm_id(&core, "db").await));
+    assert_eq!(linked.vm_link, Some(VmLink::Auto));
+
+    // The labels part again: the automatic link goes, and the audit log says why.
+    core.inventory
+        .set_environment(ctx, &[vmx("db")], Environment::Lab)
+        .await
+        .unwrap();
+    let report = core.links.auto_link(ctx).await.unwrap();
+    assert_eq!(report.unlinked.len(), 1);
+    assert_eq!(get(&core, prod.id).await.vm_id, None);
+    let audit = core.store.recent_audit(ctx, 5).await.unwrap();
+    let gone = audit
+        .iter()
+        .find(|e| e.action == "Unlinked session 'db-prod' from VM 'db' automatically")
+        .expect("audited");
+    assert_eq!(
+        gone.detail.as_deref(),
+        Some("the session is labelled Prod and the VM Lab")
+    );
+
+    // A session that gets a jump host loses its automatic link too.
+    let web = core.sessions.create(ctx, session("web", "192.0.2.10")).await.unwrap();
+    assert_eq!(get(&core, web.id).await.vm_link, Some(VmLink::Auto));
+    let mut input = session("web", "192.0.2.10");
+    input.jump_session_id = Some(bastion.id);
+    core.sessions.update(ctx, web.id, input).await.unwrap();
+    core.links.auto_link(ctx).await.unwrap();
+    assert_eq!(get(&core, web.id).await.vm_id, None);
 }

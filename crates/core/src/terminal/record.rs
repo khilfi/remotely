@@ -33,7 +33,7 @@ use serde::Serialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::activity::{is_password_prompt, prompt_came_back, FinishedHow};
+use super::activity::{is_secret_prompt, prompt_came_back, FinishedHow};
 use super::multiexec::MultiExecEvent;
 use crate::adapters::exec_output::{CollectedOutput, OutputCollector, Scrubber};
 use crate::bulk::{self, Counts, DiffLine, GroupOptions, HostOutput, HostResult, OutputDiff, OutputGroup, RecordedRun};
@@ -572,7 +572,7 @@ impl RecordSlot {
         let capture = inner.capture.as_ref()?;
         let cap = inner.started.map(|s| s + inner.limits.line_time);
         let quiet = match (capture.quiet, capture.last_output) {
-            (Some(quiet), Some(last)) if !is_password_prompt(line) => Some(last + quiet),
+            (Some(quiet), Some(last)) if !is_secret_prompt(line) => Some(last + quiet),
             _ => None,
         };
         [cap, quiet].into_iter().flatten().min()
@@ -881,6 +881,8 @@ fn target_record(v: &SlotView, now: Instant) -> JobTargetRecord {
         output_hash: v.hashes.as_ref().filter(|_| done).map(|h| h.0.clone()),
         output_hash_loose: v.hashes.as_ref().filter(|_| done).map(|h| h.1.clone()),
         error_code: error_code.map(str::to_owned),
+        peer_ip: None,
+        host_key: None,
     }
 }
 
