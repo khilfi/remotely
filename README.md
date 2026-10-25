@@ -23,7 +23,7 @@ Auto-update checks this repo's GitHub Releases, with a read-only GitHub token ke
 (AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
 or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
-tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs work in Compare runs and guest metrics without linking by hand. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
 encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
@@ -118,6 +118,47 @@ closes it at once: no SSH handshake, no login, nothing audited.
   It blocks like a changed key and is audited. An import from another laptop shows such a key as a conflict, skipped
   unless you pick it. Connections ask the host for the key types already trusted for it first, so a host with several
   keys presents the one you trusted. A terminal still asks you, and says another kind of key is trusted.
+
+### Safer operations on hosts
+
+0.4.3: how far a change on hosts can spread before you see it, and what the audit trail keeps.
+
+- **Replacing a file** (SS-08): an upload that replaces a file writes a hidden temporary file beside it
+  (`.<name>.remotely-<id>.part`), gives it the old file's permissions and owner, and puts it in place in one step
+  (OpenSSH's `posix-rename`), so a dropped VPN never leaves `nginx.conf` half written: the old file stays as it was and
+  the temporary one is deleted. Through a link, the file it points to is replaced. A server without `posix-rename` keeps
+  the old file as `<name>.<time>.bak` and the transfers list says so. Only when the folder takes no new file, or the
+  old file belongs to another user whose ownership the login can't keep, is the file written over in place as before,
+  and the list says why. Extended attributes, ACLs and other hard links of the old file are not carried over. A folder
+  listing stops at 20,000 entries and says so.
+- **Rolling out a command** (BX-02, Compare output): "Run on one host first" runs the first host alone; you see its
+  result and press **Run on the rest** or **Stop here** (the rest wait up to 15 minutes, then the run stops); a canary
+  that fails stops the run. "Stop after N failures" starts no more hosts once N failed or timed out; hosts already
+  running finish. Both are off by default: a non-zero exit is normal for read-only checks (`grep`, `test`), and the
+  approval tier already rises with the number of hosts. The approval dialog says what was chosen; going on after the
+  canary is in the audit log.
+- **Outcome unknown** (BX-04): a host that ran past the time limit, or was cancelled while its command ran (or a VM
+  whose vmrun or VBoxManage call was cancelled), may have run it, so it is "outcome unknown", not failed. **Retry
+  failed** leaves it out; a separate button retries it too, after a warning that the command may run twice.
+- **Which host was reached** (AP-05): each remote target of a job is journaled with the address this PC connected to
+  (none behind jump hosts) and the host key it accepted (`ssh-ed25519 SHA256:...`), and the job's end in the audit log
+  lists them. The results' host view shows them.
+- **Automatic VM links** (QL-01): they follow the IP address each guest reports about itself, which a guest can make up
+  (a lab VM claiming a production server's address). So they only show on the dashboard and in lists; a bulk run or
+  key push picked by VM, tag or filter reaches the VM through one only after you press **Confirm link**. Auto-linking
+  also skips sessions behind a jump host and sessions whose environment label is not the VM's (both unlabelled counts
+  as the same), and removes an automatic link that breaks either rule.
+- **Tunnels** (SS-07): the dialog says that a tunnel on 127.0.0.1 is open to every user signed in to this PC, not only
+  you, and that a remote tunnel on localhost listens on every address when the host's sshd has `GatewayPorts yes`.
+  A SOCKS tunnel on loopback is Medium (one confirm) while other users are signed in to this PC (a shared jump server);
+  otherwise it stays Low.
+- **SSH keys** (SS-09): a push can give the key an expiry day (`expiry-time`, at 00:00 UTC; needs OpenSSH 8.2 or later,
+  an older sshd refuses the key) and the hosts or networks it may log in from (`from`). A host that has the key already
+  is left as it is and fails with why (remove it there first). **Remove from hosts** takes a key off hosts'
+  `authorized_keys` (every line holding it, the file replaced in one step): Medium, audited, like a push.
+- **Starting several VMs** (VM-02): the approval names the VMs with a bridged network adapter plugged in at power-on,
+  which join the network this PC is on, so a clone with a fixed IP address can't take a customer machine's address
+  unnoticed. Starting is still Low; the warning adds one confirm.
 
 ### Command panel
 
@@ -261,7 +302,7 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   size, destination and SHA-256. Folders aren't uploaded or downloaded (zip them, or pick their files).
 - **Transfers**: the list under the drawer shows each file's progress, speed and time left, with cancel and retry (a
   retried upload asks again if it now replaces a file). A new file that fails or is cancelled part way is deleted from
-  the host; a replaced one is left as far as it got, and the message says so.
+  the host; a file being replaced stays as it was (see [Safer operations on hosts](#safer-operations-on-hosts)).
 - With MultiExec on, uploads and downloads still go through one terminal: the current one. ZMODEM (`sz`/`rz`) is not
   supported.
 
@@ -289,8 +330,9 @@ on its jump host.
   connections, waiting for a reconnect, failed and why) and starts or stops them. A tunnel rides the terminal's
   connection: behind jump hosts it starts from the session's host, it opens again by itself after a reconnect, and it
   closes with the terminal.
-- **Approvals**: opening a tunnel is a command on the bus. A local or SOCKS tunnel only this PC can use is Low (so
-  Medium on a Prod host, as the PRD's tier table says). A remote tunnel is Medium: the host listens, and whatever
+- **Approvals**: opening a tunnel is a command on the bus. A local or SOCKS tunnel on loopback is Low (so Medium on a
+  Prod host, as the PRD's tier table says); loopback is every user signed in to this PC, so a SOCKS one is Medium
+  while others are. A remote tunnel is Medium: the host listens, and whatever
   reaches that port gets into the network this PC is on. A tunnel that listens on a network address (0.0.0.0, a LAN
   IP), on either side, is Medium and never lower: other computers can use it without logging in, and the dialog says
   so. Forwards that start with the terminal go through the same approval. Opening and closing are audited with the

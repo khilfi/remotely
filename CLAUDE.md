@@ -70,17 +70,26 @@ crates/core/          remotely-core: all app logic
                       became Prod or protected since is asked again (ApprovalChanged, same id) instead of running
     settings.rs       QL-15 settings this version can't read are set aside (`<key>.unreadable`), audited, and get
                       their defaults at start, instead of stopping the app
-    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit
+    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit;
+                      SS-07 a loopback SOCKS tunnel is at least Medium while other users are signed in to this PC
+                      (set_other_users, from HostCounters::other_users_signed_in: WTSEnumerateSessionsW)
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     jobs.rs           QL-15: a failing journal or audit write is logged and the job goes on to its real result
-                      (job_finished always tried); the update install races the job's cancel token
+                      (job_finished always tried); the update install races the job's cancel token. H9 `Rollout` of
+                      a RemoteExec: canary (first host alone, then JobEvent::CanaryWaiting until CommandBus::go_on,
+                      CANARY_WAIT 15 min, audited canary_go_on) and stop_after_failures (no new hosts; running ones
+                      finish; skipped); TargetStatus::Unknown for CommandTimedOut and in-flight cancels (retry_failed
+                      leaves them out unless include_unknown); each remote target journals peer_ip and the accepted
+                      host_key (BulkVerifier; migration 0018), listed at job_finished
     adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec, every path
                       through the SS-07 jump host chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
-                      terminal's own connection, behind the RemoteFiles trait; remote/forward.rs SS-07 port forwards on
+                      terminal's own connection, behind the RemoteFiles trait (H8: a replace writes a hidden temp
+                      file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; A9
+                      a second RawSftpSession for capped listings, MAX_LISTING); remote/forward.rs SS-07 port forwards on
                       it, local, remote and SOCKS, behind RemoteForwards; remote/socks.rs SOCKS 4/4a/5),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
@@ -109,7 +118,8 @@ crates/core/          remotely-core: all app logic
     updates.rs        FD-14 update checks and the GitHub update token in the vault
     inventory.rs      VM-01 Workstation's and (VM-18) VirtualBox's VMs; a VirtualBox VM is kept when VirtualBox can't
                       be asked
-    capacity.rs       VM-07 capacity check before power-on
+    capacity.rs       VM-07 capacity check before power-on; VM-02 `bridged`: starting 2+ VMs warns about bridged
+                      adapters plugged in at power-on (one confirm)
     snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
                       names
     impact.rs         AP-02 impact preview for the approval dialog
@@ -133,7 +143,8 @@ crates/core/          remotely-core: all app logic
                       or label) for the Terminal page
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
-    vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
+    vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited);
+                      A4 never behind a jump host or across environment labels (not_linkable)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
                       QL-03 host name and IP, QL-06 a vault password typed at a prompt; SS-01 the startup command typed
                       at the first shell prompt, or not at all within STARTUP_WAIT, and after an automatic reconnect
@@ -179,7 +190,8 @@ crates/core/          remotely-core: all app logic
                       and TrackedRemote, the remote adapter every service uses, noting kept connections: dashboard,
                       Containers page, host details); SS-07 the first jump host's for a session behind one, never the
                       session itself
-    bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
+    bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters; A4, H11 a VM only through a
+                      chosen or confirmed link, else ResolvedTargets::vms_unconfirmed), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
@@ -187,7 +199,8 @@ crates/core/          remotely-core: all app logic
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
-                      authorized_keys push script (the push itself is Command::PushSshKey on the bus)
+                      authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
+                      and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
                       format version), preview with conflicts (skip, replace, keep both), commit; audited
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
@@ -248,7 +261,8 @@ src/                  React + TypeScript UI
                       (MO-13, MO-14 summaries, wording and the commands offered to copy),
                       ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
-                      addresses as `mac-N`),
+                      addresses as `mac-N`), rollout.ts (H9 canary, stop after failures, retry choices),
+                      key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals), presentation-state.ts; pure helpers with
                       *.test.ts
@@ -351,7 +365,9 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   full-screen `top`, and the exec shell's `hostname`, `uptime`, `cat`, `seq`... and fake programs, slowed by
   `with_exec_delay`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
   them (`tests/multiexec.rs`, QL-12 recording included). SS-08: it serves SFTP from a temp folder deleted with it
-  (`with_sftp_file`, `with_protected`, `with_unreadable`, `without_sftp`), and with `with_login_shell("bash")` its
+  (`with_sftp_file`, `with_protected`, `with_unreadable`, `without_sftp`; H8 renames like OpenSSH's, with
+  `posix-rename` unless `without_posix_rename`, modes and owners from `with_sftp_owner`; A9 `with_endless_folder`),
+  its exec shell knows `rm`, `mv` and `grep -v` (SS-09 key removal), and with `with_login_shell("bash")` its
   shell answers the folder hook (OSC 7 and the QL-09 user report) and knows `cd`, `pwd` and `su [-] [user]` (a shell
   without the hook, as a real switch); `fakes::FakeFiles` is the in-memory version for the fake remote adapter
   (`tests/files.rs`). Uploads
