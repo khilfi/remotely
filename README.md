@@ -17,13 +17,16 @@ snapshot tree with creation times (read from its `.vmsd`) in a panel beside the 
 days, and takes, reverts and deletes snapshots on one VM or in bulk on the selection (see
 [Virtual machines and snapshots](#virtual-machines-and-snapshots)); high-risk VM actions take a named safety snapshot
 first. Approval rules are editable in Settings; the approval dialog previews each VM's state, uptime and snapshot count,
-and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV.
+and its countdown can be cancelled from the dialog or from Activity. The hash-chained audit log exports to CSV. In
+every CSV Remotely writes (the audit log, Compare and MultiExec exports) a cell that a spreadsheet could run as a
+formula (starting with `=`, `+`, `-` or `@`, also after spaces, or with a tab) gets a `'` in front, and cells with `,`,
+`;`, quotes, tabs or line breaks are quoted.
 Auto-update checks this repo's GitHub Releases, with a read-only GitHub token kept in the vault (see
 [GitHub update token](#github-update-token)). The vault keeps passwords, private keys and passphrases encrypted
 (AES-256-GCM per item, the key wrapped by DPAPI and an Argon2id-derived vault password), unlocks with the Windows login
 or the vault password and locks after 15 minutes idle; Critical actions ask for the vault password again. The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
-tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs work in Compare runs and guest metrics without linking by hand. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs work in Compare runs and guest metrics without linking by hand. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
 encrypted file (Argon2id from a passphrase, AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
@@ -253,6 +256,11 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   gets a number. Right-click a file name in the terminal's output (`ls`, an error message) to download it; elsewhere
   right-click pastes as before. "Open folder" in the transfers list shows a finished download in Explorer. Each download
   is in the audit log with the file's name, size, host path, where it was saved and its SHA-256, never its content.
+  Names are made safe here: what Windows can't hold in a name and invisible Unicode format characters (such as U+202E,
+  which makes `invoice[U+202E]fdp.exe` look like `invoiceexe.pdf`) become `_`, and a device name (`nul`, `com1.txt`)
+  gets a `_` in front. Each download is marked as from the internet, with the `Zone.Identifier` stream browsers write
+  (ZoneId=3, without the host's name), so SmartScreen and Office's Protected View treat it as one; on a FAT or exFAT
+  drive, which can't hold the mark, the transfers list says so.
 - **Upload**: drop files on a terminal, or use the upload button (toolbar or drawer). They go into the terminal's
   folder (the drawer's upload goes into the folder it shows). Uploads are changes, so they go through the command bus:
   Low, a Prod session raises it one tier, and a file that is there already is replaced only after you say so and
@@ -370,7 +378,9 @@ approval, nothing audited, nothing changed on the host, and the read-only lock d
   delta disk counts its parents down to the base), and each network adapter with its connection, card and MAC. The
   guest OS comes from VMware Tools (`guestInfo.detailed.data`: the distribution and kernel) or the Guest Additions.
   What was read is kept, so the tab still shows it (with why) when the files can't be read. **From the guest** shows
-  a linked session's own facts.
+  a linked session's own facts. A disk, extent or parent disk named on a network share or a device path is never
+  opened (Windows would send your sign-in there): it shows its path with a note and no sizes, so a VM kept on a share
+  shows its disks as not read. A .vmx over 4 MB or a disk descriptor over 1 MB is reported, never read in part.
 - **Dashboard**: each row says "4 vCPU · 8 GB · Ubuntu 24.04" under its address (a host's from its stored facts).
 - **Memory charts (MO-15)**: the drill-down's memory chart draws what there is as a dashed line next to what is in
   use: a VM's configured RAM next to its process's working set (and the guest's own use when watched), a host's total
