@@ -1,7 +1,8 @@
 // SS-11: terminals' whole scrollback copied, printed or saved, one terminal or several at once. The text
-// is read from xterm.js here; the core scrubs each terminal's login secrets from it first, and saving
-// (in a dialog the core opens) and printing are audited there, never the text itself. FD-03: copies and saves keep the
-// real text while presenting (they don't go on screen); printing shows a preview on screen, so it prints masked text.
+// is read from xterm.js here; the core scrubs each terminal's login secrets from it first, the shell puts a copy on
+// the clipboard itself (kept out of Windows' clipboard history and cloud clipboard), and saving (in a dialog the core
+// opens) and printing are audited there, never the text itself. FD-03: copies and saves keep the real text while
+// presenting (they don't go on screen); printing shows a preview on screen, so it prints masked text.
 
 import { api, type HostFacts, type SaveLayout, type TerminalText } from "@/lib/api";
 import { maskedOutside } from "@/lib/presentation-state";
@@ -24,15 +25,9 @@ export function texts(panes: NamedPane[]): TerminalText[] {
   return panes.map(({ pane, title }) => ({ terminalId: pane.terminalId, title, text: pane.bufferText() }));
 }
 
-/** Several terminals in one text, each under a header, as the core's combined file has them. */
-export function combine(items: TerminalText[]): string {
-  if (items.length === 1) return items[0].text;
-  return items.map((i) => `===== ${i.title} =====\n${i.text}`).join("\n\n");
-}
-
-export async function copyOutput(panes: NamedPane[]) {
-  const clean = await api.terminalOutputText(texts(panes));
-  await navigator.clipboard.writeText(combine(clean));
+/** Several terminals in one text on the clipboard, each under a header (the core joins them). */
+export function copyOutput(panes: NamedPane[]) {
+  return api.terminalOutputCopy(texts(panes));
 }
 
 /** Asks where to save (a file, or a folder for one file each). null when the user cancelled. */

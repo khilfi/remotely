@@ -258,14 +258,10 @@ pub fn reachability_watch(state: State<'_, AppState>, session_ids: Vec<Uuid>) ->
 }
 
 // ---- SS-11 output ---------------------------------------------------------------------------------
+// Copying goes to the clipboard from Rust: see `terminal_output_copy` in clipboard.rs.
 
-/// SS-11: the terminals' text with their login secrets scrubbed, for the clipboard.
-#[tauri::command]
-pub fn terminal_output_text(state: State<'_, AppState>, items: Vec<TerminalText>) -> Vec<TerminalText> {
-    state.core.terminals.scrub_output(items)
-}
-
-/// SS-11: the same for printing, audited as printed (which terminals, never the text).
+/// SS-11: the terminals' text with their login secrets scrubbed, for printing, audited as printed (which
+/// terminals, never the text).
 #[tauri::command]
 pub async fn terminal_output_print(
     state: State<'_, AppState>,
