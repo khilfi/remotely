@@ -34,6 +34,7 @@ import { VmSessionLinks } from "@/components/VmLinkControls";
 import { VmSystemTab } from "@/components/VmSystemTab";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { VmSettingsTab } from "@/components/VmSettingsTab";
+import { VmSchedulesTab, type ScheduleAsk } from "@/components/VmSchedulesTab";
 import {
   api,
   type Command,
@@ -90,6 +91,8 @@ interface Props {
   askRename: number;
   renameSeen: number;
   onRenameSeen: (n: number) => void;
+  /** VM-14, VM-27: the Schedules page, for a new schedule on this VM or one schedule's runs. */
+  onSchedules?: (ask: ScheduleAsk) => void;
 }
 
 type Hints = { take: string | null; revert: string | null; delete: string | null };
@@ -153,6 +156,7 @@ export function VmDetailsPanel(props: Props) {
                 </Badge>
               )}
             </TabsTrigger>
+            <TabsTrigger value="schedules">Schedules</TabsTrigger>
           </TabsList>
           <WhyDisabled reason={props.readOnly} className="ml-auto">
             <Button
@@ -202,6 +206,16 @@ export function VmDetailsPanel(props: Props) {
         </TabsContent>
         <TabsContent value="snapshots" className="min-h-0 overflow-auto p-3">
           <SnapshotsTab {...props} hints={hints} />
+        </TabsContent>
+        <TabsContent value="schedules" className="min-h-0 overflow-auto p-3">
+          {view === "schedules" && (
+            <VmSchedulesTab
+              vm={vm}
+              refreshKey={refreshKey}
+              readOnly={props.readOnly}
+              onSchedules={(ask) => props.onSchedules?.(ask)}
+            />
+          )}
         </TabsContent>
       </Tabs>
     </aside>

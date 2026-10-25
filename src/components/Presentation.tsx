@@ -302,6 +302,11 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     blocked: "Adding, editing, duplicating and deleting sizes, images and launch templates",
     still: "Reading them and opening the cloud image pages still work.",
   },
+  schedules: {
+    blocked:
+      "New schedules, edits, approvals, pausing, resuming and deleting, and every scheduled run (it is reported as skipped, not caught up)",
+    still: "Reading schedules and their runs still works.",
+  },
   dashboard: { blocked: "Changes to VMs and hosts", still: "Watching hosts and reading metrics still work." },
   containers: {
     blocked: "Starting, stopping and removing containers, pulling and pruning, and marking container hosts",

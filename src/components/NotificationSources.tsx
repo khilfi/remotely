@@ -6,8 +6,9 @@
 import { useEffect } from "react";
 import { api } from "@/lib/api";
 import { dashboardApi } from "@/lib/dashboard-api";
-import { fromAlertEvent, JobNotes } from "@/lib/notifications";
+import { fromAlertEvent, fromScheduleEvent, JobNotes } from "@/lib/notifications";
 import { loadNotifications, notify } from "@/lib/notifications-store";
+import { schedulesApi } from "@/lib/schedules-api";
 
 export function NotificationSources() {
   useEffect(() => {
@@ -16,9 +17,12 @@ export function NotificationSources() {
     const jobs = new JobNotes();
     const stopJobs = api.onJobEvent((event) => notify(jobs.note(event)));
     const stopAlerts = dashboardApi.onAlertEvent((event) => notify(fromAlertEvent(event)));
+    // VM-14, VM-27: runs that did not happen, and schedules that wait for approval again.
+    const stopSchedules = schedulesApi.onEvent((event) => notify(fromScheduleEvent(event)));
     return () => {
       void stopJobs.then((stop) => stop());
       void stopAlerts.then((stop) => stop());
+      void stopSchedules.then((stop) => stop());
     };
   }, []);
   return null;

@@ -6,6 +6,7 @@
 
 import {
   BoxIcon,
+  CalendarClockIcon,
   ContainerIcon,
   DiscIcon,
   LayersIcon,
@@ -21,6 +22,7 @@ import type { SearchItem } from "@/lib/search";
 import {
   containerItems,
   imageItems,
+  scheduleItems,
   sessionItems,
   settingItems,
   sizeItems,
@@ -28,6 +30,7 @@ import {
   templateItems,
   vmItems,
 } from "@/lib/search-sources";
+import { schedulesApi } from "@/lib/schedules-api";
 import { SETTINGS_SECTIONS } from "@/lib/settings-index";
 
 /** Reads the palette makes anyway, shared with the providers so nothing is read twice. */
@@ -71,6 +74,12 @@ export const SEARCH_PROVIDERS: readonly SearchProvider[] = [
   },
   { id: "sizes", heading: "VM sizes", icon: BoxIcon, load: async () => sizeItems(await api.catalogSizes()) },
   { id: "images", heading: "VM images", icon: DiscIcon, load: async () => imageItems(await api.catalogImages()) },
+  {
+    id: "schedules",
+    heading: "Schedules",
+    icon: CalendarClockIcon,
+    load: async () => scheduleItems(await schedulesApi.list()),
+  },
   {
     id: "snippets",
     heading: "Commands",

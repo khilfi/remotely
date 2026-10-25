@@ -11,6 +11,7 @@ import {
   entryLink,
   fromAlertEvent,
   fromCommandFinished,
+  fromScheduleEvent,
   fromSkipped,
   fromTerminalAlert,
   fromUpdate,
@@ -192,4 +193,32 @@ test("a link the core gave back opens only when this version knows it", () => {
   });
   assert.equal(entryLink(entry(1, "2026-10-25T10:00:00Z", { link: { kind: "schedule", id: "x" } })), null);
   assert.equal(entryLink(entry(1, "2026-10-25T10:00:00Z", { link: null })), null);
+});
+
+test("a schedule's missed or skipped run and a schedule waiting for approval link to its runs", () => {
+  const missed = fromScheduleEvent({
+    event: "missed",
+    scheduleId: "s1",
+    runId: "r1",
+    name: "nightly lab",
+    detail: "Missed 3 runs, from Sun 25 Oct 02:00 to Tue 27 Oct 02:00",
+  });
+  assert.equal(missed?.source, "schedule");
+  assert.equal(missed?.title, "Missed: nightly lab");
+  assert.deepEqual(missed?.link, { kind: "schedule", scheduleId: "s1" });
+  const paused = fromScheduleEvent({
+    event: "needsApproval",
+    scheduleId: "s1",
+    name: "nightly lab",
+    reason: "web01 is labelled Prod now",
+  });
+  assert.equal(paused?.level, "warning");
+  assert.match(paused?.body ?? "", /^web01 is labelled Prod now since it was approved/);
+  assert.equal(paused?.group, missed?.group);
+  assert.equal(fromScheduleEvent({ event: "changed", scheduleId: "s1" }), null);
+  assert.equal(
+    fromScheduleEvent({ event: "runStarted", scheduleId: "s1", runId: "r2", name: "nightly lab" }),
+    null,
+    "runs that run are their jobs' entries",
+  );
 });

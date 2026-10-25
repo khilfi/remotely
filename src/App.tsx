@@ -27,6 +27,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
+  CalendarClockIcon,
   CameraIcon,
   FilePlusIcon,
   DownloadIcon,
@@ -134,6 +135,7 @@ import { ActivityPage } from "@/pages/ActivityPage";
 import { ContainersPage, type ContainerRequest, type ContainerShellRequest } from "@/pages/ContainersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
+import { SchedulesPage, type SchedulesRequest } from "@/pages/SchedulesPage";
 import { MapPage } from "@/pages/MapPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -153,10 +155,12 @@ import {
   type SettingsChange,
 } from "@/lib/job-events";
 import type { VmView } from "@/lib/vm-snapshots";
+import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 
 type PageId =
   | "vms"
   | "templates"
+  | "schedules"
   | "map"
   | "dashboard"
   | "containers"
@@ -171,6 +175,8 @@ type PageId =
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "templates", label: "Templates", title: "VM templates", icon: LayersIcon, shortcut: "Ctrl+9" },
+  // VM-14, VM-27: no Ctrl+digit was left.
+  { id: "schedules", label: "Schedules", title: "Schedules", icon: CalendarClockIcon, shortcut: "Ctrl+." },
   { id: "map", label: "Map", title: "Topology map", icon: NetworkIcon, shortcut: "Ctrl+0" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
   { id: "containers", label: "Containers", title: "Containers", icon: ContainerIcon, shortcut: "Ctrl+3" },
@@ -185,6 +191,7 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 // P6: memoised pages. Each one renders again only when its own props change; App passes them stable callbacks.
 const Vms = memo(VmsPage);
 const Templates = memo(TemplatesPage);
+const Schedules = memo(SchedulesPage);
 const TopologyMap = memo(MapPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
@@ -251,6 +258,8 @@ export default function App() {
   const [deploying, setDeploying] = useState<{ templateId: string | null } | null>(null);
   const openDeploy = useCallback((templateId?: string) => setDeploying({ templateId: templateId ?? null }), []);
   const openDeployBlank = useCallback(() => setDeploying({ templateId: null }), []);
+  // VM-14, VM-27: a new schedule (for some VMs) or one schedule's runs, asked from a VM's tab or the palette.
+  const [schedulesRequest, setSchedulesRequest] = useState<SchedulesRequest | null>(null);
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
   const [terminalOpen, setTerminalOpen] = useState<{
     sessionId: string;
@@ -293,6 +302,12 @@ export default function App() {
     setPage("vms");
   }, []);
 
+  /** VM-14, VM-27: the Schedules page, with a new schedule or one schedule's runs open. */
+  const openSchedules = useCallback((ask: ScheduleAsk) => {
+    setSchedulesRequest((prev) => ({ ...ask, n: (prev?.n ?? 0) + 1 }));
+    setPage("schedules");
+  }, []);
+
   /** A page, or a page from before 0.4.0 that is now part of another (Snapshots). */
   const go = useCallback(
     (target: NavTarget) => {
@@ -331,7 +346,7 @@ export default function App() {
         return;
       }
       if (terminal || e.shiftKey || paletteOpen.current) return;
-      const target = /^[0-9,]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
+      const target = /^[0-9,.]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
       if (target) {
         e.preventDefault();
         go(target);
@@ -604,6 +619,9 @@ export default function App() {
         case "alerts":
           setPage("dashboard");
           break;
+        case "schedule":
+          openSchedules({ scheduleId: link.scheduleId });
+          break;
         case "update":
           // The banner shows on every page; "Later" put it off, so it comes back. Nothing offered: Settings.
           if (offeredRef.current) setLaterFor(null);
@@ -620,7 +638,7 @@ export default function App() {
           break;
       }
     },
-    [go, openVms],
+    [go, openVms, openSchedules],
   );
 
   // QL-23: the wizard offers itself when there is no vault and no session yet (once the vault is known), and opens
@@ -729,6 +747,21 @@ export default function App() {
         setTemplatesRequest((prev) => ({ tab: "sizes", n: (prev?.n ?? 0) + 1 }));
         setPage("templates");
       },
+    },
+    {
+      // VM-14, VM-27.
+      id: "new-schedule",
+      label: "New schedule (snapshots, power, auto-suspend)…",
+      icon: CalendarClockIcon,
+      keywords: "schedule timetable nightly snapshot keep retention start stop suspend resume idle cron daily weekly",
+      run: () => openSchedules({ create: true }),
+    },
+    {
+      id: "schedules",
+      label: "Schedules: next runs, history, approvals",
+      icon: CalendarClockIcon,
+      keywords: "schedule timetable missed runs paused approval",
+      run: () => setPage("schedules"),
     },
     {
       id: "watch",
@@ -927,8 +960,8 @@ export default function App() {
                     <SidebarMenuItem key={p.id}>
                       <SidebarMenuButton
                         isActive={page === p.id}
-                        tooltip={`${p.label} (${p.shortcut})`}
-                        aria-keyshortcuts={p.shortcut.replace("Ctrl", "Control")}
+                        tooltip={p.shortcut ? `${p.label} (${p.shortcut})` : p.label}
+                        aria-keyshortcuts={p.shortcut ? p.shortcut.replace("Ctrl", "Control") : undefined}
                         onClick={() => setPage(p.id)}
                       >
                         <p.icon />
@@ -1048,12 +1081,23 @@ export default function App() {
                   onActions={openPalette}
                   request={vmRequest}
                   refreshKey={vmJobs + vmSettings + inventoryVersion}
+                  onSchedules={openSchedules}
                 />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "templates"}>
               <ErrorBoundary name="Templates">
                 <Templates active={page === "templates"} request={templatesRequest} onDeploy={openDeploy} />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "schedules"}>
+              <ErrorBoundary name="Schedules">
+                <Schedules
+                  active={page === "schedules"}
+                  vault={vault}
+                  onOpenVault={show.vault}
+                  request={schedulesRequest}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "map"} className="h-full">

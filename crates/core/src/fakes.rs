@@ -4,6 +4,7 @@
 //! Compiled for the crate's own unit tests and, through the `fakes` feature, for the integration
 //! tests in `tests/`. The app never enables that feature.
 
+pub mod clock;
 pub mod containers;
 pub mod github_server;
 pub mod ssh_server;

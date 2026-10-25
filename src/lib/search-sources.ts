@@ -4,6 +4,7 @@
 import type { Favourite, Image, LaunchTemplate, LibraryEntry, SessionRecord, Size, VmRecord } from "./api.ts";
 import type { CachedContainers } from "./container-cache.ts";
 import type { SearchField, SearchItem } from "./search.ts";
+import type { ScheduleView } from "./schedules-api.ts";
 import type { SettingsSection } from "./settings-index.ts";
 
 function field(text: string | null | undefined, kind: SearchField["kind"]): SearchField[] {
@@ -223,5 +224,33 @@ export function actionItems(actions: readonly { id: string; label: string; keywo
     title: a.label,
     fields: [...field(a.label, "name"), ...(a.keywords ?? "").split(/\s+/).flatMap((w) => field(w, "tag"))],
     target: { action: a.id },
+  }));
+}
+
+const SCHEDULE_STATE: Record<ScheduleView["state"], string> = {
+  active: "active",
+  paused: "paused",
+  needsApproval: "needs approval",
+};
+
+/** VM-14, VM-27: schedules by name, the VMs and tags they act on, what they do and when; choosing one shows its runs. */
+export function scheduleItems(schedules: readonly ScheduleView[]): SearchItem[] {
+  return schedules.map((s) => ({
+    id: `schedule:${s.id}`,
+    provider: "schedules",
+    title: s.name,
+    detail: `${s.action} · ${s.when}`,
+    badge: SCHEDULE_STATE[s.state],
+    fields: [
+      ...field(s.name, "name"),
+      ...s.targets.map((t) => ({
+        text: t.name,
+        kind: t.target.kind === "tag" ? ("tag" as const) : ("detail" as const),
+      })),
+      ...field(s.action, "detail"),
+      ...field(s.when, "detail"),
+    ],
+    target: { open: { kind: "schedule", scheduleId: s.id } },
+    boost: s.state === "needsApproval" ? 1 : 0,
   }));
 }

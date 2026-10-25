@@ -196,6 +196,43 @@ closes it at once: no SSH handshake, no login, nothing audited.
   rules may count it. On sites like that, turn the dots off or check less often.
 - A session behind jump hosts shows its first jump host's state (see [Jump hosts and tunnels](#jump-hosts-and-tunnels)).
 
+### Schedules
+
+VM-14 and VM-27 (0.5.0): the **Schedules** page (Ctrl+., in the sidebar under Templates; the palette's "New schedule"
+and a VM's **Schedules** tab open it too) runs actions on VMs on a timetable, or suspends VMs that sit idle.
+
+- **What**: take a snapshot of each VM, optionally keeping only the last N it took; start; shut down (through the
+  guest); suspend; or resume (only the suspended VMs: the ones that are off stay off). A power action leaves alone the
+  VMs already in that state, and says so.
+- **On**: VMs by name, and tags (every VM with the tag when it runs).
+- **When**: every hour at a minute, every day at a time, or on chosen days at a time, in local time; or **when idle**
+  (auto-suspend): a running VM whose own CPU stayed under a limit for a set time (10 minutes to 24 hours), measured
+  from the dashboard's history and its live readings. A VM Remotely didn't watch for the whole time (closed, asleep,
+  just started) waits until it has.
+- **Daylight saving** never doubles or skips a run silently: a time the clocks jump over runs at the first minute after
+  the jump (02:30 runs at 03:00), a time they repeat runs once, at the first, and the list and the run both say so.
+  Hourly runs stay an hour apart.
+- **Approval when it is saved**: saving asks with the same steps as running it then (a Prod VM raises the tier, Critical
+  asks for the vault password). A snapshot schedule that keeps the last N asks what deleting a snapshot asks (High). The
+  countdown is each run's: a High run waits it out and can be cancelled in Activity. Each run then goes through the
+  command bus under that approval and is in the audit log as one of its runs (`approval_used`, and the job's entries
+  carry the approval). The dialog shows the next runs and what each does.
+- **It asks again instead of running** when it was edited (a new name alone doesn't count), a VM became Prod or
+  protected, a new VM got its tag, or the approval rules that rated it changed. The schedule then shows "Needs
+  approval" and why, a notification says so, and **Review approval…** asks again. Fewer VMs than approved is fine.
+- **Missed runs** (the PC asleep or off, Remotely closed, or more than 2 minutes late) are reported once in the run
+  history, with how many, and never caught up. While presenting with the read-only lock on, nothing runs (each due run
+  is reported as skipped) and schedules can't be changed. Runs never overlap: a run due while the last one still goes is
+  skipped and reported.
+- **Retention deletes only the schedule's own snapshots**, oldest first: each is recorded by the hypervisor's own id
+  for it when it is taken, and named `Remotely schedule '<name>' <date> <time> (run …)`. A snapshot renamed since is
+  kept and no longer counted; a snapshot that only looks like one is never touched. Deleting a schedule keeps its
+  snapshots on the VMs.
+- **Snapshot chain warnings**: the page's limits (5 snapshots deep and 100 GB by default) flag VMs whose disks' snapshot
+  chains are deeper or larger, in the list and in each VM's Schedules tab; saving a schedule that would keep enough
+  snapshots to pass the depth warns too.
+- **Run history** per schedule (the newest 200 runs): when each was due, how it went and why, and its jobs.
+
 ### What Remotely does by itself
 
 0.4.1: what Remotely does on customers' hosts without you typing it, and how it stays gentle.
@@ -220,6 +257,8 @@ closes it at once: no SSH handshake, no login, nothing audited.
   it on. It is typed only at a line that looks like a shell prompt, starts with a space so `ignorespace` keeps it out
   of the history (nothing edits the history), and each one is in the audit log (`folder_hook_installed`, once per
   connection). Off, Files here starts in the home folder.
+- **Schedules** (VM-14, VM-27): see [Schedules](#schedules). A schedule acts on VMs only under the approval you gave
+  when you saved it, and pauses to ask again when anything that approval depended on changed.
 - **Host keys** (SS-05): a bulk run with "Trust new host keys" never trusts a key of a new type for a host that already
   has a trusted key of another type: someone in between can offer any type, and the run would give them the passwords.
   It blocks like a changed key and is audited. An import from another laptop shows such a key as a conflict, skipped
@@ -1183,6 +1222,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Alerts             | `crates/core/src/alerts/`, `store/alerts.rs`                      | MO-07                                                                                                                                               | Working: rules (threshold and duration, unreachable, stopped outside the app) run each round; alert list with acknowledge; Windows notifications with a cooldown; built-in rules; audited edits                                                                |
 | Notifications      | `crates/core/src/notifications.rs`, `src/lib/notifications*.ts`   | QL-25                                                                                                                                               | Working: the notification centre's history in memory, redacted, per workspace; read, unread and clear                                                                                                                                                          |
 | Dashboard layout   | `crates/core/src/dashboard.rs`, `src/components/Dashboard*.tsx`   | MO-16                                                                                                                                               | Working: widgets on a four-column grid, saved per workspace and audited; drag, keyboard and size menu; services widget on the kept connection                                                                                                                  |
+| Schedules          | `crates/core/src/schedules/`, `command_bus/standing.rs`           | VM-14, VM-27                                                                                                                                        | Working: snapshot (keep the last N), start, shut down, suspend, resume and idle auto-suspend; hourly, daily, weekly in local time across daylight saving; standing approvals at save; missed runs reported; chain warnings                                     |
 | Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                                 |
 | Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                              |
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                   |
