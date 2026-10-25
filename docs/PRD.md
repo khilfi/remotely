@@ -119,6 +119,8 @@ VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-la
 | Remove a disk (deletes its files); delete a VM | Critical |
 | Add an existing VM (a `.vmx` to the list, a `.vbox` to VirtualBox) | Low |
 | Open a VM's console (the hypervisor's own window; it changes nothing) | No tier; audited |
+| Add or remove a NAT port forward: a Workstation vmnet's, a VirtualBox NAT network's, or a VirtualBox VM's NAT adapter rule (it reaches every VM on the network; a network counts as Prod when a VM on it is) | High |
+| Read a VM's logs and timeline, the host networks, the waste finder's report | No tier; not audited (reads) |
 
 | ID | Requirement | Phase |
 | --- | --- | --- |

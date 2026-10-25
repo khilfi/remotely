@@ -45,6 +45,9 @@
 //!   metrics::history (MO-06): the rounds' 1-minute averages on disk, pruned daily; alerts (MO-07): rules
 //!     run on each round, an alert list and events for the UI's notifications; dashboard (MO-16): the
 //!     dashboard's layout, per workspace
+//!   host_networks (VM-11): the hypervisors' networks, the VMs on each and their NAT port forwards ──►
+//!     adapters::host_networks; changing a forward is a command on the bus. vm_insight (VM-25): a VM's logs and
+//!     timeline; waste (VM-16, VM-14): the waste finder's report. Reads only
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
