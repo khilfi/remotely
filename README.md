@@ -119,6 +119,34 @@ closes it at once: no SSH handshake, no login, nothing audited.
   unless you pick it. Connections ask the host for the key types already trusted for it first, so a host with several
   keys presents the one you trusted. A terminal still asks you, and says another kind of key is trusted.
 
+### What Remotely keeps on this PC
+
+Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS-10, SS-11, AP-05).
+
+- **Job outputs and command text**: every job keeps what its hosts printed (stdout and stderr, up to 64 KB each per
+  host) and its command (a Compare run's whole script, a MultiExec line), so Activity and Compare can show them. Settings,
+  General, **Job outputs** says for how long: 30 days, **90 days** (the default), 1 year or forever. A purge runs at
+  start and once a day: older jobs lose their outputs and their script or line text, and keep their rows, summaries,
+  tiers, targets, results, exit codes and output hashes, so Activity still lists them and Compare still groups them
+  (retrying such a run needs it typed again). **Purge now** applies the setting at once. A purge that removed something
+  is in the audit log with what went (`journal_purged`), and so is every Purge now; changing the setting is audited too.
+  Presentation mode's read-only lock refuses changing the setting and Purge now, never the daily purge.
+- **No secrets in the journal or the audit log**: what looks like a password, token or key in a script, a MultiExec
+  line or any audit entry's text (`--password=...`, `TOKEN=...`, `Bearer ...`, a password in a URL) is stored as
+  `[redacted]`, as the CSV export always did; a run whose script had one can't be retried as it ran. Jobs from before
+  this are redacted once, at start. Keys typed at a password, passphrase or one-time code prompt (sudo, su, ssh, PAM's
+  two-factor codes, a cloud CLI's MFA code, in English and the languages Linux translates them into) never reach the
+  journal or the audit log at all.
+- **Deleted means gone**: the database overwrites what it deletes (`secure_delete`), empties its write-ahead log after a
+  purge, and compacts its file (`VACUUM`) after a purge that freed a lot of space, while no job runs (a job submitted
+  meanwhile waits for it).
+- **The audit log** is never purged: it is append-only and hash-chained. Verify and Export read it row by row, however
+  long it is, and the export is written next to the file you chose, then renamed, so a failed export leaves no half
+  file.
+- **Nothing lands in a Git repository by accident**: no save path writes into a Git working tree (a folder with a
+  `.git` folder or file in it or above it): the audit log CSV, Compare and MultiExec exports, saved terminal output,
+  session logs, downloads and exports to another laptop. The message names the repository; choose a folder outside it.
+
 ### Command panel
 
 BX-08, on the right of the Terminal page: a click pastes a command into the current terminal, Shift+click also presses
@@ -174,7 +202,8 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   there (Ctrl+X Ctrl+E, v after Esc in vi mode), replay a keyboard macro (Ctrl+X E) or run an editing command by name
   (Esc then x) are not sent, and the MultiExec bar says why. A lone Esc waits for the key after it. Every line sent is
   in the audit log with the command, the sessions and the tier, never the output. Two exceptions pass keys straight
-  through, unrated: at a password prompt (the keys go only to the tabs showing one, and are never kept or logged) and
+  through, unrated: at a password, passphrase or one-time code prompt (sudo, su, ssh, two-factor codes, in English and
+  translated; the keys go only to the tabs showing one, and are never kept, journaled or logged) and
   to a full-screen program such as vim, less or top (only to the tabs that have one open; what is typed there, like
   vim's `:!command`, is not rated). Protected sessions are left out.
 - **MultiExec recording** (QL-12): every line MultiExec sends is recorded in each of its terminals, from Enter until
@@ -424,7 +453,8 @@ log.
   with it on, the core refuses every command on the bus, whatever its tier (VM power and snapshots, protection, remote
   commands including read-only ones, MultiExec lines, uploads, tunnels, SSH key pushes, updates), and every edit of the
   app's data (sessions, folders, labels, tags, saved filters, VM links, imports, the vault and SSH keys, favourites, port
-  forwards, settings, approval rules, replacing or removing trusted host keys, turning MultiExec on). An approval asked
+  forwards, settings, approval rules, how long job outputs are kept and Purge now, replacing or removing trusted host
+  keys, turning MultiExec on). The daily purge of old job outputs still runs. An approval asked
   before the lock came on waits until it is off. Still allowed, because they change nothing outside this PC or are part
   of connecting: reading everything, connecting, typing into one terminal (it is your own shell), trusting a new host's
   key on first use, downloads and saved or logged output (they only read from the host and write files on this PC),
@@ -758,7 +788,8 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                           | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one                           |
 | VM links           | `crates/core/src/vm_links.rs`                                     | QL-01, BX-01                                                                                                                                        | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept                                                                                                                       |
 | Network adapter    | `crates/core/src/adapters/network.rs`                             | QL-01, QL-03, QL-04                                                                                                                                 | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                                                             |
-| Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                  | Working: hash-chained audit log, job journal, inventory, sessions, vault ciphertext, tags, saved filters                                                                                                                    |
+| Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                  | Working: hash-chained audit log (text redacted, streamed), job journal (scripts and lines redacted), inventory, sessions, vault ciphertext, tags, saved filters; secure delete                                              |
+| Retention          | `crates/core/src/retention.rs`, `save_guard.rs`                   | BX-02, BX-05, SS-10, SS-11, AP-05                                                                                                                   | Working: job outputs and command text kept 30 days, 90 days (default), 1 year or forever; a purge at start and daily, Purge now, audited; compacting while no job runs; no save path writes into a Git working tree         |
 | Fake adapters      | `crates/core/src/fakes.rs`                                        | Development safety                                                                                                                                  | One fake per outside system; the test SSH server has SFTP on a temp folder and forwards (direct-tcpip, tcpip-forward) with internal names                                                                                   |
 | Presentation mode  | `crates/core/src/presentation.rs`, `src/lib/presentation*.ts`     | FD-03                                                                                                                                               | Working: masking by field and pattern in the DOM and in terminal output (same width), stand-ins in memory, saved and audited, a read-only lock enforced by the policy engine                                                |
 | Tauri shell        | `src-tauri/src/`                                                  | All IPC                                                                                                                                             | Working; QL-15: daily log file, crash reports, startup message boxes, one instance, a reload closes what the page had open (`diagnostics.rs`, `lib.rs`)                                                                     |
