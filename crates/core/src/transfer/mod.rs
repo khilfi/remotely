@@ -41,6 +41,7 @@
 mod catalog;
 pub mod file;
 mod groups;
+mod stacks;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

@@ -9,8 +9,7 @@ use crate::deploy::spec::tests::{cloud, plan};
 use crate::deploy::{DeployOrigin, DeploySpec};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::stacks::{
-    KeptVm, NamedVm, PowerStep, Readiness, StackDeploySpec, StackPowerSpec, StackStepRun, StackTag,
-    StackTeardownSpec,
+    KeptVm, NamedVm, PowerStep, Readiness, StackDeploySpec, StackPowerSpec, StackStepRun, StackTag, StackTeardownSpec,
 };
 use uuid::Uuid;
 
@@ -154,7 +153,9 @@ fn a_stack_deploy_is_a_deploy_of_all_its_vms() {
     assert_eq!(d.tier, Tier::Medium);
     assert_eq!(d.steps, [ApprovalStep::Confirm]);
     assert!(
-        d.reasons.iter().any(|r| r.contains("stack 'web lab': 4 new VMs in 2 step(s)")),
+        d.reasons
+            .iter()
+            .any(|r| r.contains("stack 'web lab': 4 new VMs in 2 step(s)")),
         "{:?}",
         d.reasons
     );
@@ -188,7 +189,11 @@ fn starting_or_stopping_an_instance_is_the_power_actions_own_tier() {
     assert_eq!(d.action, ActionKind::VmStart);
     assert_eq!(d.tier, Tier::Low);
     assert!(d.steps.is_empty());
-    assert!(d.reasons.iter().any(|r| r.contains("started in boot order")), "{:?}", d.reasons);
+    assert!(
+        d.reasons.iter().any(|r| r.contains("started in boot order")),
+        "{:?}",
+        d.reasons
+    );
     // Shut down: one VM Medium, two the bulk tier with the safety snapshot offered (VM-05).
     let (command, targets) = instance_power(stop, &["web-1"], Environment::Lab);
     let d = engine().evaluate(&command, &targets);
@@ -198,7 +203,11 @@ fn starting_or_stopping_an_instance_is_the_power_actions_own_tier() {
     assert_eq!(d.tier, Tier::High);
     assert!(d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })));
     assert!(safety_snapshot_applies(&command));
-    assert!(d.reasons.iter().any(|r| r.contains("last step first")), "{:?}", d.reasons);
+    assert!(
+        d.reasons.iter().any(|r| r.contains("last step first")),
+        "{:?}",
+        d.reasons
+    );
     // Suspend, as VM-02's.
     let (command, targets) = instance_power(PowerOp::Suspend, &["web-1"], Environment::Lab);
     assert_eq!(engine().classify(&command), ActionKind::VmSuspend);
@@ -228,8 +237,16 @@ fn tearing_down_an_instance_is_critical_even_for_one_vm() {
             !d.steps.iter().any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. })),
             "the VMs go with their snapshots"
         );
-        assert!(d.reasons.iter().any(|r| r.contains("deleted with their files")), "{:?}", d.reasons);
-        assert!(d.reasons.iter().any(|r| r.contains("1 VM(s) of the instance are kept")), "{:?}", d.reasons);
+        assert!(
+            d.reasons.iter().any(|r| r.contains("deleted with their files")),
+            "{:?}",
+            d.reasons
+        );
+        assert!(
+            d.reasons.iter().any(|r| r.contains("1 VM(s) of the instance are kept")),
+            "{:?}",
+            d.reasons
+        );
     }
     assert_eq!(
         PolicyRules::default().tiers[&ActionKind::StackTeardown],

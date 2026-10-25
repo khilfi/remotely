@@ -197,7 +197,11 @@ impl Deployer {
         self.list(ctx, spec, &key, made).await?;
         if let Some(tag) = spec.stack {
             // VM-08: in its stack instance as soon as it is made, so teardown finds it even if the job stops here.
-            let listed = self.store.find_vm(ctx, &key).await?.map_or_else(|| key.clone(), |vm| vm.vmx_path);
+            let listed = self
+                .store
+                .find_vm(ctx, &key)
+                .await?
+                .map_or_else(|| key.clone(), |vm| vm.vmx_path);
             self.store
                 .add_stack_vm(
                     ctx,

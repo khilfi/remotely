@@ -82,9 +82,13 @@ impl Default for StackTuning {
 /// How a readiness wait ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReadyOutcome {
-    Ready { after: Duration },
+    Ready {
+        after: Duration,
+    },
     /// A VM wasn't ready in time; why, in words.
-    NotReady { why: String },
+    NotReady {
+        why: String,
+    },
     Cancelled,
 }
 
@@ -202,7 +206,10 @@ impl StackRunner {
             tracing::warn!(error = %err, "could not forget a stack instance with no VMs");
             return None;
         }
-        let detail = format!("instance '{}' of stack '{}': {what}", instance.name, instance.stack_name);
+        let detail = format!(
+            "instance '{}' of stack '{}': {what}",
+            instance.name, instance.stack_name
+        );
         let written = self
             .store
             .append_audit(

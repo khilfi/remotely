@@ -1172,9 +1172,10 @@ impl JobRunner {
                     .pause(Duration::from_secs(u64::from(step.delay_secs)), run.token)
                     .await
                 {
-                    tally
-                        .notes
-                        .push(format!("waited {} s after step {n} ('{}')", step.delay_secs, step.label));
+                    tally.notes.push(format!(
+                        "waited {} s after step {n} ('{}')",
+                        step.delay_secs, step.label
+                    ));
                 }
             }
         }
@@ -2136,8 +2137,7 @@ fn stack_steps(op: &StackOp, targets: Vec<Target>) -> Vec<PlannedStep> {
             .steps
             .iter()
             .map(|step| {
-                let keys: std::collections::HashSet<String> =
-                    step.vms.iter().map(|k| path_key(Path::new(k))).collect();
+                let keys: std::collections::HashSet<String> = step.vms.iter().map(|k| path_key(Path::new(k))).collect();
                 PlannedStep {
                     label: step.label.clone(),
                     targets: take(&|t| keys.contains(&path_key(Path::new(&t.target.key())))),

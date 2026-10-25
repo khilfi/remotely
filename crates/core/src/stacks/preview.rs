@@ -65,10 +65,7 @@ pub async fn stack_details(
     hypervisors: &Hypervisors,
     host: &dyn HostCounters,
 ) -> StackDetails {
-    let names: HashMap<String, &str> = targets
-        .iter()
-        .map(|t| (t.target.key(), t.name.as_str()))
-        .collect();
+    let names: HashMap<String, &str> = targets.iter().map(|t| (t.target.key(), t.name.as_str())).collect();
     match op {
         StackOp::Deploy { spec } => {
             let mut steps = Vec::with_capacity(spec.steps.len());
@@ -127,7 +124,11 @@ pub async fn stack_details(
                     .map(|s| StepDetails {
                         label: s.label.clone(),
                         // Protected VMs are left out by the policy engine, so only those that run are named.
-                        vms: s.vms.iter().filter_map(|k| names.get(k).map(|n| (*n).to_owned())).collect(),
+                        vms: s
+                            .vms
+                            .iter()
+                            .filter_map(|k| names.get(k).map(|n| (*n).to_owned()))
+                            .collect(),
                         readiness: if starts { s.readiness } else { Readiness::None },
                         ready_timeout_secs: s.ready_timeout_secs,
                         delay_secs: if starts { s.delay_secs } else { 0 },

@@ -444,7 +444,12 @@ impl Stacks {
         let row = self.row(ctx, request.stack_id).await?;
         let stack = self.get(ctx, request.stack_id).await?;
         let instances = self.store.list_stack_instances(ctx).await?;
-        let instance_name = match request.instance_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        let instance_name = match request
+            .instance_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+        {
             Some(name) => spec::check_name(name, "instance")?,
             None => Self::default_instance_name(&row.input.name, &instances),
         };
@@ -832,7 +837,10 @@ impl Stacks {
         self.audit(
             ctx,
             &format!("Added '{}' to the stack instance '{}'", vm.display_name, instance.name),
-            &format!("by hand, at step {}{label}; a teardown keeps it unless it is picked", step + 1),
+            &format!(
+                "by hand, at step {}{label}; a teardown keeps it unless it is picked",
+                step + 1
+            ),
             &[target],
         )
         .await?;
@@ -889,42 +897,6 @@ impl Stacks {
         .await
     }
 
-    // ---- FD-07 ----------------------------------------------------------------------------------------------------
-
-    /// A stack from an export, new or over `replace`, its templates already mapped to this laptop's. Checked and
-    /// audited as imported.
-    pub(crate) async fn import(&self, ctx: &Context, replace: Option<Uuid>, input: StackInput) -> Result<Stack> {
-        let checked = check_stack(&input)?;
-        let rows = self.store.list_stacks(ctx).await?;
-        if rows
-            .iter()
-            .any(|r| r.input.name.eq_ignore_ascii_case(&checked.name) && Some(r.id) != replace)
-        {
-            return invalid(format!("A stack named '{}' exists already.", checked.name));
-        }
-        let id = match replace {
-            Some(id) => {
-                self.store.update_stack(ctx, id, &checked).await?;
-                id
-            }
-            None => {
-                let id = Uuid::new_v4();
-                self.store.insert_stack(ctx, id, &checked).await?;
-                id
-            }
-        };
-        let templates = self.catalog.templates(ctx).await?;
-        let verb = if replace.is_some() { "Replaced" } else { "Imported" };
-        self.audit(
-            ctx,
-            &format!("{verb} the stack '{}' from a Remotely export", checked.name),
-            &Self::describe(&checked, &templates),
-            &[],
-        )
-        .await?;
-        self.get(ctx, id).await
-    }
-
     async fn audit(&self, ctx: &Context, action: &str, detail: &str, targets: &[Target]) -> Result<()> {
         self.store
             .append_audit(
@@ -943,6 +915,58 @@ impl Stacks {
             .await
             .map(drop)
     }
+}
+
+/// FD-07: a stack from an export, new or over `replace`, its templates already mapped to this laptop's (one that
+/// isn't here stays named, and the stack says it can't deploy). Checked, named once, and audited as imported.
+pub(crate) async fn import_stack(
+    store: &Store,
+    ctx: &Context,
+    replace: Option<Uuid>,
+    input: StackInput,
+) -> Result<Uuid> {
+    let checked = check_stack(&input)?;
+    let rows = store.list_stacks(ctx).await?;
+    if rows
+        .iter()
+        .any(|r| r.input.name.eq_ignore_ascii_case(&checked.name) && Some(r.id) != replace)
+    {
+        return invalid(format!("A stack named '{}' exists already.", checked.name));
+    }
+    if replace.is_none() && rows.len() >= spec::MAX_STACKS {
+        return invalid(format!("A workspace keeps at most {} stacks.", spec::MAX_STACKS));
+    }
+    let id = match replace {
+        Some(id) => {
+            store.update_stack(ctx, id, &checked).await?;
+            id
+        }
+        None => {
+            let id = Uuid::new_v4();
+            store.insert_stack(ctx, id, &checked).await?;
+            id
+        }
+    };
+    let templates = Catalog::new(store.clone()).templates(ctx).await?;
+    let verb = if replace.is_some() { "Replaced" } else { "Imported" };
+    let action = format!("{verb} the stack '{}' from a Remotely export", checked.name);
+    let detail = Stacks::describe(&checked, &templates);
+    store
+        .append_audit(
+            ctx,
+            NewAuditEntry {
+                event: EVENT,
+                action: &action,
+                tier: None,
+                job_id: None,
+                targets: &[],
+                approval: None,
+                result: None,
+                detail: Some(&detail),
+            },
+        )
+        .await?;
+    Ok(id)
 }
 
 #[cfg(test)]

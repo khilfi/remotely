@@ -19,8 +19,8 @@ mod quick_connect;
 #[cfg(test)]
 mod retention_tests;
 mod sessions;
-mod stacks;
 mod ssh_keys;
+mod stacks;
 mod tags;
 mod terminal_rules;
 #[cfg(test)]

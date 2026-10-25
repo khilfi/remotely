@@ -17,18 +17,21 @@ use std::time::Duration;
 use common::{temp_folder, vmx, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::adapters::vmware::VmxInfo;
-use remotely_core::catalog::{AfterDeploy, CloneMode, HashProgress, Image, ImageInput, Network, SourceInput, TemplateInput};
+use remotely_core::catalog::{
+    AfterDeploy, CloneMode, HashProgress, Image, ImageInput, Network, SourceInput, TemplateInput,
+};
 use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, Command, PowerOp, StopMode, SubmitOutcome};
 use remotely_core::deploy::runner::DeployTuning;
 use remotely_core::deploy::service::{DeployFrom, DeployRequest};
 use remotely_core::domain::{Environment, PowerState, TargetRef};
 use remotely_core::fakes::stack_clock::FakeStackClock;
-use remotely_core::fakes::{FakeNetwork, FakeVmware};
+use remotely_core::fakes::{FakeNetwork, FakeVirtualBox, FakeVmware};
 use remotely_core::jobs::JobStatus;
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
 use remotely_core::presentation::Presentation;
 use remotely_core::stacks::{Readiness, StackAction, StackDeployRequest, StackInput, StackStep, StackTuning};
 use remotely_core::store::MemberOrigin;
+use remotely_core::transfer::{CatalogChoices, ExportRequest, ItemAction, ItemChoice, ItemStatus, TransferCommit};
 use remotely_core::vault::SecretString;
 use remotely_core::Core;
 use uuid::Uuid;
@@ -49,6 +52,7 @@ fn write(folder: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 struct Lab {
     core: Core,
     fake: Arc<FakeVmware>,
+    vbox: Arc<FakeVirtualBox>,
     network: Arc<FakeNetwork>,
     clock: Arc<FakeStackClock>,
     dir: PathBuf,
@@ -63,11 +67,18 @@ impl Lab {
 }
 
 async fn lab_with(label: &str, vmware: impl FnOnce(&Path) -> FakeVmware) -> Lab {
+    lab_both(label, vmware, FakeVirtualBox::new()).await
+}
+
+async fn lab_both(label: &str, vmware: impl FnOnce(&Path) -> FakeVmware, virtualbox: FakeVirtualBox) -> Lab {
     let dir = temp_folder(label);
     let lab = dir.join("lab");
     let image_file = write(&dir, "noble.vmdk", &vmdk_bytes());
     let network = Arc::new(FakeNetwork::default());
-    let setup = Setup::new(vmware(&lab)).with_network(network.clone());
+    let setup = Setup::new(vmware(&lab))
+        .with_network(network.clone())
+        .with_virtualbox(virtualbox);
+    let vbox = Arc::clone(&setup.virtualbox);
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     core.set_deploy_tuning(DeployTuning {
@@ -106,6 +117,7 @@ async fn lab_with(label: &str, vmware: impl FnOnce(&Path) -> FakeVmware) -> Lab 
     Lab {
         core,
         fake,
+        vbox,
         network,
         clock,
         dir,
@@ -120,6 +132,10 @@ async fn lab(label: &str) -> Lab {
 
 /// A launch template `name` making `<name>-{n}` VMs into the lab folder, with no after-deploy steps.
 async fn template(lab: &Lab, name: &str) -> Uuid {
+    template_on(lab, name, Hypervisor::Vmware, Network::Nat).await
+}
+
+async fn template_on(lab: &Lab, name: &str, hypervisor: Hypervisor, network: Network) -> Uuid {
     lab.core
         .catalog
         .add_template(
@@ -128,9 +144,9 @@ async fn template(lab: &Lab, name: &str) -> Uuid {
                 name: name.into(),
                 image_id: lab.image.id,
                 size_id: "gp.small".into(),
-                hypervisor: Hypervisor::Vmware,
+                hypervisor,
                 vm_folder: Some(lab.lab.display().to_string()),
-                network: Network::Nat,
+                network,
                 ssh_key_id: None,
                 naming_pattern: format!("{name}-{{n}}"),
                 default_count: 1,
@@ -278,7 +294,11 @@ async fn a_stack_deploys_as_one_job_in_boot_order_with_its_delays() {
         details.steps.iter().map(|s| s.vms.clone()).collect::<Vec<_>>(),
         [vec!["db-1".to_owned()], vec!["web-1".to_owned(), "web-2".to_owned()]]
     );
-    assert_eq!(details.disk_bytes, 3 * 20 * (1 << 30), "gp.small's 20 GB thin disk at its full size, 3 times");
+    assert_eq!(
+        details.disk_bytes,
+        3 * 20 * (1 << 30),
+        "gp.small's 20 GB thin disk at its full size, 3 times"
+    );
     let capacity = check.capacity.unwrap();
     assert_eq!(capacity.new_vms, 3);
     assert_eq!(capacity.ram.adds_mb, 3 * 2048);
@@ -304,7 +324,10 @@ async fn a_stack_deploys_as_one_job_in_boot_order_with_its_delays() {
     assert!(db_started < web_begun, "{calls:?}");
     assert_eq!(lab.clock.sleeps(), [Duration::from_secs(30)]);
     let detail = job_end_detail(core, job).await;
-    assert!(detail.contains("step 1 ('db') was ready (the guest tools running) after 0 s"), "{detail}");
+    assert!(
+        detail.contains("step 1 ('db') was ready (the guest tools running) after 0 s"),
+        "{detail}"
+    );
     assert!(detail.contains("waited 30 s after step 1 ('db')"), "{detail}");
 
     // The instance holds exactly its three VMs, at their steps.
@@ -314,8 +337,11 @@ async fn a_stack_deploys_as_one_job_in_boot_order_with_its_delays() {
     assert_eq!(instance.name, "web lab 1");
     assert_eq!(instance.stack_name, "web lab");
     assert_eq!(instance.job_id, Some(job));
-    let members: Vec<(&str, u32, MemberOrigin)> =
-        instance.vms.iter().map(|v| (v.name.as_str(), v.step, v.origin)).collect();
+    let members: Vec<(&str, u32, MemberOrigin)> = instance
+        .vms
+        .iter()
+        .map(|v| (v.name.as_str(), v.step, v.origin))
+        .collect();
     assert_eq!(
         members,
         [
@@ -329,16 +355,31 @@ async fn a_stack_deploys_as_one_job_in_boot_order_with_its_delays() {
     let impact = core.bus.submit(
         ctx,
         Command::VmPower {
-            targets: vec![TargetRef::Vm { vmx_path: lab.vmx("web-1") }],
+            targets: vec![TargetRef::Vm {
+                vmx_path: lab.vmx("web-1"),
+            }],
             op: PowerOp::Stop { mode: StopMode::Soft },
         },
     );
     let request = needs_approval(impact.await.unwrap());
     let membership = request.impact[0].stack.as_ref().expect("web-1 is the instance's");
-    assert_eq!((membership.instance_name.as_str(), membership.step, membership.steps), ("web lab 1", 2, 2));
+    assert_eq!(
+        (membership.instance_name.as_str(), membership.step, membership.steps),
+        ("web lab 1", 2, 2)
+    );
     core.bus.cancel_approvals(&[request.id], "test").await;
     // A second deploy numbers past the first.
-    let check = core.stacks.check_deploy(ctx, &StackDeployRequest { stack_id: id, instance_name: None }).await.unwrap();
+    let check = core
+        .stacks
+        .check_deploy(
+            ctx,
+            &StackDeployRequest {
+                stack_id: id,
+                instance_name: None,
+            },
+        )
+        .await
+        .unwrap();
     assert_eq!(check.instance_name, "web lab 2");
     let details = check.details.unwrap();
     assert_eq!(details.steps[1].vms, ["web-3", "web-4"]);
@@ -366,8 +407,9 @@ async fn readiness_waits_on_the_clock_until_the_guest_port_opens() {
     .await;
     // The port opens 20 s in (fake time).
     let network = Arc::clone(&lab.network);
-    lab.clock
-        .at(Duration::from_secs(20), move || network.set_open("192.0.2.31", 22, true));
+    lab.clock.at(Duration::from_secs(20), move || {
+        network.set_open("192.0.2.31", 22, true)
+    });
     let request = StackDeployRequest {
         stack_id: id,
         instance_name: Some("lab A".into()),
@@ -376,7 +418,12 @@ async fn readiness_waits_on_the_clock_until_the_guest_port_opens() {
     assert_eq!(status, JobStatus::Succeeded, "{:?}", targets_of(core, job).await);
     // Asked every 5 s until it answered: four waits, none real.
     assert_eq!(lab.clock.sleeps(), vec![Duration::from_secs(5); 4]);
-    let probes = lab.network.calls().iter().filter(|c| c.starts_with("probe 192.0.2.31:22")).count();
+    let probes = lab
+        .network
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("probe 192.0.2.31:22"))
+        .count();
     assert_eq!(probes, 5);
     let detail = job_end_detail(core, job).await;
     assert!(detail.contains("was ready (SSH (port 22) open) after 20 s"), "{detail}");
@@ -419,7 +466,10 @@ async fn a_step_not_ready_in_time_stops_the_steps_after_it_and_a_retry_finishes_
         let t = targets.iter().find(|t| t.0 == name).unwrap();
         assert_eq!(t.1, "skipped", "{t:?}");
         let why = t.2.as_deref().unwrap();
-        assert!(why.contains("step 1 ('db') was not ready within 60 s (port 5432 open expected)"), "{why}");
+        assert!(
+            why.contains("step 1 ('db') was not ready within 60 s (port 5432 open expected)"),
+            "{why}"
+        );
         assert!(why.contains("port 5432 on 192.0.2.41 doesn't answer yet"), "{why}");
         assert!(!lab.lab.join(name).exists(), "{name} was never begun");
     }
@@ -449,8 +499,7 @@ async fn a_step_not_ready_in_time_stops_the_steps_after_it_and_a_retry_finishes_
 #[tokio::test]
 async fn a_failure_mid_stack_cleans_up_only_its_own_vm() {
     let lab = lab_with("stack-failure", |_| {
-        FakeVmware::with_running([vmx("other")])
-            .in_library(&vmx("other"), Some("other"))
+        FakeVmware::with_running([vmx("other")]).in_library(&vmx("other"), Some("other"))
     })
     .await;
     let core = &lab.core;
@@ -471,7 +520,8 @@ async fn a_failure_mid_stack_cleans_up_only_its_own_vm() {
     .await;
     // Copying an image fails from 10 s on: after db-1 is made, before app-1's disk is copied.
     let fake = Arc::clone(&lab.fake);
-    lab.clock.at(Duration::from_secs(10), move || fake.set_failing("convert", true));
+    lab.clock
+        .at(Duration::from_secs(10), move || fake.set_failing("convert", true));
     let request = StackDeployRequest {
         stack_id: id,
         instance_name: None,
@@ -495,7 +545,10 @@ async fn a_failure_mid_stack_cleans_up_only_its_own_vm() {
     let web_skip = targets.iter().find(|t| t.0 == "web-1").unwrap().2.clone().unwrap();
     assert!(web_skip.contains("step 2 ('app') didn't finish"), "{web_skip}");
     let instance = &core.stacks.instances(ctx).await.unwrap()[0];
-    assert_eq!(instance.vms.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["db-1"]);
+    assert_eq!(
+        instance.vms.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        ["db-1"]
+    );
     // The VM that was here before is untouched.
     assert!(lab.fake.running().iter().any(|p| p.ends_with(r"other\other.vmx")));
     std::fs::remove_dir_all(&lab.dir).unwrap();
@@ -517,13 +570,22 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
     let id = stack(
         &lab,
         "web lab",
-        vec![step(db, 1, Readiness::Tools, 300, 15), step(web, 2, Readiness::None, 600, 0)],
+        vec![
+            step(db, 1, Readiness::Tools, 300, 15),
+            step(web, 2, Readiness::None, 600, 0),
+        ],
     )
     .await;
     let (_, status) = run(
         core,
         core.stacks
-            .deploy(ctx, &StackDeployRequest { stack_id: id, instance_name: None })
+            .deploy(
+                ctx,
+                &StackDeployRequest {
+                    stack_id: id,
+                    instance_name: None,
+                },
+            )
             .await
             .unwrap(),
     )
@@ -533,13 +595,18 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
 
     // tools01 joins by hand at step 2; web-2 is protected.
     let instance = core.stacks.add_vm(ctx, instance_id, &vmx("tools01"), 1).await.unwrap();
-    assert_eq!(instance.vms.iter().find(|v| v.name == "tools01").unwrap().origin, MemberOrigin::Hand);
+    assert_eq!(
+        instance.vms.iter().find(|v| v.name == "tools01").unwrap().origin,
+        MemberOrigin::Hand
+    );
     let protect = core
         .bus
         .submit(
             ctx,
             Command::VmProtect {
-                targets: vec![TargetRef::Vm { vmx_path: lab.vmx("web-2") }],
+                targets: vec![TargetRef::Vm {
+                    vmx_path: lab.vmx("web-2"),
+                }],
                 protected: true,
             },
         )
@@ -548,18 +615,31 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
     run(core, protect).await;
 
     // A running instance can't be torn down.
-    let err = core.stacks.teardown(ctx, instance_id, &[]).await.unwrap_err().to_string();
+    let err = core
+        .stacks
+        .teardown(ctx, instance_id, &[])
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("shut the instance down first"), "{err}");
 
     // Shut down: the last step first, the protected VM left out (AP-04).
     let calls_before = lab.fake.calls().len();
-    let approval = needs_approval(core.stacks.power(ctx, instance_id, PowerOp::Stop { mode: StopMode::Soft }).await.unwrap());
+    let approval = needs_approval(
+        core.stacks
+            .power(ctx, instance_id, PowerOp::Stop { mode: StopMode::Soft })
+            .await
+            .unwrap(),
+    );
     assert_eq!(approval.action, ActionKind::VmStopSoft);
     assert_eq!(
         approval.targets.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
         ["web-1", "db-1"]
     );
-    assert_eq!(approval.skipped.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["web-2"]);
+    assert_eq!(
+        approval.skipped.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["web-2"]
+    );
     let (_, status) = approve_and_wait(core, &approval).await;
     assert_eq!(status, JobStatus::Succeeded);
     let calls: Vec<String> = lab.fake.calls()[calls_before..].to_vec();
@@ -568,12 +648,16 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
     assert!(web_stop < db_stop, "{calls:?}");
     // Unprotect web-2 and stop it too, for the teardown.
     let unprotect = Command::VmProtect {
-        targets: vec![TargetRef::Vm { vmx_path: lab.vmx("web-2") }],
+        targets: vec![TargetRef::Vm {
+            vmx_path: lab.vmx("web-2"),
+        }],
         protected: false,
     };
     run(core, core.bus.submit(ctx, unprotect).await.unwrap()).await;
     let stop = Command::VmPower {
-        targets: vec![TargetRef::Vm { vmx_path: lab.vmx("web-2") }],
+        targets: vec![TargetRef::Vm {
+            vmx_path: lab.vmx("web-2"),
+        }],
         op: PowerOp::Stop { mode: StopMode::Soft },
     };
     run(core, core.bus.submit(ctx, stop).await.unwrap()).await;
@@ -583,7 +667,10 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
     let slept = lab.clock.sleeps().len();
     let (_, status) = run(
         core,
-        core.stacks.power(ctx, instance_id, PowerOp::Start { gui: false }).await.unwrap(),
+        core.stacks
+            .power(ctx, instance_id, PowerOp::Start { gui: false })
+            .await
+            .unwrap(),
     )
     .await;
     assert_eq!(status, JobStatus::Succeeded);
@@ -593,7 +680,11 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
     let tools_start = first(&calls, |c| c.starts_with("power Start") && c.contains("tools01.vmx"));
     assert!(db_start < web_start && db_start < tools_start, "{calls:?}");
     assert_eq!(lab.clock.sleeps()[slept..], [Duration::from_secs(15)]);
-    let stop = core.stacks.power(ctx, instance_id, PowerOp::Stop { mode: StopMode::Soft }).await.unwrap();
+    let stop = core
+        .stacks
+        .power(ctx, instance_id, PowerOp::Stop { mode: StopMode::Soft })
+        .await
+        .unwrap();
     run(core, stop).await;
 
     // web-2 protected again: the teardown leaves it, and tools01 (added by hand), and deletes the rest.
@@ -603,7 +694,9 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
             .submit(
                 ctx,
                 Command::VmProtect {
-                    targets: vec![TargetRef::Vm { vmx_path: lab.vmx("web-2") }],
+                    targets: vec![TargetRef::Vm {
+                        vmx_path: lab.vmx("web-2"),
+                    }],
                     protected: true,
                 },
             )
@@ -620,14 +713,29 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
         approval.targets.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
         ["db-1", "web-1"]
     );
-    assert_eq!(approval.skipped.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["web-2"]);
+    assert_eq!(
+        approval.skipped.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["web-2"]
+    );
     let details = approval.stack.as_ref().unwrap();
     assert_eq!(details.action, StackAction::Teardown);
-    assert_eq!(details.kept.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(), ["tools01"]);
+    assert_eq!(
+        details.kept.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+        ["tools01"]
+    );
     let change = approval.vm_change.as_ref().expect("R3's delete preview");
     assert_eq!(change.targets.len(), 2);
-    assert!(change.targets.iter().all(|t| !t.deletes.is_empty() && t.problem.is_none()), "{change:?}");
-    assert!(change.targets[0].deletes.iter().any(|f| f.path.ends_with("db-1.vmx")), "{change:?}");
+    assert!(
+        change
+            .targets
+            .iter()
+            .all(|t| !t.deletes.is_empty() && t.problem.is_none()),
+        "{change:?}"
+    );
+    assert!(
+        change.targets[0].deletes.iter().any(|f| f.path.ends_with("db-1.vmx")),
+        "{change:?}"
+    );
     let (job, status) = approve_and_wait(core, &approval).await;
     assert_eq!(status, JobStatus::Succeeded, "{:?}", targets_of(core, job).await);
     assert!(!lab.fake.has_vm(&lab.vmx("db-1")));
@@ -639,7 +747,10 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
         ["web-2", "tools01"]
     );
     let detail = job_end_detail(core, job).await;
-    assert!(detail.contains("stack instance 'web lab 1' keeps these VMs: 'web-2', 'tools01'"), "{detail}");
+    assert!(
+        detail.contains("stack instance 'web lab 1' keeps these VMs: 'web-2', 'tools01'"),
+        "{detail}"
+    );
     // The bystander, in no instance, was never touched.
     assert!(!lab.fake.calls().iter().any(|c| c.contains("bystander")));
 
@@ -652,7 +763,10 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
 
 #[tokio::test]
 async fn a_hand_added_vm_is_deleted_only_when_picked() {
-    let lab = lab_with("stack-hand", |_| FakeVmware::default().in_library(&vmx("tools01"), Some("tools01"))).await;
+    let lab = lab_with("stack-hand", |_| {
+        FakeVmware::default().in_library(&vmx("tools01"), Some("tools01"))
+    })
+    .await;
     let core = &lab.core;
     let ctx = &core.ctx;
     core.inventory.refresh(ctx).await.unwrap();
@@ -661,14 +775,27 @@ async fn a_hand_added_vm_is_deleted_only_when_picked() {
     run(
         core,
         core.stacks
-            .deploy(ctx, &StackDeployRequest { stack_id: id, instance_name: None })
+            .deploy(
+                ctx,
+                &StackDeployRequest {
+                    stack_id: id,
+                    instance_name: None,
+                },
+            )
             .await
             .unwrap(),
     )
     .await;
     let instance_id = core.stacks.instances(ctx).await.unwrap()[0].id;
     core.stacks.add_vm(ctx, instance_id, &vmx("tools01"), 0).await.unwrap();
-    run(core, core.stacks.power(ctx, instance_id, PowerOp::Stop { mode: StopMode::Soft }).await.unwrap()).await;
+    run(
+        core,
+        core.stacks
+            .power(ctx, instance_id, PowerOp::Stop { mode: StopMode::Soft })
+            .await
+            .unwrap(),
+    )
+    .await;
     let approval = needs_approval(core.stacks.teardown(ctx, instance_id, &[vmx("tools01")]).await.unwrap());
     assert_eq!(
         approval.targets.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
@@ -678,13 +805,18 @@ async fn a_hand_added_vm_is_deleted_only_when_picked() {
     let (_, status) = approve_and_wait(core, &approval).await;
     assert_eq!(status, JobStatus::Succeeded);
     assert!(
-        lab.fake.calls().iter().any(|c| c.starts_with("vmrun deleteVM") && c.contains("tools01.vmx")),
+        lab.fake
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("vmrun deleteVM") && c.contains("tools01.vmx")),
         "picked on purpose: deleted"
     );
     // Every VM of it went, so the instance went too, audited.
     assert!(core.stacks.instances(ctx).await.unwrap().is_empty());
     let audit = core.store.recent_audit(ctx, 200).await.unwrap();
-    assert!(audit.iter().any(|e| e.event == "stack_changed" && e.action == "Removed a stack instance"));
+    assert!(audit
+        .iter()
+        .any(|e| e.event == "stack_changed" && e.action == "Removed a stack instance"));
     std::fs::remove_dir_all(&lab.dir).unwrap();
 }
 
@@ -715,10 +847,20 @@ async fn stack_edits_are_audited_checked_and_refused_by_the_read_only_lock() {
     // A deleted template: the stack stays and says why it can't deploy.
     core.catalog.delete_template(ctx, db).await.unwrap();
     let listed = core.stacks.list(ctx).await.unwrap();
-    assert!(listed[0].problems[0].contains("its launch template was deleted"), "{:?}", listed[0].problems);
+    assert!(
+        listed[0].problems[0].contains("its launch template was deleted"),
+        "{:?}",
+        listed[0].problems
+    );
     let check = core
         .stacks
-        .check_deploy(ctx, &StackDeployRequest { stack_id: saved.id, instance_name: None })
+        .check_deploy(
+            ctx,
+            &StackDeployRequest {
+                stack_id: saved.id,
+                instance_name: None,
+            },
+        )
         .await
         .unwrap();
     assert!(check.details.is_none() && !check.problems.is_empty());
@@ -742,7 +884,10 @@ async fn stack_edits_are_audited_checked_and_refused_by_the_read_only_lock() {
         .unwrap_err();
     assert_eq!(err.code(), "read_only_lock");
     assert!(err.to_string().contains("Edit stacks and their instances"), "{err}");
-    assert_eq!(core.stacks.delete(ctx, saved.id).await.unwrap_err().code(), "read_only_lock");
+    assert_eq!(
+        core.stacks.delete(ctx, saved.id).await.unwrap_err().code(),
+        "read_only_lock"
+    );
     core.presentation.set(lock(false)).await.unwrap();
     core.stacks.delete(ctx, saved.id).await.unwrap();
 
@@ -801,12 +946,18 @@ async fn the_capacity_planner_shows_this_pc_after_a_deploy_and_what_to_suspend()
     assert!(!capacity.fits);
     let suspend = capacity.suspend.as_ref().unwrap();
     assert!(suspend.enough);
-    assert_eq!(suspend.vms.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(), ["build01"]);
+    assert_eq!(
+        suspend.vms.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        ["build01"]
+    );
     // The approval says it too.
     let approval = needs_approval(core.deploy.submit(ctx, &request(2)).await.unwrap());
     assert!(approval.capacity.as_ref().is_some_and(|c| !c.fits));
     assert!(
-        approval.warnings.iter().any(|w| w.contains("Suspending 'build01' would free 30.0 GB")),
+        approval
+            .warnings
+            .iter()
+            .any(|w| w.contains("Suspending 'build01' would free 30.0 GB")),
         "{:?}",
         approval.warnings
     );
@@ -874,11 +1025,262 @@ async fn vm_07_at_power_on_names_vms_to_suspend() {
         .await
         .unwrap();
     let request = needs_approval(outcome);
-    assert!(request.warnings.iter().any(|w| w.contains("more than this host's 32.0 GB")), "{:?}", request.warnings);
     assert!(
-        request.warnings.iter().any(|w| w.contains("Suspending 'big' would free 24.0 GB")),
+        request
+            .warnings
+            .iter()
+            .any(|w| w.contains("more than this host's 32.0 GB")),
         "{:?}",
         request.warnings
     );
+    assert!(
+        request
+            .warnings
+            .iter()
+            .any(|w| w.contains("Suspending 'big' would free 24.0 GB")),
+        "{:?}",
+        request.warnings
+    );
+    std::fs::remove_dir_all(&lab.dir).unwrap();
+}
+
+const PASSPHRASE: &str = "tulip anvil orbit";
+
+fn commit_all(preview_id: Uuid, stacks: Vec<ItemChoice>) -> TransferCommit {
+    TransferCommit {
+        preview_id,
+        catalog: CatalogChoices {
+            stacks,
+            ..Default::default()
+        },
+        sessions: vec![],
+        known_hosts: vec![],
+        secrets: vec![],
+        favourites: vec![],
+        keep_startup: vec![],
+        keep_forwards: vec![],
+        vault_password: None,
+        folder_defaults: vec![],
+        groups: vec![],
+    }
+}
+
+#[tokio::test]
+async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_instances() {
+    let a = lab("stack-transfer-a").await;
+    let ctx = &a.core.ctx;
+    a.core.transfer.use_insecure_fast_kdf();
+    let db = template(&a, "db").await;
+    let web = template(&a, "web").await;
+    let id = stack(
+        &a,
+        "web lab",
+        vec![
+            step(db, 1, Readiness::SshPort { port: 5432 }, 300, 20),
+            step(web, 3, Readiness::None, 600, 0),
+        ],
+    )
+    .await;
+    run(
+        &a.core,
+        a.core
+            .stacks
+            .deploy(
+                ctx,
+                &StackDeployRequest {
+                    stack_id: id,
+                    instance_name: None,
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    let file = a.dir.join("export.remotely");
+    let report = a
+        .core
+        .transfer
+        .export(
+            ctx,
+            &file,
+            ExportRequest {
+                passphrase: SecretString::new(PASSPHRASE),
+                include_known_hosts: false,
+                include_secrets: false,
+                vault_password: None,
+            },
+            &a.core.vault,
+            "Remotely test",
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.catalog.stacks, 1);
+    assert_eq!(report.catalog.templates, 2);
+
+    let b = Setup::new(FakeVmware::default()).build().await;
+    b.transfer.use_insecure_fast_kdf();
+
+    let preview = b
+        .transfer
+        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
+    let row = &preview.catalog.stacks[0];
+    assert_eq!(row.name, "web lab");
+    assert_eq!(row.status, ItemStatus::New);
+    assert_eq!(row.detail, "'db' x1 -> 'web' x3");
+    assert!(row.notes.iter().any(|n| n.contains("instances")), "{:?}", row.notes);
+    let report = b
+        .transfer
+        .commit(
+            &b.ctx,
+            commit_all(preview.id, vec![]),
+            &b.sessions,
+            &b.vault,
+            &b.known_hosts,
+            &b.snippets,
+        )
+        .await
+        .unwrap();
+    assert!(report.problems.is_empty(), "{:?}", report.problems);
+    assert_eq!(report.catalog.stacks.added, 1);
+
+    // On the other laptop, its steps point at that laptop's own templates; no instance came along.
+    let stacks = b.stacks.list(&b.ctx).await.unwrap();
+    assert_eq!(stacks.len(), 1);
+    let names: Vec<Option<&str>> = stacks[0].steps.iter().map(|s| s.template_name.as_deref()).collect();
+    assert_eq!(names, [Some("db"), Some("web")]);
+    let b_db = b
+        .catalog
+        .templates(&b.ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.spec.name == "db")
+        .unwrap();
+    assert_eq!(stacks[0].steps[0].step.template_id, b_db.id);
+    assert_ne!(b_db.id, db, "a template of its own");
+    assert_eq!(stacks[0].steps[0].step.readiness, Readiness::SshPort { port: 5432 });
+    assert_eq!(stacks[0].steps[0].step.delay_secs, 20);
+    assert_eq!(stacks[0].instances, 0);
+    assert!(b.stacks.instances(&b.ctx).await.unwrap().is_empty());
+    let audit = b.store.recent_audit(&b.ctx, 100).await.unwrap();
+    assert!(audit
+        .iter()
+        .any(|e| e.event == "stack_changed" && e.action == "Imported the stack 'web lab' from a Remotely export"));
+
+    // The same file again: the same stack. Changed here: a conflict, kept as a second copy.
+    let again = b
+        .transfer
+        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
+    assert_eq!(again.catalog.stacks[0].status, ItemStatus::Same);
+    let mut changed = b.stacks.get(&b.ctx, stacks[0].id).await.unwrap();
+    let mut input = StackInput {
+        name: changed.name.clone(),
+        description: changed.description.take(),
+        steps: changed.steps.iter().map(|s| s.step.clone()).collect(),
+    };
+    input.steps[1].count = 4;
+    b.stacks.update(&b.ctx, stacks[0].id, input).await.unwrap();
+    let again = b
+        .transfer
+        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
+    assert_eq!(again.catalog.stacks[0].status, ItemStatus::Conflict);
+    let report = b
+        .transfer
+        .commit(
+            &b.ctx,
+            commit_all(
+                again.id,
+                vec![ItemChoice {
+                    index: 0,
+                    action: ItemAction::KeepBoth,
+                }],
+            ),
+            &b.sessions,
+            &b.vault,
+            &b.known_hosts,
+            &b.snippets,
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.catalog.stacks.kept_both, 1);
+    let names: Vec<String> = b
+        .stacks
+        .list(&b.ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(names, ["web lab", "web lab (2)"]);
+    std::fs::remove_dir_all(&a.dir).unwrap();
+}
+
+#[tokio::test]
+async fn a_stack_mixes_virtualbox_and_workstation_steps() {
+    let lab = lab_both(
+        "stack-mixed",
+        |_| FakeVmware::default(),
+        FakeVirtualBox::new()
+            .with_host_only_adapters(&["VirtualBox Host-Only Ethernet Adapter"])
+            .with_ip_for_name("vdb-1", "192.0.2.51"),
+    )
+    .await;
+    let core = &lab.core;
+    let ctx = &core.ctx;
+    lab.network.set_open("192.0.2.51", 22, true);
+    let db = template_on(&lab, "vdb", Hypervisor::VirtualBox, Network::HostOnly).await;
+    let web = template(&lab, "web").await;
+    // Waiting for the Guest Additions of a VM that has none would never end: SSH is checked instead.
+    let id = stack(
+        &lab,
+        "mixed",
+        vec![
+            step(db, 1, Readiness::SshPort { port: 22 }, 120, 0),
+            step(web, 1, Readiness::None, 600, 0),
+        ],
+    )
+    .await;
+    let (job, status) = run(
+        core,
+        core.stacks
+            .deploy(
+                ctx,
+                &StackDeployRequest {
+                    stack_id: id,
+                    instance_name: None,
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, JobStatus::Succeeded, "{:?}", targets_of(core, job).await);
+    let vdb = lab.vbox.vm_named("vdb-1").expect("made on VirtualBox");
+    let instance = &core.stacks.instances(ctx).await.unwrap()[0];
+    assert_eq!(instance.vms[0].key, vdb.uuid, "a VirtualBox VM by its UUID");
+    assert_eq!(instance.vms[0].step, 0);
+    assert_eq!(instance.vms[1].key.to_lowercase(), lab.vmx("web-1").to_lowercase());
+
+    // Shut down (the last step first) and tear down: both hypervisors' own delete.
+    run(
+        core,
+        core.stacks
+            .power(ctx, instance.id, PowerOp::Stop { mode: StopMode::Soft })
+            .await
+            .unwrap(),
+    )
+    .await;
+    let approval = needs_approval(core.stacks.teardown(ctx, instance.id, &[]).await.unwrap());
+    let (job, status) = approve_and_wait(core, &approval).await;
+    assert_eq!(status, JobStatus::Succeeded, "{:?}", targets_of(core, job).await);
+    assert!(lab.vbox.vm_named("vdb-1").is_none(), "unregistered with its files");
+    assert!(!lab.fake.has_vm(&lab.vmx("web-1")));
+    assert!(core.stacks.instances(ctx).await.unwrap().is_empty());
     std::fs::remove_dir_all(&lab.dir).unwrap();
 }

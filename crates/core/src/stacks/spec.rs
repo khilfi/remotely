@@ -264,7 +264,13 @@ impl StackDeploySpec {
             .enumerate()
             .map(|(i, s)| {
                 let names: Vec<&str> = s.spec.vms.iter().map(|v| v.name.as_str()).collect();
-                let mut text = format!("step {}: '{}' x{} ({})", i + 1, s.label, s.spec.vms.len(), names.join(", "));
+                let mut text = format!(
+                    "step {}: '{}' x{} ({})",
+                    i + 1,
+                    s.label,
+                    s.spec.vms.len(),
+                    names.join(", ")
+                );
                 if i + 1 < self.steps.len() {
                     if !s.readiness.is_none() {
                         text.push_str(&format!(", then waits for {}", s.readiness.describe()));
@@ -381,11 +387,7 @@ pub struct StackPowerSpec {
 pub fn instance_op_allowed(op: &PowerOp) -> bool {
     matches!(
         op,
-        PowerOp::Start { gui: false }
-            | PowerOp::Stop {
-                mode: StopMode::Soft
-            }
-            | PowerOp::Suspend
+        PowerOp::Start { gui: false } | PowerOp::Stop { mode: StopMode::Soft } | PowerOp::Suspend
     )
 }
 

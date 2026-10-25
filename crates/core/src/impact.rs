@@ -202,7 +202,9 @@ impl ImpactPreviewer {
                 Hypervisor::Vmware => self.one_vmware(ctx, key, running.as_ref(), now).await,
                 Hypervisor::VirtualBox => self.one_virtualbox(key, now).await,
             };
-            impact.stack = memberships.get(&crate::adapters::vmware::path_key(Path::new(key))).cloned();
+            impact.stack = memberships
+                .get(&crate::adapters::vmware::path_key(Path::new(key)))
+                .cloned();
             out.push(impact);
         }
         out

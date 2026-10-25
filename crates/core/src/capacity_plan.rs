@@ -289,7 +289,9 @@ pub fn plan(now: &HostNow, demands: &[VmDemand]) -> DeployCapacity {
         .count();
     let adds_mb: u64 = demands.iter().filter(|d| d.starts).map(|d| d.ram_mb).sum();
     let after_mb = running_mb + adds_mb;
-    let ram_fits = now.physical_ram_mb.is_none_or(|physical| adds_mb == 0 || after_mb <= physical);
+    let ram_fits = now
+        .physical_ram_mb
+        .is_none_or(|physical| adds_mb == 0 || after_mb <= physical);
     out.ram = RamPlan {
         physical_mb: now.physical_ram_mb,
         in_use_mb: now
@@ -385,8 +387,9 @@ pub fn plan(now: &HostNow, demands: &[VmDemand]) -> DeployCapacity {
             }
         }
         if unknown {
-            out.unchecked
-                .push(format!("Some new VMs' disks on {drive} couldn't be read, so they are left out."));
+            out.unchecked.push(format!(
+                "Some new VMs' disks on {drive} couldn't be read, so they are left out."
+            ));
         }
         disk_fits &= fits;
         out.drives.push(DrivePlan {
@@ -495,15 +498,15 @@ impl CapacityChecker {
         for key in running {
             let (ram, cpus) = self.size(&known, &key).await;
             let record = known.get(&path_key(Path::new(&key)));
-            let name = record.map(|vm| vm.display_name.clone()).unwrap_or_else(|| {
-                match Hypervisor::of_key(&key) {
+            let name = record
+                .map(|vm| vm.display_name.clone())
+                .unwrap_or_else(|| match Hypervisor::of_key(&key) {
                     Hypervisor::Vmware => Path::new(&key)
                         .file_stem()
                         .map(|s| s.to_string_lossy().into_owned())
                         .unwrap_or_else(|| key.clone()),
                     Hypervisor::VirtualBox => key.clone(),
-                }
-            });
+                });
             out.push(RunningVm {
                 name,
                 ram_mb: ram.map(u64::from),
@@ -538,8 +541,10 @@ impl CapacityChecker {
         }
         for (drive, folder) in seen {
             let Some(dir) = existing_ancestor(&folder) else {
-                now.unchecked
-                    .push(format!("{} isn't on a drive of this PC that is there now", folder.display()));
+                now.unchecked.push(format!(
+                    "{} isn't on a drive of this PC that is there now",
+                    folder.display()
+                ));
                 continue;
             };
             match self.host().disk_space(&dir).await {
@@ -548,7 +553,9 @@ impl CapacityChecker {
                     free_bytes: space.free_bytes,
                     total_bytes: space.total_bytes,
                 }),
-                Err(err) => now.unchecked.push(format!("could not read the free space on {drive} ({err})")),
+                Err(err) => now
+                    .unchecked
+                    .push(format!("could not read the free space on {drive} ({err})")),
             }
         }
         plan(&now, demands)
@@ -616,7 +623,10 @@ mod tests {
 
     #[test]
     fn the_plan_sums_now_and_after() {
-        let now = host(vec![vm("dc01", 4, Environment::Lab), vm("sql01", 8, Environment::Staging)]);
+        let now = host(vec![
+            vm("dc01", 4, Environment::Lab),
+            vm("sql01", 8, Environment::Staging),
+        ]);
         let p = plan(&now, &[demand("web-1", 4, 2, 40, 0), demand("web-2", 4, 2, 40, 0)]);
         assert_eq!(p.ram.running_mb, 12 * 1024);
         assert_eq!(p.ram.adds_mb, 8 * 1024);
@@ -642,11 +652,19 @@ mod tests {
         // 520 GB of it thick: it won't fit.
         let p = plan(&now, &[demand("files-1", 4, 2, 540, 520)]);
         assert!(!p.fits);
-        assert!(p.problems.iter().any(|w| w.contains("thick disks need")), "{:?}", p.problems);
+        assert!(
+            p.problems.iter().any(|w| w.contains("thick disks need")),
+            "{:?}",
+            p.problems
+        );
         // 460 GB: fits, but leaves the drive under 10 % free.
         let p = plan(&now, &[demand("files-1", 4, 2, 460, 0)]);
         assert!(p.fits && p.drives[0].low_after);
-        assert!(p.warnings.iter().any(|w| w.contains("under 10% free")), "{:?}", p.warnings);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("under 10% free")),
+            "{:?}",
+            p.warnings
+        );
     }
 
     #[test]
@@ -713,7 +731,11 @@ mod tests {
         let many: Vec<VmDemand> = (0..5).map(|i| demand(&format!("w{i}"), 1, 4, 10, 0)).collect();
         let p = plan(&now, &many);
         assert!(p.fits);
-        assert!(p.warnings.iter().any(|w| w.contains("20 vCPUs on 8")), "{:?}", p.warnings);
+        assert!(
+            p.warnings.iter().any(|w| w.contains("20 vCPUs on 8")),
+            "{:?}",
+            p.warnings
+        );
     }
 
     #[test]
@@ -739,7 +761,15 @@ mod tests {
         let p = plan(&now, &[d]);
         assert!(p.fits);
         assert_eq!(p.drives[0].free_bytes, None);
-        assert!(p.unchecked.iter().any(|u| u.contains("memory isn't known")), "{:?}", p.unchecked);
-        assert!(p.unchecked.iter().any(|u| u.contains("couldn't be read")), "{:?}", p.unchecked);
+        assert!(
+            p.unchecked.iter().any(|u| u.contains("memory isn't known")),
+            "{:?}",
+            p.unchecked
+        );
+        assert!(
+            p.unchecked.iter().any(|u| u.contains("couldn't be read")),
+            "{:?}",
+            p.unchecked
+        );
     }
 }

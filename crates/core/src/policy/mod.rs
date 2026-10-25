@@ -16,11 +16,11 @@ mod commands;
 #[cfg(test)]
 mod deploy_tests;
 #[cfg(test)]
+mod stack_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod vm_settings_tests;
-#[cfg(test)]
-mod stack_tests;
 
 use std::collections::BTreeMap;
 
@@ -1270,13 +1270,13 @@ impl PolicyEngine {
                     },
                     spec.steps.len()
                 )),
-                StackOp::Power { spec } if spec.starts() => {
-                    reasons.push(format!("stack instance '{}': started in boot order", spec.instance_name))
-                }
-                StackOp::Power { spec } => reasons.push(format!(
-                    "stack instance '{}': its last step first",
+                StackOp::Power { spec } if spec.starts() => reasons.push(format!(
+                    "stack instance '{}': started in boot order",
                     spec.instance_name
                 )),
+                StackOp::Power { spec } => {
+                    reasons.push(format!("stack instance '{}': its last step first", spec.instance_name))
+                }
                 StackOp::Teardown { spec } => {
                     reasons.push("the stack instance's VMs are deleted with their files".into());
                     if !spec.kept.is_empty() {

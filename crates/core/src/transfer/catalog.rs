@@ -41,6 +41,9 @@ pub(super) struct CatalogEntries {
     images: Vec<ImageEntry>,
     #[serde(default)]
     templates: Vec<TemplateEntry>,
+    /// VM-08 stacks. Files from before 0.5.0 R6 have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stacks: Vec<super::stacks::StackEntry>,
 }
 
 impl CatalogEntries {
@@ -49,7 +52,13 @@ impl CatalogEntries {
             sizes: self.sizes.len(),
             images: self.images.len(),
             templates: self.templates.len(),
+            stacks: self.stacks.len(),
         }
+    }
+
+    /// VM-08: each template of the file by its id, with its name.
+    fn template_names(&self) -> HashMap<Uuid, String> {
+        self.templates.iter().map(|t| (t.id, t.spec.name.clone())).collect()
     }
 }
 
@@ -92,13 +101,15 @@ pub struct CatalogCounts {
     pub sizes: usize,
     pub images: usize,
     pub templates: usize,
+    /// VM-08.
+    pub stacks: usize,
 }
 
 impl CatalogCounts {
     pub(super) fn describe(&self) -> String {
         format!(
-            "{} sizes, {} images, {} launch templates",
-            self.sizes, self.images, self.templates
+            "{} sizes, {} images, {} launch templates, {} stacks",
+            self.sizes, self.images, self.templates, self.stacks
         )
     }
 }
@@ -110,6 +121,8 @@ pub struct CatalogPreview {
     pub sizes: Vec<PreviewItem>,
     pub images: Vec<PreviewItem>,
     pub templates: Vec<PreviewItem>,
+    /// VM-08.
+    pub stacks: Vec<PreviewItem>,
 }
 
 /// What the user chose for the catalogue's items. Items not listed get their default.
@@ -122,6 +135,9 @@ pub struct CatalogChoices {
     pub images: Vec<ItemChoice>,
     #[serde(default)]
     pub templates: Vec<ItemChoice>,
+    /// VM-08.
+    #[serde(default)]
+    pub stacks: Vec<ItemChoice>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -130,6 +146,8 @@ pub struct CatalogReport {
     pub sizes: Counts,
     pub images: Counts,
     pub templates: Counts,
+    /// VM-08.
+    pub stacks: Counts,
     /// Images imported whose file isn't on this laptop (or whose golden VM isn't in its VM list).
     pub images_missing_here: usize,
 }
@@ -142,6 +160,9 @@ impl CatalogReport {
             self.images.describe(),
             self.templates.describe()
         );
+        if self.stacks != Counts::default() {
+            text.push_str(&format!("; stacks {}", self.stacks.describe()));
+        }
         if self.images_missing_here > 0 {
             text.push_str(&format!(
                 "; {} imported without their file or VM here",
@@ -193,6 +214,7 @@ pub(super) async fn export(store: &Store, ctx: &Context) -> Result<CatalogEntrie
         sizes,
         images,
         templates,
+        stacks: super::stacks::export(store, ctx).await?,
     })
 }
 
@@ -204,6 +226,8 @@ pub(super) struct LocalCatalog {
     images: Vec<Image>,
     templates: Vec<TemplateRow>,
     vm_keys: HashSet<String>,
+    /// VM-08.
+    stacks: Vec<crate::store::StackRow>,
 }
 
 impl LocalCatalog {
@@ -212,6 +236,7 @@ impl LocalCatalog {
             sizes: store.list_catalog_sizes(ctx).await?,
             images: store.list_catalog_images(ctx).await?,
             templates: store.list_catalog_templates(ctx).await?,
+            stacks: store.list_stacks(ctx).await?,
             vm_keys: store
                 .list_vms(ctx)
                 .await?
@@ -444,10 +469,18 @@ pub(super) async fn preview(file: &CatalogEntries, local: &LocalCatalog) -> Resu
             item(row, e.spec.name.clone(), detail, notes)
         })
         .collect();
+    let file_templates = file.template_names();
+    let stacks = super::stacks::preview(
+        &file.stacks,
+        super::stacks::plan(&file.stacks, &local.stacks, &file_templates, &local.templates),
+        &file_templates,
+        &local.templates,
+    );
     Ok(CatalogPreview {
         sizes,
         images,
         templates,
+        stacks,
     })
 }
 
@@ -456,6 +489,7 @@ pub(super) struct CatalogDecided {
     sizes: Vec<(RowPlan<String>, ItemAction)>,
     images: Vec<(RowPlan<Uuid>, ItemAction)>,
     templates: Vec<(RowPlan<Uuid>, ItemAction)>,
+    stacks: Vec<(RowPlan<Uuid>, ItemAction)>,
 }
 
 /// Checks the user's choice for every catalogue item before anything changes.
@@ -470,6 +504,11 @@ pub(super) fn decide(file: &CatalogEntries, local: &LocalCatalog, choices: &Cata
         templates: with_actions(plan_templates(file, local), &choices.templates, |i| {
             file.templates[i].spec.name.clone()
         })?,
+        stacks: with_actions(
+            super::stacks::plan(&file.stacks, &local.stacks, &file.template_names(), &local.templates),
+            &choices.stacks,
+            |i| file.stacks[i].name().to_owned(),
+        )?,
     })
 }
 
@@ -605,7 +644,9 @@ pub(super) async fn commit(
         }
     }
 
-    // Templates, pointing at what their image, size and key became here.
+    // Templates, pointing at what their image, size and key became here. VM-08: the file's id -> the template here,
+    // for the stacks.
+    let mut template_map: HashMap<Uuid, Uuid> = HashMap::new();
     for (row, action) in decided.templates {
         let e = &file.templates[row.index];
         let mut spec = e.spec.clone();
@@ -616,6 +657,9 @@ pub(super) async fn commit(
         spec.ssh_key_id = spec.ssh_key_id.map(|k| secrets.get(&k).copied().unwrap_or(k));
         let result = match action {
             ItemAction::Skip => {
+                if let Some(here) = row.local {
+                    template_map.insert(e.id, here);
+                }
                 report.templates.count(action);
                 continue;
             }
@@ -633,12 +677,27 @@ pub(super) async fn commit(
             ItemAction::Import => catalog.import_template(ctx, None, spec).await,
         };
         match result {
-            Ok(_) => report.templates.count(action),
+            Ok(saved) => {
+                template_map.insert(e.id, saved.id);
+                report.templates.count(action);
+            }
             Err(err) => problems.push(ItemProblem {
                 name: format!("launch template '{}'", e.spec.name),
                 reason: err.to_string(),
             }),
         }
     }
+
+    // VM-08: stacks, each step pointing at what its template became here.
+    report.stacks = super::stacks::commit(
+        store,
+        ctx,
+        &file.stacks,
+        decided.stacks,
+        &file.template_names(),
+        &template_map,
+        problems,
+    )
+    .await?;
     Ok(report)
 }
