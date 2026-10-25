@@ -26,10 +26,10 @@ use super::{seed, virtualbox as vb, vmx, workstation as ws, DeployActions};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::vmx_file::VmxFile;
 use crate::catalog::images::ImageFormat;
-use crate::convert::formats::{DiskFormat, OutputKind};
 use crate::catalog::sizes::{DiskController, Provisioning};
 use crate::catalog::templates::Network;
 use crate::command_bus::{PowerOp, SnapshotOp};
+use crate::convert::formats::{DiskFormat, OutputKind};
 use crate::domain::{Context, Environment};
 use crate::error::{CoreError, Result};
 use crate::inventory::Inventory;
@@ -399,7 +399,10 @@ impl Deployer {
             let path = folder.join(&file_name);
             match images.get(i) {
                 Some((image, format)) if !crate::convert::import::copied_by_deploy(Hypervisor::Vmware, *format) => {
-                    let kind = crate::convert::import::native_kind(Hypervisor::Vmware, disk.provisioning == Provisioning::Thin);
+                    let kind = crate::convert::import::native_kind(
+                        Hypervisor::Vmware,
+                        disk.provisioning == Provisioning::Thin,
+                    );
                     self.convert_disk(image, *format, &path, kind).await?;
                 }
                 Some((image, format)) => {

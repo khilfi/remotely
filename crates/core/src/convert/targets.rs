@@ -74,7 +74,7 @@ impl ExportedVm {
         let vcpus = hardware.vcpus.unwrap_or(1).max(1);
         let cores = hardware
             .cores_per_socket
-            .filter(|c| *c > 0 && vcpus % c == 0)
+            .filter(|c| *c > 0 && vcpus.is_multiple_of(*c))
             .unwrap_or(vcpus);
         Self {
             name: name.to_owned(),
@@ -101,7 +101,11 @@ impl ExportedVm {
 pub fn slug(name: &str) -> String {
     let mut out = String::new();
     for c in name.chars() {
-        let c = if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' };
+        let c = if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            '-'
+        };
         if c == '-' && (out.is_empty() || out.ends_with('-')) {
             continue;
         }
@@ -140,7 +144,9 @@ fn xml(text: &str) -> String {
 pub fn libvirt_xml(vm: &ExportedVm, disks: &[ExportedDisk]) -> String {
     let windows = vm.family == Family::Windows;
     let mut out = String::new();
-    out.push_str("<!-- Made by Remotely. Copy the disks to /var/lib/libvirt/images, then: virsh define this file -->\n");
+    out.push_str(
+        "<!-- Made by Remotely. Copy the disks to /var/lib/libvirt/images, then: virsh define this file -->\n",
+    );
     out.push_str("<domain type='kvm'>\n");
     out.push_str(&format!("  <name>{}</name>\n", xml(&slug(&vm.name))));
     out.push_str(&format!("  <memory unit='MiB'>{}</memory>\n", vm.memory_mb));
@@ -191,7 +197,9 @@ pub fn libvirt_xml(vm: &ExportedVm, disks: &[ExportedDisk]) -> String {
         if windows { "vga" } else { "virtio" }
     ));
     out.push_str("    <console type='pty'/>\n");
-    out.push_str("    <channel type='unix'>\n      <target type='virtio' name='org.qemu.guest_agent.0'/>\n    </channel>\n");
+    out.push_str(
+        "    <channel type='unix'>\n      <target type='virtio' name='org.qemu.guest_agent.0'/>\n    </channel>\n",
+    );
     out.push_str("  </devices>\n</domain>\n");
     out
 }
@@ -224,7 +232,9 @@ pub fn proxmox_script(vm: &ExportedVm, disks: &[ExportedDisk]) -> String {
         "# Made by Remotely: makes the VM {name} on Proxmox VE from the disks in this folder.\n"
     ));
     out.push_str("# Run it on the Proxmox host, in this folder: sh import-to-proxmox.sh [VMID] [STORAGE]\n");
-    out.push_str("# VMID: the new VM's ID (the next free one by default); STORAGE: where its disks go (local-lvm by default).\n");
+    out.push_str(
+        "# VMID: the new VM's ID (the next free one by default); STORAGE: where its disks go (local-lvm by default).\n",
+    );
     out.push_str("set -eu\ncd \"$(dirname \"$0\")\"\n");
     out.push_str("VMID=\"${1:-$(pvesh get /cluster/nextid)}\"\nSTORAGE=\"${2:-local-lvm}\"\n\n");
     let bios = if vm.efi { "ovmf" } else { "seabios" };
@@ -244,7 +254,10 @@ pub fn proxmox_script(vm: &ExportedVm, disks: &[ExportedDisk]) -> String {
     }
     let bus = if windows { "sata" } else { "scsi" };
     for (i, disk) in disks.iter().enumerate() {
-        out.push_str(&format!("\nqm importdisk \"$VMID\" '{}' \"$STORAGE\"\n", disk.file.replace('\'', "")));
+        out.push_str(&format!(
+            "\nqm importdisk \"$VMID\" '{}' \"$STORAGE\"\n",
+            disk.file.replace('\'', "")
+        ));
         out.push_str(&format!(
             "DISK=\"$(qm config \"$VMID\" | sed -n 's/^unused[0-9]*: //p' | head -n 1)\"\nqm set \"$VMID\" --{bus}{i} \"$DISK\"\n"
         ));
@@ -511,7 +524,10 @@ mod tests {
     fn the_proxmox_script_imports_and_attaches_each_disk() {
         let text = proxmox_script(&linux(), &disks(OutputKind::Qcow2));
         assert!(text.starts_with("#!/bin/sh\n"));
-        assert!(text.contains("qm create \"$VMID\" --name web-01-prod --memory 4096 --sockets 2 --cores 2"), "{text}");
+        assert!(
+            text.contains("qm create \"$VMID\" --name web-01-prod --memory 4096 --sockets 2 --cores 2"),
+            "{text}"
+        );
         assert!(text.contains("--ostype l26") && text.contains("--bios ovmf"));
         assert!(text.contains("--efidisk0 \"$STORAGE:1,efitype=4m,pre-enrolled-keys=0\""));
         assert!(text.contains("qm importdisk \"$VMID\" 'web-01-prod-disk1.qcow2' \"$STORAGE\""));
@@ -534,10 +550,22 @@ mod tests {
         assert!(text.contains("--blob-type PageBlob") && text.contains("V2"));
         assert!(text.contains("waagent") && text.contains("Uninstall the VMware Tools"));
         let w = windows();
-        let text = readme(ExportTarget::Kvm, &w, &disks(OutputKind::Qcow2), &["dc01.xml".into()], "2026-10-25");
+        let text = readme(
+            ExportTarget::Kvm,
+            &w,
+            &disks(OutputKind::Qcow2),
+            &["dc01.xml".into()],
+            "2026-10-25",
+        );
         assert!(text.contains("virtio-win") && text.contains("INACCESSIBLE_BOOT_DEVICE"));
         assert!(text.contains("VirtualBox Guest Additions") && text.contains("`dc01.xml`"));
-        let text = readme(ExportTarget::HyperV, &w, &disks(OutputKind::VhdxDynamic), &[], "2026-10-25");
+        let text = readme(
+            ExportTarget::HyperV,
+            &w,
+            &disks(OutputKind::VhdxDynamic),
+            &[],
+            "2026-10-25",
+        );
         assert!(text.contains("Generation 1") && text.contains("MBR with BIOS"));
         for target in [
             ExportTarget::Esxi { thick: false },

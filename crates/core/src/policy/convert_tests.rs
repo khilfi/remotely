@@ -89,7 +89,13 @@ fn an_export_is_low_and_a_prod_vms_is_medium() {
     let d = engine().evaluate(&command, &targets);
     assert_eq!(d.tier, Tier::Medium);
     assert_eq!(d.steps, [ApprovalStep::Confirm]);
-    assert!(d.reasons.iter().any(|r| r == "a target is labelled Prod: low -> medium"), "{:?}", d.reasons);
+    assert!(
+        d.reasons
+            .iter()
+            .any(|r| r == "a target is labelled Prod: low -> medium"),
+        "{:?}",
+        d.reasons
+    );
     // The source is only read, so no safety snapshot.
     assert!(!safety_snapshot_applies(&command));
 }
@@ -106,7 +112,10 @@ fn a_protected_vm_is_not_exported() {
 fn conversions_and_exports_are_refused_from_the_ui_and_while_presenting() {
     for (command, _) in [convert(), export(Environment::Lab, false)] {
         let err = command.check_from_ui().unwrap_err().to_string();
-        assert!(err.contains("asks for the folder") || err.contains("where the new image goes"), "{err}");
+        assert!(
+            err.contains("asks for the folder") || err.contains("where the new image goes"),
+            "{err}"
+        );
         command.validate().unwrap();
         assert!(engine().check_read_only(true, &command).is_err());
         // A retry runs it again, on the same one target.

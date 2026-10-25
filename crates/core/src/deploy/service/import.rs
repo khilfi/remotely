@@ -180,7 +180,11 @@ impl Deploys {
         };
         let found = analysis.found_disks();
         let source_disks: Vec<u32> = if analysis.kind == ImportKind::Appliance {
-            analysis.disks.iter().map(|d| gb(d.virtual_bytes.unwrap_or(16 * GIB))).collect()
+            analysis
+                .disks
+                .iter()
+                .map(|d| gb(d.virtual_bytes.unwrap_or(16 * GIB)))
+                .collect()
         } else {
             found.iter().map(|(_, _, bytes)| gb(*bytes)).collect()
         };
@@ -194,7 +198,11 @@ impl Deploys {
                         let from_source = source_disks.get(i).copied().unwrap_or(0);
                         let mut plan = disk(from_size.max(from_source).max(1));
                         if let Some(d) = size.disks.get(i) {
-                            plan.provisioning = if request.thick { Provisioning::Thick } else { d.provisioning };
+                            plan.provisioning = if request.thick {
+                                Provisioning::Thick
+                            } else {
+                                d.provisioning
+                            };
                             if let Some(c) = d.controller {
                                 plan.controller = c;
                                 plan.controller_model = templates::controller_model(hv, c, &os).to_owned();
@@ -212,16 +220,23 @@ impl Deploys {
                     }
                 }
                 Err(_) => {
-                    problems.push(coded(ProblemCode::SizeGone, format!("The size '{id}' isn't in the catalogue.")));
+                    problems.push(coded(
+                        ProblemCode::SizeGone,
+                        format!("The size '{id}' isn't in the catalogue."),
+                    ));
                     return Ok(Err(problems));
                 }
             },
             None => {
-                let vcpus = request.vcpus.or(analysis.described.vcpus).unwrap_or(2).clamp(1, MAX_VCPUS);
+                let vcpus = request
+                    .vcpus
+                    .or(analysis.described.vcpus)
+                    .unwrap_or(2)
+                    .clamp(1, MAX_VCPUS);
                 let cores = request
                     .cores_per_socket
                     .or(analysis.described.cores_per_socket)
-                    .filter(|c| *c > 0 && vcpus % c == 0)
+                    .filter(|c| *c > 0 && vcpus.is_multiple_of(*c))
                     .unwrap_or(vcpus);
                 let memory_mb = request
                     .memory_mb
@@ -290,7 +305,10 @@ impl Deploys {
             }
             None => self.default_folder(hv).await?,
         };
-        let host_adapter = match self.host_adapter_for(hv, &request.network, request.host_adapter.as_deref()).await {
+        let host_adapter = match self
+            .host_adapter_for(hv, &request.network, request.host_adapter.as_deref())
+            .await
+        {
             Ok(adapter) => adapter,
             Err(problem) => return Ok(Err(vec![problem])),
         };
@@ -373,10 +391,13 @@ impl Deploys {
                     .is_none_or(|d| d.provisioning == Provisioning::Thin);
                 let kind = crate::convert::import::native_kind(spec.hypervisor, thin);
                 let how = if copied_by_deploy(spec.hypervisor, disk.format) {
-                    format!("copied by {}", match spec.hypervisor {
-                        Hypervisor::Vmware => "vmware-vdiskmanager",
-                        Hypervisor::VirtualBox => "VBoxManage",
-                    })
+                    format!(
+                        "copied by {}",
+                        match spec.hypervisor {
+                            Hypervisor::Vmware => "vmware-vdiskmanager",
+                            Hypervisor::VirtualBox => "VBoxManage",
+                        }
+                    )
                 } else {
                     match crate::convert::plan::plan(
                         crate::convert::plan::Source::file(disk.format),

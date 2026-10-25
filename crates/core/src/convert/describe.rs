@@ -242,7 +242,11 @@ fn ovf_unit(units: Option<&str>) -> Option<u64> {
     let Some(units) = units else {
         return Some(1);
     };
-    let squeezed: String = units.chars().filter(|c| !c.is_whitespace()).collect::<String>().to_ascii_lowercase();
+    let squeezed: String = units
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
     match squeezed.as_str() {
         "byte" | "bytes" => Some(1),
         "kilobytes" => Some(1 << 10),
@@ -282,9 +286,7 @@ pub fn parse_ovf(text: &str) -> Option<Described> {
         match kind {
             "3" => {
                 out.vcpus = quantity.and_then(|q| u32::try_from(q).ok());
-                out.cores_per_socket = item
-                    .child("CoresPerSocket")
-                    .and_then(|c| c.text().parse().ok());
+                out.cores_per_socket = item.child("CoresPerSocket").and_then(|c| c.text().parse().ok());
             }
             "4" => {
                 let unit = ovf_unit(item.child("AllocationUnits").map(Element::text));
@@ -384,7 +386,10 @@ pub fn parse_libvirt(text: &str) -> Option<Described> {
         return None;
     }
     let mut out = Described {
-        name: root.child("name").map(|n| n.text().to_owned()).filter(|n| !n.is_empty()),
+        name: root
+            .child("name")
+            .map(|n| n.text().to_owned())
+            .filter(|n| !n.is_empty()),
         memory_mb: root.child("memory").and_then(libvirt_mb),
         vcpus: root.child("vcpu").and_then(|v| v.text().parse().ok()),
         ..Described::default()
@@ -428,7 +433,10 @@ pub fn parse_libvirt(text: &str) -> Option<Described> {
 /// Proxmox's `size=32G` in bytes.
 fn proxmox_size(text: &str) -> Option<u64> {
     let text = text.trim();
-    let (number, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len()));
+    let (number, unit) = text.split_at(
+        text.find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(text.len()),
+    );
     let value: f64 = number.parse().ok()?;
     let factor = match unit.to_ascii_uppercase().as_str() {
         "" => 1.0,
@@ -480,7 +488,10 @@ pub fn parse_proxmox(text: &str) -> Option<Described> {
                     let parts: Vec<&str> = value.split(',').map(str::trim).collect();
                     let volume = parts.first().copied().unwrap_or("");
                     let file = file_name_of(volume.rsplit(':').next().unwrap_or(volume));
-                    let size = parts.iter().find_map(|p| p.strip_prefix("size=")).and_then(proxmox_size);
+                    let size = parts
+                        .iter()
+                        .find_map(|p| p.strip_prefix("size="))
+                        .and_then(proxmox_size);
                     let format = parts.iter().find_map(|p| p.strip_prefix("format=")).map(str::to_owned);
                     if !file.is_empty() && file != "none" {
                         out.disks.push(DescribedDisk {
@@ -531,7 +542,14 @@ mod tests {
 
     #[test]
     fn an_ovf_says_cpu_memory_disks_firmware_and_os() {
-        let text = img::ovf("web01", 4, 8192, true, "ubuntu64Guest", &[("web01-disk1.vmdk", 40 << 30), ("data.vmdk", 1 << 30)]);
+        let text = img::ovf(
+            "web01",
+            4,
+            8192,
+            true,
+            "ubuntu64Guest",
+            &[("web01-disk1.vmdk", 40 << 30), ("data.vmdk", 1 << 30)],
+        );
         let d = parse_ovf(&text).unwrap();
         assert_eq!(d.name.as_deref(), Some("web01"));
         assert_eq!((d.vcpus, d.memory_mb, d.efi), (Some(4), Some(8192), Some(true)));
@@ -542,7 +560,10 @@ mod tests {
         assert_eq!(d.disks[0].format.as_deref(), Some("vmdk"));
         let bios = parse_ovf(&img::ovf("w", 2, 4096, false, "windows2019srv_64Guest", &[])).unwrap();
         assert_eq!(bios.family, Some(GuestFamily::Windows));
-        assert_eq!(bios.efi, None, "BIOS is what an OVF without a firmware setting means: the import decides");
+        assert_eq!(
+            bios.efi, None,
+            "BIOS is what an OVF without a firmware setting means: the import decides"
+        );
         assert!(parse_ovf("<domain/>").is_none());
     }
 
@@ -564,11 +585,17 @@ mod tests {
 </domain>"#;
         let d = parse_libvirt(text).unwrap();
         assert_eq!(d.name.as_deref(), Some("db01"));
-        assert_eq!((d.vcpus, d.cores_per_socket, d.memory_mb), (Some(4), Some(4), Some(4096)));
+        assert_eq!(
+            (d.vcpus, d.cores_per_socket, d.memory_mb),
+            (Some(4), Some(4), Some(4096))
+        );
         assert_eq!(d.efi, Some(true));
         assert_eq!(d.family, Some(GuestFamily::Linux));
         assert_eq!(
-            d.disks.iter().map(|d| (d.file.as_str(), d.format.as_deref())).collect::<Vec<_>>(),
+            d.disks
+                .iter()
+                .map(|d| (d.file.as_str(), d.format.as_deref()))
+                .collect::<Vec<_>>(),
             [("db01.qcow2", Some("qcow2")), ("db01-data.img", Some("raw"))]
         );
         let bios = parse_libvirt("<domain><name>x</name><memory unit='MiB'>512</memory><os><loader>/usr/share/OVMF/OVMF_CODE.fd</loader></os></domain>").unwrap();
@@ -581,14 +608,26 @@ mod tests {
         let text = "boot: order=scsi0;net0\ncores: 2\nsockets: 2\nmemory: 4096\nname: web01\nbios: ovmf\nostype: l26\nefidisk0: local-lvm:vm-100-disk-1,efitype=4m,size=4M\nide2: local:iso/ubuntu.iso,media=cdrom,size=2G\nscsi0: local-lvm:vm-100-disk-0,iothread=1,size=32G\nscsi1: nas:100/vm-100-disk-2.qcow2,size=500G\nnet0: virtio=BC:24:11:00:00:01,bridge=vmbr0\n\n[before-upgrade]\ncores: 8\nscsi2: local-lvm:vm-100-disk-9,size=1G\n";
         let d = parse_proxmox(text).unwrap();
         assert_eq!(d.name.as_deref(), Some("web01"));
-        assert_eq!((d.vcpus, d.cores_per_socket, d.memory_mb, d.efi), (Some(4), Some(2), Some(4096), Some(true)));
+        assert_eq!(
+            (d.vcpus, d.cores_per_socket, d.memory_mb, d.efi),
+            (Some(4), Some(2), Some(4096), Some(true))
+        );
         assert_eq!(d.family, Some(GuestFamily::Linux));
         assert_eq!(
-            d.disks.iter().map(|d| (d.file.as_str(), d.capacity_bytes)).collect::<Vec<_>>(),
-            [("vm-100-disk-0", Some(32 << 30)), ("vm-100-disk-2.qcow2", Some(500 << 30))]
+            d.disks
+                .iter()
+                .map(|d| (d.file.as_str(), d.capacity_bytes))
+                .collect::<Vec<_>>(),
+            [
+                ("vm-100-disk-0", Some(32 << 30)),
+                ("vm-100-disk-2.qcow2", Some(500 << 30))
+            ]
         );
         let windows = parse_proxmox("ostype: win11\nmemory: 8192\n").unwrap();
-        assert_eq!((windows.family, windows.vcpus, windows.efi), (Some(GuestFamily::Windows), Some(1), Some(false)));
+        assert_eq!(
+            (windows.family, windows.vcpus, windows.efi),
+            (Some(GuestFamily::Windows), Some(1), Some(false))
+        );
         assert!(parse_proxmox("").is_none());
     }
 }

@@ -215,7 +215,11 @@ impl Conversions {
     fn option(info: &ImageInfo, kind: OutputKind, tools: &ToolPaths) -> OutputOption {
         let source = source_of(info, false);
         let (steps, reason, needs_qemu_img) = if let Some(problem) = info.problems.first() {
-            (Vec::new(), Some(format!("The source can't be converted: {problem}.")), false)
+            (
+                Vec::new(),
+                Some(format!("The source can't be converted: {problem}.")),
+                false,
+            )
         } else {
             match plan::plan(source, kind, None, tools) {
                 Ok(steps) => (steps, None, false),
@@ -325,11 +329,19 @@ impl Conversions {
             .find_vm(ctx, vm_key)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(vm_key.to_owned()))?;
-        let refusal = self.converter.require_off(&vm.vmx_path).await.err().map(|e| e.to_string());
+        let refusal = self
+            .converter
+            .require_off(&vm.vmx_path)
+            .await
+            .err()
+            .map(|e| e.to_string());
         let tools = self.converter.tool_paths();
         let mut targets = Vec::new();
         for target in all_targets() {
-            targets.push(self.export_option(&vm.vmx_path, &vm.display_name, vm.hypervisor, target, &tools).await);
+            targets.push(
+                self.export_option(&vm.vmx_path, &vm.display_name, vm.hypervisor, target, &tools)
+                    .await,
+            );
         }
         Ok(ExportOptions {
             vm_key: vm.vmx_path,
@@ -340,7 +352,14 @@ impl Conversions {
         })
     }
 
-    fn spec_for(vm_key: &str, vm_name: &str, hypervisor: Hypervisor, target: ExportTarget, tools: &ToolPaths, folder: &str) -> ExportSpec {
+    fn spec_for(
+        vm_key: &str,
+        vm_name: &str,
+        hypervisor: Hypervisor,
+        target: ExportTarget,
+        tools: &ToolPaths,
+        folder: &str,
+    ) -> ExportSpec {
         ExportSpec {
             vm_key: vm_key.to_owned(),
             vm_name: vm_name.to_owned(),
@@ -501,9 +520,15 @@ impl Conversions {
 
 /// The default name for a conversion's output: the source's name with the output's extension, beside it.
 pub fn default_output(source: &Path, kind: OutputKind) -> PathBuf {
-    let stem = source.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "disk".into());
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "disk".into());
     let mut name = format!("{stem}.{}", kind.extension());
-    if source.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name)) {
+    if source
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&name))
+    {
         name = format!("{stem}-converted.{}", kind.extension());
     }
     source.with_file_name(name)

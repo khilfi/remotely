@@ -89,7 +89,11 @@ impl ImportAnalysis {
             .iter()
             .filter_map(|d| {
                 let info = d.info.as_ref()?;
-                Some((PathBuf::from(d.path.as_ref()?), info.format, info.virtual_bytes.unwrap_or(0)))
+                Some((
+                    PathBuf::from(d.path.as_ref()?),
+                    info.format,
+                    info.virtual_bytes.unwrap_or(0),
+                ))
             })
             .collect()
     }
@@ -139,16 +143,18 @@ fn disk_refusal(hypervisor: Hypervisor, info: &ImageInfo, tools: &ToolPaths) -> 
 pub fn profile_for(family: Option<GuestFamily>, os: Option<&str>) -> Option<&'static str> {
     let os = os.unwrap_or("").to_ascii_lowercase();
     match family? {
-        GuestFamily::Windows => Some(if ["2012", "2016", "2019", "2022", "2025", "srv", "server"]
-            .iter()
-            .any(|w| os.contains(w))
-        {
-            "windows-server"
-        } else if os.contains("11") {
-            "windows-11"
-        } else {
-            "windows-10"
-        }),
+        GuestFamily::Windows => Some(
+            if ["2012", "2016", "2019", "2022", "2025", "srv", "server"]
+                .iter()
+                .any(|w| os.contains(w))
+            {
+                "windows-server"
+            } else if os.contains("11") {
+                "windows-11"
+            } else {
+                "windows-10"
+            },
+        ),
         GuestFamily::Linux => Some(if os.contains("ubuntu") {
             "ubuntu"
         } else if os.contains("debian") {
@@ -168,9 +174,20 @@ pub fn profile_for(family: Option<GuestFamily>, os: Option<&str>) -> Option<&'st
 pub fn vm_name(text: &str) -> String {
     let cleaned: String = text
         .chars()
-        .map(|c| if c.is_alphanumeric() || " -_.".contains(c) { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || " -_.".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
-    let trimmed = cleaned.trim().trim_matches(['.', '-']).chars().take(60).collect::<String>();
+    let trimmed = cleaned
+        .trim()
+        .trim_matches(['.', '-'])
+        .chars()
+        .take(60)
+        .collect::<String>();
     if trimmed.is_empty() {
         "imported".into()
     } else {
@@ -224,7 +241,10 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
         .unwrap_or_default();
     let folder = path.parent().map(Path::to_path_buf).unwrap_or_default();
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let mut out = ImportAnalysis {
         path: path.display().to_string(),
         kind: ImportKind::Disk,
@@ -242,27 +262,34 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
     let read_text = |p: &Path| {
         let p = p.to_path_buf();
         async move {
-            let bytes = untrusted::read_capped(&p, MAX_DESCRIPTION_BYTES).await.map_err(|err| match err {
-                untrusted::ReadError::TooLarge { .. } => CoreError::InvalidInput(format!(
-                    "{} is larger than a VM's description is ({} at most), so Remotely didn't read it.",
-                    p.display(),
-                    untrusted::size_words(MAX_DESCRIPTION_BYTES)
-                )),
-                untrusted::ReadError::Io(err) => CoreError::Io(err),
-            })?;
+            let bytes = untrusted::read_capped(&p, MAX_DESCRIPTION_BYTES)
+                .await
+                .map_err(|err| match err {
+                    untrusted::ReadError::TooLarge { .. } => CoreError::InvalidInput(format!(
+                        "{} is larger than a VM's description is ({} at most), so Remotely didn't read it.",
+                        p.display(),
+                        untrusted::size_words(MAX_DESCRIPTION_BYTES)
+                    )),
+                    untrusted::ReadError::Io(err) => CoreError::Io(err),
+                })?;
             Ok::<_, CoreError>(String::from_utf8_lossy(&bytes).into_owned())
         }
     };
     match ext.as_str() {
         "ova" | "ovf" => {
-            let format = if ext == "ova" { ImageFormat::Ova } else { ImageFormat::Ovf };
+            let format = if ext == "ova" {
+                ImageFormat::Ova
+            } else {
+                ImageFormat::Ovf
+            };
             out.kind = ImportKind::Appliance;
             out.appliance = Some(format);
             let descriptor = crate::deploy::ovf::appliance_descriptor(&out.path, format).await?;
             match descriptor.as_deref().and_then(describe::parse_ovf) {
                 Some(described) => out.described = described,
                 None => out.notes.push(
-                    "Its OVF descriptor couldn't be read, so its CPU, memory and disks come from the size you pick.".into(),
+                    "Its OVF descriptor couldn't be read, so its CPU, memory and disks come from the size you pick."
+                        .into(),
                 ),
             }
             for disk in &out.described.disks {
@@ -293,7 +320,11 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
                 return Err(CoreError::InvalidInput(format!(
                     "{} isn't a {} Remotely can read.",
                     path.display(),
-                    if ext == "xml" { "libvirt domain XML" } else { "Proxmox VM .conf" }
+                    if ext == "xml" {
+                        "libvirt domain XML"
+                    } else {
+                        "Proxmox VM .conf"
+                    }
                 )));
             };
             out.described = described;
@@ -321,7 +352,9 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
                     Some(found) => match inspect(&found).await {
                         Ok(info) => {
                             let said = disk.format.as_deref().and_then(described_format);
-                            if said.is_some_and(|f| f != info.format) && !(said == Some(DiskFormat::Raw) && kind == ImportKind::Proxmox) {
+                            if said.is_some_and(|f| f != info.format)
+                                && !(said == Some(DiskFormat::Raw) && kind == ImportKind::Proxmox)
+                            {
                                 view.problem = Some(format!(
                                     "{} is a {}, not the {} the description says",
                                     found.display(),
@@ -344,7 +377,10 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
         _ => {
             let info = inspect(path).await?;
             out.disks.push(ImportDiskView {
-                name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                name: path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
                 path: Some(out.path.clone()),
                 virtual_bytes: info.virtual_bytes,
                 problem: info.problems.first().cloned(),
@@ -366,7 +402,8 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
         }
     }
     if out.disks.len() > MAX_IMPORT_DISKS {
-        out.problems.push(format!("An import takes at most {MAX_IMPORT_DISKS} disks."));
+        out.problems
+            .push(format!("An import takes at most {MAX_IMPORT_DISKS} disks."));
     }
     if out.kind != ImportKind::Appliance {
         let mut ws = None;
@@ -427,7 +464,12 @@ mod tests {
             vboxmanage: None,
             ..ToolPaths::all()
         };
-        assert!(analyze(&vhd, &ws_only).await.unwrap().refusal(Hypervisor::Vmware).unwrap().contains("qemu-img"));
+        assert!(analyze(&vhd, &ws_only)
+            .await
+            .unwrap()
+            .refusal(Hypervisor::Vmware)
+            .unwrap()
+            .contains("qemu-img"));
     }
 
     #[tokio::test]
@@ -443,7 +485,11 @@ mod tests {
         assert_eq!(a.described.efi, Some(true));
         assert_eq!(a.disks.len(), 2);
         assert!(a.disks[0].path.as_deref().unwrap().ends_with("db01.qcow2"));
-        assert!(a.problems[0].contains("db01-data.img isn't in this folder"), "{:?}", a.problems);
+        assert!(
+            a.problems[0].contains("db01-data.img isn't in this folder"),
+            "{:?}",
+            a.problems
+        );
         // Once it is there (raw), the import can go on.
         dir.write("db01-data.img", &img::raw_mbr(1 << 20));
         let a = analyze(&path, &ToolPaths::all()).await.unwrap();
@@ -482,7 +528,14 @@ mod tests {
     #[tokio::test]
     async fn an_ova_says_its_vm_and_large_descriptions_are_refused() {
         let dir = TempFolder::new("import-ova");
-        let ovf = img::ovf("app01", 2, 4096, false, "debian11_64Guest", &[("app01-disk1.vmdk", 64 << 20)]);
+        let ovf = img::ovf(
+            "app01",
+            2,
+            4096,
+            false,
+            "debian11_64Guest",
+            &[("app01-disk1.vmdk", 64 << 20)],
+        );
         let disk = img::vmdk_sparse("app01-disk1.vmdk", 64 << 20, true);
         let path = dir.write(
             "app01.ova",
@@ -498,7 +551,11 @@ mod tests {
             ovftool: None,
             ..ToolPaths::all()
         };
-        assert!(analyze(&path, &no_ovftool).await.unwrap().refusal(Hypervisor::Vmware).is_some());
+        assert!(analyze(&path, &no_ovftool)
+            .await
+            .unwrap()
+            .refusal(Hypervisor::Vmware)
+            .is_some());
         let big = dir.write("big.xml", &vec![b' '; (MAX_DESCRIPTION_BYTES + 1) as usize]);
         let err = analyze(&big, &ToolPaths::all()).await.unwrap_err().to_string();
         assert!(err.contains("larger than a VM's description"), "{err}");

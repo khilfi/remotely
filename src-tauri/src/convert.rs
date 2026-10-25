@@ -62,7 +62,9 @@ pub async fn convert_pick(window: WebviewWindow, purpose: PickFor) -> IpcResult<
         PickFor::Import => (
             "Choose a VM or disk to import",
             "Appliances, disks and VM descriptions",
-            &["ova", "ovf", "vmdk", "vdi", "vhd", "vhdx", "qcow2", "raw", "img", "xml", "conf"],
+            &[
+                "ova", "ovf", "vmdk", "vdi", "vhd", "vhdx", "qcow2", "raw", "img", "xml", "conf",
+            ],
         ),
     };
     let (tx, rx) = tokio::sync::oneshot::channel();

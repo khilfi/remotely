@@ -105,7 +105,11 @@ impl DeploySource {
                     .iter()
                     .map(|d| format!("{} ({})", d.path, d.format.label()))
                     .collect();
-                let mut text = format!("the imported disk{} {}", if disks.len() == 1 { "" } else { "s" }, files.join(", "));
+                let mut text = format!(
+                    "the imported disk{} {}",
+                    if disks.len() == 1 { "" } else { "s" },
+                    files.join(", ")
+                );
                 if let Some(description) = description {
                     text.push_str(&format!(", described by {description}"));
                 }

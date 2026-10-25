@@ -203,7 +203,10 @@ impl OutputKind {
 
 /// `<name>-flat.vmdk` beside `<name>.vmdk`: the extent vdiskmanager, VBoxManage and qemu-img write for a flat VMDK.
 pub fn flat_extent(path: &Path) -> PathBuf {
-    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     path.with_file_name(format!("{stem}-flat.vmdk"))
 }
 
@@ -242,7 +245,10 @@ mod tests {
         assert!(OutputKind::VmdkStream.thin());
         assert_eq!(
             OutputKind::VmdkEsx.files(Path::new(r"C:\Out\web.vmdk")),
-            [PathBuf::from(r"C:\Out\web.vmdk"), PathBuf::from(r"C:\Out\web-flat.vmdk")]
+            [
+                PathBuf::from(r"C:\Out\web.vmdk"),
+                PathBuf::from(r"C:\Out\web-flat.vmdk")
+            ]
         );
         assert_eq!(OutputKind::Qcow2.files(Path::new("a.qcow2")).len(), 1);
         assert_eq!(DiskFormat::Vhd.qemu_name(), "vpc");

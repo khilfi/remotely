@@ -218,7 +218,9 @@ impl FakeDiskTools {
                 })
             }
             Some("resize") => {
-                let format = arg_after(args, "-f").and_then(qemu_format).ok_or_else(|| failed(tool, "-f"))?;
+                let format = arg_after(args, "-f")
+                    .and_then(qemu_format)
+                    .ok_or_else(|| failed(tool, "-f"))?;
                 let path = PathBuf::from(&args[args.len() - 2]);
                 let bytes: u64 = args[args.len() - 1].parse().map_err(|_| failed(tool, "Invalid size"))?;
                 write_output(&path, OutputKind::of(format, true), bytes)?;
@@ -338,7 +340,14 @@ impl FakeDiskTools {
             }
             Some("export") => {
                 let target = PathBuf::from(arg_after(args, "--output").unwrap_or_default());
-                let ovf = img::ovf("exported", 2, 2048, false, "ubuntu64Guest", &[("disk001.vmdk", 64 << 20)]);
+                let ovf = img::ovf(
+                    "exported",
+                    2,
+                    2048,
+                    false,
+                    "ubuntu64Guest",
+                    &[("disk001.vmdk", 64 << 20)],
+                );
                 write_appliance(&target, &ovf)?;
                 ok("0%...100%\r\nSuccessfully exported 1 machine(s).\r\n")
             }
@@ -350,9 +359,19 @@ impl FakeDiskTools {
         let target = PathBuf::from(args.last().cloned().unwrap_or_default());
         let source = PathBuf::from(&args[args.len().saturating_sub(2)]);
         if !source.exists() {
-            return Err(failed(Tool::Ovftool, &format!("Failed to open file: {}", source.display())));
+            return Err(failed(
+                Tool::Ovftool,
+                &format!("Failed to open file: {}", source.display()),
+            ));
         }
-        let ovf = img::ovf("exported", 2, 2048, false, "ubuntu64Guest", &[("exported-disk1.vmdk", 64 << 20)]);
+        let ovf = img::ovf(
+            "exported",
+            2,
+            2048,
+            false,
+            "ubuntu64Guest",
+            &[("exported-disk1.vmdk", 64 << 20)],
+        );
         write_appliance(&target, &ovf)?;
         Ok(ToolOutput {
             code: 0,
@@ -365,10 +384,7 @@ impl FakeDiskTools {
 fn write_appliance(target: &Path, ovf: &str) -> Result<()> {
     let disk = img::vmdk_sparse("disk1.vmdk", 64 << 20, true);
     let manifest = b"SHA256(exported.ovf)= 00\n";
-    if target
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("ova"))
-    {
+    if target.extension().is_some_and(|e| e.eq_ignore_ascii_case("ova")) {
         std::fs::write(
             target,
             img::tar(&[

@@ -94,11 +94,18 @@ async fn a_qcow2_converts_to_a_vmdk_as_a_low_job_with_progress_and_the_source_un
     // Convert's options: what each output takes, and with which tool.
     let options = core.convert.options(&source).await.unwrap();
     assert_eq!(options.info.format, DiskFormat::Qcow2);
-    let vmdk = options.outputs.iter().find(|o| o.kind == OutputKind::VmdkSparse).unwrap();
+    let vmdk = options
+        .outputs
+        .iter()
+        .find(|o| o.kind == OutputKind::VmdkSparse)
+        .unwrap();
     assert!(vmdk.reason.is_none());
     assert_eq!(vmdk.plan, "qemu-img (qcow2 to VMDK, growable (monolithicSparse))");
     let esx = options.outputs.iter().find(|o| o.kind == OutputKind::VmdkEsx).unwrap();
-    assert_eq!(esx.steps.iter().map(|s| s.tool).collect::<Vec<_>>(), [Tool::QemuImg, Tool::VdiskManager]);
+    assert_eq!(
+        esx.steps.iter().map(|s| s.tool).collect::<Vec<_>>(),
+        [Tool::QemuImg, Tool::VdiskManager]
+    );
 
     let mut events = core.jobs.subscribe();
     let output = dir.join("rocky.vmdk");
@@ -108,20 +115,34 @@ async fn a_qcow2_converts_to_a_vmdk_as_a_low_job_with_progress_and_the_source_un
             .await
             .unwrap(),
     );
-    assert_eq!(wait(&core, job).await, JobStatus::Succeeded, "{:?}", outputs(&core, job).await);
+    assert_eq!(
+        wait(&core, job).await,
+        JobStatus::Succeeded,
+        "{:?}",
+        outputs(&core, job).await
+    );
     let made = core.convert.inspect(&output).await.unwrap();
     assert_eq!(made.format, DiskFormat::Vmdk);
     assert_eq!(made.virtual_bytes, Some(64 * MB));
     assert_eq!(std::fs::read(&source).unwrap(), before, "the source is never changed");
     assert_eq!(names_in(&dir), ["rocky.qcow2", "rocky.vmdk"], "the work folder is gone");
     let calls = tools.calls();
-    assert!(calls[0].starts_with("qemu-img convert -p -f qcow2 -O vmdk -o subformat=monolithicSparse"), "{calls:?}");
+    assert!(
+        calls[0].starts_with("qemu-img convert -p -f qcow2 -O vmdk -o subformat=monolithicSparse"),
+        "{calls:?}"
+    );
     let note = outputs(&core, job).await[0].1.clone().unwrap();
     assert!(note.contains("with qemu-img (qcow2 to VMDK"), "{note}");
     // The job told how far it was.
     let mut progress = Vec::new();
     while let Ok(event) = events.try_recv() {
-        if let JobEvent::TargetProgress { job_id, percent, step, target } = event {
+        if let JobEvent::TargetProgress {
+            job_id,
+            percent,
+            step,
+            target,
+        } = event
+        {
             if job_id == job {
                 assert!(target.starts_with("disk-image/"));
                 progress.push((percent, step));
@@ -132,7 +153,12 @@ async fn a_qcow2_converts_to_a_vmdk_as_a_low_job_with_progress_and_the_source_un
     assert!(progress.iter().any(|(p, _)| *p >= 50.0), "{progress:?}");
     // The audit log names the job's start and end with what it made.
     let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
-    assert!(audit.iter().any(|e| e.action.starts_with("Convert rocky.qcow2 to rocky.vmdk")), "{audit:?}");
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.action.starts_with("Convert rocky.qcow2 to rocky.vmdk")),
+        "{audit:?}"
+    );
 
     // A second conversion to the same name is refused: nothing is ever replaced.
     let err = core
@@ -158,7 +184,13 @@ async fn without_qemu_img_qcow2_and_vhdx_say_they_need_it() {
     assert!(options.outputs.iter().all(|o| o.needs_qemu_img && o.reason.is_some()));
     let err = core
         .convert
-        .submit_convert(&core.ctx, &source, &dir.join("rocky.vdi"), OutputKind::VdiDynamic, false)
+        .submit_convert(
+            &core.ctx,
+            &source,
+            &dir.join("rocky.vdi"),
+            OutputKind::VdiDynamic,
+            false,
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), "conversion_refused");
@@ -167,9 +199,17 @@ async fn without_qemu_img_qcow2_and_vhdx_say_they_need_it() {
     let vhd = dir.join("dc01.vhd");
     std::fs::write(&vhd, img::vhd_fixed(MB)).unwrap();
     let options = core.convert.options(&vhd).await.unwrap();
-    let vdi = options.outputs.iter().find(|o| o.kind == OutputKind::VdiDynamic).unwrap();
+    let vdi = options
+        .outputs
+        .iter()
+        .find(|o| o.kind == OutputKind::VdiDynamic)
+        .unwrap();
     assert!(vdi.reason.is_none(), "{:?}", vdi.reason);
-    let vhdx = options.outputs.iter().find(|o| o.kind == OutputKind::VhdxDynamic).unwrap();
+    let vhdx = options
+        .outputs
+        .iter()
+        .find(|o| o.kind == OutputKind::VhdxDynamic)
+        .unwrap();
     assert!(vhdx.needs_qemu_img);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -190,12 +230,28 @@ async fn virtualbox_forgets_the_media_a_conversion_registered() {
             .await
             .unwrap(),
     );
-    assert_eq!(wait(&core, job).await, JobStatus::Succeeded, "{:?}", outputs(&core, job).await);
+    assert_eq!(
+        wait(&core, job).await,
+        JobStatus::Succeeded,
+        "{:?}",
+        outputs(&core, job).await
+    );
     let calls = tools.calls();
-    assert!(calls.iter().any(|c| c.starts_with("VBoxManage clonemedium disk") && c.contains("--variant Fixed")), "{calls:?}");
-    assert!(calls.iter().filter(|c| c.starts_with("VBoxManage closemedium")).count() >= 2, "{calls:?}");
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.starts_with("VBoxManage clonemedium disk") && c.contains("--variant Fixed")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().filter(|c| c.starts_with("VBoxManage closemedium")).count() >= 2,
+        "{calls:?}"
+    );
     assert_eq!(tools.registered(), [known.display().to_string()]);
-    assert_eq!(core.convert.inspect(&output).await.unwrap().subformat.as_deref(), Some("VDI (fixed)"));
+    assert_eq!(
+        core.convert.inspect(&output).await.unwrap().subformat.as_deref(),
+        Some("VDI (fixed)")
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -310,7 +366,13 @@ async fn a_vm_exports_for_kvm_with_its_xml_and_readme() {
     let ovf2 = options
         .targets
         .iter()
-        .find(|t| t.target == ExportTarget::Appliance { ova: true, version: OvfVersion::V2 })
+        .find(|t| {
+            t.target
+                == ExportTarget::Appliance {
+                    ova: true,
+                    version: OvfVersion::V2,
+                }
+        })
         .unwrap();
     assert!(ovf2.reason.as_deref().unwrap().contains("OVF 1.0 only"));
 
@@ -320,15 +382,30 @@ async fn a_vm_exports_for_kvm_with_its_xml_and_readme() {
             .await
             .unwrap(),
     );
-    assert_eq!(wait(&core, job).await, JobStatus::Succeeded, "{:?}", outputs(&core, job).await);
+    assert_eq!(
+        wait(&core, job).await,
+        JobStatus::Succeeded,
+        "{:?}",
+        outputs(&core, job).await
+    );
     let folder = out.join("web01-kvm");
     assert_eq!(names_in(&folder), ["README.md", "web01.qcow2", "web01.xml"]);
     let xml = std::fs::read_to_string(folder.join("web01.xml")).unwrap();
-    assert!(xml.contains("<name>web01</name>") && xml.contains("<os firmware='efi'>"), "{xml}");
+    assert!(
+        xml.contains("<name>web01</name>") && xml.contains("<os firmware='efi'>"),
+        "{xml}"
+    );
     let readme = std::fs::read_to_string(folder.join("README.md")).unwrap();
     assert!(readme.contains("virsh define web01.xml"), "{readme}");
     assert!(readme.contains("Uninstall the VMware Tools"), "{readme}");
-    assert!(tools.calls().iter().any(|c| c.starts_with("qemu-img convert -p -f vmdk -O qcow2")), "{:?}", tools.calls());
+    assert!(
+        tools
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("qemu-img convert -p -f vmdk -O qcow2")),
+        "{:?}",
+        tools.calls()
+    );
     // Again into the same folder: refused, the first export stays.
     let err = core
         .convert
@@ -353,11 +430,19 @@ async fn proxmox_takes_a_vmdk_without_qemu_img_and_an_ova_comes_from_ovftool() {
             .await
             .unwrap(),
     );
-    assert_eq!(wait(&core, job).await, JobStatus::Succeeded, "{:?}", outputs(&core, job).await);
+    assert_eq!(
+        wait(&core, job).await,
+        JobStatus::Succeeded,
+        "{:?}",
+        outputs(&core, job).await
+    );
     let folder = out.join("web01-proxmox");
     assert_eq!(names_in(&folder), ["README.md", "import-to-proxmox.sh", "web01.vmdk"]);
     let script = std::fs::read_to_string(folder.join("import-to-proxmox.sh")).unwrap();
-    assert!(script.contains("qm importdisk \"$VMID\" 'web01.vmdk' \"$STORAGE\""), "{script}");
+    assert!(
+        script.contains("qm importdisk \"$VMID\" 'web01.vmdk' \"$STORAGE\""),
+        "{script}"
+    );
     assert!(!script.contains('\r'), "the script runs on Linux");
     // KVM needs qemu-img: the option says so.
     let options = core.convert.export_options(&core.ctx, &vmx).await.unwrap();
@@ -369,7 +454,12 @@ async fn proxmox_takes_a_vmdk_without_qemu_img_and_an_ova_comes_from_ovftool() {
         version: OvfVersion::V1,
     };
     let job = queued(core.convert.submit_export(&core.ctx, &vmx, ova, &out).await.unwrap());
-    assert_eq!(wait(&core, job).await, JobStatus::Succeeded, "{:?}", outputs(&core, job).await);
+    assert_eq!(
+        wait(&core, job).await,
+        JobStatus::Succeeded,
+        "{:?}",
+        outputs(&core, job).await
+    );
     assert_eq!(names_in(&out.join("web01-ova")), ["README.md", "web01.ova"]);
     assert!(tools
         .calls()
@@ -397,7 +487,7 @@ async fn a_running_vm_isnt_exported_and_a_prod_vms_export_asks() {
     let (fake, vmx) = workstation_vm(&dir2, false);
     let (core, _) = export_core(fake, FakeDiskTools::new().with_qemu_img()).await;
     core.inventory
-        .set_environment(&core.ctx, &[vmx.clone()], Environment::Prod)
+        .set_environment(&core.ctx, std::slice::from_ref(&vmx), Environment::Prod)
         .await
         .unwrap();
     let outcome = core
@@ -485,11 +575,24 @@ async fn a_libvirt_vm_imports_into_workstation_as_a_deploy() {
     assert!(check.problems.is_empty(), "{:?}", check.problems);
     let preview = check.preview.unwrap();
     let size = preview.size.as_ref().unwrap();
-    assert_eq!((size.sockets * size.cores_per_socket, size.memory_mb), (3, 3072), "the XML's own CPU and memory");
+    assert_eq!(
+        (size.sockets * size.cores_per_socket, size.memory_mb),
+        (3, 3072),
+        "the XML's own CPU and memory"
+    );
     assert_eq!(size.disks[0].size_gb, 1, "the disk's own size, in whole GB");
-    assert!(preview.notes.iter().any(|n| n.contains("converted by qemu-img (qcow2 to VMDK")), "{:?}", preview.notes);
+    assert!(
+        preview
+            .notes
+            .iter()
+            .any(|n| n.contains("converted by qemu-img (qcow2 to VMDK")),
+        "{:?}",
+        preview.notes
+    );
 
-    let SubmitOutcome::NeedsApproval { request: approval } = core.deploy.submit_import(&core.ctx, &request).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request: approval } =
+        core.deploy.submit_import(&core.ctx, &request).await.unwrap()
+    else {
         panic!("an import is a deploy, Medium");
     };
     assert_eq!(approval.tier, Tier::Medium);
@@ -501,7 +604,10 @@ async fn a_libvirt_vm_imports_into_workstation_as_a_deploy() {
     assert!(text.contains("firmware = \"efi\""), "{text}");
     assert!(text.contains("numvcpus = \"3\""), "{text}");
     assert!(lab.join("db01").join("db01.vmdk").is_file(), "the converted disk");
-    assert!(tools.calls().iter().any(|c| c.starts_with("qemu-img convert -p -f qcow2 -O vmdk")));
+    assert!(tools
+        .calls()
+        .iter()
+        .any(|c| c.starts_with("qemu-img convert -p -f qcow2 -O vmdk")));
     assert!(dir.join("db01.qcow2").is_file(), "the source stays");
     std::fs::remove_dir_all(&dir).unwrap();
 }

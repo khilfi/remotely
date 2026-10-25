@@ -14,7 +14,9 @@ pub struct TempFolder {
 impl TempFolder {
     pub fn new(tag: &str) -> Self {
         let path = std::env::temp_dir().join(format!("remotely-{tag}-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&path).expect("make a temp folder");
+        if let Err(err) = std::fs::create_dir_all(&path) {
+            panic!("a temp folder for test images: {err}");
+        }
         Self { path }
     }
 
@@ -29,7 +31,9 @@ impl TempFolder {
     /// Writes `bytes` to `name` in the folder and returns its path.
     pub fn write(&self, name: &str, bytes: &[u8]) -> PathBuf {
         let path = self.join(name);
-        std::fs::write(&path, bytes).expect("write a test image");
+        if let Err(err) = std::fs::write(&path, bytes) {
+            panic!("a test image: {err}");
+        }
         path
     }
 }
@@ -38,6 +42,11 @@ impl Drop for TempFolder {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// A test disk's size in memory: a few MB at most.
+fn small(bytes: u64) -> usize {
+    usize::try_from(bytes).unwrap_or(usize::MAX).min(256 << 20)
 }
 
 fn put_u32_le(buf: &mut [u8], at: usize, v: u32) {
@@ -136,7 +145,7 @@ pub fn vhd_footer(virtual_bytes: u64, kind: u32) -> [u8; 512] {
 
 /// A whole fixed VHD of `virtual_bytes` (zeros, then the footer): a few MB at most in tests.
 pub fn vhd_fixed(virtual_bytes: u64) -> Vec<u8> {
-    let mut out = vec![0u8; usize::try_from(virtual_bytes).expect("a small test disk")];
+    let mut out = vec![0u8; small(virtual_bytes)];
     out.extend_from_slice(&vhd_footer(virtual_bytes, 2));
     out
 }
@@ -175,7 +184,7 @@ fn guid_bytes(text: &str) -> [u8; 16] {
     let hex: String = text.chars().filter(|c| *c != '-').collect();
     let mut raw = [0u8; 16];
     for (i, byte) in raw.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).expect("a GUID");
+        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0);
     }
     let mut out = raw;
     out[0..4].copy_from_slice(&[raw[3], raw[2], raw[1], raw[0]]);
@@ -216,7 +225,10 @@ pub fn vhdx(virtual_bytes: u64, fixed: bool, parent: bool) -> Vec<u8> {
     let region = 2 * MB;
     out[region..region + 8].copy_from_slice(b"metadata");
     put_u16_le(&mut out, region + 10, 2);
-    let entries = [(VHDX_FILE_PARAMETERS, 0x10000u32, 8u32), (VHDX_VIRTUAL_DISK_SIZE, 0x10008, 8)];
+    let entries = [
+        (VHDX_FILE_PARAMETERS, 0x10000u32, 8u32),
+        (VHDX_VIRTUAL_DISK_SIZE, 0x10008, 8),
+    ];
     for (i, (guid, offset, length)) in entries.iter().enumerate() {
         let at = region + 32 + i * 32;
         out[at..at + 16].copy_from_slice(&guid_bytes(guid));
@@ -286,7 +298,7 @@ pub fn ovf(name: &str, cpus: u32, memory_mb: u32, efi: bool, os: &str, disks: &[
 
 /// A raw disk of `bytes` with an MBR boot signature, so it reads as a disk with a partition table.
 pub fn raw_mbr(bytes: u64) -> Vec<u8> {
-    let mut out = vec![0u8; usize::try_from(bytes).expect("a small test disk")];
+    let mut out = vec![0u8; small(bytes)];
     if out.len() >= 512 {
         out[510] = 0x55;
         out[511] = 0xaa;

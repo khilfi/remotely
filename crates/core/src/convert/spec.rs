@@ -256,20 +256,15 @@ impl ExportSpec {
         if Hypervisor::of_key(&self.vm_key) != self.hypervisor {
             return invalid("The VM's key doesn't name its hypervisor.");
         }
-        if self.target
-            == (ExportTarget::Appliance {
-                ova: true,
+        let ovf2 = matches!(
+            self.target,
+            ExportTarget::Appliance {
                 version: OvfVersion::V2,
-            })
-            || self.target
-                == (ExportTarget::Appliance {
-                    ova: false,
-                    version: OvfVersion::V2,
-                })
-        {
-            if self.hypervisor == Hypervisor::Vmware {
-                return invalid("Workstation's ovftool writes OVF 1.0 only.");
+                ..
             }
+        );
+        if ovf2 && self.hypervisor == Hypervisor::Vmware {
+            return invalid("Workstation's ovftool writes OVF 1.0 only.");
         }
         match (self.target.disk_kind(true), self.disk_kind) {
             (None, None) => {}
@@ -303,7 +298,10 @@ mod tests {
     fn a_conversion_names_a_new_file_of_its_kind() {
         let ok = convert();
         ok.validate().unwrap();
-        assert_eq!(ok.summary(), "Convert rocky.qcow2 to rocky.vmdk (VMDK, growable (monolithicSparse))");
+        assert_eq!(
+            ok.summary(),
+            "Convert rocky.qcow2 to rocky.vmdk (VMDK, growable (monolithicSparse))"
+        );
         assert_eq!(
             ok.targets(),
             [TargetRef::DiskImage {
@@ -317,7 +315,10 @@ mod tests {
             assert!(err.contains(why), "{why}: {err}");
         };
         bad(&|s| s.output = "rocky.vmdk".into(), "full path");
-        bad(&|s| s.output = r"\\fileserver.example.com\out\rocky.vmdk".into(), "network share");
+        bad(
+            &|s| s.output = r"\\fileserver.example.com\out\rocky.vmdk".into(),
+            "network share",
+        );
         bad(&|s| s.source = r"\\?\C:\Images\rocky.qcow2".into(), "device path");
         bad(&|s| s.output = r"C:\Images\rocky.vhd".into(), "is named .vmdk");
         bad(
@@ -363,8 +364,12 @@ mod tests {
         assert_eq!(kvm.out_folder(), Path::new(r"C:\Exports\web01-kvm"));
         assert_eq!(kvm.summary(), "Export web01 as qcow2 and libvirt XML for KVM");
         assert_eq!(kvm.targets()[0].key(), r"C:\VMs\web01\web01.vmx");
-        export(ExportTarget::Proxmox, Some(OutputKind::VmdkSparse)).validate().unwrap();
-        export(ExportTarget::Proxmox, Some(OutputKind::Qcow2)).validate().unwrap();
+        export(ExportTarget::Proxmox, Some(OutputKind::VmdkSparse))
+            .validate()
+            .unwrap();
+        export(ExportTarget::Proxmox, Some(OutputKind::Qcow2))
+            .validate()
+            .unwrap();
         let ova1 = ExportTarget::Appliance {
             ova: true,
             version: OvfVersion::V1,

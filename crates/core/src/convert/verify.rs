@@ -187,7 +187,10 @@ async fn compare(
     let Some(qemu) = tools.qemu_img() else {
         return (
             None,
-            Some("qemu-img isn't installed, so the disks' contents weren't compared (the sizes and checksums are above)".into()),
+            Some(
+                "qemu-img isn't installed, so the disks' contents weren't compared (the sizes and checksums are above)"
+                    .into(),
+            ),
         );
     };
     if first.has_parent() || second.has_parent() || !first.problems.is_empty() || !second.problems.is_empty() {
@@ -266,9 +269,15 @@ mod tests {
         assert!(!report.comparison.unwrap().identical);
 
         // Without qemu-img: sizes and checksums only.
-        let report = verify(&FakeDiskTools::new(), &a, Some(&b), CancellationToken::new(), Arc::new(|_| {}))
-            .await
-            .unwrap();
+        let report = verify(
+            &FakeDiskTools::new(),
+            &a,
+            Some(&b),
+            CancellationToken::new(),
+            Arc::new(|_| {}),
+        )
+        .await
+        .unwrap();
         assert!(report.comparison.is_none());
         assert!(report.no_comparison.unwrap().contains("isn't installed"));
 

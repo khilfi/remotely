@@ -209,7 +209,13 @@ impl Converter {
             .await
     }
 
-    async fn vbox(&self, tools: &ToolPaths, args: Vec<String>, timeout: Duration, progress: &(dyn Fn(f64) + Send + Sync)) -> Result<ToolOutput> {
+    async fn vbox(
+        &self,
+        tools: &ToolPaths,
+        args: Vec<String>,
+        timeout: Duration,
+        progress: &(dyn Fn(f64) + Send + Sync),
+    ) -> Result<ToolOutput> {
         let args = args.into_iter().map(std::ffi::OsString::from).collect();
         self.run_tool(tools, Tool::VBoxManage, args, timeout, progress).await
     }
@@ -227,13 +233,19 @@ impl Converter {
             return;
         };
         let known: Vec<String> = before.iter().map(|b| path_key(Path::new(b))).collect();
-        let folders: Vec<String> = folders.iter().map(|f| format!("{}\\", path_key(f).trim_end_matches('\\'))).collect();
+        let folders: Vec<String> = folders
+            .iter()
+            .map(|f| format!("{}\\", path_key(f).trim_end_matches('\\')))
+            .collect();
         let files: Vec<String> = files.iter().map(|f| path_key(f)).collect();
         for location in now {
             let key = path_key(Path::new(&location));
             let ours = files.contains(&key) || folders.iter().any(|f| key.starts_with(f.as_str()));
             if ours && !known.contains(&key) {
-                if let Err(err) = self.vbox(tools, args::vbox_close(Path::new(&location)), SHORT, &|_| {}).await {
+                if let Err(err) = self
+                    .vbox(tools, args::vbox_close(Path::new(&location)), SHORT, &|_| {})
+                    .await
+                {
                     tracing::warn!(error = %err, "conversion: VirtualBox kept a medium it registered");
                 }
             }
@@ -260,12 +272,24 @@ impl Converter {
     /// Grows the image a step reads (one the job made, in its work folder) to `bytes`.
     async fn grow(&self, tools: &ToolPaths, path: &Path, format: DiskFormat, bytes: u64) -> Result<()> {
         match format {
-            DiskFormat::Vdi => self.vbox(tools, args::vbox_resize(path, bytes), LONG, &|_| {}).await.map(drop),
-            DiskFormat::Qcow2 => self
-                .run_tool(tools, Tool::QemuImg, args::qemu_resize(path, format, bytes), LONG, &|_| {})
+            DiskFormat::Vdi => self
+                .vbox(tools, args::vbox_resize(path, bytes), LONG, &|_| {})
                 .await
                 .map(drop),
-            other => Err(refused(format!("Remotely doesn't grow a {} on the way.", other.label()))),
+            DiskFormat::Qcow2 => self
+                .run_tool(
+                    tools,
+                    Tool::QemuImg,
+                    args::qemu_resize(path, format, bytes),
+                    LONG,
+                    &|_| {},
+                )
+                .await
+                .map(drop),
+            other => Err(refused(format!(
+                "Remotely doesn't grow a {} on the way.",
+                other.label()
+            ))),
         }
     }
 
@@ -285,7 +309,9 @@ impl Converter {
         match step.tool {
             Tool::QemuImg => {
                 let args = args::qemu_convert(input, step.from, output, step.to);
-                self.run_tool(tools, Tool::QemuImg, args, LONG, progress).await.map(drop)
+                self.run_tool(tools, Tool::QemuImg, args, LONG, progress)
+                    .await
+                    .map(drop)
             }
             Tool::VBoxManage => {
                 let args = args::vbox_convert(input, step.from, output, step.to)
@@ -390,7 +416,9 @@ impl Converter {
 
     /// VirtualBox's media list before a plan that runs VBoxManage, so the job can close what it registers.
     async fn media_before(&self, tools: &ToolPaths, steps: &[Step]) -> Result<Option<Vec<String>>> {
-        let uses_vbox = steps.iter().any(|s| s.tool == Tool::VBoxManage || (s.grow_to.is_some() && s.from == DiskFormat::Vdi));
+        let uses_vbox = steps
+            .iter()
+            .any(|s| s.tool == Tool::VBoxManage || (s.grow_to.is_some() && s.from == DiskFormat::Vdi));
         if !uses_vbox {
             return Ok(None);
         }
@@ -429,7 +457,9 @@ impl Converter {
             PowerState::Running | PowerState::Paused => Err(refused(
                 "The VM is running: an export takes a VM that is shut down. Shut it down first.",
             )),
-            PowerState::Unknown => Err(refused("Remotely could not tell whether the VM is running, so it wasn't exported.")),
+            PowerState::Unknown => Err(refused(
+                "Remotely could not tell whether the VM is running, so it wasn't exported.",
+            )),
         }
     }
 
@@ -447,7 +477,9 @@ impl Converter {
         let mut out = Vec::new();
         for (i, disk) in hardware.disks.iter().enumerate() {
             let path = PathBuf::from(&disk.path);
-            let mut info = inspect(&path).await.map_err(|err| refused(format!("Disk {}: {err}", i + 1)))?;
+            let mut info = inspect(&path)
+                .await
+                .map_err(|err| refused(format!("Disk {}: {err}", i + 1)))?;
             if vbox && info.has_parent() {
                 // VirtualBox's own differencing image: VBoxManage reads its whole chain.
                 info.problems.retain(|p| !p.contains("differencing"));
@@ -506,7 +538,11 @@ impl Converter {
         if let ExportTarget::Appliance { ova, .. } = spec.target {
             let data: u64 = hardware.disks.iter().filter_map(|d| d.on_disk_bytes).sum();
             self.check_space(folder, data).await?;
-            let file = folder.join(format!("{}.{}", targets::slug(&spec.vm_name), if ova { "ova" } else { "ovf" }));
+            let file = folder.join(format!(
+                "{}.{}",
+                targets::slug(&spec.vm_name),
+                if ova { "ova" } else { "ovf" }
+            ));
             let (tool, args) = Self::appliance_run(spec, &file);
             let what = format!("{} (the whole VM)", tool.label());
             self.run_tool(tools, tool, args, LONG, &|p| progress(p, &what)).await?;
@@ -532,7 +568,8 @@ impl Converter {
                         &format!("disk {} of {}: {what}", i + 1, disks.len()),
                     )
                 };
-                self.run_steps(tools, &disk.source, &disk.steps, &target, &work, &label).await?;
+                self.run_steps(tools, &disk.source, &disk.steps, &target, &work, &label)
+                    .await?;
                 written.push(ExportedDisk {
                     file: disk.file.clone(),
                     kind: disk.steps.last().map_or(OutputKind::Raw, |s| s.to),
@@ -610,7 +647,11 @@ impl ConvertActions for Converter {
             return Err(refused(format!("{}: {problem}.", spec.source)));
         }
         let tools = self.tool_paths();
-        let grow = if spec.whole_megabytes { whole_megabytes(&info) } else { None };
+        let grow = if spec.whole_megabytes {
+            whole_megabytes(&info)
+        } else {
+            None
+        };
         let steps = plan::plan(source_of(&info, false), spec.kind, grow, &tools)
             .map_err(|why| refused(why.describe(info.format, spec.kind)))?;
         let folder = output
@@ -675,13 +716,7 @@ impl ConvertActions for Converter {
         }
         let made = inspect(output)
             .await
-            .map(|i| {
-                format!(
-                    "{}, {} on disk",
-                    i.describe(),
-                    size_text(i.on_disk_bytes.unwrap_or(0))
-                )
-            })
+            .map(|i| format!("{}, {} on disk", i.describe(), size_text(i.on_disk_bytes.unwrap_or(0))))
             .unwrap_or_else(|_| spec.kind.label().to_owned());
         Ok(format!(
             "made {} ({made}) from {} with {}",
@@ -780,11 +815,20 @@ mod tests {
         assert_eq!(estimate(&i, &[step(OutputKind::Qcow2, None)]), 2 << 30);
         assert_eq!(estimate(&i, &[step(OutputKind::VhdFixed, None)]), 20 << 30);
         assert_eq!(
-            estimate(&i, &[step(OutputKind::Qcow2, None), step(OutputKind::VhdFixed, Some(21 << 30))]),
+            estimate(
+                &i,
+                &[
+                    step(OutputKind::Qcow2, None),
+                    step(OutputKind::VhdFixed, Some(21 << 30))
+                ]
+            ),
             (2 << 30) + (21 << 30)
         );
         assert_eq!(whole_megabytes(&info(20 << 30, 0)), None);
         assert_eq!(whole_megabytes(&info((20 << 30) + 512, 0)), Some((20 << 30) + MIB));
-        assert_eq!(work_name(Uuid::from_u128(0xabcdef12_0000_0000_0000_000000000000)), ".remotely-abcdef12");
+        assert_eq!(
+            work_name(Uuid::from_u128(0xabcdef12_0000_0000_0000_000000000000)),
+            ".remotely-abcdef12"
+        );
     }
 }

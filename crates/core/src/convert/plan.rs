@@ -106,14 +106,16 @@ fn reads(tool: Tool, source: Source) -> bool {
 fn writes(tool: Tool, source: Source, out: OutputKind) -> bool {
     match tool {
         // -t 0, 2, 4, 5; raw is the extent of a -t 2.
-        Tool::VdiskManager => matches!(
-            out,
-            OutputKind::VmdkSparse
-                | OutputKind::VmdkFlat
-                | OutputKind::VmdkStream
-                | OutputKind::VmdkEsx
-                | OutputKind::Raw
-        ) && !(source.format == DiskFormat::Raw && out == OutputKind::Raw),
+        Tool::VdiskManager => {
+            matches!(
+                out,
+                OutputKind::VmdkSparse
+                    | OutputKind::VmdkFlat
+                    | OutputKind::VmdkStream
+                    | OutputKind::VmdkEsx
+                    | OutputKind::Raw
+            ) && !(source.format == DiskFormat::Raw && out == OutputKind::Raw)
+        }
         Tool::VBoxManage => {
             let any = matches!(
                 out,
@@ -284,8 +286,14 @@ mod tests {
         assert_eq!(run(DiskFormat::Vhdx, OutputKind::VdiDynamic), [Tool::QemuImg]);
         assert_eq!(run(DiskFormat::Vdi, OutputKind::VhdxDynamic), [Tool::QemuImg]);
         // ESXi's own layout is vdiskmanager's alone: two steps from what it can't read.
-        assert_eq!(run(DiskFormat::Qcow2, OutputKind::VmdkEsx), [Tool::QemuImg, Tool::VdiskManager]);
-        assert_eq!(run(DiskFormat::Vdi, OutputKind::VmdkEsx), [Tool::VBoxManage, Tool::VdiskManager]);
+        assert_eq!(
+            run(DiskFormat::Qcow2, OutputKind::VmdkEsx),
+            [Tool::QemuImg, Tool::VdiskManager]
+        );
+        assert_eq!(
+            run(DiskFormat::Vdi, OutputKind::VmdkEsx),
+            [Tool::VBoxManage, Tool::VdiskManager]
+        );
     }
 
     #[test]
@@ -345,7 +353,15 @@ mod tests {
         // Workstation alone still converts VMDKs, raw images and its chains.
         let workstation = tools(false, true, false);
         assert_eq!(
-            tools_of(&plan(Source::file(DiskFormat::Raw), OutputKind::VmdkStream, None, &workstation).unwrap()),
+            tools_of(
+                &plan(
+                    Source::file(DiskFormat::Raw),
+                    OutputKind::VmdkStream,
+                    None,
+                    &workstation
+                )
+                .unwrap()
+            ),
             [Tool::VdiskManager]
         );
         assert_eq!(
@@ -353,7 +369,12 @@ mod tests {
             [Tool::VdiskManager]
         );
         assert_eq!(
-            plan(Source::file(DiskFormat::Vdi), OutputKind::VmdkSparse, None, &workstation),
+            plan(
+                Source::file(DiskFormat::Vdi),
+                OutputKind::VmdkSparse,
+                None,
+                &workstation
+            ),
             Err(NoPlan::NeedsQemuImg)
         );
         // ESXi's layout from a VDI with VirtualBox and qemu-img but no Workstation: vdiskmanager is missing.
@@ -370,12 +391,24 @@ mod tests {
     #[test]
     fn growing_to_whole_megabytes_goes_through_an_image_a_tool_resizes() {
         let vbox = tools(false, false, true);
-        let steps = plan(Source::file(DiskFormat::Vmdk), OutputKind::VhdFixed, Some(1 << 30), &vbox).unwrap();
+        let steps = plan(
+            Source::file(DiskFormat::Vmdk),
+            OutputKind::VhdFixed,
+            Some(1 << 30),
+            &vbox,
+        )
+        .unwrap();
         assert_eq!(tools_of(&steps), [Tool::VBoxManage, Tool::VBoxManage]);
         assert_eq!(steps[0].to, OutputKind::VdiDynamic);
         assert_eq!(steps[1].grow_to, Some(1 << 30));
         let qemu = tools(true, false, false);
-        let steps = plan(Source::file(DiskFormat::Qcow2), OutputKind::VhdFixed, Some(1 << 30), &qemu).unwrap();
+        let steps = plan(
+            Source::file(DiskFormat::Qcow2),
+            OutputKind::VhdFixed,
+            Some(1 << 30),
+            &qemu,
+        )
+        .unwrap();
         assert_eq!(tools_of(&steps), [Tool::QemuImg, Tool::QemuImg]);
         assert_eq!(steps[0].to, OutputKind::Qcow2);
         assert_eq!(

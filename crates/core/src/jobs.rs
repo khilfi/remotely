@@ -1566,7 +1566,12 @@ impl JobRunner {
                 let progress = self.progress_for(job_id, target);
                 let note = converter.convert(&spec.ctx, job_id, convert, &progress, token).await?;
                 Ok(TargetOutcome {
-                    output: Some(OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM)),
+                    output: Some(OutputCollector::collect(
+                        note.as_bytes(),
+                        b"",
+                        &[],
+                        MAX_OUTPUT_PER_STREAM,
+                    )),
                     note: Some(note),
                     ..TargetOutcome::done()
                 })
@@ -1576,7 +1581,12 @@ impl JobRunner {
                 let progress = self.progress_for(job_id, target);
                 let note = converter.export(&spec.ctx, job_id, export, &progress, token).await?;
                 Ok(TargetOutcome {
-                    output: Some(OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM)),
+                    output: Some(OutputCollector::collect(
+                        note.as_bytes(),
+                        b"",
+                        &[],
+                        MAX_OUTPUT_PER_STREAM,
+                    )),
                     note: Some(format!("{}: {note}", target.name)),
                     ..TargetOutcome::done()
                 })

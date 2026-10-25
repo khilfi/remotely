@@ -1050,7 +1050,8 @@ impl VmwareAdapter for FakeVmware {
     }
 
     fn vdiskmanager_path(&self) -> Option<PathBuf> {
-        (!self.no_vdiskmanager).then(|| PathBuf::from(r"C:\Program Files\VMware\VMware Workstation\vmware-vdiskmanager.exe"))
+        (!self.no_vdiskmanager)
+            .then(|| PathBuf::from(r"C:\Program Files\VMware\VMware Workstation\vmware-vdiskmanager.exe"))
     }
 
     async fn workstation_window_open(&self) -> bool {

@@ -238,7 +238,12 @@ mod tests {
             }
         }
         assert_eq!(
-            strings(&qemu_compare(Path::new("a.vmdk"), DiskFormat::Vmdk, Path::new("b.vhd"), DiskFormat::Vhd)),
+            strings(&qemu_compare(
+                Path::new("a.vmdk"),
+                DiskFormat::Vmdk,
+                Path::new("b.vhd"),
+                DiskFormat::Vhd
+            )),
             ["compare", "-p", "-f", "vmdk", "-F", "vpc", "a.vmdk", "b.vhd"]
         );
         assert_eq!(
@@ -250,20 +255,47 @@ mod tests {
     #[test]
     fn vdiskmanager_and_vboxmanage_get_their_types() {
         assert_eq!(
-            strings(
-                &vdisk_convert(Path::new("a.vmdk"), Path::new("e.vmdk"), OutputKind::VmdkEsx).unwrap()
-            ),
+            strings(&vdisk_convert(Path::new("a.vmdk"), Path::new("e.vmdk"), OutputKind::VmdkEsx).unwrap()),
             ["-r", "a.vmdk", "-t", "4", "e.vmdk"]
         );
         assert_eq!(vdisk_type(OutputKind::VmdkStream), Some("5"));
         assert_eq!(vdisk_type(OutputKind::Qcow2), None);
         assert_eq!(
-            vbox_convert(Path::new("a.vhd"), DiskFormat::Vhd, Path::new("b.vdi"), OutputKind::VdiFixed).unwrap(),
-            ["clonemedium", "disk", "a.vhd", "b.vdi", "--format", "VDI", "--variant", "Fixed"]
+            vbox_convert(
+                Path::new("a.vhd"),
+                DiskFormat::Vhd,
+                Path::new("b.vdi"),
+                OutputKind::VdiFixed
+            )
+            .unwrap(),
+            [
+                "clonemedium",
+                "disk",
+                "a.vhd",
+                "b.vdi",
+                "--format",
+                "VDI",
+                "--variant",
+                "Fixed"
+            ]
         );
         assert_eq!(
-            vbox_convert(Path::new("d.img"), DiskFormat::Raw, Path::new("d.vmdk"), OutputKind::VmdkStream).unwrap(),
-            ["convertfromraw", "d.img", "d.vmdk", "--format", "VMDK", "--variant", "Stream"]
+            vbox_convert(
+                Path::new("d.img"),
+                DiskFormat::Raw,
+                Path::new("d.vmdk"),
+                OutputKind::VmdkStream
+            )
+            .unwrap(),
+            [
+                "convertfromraw",
+                "d.img",
+                "d.vmdk",
+                "--format",
+                "VMDK",
+                "--variant",
+                "Stream"
+            ]
         );
         assert_eq!(
             vbox_convert(Path::new("a.vdi"), DiskFormat::Vdi, Path::new("a.raw"), OutputKind::Raw).unwrap(),
@@ -278,7 +310,11 @@ mod tests {
     #[test]
     fn appliances_are_exported_by_the_vms_hypervisor() {
         assert_eq!(
-            vbox_export("0d8b2c9e-4a8f-4c55-9f0e-5c1b2a3d4e5f", Path::new(r"C:\Out\web.ova"), OvfVersion::V2),
+            vbox_export(
+                "0d8b2c9e-4a8f-4c55-9f0e-5c1b2a3d4e5f",
+                Path::new(r"C:\Out\web.ova"),
+                OvfVersion::V2
+            ),
             [
                 "export",
                 "0d8b2c9e-4a8f-4c55-9f0e-5c1b2a3d4e5f",
@@ -289,8 +325,16 @@ mod tests {
             ]
         );
         assert_eq!(
-            strings(&ovftool_export(Path::new(r"C:\VMs\web\web.vmx"), Path::new(r"C:\Out\web.ova"))),
-            ["--shaAlgorithm=SHA256", "--noImageFiles", r"C:\VMs\web\web.vmx", r"C:\Out\web.ova"]
+            strings(&ovftool_export(
+                Path::new(r"C:\VMs\web\web.vmx"),
+                Path::new(r"C:\Out\web.ova")
+            )),
+            [
+                "--shaAlgorithm=SHA256",
+                "--noImageFiles",
+                r"C:\VMs\web\web.vmx",
+                r"C:\Out\web.ova"
+            ]
         );
     }
 }

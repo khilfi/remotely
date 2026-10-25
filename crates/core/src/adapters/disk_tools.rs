@@ -277,7 +277,10 @@ fn keep_tail(buffer: &mut Vec<u8>, chunk: &[u8], cap: usize) {
 const KEEP_OUTPUT: usize = 64 * 1024;
 
 /// Reads a tool's stream to its end, keeping its last [`KEEP_OUTPUT`] bytes and passing on the progress it prints.
-async fn read_stream(stream: Option<impl tokio::io::AsyncRead + Unpin>, progress: &(dyn Fn(f64) + Send + Sync)) -> Vec<u8> {
+async fn read_stream(
+    stream: Option<impl tokio::io::AsyncRead + Unpin>,
+    progress: &(dyn Fn(f64) + Send + Sync),
+) -> Vec<u8> {
     let mut kept = Vec::new();
     let Some(mut stream) = stream else {
         return kept;
@@ -385,10 +388,17 @@ mod tests {
             "Could not open 'a.vmdk': Image is not in qcow2 format"
         );
         assert_eq!(
-            failure_message(Tool::VdiskManager, "Creating disk 'b.vmdk'\r\nFailed to convert disk: Insufficient disk space\r\n", ""),
+            failure_message(
+                Tool::VdiskManager,
+                "Creating disk 'b.vmdk'\r\nFailed to convert disk: Insufficient disk space\r\n",
+                ""
+            ),
             "Failed to convert disk: Insufficient disk space"
         );
-        assert_eq!(failure_message(Tool::Ovftool, "Error: Invalid target", ""), "Invalid target");
+        assert_eq!(
+            failure_message(Tool::Ovftool, "Error: Invalid target", ""),
+            "Invalid target"
+        );
         assert!(failure_message(Tool::Ovftool, "", "").contains("said nothing"));
     }
 

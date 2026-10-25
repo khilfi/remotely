@@ -408,9 +408,8 @@ pub async fn inspect(path: &Path) -> Result<ImageInfo> {
             info.thin = Some(false);
             info.partition_table = partition_table(&head).map(str::to_owned);
             if info.partition_table.is_none() {
-                info.notes.push(
-                    "no partition table at its start: check it is a whole disk, not one partition".into(),
-                );
+                info.notes
+                    .push("no partition table at its start: check it is a whole disk, not one partition".into());
             }
             if size % 512 != 0 {
                 info.problems
@@ -452,7 +451,8 @@ mod tests {
     #[tokio::test]
     async fn every_format_reads_its_size_and_layout() {
         let dir = TempFolder::new("inspect");
-        let cases: Vec<(&str, Vec<u8>, DiskFormat, Option<&str>, Option<bool>)> = vec![
+        type Case<'a> = (&'a str, Vec<u8>, DiskFormat, Option<&'a str>, Option<bool>);
+        let cases: Vec<Case> = vec![
             (
                 "a.vmdk",
                 img::vmdk_sparse("a.vmdk", 64 * MB, false),
@@ -467,9 +467,27 @@ mod tests {
                 Some("streamOptimized"),
                 Some(true),
             ),
-            ("a.vdi", img::vdi(64 * MB, 1), DiskFormat::Vdi, Some("VDI (dynamic)"), Some(true)),
-            ("f.vdi", img::vdi(64 * MB, 2), DiskFormat::Vdi, Some("VDI (fixed)"), Some(false)),
-            ("f.vhd", img::vhd_fixed(2 * MB), DiskFormat::Vhd, Some("VHD (fixed)"), Some(false)),
+            (
+                "a.vdi",
+                img::vdi(64 * MB, 1),
+                DiskFormat::Vdi,
+                Some("VDI (dynamic)"),
+                Some(true),
+            ),
+            (
+                "f.vdi",
+                img::vdi(64 * MB, 2),
+                DiskFormat::Vdi,
+                Some("VDI (fixed)"),
+                Some(false),
+            ),
+            (
+                "f.vhd",
+                img::vhd_fixed(2 * MB),
+                DiskFormat::Vhd,
+                Some("VHD (fixed)"),
+                Some(false),
+            ),
             (
                 "d.vhd",
                 img::vhd_dynamic(64 * MB, false),
@@ -477,10 +495,34 @@ mod tests {
                 Some("VHD (dynamic)"),
                 Some(true),
             ),
-            ("a.vhdx", img::vhdx(64 * MB, false, false), DiskFormat::Vhdx, Some("VHDX (dynamic)"), Some(true)),
-            ("f.vhdx", img::vhdx(64 * MB, true, false), DiskFormat::Vhdx, Some("VHDX (fixed)"), Some(false)),
-            ("a.qcow2", img::qcow2(64 * MB, None), DiskFormat::Qcow2, Some("qcow2 v3"), Some(true)),
-            ("noble.img", img::qcow2(64 * MB, None), DiskFormat::Qcow2, Some("qcow2 v3"), Some(true)),
+            (
+                "a.vhdx",
+                img::vhdx(64 * MB, false, false),
+                DiskFormat::Vhdx,
+                Some("VHDX (dynamic)"),
+                Some(true),
+            ),
+            (
+                "f.vhdx",
+                img::vhdx(64 * MB, true, false),
+                DiskFormat::Vhdx,
+                Some("VHDX (fixed)"),
+                Some(false),
+            ),
+            (
+                "a.qcow2",
+                img::qcow2(64 * MB, None),
+                DiskFormat::Qcow2,
+                Some("qcow2 v3"),
+                Some(true),
+            ),
+            (
+                "noble.img",
+                img::qcow2(64 * MB, None),
+                DiskFormat::Qcow2,
+                Some("qcow2 v3"),
+                Some(true),
+            ),
             ("disk.raw", img::raw_mbr(2 * MB), DiskFormat::Raw, None, Some(false)),
         ];
         for (name, bytes, format, sub, thin) in cases {
@@ -489,7 +531,11 @@ mod tests {
             assert_eq!(info.format, format, "{name}");
             assert_eq!(info.subformat.as_deref(), sub, "{name}");
             assert_eq!(info.thin, thin, "{name}");
-            let want = if name.ends_with(".raw") || name == "f.vhd" { 2 * MB } else { 64 * MB };
+            let want = if name.ends_with(".raw") || name == "f.vhd" {
+                2 * MB
+            } else {
+                64 * MB
+            };
             assert_eq!(info.virtual_bytes, Some(want), "{name}");
             assert!(info.problems.is_empty(), "{name}: {:?}", info.problems);
             assert!(info.on_disk_bytes.is_some());
@@ -507,7 +553,11 @@ mod tests {
         let backed = dir.write("child.qcow2", &img::qcow2(64 * MB, Some("base.qcow2")));
         let info = inspect(&backed).await.unwrap();
         assert_eq!(info.parent.as_deref(), Some("base.qcow2"));
-        assert!(info.problems[0].contains("differencing disk on base.qcow2"), "{:?}", info.problems);
+        assert!(
+            info.problems[0].contains("differencing disk on base.qcow2"),
+            "{:?}",
+            info.problems
+        );
 
         let mut encrypted = img::qcow2(64 * MB, None);
         encrypted[35] = 1;
@@ -548,7 +598,10 @@ mod tests {
         iso[0x8001..0x8006].copy_from_slice(b"CD001");
         let err = inspect(&dir.write("x.raw", &iso)).await.unwrap_err().to_string();
         assert!(err.contains("an ISO image"), "{err}");
-        let err = inspect(&dir.write("notes.txt", b"hello")).await.unwrap_err().to_string();
+        let err = inspect(&dir.write("notes.txt", b"hello"))
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("isn't a disk image"), "{err}");
         let err = inspect(Path::new(r"\\fileserver.example.com\images\a.vmdk"))
             .await
