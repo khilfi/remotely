@@ -10,7 +10,9 @@
 // 1. Before any release exists: the tag matches tauri.conf.json's version, the installer has the bundler's
 //    name for it, its signature checks out against plugins.updater.pubkey and names this file and version
 //    (C3), and no release has this tag yet (C6).
-// 2. Creates the draft with the installer and its .sig, which gives them their API asset URLs.
+// 2. Creates the draft with the installer and its .sig, which gives them their API asset URLs. Its text is
+//    the notes plus the installer's SHA-256 and how to check it (releaseBody: the installer isn't
+//    Authenticode-signed, so SmartScreen warns on a manual install); latest.json keeps the notes alone.
 // 3. Writes latest.json as tauri-action did: version, notes, pub_date, and windows-x86_64 and
 //    windows-x86_64-nsis entries with the .sig's content and the installer's API asset URL (installed apps
 //    send their token only to API URLs).
@@ -59,6 +61,33 @@ export function latestJson({ version, notes, pubDate, signature, url }) {
     pub_date: pubDate,
     platforms: Object.fromEntries(PLATFORMS.map((name) => [name, platform])),
   };
+}
+
+/**
+ * The release page's text: the tag message's notes, then the installer's SHA-256 and how to check it,
+ * since the installer is not Authenticode-signed and SmartScreen warns on a manual install. latest.json
+ * keeps the notes alone, so the app's update banner doesn't show this (updates check the signature).
+ */
+export function releaseBody({ notes, file, installer }) {
+  return [
+    notes,
+    "",
+    "---",
+    "",
+    "### Checksum",
+    "",
+    `\`${file}\` SHA-256: \`${sha256(installer)}\``,
+    "",
+    'The installer isn\'t code-signed yet, so Windows SmartScreen may say "Windows protected your PC" ' +
+      "when you install it by hand. Check the checksum first, in PowerShell in the folder you downloaded it to:",
+    "",
+    "```powershell",
+    `Get-FileHash .\\${file} -Algorithm SHA256`,
+    "```",
+    "",
+    "If the hash matches, choose **More info**, then **Run anyway**. Automatic updates don't need this: " +
+      "the app checks each update's signature itself.",
+  ].join("\n");
 }
 
 /**
@@ -197,7 +226,13 @@ export async function publish({
 
   // 2. The draft, with the installer and its signature.
   const release = await github.json("POST", "releases", {
-    body: JSON.stringify({ tag_name: tag, name: `Remotely ${tag}`, body: notes, draft: true, prerelease: false }),
+    body: JSON.stringify({
+      tag_name: tag,
+      name: `Remotely ${tag}`,
+      body: releaseBody({ notes, file, installer }),
+      draft: true,
+      prerelease: false,
+    }),
     headers: { "Content-Type": "application/json" },
     expect: [201],
   });
