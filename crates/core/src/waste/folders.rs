@@ -96,7 +96,11 @@ fn direct_files(folder: &Path) -> Vec<(String, u64, Option<SystemTime>)> {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        out.push((entry.file_name().to_string_lossy().into_owned(), meta.len(), meta.modified().ok()));
+        out.push((
+            entry.file_name().to_string_lossy().into_owned(),
+            meta.len(),
+            meta.modified().ok(),
+        ));
     }
     out.sort();
     out
@@ -164,7 +168,8 @@ pub fn orphans(root: &Path, known: &HashSet<String>) -> Vec<OrphanFolder> {
             continue;
         }
         let files = direct_files(&dir);
-        let vm_files: Vec<&(String, u64, Option<SystemTime>)> = files.iter().filter(|(n, _, _)| is_vm_file(n)).collect();
+        let vm_files: Vec<&(String, u64, Option<SystemTime>)> =
+            files.iter().filter(|(n, _, _)| is_vm_file(n)).collect();
         let known_below = holds_known(&key, known);
         if !vm_files.is_empty() {
             let lower: Vec<String> = vm_files.iter().map(|(n, _, _)| n.to_ascii_lowercase()).collect();
@@ -261,7 +266,10 @@ mod tests {
         let by_path = |rel: &str| found.iter().find(|o| o.path == t.0.join(rel).display().to_string());
         let old = by_path("old").unwrap();
         assert_eq!((old.kind, old.bytes, old.files), (OrphanKind::WorkstationVm, 1015, 3));
-        assert!(found.iter().all(|o| !o.path.ends_with("sub")), "inside an orphan, not again");
+        assert!(
+            found.iter().all(|o| !o.path.ends_with("sub")),
+            "inside an orphan, not again"
+        );
         assert_eq!(by_path("lab").unwrap().kind, OrphanKind::VirtualBoxVm);
         assert_eq!(by_path("lab").unwrap().bytes, 33);
         assert_eq!(by_path("disks").unwrap().kind, OrphanKind::Disks);
@@ -269,7 +277,10 @@ mod tests {
         assert!(by_path("notes").is_none());
         // The root holds a loose disk and a known VM below: only its own VM files count.
         let root = found.iter().find(|o| o.path == t.0.display().to_string()).unwrap();
-        assert_eq!((root.bytes, root.files, root.examples.clone()), (7, 1, vec!["loose.vmdk".to_owned()]));
+        assert_eq!(
+            (root.bytes, root.files, root.examples.clone()),
+            (7, 1, vec!["loose.vmdk".to_owned()])
+        );
         assert_eq!(found[0].path, t.0.join("old").display().to_string(), "largest first");
     }
 
@@ -288,7 +299,10 @@ mod tests {
     fn shares_and_device_paths_are_refused_unopened() {
         assert!(refusal(Path::new(r"\\server\vms")).unwrap().contains("network share"));
         assert!(refusal(Path::new(r"\\?\C:\VMs")).is_some());
-        assert_eq!(folder_size(Path::new(r"\\server\vms"), &HashSet::new()), FolderSize::default());
+        assert_eq!(
+            folder_size(Path::new(r"\\server\vms"), &HashSet::new()),
+            FolderSize::default()
+        );
         let t = Temp::new();
         assert!(refusal(&t.0).is_none());
         assert!(refusal(&t.0.join("missing")).unwrap().contains("not a folder"));

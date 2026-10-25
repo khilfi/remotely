@@ -91,8 +91,8 @@ pub mod transfer;
 pub mod untrusted;
 pub mod updates;
 pub mod vault;
-pub mod vm_links;
 pub mod vm_insight;
+pub mod vm_links;
 pub mod vm_settings;
 pub mod waste;
 
@@ -492,7 +492,8 @@ impl Core {
             store.clone(),
             Arc::clone(&adapters.vault),
             CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
-            ImpactPreviewer::new(store.clone(), hypervisors.clone()).with_containers(containers.clone())
+            ImpactPreviewer::new(store.clone(), hypervisors.clone())
+                .with_containers(containers.clone())
                 .with_host_networks(networks.clone()),
         ));
         bus.set_bindings(bindings.clone());

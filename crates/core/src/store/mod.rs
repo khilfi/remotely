@@ -22,9 +22,9 @@ mod sessions;
 mod ssh_keys;
 mod tags;
 mod terminal_rules;
-mod timeline;
 #[cfg(test)]
 mod tests;
+mod timeline;
 #[cfg(test)]
 mod upgrade_tests;
 mod vault;

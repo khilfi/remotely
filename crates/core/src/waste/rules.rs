@@ -131,9 +131,10 @@ pub fn idle_verdict(
             .filter(|r| r.minute >= from_minute && r.minute < to_minute)
             .cloned()
             .collect();
-        let cpu = hourly(&rows, |r| r.cpu_avg).values().copied().fold(None, |m: Option<f64>, v| {
-            Some(m.map_or(v, |m| m.max(v)))
-        });
+        let cpu = hourly(&rows, |r| r.cpu_avg)
+            .values()
+            .copied()
+            .fold(None, |m: Option<f64>, v| Some(m.map_or(v, |m| m.max(v))));
         let net = hourly(&rows, |r| match (r.rx_avg, r.tx_avg) {
             (None, None) => None,
             (rx, tx) => Some(rx.unwrap_or(0) as f64 + tx.unwrap_or(0) as f64),
@@ -165,7 +166,10 @@ pub fn idle_verdict(
     } else if peak >= limits.host_cpu_pct {
         Some(format!("its busiest hour used {:.1}% of this PC's CPU", peak))
     } else if guest_cpu.is_some_and(|c| c >= limits.guest_cpu_pct) {
-        Some(format!("its guest's busiest hour used {:.1}% CPU", guest_cpu.unwrap_or(0.0)))
+        Some(format!(
+            "its guest's busiest hour used {:.1}% CPU",
+            guest_cpu.unwrap_or(0.0)
+        ))
     } else if guest_net.is_some_and(|n| n >= limits.guest_net_bps) {
         Some("its guest's network was busy".into())
     } else {
@@ -226,13 +230,25 @@ pub fn is_suspend_file(name: &str) -> bool {
 /// VM-16: a file only a VM has: its settings, disks, states and snapshots.
 pub fn is_vm_file(name: &str) -> bool {
     const EXTENSIONS: [&str; 16] = [
-        "vmx", "vmdk", "vmsd", "vmxf", "nvram", "vmss", "vmem", "vmsn", "vbox", "vbox-prev", "vdi", "vhd", "vhdx",
-        "sav", "qcow2", "vmtm",
+        "vmx",
+        "vmdk",
+        "vmsd",
+        "vmxf",
+        "nvram",
+        "vmss",
+        "vmem",
+        "vmsn",
+        "vbox",
+        "vbox-prev",
+        "vdi",
+        "vhd",
+        "vhdx",
+        "sav",
+        "qcow2",
+        "vmtm",
     ];
     let lower = name.to_ascii_lowercase();
-    lower
-        .rsplit_once('.')
-        .is_some_and(|(_, ext)| EXTENSIONS.contains(&ext))
+    lower.rsplit_once('.').is_some_and(|(_, ext)| EXTENSIONS.contains(&ext))
 }
 
 #[cfg(test)]
@@ -298,9 +314,11 @@ mod tests {
 
     #[test]
     fn too_little_or_too_late_history_cant_tell() {
-        let thin = day(0, 0.1);
+        let thin: Vec<MinuteRow> = day(0, 0.1).into_iter().take(20 * 60).collect();
         let v = idle_verdict(&thin, None, 0, 3 * DAY, IDLE_LIMITS);
-        assert!(!v.idle && v.why_not.unwrap().contains("covers 24 of the 72 hours"));
+        assert!(!v.idle && v.why_not.unwrap().contains("covers 20 of the 72 hours"));
+        // A third of the window is enough.
+        assert!(idle_verdict(&day(0, 0.1), None, 0, 3 * DAY, IDLE_LIMITS).idle);
         let late = [day(DAY, 0.1), day(2 * DAY, 0.1)].concat();
         let v = idle_verdict(&late, None, 0, 3 * DAY, IDLE_LIMITS);
         assert!(!v.idle && v.why_not.unwrap().contains("starts too late"));
@@ -342,7 +360,13 @@ mod tests {
     #[test]
     fn the_depth_is_the_longest_path_not_the_count() {
         let tree = SnapshotTree {
-            snapshots: vec![snap(1, None), snap(2, Some(1)), snap(3, Some(1)), snap(4, Some(3)), snap(5, Some(4))],
+            snapshots: vec![
+                snap(1, None),
+                snap(2, Some(1)),
+                snap(3, Some(1)),
+                snap(4, Some(3)),
+                snap(5, Some(4)),
+            ],
             current_uid: Some(5),
         };
         assert_eq!(chain_depth(&tree), 4);
@@ -364,7 +388,13 @@ mod tests {
         ] {
             assert!(is_snapshot_file(name), "{name}");
         }
-        for name in ["web01.vmdk", "web01-s001.vmdk", "web01-flat.vmdk", "web01.vmx", "web01-1234.vmdk"] {
+        for name in [
+            "web01.vmdk",
+            "web01-s001.vmdk",
+            "web01-flat.vmdk",
+            "web01.vmx",
+            "web01-1234.vmdk",
+        ] {
             assert!(!is_snapshot_file(name), "{name}");
         }
         assert!(is_suspend_file("web01-6f1a.vmss"));

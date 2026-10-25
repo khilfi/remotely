@@ -240,8 +240,13 @@ impl WasteFinder {
                     guest = Some((*session, rows));
                 }
             }
-            let verdict =
-                rules::idle_verdict(&host, guest.as_ref().map(|(_, g)| g.as_slice()), from, to, rules::IDLE_LIMITS);
+            let verdict = rules::idle_verdict(
+                &host,
+                guest.as_ref().map(|(_, g)| g.as_slice()),
+                from,
+                to,
+                rules::IDLE_LIMITS,
+            );
             if !verdict.idle {
                 continue;
             }
@@ -295,9 +300,7 @@ impl WasteFinder {
                 Hypervisor::VirtualBox => match self.vbox_paths(&vm.vmx_path).await {
                     Ok(paths) => {
                         // A3: a state file on a share or a device path is never opened.
-                        let state = paths
-                            .state_file
-                            .filter(|p| crate::untrusted::path_refusal(p).is_none());
+                        let state = paths.state_file.filter(|p| crate::untrusted::path_refusal(p).is_none());
                         if let Some(state) = state {
                             if let Ok(meta) = tokio::fs::metadata(&state).await {
                                 row.state_bytes = Some(meta.len());
@@ -481,7 +484,10 @@ impl WasteFinder {
             (None, None) => return Err(CoreError::InvalidInput("Say which folder to open.".into())),
         };
         if let Some(reason) = folders::refusal(&path) {
-            return Err(CoreError::InvalidInput(format!("{} can't be opened: {reason}", path.display())));
+            return Err(CoreError::InvalidInput(format!(
+                "{} can't be opened: {reason}",
+                path.display()
+            )));
         }
         Ok(path)
     }

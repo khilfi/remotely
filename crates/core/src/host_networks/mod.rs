@@ -174,7 +174,11 @@ pub fn vmnet_of(nic: &VirtualNic, nat_vmnet: &str) -> Option<String> {
 
 /// Whether `ip` is in `base`/`mask`.
 fn in_subnet(ip: &str, base: &str, mask: &str) -> bool {
-    match (ip.parse::<Ipv4Addr>(), base.parse::<Ipv4Addr>(), mask.parse::<Ipv4Addr>()) {
+    match (
+        ip.parse::<Ipv4Addr>(),
+        base.parse::<Ipv4Addr>(),
+        mask.parse::<Ipv4Addr>(),
+    ) {
         (Ok(ip), Ok(base), Ok(mask)) => {
             let mask = u32::from(mask);
             u32::from(ip) & mask == u32::from(base) & mask
@@ -237,7 +241,11 @@ fn vmware_views(vmnets: Vec<Vmnet>, vms: &[VmAdapters]) -> Vec<VmnetView> {
                         network: Vmnet {
                             index: number,
                             name: name.clone(),
-                            kind: if number == 0 { VmnetKind::Bridged } else { VmnetKind::Other(String::new()) },
+                            kind: if number == 0 {
+                                VmnetKind::Bridged
+                            } else {
+                                VmnetKind::Other(String::new())
+                            },
                             dhcp: None,
                             subnet: None,
                             mask: None,
@@ -295,17 +303,21 @@ fn virtualbox_views(
                 "hostonly" => {
                     if let Some(view) = host_only.iter_mut().find(|v| v.iface.name.eq_ignore_ascii_case(&name)) {
                         let ips = match (&view.iface.ip, &view.iface.mask) {
-                            (Some(base), Some(mask)) => {
-                                entry.ips.iter().filter(|ip| in_subnet(ip, base, mask)).cloned().collect()
-                            }
+                            (Some(base), Some(mask)) => entry
+                                .ips
+                                .iter()
+                                .filter(|ip| in_subnet(ip, base, mask))
+                                .cloned()
+                                .collect(),
                             _ => Vec::new(),
                         };
                         view.vms.push(network_vm(entry, &nic.slot, ips));
                     } else {
-                        other
-                            .entry(("hostonly".into(), name))
-                            .or_default()
-                            .push(network_vm(entry, &nic.slot, Vec::new()));
+                        other.entry(("hostonly".into(), name)).or_default().push(network_vm(
+                            entry,
+                            &nic.slot,
+                            Vec::new(),
+                        ));
                     }
                 }
                 "natnetwork" => {
@@ -318,16 +330,19 @@ fn virtualbox_views(
                             .collect();
                         view.vms.push(network_vm(entry, &nic.slot, ips));
                     } else {
-                        other
-                            .entry(("natnetwork".into(), name))
-                            .or_default()
-                            .push(network_vm(entry, &nic.slot, Vec::new()));
+                        other.entry(("natnetwork".into(), name)).or_default().push(network_vm(
+                            entry,
+                            &nic.slot,
+                            Vec::new(),
+                        ));
                     }
                 }
-                "bridged" | "intnet" => other
-                    .entry((attachment.clone(), name))
-                    .or_default()
-                    .push(network_vm(entry, &nic.slot, Vec::new())),
+                "bridged" | "intnet" => {
+                    other
+                        .entry((attachment.clone(), name))
+                        .or_default()
+                        .push(network_vm(entry, &nic.slot, Vec::new()))
+                }
                 _ => {}
             }
         }
@@ -376,7 +391,11 @@ impl HostNetworks {
     /// installed has nothing; one that fails says why, and the other is still read.
     pub async fn report(&self, ctx: &Context) -> Result<HostNetworksReport> {
         let vms = self.read_adapters(ctx).await?;
-        let stale_vms = vms.iter().filter(|e| e.stale).map(|e| e.vm.display_name.clone()).collect();
+        let stale_vms = vms
+            .iter()
+            .filter(|e| e.stale)
+            .map(|e| e.vm.display_name.clone())
+            .collect();
         let (vmware, virtualbox) = tokio::join!(self.vmware_side(&vms), self.virtualbox_side(&vms));
         Ok(HostNetworksReport {
             vmware,
@@ -543,16 +562,34 @@ impl HostNetworks {
     async fn vms_on(&self, ctx: &Context, hypervisor: Hypervisor, name: &str) -> Result<Vec<NetworkVm>> {
         let vms = self.stored(ctx).await?;
         Ok(match hypervisor {
-            Hypervisor::Vmware => vmware_views(Vec::new(), &vms)
-                .into_iter()
-                .find(|v| v.network.name.eq_ignore_ascii_case(name))
-                .map(|v| v.vms)
-                .unwrap_or_default(),
+            Hypervisor::Vmware => {
+                // Which vmnet `nat` adapters are on: the listed NAT vmnet, else vmnet8.
+                let listed = self
+                    .hypervisors
+                    .vmware()
+                    .vmrun_host(vec!["listHostNetworks".into()], READ_TIMEOUT)
+                    .await
+                    .and_then(|out| net::parse_host_networks(&out))
+                    .unwrap_or_default();
+                let nat = nat_vmnet(&listed);
+                let mut on = Vec::new();
+                for entry in vms.iter().filter(|e| e.vm.hypervisor == Hypervisor::Vmware) {
+                    for nic in &entry.nics {
+                        if vmnet_of(nic, &nat).is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+                            on.push(network_vm(entry, &nic.slot, entry.ips.clone()));
+                        }
+                    }
+                }
+                on
+            }
             Hypervisor::VirtualBox => {
                 let mut on = Vec::new();
                 for entry in vms.iter().filter(|e| e.vm.hypervisor == Hypervisor::VirtualBox) {
                     for nic in &entry.nics {
-                        let natnet = nic.connection.as_deref().is_some_and(|c| c.eq_ignore_ascii_case("natnetwork"));
+                        let natnet = nic
+                            .connection
+                            .as_deref()
+                            .is_some_and(|c| c.eq_ignore_ascii_case("natnetwork"));
                         if natnet && nic.network_name.as_deref() == Some(name) {
                             on.push(network_vm(entry, &nic.slot, entry.ips.clone()));
                         }
@@ -698,7 +735,9 @@ async fn vmnet_forwards(hypervisors: &Hypervisors, vmnet: &str) -> Result<(Vec<V
         }
         Ok(None) | Err(_) => Ok((
             forwards,
-            Some(format!("vmrun listed {total} forwards in a form Remotely could only partly read")),
+            Some(format!(
+                "vmrun listed {total} forwards in a form Remotely could only partly read"
+            )),
         )),
     }
 }
@@ -736,12 +775,12 @@ pub(crate) async fn apply(hypervisors: &Hypervisors, targets: &[TargetRef], op: 
             if let Some(why) = vmware.nat_refusal() {
                 return Err(refused(why));
             }
-            let out = vmware
-                .vmrun_host(vec!["listHostNetworks".into()], READ_TIMEOUT)
-                .await?;
+            let out = vmware.vmrun_host(vec!["listHostNetworks".into()], READ_TIMEOUT).await?;
             let listed = net::parse_host_networks(&out)?;
             let Some(network) = listed.iter().find(|n| n.name.eq_ignore_ascii_case(vmnet)) else {
-                return Err(refused(format!("{vmnet} is not one of Workstation's networks any more")));
+                return Err(refused(format!(
+                    "{vmnet} is not one of Workstation's networks any more"
+                )));
             };
             if network.kind != VmnetKind::Nat {
                 return Err(refused(format!(
@@ -750,9 +789,7 @@ pub(crate) async fn apply(hypervisors: &Hypervisors, targets: &[TargetRef], op: 
             }
             let (current, _) = vmnet_forwards(hypervisors, &network.name).await?;
             let wanted = forward.vmnet();
-            let there = current
-                .iter()
-                .find(|f| same_port(f, wanted.protocol, wanted.host_port));
+            let there = current.iter().find(|f| same_port(f, wanted.protocol, wanted.host_port));
             let args = if adding {
                 if let Some(there) = there {
                     return Err(refused(format!(
@@ -836,7 +873,10 @@ pub(crate) async fn apply(hypervisors: &Hypervisors, targets: &[TargetRef], op: 
             let taken = rules.iter().any(|r| r.rule.name == rule.name);
             if adding {
                 if taken {
-                    return Err(refused(format!("{} already has a NAT rule named '{}'", info.name, rule.name)));
+                    return Err(refused(format!(
+                        "{} already has a NAT rule named '{}'",
+                        info.name, rule.name
+                    )));
                 }
                 if let Some(other) = mine
                     .iter()
@@ -859,7 +899,11 @@ pub(crate) async fn apply(hypervisors: &Hypervisors, targets: &[TargetRef], op: 
             let args = net::vm_rule_args(uuid, slot, &rule, state.is_on(), !adding);
             vbox.vboxmanage_host(args, CHANGE_TIMEOUT).await?;
             let how = if state.is_on() { " (applied while it runs)" } else { "" };
-            Ok(format!("{verb} {} on {}'s NAT adapter {slot}{how}", forward.describe(), info.name))
+            Ok(format!(
+                "{verb} {} on {}'s NAT adapter {slot}{how}",
+                forward.describe(),
+                info.name
+            ))
         }
     }
 }
@@ -916,9 +960,18 @@ mod tests {
 
     #[test]
     fn workstation_adapters_map_to_their_vmnets() {
-        assert_eq!(vmnet_of(&nic("ethernet0", "nat", None), "vmnet8").as_deref(), Some("vmnet8"));
-        assert_eq!(vmnet_of(&nic("ethernet0", "hostonly", None), "vmnet8").as_deref(), Some("vmnet1"));
-        assert_eq!(vmnet_of(&nic("ethernet0", "bridged", None), "vmnet8").as_deref(), Some("vmnet0"));
+        assert_eq!(
+            vmnet_of(&nic("ethernet0", "nat", None), "vmnet8").as_deref(),
+            Some("vmnet8")
+        );
+        assert_eq!(
+            vmnet_of(&nic("ethernet0", "hostonly", None), "vmnet8").as_deref(),
+            Some("vmnet1")
+        );
+        assert_eq!(
+            vmnet_of(&nic("ethernet0", "bridged", None), "vmnet8").as_deref(),
+            Some("vmnet0")
+        );
         assert_eq!(
             vmnet_of(&nic("ethernet1", "custom (VMnet2)", Some("VMnet2")), "vmnet8").as_deref(),
             Some("vmnet2")
@@ -936,7 +989,12 @@ mod tests {
                 vec![nic("ethernet0", "nat", None), nic("ethernet1", "bridged", None)],
                 &["203.0.113.10", "192.0.2.50"],
             ),
-            vm("db01", Hypervisor::Vmware, vec![nic("ethernet0", "custom (VMnet2)", Some("VMnet2"))], &[]),
+            vm(
+                "db01",
+                Hypervisor::Vmware,
+                vec![nic("ethernet0", "custom (VMnet2)", Some("VMnet2"))],
+                &[],
+            ),
             vm("vbox01", Hypervisor::VirtualBox, vec![nic("nic1", "nat", None)], &[]),
         ];
         let views = vmware_views(
@@ -947,7 +1005,11 @@ mod tests {
             &vms,
         );
         let names: Vec<&str> = views.iter().map(|v| v.network.name.as_str()).collect();
-        assert_eq!(names, ["vmnet0", "vmnet1", "vmnet2", "vmnet8"], "unlisted vmnets a VM is on are added");
+        assert_eq!(
+            names,
+            ["vmnet0", "vmnet1", "vmnet2", "vmnet8"],
+            "unlisted vmnets a VM is on are added"
+        );
         let nat = views.iter().find(|v| v.network.name == "vmnet8").unwrap();
         assert_eq!(nat.vms.len(), 1);
         assert_eq!(nat.vms[0].ips, ["203.0.113.10"], "only the address in vmnet8's subnet");
@@ -970,7 +1032,12 @@ mod tests {
                 ],
                 &["198.51.100.5", "192.0.2.20"],
             ),
-            vm("lab02", Hypervisor::VirtualBox, vec![nic("nic1", "natnetwork", Some("gone-net"))], &[]),
+            vm(
+                "lab02",
+                Hypervisor::VirtualBox,
+                vec![nic("nic1", "natnetwork", Some("gone-net"))],
+                &[],
+            ),
         ];
         let (host_only, nat, other) = virtualbox_views(
             vec![VboxHostOnlyIf {

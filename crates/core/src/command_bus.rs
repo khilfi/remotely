@@ -2197,6 +2197,20 @@ mod tests {
                 targets: vec![],
                 op: ContainerOp::Start,
             },
+            Command::HostNetwork {
+                targets: vec![],
+                op: HostNetworkOp::RemoveForward {
+                    forward: crate::host_networks::NatForward {
+                        name: Some("web".into()),
+                        protocol: crate::adapters::host_networks::ForwardProtocol::Tcp,
+                        host_ip: None,
+                        host_port: 8080,
+                        guest_ip: Some("203.0.113.10".into()),
+                        guest_port: 80,
+                        slot: None,
+                    },
+                },
+            },
         ]
     }
 

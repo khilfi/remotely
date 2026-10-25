@@ -196,7 +196,9 @@ impl VmInsight {
         job_ids.sort();
         job_ids.dedup();
         let outcomes = self.store.job_rows_for(&self.ctx, &job_ids, &vm.vmx_path).await?;
-        let next_before = (rows.len() as u32 == limit).then(|| rows.last().map(|r| r.seq)).flatten();
+        let next_before = (rows.len() as u32 == limit)
+            .then(|| rows.last().map(|r| r.seq))
+            .flatten();
         let entries = rows
             .into_iter()
             .map(|row| {
@@ -208,13 +210,17 @@ impl VmInsight {
                 let targets = serde_json::from_str::<Vec<serde_json::Value>>(&row.targets_json)
                     .map(|t| t.len())
                     .unwrap_or(1);
-                let outcome = row.job_id.as_ref().and_then(|id| outcomes.get(id)).map(|o| TimelineOutcome {
-                    status: o.status.clone(),
-                    error: o.error.clone(),
-                    duration_ms: o.duration_ms,
-                    safety_snapshot: o.safety_snapshot.clone(),
-                    finished_at: o.finished_at.clone(),
-                });
+                let outcome = row
+                    .job_id
+                    .as_ref()
+                    .and_then(|id| outcomes.get(id))
+                    .map(|o| TimelineOutcome {
+                        status: o.status.clone(),
+                        error: o.error.clone(),
+                        duration_ms: o.duration_ms,
+                        safety_snapshot: o.safety_snapshot.clone(),
+                        finished_at: o.finished_at.clone(),
+                    });
                 TimelineEntry {
                     seq: row.seq,
                     at: row.ts,

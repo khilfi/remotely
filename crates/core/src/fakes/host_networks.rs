@@ -105,7 +105,10 @@ impl VmwareNetworks {
         if !self.conf_only.load(Ordering::SeqCst) {
             return None;
         }
-        let nat = locks::lock(&self.vmnets).iter().find(|n| n.kind == VmnetKind::Nat).cloned()?;
+        let nat = locks::lock(&self.vmnets)
+            .iter()
+            .find(|n| n.kind == VmnetKind::Nat)
+            .cloned()?;
         let forwards = self.forwards(&nat.name);
         let mut text = format!(
             "# Windows NAT configuration file\n[host]\nip = 203.0.113.2/24\ndevice = {}\n\n[incomingtcp]\n# SSH\n#8889 = 203.0.113.128:22\n",
@@ -152,7 +155,11 @@ impl VmwareNetworks {
                     if self.conf_only.load(Ordering::SeqCst) {
                         out.push_str(&format!("{i}: <unreadable>\r\n"));
                     } else {
-                        let description = f.description.as_deref().map(|d| format!(" \"{d}\"")).unwrap_or_default();
+                        let description = f
+                            .description
+                            .as_deref()
+                            .map(|d| format!(" \"{d}\""))
+                            .unwrap_or_default();
                         out.push_str(&format!(
                             "{i}: {} {} -> {}:{}{description}\r\n",
                             f.protocol.as_str(),
@@ -188,7 +195,8 @@ impl VmwareNetworks {
                 if !self.admin() {
                     return Err(vmrun_failed(verb, "Insufficient permissions"));
                 }
-                let protocol = ForwardProtocol::parse(protocol).ok_or_else(|| vmrun_failed(verb, "Invalid protocol"))?;
+                let protocol =
+                    ForwardProtocol::parse(protocol).ok_or_else(|| vmrun_failed(verb, "Invalid protocol"))?;
                 let port: u16 = host_port.parse().map_err(|_| vmrun_failed(verb, "Invalid port"))?;
                 let mut all = locks::lock(&self.forwards);
                 let list = all.entry(vmnet.clone()).or_default();
@@ -267,7 +275,10 @@ impl VboxNetworks {
                 let before = rules.len();
                 rules.retain(|r| !(r.slot == slot && &r.rule.name == name));
                 if rules.len() == before {
-                    return Err(vbox_failed(command, "Code E_INVALIDARG (0x80070057) (extended info not available)"));
+                    return Err(vbox_failed(
+                        command,
+                        "Code E_INVALIDARG (0x80070057) (extended info not available)",
+                    ));
                 }
             }
             [rule] => {
@@ -284,17 +295,26 @@ impl VboxNetworks {
 
     /// `showvminfo <uuid> --machinereadable`: the files and adapters, each adapter's NAT rules after its keys.
     fn showvminfo(&self, fake: &FakeVirtualBox, uuid: &str) -> Result<String> {
-        let vm = fake
-            .find(uuid)
-            .ok_or_else(|| vbox_failed("showvminfo", &format!("Could not find a registered machine named '{uuid}'")))?;
+        let vm = fake.find(uuid).ok_or_else(|| {
+            vbox_failed(
+                "showvminfo",
+                &format!("Could not find a registered machine named '{uuid}'"),
+            )
+        })?;
         let mut out = format!("name={}\nUUID={}\n", quoted(&vm.name), quoted(&vm.uuid));
         let folder = vm.config_file.as_deref().and_then(Path::parent).map(Path::to_path_buf);
         if let Some(cfg) = &vm.config_file {
             out.push_str(&format!("CfgFile={}\n", quoted(&cfg.display().to_string())));
         }
         if let Some(folder) = &folder {
-            out.push_str(&format!("SnapFldr={}\n", quoted(&folder.join("Snapshots").display().to_string())));
-            out.push_str(&format!("LogFldr={}\n", quoted(&folder.join("Logs").display().to_string())));
+            out.push_str(&format!(
+                "SnapFldr={}\n",
+                quoted(&folder.join("Snapshots").display().to_string())
+            ));
+            out.push_str(&format!(
+                "LogFldr={}\n",
+                quoted(&folder.join("Logs").display().to_string())
+            ));
         }
         out.push_str(&format!("VMState={}\n", quoted(&vm.state)));
         if vm.power_state() == PowerState::Suspended {

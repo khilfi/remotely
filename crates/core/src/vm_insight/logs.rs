@@ -152,7 +152,9 @@ pub async fn list(hypervisor: Hypervisor, folder: &Path) -> Result<Vec<LogFile>>
 pub async fn read(hypervisor: Hypervisor, folder: &Path, name: &str, from: Option<u64>, tail: u64) -> Result<LogChunk> {
     refuse(folder)?;
     if log_rank(hypervisor, name).is_none() {
-        return Err(CoreError::InvalidInput(format!("'{name}' is not one of the VM's log files.")));
+        return Err(CoreError::InvalidInput(format!(
+            "'{name}' is not one of the VM's log files."
+        )));
     }
     let path: PathBuf = folder.join(name);
     let mut file = tokio::fs::File::open(&path).await.map_err(|err| match err.kind() {
@@ -234,7 +236,10 @@ mod tests {
         assert!(chunk.truncated_before);
         // The file's start: nothing dropped in front.
         let whole = cut("vmware.log", b"one\ntwo\n", 0, 8, false, false, 0);
-        assert_eq!((whole.text.as_str(), whole.truncated_before, whole.end), ("one\ntwo\n", false, 8));
+        assert_eq!(
+            (whole.text.as_str(), whole.truncated_before, whole.end),
+            ("one\ntwo\n", false, 8)
+        );
     }
 
     #[test]

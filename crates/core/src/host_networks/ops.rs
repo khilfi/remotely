@@ -48,7 +48,11 @@ impl NatForward {
             Some(ip) => format!("{ip}:{}", self.host_port),
             None => self.host_port.to_string(),
         };
-        let guest = format!("{}:{}", self.guest_ip.as_deref().unwrap_or("the guest"), self.guest_port);
+        let guest = format!(
+            "{}:{}",
+            self.guest_ip.as_deref().unwrap_or("the guest"),
+            self.guest_port
+        );
         let line = format!("{} {host} → {guest}", self.protocol.as_str());
         match self.name.as_deref().filter(|n| !n.is_empty()) {
             Some(name) => format!("'{name}': {line}"),
@@ -170,12 +174,10 @@ pub fn place<'a>(targets: &'a [TargetRef], forward: &NatForward) -> Result<Forwa
             hypervisor: Hypervisor::VirtualBox,
             name,
         } => Ok(ForwardPlace::NatNetwork(name)),
-        TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::VirtualBox => {
-            match forward.slot {
-                Some(slot) => Ok(ForwardPlace::VboxVm(vmx_path, slot)),
-                None => invalid("Say which of the VM's NAT adapters (1 to 8) the rule is for."),
-            }
-        }
+        TargetRef::Vm { vmx_path } if Hypervisor::of_key(vmx_path) == Hypervisor::VirtualBox => match forward.slot {
+            Some(slot) => Ok(ForwardPlace::VboxVm(vmx_path, slot)),
+            None => invalid("Say which of the VM's NAT adapters (1 to 8) the rule is for."),
+        },
         TargetRef::Vm { .. } => {
             invalid("Workstation's port forwards belong to its NAT network (vmnet8), not to one VM.")
         }
@@ -365,7 +367,15 @@ mod tests {
     #[test]
     fn virtualbox_rules_need_a_name_virtualbox_can_list_again() {
         assert!(validate(&lab_net(), &add(web())).is_ok());
-        for name in [None, Some(""), Some("a:b"), Some("a,b"), Some("[x]"), Some(" pad"), Some("-x")] {
+        for name in [
+            None,
+            Some(""),
+            Some("a:b"),
+            Some("a,b"),
+            Some("[x]"),
+            Some(" pad"),
+            Some("-x"),
+        ] {
             let forward = NatForward {
                 name: name.map(String::from),
                 ..web()
@@ -388,8 +398,22 @@ mod tests {
             ..web()
         };
         assert!(validate(&vbox_vm(), &add(rule.clone())).is_ok());
-        assert!(validate(&vbox_vm(), &add(NatForward { slot: None, ..rule.clone() })).is_err());
-        assert!(validate(&vbox_vm(), &add(NatForward { slot: Some(9), ..rule.clone() })).is_err());
+        assert!(validate(
+            &vbox_vm(),
+            &add(NatForward {
+                slot: None,
+                ..rule.clone()
+            })
+        )
+        .is_err());
+        assert!(validate(
+            &vbox_vm(),
+            &add(NatForward {
+                slot: Some(9),
+                ..rule.clone()
+            })
+        )
+        .is_err());
         let workstation_vm = vec![TargetRef::Vm {
             vmx_path: r"C:\VMs\web01\web01.vmx".into(),
         }];
@@ -412,10 +436,16 @@ mod tests {
                 guest_ip: Some(guest_ip.into()),
                 ..web()
             };
-            assert!(validate(&vmnet8(), &add(forward)).is_err(), "{host_port} {guest_port} {guest_ip}");
+            assert!(
+                validate(&vmnet8(), &add(forward)).is_err(),
+                "{host_port} {guest_port} {guest_ip}"
+            );
         }
         assert!(validate(&[], &add(web())).is_err(), "one target");
-        assert!(validate(&[vmnet8(), lab_net()].concat(), &add(web())).is_err(), "one target");
+        assert!(
+            validate(&[vmnet8(), lab_net()].concat(), &add(web())).is_err(),
+            "one target"
+        );
         assert!(validate(&[TargetRef::App], &add(web())).is_err());
     }
 

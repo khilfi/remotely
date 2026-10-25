@@ -259,7 +259,9 @@ pub fn parse_host_networks(out: &str) -> Result<Vec<Vmnet>> {
         networks.push(Vmnet {
             index,
             name: name.to_ascii_lowercase(),
-            kind: cols.get(2).map_or(VmnetKind::Other(String::new()), |k| VmnetKind::parse(k)),
+            kind: cols
+                .get(2)
+                .map_or(VmnetKind::Other(String::new()), |k| VmnetKind::parse(k)),
             dhcp: cols.get(3).and_then(|d| truthy(d)),
             subnet: text(4),
             mask: text(5),
@@ -324,7 +326,9 @@ fn parse_forward_line(line: &str) -> Option<VmnetForward> {
     }
     let (guest_ip, guest_port) = guest?;
     let description = description.join(" ");
-    let description = description.trim_matches(|c: char| matches!(c, '"' | '\'' | ' ')).to_owned();
+    let description = description
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | ' '))
+        .to_owned();
     Some(VmnetForward {
         protocol: protocol?,
         host_port: host_port?,
@@ -758,7 +762,8 @@ mod tests {
 
     #[test]
     fn a_bridged_vmnet_without_a_subnet_and_an_unknown_type_still_read() {
-        let out = "Total host networks: 2\nINDEX  NAME  TYPE  DHCP  SUBNET  MASK\n0  vmnet0  bridged  false  empty  empty\n\
+        let out =
+            "Total host networks: 2\nINDEX  NAME  TYPE  DHCP  SUBNET  MASK\n0  vmnet0  bridged  false  empty  empty\n\
                    9  vmnet9  futureKind\n";
         let nets = parse_host_networks(out).unwrap();
         assert_eq!(nets[0].kind, VmnetKind::Bridged);
@@ -827,7 +832,15 @@ mod tests {
             .collect();
         assert_eq!(
             args,
-            ["setPortForwarding", "vmnet8", "tcp", "8080", "203.0.113.10", "80", "web site"]
+            [
+                "setPortForwarding",
+                "vmnet8",
+                "tcp",
+                "8080",
+                "203.0.113.10",
+                "80",
+                "web site"
+            ]
         );
         let args: Vec<String> = delete_forward_args("vmnet8", ForwardProtocol::Udp, 53)
             .iter()
@@ -921,7 +934,8 @@ mod tests {
         assert_eq!(nets[0].contains("198.51.100.77"), Some(true));
         assert_eq!(nets[0].contains("203.0.113.77"), Some(false));
         // VirtualBox 6.1 named each network with NetworkName:.
-        let old = parse_natnets("NetworkName:    old-net\nIP:             198.51.100.1\nNetwork:        198.51.100.0/24\n");
+        let old =
+            parse_natnets("NetworkName:    old-net\nIP:             198.51.100.1\nNetwork:        198.51.100.0/24\n");
         assert_eq!(old[0].name, "old-net");
     }
 
@@ -972,7 +986,9 @@ mod tests {
         assert_eq!(paths.snapshot_folder, Some(PathBuf::from(r"C:\VMs\db01\Snapshots")));
         assert_eq!(
             paths.state_file,
-            Some(PathBuf::from(r"C:\VMs\db01\Snapshots\2026-10-25T13-40-17-814880400Z.sav")),
+            Some(PathBuf::from(
+                r"C:\VMs\db01\Snapshots\2026-10-25T13-40-17-814880400Z.sav"
+            )),
             "printed without escapes"
         );
         assert_eq!(paths.state.as_deref(), Some("saved"));
@@ -990,11 +1006,26 @@ mod tests {
         };
         assert_eq!(
             natnet_rule_args("lab-net", &rule, false),
-            ["natnetwork", "modify", "--netname", "lab-net", "--port-forward-4", "ssh:tcp:[]:2222:[198.51.100.5]:22"]
+            [
+                "natnetwork",
+                "modify",
+                "--netname",
+                "lab-net",
+                "--port-forward-4",
+                "ssh:tcp:[]:2222:[198.51.100.5]:22"
+            ]
         );
         assert_eq!(
             natnet_rule_args("lab-net", &rule, true),
-            ["natnetwork", "modify", "--netname", "lab-net", "--port-forward-4", "delete", "ssh"]
+            [
+                "natnetwork",
+                "modify",
+                "--netname",
+                "lab-net",
+                "--port-forward-4",
+                "delete",
+                "ssh"
+            ]
         );
         assert_eq!(
             vm_rule_args("u-1", 1, &rule, false, false),
@@ -1020,6 +1051,9 @@ mod tests {
     fn the_nat_refusal_names_the_file_and_the_way_out() {
         assert_eq!(nat_refusal(true), None);
         let why = nat_refusal(false).unwrap();
-        assert!(why.contains("vmnetnat.conf") && why.contains("Virtual Network Editor"), "{why}");
+        assert!(
+            why.contains("vmnetnat.conf") && why.contains("Virtual Network Editor"),
+            "{why}"
+        );
     }
 }

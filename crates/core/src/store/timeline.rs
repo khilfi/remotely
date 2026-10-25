@@ -96,7 +96,10 @@ mod tests {
 
     #[test]
     fn the_needle_matches_the_key_as_json_writes_it() {
-        assert_eq!(vm_needle(r"C:\VMs\Web01\web01.vmx"), r#""vmxpath":"c:\\vms\\web01\\web01.vmx""#);
+        assert_eq!(
+            vm_needle(r"C:\VMs\Web01\web01.vmx"),
+            r#""vmxpath":"c:\\vms\\web01\\web01.vmx""#
+        );
         assert_eq!(
             vm_needle("00000000-0000-4000-8000-0000000000aa"),
             r#""vmxpath":"00000000-0000-4000-8000-0000000000aa""#

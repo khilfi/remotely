@@ -14,6 +14,8 @@
 
 mod commands;
 #[cfg(test)]
+mod host_networks_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod vm_settings_tests;
