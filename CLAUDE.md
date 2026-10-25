@@ -2,18 +2,18 @@
 
 A Windows desktop app for forward deployed engineers and IT admins: bulk control of VMware Workstation Pro VMs (and, from 0.4.0, Oracle VirtualBox VMs), a performance dashboard, a PuTTY/MobaXterm-style SSH session manager, and bulk command execution with grouped output, with multi-step approvals on every high-impact action.
 
-The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work after the MVP (0.2.1 and 0.3.0), which moves some v2/v3 items into scope and replaces the Bulk run page with MultiExec and Compare in the Terminal page, and `docs/plan-0.4.md` for 0.4.0 (VirtualBox, containers, host details, MultiExec recording and terminal fixes). Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx, QL-xx for post-MVP quality-of-life items, and CT-xx for containers); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
+The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work after the MVP (0.2.1 and 0.3.0), which moves some v2/v3 items into scope and replaces the Bulk run page with MultiExec and Compare in the Terminal page, `docs/plan-0.4.md` for 0.4.0 (VirtualBox, containers, host details, MultiExec recording and terminal fixes), and `docs/plan-0.5.md` for 0.5.0 (VM sizes, images and launch templates with deploy, full VM settings and lifecycle, VM and disk conversion, stacks, schedules, dashboard history and alerts, navigation, customer workspaces). Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx, QL-xx for post-MVP quality-of-life items, CT-xx for containers, and CV-xx for conversion); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
 
 ## Locked decisions
 
 - Stack: Tauri 2, Rust core (tokio), React + TypeScript + Vite UI, xterm.js, uPlot, SQLite via sqlx, russh for SSH.
 - UI components: shadcn/ui (Radix base, Nova preset, Lucide icons) on Tailwind CSS 4. Build screens from shadcn components first; write custom CSS only for what shadcn does not cover (e.g. the xterm.js host).
 - Single user only. No team mode, no server component.
-- Windows 10/11 x64 with VMware Workstation Pro 17 or later, and from 0.4.0 Oracle VirtualBox (`docs/plan-0.4.md`, VM-18). No Linux host support. macOS on Apple Silicon is a separate track after 0.4.0 with its own plan; until then nothing is built for it.
+- Windows 10/11 x64 with VMware Workstation Pro 17 or later, and from 0.4.0 Oracle VirtualBox (`docs/plan-0.4.md`, VM-18). Other hypervisors are not managed; from 0.5.0 Remotely reads and writes their VM and disk formats (`docs/plan-0.5.md`, CV-01 to CV-03). No Linux host support. macOS on Apple Silicon is a separate track after 0.4.0 with its own plan; until then nothing is built for it.
 - RDP means launching `mstsc.exe` with a generated .rdp file (v3).
 - Ansible: inventory export only (v2). The app never runs playbooks.
 - **The repository is public** (the owner's decision, confirmed on 22 Oct 2026; it was private while field-tested from 0.2.0 to 0.4.0), so the "Public repository rules" below apply to everything, including history. Code and releases live in one GitHub repo, and installed apps auto-update from its GitHub Releases (FD-14). The updater reads the public releases without a token; the read-only token in each app's vault (`docs/post-mvp-plan.md`, P1, built while the repo was private) is optional.
-- The MVP (32 requirements: VM-01 to VM-07, SS-01 to SS-06, BX-01 to BX-07, AP-01 to AP-06, MO-01 to MO-04, FD-01 and FD-14) shipped in 0.2.0. Post-MVP scope is exactly what `docs/post-mvp-plan.md` and `docs/plan-0.4.md` list. Do not build other v2/v3 items unless asked; if a change would add or drop scope, stop and say so.
+- The MVP (32 requirements: VM-01 to VM-07, SS-01 to SS-06, BX-01 to BX-07, AP-01 to AP-06, MO-01 to MO-04, FD-01 and FD-14) shipped in 0.2.0. Post-MVP scope is exactly what `docs/post-mvp-plan.md`, `docs/plan-0.4.md` and `docs/plan-0.5.md` list. Do not build other v2/v3 items unless asked; if a change would add or drop scope, stop and say so.
 
 ## Public repository rules (no credentials, PII or secrets)
 
