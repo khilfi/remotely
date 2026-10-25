@@ -120,7 +120,14 @@ function Field({ id, label, children, hint }: { id: string; label: string; child
   );
 }
 
-function SwitchRow({ id, label, checked, onChange, disabled, hint }: {
+function SwitchRow({
+  id,
+  label,
+  checked,
+  onChange,
+  disabled,
+  hint,
+}: {
   id: string;
   label: string;
   checked: boolean;
@@ -231,7 +238,12 @@ export function ResourcesDialog({
           </Field>
         )}
         <Field id="res-memory" label="Memory (GB)" hint={memoryMb ? formatMb(memoryMb) : undefined}>
-          <Input id="res-memory" inputMode="decimal" value={memoryGb} onChange={(e) => setMemoryGb(e.currentTarget.value)} />
+          <Input
+            id="res-memory"
+            inputMode="decimal"
+            value={memoryGb}
+            onChange={(e) => setMemoryGb(e.currentTarget.value)}
+          />
         </Field>
       </div>
       <SwitchRow
@@ -350,7 +362,10 @@ export function GuestOsDialog({
   const currentId = types?.find((t) => t.id === current || t.description === current)?.id ?? current;
   const value = chosen || currentId;
   const options = types ?? [];
-  const shown = options.some((t) => t.id === currentId) || !currentId ? options : [{ id: currentId, description: current }, ...options];
+  const shown =
+    options.some((t) => t.id === currentId) || !currentId
+      ? options
+      : [{ id: currentId, description: current }, ...options];
   return (
     <EditDialog
       title={`Guest OS type of ${vm.displayName}`}
@@ -418,7 +433,11 @@ export function NicDialog({
       ? macProblem(mac, vm.hypervisor)
       : null;
   const macValue: MacAddress | null =
-    macMode === "generated" ? { kind: "generated" } : macMode === "static" ? { kind: "static", mac: normalMac(mac) ?? mac } : null;
+    macMode === "generated"
+      ? { kind: "generated" }
+      : macMode === "static"
+        ? { kind: "static", mac: normalMac(mac) ?? mac }
+        : null;
   return (
     <EditDialog
       title={nic ? `Network adapter ${nic.slot} of ${vm.displayName}` : `Add a network adapter to ${vm.displayName}`}
@@ -658,7 +677,13 @@ export function SharedFolderDialog({
       onClose={onClose}
     >
       <Field id="share-name" label="Name in the guest">
-        <Input id="share-name" autoFocus autoComplete="off" value={name} onChange={(e) => setName(e.currentTarget.value)} />
+        <Input
+          id="share-name"
+          autoFocus
+          autoComplete="off"
+          value={name}
+          onChange={(e) => setName(e.currentTarget.value)}
+        />
       </Field>
       <SwitchRow id="share-write" label="The guest may write to it" checked={writable} onChange={setWritable} />
       <p className="flex items-center gap-1.5 text-xs text-muted-foreground">

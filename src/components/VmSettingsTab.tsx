@@ -80,6 +80,10 @@ interface Props {
   onSubmit: Submit;
   /** For the commands the shell builds from its own dialogs (ISO, shared folder). */
   onSubmitted: (outcome: SubmitOutcome) => void;
+  /** Counts the palette's asks to rename the VM; the rename dialog opens while one is not yet seen. */
+  askRename?: number;
+  renameSeen?: number;
+  onRenameSeen?: (n: number) => void;
 }
 
 type Dialog =
@@ -157,11 +161,28 @@ function vcpuText(specs: VmSpecs): string | null {
   return `${h.vcpus}${layout}`;
 }
 
-export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSubmit, onSubmitted }: Props) {
+export function VmSettingsTab({
+  vm,
+  readOnly,
+  busy,
+  snapshots,
+  refreshKey,
+  onSubmit,
+  onSubmitted,
+  askRename = 0,
+  renameSeen = 0,
+  onRenameSeen,
+}: Props) {
   const [read, setRead] = useState<{ for: string; specs: VmSpecs } | null>(null);
   const [error, setError] = useState<{ for: string; message: string } | null>(null);
   const [reading, setReading] = useState(false);
-  const [dialog, setDialog] = useState<Dialog>(null);
+  const [dialog, setDialog] = useState<Dialog>(askRename > renameSeen ? { kind: "rename" } : null);
+  // The palette's Rename while the tab shows: handled while rendering, once per ask.
+  const [lastAsk, setLastAsk] = useState(askRename);
+  if (askRename !== lastAsk) {
+    setLastAsk(askRename);
+    if (askRename > renameSeen) setDialog({ kind: "rename" });
+  }
   const key = `${vm.vmxPath}|${refreshKey}`;
   const vmxPath = vm.vmxPath;
 
@@ -196,8 +217,7 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
   }
 
   const diskReason = (disk: VirtualDisk, action: "expand" | "compact" | "defragment" | "remove") =>
-    off ??
-    diskActionReason({ action, hypervisor: vm.hypervisor, snapshots, diskPath: disk.path, vmFolder: folder });
+    off ?? diskActionReason({ action, hypervisor: vm.hypervisor, snapshots, diskPath: disk.path, vmFolder: folder });
 
   return (
     <div className="flex flex-col gap-5">
@@ -253,8 +273,8 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
       )}
       {off && running && specs && (
         <p className="text-xs text-muted-foreground">
-          Settings and disks change only while the VM is off. An ISO, a network cable and the guest tools change while it
-          runs.
+          Settings and disks change only while the VM is off. An ISO, a network cable and the guest tools change while
+          it runs.
         </p>
       )}
 
@@ -322,7 +342,9 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
                           size="xs"
                           variant="ghost"
                           disabled={toolsReason(vm, readOnly, h) !== null || busy}
-                          onClick={() => void onSubmit({ type: "vmDevice", targets: [ref], op: { kind: "installTools" } })}
+                          onClick={() =>
+                            void onSubmit({ type: "vmDevice", targets: [ref], op: { kind: "installTools" } })
+                          }
                         >
                           Install or upgrade
                         </Button>
@@ -336,7 +358,14 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
 
           <Section
             title="Processor and memory"
-            action={<ActionButton label="Edit…" icon={<PencilIcon />} reason={off} onClick={() => setDialog({ kind: "resources" })} />}
+            action={
+              <ActionButton
+                label="Edit…"
+                icon={<PencilIcon />}
+                reason={off}
+                onClick={() => setDialog({ kind: "resources" })}
+              />
+            }
           >
             <FactList
               rows={[
@@ -353,7 +382,14 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
 
           <Section
             title="Firmware"
-            action={<ActionButton label="Edit…" icon={<PencilIcon />} reason={off} onClick={() => setDialog({ kind: "firmware" })} />}
+            action={
+              <ActionButton
+                label="Edit…"
+                icon={<PencilIcon />}
+                reason={off}
+                onClick={() => setDialog({ kind: "firmware" })}
+              />
+            }
           >
             <FactList
               rows={[
@@ -367,7 +403,14 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
           <Section
             title={`Disks (${h.disks.length})`}
             icon={<HardDriveIcon className="size-4 text-muted-foreground" />}
-            action={<ActionButton label="Add…" icon={<PlusIcon />} reason={off} onClick={() => setDialog({ kind: "diskAdd" })} />}
+            action={
+              <ActionButton
+                label="Add…"
+                icon={<PlusIcon />}
+                reason={off}
+                onClick={() => setDialog({ kind: "diskAdd" })}
+              />
+            }
           >
             {h.disks.length === 0 ? (
               <p className="text-xs text-muted-foreground">No virtual disk is attached.</p>
@@ -406,12 +449,12 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
                               .filter(Boolean)
                               .join(" · ")}
                           </div>
-                          {d.chain.length > 0 && (
-                            <div className="text-muted-foreground">On {d.chain.join(" → ")}</div>
-                          )}
+                          {d.chain.length > 0 && <div className="text-muted-foreground">On {d.chain.join(" → ")}</div>}
                           {d.problem && <div className="text-tier-medium">{d.problem}</div>}
                         </TableCell>
-                        <TableCell className="text-right text-xs tabular-nums">{formatBytes(d.provisionedBytes)}</TableCell>
+                        <TableCell className="text-right text-xs tabular-nums">
+                          {formatBytes(d.provisionedBytes)}
+                        </TableCell>
                         <TableCell className="text-right text-xs tabular-nums">{formatBytes(d.onDiskBytes)}</TableCell>
                         <TableCell>
                           <DiskMenu
@@ -462,7 +505,9 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
                           ) : (
                             <span className="text-muted-foreground">Empty</span>
                           )}
-                          {c.connected === false && <div className="text-muted-foreground">not connected at power-on</div>}
+                          {c.connected === false && (
+                            <div className="text-muted-foreground">not connected at power-on</div>
+                          )}
                         </TableCell>
                         <TableCell className="text-right">
                           <span className="inline-flex gap-1.5">
@@ -475,7 +520,11 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
                               label="Eject"
                               reason={anyState ?? (!c.image && !c.hostDrive ? "Nothing to eject" : null)}
                               onClick={() =>
-                                void onSubmit({ type: "vmDevice", targets: [ref], op: { kind: "ejectIso", slot: c.slot } })
+                                void onSubmit({
+                                  type: "vmDevice",
+                                  targets: [ref],
+                                  op: { kind: "ejectIso", slot: c.slot },
+                                })
                               }
                             />
                           </span>
@@ -492,7 +541,9 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
           <Section
             title={`Network adapters (${h.nics.length})`}
             icon={<NetworkIcon className="size-4 text-muted-foreground" />}
-            action={<ActionButton label="Add…" icon={<PlusIcon />} reason={off} onClick={() => setDialog({ kind: "nic" })} />}
+            action={
+              <ActionButton label="Add…" icon={<PlusIcon />} reason={off} onClick={() => setDialog({ kind: "nic" })} />
+            }
           >
             {h.nics.length === 0 ? (
               <p className="text-xs text-muted-foreground">No network adapter.</p>
@@ -542,7 +593,14 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
 
           <Section
             title={`Shared folders (${h.sharedFolders.length})`}
-            action={<ActionButton label="Share…" icon={<PlusIcon />} reason={off} onClick={() => setDialog({ kind: "share" })} />}
+            action={
+              <ActionButton
+                label="Share…"
+                icon={<PlusIcon />}
+                reason={off}
+                onClick={() => setDialog({ kind: "share" })}
+              />
+            }
           >
             {h.sharedFolders.length === 0 ? (
               <p className="text-xs text-muted-foreground">No folder of this PC is shared with the guest.</p>
@@ -556,7 +614,10 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
                         <TableCell className="text-xs whitespace-normal">
                           <span className="font-mono break-all">{f.hostPath}</span>
                           <div className="text-muted-foreground">
-                            {[f.writable === null ? null : f.writable ? "read and write" : "read only", f.enabled === false ? "off" : null]
+                            {[
+                              f.writable === null ? null : f.writable ? "read and write" : "read only",
+                              f.enabled === false ? "off" : null,
+                            ]
                               .filter(Boolean)
                               .join(" · ")}
                           </div>
@@ -585,7 +646,10 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
           <Section title="Other devices">
             <FactList
               rows={[
-                { label: "Controllers", value: h.controllers.map((c) => `${c.name}${c.kind ? ` (${c.kind})` : ""}`).join(", ") || null },
+                {
+                  label: "Controllers",
+                  value: h.controllers.map((c) => `${c.name}${c.kind ? ` (${c.kind})` : ""}`).join(", ") || null,
+                },
                 { label: "USB", value: h.usb.length > 0 ? h.usb.join(", ") : "None" },
                 { label: "Sound", value: h.sound ?? "None" },
                 {
@@ -659,7 +723,10 @@ export function VmSettingsTab({ vm, readOnly, busy, snapshots, refreshKey, onSub
               throw new Error("Not renamed");
             }
           }}
-          onClose={() => setDialog(null)}
+          onClose={() => {
+            onRenameSeen?.(askRename);
+            setDialog(null);
+          }}
         />
       )}
       {dialog?.kind === "nic" && (

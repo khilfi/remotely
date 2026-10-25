@@ -86,6 +86,10 @@ interface Props {
   onSubmitted: (outcome: SubmitOutcome) => void;
   /** VM-24: the hypervisor's own window. */
   onOpenConsole: () => void;
+  /** VM-24: the palette's asks to rename the VM, and the last one its dialog showed for. */
+  askRename: number;
+  renameSeen: number;
+  onRenameSeen: (n: number) => void;
 }
 
 type Hints = { take: string | null; revert: string | null; delete: string | null };
@@ -185,6 +189,9 @@ export function VmDetailsPanel(props: Props) {
               refreshKey={refreshKey}
               onSubmit={props.onSubmit}
               onSubmitted={props.onSubmitted}
+              askRename={props.askRename}
+              renameSeen={props.renameSeen}
+              onRenameSeen={props.onRenameSeen}
             />
           )}
         </TabsContent>

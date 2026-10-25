@@ -131,6 +131,8 @@ export interface VmPageRequest {
   vmxPaths: string[];
   view: VmView;
   n: number;
+  /** VM-24: open the Settings tab's rename dialog too (the palette's Rename). */
+  rename?: boolean;
 }
 
 interface Props {
@@ -487,6 +489,9 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
   // the list, and shows every VM first when the filter hides the one asked for. Handled while rendering, once each.
   const [handledRequest, setHandledRequest] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  // VM-24: bumped when the palette asks to rename the VM; its Settings tab opens the dialog until it is seen.
+  const [renameAsk, setRenameAsk] = useState(0);
+  const [renameSeen, setRenameSeen] = useState(0);
   const listReady = !loading && listedFor === filter;
   if (request && request.n !== handledRequest && listReady) {
     const wanted = new Set(request.vmxPaths.map(keyOf));
@@ -497,6 +502,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
     } else {
       setHandledRequest(request.n);
       setView(request.view);
+      if (request.rename) setRenameAsk((n) => n + 1);
       setNotice(null);
       const first =
         wanted.size > 0
@@ -1128,7 +1134,9 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={toolsTargets.length === 0}
-              onSelect={() => void submit({ type: "vmDevice", targets: refs(toolsTargets), op: { kind: "installTools" } })}
+              onSelect={() =>
+                void submit({ type: "vmDevice", targets: refs(toolsTargets), op: { kind: "installTools" } })
+              }
             >
               <WrenchIcon />
               <div>
@@ -1379,6 +1387,9 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
                 onSubmit={submit}
                 onSubmitted={onSubmitted}
                 onOpenConsole={() => void openConsole(detailVm.vmxPath)}
+                askRename={renameAsk}
+                renameSeen={renameSeen}
+                onRenameSeen={setRenameSeen}
               />
             )}
           </ResizablePanel>

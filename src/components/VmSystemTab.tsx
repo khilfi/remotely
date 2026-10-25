@@ -124,7 +124,8 @@ export function VmSystemTab({ vm, thresholds, onHostDetails }: Props) {
           />
           <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
             <HardDriveIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            The VM&apos;s disks, network adapters, firmware and other devices, and changing them, are on the Settings tab.
+            The VM&apos;s disks, network adapters, firmware and other devices, and changing them, are on the Settings
+            tab.
           </p>
 
           <section className="flex flex-col gap-2">

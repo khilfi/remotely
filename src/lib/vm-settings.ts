@@ -85,11 +85,7 @@ function parentOf(path: string): string {
 }
 
 function sameFolder(a: string, b: string) {
-  const norm = (p: string) =>
-    p
-      .replace(/\//g, "\\")
-      .replace(/\\+$/, "")
-      .toLowerCase();
+  const norm = (p: string) => p.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
   return norm(a) === norm(b);
 }
 
@@ -244,10 +240,7 @@ export function nicText(nic: VirtualNic): string {
 export function normalMac(text: string): string | null {
   const hex = text.replace(/[:\-\s]/g, "");
   if (!/^[0-9a-fA-F]{12}$/.test(hex)) return null;
-  return hex
-    .toLowerCase()
-    .match(/.{2}/g)!
-    .join(":");
+  return hex.toLowerCase().match(/.{2}/g)!.join(":");
 }
 
 /** VM-11: Workstation takes a hand-picked MAC only from 00:50:56:00:00:00 to 00:50:56:3F:FF:FF. */
@@ -266,7 +259,8 @@ export function vmNameProblem(name: string): string | null {
   if (!name.trim()) return "Give the VM a name";
   if (name.trim() !== name) return "No space at the start or end";
   if (name.length > 80) return "At most 80 characters";
-  if (/[\\/:*?"<>|\u0000-\u001f]/.test(name)) return 'Not \\ / : * ? " < > |';
+  const control = [...name].some((c) => c.charCodeAt(0) < 0x20);
+  if (control || /[\\/:*?"<>|]/.test(name)) return 'Not \\ / : * ? " < > |';
   return null;
 }
 

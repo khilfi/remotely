@@ -65,10 +65,7 @@ test("settings change only while the VM is off, and tools need it running", () =
 test("the read-only lock and protection come before the power state", () => {
   const running = vm("web", { powerState: "running" });
   assert.equal(vmActionReason({ vm: running, needs: "off", readOnly: READ_ONLY_REASON }), READ_ONLY_REASON);
-  assert.equal(
-    vmActionReason({ vm: { ...running, protected: true }, needs: "off", readOnly: null }),
-    PROTECTED_REASON,
-  );
+  assert.equal(vmActionReason({ vm: { ...running, protected: true }, needs: "off", readOnly: null }), PROTECTED_REASON);
   assert.equal(vmActionReason({ vm: vm("web"), needs: "off", readOnly: null, busy: true }), "Sending the last action…");
   assert.equal(vmActionReason({ vm: vm("web"), needs: "off", readOnly: null }), null);
 });
@@ -124,14 +121,26 @@ test("a bulk resize goes to the VMs that are off and unprotected", () => {
 test("the CPU and memory dialog checks what each hypervisor takes", () => {
   const ws = { hypervisors: ["vmware" as const] };
   assert.equal(resourcesProblem({ vcpus: 4, coresPerSocket: 2, memoryMb: 8192, ...ws }), null);
-  assert.equal(resourcesProblem({ vcpus: null, coresPerSocket: null, memoryMb: null, ...ws }), "Change the vCPUs or the memory");
-  assert.equal(resourcesProblem({ vcpus: 6, coresPerSocket: 4, memoryMb: null, ...ws }), "The cores per socket must divide the vCPUs");
-  assert.equal(resourcesProblem({ vcpus: null, coresPerSocket: null, memoryMb: 1026, ...ws }), "Workstation takes memory in steps of 4 MB");
+  assert.equal(
+    resourcesProblem({ vcpus: null, coresPerSocket: null, memoryMb: null, ...ws }),
+    "Change the vCPUs or the memory",
+  );
+  assert.equal(
+    resourcesProblem({ vcpus: 6, coresPerSocket: 4, memoryMb: null, ...ws }),
+    "The cores per socket must divide the vCPUs",
+  );
+  assert.equal(
+    resourcesProblem({ vcpus: null, coresPerSocket: null, memoryMb: 1026, ...ws }),
+    "Workstation takes memory in steps of 4 MB",
+  );
   assert.equal(
     resourcesProblem({ vcpus: null, coresPerSocket: null, memoryMb: 1026, hypervisors: ["virtualbox"] }),
     null,
   );
-  assert.match(resourcesProblem({ vcpus: 2, coresPerSocket: 1, memoryMb: null, hypervisors: ["virtualbox"] })!, /sockets/);
+  assert.match(
+    resourcesProblem({ vcpus: 2, coresPerSocket: 1, memoryMb: null, hypervisors: ["virtualbox"] })!,
+    /sockets/,
+  );
   assert.equal(resourcesProblem({ vcpus: 65, coresPerSocket: null, memoryMb: null, ...ws }), "vCPUs: 1 to 64");
 });
 

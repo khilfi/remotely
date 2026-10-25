@@ -22,6 +22,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   CameraIcon,
+  FilePlusIcon,
   DownloadIcon,
   GaugeIcon,
   ContainerIcon,
@@ -217,8 +218,8 @@ export default function App() {
   const openPalette = useCallback((vm: string | null) => setPalette((p) => ({ open: true, vm, n: p.n + 1 })), []);
 
   /** QL-14: the Virtual machines page with these VMs' details, or (none) the snapshot view of the open one. */
-  const openVms = useCallback((vmxPaths: string[], view: VmView) => {
-    setVmRequest((prev) => ({ vmxPaths, view, n: (prev?.n ?? 0) + 1 }));
+  const openVms = useCallback((vmxPaths: string[], view: VmView, rename?: boolean) => {
+    setVmRequest((prev) => ({ vmxPaths, view, rename, n: (prev?.n ?? 0) + 1 }));
     setPage("vms");
   }, []);
 
@@ -497,6 +498,21 @@ export default function App() {
       run: () => {
         setInventoryVersion((v) => v + 1);
         setPage("vms");
+      },
+    },
+    {
+      // VM-24: a .vmx or .vbox from a file dialog the shell opens.
+      id: "add-vm",
+      label: "Add an existing VM…",
+      icon: FilePlusIcon,
+      keywords: "register vmx vbox open import virtual machine",
+      run: async () => {
+        try {
+          const outcome = await api.vmPickExisting();
+          if (outcome) submitted(outcome);
+        } catch (err) {
+          toast.error(errorMessage(err));
+        }
       },
     },
     {
@@ -902,7 +918,13 @@ export default function App() {
           setDashboardFocus((prev) => ({ key, n: (prev?.n ?? 0) + 1 }));
           setPage("dashboard");
         }}
-        onOpenVm={(vmxPath, view) => openVms([vmxPath], view)}
+        onOpenVm={(vmxPath, view, rename) => openVms([vmxPath], view, rename)}
+        onOpenConsole={(vmxPath) =>
+          void api.vmOpenConsole(vmxPath).then(
+            (done) => done.kind === "starting" && submitted(done.outcome),
+            (err: unknown) => toast.error(errorMessage(err)),
+          )
+        }
       />
       <ReauthDialog />
       <Toaster theme={resolved} position="bottom-right" />
