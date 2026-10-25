@@ -7,12 +7,13 @@
 import type { JobEvent, JobStatus, TerminalAlert, UpdateInfo } from "./api.ts";
 import type { Alert, AlertEvent } from "./dashboard-api.ts";
 import { isAppLink, type AppLink } from "./links.ts";
+import type { ScheduleEvent } from "./schedules-api.ts";
 import { alertNotification } from "./terminal-alerts.ts";
 
 /** Entries the core keeps (crates/core/src/notifications.rs MAX_NOTIFICATIONS); the oldest go first. */
 export const MAX_KEPT = 500;
 
-export type NotificationSource = "alert" | "terminalAlert" | "command" | "job" | "update" | "app";
+export type NotificationSource = "alert" | "terminalAlert" | "command" | "job" | "update" | "schedule" | "app";
 export type NotificationLevel = "info" | "success" | "warning" | "error";
 
 /** What the UI hands the core (crates/core/src/notifications.rs `NotificationInput`). */
@@ -114,6 +115,32 @@ export function fromUpdate(update: UpdateInfo): NotificationInput {
     link: { kind: "update" },
     once: `update:${update.version}`,
   };
+}
+
+/**
+ * VM-14, VM-27: a schedule's run that did not happen: missed (the PC slept, Remotely was closed), skipped (the read-only
+ * lock, the last run still going), or the schedule waits to be approved again. Runs that ran are their jobs' entries.
+ */
+export function fromScheduleEvent(event: ScheduleEvent): NotificationInput | null {
+  const link: AppLink = { kind: "schedule", scheduleId: event.scheduleId };
+  const group = `schedule:${event.scheduleId}`;
+  switch (event.event) {
+    case "missed":
+      return { source: "schedule", level: "warning", title: `Missed: ${event.name}`, body: event.detail, link, group };
+    case "skipped":
+      return { source: "schedule", level: "warning", title: `Skipped: ${event.name}`, body: event.detail, link, group };
+    case "needsApproval":
+      return {
+        source: "schedule",
+        level: "warning",
+        title: `${event.name} waits for approval`,
+        body: `${event.reason} since it was approved, so it doesn't run until you review it.`,
+        link,
+        group,
+      };
+    default:
+      return null;
+  }
 }
 
 /** AP-04: a Low action left protected targets alone (the toast that says so is worth keeping). */

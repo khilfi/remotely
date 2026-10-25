@@ -8,7 +8,7 @@ import { slashIsPath } from "./hypervisors.ts";
 
 /** Where a VM's details panel opens: its details, or its snapshot tree and actions. */
 /** The VM details panel's tabs (MO-13: System, the guest's own facts; VM-23: Settings, the VM's hardware). */
-export type VmView = "details" | "settings" | "system" | "snapshots" | "log" | "timeline";
+export type VmView = "details" | "settings" | "system" | "snapshots" | "log" | "timeline" | "schedules";
 
 /** AP-04: what a protected VM's actions say. */
 export const PROTECTED_REASON = "Protected: actions skip this VM until it is unprotected";

@@ -37,6 +37,7 @@ import { WhyDisabled } from "@/components/WhyDisabled";
 import { VmSettingsTab } from "@/components/VmSettingsTab";
 import { VmLogTab } from "@/components/VmLogTab";
 import { VmTimelineTab } from "@/components/VmTimelineTab";
+import { VmSchedulesTab, type ScheduleAsk } from "@/components/VmSchedulesTab";
 import {
   api,
   type Command,
@@ -93,6 +94,8 @@ interface Props {
   askRename: number;
   renameSeen: number;
   onRenameSeen: (n: number) => void;
+  /** VM-14, VM-27: the Schedules page, for a new schedule on this VM or one schedule's runs. */
+  onSchedules?: (ask: ScheduleAsk) => void;
 }
 
 type Hints = { take: string | null; revert: string | null; delete: string | null };
@@ -159,6 +162,7 @@ export function VmDetailsPanel(props: Props) {
             </TabsTrigger>
             <TabsTrigger value="log">Log</TabsTrigger>
             <TabsTrigger value="timeline">Timeline</TabsTrigger>
+            <TabsTrigger value="schedules">Schedules</TabsTrigger>
           </TabsList>
           <WhyDisabled reason={props.readOnly} className="ml-auto">
             <Button
@@ -215,6 +219,16 @@ export function VmDetailsPanel(props: Props) {
         </TabsContent>
         <TabsContent value="timeline" className="min-h-0 overflow-auto p-3">
           {view === "timeline" && <VmTimelineTab key={vm.vmxPath} vm={vm} refreshKey={refreshKey} />}
+        </TabsContent>
+        <TabsContent value="schedules" className="min-h-0 overflow-auto p-3">
+          {view === "schedules" && (
+            <VmSchedulesTab
+              vm={vm}
+              refreshKey={refreshKey}
+              readOnly={props.readOnly}
+              onSchedules={(ask) => props.onSchedules?.(ask)}
+            />
+          )}
         </TabsContent>
       </Tabs>
     </aside>

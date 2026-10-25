@@ -58,6 +58,8 @@ pub enum NotificationSource {
     Job,
     /// FD-14: an update is available.
     Update,
+    /// VM-14, VM-27: a schedule's run missed or skipped, or a schedule waiting for approval again.
+    Schedule,
     /// Anything else worth keeping from a toast.
     App,
 }
