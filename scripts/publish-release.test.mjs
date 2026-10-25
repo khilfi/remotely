@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { checkManifest, installerName, MANIFEST, PLATFORMS, publish } from "./publish-release.mjs";
+import { checkManifest, installerName, MANIFEST, PLATFORMS, publish, releaseBody } from "./publish-release.mjs";
 import { parsePublicKey } from "./verify-update-signature.mjs";
 
 const REPO = "alice/remotely";
@@ -151,7 +151,19 @@ test("publishes a draft whose latest.json an installed app accepts", async () =>
   assert.equal(release.prerelease, false);
   assert.equal(release.tag_name, "v0.9.0");
   assert.equal(release.name, "Remotely v0.9.0");
-  assert.equal(release.body, "Remotely 0.9.0: what changed.");
+  // The release page: the notes, then the installer's checksum and how to check it.
+  const checksum = createHash("sha256").update(files.bytes).digest("hex");
+  assert.ok(release.body.startsWith("Remotely 0.9.0: what changed.\n"), release.body);
+  assert.ok(release.body.includes(`\`Remotely_0.9.0_x64-setup.exe\` SHA-256: \`${checksum}\``), release.body);
+  assert.ok(release.body.includes("Get-FileHash .\\Remotely_0.9.0_x64-setup.exe -Algorithm SHA256"));
+  assert.equal(
+    release.body,
+    releaseBody({
+      notes: "Remotely 0.9.0: what changed.",
+      file: "Remotely_0.9.0_x64-setup.exe",
+      installer: files.bytes,
+    }),
+  );
   const names = release.assets.map((a) => a.name);
   assert.deepEqual(names, ["Remotely_0.9.0_x64-setup.exe", "Remotely_0.9.0_x64-setup.exe.sig", MANIFEST]);
 
@@ -161,6 +173,7 @@ test("publishes a draft whose latest.json an installed app accepts", async () =>
   assert.deepEqual(Object.keys(uploaded), ["version", "notes", "pub_date", "platforms"]);
   assert.deepEqual(Object.keys(uploaded.platforms), PLATFORMS);
   assert.equal(uploaded.version, "0.9.0");
+  // The update banner shows latest.json's notes: the notes alone, without the checksum section.
   assert.equal(uploaded.notes, "Remotely 0.9.0: what changed.");
   const installerUrl = `${github.base}/repos/${REPO}/releases/assets/${release.assets[0].id}`;
   for (const name of PLATFORMS) {
