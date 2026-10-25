@@ -92,8 +92,12 @@ crates/core/          remotely-core: all app logic
                       purge; the read-only lock refuses the setting and Purge now, never the schedule
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
                       output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
-    adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
-                      snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
+    adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
+                      found beside vmrun, vmrun_change), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
+                      comments and line endings kept; |XX escapes; non-UTF-8 refused), virtualbox.rs (VM-18
+                      VBoxManage: list, showvminfo, guest properties, power,
+                      snapshots; SwitchableVirtualBox for the Settings path; VM-23 change(), list ostypes,
+                      screenshotpng, VirtualBoxVM --separate, the .vbox's extras), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec;
                       keyboard-interactive answers are SecretStrings until russh's respond call; A9 at most 16 login
                       banners and 64 KB per connection, then one note; every path through the SS-07 jump host
@@ -159,7 +163,11 @@ crates/core/          remotely-core: all app logic
                       names; by text alone, never the file system), read_capped (a file whole up to a cap, or
                       TooLarge; MAX_VM_CONFIG_BYTES 4 MB), is_format_char (Unicode 16.0's Cf table), is_device_name
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
-                      and this PC's RAM and paging files per round), guest.rs (MO-02 SSH polling, kept connections,
+                      and this PC's RAM and paging files per round; RoundObserver: after each round, history.rs and
+                      alerts; collect_once_at for tests' own clock), history.rs (MO-06 Rollup: 1-minute averages with
+                      min and max, written once a minute in one transaction; bucket: ranges of 1 h to 7 d;
+                      HistoryRetention 1 to 30 days, 7 by default, `metrics.historyRetention`; the daily prune with
+                      resolved alerts, checkpoint and VACUUM through when_idle, audited history_pruned), guest.rs (MO-02 SSH polling, kept connections,
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
                       GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
                       POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
@@ -172,16 +180,39 @@ crates/core/          remotely-core: all app logic
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests)
+    alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
+                      Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
+                      stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
+                      as the grid shows them, rule edits and acknowledge audited and locked (Change::Alerts), the
+                      alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
+    dashboard.rs      MO-16 the layout (`dashboard.layout`, per workspace, null is the default): widgets on 4 columns
+                      and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
                       command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
-                      or label) for the Terminal page
+                      or label) for the Terminal page; sessions/defaults.rs QL-16 folder defaults (user, login, jump
+                      host, label, tags; migration 0021) and Folders::resolve, the one resolver: a session's own
+                      value, then the nearest folder up the path, then the app's default (tags add up; labels only
+                      add; a folder's jump host never applies to itself). The store resolves every session it reads
+                      (SessionRecord's fields are what applies, `own` what the editor edits, `inherited` the folders),
+                      so every consumer gets it; set_folder_defaults, move_to, move_folder, delete_folder and restore
+                      check SecretBindings like a session edit (confirm_folder_change, SecretPlaces read once)
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited);
                       P3 a name looked up once at a time and cached, lookups done by the deadline kept and the rest
                       finished in the background, sessions behind a jump host never looked up; A4 never linked
                       behind a jump host or across environment labels (not_linkable)
+    vm_settings/      VM-11, VM-12, VM-15, VM-16, VM-23, VM-24: ops.rs the typed edits (Command::VmConfig, VmDevice,
+                      VmDisk, VmLifecycle), their checks and summaries; vmware.rs each edit as changes to a VmxFile, new
+                      disk slots and vdiskmanager arguments, what deleteVM deletes; virtualbox.rs each edit as VBoxManage
+                      calls; mod.rs VmEditor: plans from the VM's state (refused while running, suspended, with
+                      snapshots under a disk change, a disk outside its folder), the approval preview (VmChangePreview:
+                      before and after, every file deleted) and the job's work (.vmx backup beside it, atomic write,
+                      restored on failure, deleted once it went well; vmware.addedVms for Add existing VM); service.rs
+                      Core.vm_settings: ISOs, shared folders and existing VMs from the shell's dialogs and drops (never
+                      from the UI: check_from_ui), guest OS types, VirtualBox screenshots, Open console (audited
+                      vm_console_opened, no tier, refused by the read-only lock)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:
                       R9 TerminalTuning::retry_delay, 10 fast tries then 12 slow ones, each spread at random;
                       Terminals::wake_reconnects on a resume or a new address, from the shell's wake.rs,
@@ -224,7 +255,15 @@ crates/core/          remotely-core: all app logic
                       FileTransfers (Core.files: staged files, uploads, retries);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
-                      closed with the terminal, audited tunnel_opened and tunnel_closed
+                      closed with the terminal, audited tunnel_opened and tunnel_closed;
+                      rules.rs QL-17 highlight and alert rules: built-ins (Error, Fatal, Panic, Python traceback,
+                      Warning; alerts off by default), the user's own (at most 50, audited terminal_rule_changed
+                      without the pattern, read-only lock Change::TerminalRules), check_pattern (a subset Rust regex
+                      and JS with the u flag read alike; \d \w \s \b . compiled with their JS meaning; nested
+                      repeats refused), RuleBook on a watch channel; alerts.rs per-pane AlertWatch: completed lines
+                      (log.rs ScrubbedLines, secrets scrubbed) matched on 2,000 characters, never full-screen,
+                      secret-prompt or typed lines; one TerminalEvent::Alert per 2 s burst, then a 60 s cooldown per
+                      rule per pane
     snippets/         BX-08 command panel: favourite commands (mod.rs; audited, no approval tier), the built-in
                       library (library.rs: ~525 Linux commands in 30 area groups plus TROUBLESHOOT symptom runbooks
                       that reference them; two LibrarySections), {{variables}} (variables.rs); classified by the bus's
@@ -242,6 +281,11 @@ crates/core/          remotely-core: all app logic
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
+    multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
+                      characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
+                      sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
+                      leaves its groups; open_terminals lists a group's open terminals. Groups only choose MultiExec's
+                      targets
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited; a new key type for a host
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
@@ -249,11 +293,15 @@ crates/core/          remotely-core: all app logic
                       authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
                       and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
-                      format version; new exports use file::KDF, 256 MiB and 3 passes, and a file opens with the
-                      parameters in its header, so older 64 MiB files still import), preview with conflicts (skip,
-                      replace, keep both), commit; audited; an export refuses the vault password as its passphrase;
-                      catalog.rs VM-19 to VM-21 own sizes, images by path (a note when the file isn't here; a refused
-                      path can only be skipped) and templates mapped to this laptop's images, sizes and keys
+                      format version 2 for an export that uses QL-16 folder defaults, else 1, which 0.4.x reads; new
+                      exports use file::KDF, 256 MiB and 3 passes, and a file opens with the parameters in its header,
+                      so older 64 MiB files still import), preview with conflicts (skip, replace, keep both), commit;
+                      audited; an export refuses the vault password as its passphrase; catalog.rs VM-19 to VM-21 own
+                      sizes, images by path (a note when the file isn't here; a refused path can only be skipped) and
+                      templates mapped to this laptop's images, sizes and keys; QL-16 sessions travel with what they
+                      set themselves and folders with their defaults (a folder here with other defaults: keep or
+                      replace); groups.rs QL-19 MultiExec groups by name with their sessions' ids (members become the
+                      sessions imported or matched here, the rest left out with a note)
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -267,7 +315,8 @@ crates/core/          remotely-core: all app logic
                       vault password may go without asking (a saved session at that host, port and jump host logs in
                       with it, gives it to sudo, or a session_secret_grants row from an earlier answer, migration
                       0016; one added since the unlock goes to its first place free; keys and key passphrases never
-                      ask; a right answer covers REAUTH_GRACE, 5 min, ended by a lock);
+                      ask; a right answer covers REAUTH_GRACE, 5 min, ended by a lock; QL-16 SecretPlaces: every
+                      session's place and what it sends, its folders' login included, read once per change);
                       Core::spawn_lock_watch closes kept connections, forgets typed logins and an open FD-07 file;
                       strength.rs (a new vault password or FD-07 export passphrase: 10 to 1024 characters and a
                       zxcvbn-style score of at least 3 of 4: common passwords and words, repeats, sequences,
@@ -276,7 +325,8 @@ crates/core/          remotely-core: all app logic
     store/            jobs.rs: the journal stores Command::for_journal (scripts and lines redacted), command_type
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
-                      and verifies and exports with row streams
+                      and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
+                      terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021)
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -290,11 +340,13 @@ crates/core/          remotely-core: all app logic
                       (private or public, rate limits), throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
-  tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation); opt-in
+  tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
+                      QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16); opt-in
                       workstation_it.rs and virtualbox_it.rs
-src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
+src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
+                      QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
-                      (command_panel.rs), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
+                      (command_panel.rs; QL-17 notify_terminal_alert), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
                       copies: selections through terminal_copy_selection, Copy output through terminal_output_copy,
                       scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
                       formats), SS-08 file
@@ -303,7 +355,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       image and folder dialogs, `catalog://hash` progress, cloud image pages after checked_site),
                       CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
-                      (host_details.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
+                      (host_details.rs), MO-06, MO-07, MO-16 the dashboard's history, alerts, layout and
+                      services widget, and the alerts' Windows notification (dashboard.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
                       startup message boxes, setting an unopenable database aside, Settings About's logs folder, UI
                       crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
                       instance (release builds), closes what a reloaded page had open (on_page_load), and turns
@@ -311,7 +364,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       the installer exits the app; SS-03 (R9) wake.rs: Windows resume
                       (PowerRegisterSuspendResumeNotification) and new-address (NotifyUnicastIpAddressChange)
                       notifications wake terminals waiting to reconnect; P10 heavy commands (terminal output scrub,
-                      the command library) run on spawn_blocking, never on the window's thread
+                      the command library) run on spawn_blocking, never on the window's thread; VM-23, VM-24
+                      vm_settings.rs (ISO, shared folder and existing VM dialogs opened here, ISO drops taken from the
+                      staged drop, Open console, screenshots, guest OS types)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -320,13 +375,21 @@ src/                  React + TypeScript UI
                       FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
+                      VmSettingsTab and VmSettingsDialogs for VM-23: the Settings tab and its edit dialogs (bulk
+                      resize too, VM-12);
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
-                      and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
+                      and dashed limit lines; MO-06, MO-07, MO-16 RangePicker, AlertsWidget, AlertRulesSheet,
+                      AlertNotifier (one Windows notification per round of alerts, masked), DashboardGrid (pointer
+                      drag, keyboard moves, resize; no drag-and-drop library), WidgetSettings, ServicesWidget,
+                      MetricChartWidget, DashboardHistoryCard; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
                       presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; VM-19 to
-                      VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check))
+                      VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check);
+                      QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
+                      MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
+                      (Ctrl+Shift+G); TerminalRulesCard for QL-17)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
@@ -338,6 +401,7 @@ src/                  React + TypeScript UI
                       each timed from when the last one finished; useVisibility); use-transfers.ts (SS-08, P6 the
                       transfers store through useSyncExternalStore); use-debounced.ts (Compare reloads once per burst
                       of job events; Activity coalesces its own asks, at most one read a second);
+                      use-chart-points.ts (MO-06 a series' live rounds, or a history range carried on with them);
                       use-password-strength.ts; use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), reauth.ts and reauth-prompt.ts (SS-04, AP-06: on `reauth_required` ask for the vault
@@ -347,7 +411,14 @@ src/                  React + TypeScript UI
                       through paste.ts, every selection copy scrubbed by the core, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
-                      xterm's internal onUserInput, checked by a test), multiexec.ts, recordings.ts (QL-12 view texts,
+                      xterm's internal onUserInput, checked by a test), multiexec.ts, multiexec-groups.ts (QL-19 which
+                      tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
+                      logical lines, matching, caps, grouping by tab), scrollback-xterm.ts (QL-18 reading a pane's
+                      buffer, showing a match with a decoration), highlight-rules.ts (QL-17 scope, compile, match a
+                      logical line to cells, colours per theme, time budget), terminal-highlights.ts (QL-17 xterm
+                      decorations for lines the cursor passed, from a marker; CSI J/K recheck; hidden on the alternate
+                      screen; one per terminal including the FD-03 masked twin), terminal-alerts.ts (QL-17 recent
+                      alerts with subscribe, for QL-25; notification text), recordings.ts (QL-12 view texts,
                       QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
                       transfers-store.ts (SS-08, P6 every transfer outside React state), job-events.ts (P6, VM-01
                       which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest
@@ -356,11 +427,15 @@ src/                  React + TypeScript UI
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form,
-                      DEPLOY_REASON), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
+                      DEPLOY_REASON), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
+                      (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
                       delay, longer after failures), host-details.ts
-                      (MO-13, MO-14 summaries, wording and the commands offered to copy),
+                      (MO-13, MO-14 summaries, wording and the commands offered to copy), dashboard-api.ts (MO-06,
+                      MO-07, MO-16 wrappers and types), history.ts (MO-06 ranges, buckets, stored minutes carried on
+                      with live rounds, gaps), alerts.ts (MO-07 wording, the editor's checks, one notification per
+                      round), dashboard-layout.ts (MO-16 add, remove, move, resize, drag snapping),
                       ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
                       debounce.ts (when a reload after job events runs), retention.ts (BX-02 the retention choices
                       and a purge's summary for Settings' DataRetentionCard),
@@ -400,6 +475,35 @@ src/                  React + TypeScript UI
   `parentFileNameHint`) or a sparse file starting with `KDMV` (capacity in sectors at byte 12, the embedded
   descriptor's offset and size in sectors at 28 and 36). A snapshot's delta disk names its parent; the chain's files
   together are what the disk takes on this PC.
+- VM-23 more .vmx keys: `vhv.enable` (nested virtualization), `uefi.secureBoot.enabled`, `vtpm.present` (a vTPM needs
+  the VM encrypted: Remotely only reads it), CD/DVD drives are `<slot>.deviceType` `cdrom-image` (an ISO in
+  `.fileName`) or `atapi-cdrom`/`cdrom-raw` (a host drive), `usb.present`, `ehci.present`, `usb_xhci.present`,
+  `sound.present` and `.virtualDev` (`hdaudio`), `svga.graphicsMemoryKB`, `mks.enable3d`, `serialN.present` with
+  `.fileType` and `.fileName`, shared folders `sharedFolderN.present`, `.enabled`, `.readAccess`, `.writeAccess`,
+  `.hostPath`, `.guestName`, `.expiration`, `sharedFolder.maxNum`, and `isolation.tools.hgfs.disable = "FALSE"`.
+  Workstation itself reorders keys when it writes a .vmx (`upgradevm` moved `config.version` and `virtualHW.version`);
+  Remotely's own edits keep the order (`adapters::vmx_file`). A minimal .vmx with `scsi0.virtualDev = "lsisas1068"`
+  needs `pciBridge0` and `pciBridge4` to `pciBridge7` (`pcieRootPort`, 8 functions), else power-on fails with "No PCIe
+  slot available for SCSI0"; a stale `*.pciSlotNumber` gives the same error.
+- `vmware-vdiskmanager.exe` sits beside vmrun (`adapters::vmware::locate_vdiskmanager`, `REMOTELY_VDISKMANAGER`):
+  `-c -s <n>MB -a lsilogic|buslogic|ide -t 0` (thin) or `-t 2` (thick), `-x <n>MB` (expand; it says to grow the
+  partition in the guest), `-k` (shrink), `-d` (defragment). It reports failures on stdout with a non-zero exit code.
+  `vmware.exe <vmx>` opens Workstation's window on the VM (a tab, not powered on); Workstation adds the VM to its library.
+- vmrun (Workstation 26): `upgradevm <vmx>` (VM off; 19 went to 22), `installTools <vmx>` (VM running; "No VMware Tools
+  image exists for the guest operating system" for a guest type without one), `connectNamedDevice` /
+  `disconnectNamedDevice <vmx> <ethernet0|sata0:1>` on a running VM. vmrun answers 0 even for a device the VM doesn't
+  have (only `vmware.log` warns), so Remotely checks the .vmx first. A running VM's ISO changes with `writeVariable
+  <vmx> runtimeConfig <slot>.fileName <iso>` then `connectNamedDevice <vmx> <slot>`; runtime changes are not written to
+  the .vmx and are gone at the next power-on. `readVariable runtimeConfig ethernet0.connected` returns nothing, so a
+  running Workstation VM's cable state can't be read. `deleteVM <vmx>` deletes the VM's own files (the .vmx, .vmxf,
+  .vmsd, snapshot states, NVRAM, logs, its disks and their snapshot deltas, which sit in the VM's folder even for a disk
+  outside it) and the folder when it is then empty; a disk outside the folder and files of other kinds stay.
+- Workstation's locks: a VM that is running or open in a Workstation tab has a `<name>.vmx.lck` folder beside its .vmx
+  and a `<disk>.vmdk.lck` folder beside each disk. A VM that is off but open in a tab keeps its settings in memory, and
+  Workstation may write them back over a change, so Remotely refuses every change that writes the .vmx or a disk while
+  a lock is there (`VmEditor::require_unlocked`; a lock left after a crash can be deleted once Workstation is closed;
+  Remotely never deletes one), and warns in the approval and the edit dialogs while `vmware.exe` runs
+  (`VmwareAdapter::workstation_window_open`, `WORKSTATION_OPEN_WARNING`).
 
 ## VirtualBox facts
 
@@ -461,10 +565,41 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   `cableconnectedN` (`on`/`off`); the storage key (`"SATA-0-0"`) is the disk's slot. A VDI's header has the signature
   0xbeda107f at 0x40, its type at 0x4c (4 is a snapshot's differencing image) and the disk size at 0x170; a VHD's
   footer (`conectix`, big-endian) has the size at 48, at the start of a dynamic one and the end of a fixed one.
+- VM-23 (checked on 7.2.22): `showvminfo` also gives `nested-hw-virt`, `SecureBoot` (only once the VM has a UEFI
+  variable store), `vram`, `accelerate3d`, `monitorcount`, `graphicscontroller`, `usb`/`ehci`/`xhci` (`on`/`off`),
+  `audio` (the host driver, `none` for no sound card), `uartN` (`off` or `0x03f8,4`) with `uartmodeN` (`file,<path>`,
+  its path not escaped), `storagecontrollernameN`/`typeN`/`portcountN`, `SharedFolderNameMachineMappingN` and
+  `...PathMachineMappingN`, and `bridgeadapterN`, `hostonlyadapterN`, `nat-networkN`, `intnetN`. A DVD drive is a slot
+  with a `"<ctl>-IsEjected-<port>-<dev>"` key; its value is an image, `emptydrive`, or `host:<drive>`. It doesn't print the
+  TPM, the shared folders' flags or the sound card: the .vbox has `<TrustedPlatformModule type="v2_0"/>`, `<SharedFolder
+  writable=... autoMount=...>` and `<AudioAdapter controller="HDA">`. `list ostypes` prints `ID / Description: <id> --
+  <description>` (7.1+). VBoxManage writes its `0%...100%` progress to stderr.
+- Changes (VM off unless said): `modifyvm` (`--cpus`, `--memory`, `--nested-hw-virt`, `--firmware bios|efi`, `--tpm-type
+  none|2.0`, `--name` (renames the folder and files too), `--ostype <id>`, `--nicN`, `--nictypeN`, `--macaddressN
+  auto|<hex>`, `--cableconnectedN`, `--bridgeadapterN`...), Secure Boot through `modifynvram <uuid> inituefivarstore`,
+  `enrollmssignatures`, `enrollorclpk`, `secureboot --enable|--disable`; `sharedfolder add|remove`; `storagectl
+  --portcount`; `storageattach ... --type dvddrive|hdd --medium <file>|emptydrive|none` (a DVD's medium changes on a
+  running VM too); `createmedium disk --filename --size <MB> --format VDI [--variant Fixed]`; `modifymedium disk <file>
+  --resize <MB>|--compact`; `closemedium disk <file> --delete`; `controlvm <uuid> setlinkstateN on|off` (running).
+  `modifymedium --resize` on a base disk under a snapshot resizes the base while the guest keeps seeing the
+  differencing image's old size, so Remotely refuses disk changes on a VM with snapshots. `unregistervm <uuid>` keeps
+  the files; `--delete` removes the .vbox, .vbox-prev, .nvram, attached disks (snapshot ones too), Logs and Snapshots,
+  and keeps other files and the folder. After a snapshot the VM runs on differencing images (`Snapshots/{uuid}.vdi`)
+  and the snapshot keeps the base disks; `--delete` deletes both, so the preview reads every `<Image uuid>` under an
+  `<AttachedDevice type="HardDisk">` in the .vbox (machine and snapshots) by its `<HardDisk location>` in the media
+  registry. `registervm <file.vbox>` refuses a VM whose UUID is registered already.
+  `controlvm <uuid> screenshotpng <file>` (running), `VirtualBoxVM.exe --startvm <uuid> --separate` (a window on a
+  running VM), `VBoxGuestAdditions.iso` beside VBoxManage.
 
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
+- VM settings (VM-23 and on): never edit, resize, delete or register a real VM in a test. `FakeVmware::with_vmx_text`,
+  `with_disk` and `with_file` hold a VM's .vmx, disks and files in memory, and the fake applies every edit, vdiskmanager
+  call and vmrun verb to them (`vmx_text`, `backups`, `disk_size_mb`, `calls`); `FakeVirtualBox` interprets the
+  VBoxManage calls (`change ...` in `calls`, `info`, `disk_size_mb`, `registerable`). Adapter tests run the real
+  `VmrunAdapter` against a stand-in `vmware-vdiskmanager.cmd` written at run time in the system temp folder
+  (`tests/vm_settings.rs`, `adapters/vmware.rs`).
 - Never let a `\\server\share`, `//server/share`, `\\?\` or `\\.\` path reach the real file system in a test, not
   even a made-up one (Windows would send the sign-in to it). Tests of refused paths (A3) go through in-memory fakes
   that fail when asked for one (`import::openssh::IncludeFiles`, `adapters::vm_hardware::VmFiles`) or an injected

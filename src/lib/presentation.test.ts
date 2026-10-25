@@ -136,6 +136,26 @@ test("values learned by field are masked as whole words in free text", () => {
   assert.equal(m.text("Customer A bastion"), "Customer A bastion");
 });
 
+test("QL-16: users a folder gives its sessions are learned too", () => {
+  const m = new Masker();
+  // A folder list with defaults, a session's own values and what it inherits, as the core sends them.
+  learnFields(m, [
+    { id: "f1", name: "Customer A", defaults: { username: "erin", tags: ["acme"] } },
+    {
+      id: "s1",
+      host: "web09",
+      username: "erin",
+      own: { username: null },
+      inherited: { username: { name: "Customer A" } },
+    },
+  ]);
+  learnFields(m, { username: "frank", inherited: { username: { id: "f2", name: "Lab" } } });
+  assert.equal(m.text("erin@web09"), "user-1@host-1");
+  assert.equal(m.text("frank logged in"), "user-2 logged in");
+  // Folder names are labels, not hosts.
+  assert.equal(m.text("from folder Customer A"), "from folder Customer A");
+});
+
 test("a field is masked whole, whatever it looks like", () => {
   const m = new Masker();
   assert.equal(m.field("host", "web"), "host-1");

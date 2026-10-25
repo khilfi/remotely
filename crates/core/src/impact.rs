@@ -22,6 +22,7 @@ use crate::containers::Containers;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::snapshots;
 use crate::store::Store;
+use crate::vm_settings::{VmChangePreview, VmEditor};
 
 /// One VM target as it is now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -84,15 +85,24 @@ pub struct ImpactPreviewer {
     hypervisors: Hypervisors,
     /// CT-01, CT-02: container targets.
     containers: Option<Containers>,
+    /// VM-23, VM-24: what a VM settings or lifecycle change does to each VM.
+    editor: VmEditor,
 }
 
 impl ImpactPreviewer {
     pub fn new(store: Store, hypervisors: Hypervisors) -> Self {
         Self {
+            editor: VmEditor::new(hypervisors.clone(), store.clone()),
             store,
             hypervisors,
             containers: None,
         }
+    }
+
+    /// VM-23, VM-24: for a VM settings or lifecycle command, what it changes on each VM, the files that go,
+    /// and why a VM would be refused. `None` for other commands. Reads only.
+    pub async fn vm_change(&self, command: &Command, targets: &[Target]) -> Option<VmChangePreview> {
+        self.editor.preview(command, targets).await
     }
 
     /// CT-01, CT-02: container targets are previewed by the containers service.

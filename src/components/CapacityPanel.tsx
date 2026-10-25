@@ -1,6 +1,7 @@
 // MO-04: the host capacity panel. RAM and vCPUs assigned to the running VMs against what this machine
 // has, its CPU right now, and free space on each drive that holds a VM folder (the VM-07 check's
-// reads, shown before anything is started). MO-15: the paging files and the commit charge under RAM.
+// reads, shown before anything is started). MO-15: the paging files and the commit charge under RAM. MO-16: its three
+// cards sit side by side once its widget is wide enough (a container query), else one under another.
 
 import { CpuIcon, HardDriveIcon, MemoryStickIcon } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,7 +18,7 @@ function gb(mb: number) {
 
 export function CapacityPanel({ capacity }: { capacity: HostCapacity | null }) {
   if (!capacity) {
-    return <div className="grid gap-4 md:grid-cols-3" aria-busy />;
+    return <div className="grid gap-4 @2xl:grid-cols-3" aria-busy />;
   }
   const ramPct = capacity.physicalRamMb ? (capacity.assignedRamMb * 100) / capacity.physicalRamMb : null;
   const ramLevel: Level = ramPct === null ? "ok" : ramPct > 100 ? "critical" : ramPct > 90 ? "warning" : "ok";
@@ -27,7 +28,7 @@ export function CapacityPanel({ capacity }: { capacity: HostCapacity | null }) {
   const unchecked = capacity.warnings.filter((w) => w.kind === "unchecked");
 
   return (
-    <section aria-label="Host capacity" className="grid gap-4 md:grid-cols-3">
+    <section aria-label="Host capacity" className="grid gap-4 @2xl:grid-cols-3">
       <Card size="sm">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-sm">
@@ -123,7 +124,7 @@ export function CapacityPanel({ capacity }: { capacity: HostCapacity | null }) {
         </CardContent>
       </Card>
       {unchecked.length > 0 && (
-        <p className="text-xs text-muted-foreground md:col-span-3">
+        <p className="text-xs text-muted-foreground @2xl:col-span-3">
           {unchecked.map((w) => (w.kind === "unchecked" ? w.message : "")).join(" ")}
         </p>
       )}

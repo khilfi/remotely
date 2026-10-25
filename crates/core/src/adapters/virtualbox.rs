@@ -62,6 +62,52 @@ pub struct VboxNic {
     pub model: Option<String>,
     /// MO-13: the virtual cable is plugged in.
     pub cable_connected: Option<bool>,
+    /// VM-11: the bridged or host-only adapter (`bridgeadapterN`, `hostonlyadapterN`), NAT network
+    /// (`nat-networkN`) or internal network (`intnetN`) it is attached to.
+    pub network_name: Option<String>,
+}
+
+/// VM-23: a storage controller (`storagecontrollernameN`, `...typeN`, `...portcountN`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VboxController {
+    pub name: String,
+    /// `IntelAhci`, `PIIX4`, `LsiLogic`, `NVMe`, `VirtioSCSI`...
+    pub kind: Option<String>,
+    pub ports: Option<u32>,
+}
+
+/// VM-23: a DVD drive: a `<controller>-<port>-<device>` slot that has an `-IsEjected-` key.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VboxDvd {
+    pub slot: String,
+    /// The image in it; `None` when it is empty.
+    pub image: Option<PathBuf>,
+    /// A drive of this PC (`host:D:`).
+    pub host_drive: Option<String>,
+}
+
+/// VM-23: a serial port: `uartN` (`off`, or `0x03f8,4`) and `uartmodeN` (`disconnected`, `file,<path>`,
+/// `server,<pipe>`, `client,<pipe>`, `tcpserver,<port>`, `tcpclient,<address>`, or a device).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VboxUart {
+    pub slot: u32,
+    pub mode: String,
+}
+
+/// VM-23: settings `showvminfo` doesn't print, from the VM's `.vbox` file: its TPM, each shared folder's
+/// flags and the sound card.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VboxSettingsExtras {
+    /// `v1_2`, `v2_0`, `Host`, `Swtpm`; `None` without a TPM.
+    pub tpm: Option<String>,
+    /// By shared folder name: (writable, mounted by itself).
+    pub shared_folders: HashMap<String, (Option<bool>, Option<bool>)>,
+    /// `HDA`, `AC97`, `SB16`.
+    pub audio_controller: Option<String>,
+    /// VM-24: the hard disk images the VM uses now or in a snapshot (a snapshot keeps the base disk, the VM its
+    /// differencing image), by their `location` in the media registry: relative to the .vbox's folder, or whole.
+    /// `unregistervm --delete` deletes them with the VM.
+    pub hard_disks: Vec<String>,
 }
 
 /// MO-13: a hard disk image attached to a VM, and where (`SATA-0-0`: controller, port, device).
@@ -110,6 +156,24 @@ pub struct VboxVmInfo {
     pub nics: Vec<VboxNic>,
     /// The snapshot tree, without creation times (see [`VirtualBoxAdapter::snapshots`]).
     pub snapshots: SnapshotTree,
+    /// VM-23: `nested-hw-virt`.
+    pub nested_hw_virt: Option<bool>,
+    /// VM-23: `SecureBoot`, printed once the VM has a UEFI variable store.
+    pub secure_boot: Option<bool>,
+    /// VM-23: `vram` (MB), `accelerate3d`, `monitorcount`, `graphicscontroller`.
+    pub video_memory_mb: Option<u32>,
+    pub accelerate_3d: Option<bool>,
+    pub monitors: Option<u32>,
+    pub graphics_controller: Option<String>,
+    /// VM-23: `usb`, `ehci` and `xhci` that are on, as "USB 1.1", "USB 2.0", "USB 3.x".
+    pub usb: Vec<String>,
+    /// VM-23: `audio`: the host driver, or `none` for no sound card.
+    pub audio: Option<String>,
+    pub uarts: Vec<VboxUart>,
+    /// VM-23: `SharedFolderNameMachineMappingN` and `SharedFolderPathMachineMappingN`.
+    pub shared_folders: Vec<(String, PathBuf)>,
+    pub controllers: Vec<VboxController>,
+    pub dvds: Vec<VboxDvd>,
 }
 
 impl VboxVmInfo {
@@ -180,20 +244,68 @@ pub trait VirtualBoxAdapter: Send + Sync {
     /// kept, and the OS type chosen for the VM ("Ubuntu (64-bit)") says more than "Linux".
     async fn hardware(&self, uuid: &str) -> Result<VmHardware> {
         let info = self.vm_info(uuid).await?;
-        let (mut os_name, mut kernel) = (None, None);
+        let (mut os_name, mut kernel, mut ips) = (None, None, Vec::new());
         if info.power_state().is_on() {
             let props = self.guest_properties(uuid).await.unwrap_or_default();
-            let read = |name: &str| props.get(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
-            let (product, release) = (read(GUEST_OS_PRODUCT), read(GUEST_OS_RELEASE));
-            match (product, release) {
-                (Some(p), Some(r)) if p.eq_ignore_ascii_case("linux") => kernel = Some(r),
-                (Some(p), None) if p.eq_ignore_ascii_case("linux") => {}
-                (Some(p), Some(r)) => os_name = Some(format!("{p} {r}")),
-                (Some(p), None) => os_name = Some(p),
-                _ => {}
+            (os_name, kernel) = guest_os_and_kernel(&props);
+            ips = guest_ips(&props);
+        }
+        let extras = self.settings_extras(&info).await;
+        let mut hardware = super::vm_hardware::read_virtualbox(&info, os_name, kernel).await;
+        super::vm_hardware::add_virtualbox_extras(&mut hardware, extras.as_ref(), ips);
+        Ok(hardware)
+    }
+
+    /// VM-23: what the VM's `.vbox` file says that `showvminfo` doesn't (TPM, shared folders' flags, the sound
+    /// card). `None` when it can't be read. A9: at most [`crate::untrusted::MAX_VM_CONFIG_BYTES`].
+    async fn settings_extras(&self, info: &VboxVmInfo) -> Option<VboxSettingsExtras> {
+        let file = info.config_file.as_ref()?;
+        match crate::untrusted::read_capped(file, crate::untrusted::MAX_VM_CONFIG_BYTES).await {
+            Ok(bytes) => Some(parse_vbox_settings_extras(&String::from_utf8_lossy(&bytes))),
+            Err(err) => {
+                tracing::debug!(file = %file.display(), error = %err, "could not read a .vbox file");
+                None
             }
         }
-        Ok(super::vm_hardware::read_virtualbox(&info, os_name, kernel).await)
+    }
+
+    /// VM-11, VM-12, VM-15, VM-16, VM-23, VM-24: a VBoxManage call that changes something (`modifyvm`,
+    /// `storagectl`, `storageattach`, `createmedium`, `modifymedium`, `closemedium`, `controlvm setlinkstateN`,
+    /// `sharedfolder`, `modifynvram`, `unregistervm`, `registervm`). Only the job runner calls this, with
+    /// arguments [`crate::vm_settings`] builds; never guest credentials.
+    async fn change(&self, _args: Vec<String>, _timeout: Duration) -> Result<String> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
+    /// VM-23: the guest OS types VirtualBox knows (`list ostypes`).
+    async fn os_types(&self) -> Result<Vec<VboxOsType>> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
+    /// VM-23: a running VM's screen as PNG (`controlvm screenshotpng`). A read: nothing changes.
+    async fn screenshot(&self, _uuid: &str) -> Result<Vec<u8>> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
+    /// VM-24: VirtualBox's own window on a running VM (`VirtualBoxVM --startvm <uuid> --separate`).
+    async fn open_console(&self, _uuid: &str) -> Result<()> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
+    /// VM-15: `VBoxGuestAdditions.iso` in VirtualBox's folder, when it is there.
+    fn guest_additions_iso(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// VM-16, VM-23: whether a file or folder is there. A path on a share or a device path reads as not
+    /// there, unopened (A3).
+    async fn file_exists(&self, path: &Path) -> bool {
+        crate::untrusted::path_refusal(path).is_none() && tokio::fs::metadata(path).await.is_ok()
+    }
+
+    /// VM-24: the files directly in a folder, with their sizes (the delete preview).
+    async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        super::vmware::files::list(folder).await
     }
 
     /// VM-21: VirtualBox's default machine folder (`list systemproperties`), where new VMs go. A read.
@@ -212,6 +324,81 @@ pub trait VirtualBoxAdapter: Send + Sync {
     async fn unattended_detect(&self, _iso: &Path) -> Result<(bool, Option<String>)> {
         Err(CoreError::VboxManageNotFound)
     }
+}
+
+/// VM-23: a guest OS type VirtualBox knows: the id `modifyvm --ostype` takes and its description.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VboxOsType {
+    pub id: String,
+    pub description: String,
+    pub family: Option<String>,
+}
+
+/// Parses `list ostypes`: VirtualBox 7.1 and later print `ID / Description: Ubuntu_64 -- Ubuntu (64-bit)` and
+/// `Family: Linux (Linux)`; 7.0 printed `ID:` and `Description:` lines.
+pub fn parse_os_types(out: &str) -> Vec<VboxOsType> {
+    let mut types: Vec<VboxOsType> = Vec::new();
+    for line in out.lines().map(str::trim) {
+        if let Some(rest) = line.strip_prefix("ID / Description:") {
+            if let Some((id, description)) = rest.split_once(" -- ") {
+                types.push(VboxOsType {
+                    id: id.trim().to_owned(),
+                    description: description.trim().to_owned(),
+                    family: None,
+                });
+            }
+        } else if let Some(id) = line.strip_prefix("ID:") {
+            types.push(VboxOsType {
+                id: id.trim().to_owned(),
+                description: id.trim().to_owned(),
+                family: None,
+            });
+        } else if let Some(description) = line.strip_prefix("Description:") {
+            if let Some(last) = types.last_mut() {
+                description.trim().clone_into(&mut last.description);
+            }
+        } else if let Some(family) = line.strip_prefix("Family:").or_else(|| line.strip_prefix("Family ID:")) {
+            if let Some(last) = types.last_mut() {
+                let family = family.trim();
+                let name = family.split(" (").next().unwrap_or(family);
+                last.family = Some(name.to_owned());
+            }
+        }
+    }
+    types.retain(|t| !t.id.is_empty());
+    types
+}
+
+/// MO-13: the guest's OS name and kernel from its Guest Additions. Linux guests report only "Linux" and the kernel:
+/// the kernel is kept, and the OS type chosen for the VM says more than "Linux".
+pub fn guest_os_and_kernel(props: &GuestProperties) -> (Option<String>, Option<String>) {
+    let read = |name: &str| props.get(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    match (read(GUEST_OS_PRODUCT), read(GUEST_OS_RELEASE)) {
+        (Some(p), Some(r)) if p.eq_ignore_ascii_case("linux") => (None, Some(r)),
+        (Some(p), None) if p.eq_ignore_ascii_case("linux") => (None, None),
+        (Some(p), Some(r)) => (Some(format!("{p} {r}")), None),
+        (Some(p), None) => (Some(p), None),
+        _ => (None, None),
+    }
+}
+
+/// VM-23: every IPv4 address the Guest Additions report, one per adapter, in their order.
+pub fn guest_ips(props: &GuestProperties) -> Vec<String> {
+    let count = props
+        .get(GUEST_NET_COUNT)
+        .and_then(|c| c.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+        .min(MAX_GUEST_NICS);
+    let mut ips: Vec<String> = Vec::new();
+    for index in 0..count {
+        if let Some(ip) = props.get(&guest_net(index, "V4/IP")).and_then(|ip| usable_ip(ip)) {
+            if !ips.contains(&ip) {
+                ips.push(ip);
+            }
+        }
+    }
+    ips
 }
 
 /// Parses `unattended detect --machine-readable`: whether VirtualBox can install the ISO by itself, and the OS
@@ -519,6 +706,72 @@ impl VirtualBoxAdapter for VBoxManageCli {
         Ok(tree)
     }
 
+    async fn change(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
+        let label = change_label(&args);
+        self.run(&label, args.into_iter().map(OsString::from).collect(), timeout)
+            .await
+    }
+
+    async fn os_types(&self) -> Result<Vec<VboxOsType>> {
+        let out = self
+            .run("list ostypes", vec!["list".into(), "ostypes".into()], LIST_TIMEOUT)
+            .await?;
+        Ok(parse_os_types(&out))
+    }
+
+    async fn screenshot(&self, uuid: &str) -> Result<Vec<u8>> {
+        // VBoxManage writes the PNG to a file; Remotely reads it and deletes it at once.
+        let file = std::env::temp_dir().join(format!("remotely-screen-{}.png", uuid::Uuid::new_v4()));
+        let args = vec![
+            "controlvm".into(),
+            uuid.into(),
+            "screenshotpng".into(),
+            file.clone().into_os_string(),
+        ];
+        let taken = self.run("controlvm screenshotpng", args, QUERY_TIMEOUT).await;
+        let read = match taken {
+            Ok(_) => crate::untrusted::read_capped(&file, MAX_SCREENSHOT_BYTES)
+                .await
+                .map_err(CoreError::from),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = tokio::fs::remove_file(&file).await {
+            if err.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(error = %err, "could not delete a screenshot's temporary file");
+            }
+        }
+        read
+    }
+
+    async fn open_console(&self, uuid: &str) -> Result<()> {
+        let window = self
+            .vboxmanage
+            .parent()
+            .map(|dir| dir.join("VirtualBoxVM.exe"))
+            .filter(|p| p.is_file())
+            .ok_or_else(|| {
+                CoreError::VmSettingRefused(
+                    "VirtualBoxVM.exe is not next to VBoxManage.exe, so Remotely can't open the VM's window".into(),
+                )
+            })?;
+        // VirtualBox's own window for a VM that already runs (headless, say); nothing about the VM changes.
+        std::process::Command::new(window)
+            .args(["--startvm", uuid, "--separate"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(drop)
+            .map_err(CoreError::from)
+    }
+
+    fn guest_additions_iso(&self) -> Option<PathBuf> {
+        self.vboxmanage
+            .parent()
+            .map(|dir| dir.join("VBoxGuestAdditions.iso"))
+            .filter(|p| p.is_file())
+    }
+
     async fn default_machine_folder(&self) -> Result<PathBuf> {
         let out = self
             .run(
@@ -558,6 +811,25 @@ impl VirtualBoxAdapter for VBoxManageCli {
             .run(&format!("list {what}"), vec!["list".into(), what.into()], LIST_TIMEOUT)
             .await?;
         Ok(parse_host_adapters(&out))
+    }
+}
+
+/// A screenshot of a 4K screen is a few MB; more than this is refused, never read in part (A9).
+pub const MAX_SCREENSHOT_BYTES: u64 = 64 * 1024 * 1024;
+
+/// How a VBoxManage change is named in errors: `modifyvm`, `storageattach`, `controlvm setlinkstate1`,
+/// `modifymedium`... (the subcommand, and for `controlvm`, `modifynvram` and `sharedfolder` its verb).
+pub fn change_label(args: &[String]) -> String {
+    match args.first().map(String::as_str) {
+        Some(sub @ ("controlvm" | "modifynvram" | "sharedfolder")) => {
+            let verb_at = if sub == "sharedfolder" { 1 } else { 2 };
+            match args.get(verb_at) {
+                Some(verb) => format!("{sub} {verb}"),
+                None => sub.to_owned(),
+            }
+        }
+        Some(sub) => sub.to_owned(),
+        None => "(nothing)".to_owned(),
     }
 }
 
@@ -693,6 +965,30 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     }
     async fn unattended_detect(&self, iso: &Path) -> Result<(bool, Option<String>)> {
         self.current().unattended_detect(iso).await
+    }
+    async fn settings_extras(&self, info: &VboxVmInfo) -> Option<VboxSettingsExtras> {
+        self.current().settings_extras(info).await
+    }
+    async fn change(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
+        self.current().change(args, timeout).await
+    }
+    async fn os_types(&self) -> Result<Vec<VboxOsType>> {
+        self.current().os_types().await
+    }
+    async fn screenshot(&self, uuid: &str) -> Result<Vec<u8>> {
+        self.current().screenshot(uuid).await
+    }
+    async fn open_console(&self, uuid: &str) -> Result<()> {
+        self.current().open_console(uuid).await
+    }
+    fn guest_additions_iso(&self) -> Option<PathBuf> {
+        self.current().guest_additions_iso()
+    }
+    async fn file_exists(&self, path: &Path) -> bool {
+        self.current().file_exists(path).await
+    }
+    async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        self.current().folder_files(folder).await
     }
 }
 
@@ -914,6 +1210,13 @@ pub fn parse_showvminfo(text: &str) -> VboxVmInfo {
         ..Default::default()
     };
     let mut nics: HashMap<u32, VboxNic> = HashMap::new();
+    let mut networks: HashMap<(String, u32), String> = HashMap::new();
+    let mut uart_modes: HashMap<u32, String> = HashMap::new();
+    let mut uarts: Vec<u32> = Vec::new();
+    let mut controllers: HashMap<u32, VboxController> = HashMap::new();
+    let mut folder_names: HashMap<u32, String> = HashMap::new();
+    let mut folder_paths: HashMap<u32, PathBuf> = HashMap::new();
+    let mut dvd_slots: Vec<String> = Vec::new();
     for (key, value) in &pairs {
         let present = || Some(value.clone()).filter(|v| !v.trim().is_empty());
         match key.as_str() {
@@ -929,15 +1232,55 @@ pub fn parse_showvminfo(text: &str) -> VboxVmInfo {
             "GuestAdditionsRunLevel" => info.additions_run_level = value.trim().parse().ok(),
             "GuestAdditionsVersion" => info.additions_version = present(),
             "firmware" => info.firmware = present(),
+            "nested-hw-virt" => info.nested_hw_virt = Some(is_on(value)),
+            "SecureBoot" => info.secure_boot = Some(is_on(value)),
+            "vram" => info.video_memory_mb = value.trim().parse().ok(),
+            "accelerate3d" => info.accelerate_3d = Some(is_on(value)),
+            "monitorcount" => info.monitors = value.trim().parse().ok(),
+            "graphicscontroller" => info.graphics_controller = present(),
+            "usb" | "ehci" | "xhci" if is_on(value) => info.usb.push(
+                match key.as_str() {
+                    "usb" => "USB 1.1",
+                    "ehci" => "USB 2.0",
+                    _ => "USB 3.x",
+                }
+                .to_owned(),
+            ),
+            "audio" => info.audio = present(),
             _ => {
-                if let Some(slot) = key.strip_prefix("nic").and_then(|n| n.parse::<u32>().ok()) {
+                let numbered = |prefix: &str| key.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok());
+                if let Some(slot) = numbered("nic") {
                     nic_slot(&mut nics, slot).attachment = value.to_ascii_lowercase();
-                } else if let Some(slot) = key.strip_prefix("macaddress").and_then(|n| n.parse::<u32>().ok()) {
+                } else if let Some(slot) = numbered("macaddress") {
                     nic_slot(&mut nics, slot).mac = present();
-                } else if let Some(slot) = key.strip_prefix("nictype").and_then(|n| n.parse::<u32>().ok()) {
+                } else if let Some(slot) = numbered("nictype") {
                     nic_slot(&mut nics, slot).model = present();
-                } else if let Some(slot) = key.strip_prefix("cableconnected").and_then(|n| n.parse::<u32>().ok()) {
+                } else if let Some(slot) = numbered("cableconnected") {
                     nic_slot(&mut nics, slot).cable_connected = Some(value.eq_ignore_ascii_case("on"));
+                } else if let Some(slot) = numbered("bridgeadapter")
+                    .or_else(|| numbered("hostonlyadapter"))
+                    .or_else(|| numbered("nat-network"))
+                    .or_else(|| numbered("intnet"))
+                {
+                    networks.insert((key.trim_end_matches(char::is_numeric).to_owned(), slot), value.clone());
+                } else if let Some(slot) = numbered("uartmode") {
+                    uart_modes.insert(slot, value.clone());
+                } else if let Some(slot) = numbered("uart") {
+                    if !value.eq_ignore_ascii_case("off") {
+                        uarts.push(slot);
+                    }
+                } else if let Some(n) = numbered("storagecontrollername") {
+                    controller(&mut controllers, n).name = value.clone();
+                } else if let Some(n) = numbered("storagecontrollertype") {
+                    controller(&mut controllers, n).kind = present();
+                } else if let Some(n) = numbered("storagecontrollerportcount") {
+                    controller(&mut controllers, n).ports = value.trim().parse().ok();
+                } else if let Some(n) = numbered("SharedFolderNameMachineMapping") {
+                    folder_names.insert(n, value.clone());
+                } else if let Some(n) = numbered("SharedFolderPathMachineMapping") {
+                    folder_paths.insert(n, PathBuf::from(value));
+                } else if key.contains("-IsEjected-") {
+                    dvd_slots.push(key.replacen("IsEjected-", "", 1));
                 } else if is_disk_attachment(key, value) {
                     info.disks.push(VboxDisk {
                         slot: key.clone(),
@@ -949,9 +1292,165 @@ pub fn parse_showvminfo(text: &str) -> VboxVmInfo {
     }
     let mut nics: Vec<VboxNic> = nics.into_values().collect();
     nics.sort_by_key(|n| n.slot);
+    for nic in &mut nics {
+        // The name that goes with how it is attached.
+        let wanted = match nic.attachment.as_str() {
+            "bridged" => "bridgeadapter",
+            "hostonly" => "hostonlyadapter",
+            "natnetwork" => "nat-network",
+            "intnet" => "intnet",
+            _ => continue,
+        };
+        nic.network_name = networks
+            .get(&(wanted.to_owned(), nic.slot))
+            .filter(|n| !n.trim().is_empty())
+            .cloned();
+    }
     info.nics = nics;
     info.snapshots = snapshot_tree(&pairs);
+    let values: HashMap<&str, &str> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    info.dvds = dvd_slots
+        .into_iter()
+        .filter_map(|slot| {
+            let value = values.get(slot.as_str())?.trim();
+            let (image, host_drive) = match value {
+                "emptydrive" | "" => (None, None),
+                "none" => return None,
+                host if host.starts_with("host:") => (None, Some(host["host:".len()..].to_owned())),
+                path => (Some(PathBuf::from(path)), None),
+            };
+            Some(VboxDvd {
+                slot,
+                image,
+                host_drive,
+            })
+        })
+        .collect();
+    let mut controllers: Vec<(u32, VboxController)> = controllers.into_iter().collect();
+    controllers.sort_by_key(|(n, _)| *n);
+    info.controllers = controllers
+        .into_iter()
+        .map(|(_, c)| c)
+        .filter(|c| !c.name.is_empty())
+        .collect();
+    uarts.sort_unstable();
+    info.uarts = uarts
+        .into_iter()
+        .map(|slot| VboxUart {
+            slot,
+            mode: uart_modes
+                .get(&slot)
+                .cloned()
+                .unwrap_or_else(|| "disconnected".to_owned()),
+        })
+        .collect();
+    let mut folders: Vec<(u32, String)> = folder_names.into_iter().collect();
+    folders.sort_by_key(|(n, _)| *n);
+    info.shared_folders = folders
+        .into_iter()
+        .map(|(n, name)| (name, folder_paths.remove(&n).unwrap_or_default()))
+        .collect();
     info
+}
+
+fn is_on(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("on")
+}
+
+fn controller(controllers: &mut HashMap<u32, VboxController>, n: u32) -> &mut VboxController {
+    controllers.entry(n).or_default()
+}
+
+/// VM-23: what a VM's `.vbox` file says that `showvminfo` doesn't: its TPM type, each shared folder's flags,
+/// and its sound card. A tag-by-tag read of the attributes used (no entity in them); anything else is ignored.
+pub fn parse_vbox_settings_extras(xml: &str) -> VboxSettingsExtras {
+    let mut extras = VboxSettingsExtras::default();
+    let tags = |name: &str| {
+        let open = format!("<{name}");
+        let mut found = Vec::new();
+        let mut rest = xml;
+        while let Some(start) = rest.find(&open) {
+            let after = &rest[start + open.len()..];
+            if after.starts_with([' ', '\t', '\r', '\n', '/', '>']) {
+                let end = after.find('>').unwrap_or(after.len());
+                found.push(after[..end].to_owned());
+            }
+            rest = after;
+        }
+        found
+    };
+    let flag = |tag: &str, name: &str| xml_attribute(tag, name).map(|v| v.eq_ignore_ascii_case("true"));
+    extras.tpm = tags("TrustedPlatformModule")
+        .first()
+        .and_then(|tag| xml_attribute(tag, "type"))
+        .filter(|t| !t.eq_ignore_ascii_case("none"));
+    for tag in tags("SharedFolder") {
+        if let Some(name) = xml_attribute(&tag, "name") {
+            extras
+                .shared_folders
+                .insert(name, (flag(&tag, "writable"), flag(&tag, "autoMount")));
+        }
+    }
+    extras.audio_controller = tags("AudioAdapter")
+        .first()
+        .filter(|tag| flag(tag, "enabled") != Some(false))
+        .and_then(|tag| xml_attribute(tag, "controller"));
+    extras.hard_disks = attached_hard_disks(xml);
+    extras
+}
+
+/// VM-24: each `<Image uuid>` inside an `<AttachedDevice type="HardDisk">`, in the machine's hardware or a
+/// snapshot's, by the `location` its `<HardDisk>` has in the media registry. An image registered in another VM's
+/// file has no location here and is left out.
+fn attached_hard_disks(xml: &str) -> Vec<String> {
+    let key = |uuid: &str| uuid.trim_matches(['{', '}']).to_ascii_lowercase();
+    let mut locations: HashMap<String, String> = HashMap::new();
+    let mut attached: Vec<String> = Vec::new();
+    let mut hard_disk_attachment = false;
+    let mut rest = xml;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        let end = after.find('>').unwrap_or(after.len());
+        let tag = &after[..end];
+        let name: String = tag.chars().take_while(char::is_ascii_alphanumeric).collect();
+        match name.as_str() {
+            "HardDisk" => {
+                if let (Some(uuid), Some(location)) = (xml_attribute(tag, "uuid"), xml_attribute(tag, "location")) {
+                    locations.insert(key(&uuid), xml_unescape(&location));
+                }
+            }
+            "AttachedDevice" => {
+                hard_disk_attachment = xml_attribute(tag, "type").is_some_and(|t| t.eq_ignore_ascii_case("HardDisk"))
+                    && !tag.ends_with('/');
+            }
+            "Image" if hard_disk_attachment => {
+                if let Some(uuid) = xml_attribute(tag, "uuid") {
+                    attached.push(key(&uuid));
+                }
+            }
+            _ if tag.starts_with("/AttachedDevice") => hard_disk_attachment = false,
+            _ => {}
+        }
+        rest = &after[end..];
+    }
+    let mut disks: Vec<String> = Vec::new();
+    for uuid in attached {
+        if let Some(location) = locations.get(&uuid) {
+            if !disks.contains(location) {
+                disks.push(location.clone());
+            }
+        }
+    }
+    disks
+}
+
+/// The five predefined XML entities, as VirtualBox writes them in attribute values.
+fn xml_unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 fn nic_slot(nics: &mut HashMap<u32, VboxNic>, slot: u32) -> &mut VboxNic {
@@ -1226,10 +1725,12 @@ CurrentSnapshotNode="SnapshotName-1"
                     mac: Some("080027AABB01".into()),
                     model: Some("82540EM".into()),
                     cable_connected: Some(true),
+                    network_name: None,
                 },
                 VboxNic {
                     slot: 2,
                     attachment: "hostonly".into(),
+                    network_name: Some("VirtualBox Host-Only Ethernet Adapter".into()),
                     mac: Some("080027AABB02".into()),
                     ..VboxNic::default()
                 },
@@ -1435,6 +1936,211 @@ Name: /VirtualBox/GuestInfo/Net/0/MAC, value: 080027000001, timestamp: 176137920
             Some(time::macros::datetime!(2026-10-19 07:00:00 UTC))
         );
         assert_eq!(tree.snapshots[2].created_at, None, "not in the file");
+    }
+
+    /// What VirtualBox 7.2.22 printed for the hand check's it- VM (UEFI with Secure Boot, nested
+    /// virtualization, xHCI, a serial port to a file, a shared folder, a SATA disk and an empty DVD drive),
+    /// with its paths and MACs changed.
+    const SHOWVMINFO_72: &str = r#"name="it-r3-capture"
+ostype="Ubuntu (64-bit)"
+UUID="d1853388-a060-4eed-8bbe-cc2fe0ecc7e6"
+CfgFile="C:\\VMs\\it-r3-capture\\it-r3-capture.vbox"
+memory=1024
+vram=32
+firmware="EFI"
+cpus=2
+nested-hw-virt="on"
+VMState="poweroff"
+graphicscontroller="vmsvga"
+monitorcount=1
+accelerate3d="off"
+storagecontrollername0="SATA"
+storagecontrollertype0="IntelAhci"
+storagecontrollerinstance0="0"
+storagecontrollermaxportcount0="30"
+storagecontrollerportcount0="4"
+storagecontrollerbootable0="on"
+"SATA-0-0"="C:\\VMs\\it-r3-capture\\disk1.vdi"
+"SATA-ImageUUID-0-0"="a484220b-bbf1-4768-9502-d32e9a1eb6d2"
+"SATA-hot-pluggable-0-0"="off"
+"SATA-nonrotational-0-0"="off"
+"SATA-discard-0-0"="off"
+"SATA-1-0"="emptydrive"
+"SATA-IsEjected-1-0"="off"
+"SATA-2-0"="none"
+natnet1="nat"
+macaddress1="080027000001"
+cableconnected1="on"
+nic1="nat"
+nictype1="virtio"
+hostonlyadapter2=""
+macaddress2="080027000002"
+cableconnected2="off"
+nic2="hostonly"
+nictype2="82540EM"
+nic3="none"
+uart1="0x03f8,4"
+uartmode1="file,C:\VMs\com1.txt"
+uarttype1="16550A"
+uart2="off"
+audio="default"
+usb="off"
+ehci="off"
+xhci="on"
+SharedFolderNameMachineMapping1="hostshare"
+SharedFolderPathMachineMapping1="C:\\Shared"
+ rec_screen0
+rec_screen_enabled="on"
+SecureBoot="on"
+"#;
+
+    #[test]
+    fn showvminfo_gives_the_settings_tab_its_devices() {
+        let info = parse_showvminfo(SHOWVMINFO_72);
+        assert_eq!(info.nested_hw_virt, Some(true));
+        assert_eq!(info.secure_boot, Some(true));
+        assert_eq!(
+            (info.video_memory_mb, info.monitors, info.accelerate_3d),
+            (Some(32), Some(1), Some(false))
+        );
+        assert_eq!(info.usb, ["USB 3.x"]);
+        assert_eq!(info.audio.as_deref(), Some("default"));
+        assert_eq!(
+            info.controllers,
+            [VboxController {
+                name: "SATA".into(),
+                kind: Some("IntelAhci".into()),
+                ports: Some(4)
+            }]
+        );
+        assert_eq!(info.disks.len(), 1, "flags and the empty slots are no disks");
+        assert_eq!(
+            info.dvds,
+            [VboxDvd {
+                slot: "SATA-1-0".into(),
+                image: None,
+                host_drive: None
+            }]
+        );
+        assert_eq!(
+            info.uarts,
+            [VboxUart {
+                slot: 1,
+                mode: r"file,C:\VMs\com1.txt".into()
+            }]
+        );
+        assert_eq!(
+            info.shared_folders,
+            [("hostshare".to_owned(), PathBuf::from(r"C:\Shared"))]
+        );
+        assert_eq!(info.nics[1].network_name, None, "no host-only adapter chosen");
+        assert_eq!(info.nics[1].cable_connected, Some(false));
+    }
+
+    #[test]
+    fn the_vbox_file_adds_the_tpm_shared_folder_flags_and_sound_card() {
+        let xml = r#"<Machine uuid="{d1853388-a060-4eed-8bbe-cc2fe0ecc7e6}" name="it-r3-capture" OSType="Ubuntu_64">
+      <TrustedPlatformModule type="v2_0" location=""/>
+      <AudioAdapter controller="HDA" useDefault="true" driver="WAS" enabled="true"/>
+      <SharedFolders>
+        <SharedFolder name="hostshare" hostPath="C:\Shared" writable="false" autoMount="true"/>
+      </SharedFolders>
+      <SharedFoldersExtra/>"#;
+        let extras = parse_vbox_settings_extras(xml);
+        assert_eq!(extras.tpm.as_deref(), Some("v2_0"));
+        assert_eq!(extras.audio_controller.as_deref(), Some("HDA"));
+        assert_eq!(extras.shared_folders.get("hostshare"), Some(&(Some(false), Some(true))));
+        assert_eq!(
+            parse_vbox_settings_extras("<TrustedPlatformModule type=\"None\"/>").tpm,
+            None
+        );
+    }
+
+    #[test]
+    fn the_disks_a_vm_uses_include_the_base_disks_its_snapshots_keep() {
+        // VM-24, from VirtualBox 7.2 after a snapshot: the machine is on differencing images, the snapshot on the
+        // base disks, and `unregistervm --delete` deletes all four. An image only in the registry (another VM's,
+        // registered here first) and a DVD's are not the VM's disks.
+        let xml = r#"<Machine uuid="{7eeedfae-8668-460f-9a40-71b160d82799}" name="it-r3-hvbox">
+    <MediaRegistry>
+      <HardDisks>
+        <HardDisk uuid="{9fe5365d-533e-46e6-a058-8c2404a68ca9}" location="it-r3-hvbox.vdi" format="VDI" type="Normal">
+          <HardDisk uuid="{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}" location="Snapshots/{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}.vdi" format="VDI"/>
+        </HardDisk>
+        <HardDisk uuid="{fe8e614d-c7bc-44f0-83af-ad4162cdf3d0}" location="D:\Disks\data &amp; logs.vdi" format="VDI" type="Normal"/>
+        <HardDisk uuid="{0b3d1c9e-0000-4000-8000-000000000001}" location="other-vm.vdi" format="VDI" type="Normal"/>
+      </HardDisks>
+      <DVDImages>
+        <Image uuid="{0b3d1c9e-0000-4000-8000-000000000002}" location="C:\ISOs\ubuntu.iso"/>
+      </DVDImages>
+    </MediaRegistry>
+    <Snapshot uuid="{5ffddc23-5eea-46a8-ad71-2df104ee9506}" name="before">
+      <Hardware>
+        <StorageControllers>
+          <StorageController name="SATA" type="AHCI" PortCount="3">
+            <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0">
+              <Image uuid="{9fe5365d-533e-46e6-a058-8c2404a68ca9}"/>
+            </AttachedDevice>
+            <AttachedDevice passthrough="false" type="DVD" hotpluggable="false" port="1" device="0">
+              <Image uuid="{0b3d1c9e-0000-4000-8000-000000000002}"/>
+            </AttachedDevice>
+          </StorageController>
+        </StorageControllers>
+      </Hardware>
+    </Snapshot>
+    <Hardware>
+      <StorageControllers>
+        <StorageController name="SATA" type="AHCI" PortCount="3">
+          <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0">
+            <Image uuid="{157A4207-B28B-4AE2-A0B7-FC64B88EB5AE}"/>
+          </AttachedDevice>
+          <AttachedDevice passthrough="false" type="DVD" hotpluggable="false" port="1" device="0"/>
+          <AttachedDevice type="HardDisk" hotpluggable="false" port="2" device="0">
+            <Image uuid="{fe8e614d-c7bc-44f0-83af-ad4162cdf3d0}"/>
+          </AttachedDevice>
+        </StorageController>
+      </StorageControllers>
+    </Hardware>"#;
+        assert_eq!(
+            parse_vbox_settings_extras(xml).hard_disks,
+            [
+                "it-r3-hvbox.vdi",
+                "Snapshots/{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}.vdi",
+                r"D:\Disks\data & logs.vdi"
+            ]
+        );
+    }
+
+    #[test]
+    fn os_types_read_in_both_formats() {
+        let new = "Supported guest OS types:\n\nID / Description: Ubuntu_64 -- Ubuntu (64-bit)\nFamily:           Linux (Linux)\nArchitecture:     x86 (64-bit)\n\nID / Description: Windows11_64 -- Windows 11 (64-bit)\nFamily:           Windows (Microsoft Windows)\n";
+        let types = parse_os_types(new);
+        assert_eq!(types.len(), 2);
+        assert_eq!(types[0].id, "Ubuntu_64");
+        assert_eq!(types[0].description, "Ubuntu (64-bit)");
+        assert_eq!(types[1].family.as_deref(), Some("Windows"));
+        let old = "ID:          Debian_64\nDescription: Debian (64-bit)\nFamily ID:   Linux\n";
+        assert_eq!(parse_os_types(old)[0].description, "Debian (64-bit)");
+        assert_eq!(
+            change_label(&["controlvm".into(), "x".into(), "setlinkstate1".into(), "off".into()]),
+            "controlvm setlinkstate1"
+        );
+        assert_eq!(change_label(&["sharedfolder".into(), "add".into()]), "sharedfolder add");
+        assert_eq!(change_label(&["modifyvm".into()]), "modifyvm");
+    }
+
+    #[test]
+    fn every_guest_address_is_listed() {
+        let props: GuestProperties = [
+            (GUEST_NET_COUNT, "3"),
+            ("/VirtualBox/GuestInfo/Net/0/V4/IP", "10.0.2.15"),
+            ("/VirtualBox/GuestInfo/Net/1/V4/IP", "192.0.2.31"),
+            ("/VirtualBox/GuestInfo/Net/2/V4/IP", "0.0.0.0"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        assert_eq!(guest_ips(&props), ["10.0.2.15", "192.0.2.31"]);
     }
 
     #[test]

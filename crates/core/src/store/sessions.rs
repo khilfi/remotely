@@ -10,7 +10,11 @@ use super::{parse_uuid, Store};
 use crate::adapters::remote::{AuthMethod, SessionSpec};
 use crate::domain::{now_rfc3339, Context, Environment};
 use crate::error::{CoreError, Result};
-use crate::sessions::{SessionAuth, SessionColor, SessionFolder, SessionInput, SessionRecord, MAX_JUMP_DEPTH};
+use crate::sessions::defaults::APP_DEFAULT_AUTH;
+use crate::sessions::{
+    FolderDefaults, Folders, Inherited, OwnValues, SessionAuth, SessionColor, SessionFolder, SessionInput,
+    SessionRecord, MAX_JUMP_DEPTH,
+};
 use crate::vault::SecretId;
 use crate::vm_links::VmLink;
 
@@ -22,6 +26,7 @@ macro_rules! session_columns {
         "id, folder_id, name, protocol, host, port, username, auth_method, credential_id, key_passphrase_id,
          jump_session_id, startup_command, startup_on_reconnect, prompt_hook, environment, color, protected, vm_id,
          vm_link, imported_from, created_at, updated_at, last_ip, last_hostname, last_seen_at, last_opened_at,
+         auth_from_folder, jump_direct,
          (SELECT group_concat(t.name, char(31)) FROM target_tags tt JOIN tags t ON t.id = tt.tag_id
           WHERE tt.target_kind = 'session' AND tt.target_id = sessions.id) AS tags"
     };
@@ -32,12 +37,9 @@ fn optional_uuid(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<Option<U
     value.as_deref().map(parse_uuid).transpose()
 }
 
-fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
-    let id: String = row.try_get("id")?;
-    let credential = optional_uuid(row, "credential_id")?.map(SecretId);
-    let passphrase = optional_uuid(row, "key_passphrase_id")?.map(SecretId);
-    let method: String = row.try_get("auth_method")?;
-    let auth = match method.as_str() {
+/// A login as the `auth_method`, `credential_id` and `key_passphrase_id` columns hold it.
+fn auth_of(method: Option<&str>, credential: Option<SecretId>, passphrase: Option<SecretId>) -> Option<SessionAuth> {
+    Some(match method? {
         "key" => SessionAuth::Key {
             key_id: credential,
             passphrase_id: passphrase,
@@ -46,6 +48,30 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         _ => SessionAuth::Password {
             password_id: credential,
         },
+    })
+}
+
+/// The `auth_method` column for a login; QL-16's "as its folders say" is kept in `auth_from_folder` (with the
+/// column's default beside it).
+fn method_column(auth: &SessionAuth) -> &'static str {
+    match auth {
+        SessionAuth::Folder => "password",
+        auth => auth.method(),
+    }
+}
+
+/// QL-16: the session's own values, as read; what applies is filled in by [`Store::resolve_sessions`].
+fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
+    let id: String = row.try_get("id")?;
+    let credential = optional_uuid(row, "credential_id")?.map(SecretId);
+    let passphrase = optional_uuid(row, "key_passphrase_id")?.map(SecretId);
+    let method: String = row.try_get("auth_method")?;
+    let from_folder: i64 = row.try_get("auth_from_folder")?;
+    let jump_direct: i64 = row.try_get("jump_direct")?;
+    let auth = if from_folder != 0 {
+        SessionAuth::Folder
+    } else {
+        auth_of(Some(&method), credential, passphrase).unwrap_or(APP_DEFAULT_AUTH)
     };
     let port: i64 = row.try_get("port")?;
     let env: String = row.try_get("environment")?;
@@ -62,6 +88,14 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         .map(String::from)
         .collect();
     tags.sort_by_key(|t| t.to_lowercase());
+    let own = OwnValues {
+        username: row.try_get("username")?,
+        auth,
+        jump_session_id: optional_uuid(row, "jump_session_id")?,
+        jump_direct: jump_direct != 0,
+        environment: Environment::parse(&env),
+        tags,
+    };
     Ok(SessionRecord {
         id: parse_uuid(&id)?,
         folder_id: optional_uuid(row, "folder_id")?,
@@ -69,16 +103,19 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         protocol: row.try_get("protocol")?,
         host: row.try_get("host")?,
         port: u16::try_from(port).unwrap_or(22),
-        username: row.try_get("username")?,
-        auth,
-        jump_session_id: optional_uuid(row, "jump_session_id")?,
+        username: own.username.clone(),
+        auth: match &own.auth {
+            SessionAuth::Folder => APP_DEFAULT_AUTH,
+            auth => auth.clone(),
+        },
+        jump_session_id: own.jump_session_id,
         startup_command: row.try_get("startup_command")?,
         startup_on_reconnect: startup_on_reconnect != 0,
         prompt_hook: prompt_hook.map(|h| h != 0),
-        environment: Environment::parse(&env),
+        environment: own.environment,
         color: color.as_deref().and_then(SessionColor::parse),
         protected: protected != 0,
-        tags,
+        tags: own.tags.clone(),
         vm_id: row.try_get("vm_id")?,
         vm_link: vm_link.as_deref().and_then(VmLink::parse),
         imported_from: row.try_get("imported_from")?,
@@ -88,16 +125,43 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         last_hostname: row.try_get("last_hostname")?,
         last_seen_at: row.try_get("last_seen_at")?,
         last_opened_at: row.try_get("last_opened_at")?,
+        own,
+        inherited: Inherited::default(),
     })
 }
 
+/// QL-16: a folder's row joined with its defaults (all NULL when it sets none).
 fn row_to_folder(row: &sqlx::sqlite::SqliteRow) -> Result<SessionFolder> {
     let id: String = row.try_get("id")?;
+    let method: Option<String> = row.try_get("d_auth_method")?;
+    let credential = optional_uuid(row, "d_credential_id")?.map(SecretId);
+    let passphrase = optional_uuid(row, "d_key_passphrase_id")?.map(SecretId);
+    let environment: Option<String> = row.try_get("d_environment")?;
+    let jump_direct: Option<i64> = row.try_get("d_jump_direct")?;
+    let tags: Option<String> = row.try_get("d_tags")?;
+    let mut tags: Vec<String> = tags
+        .unwrap_or_default()
+        .split(TAG_SEPARATOR)
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect();
+    tags.sort_by_key(|t| t.to_lowercase());
     Ok(SessionFolder {
         id: parse_uuid(&id)?,
         parent_id: optional_uuid(row, "parent_id")?,
         name: row.try_get("name")?,
         sort_order: row.try_get("sort_order")?,
+        defaults: FolderDefaults {
+            username: row.try_get("d_username")?,
+            auth: auth_of(method.as_deref(), credential, passphrase),
+            jump_session_id: optional_uuid(row, "d_jump_session_id")?,
+            jump_direct: jump_direct.unwrap_or(0) != 0,
+            environment: environment
+                .as_deref()
+                .map(Environment::parse)
+                .filter(|e| *e != Environment::None),
+            tags,
+        },
     })
 }
 
@@ -156,8 +220,27 @@ async fn delete_unused_tags(tx: &mut Transaction<'_, Sqlite>, ctx: &Context) -> 
 }
 
 impl Store {
-    /// Every session in the workspace, by name.
+    /// QL-16: the folder tree with each folder's defaults, to resolve sessions against.
+    pub async fn session_folders(&self, ctx: &Context) -> Result<Folders> {
+        Ok(Folders::new(self.list_session_folders(ctx).await?))
+    }
+
+    /// QL-16: fills in what applies to each session (its own values, then its folders', then the app's).
+    pub(crate) fn resolve_sessions(sessions: &mut [SessionRecord], folders: &Folders) {
+        for session in sessions {
+            let effective = session.resolve_in(folders);
+            session.apply(effective);
+        }
+    }
+
+    /// Every session in the workspace, by name, with what applies to it (QL-16).
     pub async fn list_sessions(&self, ctx: &Context) -> Result<Vec<SessionRecord>> {
+        let folders = self.session_folders(ctx).await?;
+        self.list_sessions_in(ctx, &folders).await
+    }
+
+    /// [`Self::list_sessions`], resolved against `folders` (QL-16: as the tree is, or as a change would make it).
+    pub(crate) async fn list_sessions_in(&self, ctx: &Context, folders: &Folders) -> Result<Vec<SessionRecord>> {
         let rows = sqlx::query(concat!(
             "SELECT ",
             session_columns!(),
@@ -166,10 +249,18 @@ impl Store {
         .bind(ctx.workspace_id.to_string())
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_to_session).collect()
+        let mut sessions = rows.iter().map(row_to_session).collect::<Result<Vec<_>>>()?;
+        Self::resolve_sessions(&mut sessions, folders);
+        Ok(sessions)
     }
 
+    /// One session, with what applies to it (QL-16).
     pub async fn get_session(&self, ctx: &Context, id: Uuid) -> Result<Option<SessionRecord>> {
+        let folders = self.session_folders(ctx).await?;
+        self.get_session_in(ctx, id, &folders).await
+    }
+
+    async fn get_session_in(&self, ctx: &Context, id: Uuid, folders: &Folders) -> Result<Option<SessionRecord>> {
         let row = sqlx::query(concat!(
             "SELECT ",
             session_columns!(),
@@ -179,7 +270,11 @@ impl Store {
         .bind(id.to_string())
         .fetch_optional(&self.pool)
         .await?;
-        row.as_ref().map(row_to_session).transpose()
+        let Some(mut session) = row.as_ref().map(row_to_session).transpose()? else {
+            return Ok(None);
+        };
+        Self::resolve_sessions(std::slice::from_mut(&mut session), folders);
+        Ok(Some(session))
     }
 
     /// `input` must already be checked (`crate::sessions`). `imported_from`: SS-02's source name.
@@ -196,8 +291,8 @@ impl Store {
             "INSERT INTO sessions (id, workspace_id, user_id, folder_id, name, protocol, host, port, username,
                                    auth_method, credential_id, key_passphrase_id, jump_session_id, startup_command,
                                    startup_on_reconnect, prompt_hook, environment, color, vm_id, imported_from,
-                                   created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   created_at, updated_at, auth_from_folder, jump_direct)
+             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(ctx.workspace_id.to_string())
@@ -207,7 +302,7 @@ impl Store {
         .bind(&input.host)
         .bind(i64::from(input.port))
         .bind(&input.username)
-        .bind(input.auth.method())
+        .bind(method_column(&input.auth))
         .bind(input.auth.credential_id().map(|s| s.0.to_string()))
         .bind(input.auth.passphrase_id().map(|s| s.0.to_string()))
         .bind(input.jump_session_id.map(|j| j.to_string()))
@@ -220,6 +315,8 @@ impl Store {
         .bind(imported_from)
         .bind(&now)
         .bind(&now)
+        .bind(i64::from(input.auth == SessionAuth::Folder))
+        .bind(i64::from(input.jump_direct && input.jump_session_id.is_none()))
         .execute(&mut *tx)
         .await?;
         set_session_tags(&mut tx, ctx, id, &input.tags).await?;
@@ -234,7 +331,7 @@ impl Store {
             "UPDATE sessions SET folder_id = ?, name = ?, host = ?, port = ?, username = ?, auth_method = ?,
                  credential_id = ?, key_passphrase_id = ?, jump_session_id = ?, startup_command = ?,
                  startup_on_reconnect = ?, prompt_hook = ?, environment = ?, color = ?, vm_id = ?, user_id = ?,
-                 updated_at = ?
+                 updated_at = ?, auth_from_folder = ?, jump_direct = ?
              WHERE workspace_id = ? AND id = ?",
         )
         .bind(input.folder_id.map(|f| f.to_string()))
@@ -242,7 +339,7 @@ impl Store {
         .bind(&input.host)
         .bind(i64::from(input.port))
         .bind(&input.username)
-        .bind(input.auth.method())
+        .bind(method_column(&input.auth))
         .bind(input.auth.credential_id().map(|s| s.0.to_string()))
         .bind(input.auth.passphrase_id().map(|s| s.0.to_string()))
         .bind(input.jump_session_id.map(|j| j.to_string()))
@@ -254,6 +351,8 @@ impl Store {
         .bind(&input.vm_id)
         .bind(ctx.user_id.to_string())
         .bind(now_rfc3339())
+        .bind(i64::from(input.auth == SessionAuth::Folder))
+        .bind(i64::from(input.jump_direct && input.jump_session_id.is_none()))
         .bind(ctx.workspace_id.to_string())
         .bind(id.to_string())
         .execute(&mut *tx)
@@ -305,29 +404,85 @@ impl Store {
         Ok(moved)
     }
 
-    /// Each session's jump host, for the cycle check.
-    pub(crate) async fn session_jumps(&self, ctx: &Context) -> Result<HashMap<Uuid, Option<Uuid>>> {
-        let rows = sqlx::query("SELECT id, jump_session_id FROM sessions WHERE workspace_id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
-        rows.iter()
-            .map(|r| {
-                let id: String = r.try_get("id")?;
-                Ok((parse_uuid(&id)?, optional_uuid(r, "jump_session_id")?))
-            })
-            .collect()
+    /// Each session's jump host as it applies (QL-16: its own, or its folders' as `folders` has them), for the
+    /// cycle check.
+    pub(crate) async fn session_jumps_in(
+        &self,
+        ctx: &Context,
+        folders: &Folders,
+    ) -> Result<HashMap<Uuid, Option<Uuid>>> {
+        Ok(self
+            .list_sessions_in(ctx, folders)
+            .await?
+            .into_iter()
+            .map(|s| (s.id, s.jump_session_id))
+            .collect())
     }
 
+    /// Every folder with its defaults (QL-16), in the tree's order.
     pub async fn list_session_folders(&self, ctx: &Context) -> Result<Vec<SessionFolder>> {
         let rows = sqlx::query(
-            "SELECT id, parent_id, name, sort_order FROM session_folders WHERE workspace_id = ?
-             ORDER BY sort_order, name COLLATE NOCASE",
+            "SELECT f.id, f.parent_id, f.name, f.sort_order,
+                    d.username AS d_username, d.auth_method AS d_auth_method, d.credential_id AS d_credential_id,
+                    d.key_passphrase_id AS d_key_passphrase_id, d.jump_session_id AS d_jump_session_id,
+                    d.jump_direct AS d_jump_direct, d.environment AS d_environment, d.tags AS d_tags
+             FROM session_folders f
+             LEFT JOIN session_folder_defaults d ON d.folder_id = f.id AND d.workspace_id = f.workspace_id
+             WHERE f.workspace_id = ?
+             ORDER BY f.sort_order, f.name COLLATE NOCASE",
         )
         .bind(ctx.workspace_id.to_string())
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_folder).collect()
+    }
+
+    /// QL-16: what a folder sets for its sessions (already checked by `crate::sessions`). Empty defaults remove
+    /// the row.
+    pub(crate) async fn set_folder_defaults(
+        &self,
+        ctx: &Context,
+        folder: Uuid,
+        defaults: &FolderDefaults,
+    ) -> Result<()> {
+        if defaults.is_empty() {
+            sqlx::query("DELETE FROM session_folder_defaults WHERE workspace_id = ? AND folder_id = ?")
+                .bind(ctx.workspace_id.to_string())
+                .bind(folder.to_string())
+                .execute(&self.pool)
+                .await?;
+            return Ok(());
+        }
+        let now = now_rfc3339();
+        let auth = defaults.auth.as_ref();
+        let tags = defaults.tags.join(&TAG_SEPARATOR.to_string());
+        sqlx::query(
+            "INSERT INTO session_folder_defaults (folder_id, workspace_id, user_id, username, auth_method, credential_id,
+                                                  key_passphrase_id, jump_session_id, jump_direct, environment, tags,
+                                                  created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(folder_id) DO UPDATE SET user_id = excluded.user_id, username = excluded.username,
+                 auth_method = excluded.auth_method, credential_id = excluded.credential_id,
+                 key_passphrase_id = excluded.key_passphrase_id, jump_session_id = excluded.jump_session_id,
+                 jump_direct = excluded.jump_direct, environment = excluded.environment, tags = excluded.tags,
+                 updated_at = excluded.updated_at",
+        )
+        .bind(folder.to_string())
+        .bind(ctx.workspace_id.to_string())
+        .bind(ctx.user_id.to_string())
+        .bind(&defaults.username)
+        .bind(auth.map(SessionAuth::method))
+        .bind(auth.and_then(SessionAuth::credential_id).map(|s| s.0.to_string()))
+        .bind(auth.and_then(SessionAuth::passphrase_id).map(|s| s.0.to_string()))
+        .bind(defaults.jump_session_id.map(|j| j.to_string()))
+        .bind(i64::from(defaults.jump_direct && defaults.jump_session_id.is_none()))
+        .bind(defaults.environment.map(Environment::as_str))
+        .bind(tags)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub(crate) async fn insert_session_folder(
@@ -410,9 +565,15 @@ impl Store {
     /// Name, label and protection of a saved session (SS-06: what the policy engine needs). A session
     /// that reaches a VM (BX-01) counts as Prod when the VM is labelled Prod, and as protected when
     /// either is (AP-04): a command over SSH changes the VM as much as a VM action would.
+    ///
+    /// QL-16: the label is the one that applies, so a label the session has from its folders counts (a session
+    /// in a Prod folder is Prod).
     pub async fn find_session_target(&self, ctx: &Context, id: Uuid) -> Result<Option<(String, Environment, bool)>> {
+        let Some(session) = self.get_session(ctx, id).await? else {
+            return Ok(None);
+        };
         let row = sqlx::query(
-            "SELECT s.name, s.environment, s.protected, v.environment AS vm_environment, v.protected AS vm_protected
+            "SELECT s.protected, v.environment AS vm_environment, v.protected AS vm_protected
              FROM sessions s LEFT JOIN vms v ON v.id = s.vm_id AND v.workspace_id = s.workspace_id
              WHERE s.workspace_id = ? AND s.id = ?",
         )
@@ -421,7 +582,7 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
         row.map(|r| -> Result<_> {
-            let env = Environment::parse(&r.try_get::<String, _>("environment")?);
+            let env = session.environment;
             let vm_env = r
                 .try_get::<Option<String>, _>("vm_environment")?
                 .map(|e| Environment::parse(&e));
@@ -433,7 +594,7 @@ impl Store {
                 env
             };
             Ok((
-                r.try_get("name")?,
+                session.name.clone(),
                 env,
                 protected != 0 || vm_protected.unwrap_or(0) != 0,
             ))
@@ -489,7 +650,9 @@ impl Store {
         .bind(i64::from(limit))
         .fetch_all(&self.pool)
         .await?;
-        rows.iter().map(row_to_session).collect()
+        let mut sessions = rows.iter().map(row_to_session).collect::<Result<Vec<_>>>()?;
+        Self::resolve_sessions(&mut sessions, &self.session_folders(ctx).await?);
+        Ok(sessions)
     }
 
     /// QL-01: how the session's VM link was made, after a create or an edit set `vm_id`.
@@ -567,8 +730,11 @@ impl Store {
     /// session's jump host, that one's own, and so on, each with its own login. Jump hosts that lead
     /// back to a session on the way, or more than [`MAX_JUMP_DEPTH`] of them, can't connect: an
     /// error that names them. So is a key login with no key chosen, here or on a jump host.
+    ///
+    /// QL-16: each hop's user, login and jump host are the ones that apply to it (its own, then its folders').
     pub async fn session_spec(&self, ctx: &Context, id: Uuid) -> Result<Option<SessionSpec>> {
-        let Some(session) = self.get_session(ctx, id).await? else {
+        let folders = self.session_folders(ctx).await?;
+        let Some(session) = self.get_session_in(ctx, id, &folders).await? else {
             return Ok(None);
         };
         let mut names = vec![session.name.clone()];
@@ -592,7 +758,7 @@ impl Store {
                 )));
             }
             // A jump host deleted meanwhile leaves the chain shorter (the link is cleared with it).
-            let Some(jump) = self.get_session(ctx, jump_id).await? else {
+            let Some(jump) = self.get_session_in(ctx, jump_id, &folders).await? else {
                 break;
             };
             seen.push(jump.id);
@@ -659,6 +825,9 @@ fn auth_method(auth: &SessionAuth) -> AuthMethod {
         },
         // A key login with no key chosen never gets here (see `spec_auth`, `unsaved_spec`).
         SessionAuth::Key { key_id: None, .. } | SessionAuth::Agent => AuthMethod::Agent,
+        // QL-16: what applies to a session is never "as its folders say"; a quick connection without a folder
+        // gets the app's default.
+        SessionAuth::Folder => AuthMethod::Password(None),
     }
 }
 

@@ -1,7 +1,7 @@
 // FD-07: import a Remotely export from another laptop. The core opens the file (chosen in a dialog it
 // opens) with the passphrase typed here and compares it with this library; this shows each session,
-// trusted host key, vault secret and favourite command (BX-08) as new, already here or in conflict, and lets the
-// user choose per item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
+// trusted host key, vault secret, favourite command (BX-08) and saved MultiExec group (QL-19) as new, already here or
+// in conflict, and lets the user choose per item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
 // Startup commands (SS-01) and saved port forwards (SS-07) are shown with a warning and left out unless ticked.
 // VM-19 to VM-21: the spec catalogue's own sizes, images (by path, noted when the file isn't here) and launch templates
 // show in their own sections when the file has any.
@@ -56,7 +56,8 @@ interface Props {
   onClose: () => void;
 }
 
-type Section = "sessions" | "knownHosts" | "secrets" | "favourites" | "sizes" | "images" | "templates";
+type Section =
+  "sessions" | "folderDefaults" | "knownHosts" | "secrets" | "favourites" | "groups" | "sizes" | "images" | "templates";
 /** VM-19 to VM-21: the catalogue's sections, shown only when the file has some. */
 const CATALOG_SECTIONS = new Set<Section>(["sizes", "images", "templates"]);
 
@@ -69,6 +70,11 @@ function itemsOf(preview: TransferPreview, section: Section): TransferItem[] {
       return preview.catalog?.[section] ?? [];
     case "favourites":
       return preview.favourites ?? [];
+    // QL-16, QL-19: files from before 0.5.0 have none.
+    case "folderDefaults":
+      return preview.folderDefaults ?? [];
+    case "groups":
+      return preview.groups ?? [];
     default:
       return preview[section];
   }
@@ -90,9 +96,12 @@ const STATUS: Record<TransferStatus, { label: string; className: string }> = {
 
 const SECTIONS: { key: Section; title: string; empty: string }[] = [
   { key: "sessions", title: "Sessions", empty: "No sessions in the file." },
+  // QL-16: shown only when the file's folders set defaults.
+  { key: "folderDefaults", title: "Folder defaults", empty: "" },
   { key: "knownHosts", title: "Trusted host keys", empty: "No host keys in the file." },
   { key: "secrets", title: "Vault secrets", empty: "" },
   { key: "favourites", title: "Favourite commands", empty: "No favourite commands in the file." },
+  { key: "groups", title: "MultiExec groups", empty: "No MultiExec groups in the file." },
   { key: "sizes", title: "VM sizes", empty: "" },
   { key: "images", title: "Images", empty: "" },
   { key: "templates", title: "Launch templates", empty: "" },
@@ -108,6 +117,8 @@ function defaults(preview: TransferPreview): Choices {
     sizes: of("sizes"),
     images: of("images"),
     templates: of("templates"),
+    folderDefaults: of("folderDefaults"),
+    groups: of("groups"),
   };
 }
 
@@ -122,9 +133,11 @@ function counts(report: TransferReport) {
   };
   return [
     part("Sessions", report.sessions),
+    part("Folder defaults", report.folderDefaults),
     part("Host keys", report.knownHosts),
     part("Secrets", report.secrets),
     part("Favourite commands", report.favourites),
+    part("MultiExec groups", report.groups),
     report.catalog && part("VM sizes", report.catalog.sizes),
     report.catalog && part("Images", report.catalog.images),
     report.catalog && part("Launch templates", report.catalog.templates),
@@ -144,9 +157,11 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
   const [preview, setPreview] = useState<TransferPreview | null>(null);
   const [choices, setChoices] = useState<Choices>({
     sessions: {},
+    folderDefaults: {},
     knownHosts: {},
     secrets: {},
     favourites: {},
+    groups: {},
     sizes: {},
     images: {},
     templates: {},
@@ -224,6 +239,8 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         knownHosts: list("knownHosts"),
         secrets: list("secrets"),
         favourites: list("favourites"),
+        folderDefaults: list("folderDefaults"),
+        groups: list("groups"),
         catalog: { sizes: list("sizes"), images: list("images"), templates: list("templates") },
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),
@@ -398,6 +415,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
             {SECTIONS.filter(
               (s) =>
                 (s.key !== "secrets" || preview.secretValues) &&
+                (s.key !== "folderDefaults" || itemsOf(preview, s.key).length > 0) &&
                 (!CATALOG_SECTIONS.has(s.key) || itemsOf(preview, s.key).length > 0),
             ).map((section) => (
               <ItemTable

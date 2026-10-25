@@ -17,6 +17,8 @@ mod commands;
 mod deploy_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vm_settings_tests;
 
 use std::collections::BTreeMap;
 
@@ -29,6 +31,7 @@ use crate::command_bus::{Command, ContainerOp, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::presentation::Change;
+use crate::vm_settings::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
 pub use commands::{default_dangerous_patterns, default_read_only_commands, DangerousPattern};
 
@@ -130,6 +133,33 @@ pub enum ActionKind {
     PruneBuildCache,
     /// Prune volumes no container uses, which deletes their data.
     PruneVolumes,
+    // VM-11, VM-12, VM-15, VM-16, VM-23, VM-24 (docs/plan-0.5.md, "Approval tiers").
+    /// Change a powered-off VM's CPU, memory, firmware, network adapters, shared folders, name or guest OS
+    /// type (VM-23, VM-12 bulk resize, VM-11).
+    VmConfigure,
+    /// Upgrade a Workstation VM's hardware version: it can't be undone.
+    VmUpgradeHardware,
+    /// Attach an ISO to a VM's CD/DVD drive, or eject it.
+    VmIso,
+    /// Plug a network adapter's cable in (VM-11).
+    VmNicConnect,
+    /// Pull a network adapter's cable out: the VM drops off its network. Critical for two or more VMs (the
+    /// PRD's "bulk network disconnect").
+    VmNicDisconnect,
+    /// Install or upgrade VMware Tools or the Guest Additions (VM-15).
+    VmToolsInstall,
+    /// Add a virtual disk (VM-16).
+    VmDiskAdd,
+    /// Compact or defragment a virtual disk (VM-16).
+    VmDiskCompact,
+    /// Expand a virtual disk: it can't be shrunk back (VM-16).
+    VmDiskExpand,
+    /// Remove a virtual disk, which deletes its files (VM-16).
+    VmDiskRemove,
+    /// Delete VMs and their files (VM-24).
+    VmDelete,
+    /// Add an existing VM to the list (a .vmx) or to VirtualBox (a .vbox) (VM-24).
+    VmRegister,
     /// VM-21, VM-10 (docs/plan-0.5.md, "Approval tiers"): make new VMs (create, clone, import). Its bulk tier
     /// applies from [`PolicyRules::deploy_bulk_threshold`] VMs.
     VmDeploy,
@@ -137,7 +167,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 38] = [
+    pub const ALL: [ActionKind; 50] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -151,6 +181,18 @@ impl ActionKind {
         ActionKind::SnapshotDelete,
         ActionKind::VmProtect,
         ActionKind::VmUnprotect,
+        ActionKind::VmIso,
+        ActionKind::VmNicConnect,
+        ActionKind::VmNicDisconnect,
+        ActionKind::VmToolsInstall,
+        ActionKind::VmConfigure,
+        ActionKind::VmUpgradeHardware,
+        ActionKind::VmDiskAdd,
+        ActionKind::VmDiskCompact,
+        ActionKind::VmDiskExpand,
+        ActionKind::VmDiskRemove,
+        ActionKind::VmRegister,
+        ActionKind::VmDelete,
         ActionKind::VmDeploy,
         ActionKind::ExecReadOnly,
         ActionKind::ExecOther,
@@ -218,6 +260,18 @@ impl ActionKind {
             ActionKind::PruneImages => "Prune unused images",
             ActionKind::PruneBuildCache => "Prune the build cache",
             ActionKind::PruneVolumes => "Prune unused volumes (deletes their data)",
+            ActionKind::VmConfigure => "Change VM settings (VM off)",
+            ActionKind::VmUpgradeHardware => "Upgrade a VM's hardware version",
+            ActionKind::VmIso => "Attach or eject an ISO",
+            ActionKind::VmNicConnect => "Connect a VM's network adapter",
+            ActionKind::VmNicDisconnect => "Disconnect a VM's network adapter",
+            ActionKind::VmToolsInstall => "Install or upgrade the guest tools",
+            ActionKind::VmDiskAdd => "Add a virtual disk",
+            ActionKind::VmDiskCompact => "Compact or defragment a virtual disk",
+            ActionKind::VmDiskExpand => "Expand a virtual disk",
+            ActionKind::VmDiskRemove => "Remove a virtual disk (deletes its files)",
+            ActionKind::VmDelete => "Delete VMs (deletes their files)",
+            ActionKind::VmRegister => "Add an existing VM",
             ActionKind::VmDeploy => "Deploy VMs (create, clone or import)",
         }
     }
@@ -805,6 +859,30 @@ impl Default for PolicyRules {
             (PruneImages, TierRule::same(High)),
             (PruneBuildCache, TierRule::same(High)),
             (PruneVolumes, TierRule::same(Critical)),
+            // docs/plan-0.5.md, "Approval tiers". VM-12: a bulk resize is one confirm for all the VMs.
+            (VmConfigure, TierRule::same(Medium)),
+            // Can't be undone, and older Workstation versions won't open the VM.
+            (VmUpgradeHardware, TierRule::same(High)),
+            (VmIso, TierRule::same(Low)),
+            (VmNicConnect, TierRule::same(Low)),
+            // The PRD: a bulk network disconnect is Critical.
+            (
+                VmNicDisconnect,
+                TierRule {
+                    single: Medium,
+                    bulk: Critical,
+                },
+            ),
+            (VmToolsInstall, TierRule::same(Medium)),
+            (VmDiskAdd, TierRule::same(Medium)),
+            (VmDiskCompact, TierRule::same(Medium)),
+            // Can't be shrunk back.
+            (VmDiskExpand, TierRule::same(High)),
+            // The files go with it.
+            (VmDiskRemove, TierRule::same(Critical)),
+            (VmDelete, TierRule::same(Critical)),
+            // Lists a VM (or registers it with VirtualBox); nothing in it changes.
+            (VmRegister, TierRule::same(Low)),
             // VM-21, VM-10 (docs/plan-0.5.md): 1 to 4 VMs are one confirm, 5 or more (deploy_bulk_threshold) the
             // full approval; a Prod label moves it up one, as for every action.
             (
@@ -1024,6 +1102,27 @@ impl PolicyEngine {
                     PruneWhat::Volumes => ActionKind::PruneVolumes,
                 },
             },
+            Command::VmConfig {
+                edit: VmConfigEdit::UpgradeHardware,
+                ..
+            } => ActionKind::VmUpgradeHardware,
+            Command::VmConfig { .. } => ActionKind::VmConfigure,
+            Command::VmDevice { op, .. } => match op {
+                VmDeviceOp::AttachIso { .. } | VmDeviceOp::EjectIso { .. } => ActionKind::VmIso,
+                VmDeviceOp::ConnectNic { .. } => ActionKind::VmNicConnect,
+                VmDeviceOp::DisconnectNic { .. } => ActionKind::VmNicDisconnect,
+                VmDeviceOp::InstallTools => ActionKind::VmToolsInstall,
+            },
+            Command::VmDisk { op, .. } => match op {
+                VmDiskOp::Add { .. } => ActionKind::VmDiskAdd,
+                VmDiskOp::Compact { .. } | VmDiskOp::Defragment { .. } => ActionKind::VmDiskCompact,
+                VmDiskOp::Expand { .. } => ActionKind::VmDiskExpand,
+                VmDiskOp::Remove { .. } => ActionKind::VmDiskRemove,
+            },
+            Command::VmLifecycle { op, .. } => match op {
+                VmLifecycleOp::Delete => ActionKind::VmDelete,
+                VmLifecycleOp::Register { .. } => ActionKind::VmRegister,
+            },
             Command::Deploy { .. } => ActionKind::VmDeploy,
         }
     }
@@ -1138,6 +1237,29 @@ impl PolicyEngine {
                 }
                 _ => {}
             }
+        }
+
+        // VM-16, VM-23, VM-24: say what can't be undone, for the dialog and the audit log.
+        match command {
+            Command::VmDisk {
+                op: VmDiskOp::Remove { .. },
+                ..
+            } => reasons.push("the disk's files are deleted".into()),
+            Command::VmDisk {
+                op: VmDiskOp::Expand { .. },
+                ..
+            } => reasons.push("a disk can't be shrunk back after it grows".into()),
+            Command::VmLifecycle {
+                op: VmLifecycleOp::Delete,
+                ..
+            } => reasons.push("the VMs' files are deleted with them".into()),
+            Command::VmConfig {
+                edit: VmConfigEdit::UpgradeHardware,
+                ..
+            } => {
+                reasons.push("a hardware upgrade can't be undone (older Workstation versions won't open the VM)".into())
+            }
+            _ => {}
         }
 
         // SS-10: say why a pager or editor in a MultiExec line is not read-only.
@@ -1263,11 +1385,19 @@ pub fn read_only_edit_refusal(locked: bool, change: Change) -> Result<()> {
 /// (start, pause, unpause), are snapshots themselves (take), would undo their own purpose (deleting
 /// snapshots to free space would add one per VM; the deleted snapshot is not in it anyway) or do not
 /// touch the VM (protect). The job runner asks this too, so the dialog and the job always agree.
+///
+/// VM-23, VM-15: a snapshot keeps a VM's settings too, so it undoes a settings change (a hardware upgrade
+/// included) and an install of the guest tools; renaming has nothing to undo. Disk changes are refused while
+/// the VM has snapshots (expand, compact, remove) or don't need one (add), a deleted VM takes its snapshots
+/// with it, and ISOs and cables change nothing a snapshot would keep.
 pub fn safety_snapshot_applies(command: &Command) -> bool {
     let on_vms = command.targets().iter().any(|t| matches!(t, TargetRef::Vm { .. }));
     let can_lose_state = match command {
         Command::VmPower { op, .. } => matches!(op, PowerOp::Stop { .. } | PowerOp::Reset { .. } | PowerOp::Suspend),
         Command::VmSnapshot { op, .. } => matches!(op, SnapshotOp::Revert { .. }),
+        Command::VmConfig { edit, .. } => !matches!(edit, VmConfigEdit::Rename { .. }),
+        Command::VmDevice { op, .. } => matches!(op, VmDeviceOp::InstallTools),
+        Command::VmDisk { .. } | Command::VmLifecycle { .. } => false,
         Command::VmProtect { .. }
         | Command::RemoteExec { .. }
         | Command::AppUpdate { .. }

@@ -8,14 +8,15 @@ import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tau
 import { learnFields, masker } from "@/lib/presentation";
 
 // FD-03: every answer and event passes the host, IP and user fields it holds to the presentation masker, so those
-// values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored.
-async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+// values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored. Exported for
+// the other wrappers (dashboard-api.ts), which go through them too.
+export async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
   const answer = await tauriInvoke<T>(cmd, args, options);
   learnFields(masker, answer);
   return answer;
 }
 
-function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+export function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
   return tauriListen<T>(event, (e) => {
     learnFields(masker, e.payload);
     handler(e);
@@ -269,8 +270,103 @@ export type Command =
   | { type: "openTunnel"; targets: TargetRef[]; forward: PortForward }
   /** CT-01, CT-02: every target a container target whose object fits the op. */
   | { type: "container"; targets: TargetRef[]; op: ContainerOp }
+  /** VM-23, VM-12, VM-11: settings of powered-off VMs (a shared folder only through `vmPickSharedFolder`). */
+  | { type: "vmConfig"; targets: TargetRef[]; edit: VmConfigEdit }
+  /** VM-23, VM-11, VM-15: CD/DVD, cables and guest tools (an ISO only through `vmPickIso` or a drop). */
+  | { type: "vmDevice"; targets: TargetRef[]; op: VmDeviceOp }
+  /** VM-16: virtual disks of powered-off VMs. */
+  | { type: "vmDisk"; targets: TargetRef[]; op: VmDiskOp }
+  /** VM-24: deleting VMs (an existing VM is added only through `vmPickExisting`). */
+  | { type: "vmLifecycle"; targets: TargetRef[]; op: VmLifecycleOp }
   /** VM-21, VM-10: new VMs. Never submitted by the UI: `deploySubmit` and `deployCloneSubmit` build it in the core. */
   | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> };
+
+/** VM-11: what a network adapter is attached to. */
+export type NicNetwork =
+  | { kind: "nat" }
+  | { kind: "bridged"; adapter?: string | null }
+  | { kind: "hostOnly"; adapter?: string | null }
+  /** Workstation: VMnet0 to VMnet19. */
+  | { kind: "custom"; vnet: string }
+  /** VirtualBox. */
+  | { kind: "natNetwork"; name: string }
+  /** VirtualBox. */
+  | { kind: "internal"; name: string };
+
+export type MacAddress = { kind: "generated" } | { kind: "static"; mac: string };
+
+/** VM-23: a VM's firmware in a settings edit (the catalogue's `Firmware` also has Secure Boot in it). */
+export type VmFirmware = "bios" | "efi";
+
+/** VM-23, VM-12, VM-11 (crates/core/src/vm_settings/ops.rs). A field left out keeps its value. */
+export type VmConfigEdit =
+  | {
+      kind: "resources";
+      vcpus?: number | null;
+      coresPerSocket?: number | null;
+      memoryMb?: number | null;
+      nestedVirtualization?: boolean | null;
+    }
+  | { kind: "firmware"; firmware: VmFirmware; secureBoot: boolean; tpm?: boolean | null }
+  | { kind: "rename"; name: string }
+  | { kind: "guestOs"; osType: string }
+  | { kind: "addNic"; network: NicNetwork; model?: string | null }
+  | {
+      kind: "editNic";
+      slot: string;
+      network?: NicNetwork | null;
+      model?: string | null;
+      mac?: MacAddress | null;
+      connectAtPowerOn?: boolean | null;
+    }
+  | { kind: "removeNic"; slot: string }
+  | { kind: "addSharedFolder"; name: string; hostPath: string; writable: boolean }
+  | { kind: "removeSharedFolder"; name: string }
+  | { kind: "upgradeHardware" };
+
+export type VmDeviceOp =
+  | { kind: "attachIso"; slot?: string | null; path: string }
+  | { kind: "ejectIso"; slot?: string | null }
+  | { kind: "connectNic"; slot: string }
+  | { kind: "disconnectNic"; slot: string }
+  | { kind: "installTools" };
+
+export type VmDiskOp =
+  | { kind: "add"; sizeMb: number; thin: boolean; bus?: string | null }
+  | { kind: "expand"; slot: string; sizeMb: number }
+  | { kind: "compact"; slot: string }
+  | { kind: "defragment"; slot: string }
+  | { kind: "remove"; slot: string };
+
+export type VmLifecycleOp = { kind: "delete" } | { kind: "register"; path: string };
+
+/** AP-02: what a VM settings or lifecycle command does to each VM. */
+export interface VmChangePreview {
+  targets: VmChangeTarget[];
+  /** Said once for the command (Workstation's window is open); the approval's warnings list them too. */
+  warnings: string[];
+}
+
+export interface VmChangeTarget {
+  target: string;
+  name: string;
+  /** "vCPUs: 2 → 4". */
+  changes: string[];
+  /** Every file that is deleted. */
+  deletes: { path: string; bytes: number | null }[];
+  /** What stays that one might expect to go. */
+  keeps: string[];
+  /** Why this VM would be refused now. */
+  problem: string | null;
+}
+
+/** VM-24: what Open console did. */
+export type ConsoleOutcome = { kind: "opened" } | { kind: "starting"; outcome: SubmitOutcome };
+
+export interface GuestOsType {
+  id: string;
+  description: string;
+}
 
 /** SS-08: one file of an upload. */
 export interface UploadFile {
@@ -392,6 +488,8 @@ export interface ApprovalRequest {
   tunnel: TunnelDetails | null;
   /** VM-21: for a deploy, each VM it makes, where, and the disk space it may take. */
   deploy: DeployPreview | null;
+  /** VM-23, VM-24: what changes on each VM, the files that go, and why a VM would be refused. */
+  vmChange: VmChangePreview | null;
 }
 
 /** SS-07: a tunnel as the approval dialog shows it. */
@@ -730,6 +828,18 @@ export type ActionKind =
   | "pruneImages"
   | "pruneBuildCache"
   | "pruneVolumes"
+  | "vmConfigure"
+  | "vmUpgradeHardware"
+  | "vmIso"
+  | "vmNicConnect"
+  | "vmNicDisconnect"
+  | "vmToolsInstall"
+  | "vmDiskAdd"
+  | "vmDiskCompact"
+  | "vmDiskExpand"
+  | "vmDiskRemove"
+  | "vmDelete"
+  | "vmRegister"
   /** VM-21, VM-10: make new VMs. */
   | "vmDeploy"
   | "appUpdate";
@@ -885,7 +995,9 @@ export type SessionAuth =
   /** No password chosen: the terminal asks when it connects (SS-03). */
   | { method: "password"; passwordId: string | null }
   | { method: "key"; keyId: string | null; passphraseId: string | null }
-  | { method: "agent" };
+  | { method: "agent" }
+  /** QL-16: as the session's folders say (a session's own choice; what applies to it is never this). */
+  | { method: "folder" };
 
 /** What the session editor sends; the core checks and tidies it. */
 export interface SessionInput {
@@ -896,7 +1008,10 @@ export interface SessionInput {
   port: number;
   username: string | null;
   auth: SessionAuth;
+  /** null: as its folders say (QL-16), unless jumpDirect. */
   jumpSessionId: string | null;
+  /** QL-16: no jump host, whatever its folders set. */
+  jumpDirect: boolean;
   startupCommand: string | null;
   /** SS-01: type the startup command again after an automatic reconnect (off: only on connections the user opens). */
   startupOnReconnect: boolean;
@@ -910,9 +1025,55 @@ export interface SessionInput {
   vmId: string | null;
 }
 
+/** QL-16: the folder a value comes from. */
+export interface FromFolder {
+  id: string;
+  name: string;
+}
+
+/** QL-16: which folder gives each value a session doesn't set itself (null: its own, or the app's default). */
+export interface Inherited {
+  username: FromFolder | null;
+  auth: FromFolder | null;
+  jump: FromFolder | null;
+  environment: FromFolder | null;
+  /** Tags from folders the session doesn't have itself. */
+  tags: { tag: string; folder: FromFolder }[];
+}
+
+/** QL-16: what a session sets itself, of what a folder can set too (what the editor edits). */
+export interface OwnValues {
+  /** null: from its folders. */
+  username: string | null;
+  /** "folder": from its folders. */
+  auth: SessionAuth;
+  jumpSessionId: string | null;
+  jumpDirect: boolean;
+  /** "none": from its folders. */
+  environment: Environment;
+  tags: string[];
+}
+
+/** QL-16: what applies to a session in a folder that sets nothing itself (the editor's "from folder X"). */
+export interface Effective {
+  username: string | null;
+  auth: SessionAuth;
+  jumpSessionId: string | null;
+  environment: Environment;
+  tags: string[];
+  inherited: Inherited;
+}
+
+/**
+ * A saved session. QL-16: username, auth, jumpSessionId, environment and tags are what applies to it (its own values,
+ * then its folders', then the app's); `own` is what it sets itself, and `inherited` names the folders that give the
+ * rest.
+ */
 export interface SessionRecord extends SessionInput {
   id: string;
   protocol: string;
+  own: OwnValues;
+  inherited: Inherited;
   /** AP-04: bulk actions skip it. */
   protected: boolean;
   /** QL-01: how vmId was set. null: no decision yet, so auto-linking may link it. */
@@ -929,12 +1090,36 @@ export interface SessionRecord extends SessionInput {
   lastOpenedAt: string | null;
 }
 
+/** QL-16: what a folder sets for the sessions in it and its subfolders. null (or empty): the folder above decides. */
+export interface FolderDefaults {
+  username: string | null;
+  /** Never "folder". */
+  auth: SessionAuth | null;
+  jumpSessionId: string | null;
+  /** No jump host for its sessions, whatever a folder above sets. */
+  jumpDirect: boolean;
+  /** Never "none": a folder adds a label, it can't take one off. */
+  environment: Environment | null;
+  tags: string[];
+}
+
+export const NO_FOLDER_DEFAULTS: FolderDefaults = {
+  username: null,
+  auth: null,
+  jumpSessionId: null,
+  jumpDirect: false,
+  environment: null,
+  tags: [],
+};
+
 export interface SessionFolder {
   id: string;
   /** null: at the top level. */
   parentId: string | null;
   name: string;
   sortOrder: number;
+  /** QL-16. */
+  defaults: FolderDefaults;
 }
 
 /** SS-01 search. Empty fields match everything. */
@@ -1011,7 +1196,9 @@ export type TerminalEvent =
   /** SS-08: the shell's folder, or how far it is known (each connection starts over). */
   | { event: "folder"; folder: FolderInfo }
   /** SS-11: the session log could not be written (a full disk, say), so it stopped. */
-  | { event: "logStopped"; path: string; reason: string };
+  | { event: "logStopped"; path: string; reason: string }
+  /** QL-17: an alert rule matched (one event per burst of matching lines). */
+  | { event: "alert"; alert: TerminalAlert };
 
 // ---- SS-07 port forwards and tunnels ----
 
@@ -1248,6 +1435,91 @@ export interface FavouriteInput {
   name: string;
   command: string;
   description: string | null;
+}
+
+/** QL-19: one session of a saved MultiExec group. */
+export interface GroupMember {
+  sessionId: string;
+  name: string;
+}
+
+/** QL-19: a saved MultiExec group: a named set of saved sessions, in order. */
+export interface MultiExecGroup {
+  id: string;
+  name: string;
+  members: GroupMember[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** QL-19: what the group editor sends. 1 to 60 characters; 1 to 100 saved sessions. */
+export interface GroupInput {
+  name: string;
+  sessionIds: string[];
+}
+
+/** QL-17: how a rule colours what it matches: the text in the colour, or the colour behind it. */
+export type RuleStyle = "text" | "fill";
+
+/** QL-17: which terminals a rule applies to. */
+export type RuleScope =
+  | { kind: "global" }
+  | { kind: "environment"; environment: Exclude<Environment, "none"> }
+  | { kind: "session"; sessionId: string };
+
+/** QL-17: a highlight and alert rule. */
+export interface TerminalRule {
+  /** `builtin:<key>` for a built-in rule, else the rule's id. */
+  id: string;
+  builtin: boolean;
+  name: string;
+  /** A regular expression both Rust and JavaScript (with the u flag) read alike; the core checks it. */
+  pattern: string;
+  caseSensitive: boolean;
+  /** null: no highlight, the rule only alerts. */
+  color: SessionColor | null;
+  style: RuleStyle;
+  alert: boolean;
+  scope: RuleScope;
+  enabled: boolean;
+  /** Why a saved pattern can't be used any more (saved by another version): it neither highlights nor alerts. */
+  problem: string | null;
+  updatedAt: string | null;
+}
+
+export interface TerminalRuleInput {
+  name: string;
+  pattern: string;
+  caseSensitive: boolean;
+  color: SessionColor | null;
+  style: RuleStyle;
+  alert: boolean;
+  scope: RuleScope;
+  enabled: boolean;
+}
+
+/** QL-17: the editor's live check of a pattern. */
+export interface PatternCheck {
+  valid: boolean;
+  message: string | null;
+}
+
+/** QL-17: a burst of lines that matched an alert rule in one terminal (one event per burst, then a cooldown). */
+export interface TerminalAlert {
+  ruleId: string;
+  ruleName: string;
+  terminalId: string;
+  /** null: a quick connection that was not saved. */
+  sessionId: string | null;
+  /** Lines that matched in this burst. */
+  count: number;
+  /** Lines that matched during the cooldown since the last alert. */
+  suppressed: number;
+  /** RFC 3339, UTC. */
+  firstAt: string;
+  lastAt: string;
+  /** The first matching line, scrubbed of the terminal's secrets, at most 200 characters. */
+  sample: string;
 }
 
 /** BX-08: the two sections of the library: symptom runbooks first, then groups by area. */
@@ -1524,6 +1796,10 @@ export interface ExportReport {
   favourites: number;
   /** SS-07 saved port forwards, over all sessions. */
   forwards: number;
+  /** QL-16 folders with defaults. */
+  folderDefaults: number;
+  /** QL-19 saved MultiExec groups. */
+  groups: number;
   /** VM-19 to VM-21: own sizes, images and launch templates. */
   catalog: { sizes: number; images: number; templates: number };
 }
@@ -1562,6 +1838,10 @@ export interface TransferPreview {
   secretValues: boolean;
   /** BX-08 favourite commands. */
   favourites: TransferItem[];
+  /** QL-16: the file's folders that set defaults, compared with the folder at the same place here. */
+  folderDefaults: TransferItem[];
+  /** QL-19 saved MultiExec groups. */
+  groups: TransferItem[];
   /** VM-19 to VM-21: own sizes, images (by path) and launch templates. */
   catalog: { sizes: TransferItem[]; images: TransferItem[]; templates: TransferItem[] };
   warnings: string[];
@@ -1584,6 +1864,8 @@ export interface TransferReport {
   knownHosts: TransferCounts;
   secrets: TransferCounts;
   favourites: TransferCounts;
+  /** QL-19 saved MultiExec groups. */
+  groups: TransferCounts;
   /** VM-19 to VM-21; imagesMissingHere: imported without their file (or golden VM) on this laptop. */
   catalog: { sizes: TransferCounts; images: TransferCounts; templates: TransferCounts; imagesMissingHere: number };
   /** SS-07: port forwards saved with the imported sessions. */
@@ -1592,6 +1874,8 @@ export interface TransferReport {
   startupLeftOut: number;
   forwardsLeftOut: number;
   foldersAdded: number;
+  /** QL-16: folder defaults taken from the file. */
+  folderDefaults: TransferCounts;
   /** Sessions imported without the password or key they used. */
   withoutCredentials: number;
   problems: { name: string; reason: string }[];
@@ -2113,7 +2397,7 @@ export interface VmHostUsage {
   ts: string;
 }
 
-/** MO-03 drill-down: one point of a chart. In memory only (history in SQLite is MO-06, v2). */
+/** MO-03 drill-down: one point of a chart, kept in memory for 30 minutes (MO-06's history on disk: dashboard-api.ts). */
 export interface MetricPoint {
   /** Unix time in milliseconds. */
   t: number;
@@ -2457,6 +2741,12 @@ export interface VirtualDisk {
   files: number;
   delta: boolean;
   problem: string | null;
+  /** VM-23: the controller's kind (pvscsi, SATA (AHCI), IntelAhci...). */
+  controller: string | null;
+  /** VM-23: thin or thick; null when unknown (a snapshot's delta). */
+  thin: boolean | null;
+  /** VM-23: a delta's parents down to the base disk, nearest first. */
+  chain: string[];
 }
 
 export interface VirtualNic {
@@ -2465,7 +2755,46 @@ export interface VirtualNic {
   model: string | null;
   /** FD-03: masked while presenting (`mac` is a field `learnFields` knows). */
   mac: string | null;
+  /** Connected when the VM starts (VirtualBox: its cable). */
   connected: boolean | null;
+  /** VM-11: the vnet, host adapter, NAT network or internal network. */
+  networkName: string | null;
+  /** VM-11: plugged in right now (VirtualBox; Workstation can't be asked). */
+  connectedNow: boolean | null;
+  staticMac: boolean;
+}
+
+export interface StorageController {
+  name: string;
+  kind: string | null;
+  ports: number | null;
+}
+
+export interface VirtualCdrom {
+  slot: string;
+  image: string | null;
+  hostDrive: string | null;
+  connected: boolean | null;
+}
+
+export interface VirtualDisplay {
+  videoMemoryMb: number | null;
+  accelerate3d: boolean | null;
+  monitors: number | null;
+  controller: string | null;
+}
+
+export interface SerialPort {
+  slot: string;
+  kind: string;
+  target: string | null;
+}
+
+export interface SharedFolder {
+  name: string;
+  hostPath: string;
+  writable: boolean | null;
+  enabled: boolean | null;
 }
 
 /** MO-13: a VM's virtual hardware from its hypervisor's files. */
@@ -2480,6 +2809,20 @@ export interface VmHardware {
   hardwareVersion: string | null;
   disks: VirtualDisk[];
   nics: VirtualNic[];
+  // VM-23: the Settings tab.
+  nestedVirtualization: boolean | null;
+  /** null for BIOS. */
+  secureBoot: boolean | null;
+  tpm: string | null;
+  controllers: StorageController[];
+  cdroms: VirtualCdrom[];
+  usb: string[];
+  sound: string | null;
+  display: VirtualDisplay | null;
+  serialPorts: SerialPort[];
+  sharedFolders: SharedFolder[];
+  toolsVersion: string | null;
+  guestIps: string[];
 }
 
 export interface VmSpecs {
@@ -2942,6 +3285,22 @@ export const api = {
   hostDetailsRelease: (sessionId: string) => invoke<void>("host_details_release", { sessionId }),
   /** MO-13: a VM's hardware from its files, and its guest's facts from a linked session. */
   vmSpecs: (vmxPath: string) => invoke<VmSpecs>("vm_specs", { vmxPath }),
+  // VM-23, VM-24: the commands that carry a path of this PC are built in the shell, from a dialog it opens or a
+  // drop; null when the dialog was closed.
+  vmPickIso: (vmxPath: string, slot?: string | null) =>
+    invoke<SubmitOutcome | null>("vm_pick_iso", { vmxPath, slot: slot ?? null }),
+  vmAttachDroppedIso: (stagedId: string, vmxPath: string) =>
+    invoke<SubmitOutcome>("vm_attach_dropped_iso", { stagedId, vmxPath }),
+  vmPickSharedFolder: (vmxPath: string, name: string, writable: boolean) =>
+    invoke<SubmitOutcome | null>("vm_pick_shared_folder", { vmxPath, name, writable }),
+  vmPickExisting: () => invoke<SubmitOutcome | null>("vm_pick_existing"),
+  /** VM-24: the hypervisor's own window; audited, no tier. */
+  vmOpenConsole: (vmxPath: string) => invoke<ConsoleOutcome>("vm_open_console", { vmxPath }),
+  /** VM-23: a running VirtualBox VM's screen as a PNG data URL. */
+  vmScreenshot: (vmxPath: string) => invoke<string>("vm_screenshot", { vmxPath }),
+  vmGuestOsTypes: (vmxPath: string) => invoke<GuestOsType[]>("vm_guest_os_types", { vmxPath }),
+  /** VM-23: whether Workstation's window runs (it may write its own copy of a VM's settings over a change). */
+  vmWorkstationOpen: () => invoke<boolean>("vm_workstation_open"),
   onMetricsRound: (handler: (cost: CollectorCost) => void): Promise<UnlistenFn> =>
     listen<CollectorCost>("metrics://round", (e) => handler(e.payload)),
 
@@ -2996,8 +3355,12 @@ export const api = {
   confirmSessionVmLink: (sessionId: string) => invoke<SessionRecord>("session_confirm_vm_link", { sessionId }),
   /** QL-01: sessions several VMs match, left for the user to pick. */
   ambiguousVmLinks: () => invoke<AmbiguousLink[]>("vm_links_ambiguous"),
-  /** folderId null: the top level. */
-  moveSessions: (ids: string[], folderId: string | null) => invoke<void>("sessions_move", { ids, folderId }),
+  /**
+   * folderId null: the top level. QL-16, SS-04: `reauth_required` when the new folder's login would send a vault
+   * password where no saved session sends it yet.
+   */
+  moveSessions: (ids: string[], folderId: string | null, vaultPassword?: string) =>
+    invoke<void>("sessions_move", { ids, folderId, vaultPassword: vaultPassword ?? null }),
   // SS-07: saved port forwards and a terminal's tunnels.
   forwards: (sessionId: string) => invoke<PortForward[]>("forwards_list", { sessionId }),
   allForwards: () => invoke<Record<string, PortForward[]>>("forwards_all"),
@@ -3016,9 +3379,20 @@ export const api = {
     invoke<void>("terminal_tunnel_stop", { terminalId, forwardId }),
   createFolder: (name: string, parentId: string | null) => invoke<SessionFolder>("folder_create", { name, parentId }),
   renameFolder: (id: string, name: string) => invoke<SessionFolder>("folder_rename", { id, name }),
-  moveFolder: (id: string, parentId: string | null) => invoke<SessionFolder>("folder_move", { id, parentId }),
+  moveFolder: (id: string, parentId: string | null, vaultPassword?: string) =>
+    invoke<SessionFolder>("folder_move", { id, parentId, vaultPassword: vaultPassword ?? null }),
   /** Its sessions and subfolders move up to its parent. */
-  deleteFolder: (id: string) => invoke<void>("folder_delete", { id }),
+  deleteFolder: (id: string, vaultPassword?: string) =>
+    invoke<void>("folder_delete", { id, vaultPassword: vaultPassword ?? null }),
+  /**
+   * QL-16: what a folder gives its sessions. Audited like a session edit; `reauth_required` when it would send a vault
+   * password where no saved session sends it yet.
+   */
+  setFolderDefaults: (id: string, defaults: FolderDefaults, vaultPassword?: string) =>
+    invoke<SessionFolder>("folder_set_defaults", { id, defaults, vaultPassword: vaultPassword ?? null }),
+  /** QL-16: what a session in `folderId` gets when it sets nothing itself (`sessionId`: the one being edited). */
+  sessionInherited: (folderId: string | null, sessionId: string | null) =>
+    invoke<Effective>("session_inherited", { folderId, sessionId }),
 
   /**
    * SS-02: reads a session list (PuTTY's registry, or a file chosen in a dialog the core opens; the
@@ -3066,6 +3440,10 @@ export const api = {
     knownHosts: TransferChoice[];
     secrets: TransferChoice[];
     favourites: TransferChoice[];
+    /** QL-16: what to do with each folder's defaults. */
+    folderDefaults: TransferChoice[];
+    /** QL-19 saved MultiExec groups. */
+    groups?: TransferChoice[];
     /** VM-19 to VM-21. */
     catalog?: { sizes: TransferChoice[]; images: TransferChoice[]; templates: TransferChoice[] };
     /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
@@ -3240,6 +3618,12 @@ export const api = {
   /** One folder's favourites in a new order; `folder` null for the top level. */
   reorderFavourites: (folder: string | null, ids: string[]) =>
     invoke<Favourite[]>("favourites_reorder", { folder, ids }),
+  /** QL-19 saved MultiExec groups, by name; changes are audited and refused by the read-only lock. */
+  multiExecGroups: () => invoke<MultiExecGroup[]>("multiexec_groups_list"),
+  createMultiExecGroup: (input: GroupInput) => invoke<MultiExecGroup>("multiexec_group_create", { input }),
+  updateMultiExecGroup: (id: string, input: GroupInput) =>
+    invoke<MultiExecGroup>("multiexec_group_update", { id, input }),
+  deleteMultiExecGroup: (id: string) => invoke<void>("multiexec_group_delete", { id }),
   /** BX-08 built-in commands, classified with the current rules. */
   commandLibrary: () => invoke<LibraryEntry[]>("command_library"),
   /** BX-08: a command's variables and what the policy engine makes of it. */
@@ -3259,6 +3643,24 @@ export const api = {
     invoke<void>("terminal_type_secret", { id, secretId, force, vaultPassword: vaultPassword ?? null }),
   /** QL-07: a Windows notification that a long command finished in a background tab. */
   notifyCommandFinished: (title: string, body: string) => invoke<void>("notify_command_finished", { title, body }),
+  /** QL-17: a Windows notification that an alert rule matched in a background tab (one per burst). */
+  notifyTerminalAlert: (title: string, body: string) => invoke<void>("notify_terminal_alert", { title, body }),
+
+  /** QL-17 highlight and alert rules: built-in ones first, then the user's in their order. */
+  terminalRules: () => invoke<TerminalRule[]>("terminal_rules_list"),
+  /** QL-17: the editor's live check of a pattern (what Rust and JavaScript both read alike). */
+  terminalRuleValidate: (pattern: string, caseSensitive: boolean) =>
+    invoke<PatternCheck>("terminal_rule_validate", { pattern, caseSensitive }),
+  /** QL-17: changes are audited (name and scope, never the pattern) and refused by the read-only lock. */
+  addTerminalRule: (input: TerminalRuleInput) => invoke<TerminalRule>("terminal_rule_add", { input }),
+  updateTerminalRule: (id: string, input: TerminalRuleInput) =>
+    invoke<TerminalRule>("terminal_rule_update", { id, input }),
+  deleteTerminalRule: (id: string) => invoke<void>("terminal_rule_delete", { id }),
+  /** The user's rules (all of them, by id) in a new order. */
+  reorderTerminalRules: (ids: string[]) => invoke<TerminalRule[]>("terminal_rules_reorder", { ids }),
+  /** A built-in rule (by its key, e.g. "error") or its alert on or off. */
+  setBuiltinTerminalRule: (key: string, enabled: boolean, alert: boolean) =>
+    invoke<TerminalRule>("terminal_rule_set_builtin", { key, enabled, alert }),
 
   /** SS-08: the shell's folder as far as it is known. */
   filesFolder: (id: string) => invoke<FolderInfo | null>("files_folder", { id }),

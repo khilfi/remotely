@@ -27,6 +27,10 @@
 // Right-clicking a file name in a terminal offers to download it. Uploads are commands on the bus (Low; Prod and
 // replacing ask); the transfers panel shows progress, speed and time left, with cancel and retry. No path on this PC
 // comes from here: the shell opens the dialogs and catches drops.
+//
+// 0.5.0: QL-18 searches every open terminal's scrollback from a panel under the terminals (Ctrl+Shift+G), results
+// grouped by tab, a click showing the match in its pane. QL-19's Groups menu, next to the MultiExec switch, opens or
+// selects a saved group of sessions for MultiExec, saves the picked tabs as one, and manages them.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
@@ -54,6 +58,7 @@ import {
   ShieldAlertIcon,
   SquareChevronRightIcon,
   SquareTerminalIcon,
+  TextSearchIcon,
   UploadIcon,
   XIcon,
 } from "lucide-react";
@@ -80,9 +85,12 @@ import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
+import { MultiExecGroupsDialog, type GroupsDialogStart } from "@/components/MultiExecGroupsDialog";
+import { MultiExecGroupsMenu } from "@/components/MultiExecGroupsMenu";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
 import { usePresentation } from "@/components/Presentation";
+import { ScrollbackSearchPanel, type SearchPane } from "@/components/ScrollbackSearchPanel";
 import { SessionTree } from "@/components/SessionTree";
 import { TunnelsButton } from "@/components/TunnelsPanel";
 import { TypeSecretMenu } from "@/components/TypeSecretMenu";
@@ -96,6 +104,7 @@ import {
   type Environment,
   type LeftOut,
   type MultiExecEvent,
+  type MultiExecGroup,
   type MultiExecOutcome,
   type MultiExecStatus,
   type QuickConnectRequest,
@@ -105,16 +114,22 @@ import {
   type SessionRecord,
   type StagedFiles,
   type SubmitOutcome,
+  type TerminalAlert,
+  type TerminalRule,
   type TransferInfo,
   type UploadStart,
   type VaultInfo,
 } from "@/lib/api";
+import { rulesForPane } from "@/lib/highlight-rules";
+import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
 import { sendCommand } from "@/lib/command-send";
-import { connectedReason, multiExecReason, splitReason, uploadReason } from "@/lib/disabled-reasons";
+import { connectedReason, multiExecReason, READ_ONLY_REASON, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { useThresholds } from "@/lib/metrics";
 import { MultiExecSender } from "@/lib/multiexec";
+import { groupTabs, memberNames, saveGroupReason, sessionsOfTabs, type GroupTab } from "@/lib/multiexec-groups";
 import { lineNotification, shouldNotify, type NotifyChoice } from "@/lib/recordings";
+import type { LineHit } from "@/lib/scrollback-search";
 import type { PickableTab } from "@/lib/multiexec-picks";
 import { clickTab, isMulti, NO_SELECTION, pruneSelection, type TabSelection } from "@/lib/tab-selection";
 import { copyOutput, paneTitle, printOutput, saveOutput, type NamedPane } from "@/lib/terminal-output";
@@ -184,6 +199,8 @@ interface Props {
   compareRequest: number;
   /** SS-10: turns MultiExec on when it changes (the command palette). */
   multiExecRequest: number;
+  /** QL-18: opens Search all terminals when it changes (the command palette). */
+  searchRequest?: number;
   vault: VaultInfo | null;
   /** Compare runs go through the app, which opens the approval dialog; `onJob` gets the job once queued. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
@@ -299,6 +316,7 @@ export function TerminalPage({
   newRequest,
   compareRequest,
   multiExecRequest,
+  searchRequest = 0,
   vault,
   onSubmitted,
   onOpenVault,
@@ -317,8 +335,10 @@ export function TerminalPage({
   /** QL-07: what Settings say about notifications (on, long commands or any while away, how long). */
   const [notify, setNotify] = useState<NotifyChoice>({ on: true, when: "long", afterSecs: 30 });
   const notifyOn = notify.on;
-  /** QL-07: tabs where a long command finished while they were in the background. */
+  /** QL-07: tabs where a long command finished (QL-17: or an alert rule matched) while they were in the background. */
   const [attention, setAttention] = useState<string[]>([]);
+  /** QL-17: the highlight and alert rules; each pane highlights with those for its scope. */
+  const [highlightRules, setHighlightRules] = useState<TerminalRule[]>([]);
   const [newOpen, setNewOpen] = useState(false);
   const [version, setVersion] = useState(0);
   /** SS-10: MultiExec is on; the picked tabs (`selection`) receive what is typed into any of them. */
@@ -365,13 +385,22 @@ export function TerminalPage({
     x: number;
     y: number;
   } | null>(null);
+  /** QL-19: saved MultiExec groups, and the dialog that manages them. */
+  const [groups, setGroups] = useState<MultiExecGroup[]>([]);
+  const [groupsDialog, setGroupsDialog] = useState<GroupsDialogStart | null>(null);
   const handled = useRef(0);
   // For closing every pane when the page goes away (the app closing).
   const tabsRef = useRef(tabs);
 
+  const loadGroups = useCallback(() => {
+    api.multiExecGroups().then(setGroups, () => undefined);
+  }, []);
+
   const loadSessions = useCallback(() => {
     api.sessions().then(setSessions, (err) => toast.error(errorMessage(err)));
     api.sessionFolders().then(setFolders, () => undefined);
+    // QL-17: Settings edits the rules, so they are read again each time the page shows.
+    api.terminalRules().then(setHighlightRules, () => undefined);
     api.terminalSettings().then(
       (s) => {
         setOptions({
@@ -389,6 +418,9 @@ export function TerminalPage({
   useEffect(() => {
     if (active) loadSessions();
   }, [active, loadSessions, version]);
+  useEffect(() => {
+    if (active) loadGroups();
+  }, [active, loadGroups]);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -421,6 +453,15 @@ export function TerminalPage({
 
   const sessionById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
 
+  // QL-17: each pane highlights with the enabled rules for its scope: its saved session, and that session's label
+  // (none for a quick connection that was not saved). The same rules again change nothing in a pane.
+  useEffect(() => {
+    for (const pane of tabs.flatMap((t) => allPanes(t.layout))) {
+      const session = pane.sessionId ? sessionById.get(pane.sessionId) : undefined;
+      pane.setHighlightRules(rulesForPane(highlightRules, pane.sessionId, session?.environment ?? "none"));
+    }
+  }, [tabs, highlightRules, sessionById]);
+
   /** SS-07: a tunnel needs the approval dialog (started here, or one that starts with the terminal). */
   const askTunnel = useCallback((pane: PaneSession, forwardId: string, request: ApprovalRequest) => {
     setTunnelApprovals((queue) =>
@@ -430,6 +471,8 @@ export function TerminalPage({
 
   // QL-07: a pane's finished command is handled with the page's latest state.
   const finishedRef = useRef<(pane: PaneSession, finished: CommandFinished) => void>(() => undefined);
+  // QL-17: so is an alert.
+  const alertRef = useRef<(pane: PaneSession, alert: TerminalAlert) => void>(() => undefined);
   // SS-08: a file name right-clicked in a pane, too.
   const fileWordRef = useRef<(pane: PaneSession, word: string, x: number, y: number) => void>(() => undefined);
   // QL-05: a paste with a line break waits for the confirm (one at a time: a newer one cancels the one shown).
@@ -438,6 +481,7 @@ export function TerminalPage({
     (opener: PaneOpener, label: string, fixedTitle = false) => {
       const pane = new PaneSession(newKey(), opener, label, theme, options, fixedTitle);
       pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
+      pane.onAlert = (alert) => alertRef.current(pane, alert);
       pane.onFileWord = (word, x, y) => fileWordRef.current(pane, word, x, y);
       pane.onPasteConfirm = (p, ask) => pasteAskRef.current(p, ask);
       // OSC 8 links from the host are never opened: the address shows, to copy.
@@ -460,7 +504,8 @@ export function TerminalPage({
 
   // SS-10: a new tab does not join MultiExec by itself (Ctrl+click adds it), and keeps the picked tabs picked.
   const multiExecOn = useRef(false);
-  const addTab = useCallback((pane: PaneSession) => {
+  /** Returns the new tab's key (QL-19 picks the tabs a group opened). */
+  const addTab = useCallback((pane: PaneSession): string => {
     const tab: Tab = {
       key: newKey(),
       layout: { kind: "pane", key: pane.key, pane },
@@ -470,6 +515,7 @@ export function TerminalPage({
     setTabs((prev) => [...prev, tab]);
     setActiveTab(tab.key);
     setSelection((s) => (multiExecOn.current ? s : { keys: [], anchor: tab.key }));
+    return tab.key;
   }, []);
 
   const openSession = useCallback(
@@ -543,7 +589,10 @@ export function TerminalPage({
       ),
     );
     if (!next.some((t) => t.key === activeTab)) setActiveTab(next[next.length - 1]?.key ?? null);
-    if (next.length === 0) stopMultiExec();
+    if (next.length === 0) {
+      stopMultiExec();
+      setSearchAll(false);
+    }
   }
 
   function closeTab(tab: Tab) {
@@ -557,7 +606,10 @@ export function TerminalPage({
       ),
     );
     if (activeTab === tab.key) setActiveTab(next[next.length - 1]?.key ?? null);
-    if (next.length === 0) stopMultiExec();
+    if (next.length === 0) {
+      stopMultiExec();
+      setSearchAll(false);
+    }
   }
 
   function pickTab(key: string, modifiers: { ctrl: boolean; shift: boolean }) {
@@ -634,6 +686,24 @@ export function TerminalPage({
       // FD-03: Windows shows it outside the window, so it is masked here while presenting.
       api
         .notifyCommandFinished(maskedOutside(title), maskedOutside(body))
+        .catch((err) => console.warn("notification failed", err));
+      if (tab.key !== activeTab || !active)
+        setAttention((prev) => (prev.includes(tab.key) ? prev : [...prev, tab.key]));
+    };
+  });
+
+  // QL-17: an alert (the core sends one per burst of matching lines, never one per line) is kept for the list of
+  // recent alerts, and notifies like a finished command when its tab is away, unless the tab's bell is off.
+  useEffect(() => {
+    alertRef.current = (pane, alert) => {
+      const name = nameOf(pane);
+      recordAlert(alert, name);
+      const tab = tabs.find((t) => allPanes(t.layout).includes(pane));
+      if (!tab || !tab.notify || !inBackground(tab.key, activeTab, active)) return;
+      const { title, body } = alertNotification(alert, name);
+      // FD-03: Windows shows it outside the window, so it is masked here while presenting.
+      api
+        .notifyTerminalAlert(maskedOutside(title), maskedOutside(body))
         .catch((err) => console.warn("notification failed", err));
       if (tab.key !== activeTab || !active)
         setAttention((prev) => (prev.includes(tab.key) ? prev : [...prev, tab.key]));
@@ -866,6 +936,87 @@ export function TerminalPage({
     };
   });
 
+  // ---- QL-19 saved MultiExec groups ------------------------------------------------------------------
+
+  /** Each tab's saved session (its panes share one), for the groups. */
+  const groupTabList: GroupTab[] = tabs.map((t) => ({
+    key: t.key,
+    sessionId: allPanes(t.layout).find((p) => p.sessionId)?.sessionId ?? null,
+  }));
+  const groupsBlocked = multiExecReason({
+    tabs: Math.max(1, tabs.length),
+    on: false,
+    readOnly: readOnlyLocked(presentation),
+  });
+
+  /** A tab for each of the group's sessions (one already open is used, not opened again), then MultiExec on them. */
+  function openGroup(group: MultiExecGroup) {
+    const { keys, missing } = groupTabs(group, groupTabList);
+    const opened = missing.map((m) => {
+      const pane = createPane(
+        { kind: "session", sessionId: m.sessionId },
+        sessionById.get(m.sessionId)?.name ?? m.name,
+      );
+      // Connects now, shown or not, so it can take MultiExec's keys.
+      pane.start().catch(() => undefined);
+      return addTab(pane);
+    });
+    const picked = [...keys, ...opened];
+    setSelection({ keys: picked, anchor: picked[0] ?? null });
+    if (picked[0]) setActiveTab(picked[0]);
+    setMxNote({
+      tone: "info",
+      text:
+        missing.length > 0
+          ? `Group '${group.name}': opened ${plural(missing.length, "tab")}${keys.length > 0 ? `, used ${keys.length} open already` : ""}`
+          : `Group '${group.name}': its ${plural(keys.length, "tab")} picked`,
+    });
+    setMultiExec(true);
+    if (opened.length > 0) window.setTimeout(() => setVersion((v) => v + 1), 500);
+  }
+
+  /** The group's open tabs picked for MultiExec; the ones not open are named. */
+  function selectGroup(group: MultiExecGroup) {
+    const { keys, missing } = groupTabs(group, groupTabList);
+    if (keys.length === 0) {
+      toast.info(`None of the sessions of '${group.name}' is open: use Open group`);
+      return;
+    }
+    setSelection({ keys, anchor: keys[0] });
+    setMxNote(
+      missing.length > 0
+        ? { tone: "warn", text: `Group '${group.name}': not open, so left out: ${memberNames(missing)}` }
+        : { tone: "info", text: `Group '${group.name}': its ${plural(keys.length, "tab")} picked` },
+    );
+    setMultiExec(true);
+  }
+
+  /** "Save picked tabs as a group": MultiExec's tabs, or the Ctrl+clicked ones, or the current one. */
+  const saveTabKeys = multiExec
+    ? pickedTabs.map((t) => t.key)
+    : isMulti(selection)
+      ? selection.keys
+      : current
+        ? [current.key]
+        : [];
+  const saveTabs = groupTabList.filter((t) => saveTabKeys.includes(t.key));
+  const toSave = sessionsOfTabs(saveTabs);
+  const saveReason = saveGroupReason({
+    tabs: saveTabs,
+    readOnly: readOnlyLocked(presentation) ? READ_ONLY_REASON : null,
+  });
+
+  function saveAsGroup() {
+    setGroupsDialog({
+      kind: "new",
+      sessionIds: toSave.sessionIds,
+      note:
+        toSave.quick > 0
+          ? `${plural(toSave.quick, "quick connection")} left out: save ${toSave.quick === 1 ? "it" : "them"} as a session to add ${toSave.quick === 1 ? "it" : "them"}.`
+          : null,
+    });
+  }
+
   // ---- BX-03 Compare ----------------------------------------------------------------------------------
 
   // The palette opened it.
@@ -885,6 +1036,77 @@ export function TerminalPage({
   const comparePanes = compareTabs.map((t) => findPane(t.layout, t.activePane)).filter((p): p is PaneSession => !!p);
   const compareTerminals = comparePanes.map((p) => p.terminalId).filter((id): id is string => id !== null);
   const unsavedTabs = comparePanes.filter((p) => !p.sessionId).length;
+
+  // ---- QL-18 search all terminals ---------------------------------------------------------------------
+
+  const [searchAll, setSearchAll] = useState(false);
+  /** Bumped to put the focus in the search panel's input. */
+  const [searchFocus, setSearchFocus] = useState(0);
+  /** A match to show once its tab and pane are on screen. */
+  const [reveal, setReveal] = useState<{ pane: PaneSession; hit: LineHit } | null>(null);
+  const openSearchAll = useCallback(() => {
+    setSearchAll(true);
+    setSearchFocus((n) => n + 1);
+  }, []);
+  function closeSearchAll() {
+    setSearchAll(false);
+    setReveal(null);
+    for (const pane of everyPane) pane.endScrollbackSearch();
+    currentPane?.focus();
+  }
+  // The palette opened it.
+  const [searchHandled, setSearchHandled] = useState(searchRequest);
+  if (searchRequest !== searchHandled) {
+    setSearchHandled(searchRequest);
+    openSearchAll();
+  }
+  // Ctrl+Shift+G, caught before a focused terminal sees it (Ctrl+Shift+F searches that terminal alone).
+  const hasTabs = tabs.length > 0;
+  // Asked for with no terminal open (the palette): nothing to search. Closing the last tab closes it quietly.
+  useEffect(() => {
+    if (!searchAll || hasTabs) return;
+    setSearchAll(false);
+    toast.info("No terminal is open: open one, then search");
+  }, [searchAll, hasTabs]);
+  useEffect(() => {
+    if (!active || !hasTabs) return;
+    function onKey(e: KeyboardEvent) {
+      if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey || e.key.toLowerCase() !== "g") return;
+      e.preventDefault();
+      e.stopPropagation();
+      openSearchAll();
+    }
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
+  }, [active, hasTabs, openSearchAll]);
+
+  /** Every pane of every tab, in tab order, named as their tabs and titles show them. */
+  const searchPanes: SearchPane[] = tabs.flatMap((t) => {
+    const panes = allPanes(t.layout);
+    const shown = findPane(t.layout, t.activePane) ?? panes[0];
+    const title = shown ? nameOf(shown) : "Terminal";
+    return panes.map((pane) => ({ tabKey: t.key, title, pane, name: nameOf(pane), split: panes.length > 1 }));
+  });
+
+  /** A result clicked: its tab and pane shown, then (once they are on screen) the match. */
+  function revealMatch(target: SearchPane, hit: LineHit) {
+    if (!tabs.some((t) => t.key === target.tabKey && findPane(t.layout, target.pane.key))) {
+      toast.info("That terminal has closed: search again");
+      return;
+    }
+    for (const pane of everyPane) if (pane !== target.pane) pane.clearReveal();
+    setActiveTab(target.tabKey);
+    setTabs((prev) => prev.map((t) => (t.key === target.tabKey ? { ...t, activePane: target.pane.key } : t)));
+    setReveal({ pane: target.pane, hit });
+  }
+  useEffect(() => {
+    if (!reveal) return;
+    const frame = window.requestAnimationFrame(() => {
+      const why = reveal.pane.revealMatch(reveal.hit);
+      if (why) toast.info(why);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [reveal]);
 
   /** BX-08: the command panel pastes into the current pane; with MultiExec on, into a picked one, which sends it on. */
   function sendToCurrent(command: string, enter: boolean) {
@@ -1025,14 +1247,15 @@ export function TerminalPage({
   useEffect(() => {
     dropRef.current = (dropped) => {
       if (dropped.error) {
-        toast.error(`Not uploaded: ${dropped.error}`);
+        if (active) toast.error(`Not uploaded: ${dropped.error}`);
         return;
       }
-      if (!dropped.staged) return;
-      const pane = active ? paneAt(dropped.x, dropped.y) : undefined;
+      // VM-23: the page on screen owns a drop (an ISO dropped on the Virtual machines page is that page's).
+      if (!dropped.staged || !active) return;
+      const pane = paneAt(dropped.x, dropped.y);
       if (!pane) {
         void api.filesUnstage(dropped.staged.id).catch(() => undefined);
-        if (active) toast.info("Drop files on a terminal to upload them into its folder.");
+        toast.info("Drop files on a terminal to upload them into its folder.");
         return;
       }
       void uploadStaged(pane, dropped.staged, null);
@@ -1151,9 +1374,13 @@ export function TerminalPage({
     <ResizablePanelGroup
       orientation="vertical"
       className="min-h-0 flex-1"
-      id={`terminal-stack-${compareOpen ? "compare" : "plain"}`}
+      id={`terminal-stack-${compareOpen ? "compare" : "plain"}${searchAll ? "-search" : ""}`}
     >
-      <ResizablePanel id="terminal-panes" defaultSize={compareOpen ? "55%" : "100%"} minSize="20%">
+      <ResizablePanel
+        id="terminal-panes"
+        defaultSize={compareOpen && searchAll ? "45%" : compareOpen || searchAll ? "55%" : "100%"}
+        minSize="20%"
+      >
         {multiExec && tile && pickedTabs.length > 1 ? (
           <TileView
             tabs={pickedTabs}
@@ -1186,10 +1413,23 @@ export function TerminalPage({
           </div>
         )}
       </ResizablePanel>
+      {searchAll && (
+        <>
+          <ResizableHandle withHandle className="my-1" />
+          <ResizablePanel id="terminal-search" defaultSize={compareOpen ? "25%" : "45%"} minSize="15%">
+            <ScrollbackSearchPanel
+              panes={searchPanes}
+              focus={searchFocus}
+              onReveal={revealMatch}
+              onClose={closeSearchAll}
+            />
+          </ResizablePanel>
+        </>
+      )}
       {compareOpen && (
         <>
           <ResizableHandle withHandle className="my-1" />
-          <ResizablePanel id="terminal-compare" defaultSize="45%" minSize="20%">
+          <ResizablePanel id="terminal-compare" defaultSize={searchAll ? "30%" : "45%"} minSize="20%">
             <ComparePanel
               active={active}
               vault={vault}
@@ -1297,6 +1537,14 @@ export function TerminalPage({
             <IconButton label="Search (Ctrl+Shift+F)" onClick={() => currentPane?.openSearch()}>
               <SearchIcon />
             </IconButton>
+            <IconButton
+              label={searchAll ? "Hide Search all terminals" : "Search all terminals (Ctrl+Shift+G)"}
+              onClick={() => (searchAll ? closeSearchAll() : openSearchAll())}
+              className={cn(searchAll && "bg-accent")}
+              pressed={searchAll}
+            >
+              <TextSearchIcon />
+            </IconButton>
             <IconButton label="Split right" onClick={() => split("horizontal")} disabledReason={splitBlocked}>
               <Columns2Icon />
             </IconButton>
@@ -1373,6 +1621,19 @@ export function TerminalPage({
         >
           <RadioTowerIcon />
         </IconButton>
+        <MultiExecGroupsMenu
+          className="mb-1"
+          groups={groups}
+          tabs={groupTabList}
+          multiExecBlocked={groupsBlocked}
+          saveReason={saveReason}
+          saveCount={toSave.sessionIds.length}
+          onOpenGroup={openGroup}
+          onSelectGroup={selectGroup}
+          onSave={saveAsGroup}
+          onManage={() => setGroupsDialog({ kind: "manage" })}
+          onShow={loadGroups}
+        />
         <IconButton
           label={compareOpen ? "Hide Compare output" : "Compare output: one command on several hosts, grouped answers"}
           onClick={() => setCompareOpen((v) => !v)}
@@ -1487,10 +1748,10 @@ export function TerminalPage({
       <p className="text-xs text-muted-foreground">
         {options.copyOnSelect ? "Selecting text copies it. " : "Ctrl+Shift+C copies a selection. "}
         Ctrl+Shift+V or right-click pastes{options.confirmMultilinePaste ? " (text with line breaks asks first)" : ""},
-        Ctrl+Shift+F searches. Ctrl+click tabs to pick several for Output, MultiExec and Compare. Typing into one
-        terminal is not audited; each line MultiExec sends is (the command, the sessions, the tier), and so are opening
-        and closing a terminal, saving its output, typing a vault password and every file uploaded or downloaded (its
-        name, size and SHA-256).
+        Ctrl+Shift+F searches, Ctrl+Shift+G searches every terminal. Ctrl+click tabs to pick several for Output,
+        MultiExec and Compare. Typing into one terminal is not audited; each line MultiExec sends is (the command, the
+        sessions, the tier), and so are opening and closing a terminal, saving its output, typing a vault password and
+        every file uploaded or downloaded (its name, size and SHA-256).
       </p>
     </div>
   );
@@ -1557,6 +1818,15 @@ export function TerminalPage({
         onOpenSession={(s) => openSession(s)}
       />
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+      {groupsDialog && (
+        <MultiExecGroupsDialog
+          groups={groups}
+          sessions={sessions}
+          start={groupsDialog}
+          onChanged={loadGroups}
+          onClose={() => setGroupsDialog(null)}
+        />
+      )}
       {conflict && (
         <UploadConflictDialog
           folder={conflict.folder}
@@ -1774,7 +2044,7 @@ function TabButton({
     via.length > 0 && `Through ${routeText(via)}`,
     session ? null : "Not saved as a session",
     snapshot.logPath && `Logging to ${snapshot.logPath}`,
-    attention && "A long command finished here",
+    attention && "A long command finished, or an alert rule matched, here",
     !tab.notify && "No notifications from this tab",
     multiExec === "receives" && "MultiExec: what you type goes here",
     multiExec === "off" && "MultiExec: not picked, so typing elsewhere does not reach it (Ctrl+click to add it)",
@@ -1824,7 +2094,9 @@ function TabButton({
         )}
       </span>
       {snapshot.logPath && <FileTextIcon className="size-3.5 shrink-0 text-tier-medium" aria-label="Logging" />}
-      {attention && <BellRingIcon className="size-3.5 shrink-0 text-primary" aria-label="A long command finished" />}
+      {attention && (
+        <BellRingIcon className="size-3.5 shrink-0 text-primary" aria-label="A long command finished or an alert" />
+      )}
       {!tab.notify && <BellOffIcon className="size-3.5 shrink-0 text-muted-foreground" aria-label="No notifications" />}
       {count > 1 && <span className="text-xs text-muted-foreground">{count}</span>}
       <button

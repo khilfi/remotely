@@ -8,10 +8,12 @@
 //!   sessions the user watches, Linux only.
 //!
 //! [`Metrics`] polls both every 5 seconds, keeps the latest sample and 30 minutes of history per
-//! series in memory ([`MetricsHub`]; history in SQLite is MO-06, v2), measures what a round costs,
-//! and builds the dashboard's rows (MO-03) and host capacity panel (MO-04).
+//! series in memory ([`MetricsHub`]), measures what a round costs, and builds the dashboard's rows
+//! (MO-03) and host capacity panel (MO-04). After each round it hands what it read to its observers
+//! ([`RoundObserver`]): MO-06's history on disk ([`history`]) and MO-07's alerts ([`crate::alerts`]).
 
 pub mod guest;
+pub mod history;
 pub mod procfs;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -371,7 +373,7 @@ impl MetricsHub {
         }
     }
 
-    fn point(t: i64, s: &MetricSample) -> MetricPoint {
+    pub(crate) fn point(t: i64, s: &MetricSample) -> MetricPoint {
         MetricPoint {
             t,
             cpu_pct: s.cpu_pct,
@@ -478,29 +480,20 @@ impl MetricsHub {
         locks::lock(&self.state).cost.clone()
     }
 
-    /// MO-15: records this PC's memory at `t`, keeping the history window.
-    fn record_this_pc(&self, t: i64, memory: ThisPcMemory) {
+    /// MO-15: records this PC's memory (and, MO-06, its CPU) at `t`, keeping the history window.
+    fn record_this_pc(&self, t: i64, memory: ThisPcMemory, cpu_pct: Option<f64>) {
         let mut state = locks::lock(&self.state);
         let oldest = t - i64::try_from(self.window.as_millis()).unwrap_or(i64::MAX);
-        let paging = memory.paging.as_ref();
-        state.this_pc.push_back(MetricPoint {
-            t,
-            cpu_pct: None,
-            mem_bytes: Some(memory.ram_used_bytes),
-            mem_total_bytes: Some(memory.ram_total_bytes),
-            swap_used_bytes: paging.map(|p| p.used_bytes),
-            swap_total_bytes: paging.map(|p| p.total_bytes),
-            disk_read_bps: None,
-            disk_write_bps: None,
-            net_rx_bps: None,
-            net_tx_bps: None,
-            load1: None,
-            disk_used_pct: None,
-        });
+        state.this_pc.push_back(this_pc_point(t, &memory, cpu_pct));
         while state.this_pc.front().is_some_and(|p| p.t < oldest) {
             state.this_pc.pop_front();
         }
         state.this_pc_latest = Some(memory);
+    }
+
+    /// This PC's CPU busy share, as the last round that could read it saw it.
+    pub fn host_cpu_pct(&self) -> Option<f64> {
+        locks::lock(&self.state).host_cpu_pct
     }
 
     /// MO-15: this PC's RAM in use and total (`mem_bytes`, `mem_total_bytes`) and its paging files in use
@@ -512,6 +505,56 @@ impl MetricsHub {
     pub fn this_pc(&self) -> Option<ThisPcMemory> {
         locks::lock(&self.state).this_pc_latest.clone()
     }
+}
+
+/// MO-15, MO-06: this PC's point of a round: its CPU busy share, RAM in use and all there is, and its paging files.
+fn this_pc_point(t: i64, memory: &ThisPcMemory, cpu_pct: Option<f64>) -> MetricPoint {
+    let paging = memory.paging.as_ref();
+    MetricPoint {
+        t,
+        cpu_pct,
+        mem_bytes: Some(memory.ram_used_bytes),
+        mem_total_bytes: Some(memory.ram_total_bytes),
+        swap_used_bytes: paging.map(|p| p.used_bytes),
+        swap_total_bytes: paging.map(|p| p.total_bytes),
+        disk_read_bps: None,
+        disk_write_bps: None,
+        net_rx_bps: None,
+        net_tx_bps: None,
+        load1: None,
+        disk_used_pct: None,
+    }
+}
+
+/// What one round read, handed to the collector's observers once it is recorded in the hub.
+pub struct RecordedRound<'a> {
+    /// When the round was recorded, Unix time in milliseconds.
+    pub t_ms: i64,
+    /// The VMs' host-side samples; `None` when the host side could not be read this round.
+    pub host: Option<&'a [MetricSample]>,
+    /// The guests polled in this round (a guest polled less often has no sample in the rounds between);
+    /// `None` when the guest side failed.
+    pub guest: Option<&'a [MetricSample]>,
+    /// MO-15: this PC's memory, when it could be read.
+    pub this_pc: Option<&'a ThisPcMemory>,
+    /// This PC's CPU busy share since the previous round.
+    pub host_cpu_pct: Option<f64>,
+    /// Everything recorded so far: the latest samples, guest states, the running VMs.
+    pub hub: &'a MetricsHub,
+}
+
+impl RecordedRound<'_> {
+    /// This PC's point of the round, when its memory could be read.
+    pub fn this_pc_point(&self) -> Option<MetricPoint> {
+        self.this_pc.map(|m| this_pc_point(self.t_ms, m, self.host_cpu_pct))
+    }
+}
+
+/// Something that follows the collector's rounds: MO-06's history on disk, MO-07's alerts. Called after
+/// each round, in order; a slow observer delays the next round, so each does little (or once a minute).
+#[async_trait]
+pub trait RoundObserver: Send + Sync {
+    async fn after_round(&self, round: &RecordedRound<'_>);
 }
 
 /// A session linked to a VM row, or the session of a session row.
@@ -604,6 +647,8 @@ pub struct Metrics {
     tx: broadcast::Sender<CollectorCost>,
     /// MO-13: the rows' one-line summaries, parsed once per reading of a host's facts.
     briefs: crate::host_details::Briefs,
+    /// MO-06, MO-07: what follows the rounds (history on disk, alerts), in the order added.
+    observers: Mutex<Vec<Arc<dyn RoundObserver>>>,
 }
 
 impl Metrics {
@@ -625,11 +670,17 @@ impl Metrics {
             cpu: Mutex::new(None),
             tx,
             briefs: crate::host_details::Briefs::default(),
+            observers: Mutex::new(Vec::new()),
         }
     }
 
     pub fn hub(&self) -> &MetricsHub {
         &self.hub
+    }
+
+    /// MO-06, MO-07: `observer` follows every round from the next one on.
+    pub fn add_observer(&self, observer: Arc<dyn RoundObserver>) {
+        locks::lock(&self.observers).push(observer);
     }
 
     pub fn guest(&self) -> &GuestSource {
@@ -643,6 +694,12 @@ impl Metrics {
 
     /// One round: both sources side by side, then the samples, statuses and cost are recorded.
     pub async fn collect_once(&self) -> CollectorCost {
+        self.collect_once_at(history::now_ms()).await
+    }
+
+    /// One round recorded at `now_ms` (Unix ms): what [`Metrics::collect_once`] does with the wall clock.
+    /// Tests give their own clock, so history minutes and alert durations pass without waiting.
+    pub async fn collect_once_at(&self, now_ms: i64) -> CollectorCost {
         async fn timed(source: &dyn MetricsSource) -> (Result<SourceRound>, f64) {
             let started = Instant::now();
             let result = source.collect().await;
@@ -691,22 +748,33 @@ impl Metrics {
             guests: guest.as_ref().map_or(0, |r| r.samples.len()),
             collected_at: Some(now_rfc3339()),
         };
-        let now_ms = i64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis(),
-        )
-        .unwrap_or(i64::MAX);
-        self.hub.record(now_ms, host.map(|r| r.samples), guest);
+        // Kept for the observers: the hub takes its own copy.
+        let host_samples = host.map(|r| r.samples);
+        let guest_samples = guest.as_ref().map(|r| r.samples.clone());
+        let this_pc_kept = this_pc.clone();
+        self.hub.record(now_ms, host_samples.clone(), guest);
         if let Some(memory) = this_pc {
-            self.hub.record_this_pc(now_ms, memory);
+            self.hub.record_this_pc(now_ms, memory, host_cpu_pct);
         }
         {
             let mut state = locks::lock(&self.hub.state);
             state.cost = cost.clone();
             if host_cpu_pct.is_some() {
                 state.host_cpu_pct = host_cpu_pct;
+            }
+        }
+        let observers: Vec<Arc<dyn RoundObserver>> = locks::lock(&self.observers).clone();
+        if !observers.is_empty() {
+            let round = RecordedRound {
+                t_ms: now_ms,
+                host: host_samples.as_deref(),
+                guest: guest_samples.as_deref(),
+                this_pc: this_pc_kept.as_ref(),
+                host_cpu_pct,
+                hub: &self.hub,
+            };
+            for observer in &observers {
+                observer.after_round(&round).await;
             }
         }
         // No subscriber is fine (tests, or the window is closed).

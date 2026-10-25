@@ -288,6 +288,7 @@ async fn every_high_and_critical_action_is_logged_from_approval_to_finish() {
                     username: Some("alice".into()),
                     auth: SessionAuth::Agent,
                     jump_session_id: None,
+                    jump_direct: false,
                     startup_command: None,
                     startup_on_reconnect: false,
                     prompt_hook: None,

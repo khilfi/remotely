@@ -128,6 +128,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str, vm_id: Opt
                 username: Some("alice".into()),
                 auth: SessionAuth::Password { password_id: Some(id) },
                 jump_session_id: None,
+                jump_direct: false,
                 startup_command: None,
                 startup_on_reconnect: false,
                 prompt_hook: None,
@@ -428,6 +429,7 @@ fn web_hardware() -> VmHardware {
             files: 1,
             delta: false,
             problem: None,
+            ..VirtualDisk::default()
         }],
         nics: vec![VirtualNic {
             slot: "ethernet0".into(),
@@ -435,7 +437,9 @@ fn web_hardware() -> VmHardware {
             model: Some("vmxnet3".into()),
             mac: Some("00:0c:29:ab:cd:ef".into()),
             connected: None,
+            ..VirtualNic::default()
         }],
+        ..VmHardware::default()
     }
 }
 

@@ -17,6 +17,7 @@
 //! The Terminal page shows the same library as a tree ([`tree`], QL-04), and each session keeps what
 //! its last connection saw (QL-03) and when it was last opened (QL-02 Recent sessions).
 
+pub mod defaults;
 pub mod tree;
 
 use std::collections::{HashMap, HashSet};
@@ -35,6 +36,7 @@ use crate::presentation::Change;
 use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
 use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
 use crate::vm_links::{AutoLinkReport, VmLink, VmLinks};
+pub use defaults::{Effective, FolderDefaults, Folders, FromFolder, Inherited, InheritedTag, OwnValues};
 use tree::{SessionTree, TreeGrouping};
 
 /// Colour of a session's tab and list entry (SS-01). Named, so each theme can draw it legibly.
@@ -97,15 +99,19 @@ pub enum SessionAuth {
     },
     /// Keys from a running SSH agent or Pageant.
     Agent,
+    /// QL-16: as the session's folders say (the nearest one that sets a login), else a password asked when
+    /// connecting. Only a session's own choice: what applies to it is never this.
+    Folder,
 }
 
 impl SessionAuth {
-    /// The `sessions.auth_method` value.
+    /// The `sessions.auth_method` value; `folder` is kept as `sessions.auth_from_folder`.
     pub fn method(&self) -> &'static str {
         match self {
             SessionAuth::Password { .. } => "password",
             SessionAuth::Key { .. } => "key",
             SessionAuth::Agent => "agent",
+            SessionAuth::Folder => "folder",
         }
     }
 
@@ -114,7 +120,15 @@ impl SessionAuth {
         match self {
             SessionAuth::Password { password_id } => *password_id,
             SessionAuth::Key { key_id, .. } => *key_id,
-            SessionAuth::Agent => None,
+            SessionAuth::Agent | SessionAuth::Folder => None,
+        }
+    }
+
+    /// SS-04: the vault password a host receives when this logs in (keys never leave this PC).
+    pub(crate) fn sent_secret(&self) -> Option<SecretId> {
+        match self {
+            SessionAuth::Password { password_id } => *password_id,
+            _ => None,
         }
     }
 
@@ -137,6 +151,7 @@ impl SessionAuth {
             SessionAuth::Key { key_id: Some(_), .. } => "key from the vault".into(),
             SessionAuth::Key { key_id: None, .. } => "key (none chosen)".into(),
             SessionAuth::Agent => "SSH agent".into(),
+            SessionAuth::Folder => "as its folders say".into(),
         }
     }
 }
@@ -156,8 +171,12 @@ pub struct SessionInput {
     #[serde(default)]
     pub username: Option<String>,
     pub auth: SessionAuth,
+    /// `None`: as its folders say (QL-16), unless `jump_direct`.
     #[serde(default)]
     pub jump_session_id: Option<Uuid>,
+    /// QL-16: no jump host, whatever its folders set.
+    #[serde(default)]
+    pub jump_direct: bool,
     #[serde(default)]
     pub startup_command: Option<String>,
     /// SS-01: type the startup command again after an automatic reconnect (off: only on connections
@@ -183,6 +202,9 @@ fn default_port() -> u16 {
     22
 }
 
+/// A saved session. QL-16: `username`, `auth`, `jump_session_id`, `environment` and `tags` are what applies to it
+/// (its own values, then its folders', then the app's defaults: [`defaults::Folders::resolve`]); `own` is what it
+/// sets itself, which the editor edits, and `inherited` says which folder gives the rest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
@@ -194,6 +216,7 @@ pub struct SessionRecord {
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
+    /// Never [`SessionAuth::Folder`].
     pub auth: SessionAuth,
     pub jump_session_id: Option<Uuid>,
     pub startup_command: Option<String>,
@@ -224,9 +247,28 @@ pub struct SessionRecord {
     pub last_seen_at: Option<String>,
     /// QL-02: when a terminal to it was last opened (the Recent sessions list).
     pub last_opened_at: Option<String>,
+    /// QL-16: what the session sets itself, of what a folder can set too.
+    pub own: OwnValues,
+    /// QL-16: which folder gives each value the session doesn't set itself.
+    pub inherited: Inherited,
 }
 
 impl SessionRecord {
+    /// QL-16: applies `effective` (from [`Folders::resolve`]) over the session's own values.
+    pub(crate) fn apply(&mut self, effective: Effective) {
+        self.username = effective.username;
+        self.auth = effective.auth;
+        self.jump_session_id = effective.jump_session_id;
+        self.environment = effective.environment;
+        self.tags = effective.tags;
+        self.inherited = effective.inherited;
+    }
+
+    /// QL-16: what applies to it in `folders` (the session's own values first).
+    pub(crate) fn resolve_in(&self, folders: &Folders) -> Effective {
+        folders.resolve(Some(self.id), &self.own, self.folder_id)
+    }
+
     /// As a command target, with the label the policy engine reads (SS-06).
     pub fn target(&self) -> Target {
         Target {
@@ -242,23 +284,39 @@ impl SessionRecord {
         format!("{user}{}:{}", self.host, self.port)
     }
 
-    /// The editor's view of this session, to start a copy or compare an edit.
+    /// The editor's view of this session, to start a copy or compare an edit: what it sets itself (QL-16: not
+    /// what it has from its folders).
     pub fn input(&self) -> SessionInput {
         SessionInput {
             name: self.name.clone(),
             folder_id: self.folder_id,
             host: self.host.clone(),
             port: self.port,
-            username: self.username.clone(),
-            auth: self.auth.clone(),
-            jump_session_id: self.jump_session_id,
+            username: self.own.username.clone(),
+            auth: self.own.auth.clone(),
+            jump_session_id: self.own.jump_session_id,
+            jump_direct: self.own.jump_direct,
             startup_command: self.startup_command.clone(),
             startup_on_reconnect: self.startup_on_reconnect,
             prompt_hook: self.prompt_hook,
-            environment: self.environment,
+            environment: self.own.environment,
             color: self.color,
-            tags: self.tags.clone(),
+            tags: self.own.tags.clone(),
             vm_id: self.vm_id.clone(),
+        }
+    }
+}
+
+impl SessionInput {
+    /// QL-16: the values a folder can set too, as this input sets them.
+    pub fn own(&self) -> OwnValues {
+        OwnValues {
+            username: self.username.clone(),
+            auth: self.auth.clone(),
+            jump_session_id: self.jump_session_id,
+            jump_direct: self.jump_direct,
+            environment: self.environment,
+            tags: self.tags.clone(),
         }
     }
 }
@@ -271,6 +329,8 @@ pub struct SessionFolder {
     pub parent_id: Option<Uuid>,
     pub name: String,
     pub sort_order: i64,
+    /// QL-16: what it sets for the sessions in it and in its subfolders.
+    pub defaults: FolderDefaults,
 }
 
 /// Which sessions to show (SS-01 search). Empty fields match everything; a session must match every
@@ -365,15 +425,7 @@ fn tidy(mut input: SessionInput) -> Result<SessionInput> {
         return invalid("A session name can't hold line breaks or tabs.");
     }
 
-    input.username = input.username.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
-    if let Some(user) = &input.username {
-        if user.chars().count() > MAX_USERNAME_LEN {
-            return invalid(format!("A user name can be at most {MAX_USERNAME_LEN} characters."));
-        }
-        if user.chars().any(char::is_control) {
-            return invalid("A user name can't hold line breaks or tabs.");
-        }
-    }
+    input.username = clean_username(input.username)?;
 
     input.startup_command = input
         .startup_command
@@ -399,21 +451,43 @@ fn tidy(mut input: SessionInput) -> Result<SessionInput> {
     }
 
     input.vm_id = input.vm_id.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    // QL-16: "no jump host" only means something without one chosen.
+    if input.jump_session_id.is_some() {
+        input.jump_direct = false;
+    }
+    input.tags = clean_tags(&input.tags, "A session")?;
+    Ok(input)
+}
 
+/// Tag names checked, without repeats (letter case aside), sorted. `whose`: "A session", "A folder".
+fn clean_tags(tags: &[String], whose: &str) -> Result<Vec<String>> {
     let mut seen = HashSet::new();
-    let mut tags = Vec::new();
-    for tag in &input.tags {
+    let mut out = Vec::new();
+    for tag in tags {
         let tag = clean_name("tag", tag, MAX_TAG_LEN)?;
         if seen.insert(tag.to_lowercase()) {
-            tags.push(tag);
+            out.push(tag);
         }
     }
-    if tags.len() > MAX_TAGS {
-        return invalid(format!("A session can have at most {MAX_TAGS} tags."));
+    if out.len() > MAX_TAGS {
+        return invalid(format!("{whose} can have at most {MAX_TAGS} tags."));
     }
-    tags.sort_by_key(|t| t.to_lowercase());
-    input.tags = tags;
-    Ok(input)
+    out.sort_by_key(|t| t.to_lowercase());
+    Ok(out)
+}
+
+/// A user name as typed: trimmed, `None` when empty, and checked.
+fn clean_username(user: Option<String>) -> Result<Option<String>> {
+    let user = user.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
+    if let Some(user) = &user {
+        if user.chars().count() > MAX_USERNAME_LEN {
+            return invalid(format!("A user name can be at most {MAX_USERNAME_LEN} characters."));
+        }
+        if user.chars().any(char::is_control) {
+            return invalid("A user name can't hold line breaks or tabs.");
+        }
+    }
+    Ok(user)
 }
 
 fn clean_folder_name(name: &str) -> Result<String> {
@@ -685,8 +759,14 @@ impl SessionLibrary {
     ) -> Result<SessionRecord> {
         self.store.read_only().check(Change::Sessions)?;
         let input = self.check(ctx, None, input).await?;
-        let place = Destination::new(&input.host, input.port, input.jump_session_id);
-        let sent = input.sent_secret().into_iter().collect::<Vec<_>>();
+        // QL-16: where it goes and what it sends are what applies to it, its folders' values included.
+        let effective = self
+            .store
+            .session_folders(ctx)
+            .await?
+            .resolve(None, &input.own(), input.folder_id);
+        let place = Destination::new(&input.host, input.port, effective.jump_session_id);
+        let sent = effective.sent_secret().into_iter().collect::<Vec<_>>();
         let action = format!("Failed to create session {}", quoted(&display_name(&input)));
         let asked = self
             .confirm_place(ctx, &place, &sent, None, &[], Reauth::Ask(vault_password), &action)
@@ -747,6 +827,11 @@ impl SessionLibrary {
     /// when that is free here, so a later import finds it again), checked like an edit and audited
     /// like an SS-02 import. `imported_from` keeps where it first came from, if anywhere; `link` is how
     /// its VM link was made there (QL-01), for a session that reaches a VM here too.
+    ///
+    /// QL-16, SS-04: a session that logs in as its folders say and would send a folder's vault password to its host,
+    /// where it doesn't go yet, needs the master password (`reauth`: the import asked for it once, or not). Its own
+    /// login is checked by the import before anything is saved.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn restore(
         &self,
         ctx: &Context,
@@ -755,14 +840,34 @@ impl SessionLibrary {
         imported_from: Option<&str>,
         link: VmLink,
         source: &str,
+        reauth: Reauth<'_>,
     ) -> Result<SessionRecord> {
         let input = self.check(ctx, None, input).await?;
+        let mut asked = None;
+        let mut sent = Vec::new();
+        if input.auth == SessionAuth::Folder {
+            let effective = self
+                .store
+                .session_folders(ctx)
+                .await?
+                .resolve(Some(id), &input.own(), input.folder_id);
+            let place = Destination::new(&input.host, input.port, effective.jump_session_id);
+            sent.extend(effective.sent_secret());
+            let action = format!("Failed to import session {}", quoted(&display_name(&input)));
+            asked = self
+                .confirm_place(ctx, &place, &sent, None, &[], reauth, &action)
+                .await?;
+        }
         self.store.insert_session(ctx, id, &input, imported_from).await?;
+        self.settle(&sent);
         if input.vm_id.is_some() {
             self.store.set_vm_link_kind(ctx, id, Some(link)).await?;
         }
         let session = self.get(ctx, id).await?;
-        let detail = self.describe(ctx, &session).await?;
+        let mut detail = self.describe(ctx, &session).await?;
+        if let Some(how) = asked {
+            detail.push_str(&format!("; {how}"));
+        }
         self.audit(
             ctx,
             &format!("Imported session {} from {source}", quoted(&session.name)),
@@ -809,18 +914,24 @@ impl SessionLibrary {
         if input == before.input() {
             return Ok(before);
         }
-        let place = Destination::new(&input.host, input.port, input.jump_session_id);
+        // QL-16: the place and login that apply, before and after (its folders' values included).
+        let effective = self
+            .store
+            .session_folders(ctx)
+            .await?
+            .resolve(Some(id), &input.own(), input.folder_id);
+        let place = Destination::new(&input.host, input.port, effective.jump_session_id);
         let moved = !place.same(&Destination::new(&before.host, before.port, before.jump_session_id));
         let (sent, already) = match &self.bindings {
             Some(bindings) => {
                 let now = bindings.sent_by(ctx, id).await?;
-                let old_login = before.input().sent_secret();
+                let old_login = before.auth.sent_secret();
                 let mut sent: Vec<SecretId> = if moved {
                     now.iter().copied().filter(|s| Some(*s) != old_login).collect()
                 } else {
                     Vec::new()
                 };
-                if let Some(login) = input.sent_secret() {
+                if let Some(login) = effective.sent_secret() {
                     if !sent.contains(&login) {
                         sent.push(login);
                     }
@@ -890,13 +1001,21 @@ impl SessionLibrary {
     pub async fn delete(&self, ctx: &Context, id: Uuid) -> Result<()> {
         self.store.read_only().check(Change::Sessions)?;
         let session = self.get(ctx, id).await?;
+        // QL-16: sessions whose own jump host it is; a folder's is named apart.
         let jumpers = self
             .store
-            .session_jumps(ctx)
+            .list_sessions(ctx)
             .await?
-            .values()
-            .filter(|jump| **jump == Some(id))
+            .iter()
+            .filter(|s| s.own.jump_session_id == Some(id))
             .count();
+        let folders_using: Vec<String> = self
+            .folders(ctx)
+            .await?
+            .into_iter()
+            .filter(|f| f.defaults.jump_session_id == Some(id))
+            .map(|f| quoted(&f.name))
+            .collect();
         if !self.store.delete_session(ctx, id).await? {
             return Err(CoreError::UnknownTarget(format!("session {id}")));
         }
@@ -905,6 +1024,12 @@ impl SessionLibrary {
             0 => {}
             1 => detail.push_str("; 1 session used it as its jump host and now has none"),
             n => detail.push_str(&format!("; {n} sessions used it as their jump host and now have none")),
+        }
+        if !folders_using.is_empty() {
+            detail.push_str(&format!(
+                "; it was the jump host of folder {}, whose sessions now go as the folders above say",
+                folders_using.join(", ")
+            ));
         }
         self.audit(
             ctx,
@@ -917,6 +1042,18 @@ impl SessionLibrary {
 
     /// Moves sessions into a folder, or to the top level with `None`.
     pub async fn move_to(&self, ctx: &Context, ids: &[Uuid], folder: Option<Uuid>) -> Result<()> {
+        self.move_to_with(ctx, ids, folder, None).await
+    }
+
+    /// [`Self::move_to`], with the master password for a move that makes sessions send a vault password their new
+    /// folder sets (QL-16) somewhere it doesn't go yet (SS-04, AP-06: otherwise [`CoreError::ReauthRequired`]).
+    pub async fn move_to_with(
+        &self,
+        ctx: &Context,
+        ids: &[Uuid],
+        folder: Option<Uuid>,
+        vault_password: Option<&SecretString>,
+    ) -> Result<()> {
         self.store.read_only().check(Change::Sessions)?;
         if ids.is_empty() {
             return Err(CoreError::NoTargets);
@@ -927,11 +1064,31 @@ impl SessionLibrary {
         for id in ids {
             targets.push(self.get(ctx, *id).await?.target());
         }
-        self.store.move_sessions(ctx, ids, folder).await?;
+        // QL-16: what the moved sessions get from their new folders, checked like an edit of each.
+        let tree = self.store.session_folders(ctx).await?;
+        let before = self.store.list_sessions_in(ctx, &tree).await?;
+        let after = resolved_after(
+            &before,
+            &tree,
+            |s| if ids.contains(&s.id) { folder } else { s.folder_id },
+        );
+        check_jump_loops(&after, |s| ids.contains(&s.id))?;
         let what = match ids.len() {
             1 => format!("session {}", quoted(&targets[0].name)),
             n => format!("{n} sessions"),
         };
+        let action = format!("Failed to move {what} to {place}");
+        let (asked, sent) = self
+            .confirm_folder_change(ctx, &tree, &before, &after, Reauth::Ask(vault_password), &action)
+            .await?;
+        self.store.move_sessions(ctx, ids, folder).await?;
+        self.settle(&sent);
+        let targets: Vec<Target> = after
+            .iter()
+            .filter(|s| ids.contains(&s.id))
+            .map(SessionRecord::target)
+            .collect();
+        let detail = asked.map(str::to_owned);
         self.store
             .append_audit(
                 ctx,
@@ -943,7 +1100,7 @@ impl SessionLibrary {
                     targets: &targets,
                     approval: None,
                     result: None,
-                    detail: None,
+                    detail: detail.as_deref(),
                 },
             )
             .await
@@ -991,6 +1148,18 @@ impl SessionLibrary {
 
     /// Moves a folder, with everything in it, under another folder or to the top level.
     pub async fn move_folder(&self, ctx: &Context, id: Uuid, parent: Option<Uuid>) -> Result<SessionFolder> {
+        self.move_folder_with(ctx, id, parent, None).await
+    }
+
+    /// [`Self::move_folder`], with the master password for a move that makes its sessions send a vault password
+    /// the folders above set (QL-16) somewhere it doesn't go yet (SS-04, AP-06).
+    pub async fn move_folder_with(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        parent: Option<Uuid>,
+        vault_password: Option<&SecretString>,
+    ) -> Result<SessionFolder> {
         self.store.read_only().check(Change::Sessions)?;
         let folders = self.folders(ctx).await?;
         let folder = Self::find_folder(&folders, id)?.clone();
@@ -1004,14 +1173,36 @@ impl SessionLibrary {
             }
         }
         Self::check_unique_name(&folders, Some(id), parent, &folder.name)?;
+        // QL-16: its sessions get what the folders above their new place set.
+        let tree = Folders::new(folders);
+        let moved = tree.with_parent(id, parent);
+        let before = self.store.list_sessions_in(ctx, &tree).await?;
+        let after = resolved_after(&before, &moved, |s| s.folder_id);
+        check_jump_loops(&after, |s| moved.is_within(s.folder_id, id))?;
+        let action = format!("Failed to move folder {} to {place}", quoted(&folder.name));
+        let (asked, sent) = self
+            .confirm_folder_change(ctx, &tree, &before, &after, Reauth::Ask(vault_password), &action)
+            .await?;
         self.store.update_session_folder(ctx, id, &folder.name, parent).await?;
-        self.audit_folder(ctx, &format!("Moved folder {} to {place}", quoted(&folder.name)), None)
+        self.settle(&sent);
+        self.audit_folder(ctx, &format!("Moved folder {} to {place}", quoted(&folder.name)), asked)
             .await?;
         self.folder(ctx, id).await
     }
 
     /// Deletes a folder only: its sessions and subfolders move up to its parent.
     pub async fn delete_folder(&self, ctx: &Context, id: Uuid) -> Result<()> {
+        self.delete_folder_with(ctx, id, None).await
+    }
+
+    /// [`Self::delete_folder`], with the master password for when its sessions, moved up, would send a vault
+    /// password the folders above set (QL-16) somewhere it doesn't go yet (SS-04, AP-06).
+    pub async fn delete_folder_with(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        vault_password: Option<&SecretString>,
+    ) -> Result<()> {
         self.store.read_only().check(Change::Sessions)?;
         let folders = self.folders(ctx).await?;
         let folder = Self::find_folder(&folders, id)?.clone();
@@ -1036,14 +1227,263 @@ impl SessionLibrary {
                 })?;
             }
         }
+        // QL-16: its sessions lose its defaults and get what the folders above set.
+        let tree = Folders::new(folders.clone());
+        let gone = tree.without(id);
+        let before = self.store.list_sessions_in(ctx, &tree).await?;
+        let after = resolved_after(&before, &gone, |s| {
+            if s.folder_id == Some(id) {
+                folder.parent_id
+            } else {
+                s.folder_id
+            }
+        });
+        check_jump_loops(&after, |s| {
+            s.folder_id == folder.parent_id || tree.is_within(s.folder_id, id)
+        })?;
+        let action = format!("Failed to delete folder {}", quoted(&folder.name));
+        let (asked, sent) = self
+            .confirm_folder_change(ctx, &tree, &before, &after, Reauth::Ask(vault_password), &action)
+            .await?;
         self.store.delete_session_folder(ctx, id, folder.parent_id).await?;
-        let detail = format!(
+        self.settle(&sent);
+        let mut detail = format!(
             "{} and {} moved to {place}",
             plural(sessions, "session"),
             plural(subfolders, "folder")
         );
+        if !folder.defaults.is_empty() {
+            detail.push_str("; its defaults no longer apply");
+        }
+        if let Some(how) = asked {
+            detail.push_str(&format!("; {how}"));
+        }
         self.audit_folder(ctx, &format!("Deleted folder {}", quoted(&folder.name)), Some(&detail))
             .await
+    }
+
+    /// QL-16: what a session in `folder` gets when it sets nothing itself (the editor's "from folder X"). `session`:
+    /// the session being edited, so a folder whose jump host it is doesn't send it through itself.
+    pub async fn inherited(&self, ctx: &Context, folder: Option<Uuid>, session: Option<Uuid>) -> Result<Effective> {
+        let folders = self.store.session_folders(ctx).await?;
+        if let Some(folder) = folder {
+            if folders.get(folder).is_none() {
+                return Err(CoreError::UnknownTarget(format!("folder {folder}")));
+            }
+        }
+        Ok(folders.resolve(session, &OwnValues::from_folders(), folder))
+    }
+
+    /// QL-16: sets what a folder gives the sessions in it and in its subfolders (user, login, jump host, label,
+    /// tags). Audited like a session edit, with the sessions whose values change as targets.
+    pub async fn set_folder_defaults(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        defaults: FolderDefaults,
+    ) -> Result<SessionFolder> {
+        self.set_folder_defaults_with(ctx, id, defaults, None).await
+    }
+
+    /// [`Self::set_folder_defaults`], with the master password for defaults that would send a vault password to a
+    /// host it doesn't go to yet: a password login, or a jump host that moves sessions sending vault passwords
+    /// (SS-04, AP-06: otherwise [`CoreError::ReauthRequired`]), the same check as editing each session.
+    pub async fn set_folder_defaults_with(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        defaults: FolderDefaults,
+        vault_password: Option<&SecretString>,
+    ) -> Result<SessionFolder> {
+        self.set_folder_defaults_checked(ctx, id, defaults, Reauth::Ask(vault_password))
+            .await
+    }
+
+    /// FD-07: [`Self::set_folder_defaults_with`] after the import asked for the master password itself (or not).
+    pub(crate) async fn set_folder_defaults_checked(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        defaults: FolderDefaults,
+        reauth: Reauth<'_>,
+    ) -> Result<SessionFolder> {
+        self.store.read_only().check(Change::Sessions)?;
+        let tree = self.store.session_folders(ctx).await?;
+        let folder = tree
+            .get(id)
+            .cloned()
+            .ok_or_else(|| CoreError::UnknownTarget(format!("folder {id}")))?;
+        let defaults = self.check_defaults(ctx, defaults).await?;
+        if defaults == folder.defaults {
+            return Ok(folder);
+        }
+        let changed_tree = tree.with_defaults(id, defaults.clone());
+        let before = self.store.list_sessions_in(ctx, &tree).await?;
+        let after = resolved_after(&before, &changed_tree, |s| s.folder_id);
+        check_jump_loops(&after, |s| changed_tree.is_within(s.folder_id, id))?;
+        let action = format!("Failed to change the defaults of folder {}", quoted(&folder.name));
+        let (asked, sent) = self
+            .confirm_folder_change(ctx, &tree, &before, &after, reauth, &action)
+            .await?;
+        self.store.set_folder_defaults(ctx, id, &defaults).await?;
+        self.settle(&sent);
+        let targets: Vec<Target> = after
+            .iter()
+            .zip(&before)
+            .filter(|(a, b)| a != b)
+            .map(|(a, _)| a.target())
+            .collect();
+        let mut detail = self.defaults_changes(ctx, &folder.defaults, &defaults).await?;
+        detail.push(format!("{} affected", plural(targets.len(), "session")));
+        if let Some(how) = asked {
+            detail.push(how.into());
+        }
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "session_changed",
+                    action: &format!("Changed the defaults of folder {}", quoted(&folder.name)),
+                    tier: None,
+                    job_id: None,
+                    targets: &targets,
+                    approval: None,
+                    result: None,
+                    detail: Some(&detail.join("; ")),
+                },
+            )
+            .await?;
+        self.folder(ctx, id).await
+    }
+
+    /// QL-16: folder defaults tidied and checked like a session's own values.
+    async fn check_defaults(&self, ctx: &Context, mut d: FolderDefaults) -> Result<FolderDefaults> {
+        d.username = clean_username(d.username)?;
+        if d.auth == Some(SessionAuth::Folder) {
+            d.auth = None;
+        }
+        if let Some(auth) = &d.auth {
+            self.check_auth(ctx, auth).await?;
+        }
+        if let Some(jump) = d.jump_session_id {
+            if self.store.get_session(ctx, jump).await?.is_none() {
+                return invalid("The chosen jump host is not a saved session.");
+            }
+            d.jump_direct = false;
+        }
+        if d.environment == Some(Environment::None) {
+            d.environment = None;
+        }
+        d.tags = clean_tags(&d.tags, "A folder")?;
+        Ok(d)
+    }
+
+    /// QL-16, SS-04, AP-06: a change of folders (their defaults or places) or of which folder sessions are in, as
+    /// `after` (every session resolved after it; `before` and `tree` as things are). A session that would send a
+    /// vault password somewhere it doesn't go yet (its login from a folder, or every password it sends when its
+    /// place moves) needs the master password, asked once for the whole change, as editing the session would.
+    /// Returns how it was confirmed, when it was needed, and the passwords to settle once it is saved.
+    async fn confirm_folder_change(
+        &self,
+        ctx: &Context,
+        tree: &Folders,
+        before: &[SessionRecord],
+        after: &[SessionRecord],
+        reauth: Reauth<'_>,
+        action: &str,
+    ) -> Result<(Option<&'static str>, Vec<SecretId>)> {
+        let Some(bindings) = &self.bindings else {
+            return Ok((None, Vec::new()));
+        };
+        let old: HashMap<Uuid, &SessionRecord> = before.iter().map(|s| (s.id, s)).collect();
+        let places = bindings.places_in(ctx, tree).await?;
+        let mut sent = Vec::new();
+        let mut new: Vec<(String, Destination)> = Vec::new();
+        for s in after {
+            let Some(b) = old.get(&s.id) else {
+                continue;
+            };
+            let place = Destination::new(&s.host, s.port, s.jump_session_id);
+            let moved = !place.same(&Destination::new(&b.host, b.port, b.jump_session_id));
+            let old_login = b.auth.sent_secret();
+            let login = s.auth.sent_secret();
+            let mut check: Vec<SecretId> = Vec::new();
+            if moved {
+                check.extend(places.sent_by(s.id).into_iter().filter(|x| Some(*x) != old_login));
+            }
+            if let Some(login) = login {
+                if (moved || Some(login) != old_login) && !check.contains(&login) {
+                    check.push(login);
+                }
+            }
+            for secret in check {
+                sent.push(secret);
+                if !bindings.may_go_in(ctx, &places, secret, &place, Some(s.id)).await? {
+                    let what = bindings.describe(ctx, secret).await?;
+                    if !new.iter().any(|(w, p)| *w == what && p.same(&place)) {
+                        new.push((what, place.clone()));
+                    }
+                }
+            }
+        }
+        if new.is_empty() {
+            return Ok((None, sent));
+        }
+        let vault_password = match reauth {
+            Reauth::Given => return Ok((Some(crate::vault::bindings::ASKED_NOW), sent)),
+            Reauth::Ask(password) => password,
+        };
+        let (what, place) = &new[0];
+        let more = match new.len() - 1 {
+            0 => String::new(),
+            1 => " and one more place".to_owned(),
+            n => format!(" and {n} more places"),
+        };
+        let reason = format!(
+            "This would send the {what} to {}:{}{more}, where no saved session sends it yet",
+            place.host, place.port
+        );
+        let how = bindings.confirm(ctx, vault_password, action, &reason).await?;
+        Ok((Some(how), sent))
+    }
+
+    /// QL-16: what a change of a folder's defaults changed, for the audit log.
+    async fn defaults_changes(&self, ctx: &Context, a: &FolderDefaults, b: &FolderDefaults) -> Result<Vec<String>> {
+        let (_, sessions) = self.names(ctx).await?;
+        let not_set = || "not set".to_owned();
+        let user = |d: &FolderDefaults| d.username.clone().unwrap_or_else(not_set);
+        let login = |d: &FolderDefaults| d.auth.as_ref().map_or_else(not_set, SessionAuth::describe);
+        let jump = |d: &FolderDefaults| {
+            if d.jump_direct {
+                "no jump host".to_owned()
+            } else {
+                d.jump_session_id
+                    .map(|j| {
+                        sessions
+                            .get(&j)
+                            .map_or_else(|| "a deleted session".to_owned(), |n| quoted(n))
+                    })
+                    .unwrap_or_else(not_set)
+            }
+        };
+        let label = |d: &FolderDefaults| d.environment.map_or_else(not_set, |e| e.as_str().to_owned());
+        let tags = |d: &FolderDefaults| {
+            if d.tags.is_empty() {
+                "none".to_owned()
+            } else {
+                d.tags.join(", ")
+            }
+        };
+        let mut out = Vec::new();
+        field_text(&mut out, "user", &user(a), &user(b));
+        field_text(&mut out, "login", &login(a), &login(b));
+        if a.auth != b.auth && login(a) == login(b) {
+            out.push("login: another vault item".into());
+        }
+        field_text(&mut out, "jump host", &jump(a), &jump(b));
+        field_text(&mut out, "environment", &label(a), &label(b));
+        field_text(&mut out, "tags", &tags(a), &tags(b));
+        Ok(out)
     }
 
     async fn folder(&self, ctx: &Context, id: Uuid) -> Result<SessionFolder> {
@@ -1107,12 +1547,65 @@ impl SessionLibrary {
     /// quick connection with it too, saved or not.
     pub(crate) async fn check(&self, ctx: &Context, id: Option<Uuid>, input: SessionInput) -> Result<SessionInput> {
         let input = tidy(input)?;
+        let folders = self.store.session_folders(ctx).await?;
         if let Some(folder) = input.folder_id {
-            Self::find_folder(&self.folders(ctx).await?, folder)?;
+            if folders.get(folder).is_none() {
+                return Err(CoreError::UnknownTarget(format!("folder {folder}")));
+            }
+        }
+        self.check_auth(ctx, &input.auth).await?;
+        if let Some(vm) = &input.vm_id {
+            if self.store.vm_by_id(ctx, vm).await?.is_none() {
+                return invalid("The chosen VM is not in the VM list. Refresh the VMs and choose it again.");
+            }
+        }
+        if let Some(jump) = input.jump_session_id {
+            if Some(jump) == id {
+                return invalid("A session can't be its own jump host.");
+            }
+        }
+        // QL-16: the jump host that applies, its own or its folders'.
+        let effective = folders.resolve(id, &input.own(), input.folder_id);
+        if let Some(jump) = effective.jump_session_id {
+            let jumps = self.store.session_jumps_in(ctx, &folders).await?;
+            if !jumps.contains_key(&jump) {
+                return invalid("The chosen jump host is not a saved session.");
+            }
+            let from_folder = input.jump_session_id.is_none();
+            let mut next = Some(jump);
+            for _ in 0..MAX_JUMP_DEPTH {
+                match next {
+                    None => break,
+                    Some(hop) if Some(hop) == id => {
+                        return invalid(if from_folder {
+                            "The jump host its folder sets reaches this session through its own jump host. Choose \
+                             another jump host for it, or no jump host."
+                        } else {
+                            "That jump host reaches this session through its own jump host."
+                        });
+                    }
+                    Some(hop) => next = jumps.get(&hop).copied().flatten(),
+                }
+            }
+            if next.is_some() {
+                return invalid(format!("That jump host chain is longer than {MAX_JUMP_DEPTH} hops."));
+            }
+        }
+        Ok(input)
+    }
+
+    /// The vault items a login names exist and have the right kind (a password, a private key, its passphrase).
+    async fn check_auth(&self, ctx: &Context, auth: &SessionAuth) -> Result<()> {
+        if let SessionAuth::Key {
+            key_id: None,
+            passphrase_id: Some(_),
+        } = auth
+        {
+            return invalid("Choose the private key the passphrase is for.");
         }
         let wanted = [
-            (input.auth.credential_id(), input.auth_kind()),
-            (input.auth.passphrase_id(), Some(SecretKind::Passphrase)),
+            (auth.credential_id(), auth_kind(auth)),
+            (auth.passphrase_id(), Some(SecretKind::Passphrase)),
         ];
         for (secret, kind) in wanted {
             let (Some(secret), Some(kind)) = (secret, kind) else {
@@ -1130,34 +1623,7 @@ impl SessionLibrary {
                 None => return invalid(format!("The chosen {} is not in the vault.", kind.label())),
             }
         }
-        if let Some(vm) = &input.vm_id {
-            if self.store.vm_by_id(ctx, vm).await?.is_none() {
-                return invalid("The chosen VM is not in the VM list. Refresh the VMs and choose it again.");
-            }
-        }
-        if let Some(jump) = input.jump_session_id {
-            if Some(jump) == id {
-                return invalid("A session can't be its own jump host.");
-            }
-            let jumps = self.store.session_jumps(ctx).await?;
-            if !jumps.contains_key(&jump) {
-                return invalid("The chosen jump host is not a saved session.");
-            }
-            let mut next = Some(jump);
-            for _ in 0..MAX_JUMP_DEPTH {
-                match next {
-                    None => break,
-                    Some(hop) if Some(hop) == id => {
-                        return invalid("That jump host reaches this session through its own jump host.");
-                    }
-                    Some(hop) => next = jumps.get(&hop).copied().flatten(),
-                }
-            }
-            if next.is_some() {
-                return invalid(format!("That jump host chain is longer than {MAX_JUMP_DEPTH} hops."));
-            }
-        }
-        Ok(input)
+        Ok(())
     }
 
     async fn names(&self, ctx: &Context) -> Result<(HashMap<Uuid, String>, HashMap<Uuid, String>)> {
@@ -1207,6 +1673,11 @@ impl SessionLibrary {
         if !s.tags.is_empty() {
             parts.push(format!("tags {}", s.tags.join(", ")));
         }
+        // QL-16: which of these come from its folders.
+        let inherited = s.inherited.describe();
+        if !inherited.is_empty() {
+            parts.push(inherited);
+        }
         Ok(parts.join(", "))
     }
 
@@ -1223,6 +1694,11 @@ impl SessionLibrary {
                 .map_or_else(|| "none".to_owned(), |n| quoted(n))
         };
         let none = |v: &Option<String>| v.clone().unwrap_or_else(|| "none".to_owned());
+        // QL-16: "alice (from folder 'A')" for a value the session has from a folder.
+        let shown = |value: String, from: &Option<FromFolder>| match from {
+            Some(f) => format!("{value} (from folder {})", quoted(&f.name)),
+            None => value,
+        };
         let mut out = Vec::new();
         let mut field = |name: &str, before: String, after: String| {
             if before != after {
@@ -1233,13 +1709,25 @@ impl SessionLibrary {
         field("folder", folder(a.folder_id), folder(b.folder_id));
         field("host", a.host.clone(), b.host.clone());
         field("port", a.port.to_string(), b.port.to_string());
-        field("user", none(&a.username), none(&b.username));
-        field("login", a.auth.describe(), b.auth.describe());
-        field("jump host", jump(a.jump_session_id), jump(b.jump_session_id));
+        field(
+            "user",
+            shown(none(&a.username), &a.inherited.username),
+            shown(none(&b.username), &b.inherited.username),
+        );
+        field(
+            "login",
+            shown(a.auth.describe(), &a.inherited.auth),
+            shown(b.auth.describe(), &b.inherited.auth),
+        );
+        field(
+            "jump host",
+            shown(jump(a.jump_session_id), &a.inherited.jump),
+            shown(jump(b.jump_session_id), &b.inherited.jump),
+        );
         field(
             "environment",
-            a.environment.as_str().to_owned(),
-            b.environment.as_str().to_owned(),
+            shown(a.environment.as_str().to_owned(), &a.inherited.environment),
+            shown(b.environment.as_str().to_owned(), &b.inherited.environment),
         );
         field(
             "colour",
@@ -1346,22 +1834,67 @@ fn display_name(input: &SessionInput) -> String {
 }
 
 impl SessionInput {
-    /// SS-04: the vault password the host receives when the session logs in (keys never leave this PC).
+    /// SS-04: the vault password the host receives when the session logs in with its own login (keys never leave
+    /// this PC). QL-16: a login from its folders is [`Effective::sent_secret`].
     pub(crate) fn sent_secret(&self) -> Option<SecretId> {
-        match self.auth {
-            SessionAuth::Password { password_id } => password_id,
-            _ => None,
-        }
+        self.auth.sent_secret()
     }
+}
 
-    /// The vault kind the credential must have.
-    fn auth_kind(&self) -> Option<SecretKind> {
-        match self.auth {
-            SessionAuth::Password { .. } => Some(SecretKind::Password),
-            SessionAuth::Key { .. } => Some(SecretKind::PrivateKey),
-            SessionAuth::Agent => None,
+/// The vault kind a login's credential must have.
+fn auth_kind(auth: &SessionAuth) -> Option<SecretKind> {
+    match auth {
+        SessionAuth::Password { .. } => Some(SecretKind::Password),
+        SessionAuth::Key { .. } => Some(SecretKind::PrivateKey),
+        SessionAuth::Agent | SessionAuth::Folder => None,
+    }
+}
+
+/// QL-16: every session as it would be after a change: in the folder `folder_of` says, resolved against `folders`.
+fn resolved_after(
+    before: &[SessionRecord],
+    folders: &Folders,
+    folder_of: impl Fn(&SessionRecord) -> Option<Uuid>,
+) -> Vec<SessionRecord> {
+    before
+        .iter()
+        .map(|s| {
+            let mut s = s.clone();
+            s.folder_id = folder_of(&s);
+            let effective = s.resolve_in(folders);
+            s.apply(effective);
+            s
+        })
+        .collect()
+}
+
+/// SS-07, QL-16: no session `which` picks reaches itself through its jump hosts, or through more than
+/// [`MAX_JUMP_DEPTH`] of them, once a change gives it its folders' jump host.
+fn check_jump_loops(after: &[SessionRecord], which: impl Fn(&SessionRecord) -> bool) -> Result<()> {
+    let jumps: HashMap<Uuid, Option<Uuid>> = after.iter().map(|s| (s.id, s.jump_session_id)).collect();
+    for s in after.iter().filter(|s| which(s)) {
+        let mut next = s.jump_session_id;
+        for _ in 0..MAX_JUMP_DEPTH {
+            match next {
+                None => break,
+                Some(hop) if hop == s.id => {
+                    return invalid(format!(
+                        "With that change, {} would reach itself through its jump hosts. Choose another jump host, \
+                         or no jump host for it.",
+                        quoted(&s.name)
+                    ));
+                }
+                Some(hop) => next = jumps.get(&hop).copied().flatten(),
+            }
+        }
+        if next.is_some() {
+            return invalid(format!(
+                "With that change, {} would go through more than {MAX_JUMP_DEPTH} jump hosts.",
+                quoted(&s.name)
+            ));
         }
     }
+    Ok(())
 }
 
 fn plural(n: usize, noun: &str) -> String {
@@ -1385,6 +1918,7 @@ mod tests {
             username: Some("alice".into()),
             auth: SessionAuth::Agent,
             jump_session_id: None,
+            jump_direct: false,
             startup_command: None,
             startup_on_reconnect: false,
             prompt_hook: None,
@@ -1422,6 +1956,15 @@ mod tests {
             last_hostname: None,
             last_seen_at: None,
             last_opened_at: None,
+            own: OwnValues {
+                username: Some("alice".into()),
+                auth: SessionAuth::Agent,
+                jump_session_id: None,
+                jump_direct: false,
+                environment: Environment::Lab,
+                tags: vec![],
+            },
+            inherited: Inherited::default(),
         }
     }
 
@@ -1560,6 +2103,7 @@ mod tests {
             parent_id: parent,
             name: id.to_string(),
             sort_order: 0,
+            defaults: FolderDefaults::default(),
         };
         let (a, b, c, d) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let folders = [folder(a, None), folder(b, Some(a)), folder(c, Some(b)), folder(d, None)];

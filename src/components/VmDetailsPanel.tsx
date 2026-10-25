@@ -13,6 +13,7 @@ import {
   CameraIcon,
   HistoryIcon,
   InfoIcon,
+  MonitorIcon,
   RefreshCwIcon,
   ShieldIcon,
   TriangleAlertIcon,
@@ -32,8 +33,11 @@ import { SnapshotTree } from "@/components/SnapshotTree";
 import { VmSessionLinks } from "@/components/VmLinkControls";
 import { VmSystemTab } from "@/components/VmSystemTab";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { VmSettingsTab } from "@/components/VmSettingsTab";
 import {
   api,
+  type Command,
+  type SubmitOutcome,
   type SessionRecord,
   type SnapshotLimits,
   type SnapshotNode,
@@ -75,6 +79,17 @@ interface Props {
   onTake: () => void;
   onRevert: (node: SnapshotNode) => void;
   onDelete: (node: SnapshotNode) => void;
+
+  /** VM-23: submits a settings command to the bus; resolves true when the bus took it. */
+  onSubmit: (command: Command) => Promise<boolean>;
+  /** VM-23: the outcome of a command the shell built (ISO, shared folder). */
+  onSubmitted: (outcome: SubmitOutcome) => void;
+  /** VM-24: the hypervisor's own window. */
+  onOpenConsole: () => void;
+  /** VM-24: the palette's asks to rename the VM, and the last one its dialog showed for. */
+  askRename: number;
+  renameSeen: number;
+  onRenameSeen: (n: number) => void;
 }
 
 type Hints = { take: string | null; revert: string | null; delete: string | null };
@@ -93,6 +108,7 @@ export function VmDetailsPanel(props: Props) {
   return (
     <aside
       id="vm-details"
+      data-vm-drop={vm.vmxPath}
       aria-label={`${vm.displayName}: details and snapshots`}
       className="flex h-full min-h-0 flex-col rounded-lg border"
     >
@@ -124,9 +140,10 @@ export function VmDetailsPanel(props: Props) {
         className="min-h-0 flex-1 gap-0"
         aria-label={`${vm.displayName}'s details`}
       >
-        <div className="flex items-center gap-2 border-b px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
           <TabsList>
             <TabsTrigger value="details">Details</TabsTrigger>
+            <TabsTrigger value="settings">Settings</TabsTrigger>
             <TabsTrigger value="system">System</TabsTrigger>
             <TabsTrigger value="snapshots">
               Snapshots
@@ -137,13 +154,46 @@ export function VmDetailsPanel(props: Props) {
               )}
             </TabsTrigger>
           </TabsList>
-          <Button variant="outline" size="sm" className="ml-auto" onClick={onActions}>
+          <WhyDisabled reason={props.readOnly} className="ml-auto">
+            <Button
+              variant="outline"
+              size="sm"
+              className={props.readOnly ? undefined : "ml-auto"}
+              disabled={props.readOnly !== null}
+              title={
+                vm.hypervisor === "virtualbox"
+                  ? "VirtualBox's own window; a VM that is off starts with it"
+                  : "Workstation's own window, in a tab, without powering the VM on"
+              }
+              onClick={props.onOpenConsole}
+            >
+              <MonitorIcon data-icon="inline-start" />
+              Console
+            </Button>
+          </WhyDisabled>
+          <Button variant="outline" size="sm" onClick={onActions}>
             <ZapIcon data-icon="inline-start" />
             Actions…
           </Button>
         </div>
         <TabsContent value="details" className="min-h-0 overflow-auto p-3">
           <DetailsTab {...props} />
+        </TabsContent>
+        <TabsContent value="settings" className="min-h-0 overflow-auto p-3">
+          {view === "settings" && (
+            <VmSettingsTab
+              vm={vm}
+              readOnly={props.readOnly}
+              busy={props.busy}
+              snapshots={!tree ? null : tree.error ? "failed" : tree.snapshots.length}
+              refreshKey={refreshKey}
+              onSubmit={props.onSubmit}
+              onSubmitted={props.onSubmitted}
+              askRename={props.askRename}
+              renameSeen={props.renameSeen}
+              onRenameSeen={props.onRenameSeen}
+            />
+          )}
         </TabsContent>
         <TabsContent value="system" className="min-h-0 overflow-auto p-3">
           {view === "system" && (

@@ -250,6 +250,13 @@ impl Inventory {
             Ok(entries) => entries.into_iter().for_each(|e| add(e.vmx_path, e.display_name)),
             Err(err) => warnings.push(InventoryWarning::new("Could not read the Workstation library", &err)),
         }
+        // VM-24: .vmx files added by hand (Add existing VM).
+        let added = self
+            .store
+            .get_setting::<Vec<String>>(ctx, crate::vm_settings::ADDED_VMS_KEY)
+            .await?
+            .unwrap_or_default();
+        added.into_iter().for_each(|p| add(PathBuf::from(p), None));
         for folder in self.scan_folders(ctx).await? {
             match vmware.scan_folder(&folder).await {
                 Ok(paths) => paths.into_iter().for_each(|p| add(p, None)),

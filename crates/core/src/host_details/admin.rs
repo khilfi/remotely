@@ -27,6 +27,12 @@ echo @@uptime; cat /proc/uptime; \
 echo @@last; last -x -F -n 200 2>/dev/null; \
 echo @@ps; ps -eo pid,user,pcpu,pmem,rss,etime,comm 2>/dev/null";
 
+/// MO-16: the dashboard's services widget: only the services part of [`ADMIN_SCRIPT`], read every minute.
+pub const SERVICES_SCRIPT: &str =
+    "echo @@running; systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null; \
+echo @@failed; systemctl list-units --type=service --state=failed --no-pager --no-legend --plain 2>/dev/null; \
+echo @@other-init; type systemctl >/dev/null 2>&1 || rc-status 2>/dev/null || service --status-all 2>&1";
+
 /// Pending updates, from apt's lists as they are (no `apt update`: that needs root and changes them)
 /// or dnf, which refreshes its metadata first when it is old: that can take a minute or more.
 pub const UPDATES_SCRIPT: &str =
@@ -711,7 +717,7 @@ mod tests {
     #[test]
     fn every_command_only_reads() {
         let policy = PolicyEngine::new(PolicyRules::default()).unwrap();
-        for script in [ADMIN_SCRIPT, UPDATES_SCRIPT] {
+        for script in [ADMIN_SCRIPT, UPDATES_SCRIPT, SERVICES_SCRIPT] {
             assert_eq!(policy.classify_script(script), ActionKind::ExecReadOnly, "{script}");
             for part in script.split(';') {
                 assert_eq!(policy.classify_script(part), ActionKind::ExecReadOnly, "{part}");

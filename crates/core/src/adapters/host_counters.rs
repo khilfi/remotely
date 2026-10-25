@@ -196,6 +196,13 @@ impl HostCounters for WindowsCounters {
     }
 }
 
+/// VM-23: whether a process named `exe` (any letter case) runs on this PC; false when the list can't be read.
+pub async fn process_running(exe: &'static str) -> bool {
+    blocking(move || win::pids_named_any(&[exe]))
+        .await
+        .is_ok_and(|pids| !pids.is_empty())
+}
+
 /// One process as read this round, before rates.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RawProcess {
@@ -768,6 +775,10 @@ mod win {
 
     pub fn other_users_signed_in() -> Result<usize> {
         Ok(0)
+    }
+
+    pub fn pids_named_any(_exes: &[&str]) -> Result<Vec<(u32, usize)>> {
+        Err(CoreError::NotImplemented("processes outside Windows"))
     }
 }
 

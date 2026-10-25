@@ -23,6 +23,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   CameraIcon,
+  FilePlusIcon,
   DownloadIcon,
   GaugeIcon,
   ContainerIcon,
@@ -47,6 +48,7 @@ import {
   ShieldCheckIcon,
   SunIcon,
   TerminalIcon,
+  TextSearchIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -89,6 +91,7 @@ import {
   useReadOnlyReason,
 } from "@/components/Presentation";
 import { UpdateBanner, UpdateNotice } from "@/components/UpdateBanner";
+import { AlertNotifier } from "@/components/AlertNotifier";
 import {
   api,
   errorCode,
@@ -218,6 +221,8 @@ export default function App() {
   // BX-03, SS-10: Compare output and MultiExec, opened from the palette.
   const [terminalCompare, setTerminalCompare] = useState(0);
   const [terminalMultiExec, setTerminalMultiExec] = useState(0);
+  // QL-18: Search all terminals, opened from the palette.
+  const [terminalSearch, setTerminalSearch] = useState(0);
   // SS-10: MultiExec lines are jobs too; their terminals show what happened, so they get no toasts.
   const quietJobs = useRef(new Set<string>());
   // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
@@ -242,8 +247,8 @@ export default function App() {
   const openPalette = useCallback((vm: string | null) => setPalette((p) => ({ open: true, vm, n: p.n + 1 })), []);
 
   /** QL-14: the Virtual machines page with these VMs' details, or (none) the snapshot view of the open one. */
-  const openVms = useCallback((vmxPaths: string[], view: VmView) => {
-    setVmRequest((prev) => ({ vmxPaths, view, n: (prev?.n ?? 0) + 1 }));
+  const openVms = useCallback((vmxPaths: string[], view: VmView, rename?: boolean) => {
+    setVmRequest((prev) => ({ vmxPaths, view, rename, n: (prev?.n ?? 0) + 1 }));
     setPage("vms");
   }, []);
 
@@ -525,6 +530,21 @@ export default function App() {
       },
     },
     {
+      // VM-24: a .vmx or .vbox from a file dialog the shell opens.
+      id: "add-vm",
+      label: "Add an existing VM…",
+      icon: FilePlusIcon,
+      keywords: "register vmx vbox open import virtual machine",
+      run: async () => {
+        try {
+          const outcome = await api.vmPickExisting();
+          if (outcome) submitted(outcome);
+        } catch (err) {
+          toast.error(errorMessage(err));
+        }
+      },
+    },
+    {
       id: "snapshots",
       label: "Snapshots: take, revert or delete…",
       icon: CameraIcon,
@@ -602,6 +622,16 @@ export default function App() {
       keywords: "broadcast bulk many tabs at once",
       run: () => {
         setTerminalMultiExec((n) => n + 1);
+        setPage("terminal");
+      },
+    },
+    {
+      id: "search-terminals",
+      label: "Search all terminals (Ctrl+Shift+G)",
+      icon: TextSearchIcon,
+      keywords: "find scrollback output grep every tab",
+      run: () => {
+        setTerminalSearch((n) => n + 1);
         setPage("terminal");
       },
     },
@@ -900,6 +930,7 @@ export default function App() {
                   newRequest={terminalNew}
                   compareRequest={terminalCompare}
                   multiExecRequest={terminalMultiExec}
+                  searchRequest={terminalSearch}
                   vault={vault}
                   onSubmitted={submitted}
                   onOpenVault={show.vault}
@@ -973,9 +1004,17 @@ export default function App() {
           setDashboardFocus((prev) => ({ key, n: (prev?.n ?? 0) + 1 }));
           setPage("dashboard");
         }}
-        onOpenVm={(vmxPath, view) => openVms([vmxPath], view)}
+        onOpenVm={(vmxPath, view, rename) => openVms([vmxPath], view, rename)}
+        onOpenConsole={(vmxPath) =>
+          void api.vmOpenConsole(vmxPath).then(
+            (done) => done.kind === "starting" && submitted(done.outcome),
+            (err: unknown) => toast.error(errorMessage(err)),
+          )
+        }
       />
       <ReauthDialog />
+      {/* MO-07: alerts notify through Windows whatever page shows. */}
+      <AlertNotifier />
       <Toaster theme={resolved} position="bottom-right" />
       <PresentationLayer />
     </TooltipProvider>

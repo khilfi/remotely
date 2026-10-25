@@ -17,10 +17,12 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DashboardHistoryCard } from "@/components/DashboardHistoryCard";
 import { DataRetentionCard } from "@/components/DataRetentionCard";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
 import { PresentationCard } from "@/components/Presentation";
+import { TerminalRulesCard } from "@/components/TerminalRulesCard";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
 import { api, errorMessage, type AppInfo, type LogsInfo, type Settings, type VaultInfo } from "@/lib/api";
@@ -217,8 +219,9 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
       <TabsContent value="about">
         <AboutCard />
       </TabsContent>
-      <TabsContent value="terminal">
+      <TabsContent value="terminal" className="flex flex-col gap-6">
         <TerminalSettingsCard />
+        <TerminalRulesCard />
       </TabsContent>
       <TabsContent value="rules">
         <PolicyRulesEditor />
@@ -470,6 +473,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
         )}
 
         <DataRetentionCard />
+        <DashboardHistoryCard />
 
         <Card>
           <CardHeader>

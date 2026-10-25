@@ -23,11 +23,13 @@
 //!     vault passwords typed at a prompt (QL-06), long runs finishing (QL-07)
 //!     MultiExec (SS-10): typed into several at once; each line's Enter is a command on the bus, and the
 //!     job runner sends it to the terminals
+//!     multiexec_groups (QL-19): saved sets of sessions that choose MultiExec's terminals; edits audited
 //!     files (SS-08): SFTP on each terminal's connection; the shell's folder (OSC 7); downloads are
 //!     audited reads, uploads are commands on the bus that the job runner carries out in the terminal
 //!     jump hosts (SS-07): every SSH connection goes through the session's jump host chain
 //!     tunnels (SS-07): saved port forwards (forwards) open on a terminal's connection; opening one is
 //!     a command on the bus, which the job runner carries out in the terminal; closing is audited
+//!     highlight and alert rules (QL-17): the UI colours matches; each pane alerts once per burst of matching lines
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows, skipping hosts with an
 //!     open connection and backing off from hosts that are down ──► adapters::network
@@ -40,17 +42,22 @@
 //!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
 //!     ──► adapters::containers (their CLIs, over adapters::remote or on this PC); reads skip the bus,
 //!     changes are commands on it that the job runner carries out there
+//!   metrics::history (MO-06): the rounds' 1-minute averages on disk, pruned daily; alerts (MO-07): rules
+//!     run on each round, an alert list and events for the UI's notifications; dashboard (MO-16): the
+//!     dashboard's layout, per workspace
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
 //! runner (changes) or [`inventory::Inventory`] and [`metrics`] (reads).
 
 pub mod adapters;
+pub mod alerts;
 pub mod bulk;
 pub mod capacity;
 pub mod catalog;
 pub mod command_bus;
 pub mod containers;
+pub mod dashboard;
 pub mod deploy;
 pub mod domain;
 pub mod error;
@@ -67,6 +74,7 @@ pub mod known_hosts;
 pub mod locks;
 pub mod login_guard;
 pub mod metrics;
+pub mod multiexec_groups;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
@@ -84,6 +92,7 @@ pub mod untrusted;
 pub mod updates;
 pub mod vault;
 pub mod vm_links;
+pub mod vm_settings;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -98,11 +107,13 @@ use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::UpdaterAdapter;
 use adapters::virtualbox::{SwitchableVirtualBox, VirtualBoxAdapter};
 use adapters::vmware::{SwitchableVmware, VmwareAdapter};
+use alerts::Alerts;
 use bulk::BulkRuns;
 use capacity::CapacityChecker;
 use catalog::Catalog;
 use command_bus::CommandBus;
 use containers::Containers;
+use dashboard::Layouts;
 use domain::Context;
 use forwards::Forwards;
 use host_details::{HostDetails, HostDetailsParts, SpecsCollector};
@@ -112,7 +123,9 @@ use inventory::{Inventory, StoreDirectory};
 use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
 use login_guard::LoginGuard;
+use metrics::history::MetricsHistory;
 use metrics::{GuestSource, Metrics, MetricsParts};
+use multiexec_groups::MultiExecGroups;
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
@@ -125,6 +138,7 @@ use ssh_keys::KeyManager;
 use store::{NewAuditEntry, Store};
 use terminal::files::FileTransfers;
 use terminal::multiexec::MultiExec;
+use terminal::rules::TerminalRules;
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use transfer::Transfer;
 use vault::{Dpapi, LocalVault, SecretBindings, Vault, VaultOptions, VaultService, VaultStatus};
@@ -227,11 +241,15 @@ pub struct Core {
     pub terminals: Terminals,
     /// SS-10: what is typed into one terminal goes to several; each line's Enter goes through the bus.
     pub multiexec: MultiExec,
+    /// QL-19: saved MultiExec groups (named sets of sessions). They only choose MultiExec's targets.
+    pub groups: MultiExecGroups,
     /// SS-08: uploads (commands on the bus) and retries; listing and downloads are on [`Core::terminals`].
     pub files: FileTransfers,
     /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
     /// classified by the bus's policy engine.
     pub snippets: Snippets,
+    /// QL-17: highlight and alert rules for terminal output; open panes follow their alert rules.
+    pub terminal_rules: TerminalRules,
     /// QL-04: background checks of the sessions the Terminal page's tree shows. Reads only. The shell
     /// starts it with [`ReachabilityChecker::run`].
     pub reachability: Arc<ReachabilityChecker>,
@@ -246,12 +264,22 @@ pub struct Core {
     /// MO-01 to MO-04: host-side and guest metrics, history in memory, host capacity. Reads only.
     /// The shell starts its polling with [`Metrics::run`].
     pub metrics: Arc<Metrics>,
+    /// MO-06: the dashboard's history on disk (1-minute averages), its retention and prune. The shell starts
+    /// the prune's schedule with [`MetricsHistory::run`].
+    pub history: Arc<MetricsHistory>,
+    /// MO-07: alert rules, the alert list and alert events, evaluated on every metrics round.
+    pub alerts: Arc<Alerts>,
+    /// MO-16: the dashboard's layout of this workspace.
+    pub layouts: Layouts,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
     pub login_guard: LoginGuard,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
     pub presentation: PresentationMode,
+    /// VM-23, VM-24: VM settings the shell builds from dialogs and drops (ISOs, shared folders, an existing
+    /// VM), guest OS types, screenshots and Open console. Changes go through [`Core::bus`].
+    pub vm_settings: vm_settings::VmSettings,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -379,6 +407,9 @@ impl Core {
             Arc::clone(&links),
         );
         terminals.set_bindings(bindings.clone());
+        // QL-17: every pane matches its output against the rules with an alert on, as they change.
+        let terminal_rules = TerminalRules::load(store.clone(), &ctx).await?;
+        terminals.set_rules(terminal_rules.subscribe());
         // MO-13: terminals and the dashboard's kept connections read a session's facts as they go.
         let specs = SpecsCollector::new(store.clone());
         terminals.set_specs(specs.clone());
@@ -412,6 +443,11 @@ impl Core {
             guest,
             capacity: CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
         }));
+        // MO-06, MO-07: the rounds go on to the history on disk, then to the alert rules.
+        let history = Arc::new(MetricsHistory::new(store.clone(), ctx));
+        metrics.add_observer(history.clone());
+        let alerts = Arc::new(Alerts::load(store.clone(), ctx).await?);
+        metrics.add_observer(alerts.clone());
         let host_details = HostDetails::new(HostDetailsParts {
             store: store.clone(),
             collector: specs,
@@ -434,6 +470,8 @@ impl Core {
         );
         // CT-01, CT-02: container changes go from the job runner to the containers service.
         jobs.set_containers(Arc::new(containers.clone()));
+        // MO-06: a prune compacts the file only while no job runs.
+        history.set_jobs(Arc::clone(&jobs));
         let bus = Arc::new(CommandBus::new(
             policy,
             Arc::new(
@@ -473,7 +511,9 @@ impl Core {
             Arc::clone(&adapters.host_counters),
             Arc::clone(&bus),
         );
+        let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
         let core = Self {
+            vm_settings,
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog,
@@ -498,10 +538,15 @@ impl Core {
             containers,
             terminals,
             multiexec,
+            groups: MultiExecGroups::new(store.clone()),
             files,
             snippets,
+            terminal_rules,
             reachability,
             metrics,
+            history,
+            alerts,
+            layouts: Layouts::new(store.clone(), ctx),
             host_details,
             login_guard,
             presentation,
@@ -581,6 +626,10 @@ impl Core {
     /// closes, audited, with its tunnels, and session logs are written out to the end.
     pub async fn shutdown(&self) {
         self.terminals.close_all().await;
+        // MO-06: the minute still open is written as it is.
+        if let Err(err) = self.history.flush_all().await {
+            tracing::warn!(error = %err, "could not write the dashboard's last minute of history");
+        }
     }
 
     /// MO-02, CT-01: the user pressed Retry on a parked or waiting host: the dashboard and the

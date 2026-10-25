@@ -1,21 +1,25 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
 //! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
-//! [`files`] and [`clipboard`], never vmrun or SSH directly.
+//! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
 mod catalog;
 mod clipboard;
 mod command_panel;
 mod containers;
+mod dashboard;
 pub mod data_dirs;
 mod deploy;
 pub mod diagnostics;
 mod files;
+mod groups;
 mod host_details;
 mod ipc;
 mod multiexec;
 mod terminal;
+mod terminal_rules;
 mod tunnels;
 pub mod updater;
+mod vm_settings;
 mod wake;
 
 use std::path::Path;
@@ -353,6 +357,25 @@ fn forward_events(app: &App, core: &Arc<Core>) {
         let retention = Arc::clone(&core.retention);
         tauri::async_runtime::spawn(async move { retention.run(CancellationToken::new()).await });
 
+        // MO-06: the dashboard history's prune, at start and daily.
+        let history = Arc::clone(&core.history);
+        tauri::async_runtime::spawn(async move { history.run(CancellationToken::new()).await });
+
+        // MO-07: alerts firing, resolving and acknowledged -> UI (its notifications, the alert list).
+        let mut alerts = core.alerts.subscribe();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match alerts.recv().await {
+                    Ok(event) => {
+                        let _ = handle.emit("alerts://event", &event);
+                    }
+                    Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed alert events"),
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
         // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
         let reachability = Arc::clone(&core.reachability);
         tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -451,6 +474,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::folder_rename,
         ipc::folder_move,
         ipc::folder_delete,
+        ipc::folder_set_defaults,
+        ipc::session_inherited,
         ipc::import_preview,
         ipc::import_guide,
         ipc::import_save_sample,
@@ -491,6 +516,29 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         host_details::host_updates,
         host_details::host_details_release,
         host_details::vm_specs,
+        vm_settings::vm_pick_iso,
+        vm_settings::vm_attach_dropped_iso,
+        vm_settings::vm_pick_shared_folder,
+        vm_settings::vm_pick_existing,
+        vm_settings::vm_open_console,
+        vm_settings::vm_screenshot,
+        vm_settings::vm_guest_os_types,
+        vm_settings::vm_workstation_open,
+        dashboard::metrics_history,
+        dashboard::history_info,
+        dashboard::history_retention_set,
+        dashboard::alerts_list,
+        dashboard::alerts_acknowledge,
+        dashboard::alert_rules,
+        dashboard::alert_rule_create,
+        dashboard::alert_rule_update,
+        dashboard::alert_rule_delete,
+        dashboard::alert_rule_reset,
+        dashboard::alert_notify,
+        dashboard::dashboard_layout,
+        dashboard::dashboard_layout_set,
+        dashboard::dashboard_layout_reset,
+        dashboard::host_services,
         terminal::terminal_open,
         terminal::terminal_quick_connect,
         terminal::terminal_open_like,
@@ -548,6 +596,10 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         multiexec::multiexec_recorded_output,
         multiexec::multiexec_recorded_diff,
         multiexec::multiexec_export,
+        groups::multiexec_groups_list,
+        groups::multiexec_group_create,
+        groups::multiexec_group_update,
+        groups::multiexec_group_delete,
         command_panel::favourites_list,
         command_panel::favourite_add,
         command_panel::favourite_update,
@@ -558,7 +610,15 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         command_panel::command_fill,
         command_panel::terminal_type_secret,
         command_panel::notify_command_finished,
+        command_panel::notify_terminal_alert,
         command_panel::open_manual,
+        terminal_rules::terminal_rules_list,
+        terminal_rules::terminal_rule_validate,
+        terminal_rules::terminal_rule_add,
+        terminal_rules::terminal_rule_update,
+        terminal_rules::terminal_rule_delete,
+        terminal_rules::terminal_rules_reorder,
+        terminal_rules::terminal_rule_set_builtin,
         catalog::catalog_profiles,
         catalog::catalog_sites,
         catalog::catalog_sizes,

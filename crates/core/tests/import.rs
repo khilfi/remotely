@@ -28,6 +28,7 @@ fn existing(name: &str, host: &str, user: &str) -> SessionInput {
         username: Some(user.into()),
         auth: SessionAuth::Agent,
         jump_session_id: None,
+        jump_direct: false,
         startup_command: None,
         startup_on_reconnect: false,
         prompt_hook: None,

@@ -669,6 +669,7 @@ async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first(
         model: Some("vmxnet3".into()),
         mac: Some("00:0c:29:00:00:01".into()),
         connected: Some(connected),
+        ..VirtualNic::default()
     };
     let hardware = |nics: Vec<VirtualNic>| VmHardware {
         nics,

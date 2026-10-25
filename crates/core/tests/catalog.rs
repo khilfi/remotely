@@ -909,6 +909,8 @@ async fn the_catalogue_travels_to_another_laptop() {
                 keep_startup: vec![],
                 keep_forwards: vec![],
                 vault_password: None,
+                folder_defaults: vec![],
+                groups: vec![],
             },
             &b.sessions,
             &b.vault,
@@ -1032,6 +1034,8 @@ async fn the_catalogue_travels_to_another_laptop() {
                     keep_startup: vec![],
                     keep_forwards: vec![],
                     vault_password: None,
+                    folder_defaults: vec![],
+                    groups: vec![],
                 },
                 &b.sessions,
                 &b.vault,
@@ -1118,6 +1122,8 @@ async fn an_image_on_a_network_share_in_a_file_can_only_be_skipped() {
         keep_startup: vec![],
         keep_forwards: vec![],
         vault_password: None,
+        folder_defaults: vec![],
+        groups: vec![],
     };
     let err = b
         .transfer

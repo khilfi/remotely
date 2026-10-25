@@ -863,6 +863,7 @@ async fn a_session_reaching_a_virtualbox_guest_is_linked_by_a_refresh() {
         username: Some("alice".into()),
         auth: SessionAuth::Agent,
         jump_session_id: None,
+        jump_direct: false,
         startup_command: None,
         startup_on_reconnect: false,
         prompt_hook: None,
