@@ -1,9 +1,12 @@
 //! MO-02: Linux guest metrics over SSH, for the sessions the user chose to watch on the dashboard
 //! (a VM's guest metrics come from a session linked to it).
 //!
-//! Each watched host gets one connection, logged in once and kept between rounds; every round runs
-//! [`procfs::GUEST_SCRIPT`] on a new channel of it. A read, so it skips the command bus and the
-//! approval flow (CLAUDE.md, architecture rule 3), and it changes nothing on the host.
+//! Each watched host gets one connection, logged in once and kept between rounds; every poll runs
+//! [`procfs::GUEST_SCRIPT_WITHOUT_DF`] on a new channel of it (one `grep`), and once a minute
+//! [`procfs::GUEST_SCRIPT`] (with `df`). A host is polled every 5 s by default, or every 15, 30 or 60 s
+//! ([`POLL_KEY`], Settings): each poll is a few process starts on the host that a SIEM may log. A
+//! read, so it skips the command bus and the approval flow (CLAUDE.md, architecture rule 3), and it
+//! changes nothing on the host.
 //!
 //! A host that can't be reached or presents an untrusted key is retried after a wait that doubles
 //! each time (5 s up to 5 minutes), and its state says why. A login the host refused, a changed host
@@ -39,6 +42,14 @@ use crate::vault::{Vault, VaultStatus};
 
 /// Settings key: the sessions watched for guest metrics (a list of session ids).
 pub const WATCHED_KEY: &str = "metrics.guestSessions";
+
+/// Settings key: seconds between two polls of a watched host (MO-02, P8): one of [`POLL_CHOICES`].
+pub const POLL_KEY: &str = "metrics.guestPollSecs";
+/// The polling intervals offered, in seconds; the first is the default.
+pub const POLL_CHOICES: [u64; 4] = [5, 15, 30, 60];
+/// A host is polled in the collector's round that comes this close to its interval, so a 15 s
+/// interval on 5 s rounds polls every third round rather than every fourth.
+const POLL_SLACK: Duration = Duration::from_secs(1);
 
 /// How guest polling connects and backs off. The defaults suit real networks; tests shorten them.
 #[derive(Debug, Clone)]
@@ -86,6 +97,9 @@ struct Host {
     next_try: Option<Instant>,
     /// MO-13: when this connection last looked at the age of the host's stored facts.
     specs_checked: Option<Instant>,
+    /// P8: when it was last polled (the polling interval counts from there) and last ran `df`.
+    polled_at: Option<Instant>,
+    df_at: Option<Instant>,
 }
 
 impl Host {
@@ -97,6 +111,8 @@ impl Host {
             failures: 0,
             next_try: None,
             specs_checked: None,
+            polled_at: None,
+            df_at: None,
         }
     }
 
@@ -127,6 +143,8 @@ struct Shared {
     fresh: Mutex<HashMap<Uuid, MetricSample>>,
     /// MO-13: reads a watched host's facts on its kept connection when they are old.
     specs: OnceLock<SpecsCollector>,
+    /// P8: the time between two polls of a host ([`POLL_KEY`]).
+    interval: RwLock<Duration>,
 }
 
 pub struct GuestSource {
@@ -270,6 +288,7 @@ impl GuestSource {
                 statuses: Mutex::new(HashMap::new()),
                 fresh: Mutex::new(HashMap::new()),
                 specs: OnceLock::new(),
+                interval: RwLock::new(Duration::from_secs(POLL_CHOICES[0])),
             }),
             hosts: Mutex::new(HashMap::new()),
         }
@@ -298,6 +317,16 @@ impl GuestSource {
         *locks::write(&self.shared.tuning) = tuning;
     }
 
+    /// P8: how long a watched host waits between two polls.
+    pub fn interval(&self) -> Duration {
+        *locks::read(&self.shared.interval)
+    }
+
+    /// P8: polls each host this often from now on (the next poll counts from the last one).
+    pub fn set_interval(&self, every: Duration) {
+        *locks::write(&self.shared.interval) = every;
+    }
+
     /// The user pressed Retry: a parked host logs in again next round, and a waiting one stops waiting.
     pub fn retry(&self, session_id: Uuid) {
         self.shared.guard.retry(session_id);
@@ -306,6 +335,7 @@ impl GuestSource {
             if let Ok(mut host) = host.try_lock() {
                 host.failures = 0;
                 host.next_try = None;
+                host.polled_at = None;
             }
         }
         if let Some(entry) = locks::lock(&self.shared.statuses).get_mut(&session_id) {
@@ -370,6 +400,7 @@ impl MetricsSource for GuestSource {
         self.forget_unwatched(&watched).await;
         let tuning = self.tuning();
         let now = Instant::now();
+        let every = self.interval().saturating_sub(POLL_SLACK);
         let semaphore = Arc::new(tokio::sync::Semaphore::new(tuning.parallel.max(1)));
         let (done_tx, mut done_rx) = mpsc::channel::<()>(watched.len().max(1));
         let mut started = 0usize;
@@ -384,6 +415,14 @@ impl MetricsSource for GuestSource {
                 continue;
             };
             if guard.next_try.is_some_and(|at| at > now) {
+                continue;
+            }
+            // P8: polled less than an interval ago (a failed poll waits for `next_try` instead).
+            if guard.next_try.is_none()
+                && guard
+                    .polled_at
+                    .is_some_and(|at| now.saturating_duration_since(at) < every)
+            {
                 continue;
             }
             locks::lock(&self.shared.statuses)
@@ -428,6 +467,7 @@ impl MetricsSource for GuestSource {
 /// One poll of one host: connect if needed, run the script, keep the reading.
 async fn poll(shared: &Shared, id: Uuid, host: &mut Host) {
     let tuning = locks::read(&shared.tuning).clone();
+    host.polled_at = Some(Instant::now());
     match read_once(shared, &tuning, id, host).await {
         Ok(sample) => {
             host.failures = 0;
@@ -439,6 +479,10 @@ async fn poll(shared: &Shared, id: Uuid, host: &mut Host) {
             read_specs_when_old(shared, id, host).await;
         }
         Err(failure) => {
+            // Nothing went over the network (the vault is locked): next round, whatever the interval.
+            if failure.retry_now {
+                host.polled_at = None;
+            }
             // Parked: the guard keeps it from logging in, at no cost each round. Retry clears it.
             let retry_at = if failure.retry_now || failure.parked {
                 None
@@ -486,11 +530,14 @@ async fn read_once(
     let Some(conn) = host.conn.as_ref() else {
         return Err(Failure::new(GuestState::Error, "no connection"));
     };
-    let ran = tokio::time::timeout(
-        tuning.command_timeout,
-        conn.run(procfs::GUEST_SCRIPT, procfs::MAX_OUTPUT),
-    )
-    .await;
+    // P8: `df` once a minute (and on the first poll of a connection); the rounds between keep its mounts.
+    let with_df = host.previous.is_none() || host.df_at.is_none_or(|at| at.elapsed() >= procfs::DF_EVERY);
+    let script = if with_df {
+        procfs::GUEST_SCRIPT
+    } else {
+        procfs::GUEST_SCRIPT_WITHOUT_DF
+    };
+    let ran = tokio::time::timeout(tuning.command_timeout, conn.run(script, procfs::MAX_OUTPUT)).await;
     let result = match ran {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => {
@@ -510,7 +557,12 @@ async fn read_once(
         }
     };
     let at = Instant::now();
-    let reading = procfs::parse(&result.output.stdout);
+    let mut reading = procfs::parse(&result.output.stdout);
+    if with_df {
+        host.df_at = Some(at);
+    } else if let Some((previous, _)) = &host.previous {
+        reading.mounts = previous.mounts.clone();
+    }
     if reading.is_empty() {
         return Err(Failure::new(
             GuestState::NoData,

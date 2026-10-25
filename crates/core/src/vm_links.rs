@@ -18,6 +18,13 @@
 //! reaches a VM through it only once the user confirmed it ([`VmLinks::confirm`],
 //! `bulk::ResolvedTargets::vms_unconfirmed`).
 //!
+//! Host names are looked up gently (P3): a name is resolved once at a time and kept for
+//! [`VmLinks::RESOLVED_FOR`] (one that did not resolve for [`VmLinks::FAILED_FOR`]); a pass waits at
+//! most [`VmLinks::LOOKUPS_DEADLINE`] for its lookups and keeps every one that finished by then, while
+//! the rest finish in the background for the next pass. A session behind a jump host (SS-07) is never
+//! looked up: its name is one the far network knows, and asking this PC's resolvers would send it out
+//! on the customer's LAN (LLMNR, NetBIOS). (A4 doesn't link it automatically either.)
+//!
 //! An automatic link follows the addresses: it moves when another VM now has the session's address,
 //! and goes when its VM has another address now. Linking is the app's own data: it skips the command
 //! bus, has no approval tier and every change is audited like a setting. A link can only make a
@@ -212,16 +219,51 @@ impl Resolved {
     }
 }
 
+/// Names looked up lately, by lower-case name, and those being looked up now.
+#[derive(Default)]
+struct Lookups {
+    resolved: HashMap<String, Resolved>,
+    in_flight: HashSet<String>,
+}
+
+/// A lookup in progress. It counts as in flight until it is dropped, even if its task is aborted.
+struct InFlight {
+    lookups: Arc<Mutex<Lookups>>,
+    key: String,
+}
+
+impl InFlight {
+    /// Keeps what the lookup found (or that it found nothing) for the next passes.
+    fn finish(&self, addresses: Option<Vec<IpAddr>>) {
+        locks::lock(&self.lookups).resolved.insert(
+            self.key.clone(),
+            Resolved {
+                at: Instant::now(),
+                addresses,
+            },
+        );
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        locks::lock(&self.lookups).in_flight.remove(&self.key);
+    }
+}
+
 /// Saved sessions' links to VMs: automatic ones and the user's choices.
 pub struct VmLinks {
     store: Store,
     /// Forward DNS lookups of session host names.
     network: Arc<dyn NetworkAdapter>,
-    cache: Mutex<HashMap<String, Resolved>>,
+    /// Shared with lookups that outlive their pass.
+    cache: Arc<Mutex<Lookups>>,
     /// Sessions whose address several VMs have, from the latest pass.
     ambiguous: Mutex<HashMap<Uuid, Vec<String>>>,
     /// One pass at a time, so two passes can't each link the same session.
     pass: tokio::sync::Mutex<()>,
+    /// [`Self::LOOKUPS_DEADLINE`], unless a test shortens it.
+    deadline: Mutex<Duration>,
 }
 
 impl VmLinks {
@@ -239,10 +281,16 @@ impl VmLinks {
         Self {
             store,
             network,
-            cache: Mutex::default(),
+            cache: Arc::default(),
             ambiguous: Mutex::default(),
             pass: tokio::sync::Mutex::new(()),
+            deadline: Mutex::new(Self::LOOKUPS_DEADLINE),
         }
+    }
+
+    /// Tests shorten how long a pass waits for its lookups.
+    pub fn set_lookups_deadline(&self, deadline: Duration) {
+        *locks::lock(&self.deadline) = deadline;
     }
 
     /// Links every session the rules allow (see the module docs). Never fails a refresh over a name
@@ -289,9 +337,14 @@ impl VmLinks {
             .collect();
         let by_id: HashMap<&str, &VmRecord> = vms.iter().map(|vm| (vm.id.as_str(), vm)).collect();
         // No VM has an address (none running, or the VM list not read yet): nothing can match or go
-        // stale, so no name is looked up.
+        // stale, so no name is looked up. SS-07, A4: nor is the name of a session behind a jump host,
+        // which is never linked automatically.
         let hosts: Vec<String> = if addresses.iter().any(|vm| vm.ip.is_some()) {
-            sessions.iter().map(|s| s.host.clone()).collect()
+            sessions
+                .iter()
+                .filter(|s| s.jump_session_id.is_none())
+                .map(|s| s.host.clone())
+                .collect()
         } else {
             Vec::new()
         };
@@ -421,15 +474,17 @@ impl VmLinks {
     }
 
     /// What each host is or resolves to. IP literals need no lookup; names come from the cache while
-    /// it is fresh, otherwise from DNS, many at once, within [`Self::LOOKUPS_DEADLINE`].
-    /// A name still unresolved by then maps to `None` and is tried again on the next pass.
+    /// it is fresh, otherwise from DNS, many at once, within [`Self::LOOKUPS_DEADLINE`]. Every lookup
+    /// that finished by then counts; a name still being looked up maps to `None` (unknown this time),
+    /// and its lookup goes on in the background and keeps its answer for the next pass. A name
+    /// another pass is looking up already is not looked up again.
     async fn resolve(&self, hosts: Vec<String>) -> HashMap<String, Option<Vec<IpAddr>>> {
         let mut out = HashMap::new();
-        let mut lookups = Vec::new();
+        let mut lookups: Vec<(String, InFlight)> = Vec::new();
         {
-            let cache = locks::lock(&self.cache);
+            let mut cache = locks::lock(&self.cache);
             for host in hosts {
-                if out.contains_key(&host) || lookups.contains(&host) {
+                if out.contains_key(&host) || lookups.iter().any(|(h, _)| h == &host) {
                     continue;
                 }
                 if let Some(ip) = ip_literal(&host) {
@@ -437,11 +492,19 @@ impl VmLinks {
                     continue;
                 }
                 let key = host.to_ascii_lowercase();
-                match cache.get(&key) {
+                match cache.resolved.get(&key) {
                     Some(hit) if hit.fresh() => {
                         out.insert(host, hit.addresses.clone());
                     }
-                    _ => lookups.push(host),
+                    _ if cache.in_flight.contains(&key) => {}
+                    _ => {
+                        cache.in_flight.insert(key.clone());
+                        let guard = InFlight {
+                            lookups: Arc::clone(&self.cache),
+                            key,
+                        };
+                        lookups.push((host, guard));
+                    }
                 }
             }
         }
@@ -450,7 +513,7 @@ impl VmLinks {
         }
         let limit = Arc::new(Semaphore::new(Self::LOOKUPS_AT_ONCE));
         let mut tasks = JoinSet::new();
-        for host in lookups {
+        for (host, guard) in lookups {
             let network = Arc::clone(&self.network);
             let limit = Arc::clone(&limit);
             tasks.spawn(async move {
@@ -468,39 +531,30 @@ impl VmLinks {
                         None
                     }
                 };
+                guard.finish(addresses.clone());
                 (host, addresses)
             });
         }
-        let gathered = tokio::time::timeout(Self::LOOKUPS_DEADLINE, async {
-            let mut done = Vec::new();
-            while let Some(joined) = tasks.join_next().await {
-                if let Ok(result) = joined {
-                    done.push(result);
+        let deadline = tokio::time::Instant::now() + *locks::lock(&self.deadline);
+        loop {
+            match tokio::time::timeout_at(deadline, tasks.join_next()).await {
+                Ok(Some(Ok((host, addresses)))) => {
+                    out.insert(host, addresses);
+                }
+                Ok(Some(Err(_))) => {}
+                Ok(None) => break,
+                Err(_) => {
+                    // Names still looking up are unknown this time. Their lookups finish on their own,
+                    // each within its timeout, and keep the answer for the next pass.
+                    tracing::debug!(
+                        unfinished = tasks.len(),
+                        "host name lookups ran out of time; the rest finish in the background"
+                    );
+                    tasks.detach_all();
+                    break;
                 }
             }
-            done
-        })
-        .await;
-        let done = match gathered {
-            Ok(done) => done,
-            Err(_) => {
-                tracing::debug!("host name lookups ran out of time; the rest are tried on the next pass");
-                Vec::new()
-            }
-        };
-        let mut cache = locks::lock(&self.cache);
-        let now = Instant::now();
-        for (host, addresses) in done {
-            cache.insert(
-                host.to_ascii_lowercase(),
-                Resolved {
-                    at: now,
-                    addresses: addresses.clone(),
-                },
-            );
-            out.insert(host, addresses);
         }
-        // Names still looking up when the deadline passed: unknown this time.
         out
     }
 

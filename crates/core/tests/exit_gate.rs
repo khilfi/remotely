@@ -27,7 +27,7 @@ use uuid::Uuid;
 async fn wait(events: &mut Receiver<JobEvent>, job: Uuid, limit: Duration) -> JobStatus {
     tokio::time::timeout(limit, async {
         loop {
-            if let JobEvent::Finished { job_id, status } = events.recv().await.unwrap() {
+            if let JobEvent::Finished { job_id, status, .. } = events.recv().await.unwrap() {
                 if job_id == job {
                     return status;
                 }

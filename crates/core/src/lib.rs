@@ -357,6 +357,11 @@ impl Core {
             login_guard.clone(),
         );
         guest.set_specs(specs.clone());
+        if let Some(secs) = store.get_setting::<u64>(&ctx, metrics::guest::POLL_KEY).await? {
+            if metrics::guest::POLL_CHOICES.contains(&secs) {
+                guest.set_interval(Duration::from_secs(secs));
+            }
+        }
         let metrics = Arc::new(Metrics::new(MetricsParts {
             store: store.clone(),
             ctx,
@@ -693,6 +698,37 @@ impl Core {
         self.jobs.set_remote_limit(limit);
         self.audit_setting("Set the hosts a bulk run reaches at once", &limit.to_string())
             .await
+    }
+
+    /// MO-02, P8: seconds between two polls of a host the dashboard watches (default 5).
+    pub fn guest_poll_secs(&self) -> u64 {
+        self.metrics.guest().interval().as_secs()
+    }
+
+    /// MO-02, P8: one of [`metrics::guest::POLL_CHOICES`] (5, 15, 30 or 60 s). Applies from each host's
+    /// next poll on. Audited.
+    pub async fn set_guest_poll_secs(&self, secs: u64) -> Result<()> {
+        self.store.read_only().check(Change::Settings)?;
+        let choices = metrics::guest::POLL_CHOICES;
+        if !choices.contains(&secs) {
+            let offered: Vec<String> = choices.iter().map(u64::to_string).collect();
+            let text = match offered.split_last() {
+                Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+                _ => offered.concat(),
+            };
+            return Err(CoreError::InvalidSetting(format!(
+                "watched hosts can be polled every {text} seconds"
+            )));
+        }
+        self.store
+            .put_setting(&self.ctx, metrics::guest::POLL_KEY, &secs)
+            .await?;
+        self.metrics.guest().set_interval(Duration::from_secs(secs));
+        self.audit_setting(
+            "Set how often the dashboard polls watched hosts",
+            &format!("every {secs} s"),
+        )
+        .await
     }
 
     /// FD-14: whether update checks are on. Defaults to on.

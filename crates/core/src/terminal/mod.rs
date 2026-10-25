@@ -314,8 +314,15 @@ pub struct TerminalTuning {
     /// The pause before the first reconnect; it doubles with each try, up to `max_retry`.
     pub first_retry: Duration,
     pub max_retry: Duration,
-    /// Reconnect tries before the pane gives up and waits for the user.
+    /// Fast reconnect tries ([`Self::retry_delay`]); after them come the slow ones.
     pub max_attempts: u32,
+    /// R9: after the fast tries, `slow_attempts` more, `slow_retry` apart, before the pane gives up and
+    /// waits for the user (or for Windows to resume or the network to come back).
+    pub slow_retry: Duration,
+    pub slow_attempts: u32,
+    /// R9: a pane woken by a resume or a network change tries within this long, at a random moment
+    /// in it, so panes behind one jump host don't all log in at the same instant.
+    pub wake_spread: Duration,
     /// Overrides the keep-alive interval from the settings.
     pub keepalive_interval: Option<Duration>,
     pub keepalive_max: usize,
@@ -335,6 +342,9 @@ impl Default for TerminalTuning {
             first_retry: Duration::from_secs(1),
             max_retry: Duration::from_secs(30),
             max_attempts: 10,
+            slow_retry: Duration::from_secs(5 * 60),
+            slow_attempts: 12,
+            wake_spread: Duration::from_secs(3),
             keepalive_interval: None,
             keepalive_max: 3,
             agent: AgentSource::System,
@@ -345,9 +355,77 @@ impl Default for TerminalTuning {
 }
 
 impl TerminalTuning {
-    fn retry_delay(&self, attempt: u32) -> Duration {
-        let factor = 2u32.saturating_pow(attempt.saturating_sub(1).min(16));
-        self.first_retry.saturating_mul(factor).min(self.max_retry)
+    /// R9: the wait before automatic try `attempt` (1 and up). The first `max_attempts` double from
+    /// `first_retry` up to `max_retry` (1, 2, 4 ... 30 s by default), each spread from half to one and a
+    /// half times that; the slow ones after them are `slow_retry` apart (5 minutes), spread by a fifth
+    /// either way. `unit` (0 to 1) is random in use ([`jitter_unit`]), so panes that lost their
+    /// connections together (one jump host, one VPN) don't come back in lock-step.
+    pub fn retry_delay(&self, attempt: u32, unit: f64) -> Duration {
+        let unit = if unit.is_finite() { unit.clamp(0.0, 1.0) } else { 0.5 };
+        let (base, spread) = if attempt <= self.max_attempts {
+            let factor = 2u32.saturating_pow(attempt.saturating_sub(1).min(16));
+            (self.first_retry.saturating_mul(factor).min(self.max_retry), 0.5)
+        } else {
+            (self.slow_retry, 0.2)
+        };
+        scaled(base, 1.0 - spread + 2.0 * spread * unit)
+    }
+
+    /// Every automatic try, fast and slow.
+    pub fn total_attempts(&self) -> u32 {
+        self.max_attempts.saturating_add(self.slow_attempts)
+    }
+
+    /// R9: how long a woken pane waits before it tries: a random part of `wake_spread`.
+    pub fn wake_delay(&self, unit: f64) -> Duration {
+        scaled(
+            self.wake_spread,
+            if unit.is_finite() { unit.clamp(0.0, 1.0) } else { 0.5 },
+        )
+    }
+}
+
+fn scaled(base: Duration, factor: f64) -> Duration {
+    Duration::try_from_secs_f64(base.as_secs_f64() * factor).unwrap_or(base)
+}
+
+/// R9: a random number from 0 to 1 for spreading retries (53 random bits of a v4 UUID).
+pub fn jitter_unit() -> f64 {
+    let (_, low) = Uuid::new_v4().as_u64_pair();
+    (low & ((1 << 53) - 1)) as f64 / (1u64 << 53) as f64
+}
+
+/// R9: why terminals waiting to reconnect were woken ([`Terminals::wake_reconnects`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WakeReason {
+    /// Windows resumed from sleep or hibernation.
+    Resumed,
+    /// This PC got a new IP address (Wi-Fi, a cable or a VPN came back).
+    NetworkChanged,
+}
+
+impl WakeReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WakeReason::Resumed => "resumed",
+            WakeReason::NetworkChanged => "network_changed",
+        }
+    }
+
+    /// Of two reasons that came together, the one that says more: a resume.
+    pub fn or(self, other: WakeReason) -> WakeReason {
+        if self == WakeReason::Resumed || other == WakeReason::Resumed {
+            WakeReason::Resumed
+        } else {
+            WakeReason::NetworkChanged
+        }
+    }
+
+    fn said(self) -> &'static str {
+        match self {
+            WakeReason::Resumed => "Windows resumed",
+            WakeReason::NetworkChanged => "The network changed",
+        }
     }
 }
 
@@ -679,6 +757,10 @@ struct Inner {
     bus: OnceLock<Weak<CommandBus>>,
     /// MO-13: reads a saved session's facts when one of its terminals connects.
     specs: OnceLock<SpecsCollector>,
+    /// R9: bumped when Windows resumes or the network changes; panes waiting to reconnect watch it.
+    wake: tokio::sync::watch::Sender<(u64, WakeReason)>,
+    /// R9: the panes that a wake would make try again now.
+    waiting: Mutex<HashSet<Uuid>>,
 }
 
 /// A pane about to open.
@@ -726,8 +808,24 @@ impl Terminals {
                 transfers: Transfers::default(),
                 bus: OnceLock::new(),
                 specs: OnceLock::new(),
+                wake: tokio::sync::watch::channel((0, WakeReason::NetworkChanged)).0,
+                waiting: Mutex::default(),
             }),
         }
+    }
+
+    /// R9: Windows resumed or this PC got a new address: every pane waiting to reconnect tries again
+    /// soon, each after its own short random wait ([`TerminalTuning::wake_spread`]), instead of after
+    /// its backoff; one that had given up after its tries starts them again. Connected panes, and
+    /// panes waiting because of something a retry can't fix (a refused login, a changed host key),
+    /// are left alone. Returns how many panes were woken.
+    pub fn wake_reconnects(&self, reason: WakeReason) -> usize {
+        let woken = locks::lock(&self.inner.waiting).len();
+        self.inner.wake.send_modify(|(count, why)| {
+            *count += 1;
+            *why = reason;
+        });
+        woken
     }
 
     /// MO-13: terminals to saved sessions read the host's facts when they connect.
@@ -1866,6 +1964,27 @@ enum Pump {
 enum Wait {
     Connect,
     Close,
+    /// R9: Windows resumed or the network changed while the pane waited after its last try.
+    Woken,
+}
+
+/// R9: a pane counts as waiting for a wake while this lives.
+struct Waiting<'a> {
+    inner: &'a Inner,
+    id: Uuid,
+}
+
+impl<'a> Waiting<'a> {
+    fn new(inner: &'a Inner, id: Uuid) -> Self {
+        locks::lock(&inner.waiting).insert(id);
+        Self { inner, id }
+    }
+}
+
+impl Drop for Waiting<'_> {
+    fn drop(&mut self) {
+        locks::lock(&self.inner.waiting).remove(&self.id);
+    }
 }
 
 /// What a connection logs in with that may show up in its output: a password or a key's passphrase.
@@ -1982,29 +2101,41 @@ impl Pane {
                         locks::lock(&self.control.jump_passwords).clear();
                     }
                     let tuning = self.tuning();
-                    if attempt > 0 && retryable(&err) && attempt < tuning.max_attempts {
+                    if attempt > 0 && retryable(&err) && attempt < tuning.total_attempts() {
                         attempt += 1;
                         self.wait_to_retry(attempt, &message).await
                     } else {
+                        // R9: out of tries on a connection that dropped: a resume or a network change
+                        // starts them again.
+                        let gave_up = attempt > 0 && retryable(&err);
                         attempt = 0;
                         if !matches!(err, CoreError::Cancelled) || !self.control.cancel.is_cancelled() {
-                            self.say(notice(
-                                RED,
-                                &format!("Not connected: {message}. Press Enter to try again"),
-                            ))
-                            .await;
+                            let next = if gave_up {
+                                "Press Enter to try again (it tries by itself when the network comes back)"
+                            } else {
+                                "Press Enter to try again"
+                            };
+                            self.say(notice(RED, &format!("Not connected: {message}. {next}")))
+                                .await;
                         }
                         self.status(TerminalStatus::Disconnected {
                             code: err.code().to_owned(),
                             message,
                         })
                         .await;
-                        self.wait_for_user().await
+                        if gave_up {
+                            self.wait_for_user_or_wake().await
+                        } else {
+                            self.wait_for_user().await
+                        }
                     }
                 }
             };
-            if wait == Wait::Close {
-                break;
+            match wait {
+                Wait::Close => break,
+                // R9: a fresh round of tries, as after a dropped connection.
+                Wait::Woken => attempt = 1,
+                Wait::Connect => {}
             }
         }
         self.finish(opened, connections, last_error).await;
@@ -2637,26 +2768,30 @@ impl Pane {
         }
     }
 
-    /// Shows the countdown to the next try; Enter or Reconnect tries at once.
+    /// Shows the countdown to the next try; Enter or Reconnect tries at once. R9: a resume or a network
+    /// change cuts the wait short (to a random moment in [`TerminalTuning::wake_spread`]).
     async fn wait_to_retry(&mut self, attempt: u32, reason: &str) -> Wait {
         let tuning = self.tuning();
-        let delay = tuning.retry_delay(attempt);
+        let delay = tuning.retry_delay(attempt, jitter_unit());
         let seconds = delay.as_secs_f64().ceil() as u64;
         self.say(notice(
             YELLOW,
             &format!(
                 "Connection lost: {reason}. Reconnecting in {seconds} s (try {attempt} of {}); press Enter to try now",
-                tuning.max_attempts
+                tuning.total_attempts()
             ),
         ))
         .await;
         self.status(TerminalStatus::Reconnecting {
             attempt,
-            max_attempts: tuning.max_attempts,
+            max_attempts: tuning.total_attempts(),
             seconds,
             reason: reason.to_owned(),
         })
         .await;
+        let inner = Arc::clone(&self.inner);
+        let _waiting = Waiting::new(&inner, self.id);
+        let mut wake = inner.wake.subscribe();
         let sleep = tokio::time::sleep(delay);
         tokio::pin!(sleep);
         let cancel = self.control.cancel.clone();
@@ -2668,8 +2803,60 @@ impl Pane {
                     self.automatic = true;
                     return Wait::Connect;
                 }
+                Ok(()) = wake.changed() => {
+                    let why = wake.borrow_and_update().1;
+                    let soon = tokio::time::Instant::now() + tuning.wake_delay(jitter_unit());
+                    if soon < sleep.deadline() {
+                        sleep.as_mut().reset(soon);
+                        self.say(notice(DIM, &format!("{}: reconnecting now", why.said()))).await;
+                        self.status(TerminalStatus::Reconnecting {
+                            attempt,
+                            max_attempts: tuning.total_attempts(),
+                            seconds: tuning.wake_spread.as_secs_f64().ceil() as u64,
+                            reason: reason.to_owned(),
+                        })
+                        .await;
+                    }
+                }
                 msg = self.input.recv() => match self.waiting_input(msg) {
                     Some(wait) => return wait,
+                    None => continue,
+                },
+            }
+        }
+    }
+
+    /// R9: [`Self::wait_for_user`], and a resume or a network change starts the tries again (after a
+    /// random moment in [`TerminalTuning::wake_spread`]).
+    async fn wait_for_user_or_wake(&mut self) -> Wait {
+        let inner = Arc::clone(&self.inner);
+        let mut waiting = Some(Waiting::new(&inner, self.id));
+        let mut wake = inner.wake.subscribe();
+        let cancel = self.control.cancel.clone();
+        let sleep = tokio::time::sleep(Duration::MAX);
+        tokio::pin!(sleep);
+        let mut woken = false;
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => return Wait::Close,
+                () = &mut sleep, if woken => {
+                    // SS-01: the pane's own retry, not the user's.
+                    self.automatic = true;
+                    return Wait::Woken;
+                }
+                Ok(()) = wake.changed(), if !woken => {
+                    let why = wake.borrow_and_update().1;
+                    woken = true;
+                    waiting = None;
+                    let tuning = self.tuning();
+                    sleep.as_mut().reset(tokio::time::Instant::now() + tuning.wake_delay(jitter_unit()));
+                    self.say(notice(DIM, &format!("{}: reconnecting", why.said()))).await;
+                }
+                msg = self.input.recv() => match self.waiting_input(msg) {
+                    Some(wait) => {
+                        drop(waiting);
+                        return wait;
+                    }
                     None => continue,
                 },
             }
@@ -3089,11 +3276,63 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_pauses_double_up_to_the_cap() {
+    fn reconnect_pauses_double_up_to_the_cap_then_slow_down() {
+        // R9: at the middle of the spread (0.5) each pause is its base.
         let tuning = TerminalTuning::default();
-        let secs: Vec<u64> = (1..=8).map(|a| tuning.retry_delay(a).as_secs()).collect();
-        assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30]);
-        assert_eq!(tuning.retry_delay(1000).as_secs(), 30);
+        let secs: Vec<u64> = (1..=12).map(|a| tuning.retry_delay(a, 0.5).as_secs()).collect();
+        assert_eq!(secs, [1, 2, 4, 8, 16, 30, 30, 30, 30, 30, 300, 300]);
+        assert_eq!(tuning.total_attempts(), 22, "10 fast, then 12 slow: about an hour");
+        assert_eq!(tuning.retry_delay(1000, 0.5).as_secs(), 300);
+        let fast: f64 = (1..=10).map(|a| tuning.retry_delay(a, 0.5).as_secs_f64()).sum();
+        let slow: f64 = (11..=22).map(|a| tuning.retry_delay(a, 0.5).as_secs_f64()).sum();
+        assert_eq!(
+            (fast, slow),
+            (181.0, 3600.0),
+            "about 3 minutes of quick tries, then an hour of slow ones"
+        );
+    }
+
+    #[test]
+    fn reconnect_pauses_are_spread_so_panes_do_not_retry_in_lock_step() {
+        // R9: two panes that dropped together (one jump host) wait different times.
+        let tuning = TerminalTuning::default();
+        for attempt in [1, 4, 10] {
+            let base = tuning.retry_delay(attempt, 0.5).as_secs_f64();
+            let (low, high) = (
+                tuning.retry_delay(attempt, 0.0).as_secs_f64(),
+                tuning.retry_delay(attempt, 1.0).as_secs_f64(),
+            );
+            assert_eq!(
+                (low, high),
+                (base * 0.5, base * 1.5),
+                "try {attempt}: half to one and a half"
+            );
+        }
+        let slow = (
+            tuning.retry_delay(11, 0.0).as_secs_f64(),
+            tuning.retry_delay(11, 1.0).as_secs_f64(),
+        );
+        assert_eq!(slow, (240.0, 360.0), "slow tries: a fifth either way");
+        // Out-of-range or broken randomness can't make a pause negative or endless.
+        assert_eq!(tuning.retry_delay(1, -3.0), tuning.retry_delay(1, 0.0));
+        assert_eq!(tuning.retry_delay(1, f64::NAN), tuning.retry_delay(1, 0.5));
+        assert!(tuning.wake_delay(1.0) <= tuning.wake_spread);
+
+        // jitter_unit really spreads: 200 draws are all in [0, 1) and far from all the same.
+        let draws: Vec<f64> = (0..200).map(|_| jitter_unit()).collect();
+        assert!(draws.iter().all(|u| (0.0..1.0).contains(u)));
+        let (min, max) = draws
+            .iter()
+            .fold((1.0f64, 0.0f64), |(lo, hi), u| (lo.min(*u), hi.max(*u)));
+        assert!(min < 0.1 && max > 0.9, "{min} {max}");
+    }
+
+    #[test]
+    fn a_resume_says_more_than_a_network_change() {
+        use WakeReason::{NetworkChanged, Resumed};
+        assert_eq!(NetworkChanged.or(Resumed), Resumed);
+        assert_eq!(Resumed.or(NetworkChanged), Resumed);
+        assert_eq!(NetworkChanged.or(NetworkChanged), NetworkChanged);
     }
 
     #[test]

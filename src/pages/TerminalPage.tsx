@@ -132,7 +132,8 @@ import {
 } from "@/lib/terminal-session";
 import { maskedOutside, readOnlyLocked } from "@/lib/presentation-state";
 import type { ResolvedTheme } from "@/lib/theme";
-import { formatSize, isActive, mergeTransfer } from "@/lib/transfers";
+import { formatSize } from "@/lib/transfers";
+import { transferStore } from "@/lib/transfers-store";
 import { routeText, viaText } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 
@@ -343,10 +344,11 @@ export function TerminalPage({
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   /** Bumped when a pane's state changes, so what depends on terminal ids and statuses is recomputed. */
   const [paneTick, setPaneTick] = useState(0);
-  /** SS-08: the "Files here" drawer, and every transfer (newest last) less the ones cleared from the panel. */
+  /**
+   * SS-08: the "Files here" drawer. P6: the transfers themselves are in the transfers store (src/lib/transfers-store.ts),
+   * which the drawer and its panel read, so a transfer's progress doesn't re-render this page.
+   */
   const [filesShown, setFilesShown] = useState(() => readShown(FILES_KEY, false));
-  const [transfers, setTransfers] = useState<TransferInfo[]>([]);
-  const [clearedTransfers, setClearedTransfers] = useState<string[]>([]);
   /** SS-08: files picked or dropped for upload that are in the folder already. */
   const [conflict, setConflict] = useState<{
     pane: PaneSession;
@@ -907,24 +909,19 @@ export function TerminalPage({
     }
   }, [filesShown]);
 
-  // Every transfer, then each change as it comes. A transfer that ends while the drawer is hidden says so.
-  const transferStates = useRef(new Map<string, TransferInfo["state"]>());
+  // Every transfer, then each change as it comes, into the transfers store (no state here). A transfer that ends
+  // while the drawer is hidden says so.
   const endedRef = useRef<(transfer: TransferInfo) => void>(() => undefined);
   useEffect(() => {
     let gone = false;
     api.filesTransfers().then(
       (list) => {
-        if (gone) return;
-        list.forEach((t) => transferStates.current.set(t.id, t.state));
-        setTransfers(list);
+        if (!gone) transferStore.load(list);
       },
       () => undefined,
     );
     const unlisten = api.onTransfer((changed) => {
-      const before = transferStates.current.get(changed.id);
-      transferStates.current.set(changed.id, changed.state);
-      if (before && before !== changed.state && !isActive(changed)) endedRef.current(changed);
-      setTransfers((prev) => mergeTransfer(prev, changed));
+      if (transferStore.apply(changed)) endedRef.current(changed);
     });
     return () => {
       gone = true;
@@ -1098,10 +1095,6 @@ export function TerminalPage({
     };
   });
 
-  const shownTransfers = transfers.filter((t) => !clearedTransfers.includes(t.id));
-  const uploadsHere = transfers.filter(
-    (t) => t.terminalId === currentPane?.terminalId && t.direction === "upload" && t.state === "done",
-  ).length;
   const uploadBlocked = uploadReason({
     open: Boolean(currentPane),
     connected: currentConnected,
@@ -1113,16 +1106,11 @@ export function TerminalPage({
       snapshot={currentSnapshot}
       name={currentPane ? nameOf(currentPane) : "No terminal"}
       multiExecTerminals={multiExec ? pickedPanes.length : 0}
-      transfers={shownTransfers}
-      refresh={uploadsHere}
       onUpload={(folder) => void pickAndUpload(currentPane, folder)}
       onDownload={(paths, to) => {
         if (currentPane) void download(currentPane, paths, to);
       }}
       onRetry={(t) => void retryTransfer(t)}
-      onClearTransfers={() =>
-        setClearedTransfers((prev) => [...prev, ...transfers.filter((t) => !isActive(t)).map((t) => t.id)])
-      }
       onClose={() => setFilesShown(false)}
     />
   );

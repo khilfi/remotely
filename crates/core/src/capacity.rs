@@ -11,7 +11,7 @@
 //! at power-on ([`CapacityChecker::bridged`]): such a VM joins the network this PC is on, so a clone
 //! with a fixed IP address can take an address the customer's network already uses.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -193,13 +193,14 @@ impl CapacityChecker {
             return warnings;
         }
 
+        let known = by_key(&inventory);
         let mut running_mb = 0;
         for path in &running {
-            running_mb += self.memsize_mb(ctx, path).await;
+            running_mb += self.memsize_mb(&known, path).await;
         }
         let mut starting_mb = 0;
         for path in &starting {
-            starting_mb += self.memsize_mb(ctx, path).await;
+            starting_mb += self.memsize_mb(&known, path).await;
         }
         let physical_mb = match self.host.host_totals().await {
             Ok(totals) => totals.physical_ram_mb,
@@ -212,7 +213,7 @@ impl CapacityChecker {
         // One free-space read per drive, through one of its VM folders.
         let mut folders: BTreeMap<String, PathBuf> = BTreeMap::new();
         for path in &starting {
-            if let Some(folder) = self.folder(ctx, path).await {
+            if let Some(folder) = self.folder(&known, path).await {
                 folders.entry(drive_of(&folder)).or_insert(folder);
             }
         }
@@ -285,16 +286,16 @@ impl CapacityChecker {
     }
 
     /// The VM's assigned RAM: from the inventory, else its .vmx; 0 when neither says.
-    async fn memsize_mb(&self, ctx: &Context, vmx_path: &str) -> u64 {
-        self.size(ctx, vmx_path).await.0.map_or(0, u64::from)
+    async fn memsize_mb(&self, known: &HashMap<String, &VmRecord>, vmx_path: &str) -> u64 {
+        self.size(known, vmx_path).await.0.map_or(0, u64::from)
     }
 
-    /// The VM's assigned RAM (MB) and vCPUs: from the inventory, else its .vmx (VirtualBox:
-    /// `showvminfo`).
-    async fn size(&self, ctx: &Context, vmx_path: &str) -> (Option<u32>, Option<u32>) {
-        let (mut ram, mut cpus) = match self.store.find_vm(ctx, vmx_path).await {
-            Ok(Some(vm)) => (vm.memsize_mb, vm.num_vcpus),
-            _ => (None, None),
+    /// The VM's assigned RAM (MB) and vCPUs: from the inventory (`known`, read once per check: P8),
+    /// else its .vmx (VirtualBox: `showvminfo`).
+    async fn size(&self, known: &HashMap<String, &VmRecord>, vmx_path: &str) -> (Option<u32>, Option<u32>) {
+        let (mut ram, mut cpus) = match known.get(&path_key(Path::new(vmx_path))) {
+            Some(vm) => (vm.memsize_mb, vm.num_vcpus),
+            None => (None, None),
         };
         if ram.is_none() || cpus.is_none() {
             match Hypervisor::of_key(vmx_path) {
@@ -318,11 +319,9 @@ impl CapacityChecker {
 
     /// The folder holding a VM's files: from the inventory, else the .vmx's folder (VirtualBox: the
     /// .vbox's, from `showvminfo`).
-    async fn folder(&self, ctx: &Context, key: &str) -> Option<PathBuf> {
-        if let Ok(Some(vm)) = self.store.find_vm(ctx, key).await {
-            if let Some(folder) = vm.folder() {
-                return Some(folder.to_path_buf());
-            }
+    async fn folder(&self, known: &HashMap<String, &VmRecord>, key: &str) -> Option<PathBuf> {
+        if let Some(folder) = known.get(&path_key(Path::new(key))).and_then(|vm| vm.folder()) {
+            return Some(folder.to_path_buf());
         }
         match Hypervisor::of_key(key) {
             Hypervisor::Vmware => Path::new(key).parent().map(Path::to_path_buf),
@@ -357,8 +356,9 @@ impl CapacityChecker {
             None => self.running(&inventory).await,
         };
         capacity.running_vms = running.len();
+        let known = by_key(&inventory);
         for path in &running {
-            match self.size(ctx, path).await {
+            match self.size(&known, path).await {
                 (Some(ram), Some(cpus)) => {
                     capacity.assigned_ram_mb += u64::from(ram);
                     capacity.assigned_vcpus += cpus;
@@ -437,6 +437,14 @@ fn unchecked(what: &str, err: &crate::error::CoreError) -> CapacityWarning {
 }
 
 /// `C:` for `C:\VMs\web`, `\\server\share` for a UNC path; the folder itself otherwise.
+/// The inventory by [`path_key`], so each VM is looked up without a query.
+fn by_key(inventory: &[VmRecord]) -> HashMap<String, &VmRecord> {
+    inventory
+        .iter()
+        .map(|vm| (path_key(Path::new(&vm.vmx_path)), vm))
+        .collect()
+}
+
 fn drive_of(folder: &Path) -> String {
     match folder.components().next() {
         Some(Component::Prefix(prefix)) => prefix.as_os_str().to_string_lossy().into_owned(),

@@ -12,8 +12,13 @@
 //
 // FD-03: the top bar's Present button (Presenting menu while on) and the palette start and stop presentation mode,
 // its read-only lock and "Hide terminal output" (Presentation.tsx).
+//
+// P6: App renders again only when a job is queued or ends, not on each of its progress events (src/lib/job-events.ts),
+// and the pages are memoised with stable callbacks, so a render here doesn't re-render the pages whose props stayed
+// the same. VM-01: a finished job refreshes the VM list only when it may have changed VMs (its scope), and a settings
+// save only when it changed where VMs are found; the Containers page likewise for container jobs and docker.exe.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   CameraIcon,
@@ -103,6 +108,16 @@ import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage, type VmPageRequest } from "@/pages/VmsPage";
 import { navTarget, shortcutTarget, type NavTarget } from "@/lib/navigation";
+import {
+  changesAppInfo,
+  changesContainerHosts,
+  changesJobList,
+  changesUpdates,
+  changesVmList,
+  refreshesContainers,
+  refreshesVms,
+  type SettingsChange,
+} from "@/lib/job-events";
 import type { VmView } from "@/lib/vm-snapshots";
 
 type PageId =
@@ -121,6 +136,17 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
   { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon, shortcut: "Ctrl+," },
 ];
 
+// P6: memoised pages. Each one renders again only when its own props change; App passes them stable callbacks.
+const Vms = memo(VmsPage);
+const Dashboard = memo(DashboardPage);
+const Containers = memo(ContainersPage);
+const Sessions = memo(SessionsPage);
+const Terminal = memo(TerminalPage);
+const KnownHosts = memo(KnownHostsPage);
+const Vault = memo(VaultPage);
+const Activity = memo(ActivityPage);
+const SettingsView = memo(SettingsPage);
+
 /** Focus is in a terminal pane, where Ctrl+letter and Ctrl+digit keys belong to the remote shell. */
 function inTerminal(target: EventTarget | null) {
   return target instanceof Element && target.closest(".xterm") !== null;
@@ -131,10 +157,18 @@ export default function App() {
   const [info, setInfo] = useState<AppInfo | null>(null);
   // The open approval, and who wants the job id once it is approved (Compare output follows its run).
   const [approval, setApproval] = useState<{ request: ApprovalRequest; onJob?: (jobId: string) => void } | null>(null);
+  // Bumped when a job is queued or ends (P6: not on its progress, which Activity reads itself while it shows).
   const [jobsVersion, setJobsVersion] = useState(0);
-  // Bumped when a job finishes, so the VM list shows the new power states.
-  const [jobsFinished, setJobsFinished] = useState(0);
-  const [settingsVersion, setSettingsVersion] = useState(0);
+  // VM-01: bumped when a job that may have changed VMs finished, so the VM list shows the new power states; CT-01 the
+  // same for container actions and the Containers page.
+  const [vmJobs, setVmJobs] = useState(0);
+  const [containerJobs, setContainerJobs] = useState(0);
+  // Bumped by settings saves, each for what depends on it: the sidebar's app info, update checks, where VMs are found
+  // and this PC's docker.exe.
+  const [infoVersion, setInfoVersion] = useState(0);
+  const [updatesVersion, setUpdatesVersion] = useState(0);
+  const [vmSettings, setVmSettings] = useState(0);
+  const [containerSettings, setContainerSettings] = useState(0);
   // FD-14: the last update check, a problem with the GitHub update token it ran into, and the banner
   // put off with "Later" (an update's version, or "tokenNeeded" / the problem's code).
   const [updateCheck, setUpdateCheck] = useState<UpdateCheck | null>(null);
@@ -252,7 +286,7 @@ export default function App() {
     api.appInfo().then(setInfo, () => setInfo(null));
   }, []);
 
-  useEffect(loadInfo, [loadInfo, settingsVersion]);
+  useEffect(loadInfo, [loadInfo, infoVersion]);
 
   const applyUpdateCheck = useCallback((result: UpdateCheck) => {
     lastUpdateStatus.current = result.status;
@@ -278,7 +312,7 @@ export default function App() {
     }
   }, []);
 
-  // FD-14: check for a newer release at start and every 24 hours, again when settings change, and
+  // FD-14: check for a newer release at start and every 24 hours, again when the update settings change, and
   // once the vault is unlocked if the check needed it. The releases are public, so the core checks
   // without a token unless the vault can give it one. It makes no network call when update checks
   // are off, or while GitHub's API limit is used up; then one more check runs just after the limit resets.
@@ -299,7 +333,21 @@ export default function App() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [settingsVersion, updateRun, applyUpdateCheck, applyUpdateError]);
+  }, [updatesVersion, updateRun, applyUpdateCheck, applyUpdateError]);
+
+  // Stable (P6): the memoised pages get it as a prop.
+  const submitted = useCallback((outcome: SubmitOutcome, onJob?: (jobId: string) => void) => {
+    if (outcome.status === "needsApproval") {
+      setApproval({ request: outcome.request, onJob });
+      return;
+    }
+    onJob?.(outcome.jobId);
+    if (outcome.skipped.length > 0) {
+      // AP-04: a Low action has no dialog, so say which protected targets it left alone.
+      const names = outcome.skipped.map((t) => t.name).join(", ");
+      toast.info(`Skipped ${outcome.skipped.length} protected: ${names}`, { duration: 8000 });
+    }
+  }, []);
 
   useEffect(() => {
     const retry = updateRetry;
@@ -317,7 +365,10 @@ export default function App() {
   // Job progress from the core -> toasts (one per job, updated in place) and an Activity refresh.
   useEffect(() => {
     const unlisten = api.onJobEvent((event) => {
-      setJobsVersion((v) => v + 1);
+      // P6: progress (a countdown, a start, each target) changes no state here: the toasts below show it.
+      if (changesJobList(event)) setJobsVersion((v) => v + 1);
+      if (refreshesVms(event)) setVmJobs((v) => v + 1);
+      if (refreshesContainers(event)) setContainerJobs((v) => v + 1);
       const id = event.jobId;
       if (event.event === "queued" && event.quiet) quietJobs.current.add(id);
       if (quietJobs.current.has(id)) {
@@ -370,27 +421,13 @@ export default function App() {
           break;
         }
         case "finished":
-          setJobsFinished((v) => v + 1);
           if (event.status === "succeeded") toast.success("Job succeeded", { id, description: null, duration: 5000 });
           else toast.error(`Job ${event.status.replace("_", " ")}`, { id, description: null, duration: 8000 });
           break;
       }
     });
     return () => void unlisten.then((stop) => stop());
-  }, []);
-
-  function submitted(outcome: SubmitOutcome, onJob?: (jobId: string) => void) {
-    if (outcome.status === "needsApproval") {
-      setApproval({ request: outcome.request, onJob });
-      return;
-    }
-    onJob?.(outcome.jobId);
-    if (outcome.skipped.length > 0) {
-      // AP-04: a Low action has no dialog, so say which protected targets it left alone.
-      const names = outcome.skipped.map((t) => t.name).join(", ");
-      toast.info(`Skipped ${outcome.skipped.length} protected: ${names}`, { duration: 8000 });
-    }
-  }
+  }, [submitted]);
 
   async function submitCommand(command: Command) {
     try {
@@ -400,16 +437,35 @@ export default function App() {
     }
   }
 
-  function openTerminal(sessionId: string) {
+  const openTerminal = useCallback((sessionId: string) => {
     setTerminalOpen((prev) => ({ sessionId, n: (prev?.n ?? 0) + 1 }));
     setPage("terminal");
-  }
+  }, []);
 
   /** CT-01 "Open a shell": a terminal tab inside a container on a session's host. */
-  function openContainerShell(container: ContainerShellRequest) {
+  const openContainerShell = useCallback((container: ContainerShellRequest) => {
     setTerminalOpen((prev) => ({ sessionId: container.sessionId, n: (prev?.n ?? 0) + 1, container }));
     setPage("terminal");
-  }
+  }, []);
+
+  /** Pages the others link to, as stable callbacks (P6). */
+  const show = useMemo(
+    () => ({
+      vms: () => setPage("vms"),
+      sessions: () => setPage("sessions"),
+      vault: () => setPage("vault"),
+      settings: () => setPage("settings"),
+    }),
+    [],
+  );
+
+  /** What a settings save changed: only what depends on it is read again. */
+  const settingsChanged = useCallback((change: SettingsChange) => {
+    if (changesAppInfo(change)) setInfoVersion((v) => v + 1);
+    if (changesUpdates(change)) setUpdatesVersion((v) => v + 1);
+    if (changesVmList(change)) setVmSettings((v) => v + 1);
+    if (changesContainerHosts(change)) setContainerSettings((v) => v + 1);
+  }, []);
 
   // FD-01: the app's own actions in the palette. Changes to VMs and hosts are commands it submits.
   const paletteActions: PaletteAction[] = [
@@ -703,46 +759,46 @@ export default function App() {
             )}
             <section hidden={page !== "vms"} className="h-full">
               <ErrorBoundary name="Virtual machines">
-                <VmsPage
+                <Vms
                   active={page === "vms"}
                   onSubmitted={submitted}
-                  onOpenSettings={() => setPage("settings")}
+                  onOpenSettings={show.settings}
                   onActions={openPalette}
                   request={vmRequest}
-                  refreshKey={jobsFinished + settingsVersion + inventoryVersion}
+                  refreshKey={vmJobs + vmSettings + inventoryVersion}
                 />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "dashboard"}>
               <ErrorBoundary name="Dashboard">
-                <DashboardPage
+                <Dashboard
                   active={page === "dashboard"}
                   theme={resolved}
                   focus={dashboardFocus}
                   onConnect={openTerminal}
-                  onActions={(vmxPath) => openPalette(vmxPath)}
-                  onOpenVms={() => setPage("vms")}
-                  onOpenSessions={() => setPage("sessions")}
+                  onActions={openPalette}
+                  onOpenVms={show.vms}
+                  onOpenSessions={show.sessions}
                 />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "containers"} className="h-full">
               <ErrorBoundary name="Containers">
-                <ContainersPage
+                <Containers
                   active={page === "containers"}
                   onSubmitted={submitted}
                   onOpenShell={openContainerShell}
-                  onOpenSettings={() => setPage("settings")}
-                  refreshKey={jobsFinished + settingsVersion}
+                  onOpenSettings={show.settings}
+                  refreshKey={containerJobs + containerSettings}
                 />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "sessions"}>
               <ErrorBoundary name="Sessions">
-                <SessionsPage
+                <Sessions
                   vault={vault}
                   onVaultChanged={setVault}
-                  onOpenVault={() => setPage("vault")}
+                  onOpenVault={show.vault}
                   onConnect={openTerminal}
                   active={page === "sessions"}
                 />
@@ -750,7 +806,7 @@ export default function App() {
             </section>
             <section hidden={page !== "terminal"} className="h-full">
               <ErrorBoundary name="Terminal">
-                <TerminalPage
+                <Terminal
                   active={page === "terminal"}
                   theme={resolved}
                   openRequest={terminalOpen}
@@ -759,38 +815,38 @@ export default function App() {
                   multiExecRequest={terminalMultiExec}
                   vault={vault}
                   onSubmitted={submitted}
-                  onOpenVault={() => setPage("vault")}
+                  onOpenVault={show.vault}
                 />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "knownHosts"}>
               <ErrorBoundary name="Known hosts">
-                <KnownHostsPage active={page === "knownHosts"} />
+                <KnownHosts active={page === "knownHosts"} />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "vault"}>
               <ErrorBoundary name="Vault">
-                <VaultPage
+                <Vault
                   vault={vault}
                   onVaultChanged={setVault}
                   active={page === "vault"}
                   onSubmitted={submitted}
-                  onOpenSessions={() => setPage("sessions")}
+                  onOpenSessions={show.sessions}
                 />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "activity"}>
               <ErrorBoundary name="Activity">
-                <ActivityPage version={jobsVersion} active={page === "activity"} />
+                <Activity version={jobsVersion} active={page === "activity"} />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "settings"}>
               <ErrorBoundary name="Settings">
-                <SettingsPage
-                  onChanged={() => setSettingsVersion((v) => v + 1)}
+                <SettingsView
+                  onChanged={settingsChanged}
                   vault={vault}
                   onVaultChanged={setVault}
-                  onOpenVault={() => setPage("vault")}
+                  onOpenVault={show.vault}
                 />
               </ErrorBoundary>
             </section>

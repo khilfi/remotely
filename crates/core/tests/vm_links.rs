@@ -451,6 +451,84 @@ async fn a_dns_server_that_does_not_answer_does_not_hold_up_a_refresh() {
     }
 }
 
+#[tokio::test]
+async fn lookups_done_in_time_count_and_a_slow_one_is_kept_for_the_next_pass() {
+    // P3: web answers at once, db only after the pass stopped waiting.
+    let network = FakeNetwork::default()
+        .with_addresses("web.lab.test", &["192.0.2.10"])
+        .with_addresses("db.lab.test", &["192.0.2.20"])
+        .with_slow_name("db.lab.test", Duration::from_millis(800));
+    let (core, network) = lab_core(network).await;
+    let ctx = &core.ctx;
+    core.links.set_lookups_deadline(Duration::from_millis(200));
+    let web = core
+        .sessions
+        .create(ctx, session("web", "web.lab.test"))
+        .await
+        .unwrap()
+        .id;
+    let db = core
+        .sessions
+        .create(ctx, session("db", "db.lab.test"))
+        .await
+        .unwrap()
+        .id;
+
+    core.inventory.refresh(ctx).await.unwrap();
+    assert_eq!(
+        get(&core, web).await.vm_id,
+        Some(vm_id(&core, "web").await),
+        "a lookup that finished in time counts, though another one did not"
+    );
+    assert_eq!(get(&core, db).await.vm_id, None, "unknown this time");
+    let looked_up = network.lookups().len();
+
+    // While db's lookup is still out, another pass asks no one: web comes from the cache, db waits.
+    core.inventory.refresh(ctx).await.unwrap();
+    assert_eq!(network.lookups().len(), looked_up, "{:?}", network.lookups());
+
+    // Once it has finished, its answer links db without a new lookup.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    core.inventory.refresh(ctx).await.unwrap();
+    assert_eq!(get(&core, db).await.vm_id, Some(vm_id(&core, "db").await));
+    assert_eq!(network.lookups().len(), looked_up);
+}
+
+#[tokio::test]
+async fn a_session_behind_a_jump_host_is_never_looked_up() {
+    // SS-07, P3: its name means something on the far side only; asking this PC's resolvers would send it
+    // out on the local network. (A4: it isn't linked automatically either, by name or by address.)
+    let network = FakeNetwork::default()
+        .with_addresses("bastion.lab.test", &["203.0.113.5"])
+        .with_addresses("db.internal.test", &["192.0.2.20"]);
+    let (core, network) = lab_core(network).await;
+    let ctx = &core.ctx;
+    let bastion = core
+        .sessions
+        .create(ctx, session("bastion", "bastion.lab.test"))
+        .await
+        .unwrap()
+        .id;
+    let behind = SessionInput {
+        jump_session_id: Some(bastion),
+        ..session("db behind bastion", "db.internal.test")
+    };
+    let db = core.sessions.create(ctx, behind).await.unwrap().id;
+
+    core.inventory.refresh(ctx).await.unwrap();
+    assert!(
+        network.lookups().iter().any(|h| h == "bastion.lab.test"),
+        "{:?}",
+        network.lookups()
+    );
+    assert!(
+        !network.lookups().iter().any(|h| h == "db.internal.test"),
+        "{:?}",
+        network.lookups()
+    );
+    assert_eq!(get(&core, db).await.vm_id, None);
+}
+
 // ---- A4, H11: automatic links are hints until confirmed ----------------------------------------
 
 #[tokio::test]

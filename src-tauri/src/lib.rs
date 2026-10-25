@@ -14,6 +14,7 @@ mod multiexec;
 mod terminal;
 mod tunnels;
 pub mod updater;
+mod wake;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -343,6 +344,9 @@ fn forward_events(app: &App, core: &Arc<Core>) {
             }
         });
 
+        // SS-03 (R9): Windows resuming or a new network address wakes terminals waiting to reconnect.
+        wake::watch(Arc::clone(core));
+
         // BX-02: the job journal's retention purge, at start and daily.
         let retention = Arc::clone(&core.retention);
         tauri::async_runtime::spawn(async move { retention.run(CancellationToken::new()).await });
@@ -407,6 +411,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::settings_set_power_on_limit,
         ipc::settings_set_shutdown_wait,
         ipc::settings_set_update_checks,
+        ipc::settings_set_guest_poll,
         ipc::settings_set_bulk_parallel,
         ipc::presentation_get,
         ipc::presentation_set,

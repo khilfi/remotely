@@ -272,7 +272,30 @@ pub enum JobEvent {
     Finished {
         job_id: Uuid,
         status: JobStatus,
+        /// VM-01: what the job may have changed, so the UI reads again only what that touches.
+        scope: JobScope,
     },
+}
+
+/// VM-01: what a job may have changed. The VM page refreshes the inventory after a `Vms` job and the
+/// Containers page reads its hosts again after a `Containers` one; nothing is read again after the
+/// rest (remote commands, uploads, tunnels, MultiExec lines, updates).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum JobScope {
+    Vms,
+    Containers,
+    Other,
+}
+
+impl JobScope {
+    pub fn of(command: &Command) -> Self {
+        match command {
+            Command::VmPower { .. } | Command::VmSnapshot { .. } | Command::VmProtect { .. } => JobScope::Vms,
+            Command::Container { .. } => JobScope::Containers,
+            _ => JobScope::Other,
+        }
+    }
 }
 
 struct TargetOutcome {
@@ -629,7 +652,7 @@ impl JobRunner {
         if locks::lock(&self.running).contains_key(&job_id) {
             loop {
                 match events.recv().await {
-                    Ok(JobEvent::Finished { job_id: id, status }) if id == job_id => return Ok(status),
+                    Ok(JobEvent::Finished { job_id: id, status, .. }) if id == job_id => return Ok(status),
                     Ok(_) => {}
                     // Missed events: the journal says how it ended once it has.
                     Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -751,6 +774,7 @@ impl JobRunner {
                 this.emit(JobEvent::Finished {
                     job_id: id,
                     status: JobStatus::Failed,
+                    scope: JobScope::of(&spec.command),
                 });
             }
             locks::lock(&this.running).remove(&id);
@@ -787,7 +811,11 @@ impl JobRunner {
                         Some("cancelled during the countdown; no target was touched")).await {
                         tracing::error!(%id, error = %err, "could not audit a job cancelled in its countdown");
                     }
-                    self.emit(JobEvent::Finished { job_id: id, status: JobStatus::Cancelled });
+                    self.emit(JobEvent::Finished {
+                        job_id: id,
+                        status: JobStatus::Cancelled,
+                        scope: JobScope::of(&spec.command),
+                    });
                     return Ok(());
                 }
             }
@@ -952,7 +980,11 @@ impl JobRunner {
         {
             tracing::error!(%id, error = %err, "could not audit a job's end");
         }
-        self.emit(JobEvent::Finished { job_id: id, status });
+        self.emit(JobEvent::Finished {
+            job_id: id,
+            status,
+            scope: JobScope::of(&spec.command),
+        });
         Ok(())
     }
 
@@ -1802,5 +1834,53 @@ fn state_after(op: PowerOp) -> PowerState {
         PowerOp::Stop { .. } => PowerState::NotRunning,
         PowerOp::Suspend => PowerState::Suspended,
         PowerOp::Pause => PowerState::Paused,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_job_says_what_it_may_have_changed() {
+        let vm = vec![TargetRef::Vm {
+            vmx_path: r"C:\VMs\web01\web01.vmx".into(),
+        }];
+        let scope = |command: &Command| JobScope::of(command);
+        assert_eq!(
+            scope(&Command::VmPower {
+                targets: vm.clone(),
+                op: PowerOp::Suspend
+            }),
+            JobScope::Vms
+        );
+        assert_eq!(
+            scope(&Command::VmProtect {
+                targets: vm.clone(),
+                protected: true
+            }),
+            JobScope::Vms
+        );
+        assert_eq!(
+            scope(&Command::Container {
+                targets: Vec::new(),
+                op: crate::command_bus::ContainerOp::Restart
+            }),
+            JobScope::Containers
+        );
+        assert_eq!(
+            scope(&Command::AppUpdate {
+                version: "9.9.9".into()
+            }),
+            JobScope::Other
+        );
+        let event = JobEvent::Finished {
+            job_id: Uuid::nil(),
+            status: JobStatus::Succeeded,
+            scope: JobScope::Vms,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["event"], "finished");
+        assert_eq!(json["scope"], "vms");
     }
 }

@@ -9,6 +9,8 @@
 // and Up, Home, Back (to the last folder that opened), a typed path (from the folder shown) and Refresh all go on from
 // there. The top line says which user transfers run as (the SSH login), and, when the shell may run as someone else
 // (su, sudo -i), says so and that transfers still run as the login user. User names carry data-mask="user" (FD-03).
+// P6: transfers come from the transfers store, not from the page: the drawer re-renders when an upload into its
+// terminal finished (to list the folder again), and only the transfers panel follows each transfer's progress.
 
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
@@ -35,6 +37,7 @@ import { SortableHead } from "@/components/SortableHead";
 import { usePresentation } from "@/components/Presentation";
 import { TransfersList } from "@/components/TransfersList";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { useUploadsDone } from "@/hooks/use-transfers";
 import {
   api,
   errorMessage,
@@ -58,13 +61,9 @@ interface Props {
   name: string;
   /** SS-10: terminals MultiExec types into; uploads still go to this one only. */
   multiExecTerminals: number;
-  transfers: TransferInfo[];
-  /** Bumped when a transfer into this terminal finished, so the list shows it. */
-  refresh: number;
   onUpload: (folder: string) => void;
   onDownload: (paths: string[], to: "downloads" | "choose") => void;
   onRetry: (transfer: TransferInfo) => void;
-  onClearTransfers: () => void;
   onClose: () => void;
 }
 
@@ -163,14 +162,13 @@ export function FilesDrawer({
   snapshot,
   name,
   multiExecTerminals,
-  transfers,
-  refresh,
   onUpload,
   onDownload,
   onRetry,
-  onClearTransfers,
   onClose,
 }: Props) {
+  // Grows when an upload into this terminal finished, so the listing shows the new file.
+  const refresh = useUploadsDone(terminalId);
   // FD-03: uploads say why they are off while the read-only lock applies.
   const presentation = usePresentation();
   const connected = terminalId !== null && snapshot.status.state === "connected";
@@ -541,7 +539,7 @@ export function FilesDrawer({
         </>
       )}
       <div className="flex max-h-[35%] min-h-0 shrink-0 flex-col overflow-hidden">
-        <TransfersList transfers={transfers} onRetry={onRetry} onClear={onClearTransfers} />
+        <TransfersList onRetry={onRetry} />
       </div>
     </div>
   );

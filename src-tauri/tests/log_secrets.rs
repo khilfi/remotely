@@ -196,7 +196,7 @@ async fn the_log_file_never_holds_a_secret() {
     };
     let status = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if let JobEvent::Finished { job_id, status } = events.recv().await.unwrap() {
+            if let JobEvent::Finished { job_id, status, .. } = events.recv().await.unwrap() {
                 if job_id == job {
                     return status;
                 }

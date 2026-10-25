@@ -62,8 +62,9 @@ async fn showvminfo_describes_every_it_vm() {
         if info.power_state().is_on() {
             assert!(info.running_since().is_some(), "VMStateChangeTime parsed");
             if info.tools_state() == Some(remotely_core::adapters::vmware::ToolsState::Running) {
-                let ip = virtualbox::guest_ip(vbox.as_ref(), &vm.uuid, &info.nics).await.unwrap();
-                let os = virtualbox::guest_os_name(vbox.as_ref(), &vm.uuid).await.unwrap();
+                let props = vbox.guest_properties(&vm.uuid).await.unwrap();
+                let ip = virtualbox::guest_ip(&props, &info.nics);
+                let os = virtualbox::guest_os_name(&props);
                 eprintln!("a guest reports an IP: {}, an OS: {}", ip.is_some(), os.is_some());
             }
         }

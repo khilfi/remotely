@@ -79,7 +79,7 @@ fn vm(name: &str) -> TargetRef {
 async fn wait_finished(rx: &mut tokio::sync::broadcast::Receiver<JobEvent>, job: uuid::Uuid) -> JobStatus {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let JobEvent::Finished { job_id, status } = rx.recv().await.unwrap() {
+            if let JobEvent::Finished { job_id, status, .. } = rx.recv().await.unwrap() {
                 if job_id == job {
                     return status;
                 }

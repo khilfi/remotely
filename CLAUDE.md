@@ -130,7 +130,8 @@ crates/core/          remotely-core: all app logic
     updates.rs        FD-14 update checks (UpdateCheck: without a token unless the vault gives one) and the optional
                       GitHub update token in the vault
     inventory.rs      VM-01 Workstation's and (VM-18) VirtualBox's VMs; a VirtualBox VM is kept when VirtualBox can't
-                      be asked
+                      be asked; P2 refreshes single-flight and coalesced (RefreshGate: requests while one runs share
+                      the next run)
     capacity.rs       VM-07 capacity check before power-on; VM-02 `bridged`: starting 2+ VMs warns about bridged
                       adapters plugged in at power-on (one confirm)
     snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
@@ -146,8 +147,9 @@ crates/core/          remotely-core: all app logic
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
                       and this PC's RAM and paging files per round), guest.rs (MO-02 SSH polling, kept connections,
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
-                      GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old),
-                      procfs.rs (/proc and df parsers)
+                      GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
+                      POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
+                      minute (DF_EVERY), and their parsers); HostProcessSource reads no inventory with no VM process
     host_details/     MO-13, MO-14 (reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
                       (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
                       channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the
@@ -163,8 +165,12 @@ crates/core/          remotely-core: all app logic
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited);
-                      A4 never behind a jump host or across environment labels (not_linkable)
-    terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
+                      P3 a name looked up once at a time and cached, lookups done by the deadline kept and the rest
+                      finished in the background, sessions behind a jump host never looked up; A4 never linked
+                      behind a jump host or across environment labels (not_linkable)
+    terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:
+                      R9 TerminalTuning::retry_delay, 10 fast tries then 12 slow ones, each spread at random;
+                      Terminals::wake_reconnects on a resume or a new address, from the shell's wake.rs,
                       QL-03 host name and IP, QL-06 a vault password typed at a prompt; SS-01 the startup command typed
                       at the first shell prompt, or not at all within STARTUP_WAIT, and after an automatic reconnect
                       only with startup_on_reconnect); quick.rs QL-02 quick connect;
@@ -236,7 +242,8 @@ crates/core/          remotely-core: all app logic
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
                       and verifies and exports with row streams
-    fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18
+    fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
+                      vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
                       subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
@@ -261,7 +268,10 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
                       instance (release builds), closes what a reloaded page had open (on_page_load), and turns
                       WebView2's browser keys off in release builds; updater.rs timeouts and core.shutdown() before
-                      the installer exits the app
+                      the installer exits the app; SS-03 (R9) wake.rs: Windows resume
+                      (PowerRegisterSuspendResumeNotification) and new-address (NotifyUnicastIpAddressChange)
+                      notifications wake terminals waiting to reconnect; P10 heavy commands (terminal output scrub,
+                      the command library) run on spawn_blocking, never on the window's thread
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -276,18 +286,26 @@ src/                  React + TypeScript UI
                       and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
-                      ContainersPage at Ctrl+3)
+                      ContainersPage at Ctrl+3). P6: App memoises every page and passes stable callbacks, and renders
+                      only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
+                      shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
   hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
-                      each timed from when the last one finished; useVisibility); use-debounced.ts (Activity and
-                      Compare reload once per burst of job events); use-mobile.ts is shadcn's
+                      each timed from when the last one finished; useVisibility); use-transfers.ts (SS-08, P6 the
+                      transfers store through useSyncExternalStore); use-debounced.ts (Compare reloads once per burst
+                      of job events; Activity coalesces its own asks, at most one read a second); use-mobile.ts is
+                      shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), theme.ts, utils.ts, terminal-session.ts (SS-03 a pane: its xterm.js, its connection,
                       every paste through paste.ts, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
                       xterm's internal onUserInput, checked by a test), multiexec.ts, recordings.ts (QL-12 view texts,
-                      QL-07 notify choice and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07
-                      chains and forwards),
+                      QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
+                      transfers-store.ts (SS-08, P6 every transfer outside React state), job-events.ts (P6, VM-01
+                      which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest
+                      polled less often keeps its line on a VM's charts), terminal-render.ts (SS-03 WebGL for panes on
+                      screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
+                      1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
@@ -301,7 +319,8 @@ src/                  React + TypeScript UI
                       addresses as `mac-N`), rollout.ts (H9 canary, stop after failures, retry choices),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
-                      `data-presentation-skip` for terminals), presentation-state.ts; pure helpers with
+                      `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
+                      mentions it, presentation-rescan.ts), presentation-state.ts; pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```
@@ -376,7 +395,9 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   checks VMware Tools), `savestate` (suspend; needs nothing from the guest), `pause`, `resume`. `controlvm` on a VM that
   is not running fails ("is not currently running"). Each call has vmrun's time limit for its operation
   (`adapters::vmware::power_timeout`); job cancel kills VBoxManage, but VirtualBox may still finish.
-- Guest properties (`guestproperty get <uuid> <name>` prints `Value: <value>` or `No value set!`):
+- Guest properties: the app reads them all with one `guestproperty enumerate <uuid>` (VirtualBox 7 prints
+  `<name> = '<value>' @ <time> (<flags>)` a line, the name padded; before 7.0 `Name: <name>, value: <value>, timestamp:
+  <ns>, flags: <flags>`; `adapters::virtualbox::parse_guest_properties` reads both). Used:
   `/VirtualBox/GuestInfo/Net/Count`, `/Net/N/V4/IP`, `/Net/N/MAC` (as in `macaddressN`), `/OS/Product` ("Linux" for any
   distribution, "Windows 11"), `/OS/Release`. A NAT adapter's guest address (10.0.2.15 by default, in every VM) can't be
   reached from the host, so with a NAT and a host-only or bridged adapter the app takes the other one's address, matched
@@ -401,8 +422,10 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   check (`import::importer::key_file`); an end-to-end test may use a DOS device name such as `NUL` instead.
 - Tests against real Workstation or VirtualBox are opt-in: they run only when `REMOTELY_IT=1` is set, read only, and only touch VMs whose display name starts with `it-`.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
-  (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, and runs exec requests in a toy
-  shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C, a
+  (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, or refuse new ones for a while
+  (`set_refusing`, R9 reconnect tests), and runs exec requests in a toy shell with sudo modes, /proc files, a `grep`
+  that reads several files the way the guest metrics script does, and fake programs such as `df`; its interactive
+  shell has `sudo`, Ctrl+C, a
   full-screen `top`, and the exec shell's `hostname`, `uptime`, `cat`, `seq`... and fake programs, slowed by
   `with_exec_delay`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
   them (`tests/multiexec.rs`, QL-12 recording included). SS-08: it serves SFTP from a temp folder deleted with it

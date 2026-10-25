@@ -2,7 +2,8 @@
 // its current readings and each mounted disk. Host-side series come from the VM's process (MO-01),
 // guest series from a watched session (MO-02). Each chart has one axis and one unit. MO-15: the memory chart
 // draws what there is (a VM's configured RAM, a host's total) dashed next to what is in use, and Linux swap has a
-// chart of its own. MO-13: "Host details…" opens the session's host details.
+// chart of its own. MO-13: "Host details…" opens the session's host details. MO-02: a guest polled less often than
+// the host side (Settings, Dashboard) keeps its line on a VM's charts (chart-gaps.ts).
 
 import { useEffect, useState } from "react";
 import { EyeIcon, HardDriveIcon, RotateCwIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
@@ -15,14 +16,17 @@ import { GuestStatusBadge } from "@/components/GuestStatusBadge";
 import { LevelIcon, Meter } from "@/components/MetricBits";
 import { MetricChart, type ChartSeries } from "@/components/MetricChart";
 import { api, type DashboardRow, type MetricPoint } from "@/lib/api";
+import { guestGapMs, joinShortGaps } from "@/lib/chart-gaps";
 import { formatDuration } from "@/lib/format";
 import { formatBytes, formatPct, formatRate, level, rowCpu, rowMemory, type Thresholds } from "@/lib/metrics";
 import type { ResolvedTheme } from "@/lib/theme";
 
 interface Props {
   row: DashboardRow | null;
-  /** Bumped on every metrics round, so the charts move on. */
+  /** Bumped on every metrics round while the dashboard shows, so the charts move on. */
   round: number;
+  /** MO-02: seconds between two polls of a watched host. */
+  guestIntervalSecs: number;
   thresholds: Thresholds;
   theme: ResolvedTheme;
   onClose: () => void;
@@ -59,6 +63,7 @@ function Stat({ label, value, hint }: { label: string; value: string; hint?: str
 export function MetricsDetail({
   row,
   round,
+  guestIntervalSecs,
   thresholds,
   theme,
   onClose,
@@ -94,9 +99,12 @@ export function MetricsDetail({
 
   const current = series && series.key === rowKey ? series : { host: [], guest: [] };
   const { times, host, guest } = align(current.host, current.guest);
-  const values = (points: (MetricPoint | null)[], pick: (p: MetricPoint) => number | null) =>
-    points.map((p) => (p ? pick(p) : null));
   const hasHost = row?.kind === "vm";
+  const values = (points: (MetricPoint | null)[], pick: (p: MetricPoint) => number | null) => {
+    const raw = points.map((p) => (p ? pick(p) : null));
+    // A VM's guest has no reading at the host-only rounds between its polls.
+    return hasHost && points === guest ? joinShortGaps(times, raw, guestGapMs(guestIntervalSecs)) : raw;
+  };
   const hasGuest = guestKey !== null;
   const two = (a: ChartSeries | null, b: ChartSeries | null) => [a, b].filter((s): s is ChartSeries => s !== null);
 
