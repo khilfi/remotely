@@ -4,8 +4,11 @@
 // charts. Everything here is a read: it goes straight
 // to the core's metrics collector, never through the command bus. Actions open the command palette,
 // which submits to the bus like every other page.
+//
+// P8: the page follows the core's rounds only while it shows and the window is visible (shouldPoll): hidden, it reads
+// nothing and renders nothing each round; shown again, it reads once at once and then follows the rounds.
 
-import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   CheckIcon,
   EllipsisIcon,
@@ -49,6 +52,7 @@ import { MetricsDetail } from "@/components/MetricsDetail";
 import { SortableHead } from "@/components/SortableHead";
 import { ThisPcMemoryChart } from "@/components/ThisPcMemoryChart";
 import { AutoBadge } from "@/components/VmLinkControls";
+import { useVisibility } from "@/hooks/use-poll";
 import {
   api,
   errorMessage,
@@ -81,6 +85,7 @@ import {
   useThresholds,
   type Thresholds,
 } from "@/lib/metrics";
+import { shouldPoll } from "@/lib/polling";
 import type { ResolvedTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -163,7 +168,11 @@ function CostLine({ cost }: { cost: CollectorCost | null }) {
   }
   return (
     <span>
-      Every {cost.intervalSecs} s · last round {Math.round(cost.roundMs)} ms (host side {Math.round(cost.hostMs)} ms
+      Every {cost.intervalSecs} s
+      {cost.guestIntervalSecs > 0 && cost.guestIntervalSecs !== cost.intervalSecs
+        ? ` (watched hosts every ${cost.guestIntervalSecs} s)`
+        : ""}{" "}
+      · last round {Math.round(cost.roundMs)} ms (host side {Math.round(cost.hostMs)} ms
       {cost.guests > 0 || cost.guestMs > 1 ? `, guests ${Math.round(cost.guestMs)} ms` : ""}) ·{" "}
       <Tooltip>
         <TooltipTrigger asChild>
@@ -237,7 +246,16 @@ function ThresholdsEditor({ value, onChange }: { value: Thresholds; onChange: (t
   );
 }
 
-function WatchPicker({ watched, onWatch }: { watched: Set<string>; onWatch: (id: string, watch: boolean) => void }) {
+function WatchPicker({
+  watched,
+  intervalSecs,
+  onWatch,
+}: {
+  watched: Set<string>;
+  /** MO-02: seconds between two polls of each watched host (Settings, Dashboard). */
+  intervalSecs: number;
+  onWatch: (id: string, watch: boolean) => void;
+}) {
   const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<SessionRecord[] | null>(null);
   useEffect(() => {
@@ -277,7 +295,8 @@ function WatchPicker({ watched, onWatch }: { watched: Set<string>; onWatch: (id:
           </CommandList>
         </Command>
         <p className="border-t px-3 py-2 text-xs text-muted-foreground">
-          Watching logs in with the session's saved login every 5 seconds and reads /proc. Nothing on the host changes.
+          Watching logs in once with the session's saved login, then reads /proc every {intervalSecs} seconds (Settings,
+          Dashboard). Nothing on the host changes.
         </p>
       </PopoverContent>
     </Popover>
@@ -313,9 +332,24 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   /** MO-13, MO-14: a session's host details, opened from the drill-down. */
   const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
 
+  // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
+  // everything reads once at once.
+  const visibility = useVisibility();
+  const live = shouldPoll(active, visibility);
+  const liveRef = useRef(live);
+  useEffect(() => {
+    liveRef.current = live;
+  }, [live]);
+  const [wasLive, setWasLive] = useState(live);
+  if (live !== wasLive) {
+    setWasLive(live);
+    if (live) setRound((n) => n + 1);
+  }
+
   // Each round the core finishes -> read what it collected (only while this page shows).
   useEffect(() => {
     const unlisten = api.onMetricsRound((c) => {
+      if (!liveRef.current) return;
       setCost(c);
       setRound((n) => n + 1);
     });
@@ -333,15 +367,15 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   }, []);
 
   useEffect(() => {
-    if (active) load();
-  }, [active, round, load]);
+    if (live) load();
+  }, [live, round, load]);
 
-  // Capacity changes slowly: read when the page opens, then every third round (15 s).
+  // Capacity changes slowly: read when the page shows, then every third round (15 s).
   const capacityTick = Math.floor(round / 3);
   useEffect(() => {
-    if (!active) return;
+    if (!live) return;
     api.metricsCapacity().then(setCapacity, () => setCapacity(null));
-  }, [active, capacityTick]);
+  }, [live, capacityTick]);
 
   // The palette asked to open a row: follow it once per request.
   const [seenFocus, setSeenFocus] = useState(focus);
@@ -410,7 +444,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   return (
     <div className="flex flex-col gap-4">
       <CapacityPanel capacity={capacity} />
-      <ThisPcMemoryChart round={round} theme={theme} />
+      <ThisPcMemoryChart round={round} live={live} theme={theme} />
 
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-56">
@@ -456,7 +490,11 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
         </Toggle>
         <div className="ml-auto flex items-center gap-2">
           <ThresholdsEditor value={thresholds} onChange={setThresholds} />
-          <WatchPicker watched={watched} onWatch={(id, on) => void watch(id, on)} />
+          <WatchPicker
+            watched={watched}
+            intervalSecs={cost?.guestIntervalSecs || 5}
+            onWatch={(id, on) => void watch(id, on)}
+          />
         </div>
       </div>
 
@@ -705,6 +743,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
       <MetricsDetail
         row={selectedRow}
         round={round}
+        guestIntervalSecs={cost?.guestIntervalSecs || 5}
         thresholds={thresholds}
         theme={theme}
         onClose={() => setSelected(null)}

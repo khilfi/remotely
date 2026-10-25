@@ -1,6 +1,8 @@
 // SS-08: the transfers panel: each file going up or down through a terminal, with its progress, speed and time left.
 // Cancel while it runs, retry once it failed or was cancelled (an upload goes through the approval flow again), and
-// "Open folder" for a finished download. The core keeps the list; "Clear finished" only hides rows here.
+// "Open folder" for a finished download. The core keeps the list; "Clear finished" only hides rows here. P6: the list
+// comes from the transfers store (src/lib/transfers-store.ts), so a transfer's progress re-renders this panel and its
+// changed row only, not the Terminal page around it.
 
 import {
   ArrowDownToLineIcon,
@@ -19,15 +21,17 @@ import { formatDuration } from "@/lib/format";
 import { formatSize, formatSpeed, isActive, percent, secondsLeft } from "@/lib/transfers";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { memo } from "react";
+import { useTransfers } from "@/hooks/use-transfers";
+import { transferStore } from "@/lib/transfers-store";
 
 interface Props {
-  /** Newest last, as the core keeps them. */
-  transfers: TransferInfo[];
   onRetry: (transfer: TransferInfo) => void;
-  onClear: () => void;
 }
 
-export function TransfersList({ transfers, onRetry, onClear }: Props) {
+export function TransfersList({ onRetry }: Props) {
+  // Newest last, as the core keeps them; the panel shows the newest first.
+  const transfers = useTransfers().shown;
   const shown = [...transfers].reverse();
   const finished = transfers.some((t) => !isActive(t));
   return (
@@ -35,7 +39,7 @@ export function TransfersList({ transfers, onRetry, onClear }: Props) {
       <div className="flex items-center gap-2">
         <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Transfers</h3>
         {finished && (
-          <Button size="xs" variant="ghost" className="ml-auto" onClick={onClear}>
+          <Button size="xs" variant="ghost" className="ml-auto" onClick={() => transferStore.clearFinished()}>
             Clear finished
           </Button>
         )}
@@ -47,7 +51,7 @@ export function TransfersList({ transfers, onRetry, onClear }: Props) {
       ) : (
         <ul className="min-h-0 divide-y overflow-auto rounded-md border">
           {shown.map((t) => (
-            <TransferRow key={t.id} transfer={t} onRetry={() => onRetry(t)} />
+            <TransferRow key={t.id} transfer={t} onRetry={onRetry} />
           ))}
         </ul>
       )}
@@ -68,7 +72,14 @@ function RowButton({ label, onClick, children }: { label: string; onClick: () =>
   );
 }
 
-function TransferRow({ transfer: t, onRetry }: { transfer: TransferInfo; onRetry: () => void }) {
+/** Memoised: a change to one transfer re-renders its own row only. */
+const TransferRow = memo(function TransferRow({
+  transfer: t,
+  onRetry,
+}: {
+  transfer: TransferInfo;
+  onRetry: (transfer: TransferInfo) => void;
+}) {
   const active = isActive(t);
   const left = secondsLeft(t);
   const speed = formatSpeed(t.bytesPerSec);
@@ -120,7 +131,7 @@ function TransferRow({ transfer: t, onRetry }: { transfer: TransferInfo; onRetry
             </RowButton>
           )}
           {(t.state === "failed" || t.state === "cancelled") && (
-            <RowButton label="Retry" onClick={onRetry}>
+            <RowButton label="Retry" onClick={() => onRetry(t)}>
               <RotateCcwIcon />
             </RowButton>
           )}
@@ -147,4 +158,4 @@ function TransferRow({ transfer: t, onRetry }: { transfer: TransferInfo; onRetry
       </p>
     </li>
   );
-}
+});

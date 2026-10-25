@@ -409,7 +409,11 @@ export type JobEvent =
     }
   /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
   | { event: "stillRunning"; jobId: string; targets: Target[] }
-  | { event: "finished"; jobId: string; status: JobStatus };
+  /** VM-01: `scope` says what the job may have changed, so only that page reads it again. */
+  | { event: "finished"; jobId: string; status: JobStatus; scope: JobScope };
+
+/** VM-01: what a finished job may have changed: VMs (power, snapshots, protection), containers, or neither. */
+export type JobScope = "vms" | "containers" | "other";
 
 /** SS-10: how MultiExec handled a line's keys. */
 export type LineMode = "command" | "password" | "fullScreen";
@@ -757,6 +761,8 @@ export interface Settings {
   dockerPathSaved: string | null;
   /** CT-02: the docker.exe in use; null: Docker Desktop was not found. */
   dockerPathInUse: string | null;
+  /** MO-02: seconds between two dashboard polls of each watched host over SSH: 5 (default), 15, 30 or 60. */
+  guestPollSecs: number;
 }
 
 /** SS-04. */
@@ -1745,6 +1751,8 @@ export interface GuestStatus {
 export interface CollectorCost {
   rounds: number;
   intervalSecs: number;
+  /** MO-02: seconds between two polls of each watched host (the Settings value in force). */
+  guestIntervalSecs: number;
   roundMs: number;
   hostMs: number;
   guestMs: number;
@@ -2470,6 +2478,8 @@ export const api = {
   setShutdownWait: (secs: number) => invoke<Settings>("settings_set_shutdown_wait", { secs }),
   /** BX-02: how many hosts a bulk run reaches at once. */
   setBulkParallel: (limit: number) => invoke<Settings>("settings_set_bulk_parallel", { limit }),
+  /** MO-02: 5, 15, 30 or 60 seconds between two dashboard polls of each watched host. */
+  setGuestPoll: (secs: number) => invoke<Settings>("settings_set_guest_poll", { secs }),
   /** FD-14: installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateCheck>("update_check"),
   /** FD-14: write-only; stored in the vault, replacing the one there. Needs the vault unlocked. */

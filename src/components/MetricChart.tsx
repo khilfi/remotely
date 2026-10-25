@@ -14,8 +14,8 @@ import type { ResolvedTheme } from "@/lib/theme";
 
 export interface ChartSeries {
   label: string;
-  /** One value per time; null leaves a gap. */
-  values: (number | null)[];
+  /** One value per time; null leaves a gap, undefined (no reading at that time) is joined over. */
+  values: (number | null | undefined)[];
   /** Categorical slot: the series' colour follows its identity, never its rank. "muted" for a shared limit. */
   slot: 1 | 2 | "muted";
   /** MO-15: a limit (what there is), drawn dashed. */
@@ -74,7 +74,7 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
   /** The hovered point's index, or null when the pointer is elsewhere. */
   const [hovered, setHovered] = useState<number | null>(null);
   const labels = series.map((s) => `${s.slot}:${s.label}:${s.dashed ? 1 : 0}`).join("|");
-  const hasData = series.some((s) => s.values.some((v) => v !== null));
+  const hasData = series.some((s) => s.values.some((v) => v != null));
 
   // Keep the plot as wide as its card.
   useEffect(() => {
@@ -150,7 +150,7 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
 
   // New points only: hovering re-renders the chart (the legend follows the pointer) without new data.
   const latest = times.length > 0 ? times[times.length - 1] : 0;
-  const filled = series.map((s) => s.values.filter((v) => v !== null).length).join(",");
+  const filled = series.map((s) => s.values.filter((v) => v != null).length).join(",");
   useEffect(() => {
     plot.current?.setData(data);
     // eslint-disable-next-line react-hooks/exhaustive-deps

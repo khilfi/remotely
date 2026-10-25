@@ -152,7 +152,7 @@ export function upgradeCommand(report: UpdatesReport): string | null {
 }
 
 /** The last value that is not empty, for a chart's legend when nothing is hovered. */
-export function latestValue(values: (number | null)[]): number | null {
+export function latestValue(values: (number | null | undefined)[]): number | null {
   for (let i = values.length - 1; i >= 0; i--) {
     const v = values[i];
     if (v !== null && v !== undefined) return v;

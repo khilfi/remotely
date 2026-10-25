@@ -3,6 +3,9 @@
 // not started and stops waiting for VM power actions in progress (Workstation or VirtualBox may still finish
 // those). A job's results show each target's outcome and the safety snapshot taken on it. The audit
 // log can be verified and exported to CSV.
+//
+// P6: App bumps `version` only when a job is queued or ends. While this page shows, it follows a job's progress (its
+// countdown, its start, each target's result) itself, reading the list again at most once a second.
 
 import { useEffect, useState } from "react";
 import { CameraIcon, DownloadIcon, ListChecksIcon, ScrollTextIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
@@ -17,6 +20,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { StatusBadge, TierBadge } from "@/components/Badges";
 import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary, type JobTarget } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
+import { progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
 
 const OPEN = new Set(["queued", "countdown", "running"]);
 
@@ -27,7 +31,7 @@ function secondsLeft(job: JobSummary, now: number) {
 }
 
 /**
- * `version` changes on every job event; `active` is true while the page is shown, so entries written
+ * `version` changes when a job is queued or ends; `active` is true while the page is shown, so entries written
  * without a job (terminals, host keys, imports, settings) show up when the user comes back.
  */
 export function ActivityPage({ version, active }: { version: number; active: boolean }) {
@@ -61,6 +65,23 @@ export function ActivityPage({ version, active }: { version: number; active: boo
       stale = true;
     };
   }, [version, reloads, active]);
+
+  // A job's progress while the page shows: one read after a moment, however many targets finished meanwhile.
+  useEffect(() => {
+    if (!active) return;
+    let timer: number | undefined;
+    const unlisten = api.onJobEvent((event) => {
+      if (!progressesJob(event) || timer !== undefined) return;
+      timer = window.setTimeout(() => {
+        timer = undefined;
+        setReloads((n) => n + 1);
+      }, PROGRESS_READ_MS);
+    });
+    return () => {
+      window.clearTimeout(timer);
+      void unlisten.then((stop) => stop());
+    };
+  }, [active]);
 
   // AP-03: the time left ticks while a job is in its countdown.
   useEffect(() => {
@@ -271,7 +292,7 @@ export function ActivityPage({ version, active }: { version: number; active: boo
         </CardContent>
       </Card>
 
-      {opened && <JobResults job={opened} version={version} onClose={() => setOpenedId(null)} />}
+      {opened && <JobResults job={opened} version={version + reloads} onClose={() => setOpenedId(null)} />}
     </div>
   );
 }
