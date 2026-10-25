@@ -152,6 +152,7 @@ async fn the_sudo_password_never_leaks() {
                 password_id: Some(login_id),
             },
             jump_session_id: None,
+            jump_direct: false,
             startup_command: None,
             startup_on_reconnect: false,
             prompt_hook: None,

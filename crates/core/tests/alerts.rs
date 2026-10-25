@@ -496,6 +496,7 @@ async fn a_watched_host_that_cant_be_reached_fires_after_its_duration() {
                     password_id: Some(password_id),
                 },
                 jump_session_id: None,
+                jump_direct: false,
                 startup_command: None,
                 startup_on_reconnect: false,
                 prompt_hook: None,

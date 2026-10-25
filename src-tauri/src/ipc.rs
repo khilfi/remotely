@@ -21,7 +21,9 @@ use remotely_core::metrics::{DashboardOverview, MetricPoint, MetricSource, VmHos
 use remotely_core::policy::{ActionKind, PolicyRules, MAX_BULK_THRESHOLD, MAX_COUNTDOWN_SECONDS};
 use remotely_core::presentation::Presentation;
 use remotely_core::retention::{PurgeReport, Retention, RetentionInfo};
-use remotely_core::sessions::{SessionFilter, SessionFolder, SessionInput, SessionRecord, StartupRating};
+use remotely_core::sessions::{
+    Effective, FolderDefaults, SessionFilter, SessionFolder, SessionInput, SessionRecord, StartupRating,
+};
 use remotely_core::snapshots::{VmSnapshots, OLD_AFTER_DAYS, SAFETY_PREFIX};
 use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
@@ -815,11 +817,20 @@ pub fn vm_links_ambiguous(state: State<'_, AppState>) -> Vec<AmbiguousLink> {
     state.core.links.ambiguous()
 }
 
-/// `folder_id: None` moves them to the top level.
+/// `folder_id: None` moves them to the top level. QL-16, SS-04: `vault_password` when the core asked for it (the new
+/// folder's login would send a vault password where no saved session sends it yet).
 #[tauri::command]
-pub async fn sessions_move(state: State<'_, AppState>, ids: Vec<Uuid>, folder_id: Option<Uuid>) -> IpcResult<()> {
+pub async fn sessions_move(
+    state: State<'_, AppState>,
+    ids: Vec<Uuid>,
+    folder_id: Option<Uuid>,
+    vault_password: Option<SecretString>,
+) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.sessions.move_to(&core.ctx, &ids, folder_id).await?)
+    Ok(core
+        .sessions
+        .move_to_with(&core.ctx, &ids, folder_id, vault_password.as_ref())
+        .await?)
 }
 
 #[tauri::command]
@@ -839,16 +850,59 @@ pub async fn folder_rename(state: State<'_, AppState>, id: Uuid, name: String) -
 }
 
 #[tauri::command]
-pub async fn folder_move(state: State<'_, AppState>, id: Uuid, parent_id: Option<Uuid>) -> IpcResult<SessionFolder> {
+pub async fn folder_move(
+    state: State<'_, AppState>,
+    id: Uuid,
+    parent_id: Option<Uuid>,
+    vault_password: Option<SecretString>,
+) -> IpcResult<SessionFolder> {
     let core = &state.core;
-    Ok(core.sessions.move_folder(&core.ctx, id, parent_id).await?)
+    Ok(core
+        .sessions
+        .move_folder_with(&core.ctx, id, parent_id, vault_password.as_ref())
+        .await?)
 }
 
 /// Its sessions and subfolders move up to its parent.
 #[tauri::command]
-pub async fn folder_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+pub async fn folder_delete(
+    state: State<'_, AppState>,
+    id: Uuid,
+    vault_password: Option<SecretString>,
+) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.sessions.delete_folder(&core.ctx, id).await?)
+    Ok(core
+        .sessions
+        .delete_folder_with(&core.ctx, id, vault_password.as_ref())
+        .await?)
+}
+
+/// QL-16: what a folder gives its sessions. `vault_password` when the core asked for it (`reauth_required`: the
+/// defaults would send a vault password where no saved session sends it yet).
+#[tauri::command]
+pub async fn folder_set_defaults(
+    state: State<'_, AppState>,
+    id: Uuid,
+    defaults: FolderDefaults,
+    vault_password: Option<SecretString>,
+) -> IpcResult<SessionFolder> {
+    let core = &state.core;
+    Ok(core
+        .sessions
+        .set_folder_defaults_with(&core.ctx, id, defaults, vault_password.as_ref())
+        .await?)
+}
+
+/// QL-16: what a session in `folder_id` gets when it sets nothing itself, and from which folder (the session
+/// editor's "from folder X"). `session_id`: the session being edited, if any.
+#[tauri::command]
+pub async fn session_inherited(
+    state: State<'_, AppState>,
+    folder_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+) -> IpcResult<Effective> {
+    let core = &state.core;
+    Ok(core.sessions.inherited(&core.ctx, folder_id, session_id).await?)
 }
 
 // ---- Session import (SS-02) ---------------------------------------------------------------------

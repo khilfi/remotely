@@ -147,6 +147,7 @@ async fn a_password_typed_with_multiexec_is_never_logged_or_kept() {
                         password_id: Some(login_id),
                     },
                     jump_session_id: None,
+                    jump_direct: false,
                     startup_command: None,
                     startup_on_reconnect: false,
                     prompt_hook: None,

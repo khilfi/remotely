@@ -23,11 +23,13 @@
 //!     vault passwords typed at a prompt (QL-06), long runs finishing (QL-07)
 //!     MultiExec (SS-10): typed into several at once; each line's Enter is a command on the bus, and the
 //!     job runner sends it to the terminals
+//!     multiexec_groups (QL-19): saved sets of sessions that choose MultiExec's terminals; edits audited
 //!     files (SS-08): SFTP on each terminal's connection; the shell's folder (OSC 7); downloads are
 //!     audited reads, uploads are commands on the bus that the job runner carries out in the terminal
 //!     jump hosts (SS-07): every SSH connection goes through the session's jump host chain
 //!     tunnels (SS-07): saved port forwards (forwards) open on a terminal's connection; opening one is
 //!     a command on the bus, which the job runner carries out in the terminal; closing is audited
+//!     highlight and alert rules (QL-17): the UI colours matches; each pane alerts once per burst of matching lines
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows, skipping hosts with an
 //!     open connection and backing off from hosts that are down ──► adapters::network
@@ -71,6 +73,7 @@ pub mod known_hosts;
 pub mod locks;
 pub mod login_guard;
 pub mod metrics;
+pub mod multiexec_groups;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
@@ -120,6 +123,7 @@ use known_hosts::KnownHosts;
 use login_guard::LoginGuard;
 use metrics::history::MetricsHistory;
 use metrics::{GuestSource, Metrics, MetricsParts};
+use multiexec_groups::MultiExecGroups;
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
@@ -132,6 +136,7 @@ use ssh_keys::KeyManager;
 use store::{NewAuditEntry, Store};
 use terminal::files::FileTransfers;
 use terminal::multiexec::MultiExec;
+use terminal::rules::TerminalRules;
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use transfer::Transfer;
 use vault::{Dpapi, LocalVault, SecretBindings, Vault, VaultOptions, VaultService, VaultStatus};
@@ -231,11 +236,15 @@ pub struct Core {
     pub terminals: Terminals,
     /// SS-10: what is typed into one terminal goes to several; each line's Enter goes through the bus.
     pub multiexec: MultiExec,
+    /// QL-19: saved MultiExec groups (named sets of sessions). They only choose MultiExec's targets.
+    pub groups: MultiExecGroups,
     /// SS-08: uploads (commands on the bus) and retries; listing and downloads are on [`Core::terminals`].
     pub files: FileTransfers,
     /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
     /// classified by the bus's policy engine.
     pub snippets: Snippets,
+    /// QL-17: highlight and alert rules for terminal output; open panes follow their alert rules.
+    pub terminal_rules: TerminalRules,
     /// QL-04: background checks of the sessions the Terminal page's tree shows. Reads only. The shell
     /// starts it with [`ReachabilityChecker::run`].
     pub reachability: Arc<ReachabilityChecker>,
@@ -390,6 +399,9 @@ impl Core {
             Arc::clone(&links),
         );
         terminals.set_bindings(bindings.clone());
+        // QL-17: every pane matches its output against the rules with an alert on, as they change.
+        let terminal_rules = TerminalRules::load(store.clone(), &ctx).await?;
+        terminals.set_rules(terminal_rules.subscribe());
         // MO-13: terminals and the dashboard's kept connections read a session's facts as they go.
         let specs = SpecsCollector::new(store.clone());
         terminals.set_specs(specs.clone());
@@ -507,8 +519,10 @@ impl Core {
             containers,
             terminals,
             multiexec,
+            groups: MultiExecGroups::new(store.clone()),
             files,
             snippets,
+            terminal_rules,
             reachability,
             metrics,
             history,

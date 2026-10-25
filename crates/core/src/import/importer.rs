@@ -21,7 +21,8 @@ use crate::locks;
 use crate::policy::PolicyEngine;
 use crate::presentation::Change;
 use crate::sessions::{
-    rate_startup, SessionAuth, SessionInput, SessionLibrary, SessionRecord, StartupRating, MAX_SESSION_NAME,
+    rate_startup, Folders, OwnValues, SessionAuth, SessionInput, SessionLibrary, SessionRecord, StartupRating,
+    MAX_SESSION_NAME,
 };
 use crate::store::{NewAuditEntry, Store};
 use crate::untrusted::{path_refusal, read_capped, ReadError};
@@ -457,6 +458,9 @@ impl Importer {
             }
         }
 
+        // QL-16: the folders with their defaults, as they are now (new ones set none).
+        let tree = self.store.session_folders(ctx).await?;
+
         // Rows whose jump host is another row of this import are saved after it, so the link can
         // be kept for SS-07 (the terminal says jump hosts are not supported yet).
         let existing = self.store.list_sessions(ctx).await?;
@@ -489,6 +493,7 @@ impl Importer {
                     &row,
                     jump,
                     &folder_ids,
+                    &tree,
                     &keys,
                     sessions,
                     &mut report,
@@ -508,6 +513,7 @@ impl Importer {
                         &row,
                         None,
                         &folder_ids,
+                        &tree,
                         &keys,
                         sessions,
                         &mut report,
@@ -605,14 +611,22 @@ impl Importer {
         row: &PreviewRow,
         jump: Option<Uuid>,
         folders: &HashMap<Vec<String>, Option<Uuid>>,
+        tree: &Folders,
         keys: &HashMap<String, SecretId>,
         sessions: &SessionLibrary,
         report: &mut ImportReport,
         created: &mut Vec<(usize, SessionRecord)>,
     ) -> Result<()> {
         let c = &row.candidate;
+        let folder_id = folders.get(&c.folder).copied().flatten();
         let auth = match &c.auth {
-            CandidateAuth::Password => SessionAuth::Password { password_id: None },
+            // QL-16: a source that says only "password" (asked at login) takes its folder's login when that is a key
+            // or the SSH agent, which never leave this PC. A folder's vault password is never given to an imported
+            // host this way (SS-04): such sessions still ask, and the editor can switch them to the folder's login.
+            CandidateAuth::Password => match tree.resolve(None, &OwnValues::from_folders(), folder_id).auth {
+                SessionAuth::Key { key_id: Some(_), .. } | SessionAuth::Agent => SessionAuth::Folder,
+                _ => SessionAuth::Password { password_id: None },
+            },
             CandidateAuth::Agent => SessionAuth::Agent,
             CandidateAuth::KeyFile { path } => {
                 let key_id = keys.get(path).copied();
@@ -640,12 +654,13 @@ impl Importer {
         };
         let input = SessionInput {
             name,
-            folder_id: folders.get(&c.folder).copied().flatten(),
+            folder_id,
             host: c.host.clone(),
             port: c.port,
             username: c.username.clone(),
             auth,
             jump_session_id: jump,
+            jump_direct: false,
             startup_command: c.startup_command.clone(),
             startup_on_reconnect: false,
             prompt_hook: None,

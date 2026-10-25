@@ -52,8 +52,12 @@
 //!   a password typed for a jump host is kept for reconnects like the session's. Port forwards
 //!   ([`tunnels`]) open on the pane's connection through the command bus, and open again after a
 //!   reconnect.
+//! * QL-17 ([`rules`], [`alerts`]): highlight and alert rules. The UI colours what a pane's rules match; each pane
+//!   matches the lines its output completes against its rules with an alert on, and reports a burst of matches as one
+//!   [`TerminalEvent::Alert`] (never one per line), which the UI notifies when the tab is in the background.
 
 pub mod activity;
+pub mod alerts;
 pub mod files;
 pub mod folder;
 pub mod log;
@@ -61,6 +65,7 @@ pub mod multiexec;
 pub mod output;
 pub mod quick;
 pub mod record;
+pub mod rules;
 pub mod shell_user;
 pub mod tunnels;
 
@@ -80,12 +85,14 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use self::activity::{is_password_prompt, is_secret_prompt, FinishedHow, RunWatch, WatchConfig};
+use self::alerts::{AlertBurst, AlertTiming, AlertWatch, TerminalAlert};
 use self::files::{Transfers, UploadReport, UploadRun};
 use self::folder::{FolderInfo, FolderTracking, FolderWatch, PromptHook};
 use self::log::{LogMessage, SessionLog};
 use self::output::{SaveLayout, SavedOutput, TerminalText};
 use self::quick::{QuickConnect, QuickOpened};
 use self::record::RecordSlot;
+use self::rules::RuleBook;
 use self::shell_user::{UserInfo, UserWatch};
 use self::tunnels::{TunnelInfo, TunnelRun, TunnelTable};
 use crate::adapters::exec_output::Scrubber;
@@ -593,6 +600,11 @@ pub enum TerminalEvent {
         path: String,
         reason: String,
     },
+    /// QL-17: a rule with its alert on matched the output: one event per burst of matches, then a cooldown. The UI
+    /// notifies when the tab is in the background.
+    Alert {
+        alert: TerminalAlert,
+    },
 }
 
 /// SS-10: what a pane's screen shows now, as far as its output tells.
@@ -709,6 +721,8 @@ struct Control {
     commands: Mutex<Option<Arc<dyn ExecSession>>>,
     /// SS-07: the jump host logging in while a login asks something; `None` for the session itself.
     hop: Mutex<Option<Uuid>>,
+    /// QL-17: the pane's alert rules, its bursts and cooldowns (kept across reconnects).
+    alerts: Mutex<AlertWatch>,
 }
 
 impl Control {
@@ -772,6 +786,10 @@ struct Inner {
     wake: tokio::sync::watch::Sender<(u64, WakeReason)>,
     /// R9: the panes that a wake would make try again now.
     waiting: Mutex<HashSet<Uuid>>,
+    /// QL-17: the rules with their alert on, as they change (set once the core is put together).
+    rules: OnceLock<tokio::sync::watch::Receiver<Arc<RuleBook>>>,
+    /// QL-17: how matches gather into alerts; tests shorten it.
+    alert_timing: Mutex<AlertTiming>,
 }
 
 /// A pane about to open.
@@ -822,7 +840,23 @@ impl Terminals {
                 bindings: OnceLock::new(),
                 wake: tokio::sync::watch::channel((0, WakeReason::NetworkChanged)).0,
                 waiting: Mutex::default(),
+                rules: OnceLock::new(),
+                alert_timing: Mutex::new(AlertTiming::default()),
             }),
+        }
+    }
+
+    /// QL-17: the rules with their alert on ([`rules::TerminalRules::subscribe`]); panes opened from now on follow them.
+    pub fn set_rules(&self, rules: tokio::sync::watch::Receiver<Arc<RuleBook>>) {
+        let _ = self.inner.rules.set(rules);
+    }
+
+    /// QL-17: how long a burst gathers matches and a cooldown lasts, for open panes and new ones (tests shorten them).
+    pub fn set_alert_timing(&self, timing: AlertTiming) {
+        *locks::lock(&self.inner.alert_timing) = timing;
+        let open: Vec<Arc<Control>> = locks::lock(&self.inner.open).values().cloned().collect();
+        for control in open {
+            locks::lock(&control.alerts).set_timing(timing);
         }
     }
 
@@ -1171,6 +1205,10 @@ impl Terminals {
             container: pane.container,
             commands: Mutex::default(),
             hop: Mutex::default(),
+            alerts: Mutex::new(AlertWatch::new(
+                self.inner.rules.get().cloned(),
+                *locks::lock(&self.inner.alert_timing),
+            )),
         });
         audit(
             &self.inner.store,
@@ -2012,6 +2050,8 @@ struct Typed {
     startup: Vec<String>,
     /// SS-08: whether the folder prompt hook may be typed.
     hook: bool,
+    /// QL-17: the session's label as it is now (a quick connection's own), which picks its alert rules.
+    environment: Environment,
 }
 
 /// A live shell, as the pump keeps it.
@@ -2450,7 +2490,14 @@ impl Pane {
         if let Some(ip) = shell.peer_ip {
             self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
         }
-        Ok((shell, Typed { startup, hook }))
+        Ok((
+            shell,
+            Typed {
+                startup,
+                hook,
+                environment: spec.environment,
+            },
+        ))
     }
 
     /// QL-03: fills in what the session lacks, beside the connection so a slow DNS server never
@@ -2542,6 +2589,27 @@ impl Pane {
             .await;
     }
 
+    /// QL-17: keys with Enter (or another key that runs the line) make the line on screen a command, which never
+    /// alerts.
+    fn note_enter(&self, bytes: &[u8]) {
+        if bytes.iter().any(|b| matches!(*b, b'\r' | b'\n' | 0x0f)) {
+            locks::lock(&self.control.alerts).enter_pressed();
+        }
+    }
+
+    /// QL-17: alerts whose burst ended go to the UI.
+    async fn send_alerts(&self, due: Vec<AlertBurst>) {
+        if due.is_empty() {
+            return;
+        }
+        let (now, wall) = (Instant::now(), time::OffsetDateTime::now_utc());
+        let session_id = self.control.session_id();
+        for burst in due {
+            let alert = burst.into_alert(self.id, session_id, now, wall);
+            let _ = self.events.send(TerminalEvent::Alert { alert }).await;
+        }
+    }
+
     /// SS-08: changes the shell's folder as the UI knows it, and tells it when that changed.
     async fn update_folder(&self, change: impl FnOnce(&mut FolderInfo)) {
         let folder = {
@@ -2581,6 +2649,9 @@ impl Pane {
         }
         self.tee(&bytes).await;
         let now = Instant::now();
+        // QL-17: the lines this completes, against the alert rules (before the watch, which then knows the screen
+        // after these bytes).
+        locks::lock(&self.control.alerts).output(&bytes, live.watch.alternate(), now);
         let done = live.watch.output(&bytes, now);
         self.show_screen(&live.watch);
         // QL-12: after the screen line, which says whether the prompt is back.
@@ -2659,6 +2730,12 @@ impl Pane {
             }
         })
         .await;
+        // QL-17: a new shell's lines, matched against the rules for the session as it is now.
+        locks::lock(&self.control.alerts).new_shell(
+            self.control.session_id(),
+            typed.environment,
+            self.control.known_secrets(),
+        );
         let now = Instant::now();
         let live = Live {
             input: shell_input,
@@ -2683,6 +2760,9 @@ impl Pane {
         let end = self
             .pump_shell(live, &mut shell_output, &mut hostname_answer, shell_answer)
             .await;
+        // QL-17: a burst still gathering goes out now; its cooldown carries on into the next connection.
+        let due = locks::lock(&self.control.alerts).flush(Instant::now());
+        self.send_alerts(due).await;
         *locks::lock(&self.control.screen) = PaneScreen::default();
         locks::lock(&self.control.files).take();
         locks::lock(&self.control.forwards).take();
@@ -2727,6 +2807,7 @@ impl Pane {
         }
         for line in std::mem::take(&mut live.startup) {
             live.users.input(b"\r");
+            locks::lock(&self.control.alerts).enter_pressed();
             let _ = live
                 .input
                 .send(ShellInput::Data(format!("{line}\r").into_bytes()))
@@ -2760,12 +2841,15 @@ impl Pane {
                 None => String::new(),
             };
             let recording_due = live.recording().and_then(|slot| slot.deadline(&line));
+            // QL-17: the end of the first burst of alert matches.
+            let alert_due = locks::lock(&self.control.alerts).deadline();
             let deadline = [
                 live.watch.deadline(),
                 live.hook.deadline(),
                 live.users.deadline(),
                 startup_due,
                 recording_due,
+                alert_due,
             ]
             .into_iter()
             .flatten()
@@ -2780,6 +2864,8 @@ impl Pane {
                     if let Some(done) = live.watch.tick(now) {
                         self.finished(done, &live).await;
                     }
+                    let due = locks::lock(&self.control.alerts).tick(now);
+                    self.send_alerts(due).await;
                     // QL-12: a recording that went quiet or reached its time limit ends.
                     if let Some(slot) = live.recording() {
                         slot.tick(now, &line);
@@ -2839,6 +2925,7 @@ impl Pane {
                                 live.multiexec_run = false;
                             }
                             live.users.input(&bytes);
+                            self.note_enter(&bytes);
                             let _ = live.input.send(ShellInput::Data(bytes)).await;
                         }
                         Some(TerminalInput::Keys(bytes)) => {
@@ -2850,6 +2937,7 @@ impl Pane {
                                 live.multiexec_run = true;
                             }
                             live.users.input(&bytes);
+                            self.note_enter(&bytes);
                             let control = &self.control;
                             let quiet = self.watch_config().quiet;
                             live.record_keys(&bytes, || control.known_secrets(), quiet);
@@ -2881,9 +2969,14 @@ impl Pane {
                                 let _ = reply.send(Err(CoreError::NoPasswordPrompt));
                                 continue;
                             }
-                            // QL-12: a line being recorded never keeps it either.
+                            // QL-12: a line being recorded never keeps it either; QL-17: nor an alert's sample.
                             if let Some(slot) = live.recording() {
                                 slot.add_secret(&secret);
+                            }
+                            {
+                                let mut alerts = locks::lock(&self.control.alerts);
+                                alerts.add_secret(&secret);
+                                alerts.enter_pressed();
                             }
                             let mut bytes = Zeroizing::new(secret.expose().as_bytes().to_vec());
                             bytes.push(b'\r');

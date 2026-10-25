@@ -1,6 +1,6 @@
 //! The Terminal page's helpers (post-MVP P5): BX-08's command panel (favourite and built-in commands,
 //! `{{variables}}` filled in before pasting), QL-06 "Type vault password", and QL-07's Windows
-//! notification when a long command in a background tab finishes.
+//! notification when a long command in a background tab finishes (QL-17: and when an alert rule matched there).
 //!
 //! Pasting a command is the terminal's own input path (`terminal_write`, as if typed), so nothing here
 //! sends a command anywhere. A vault password goes from the vault to the shell inside the core: the UI
@@ -170,19 +170,40 @@ pub async fn terminal_type_secret(
 /// how long the command ran, nothing of its output.
 #[tauri::command]
 pub fn notify_command_finished(app: AppHandle, title: String, body: String) -> IpcResult<()> {
-    let title: String = title.chars().filter(|c| !c.is_control()).take(MAX_TITLE).collect();
-    let body: String = body.chars().filter(|c| !c.is_control()).take(MAX_BODY).collect();
+    notify(&app, &title, &body)?;
+    tracing::info!("long-command notification shown");
+    Ok(())
+}
+
+/// QL-17: a Windows notification that an alert rule matched in a background tab. The core sends one alert per burst
+/// of matches, never one per line; the UI decides when to notify (the tab is in the background) and masks the text
+/// while presenting (FD-03). The body may hold the matched line, scrubbed by the core.
+#[tauri::command]
+pub fn notify_terminal_alert(app: AppHandle, title: String, body: String) -> IpcResult<()> {
+    notify(&app, &title, &body)?;
+    tracing::info!("terminal alert notification shown");
+    Ok(())
+}
+
+/// The title and text without control characters (or invisible formatting ones), cut to their caps.
+fn notification_text(title: &str, body: &str) -> IpcResult<(String, String)> {
+    let shown = |c: &char| !c.is_control() && !remotely_core::untrusted::is_format_char(*c);
+    let title: String = title.chars().filter(shown).take(MAX_TITLE).collect();
+    let body: String = body.chars().filter(shown).take(MAX_BODY).collect();
     if title.trim().is_empty() {
         return Err(CoreError::InvalidInput("A notification needs a title.".into()).into());
     }
+    Ok((title, body))
+}
+
+fn notify(app: &AppHandle, title: &str, body: &str) -> IpcResult<()> {
+    let (title, body) = notification_text(title, body)?;
     app.notification()
         .builder()
         .title(title)
         .body(body)
         .show()
-        .map_err(|err| IpcError::new("notification", format!("the notification could not be shown: {err}")))?;
-    tracing::info!("long-command notification shown");
-    Ok(())
+        .map_err(|err| IpcError::new("notification", format!("the notification could not be shown: {err}")))
 }
 
 #[cfg(test)]
@@ -192,6 +213,19 @@ mod tests {
     use super::*;
 
     // Only the check: a test never starts the real browser.
+
+    #[test]
+    fn notification_text_loses_control_and_bidi_characters_and_keeps_to_its_caps() {
+        let (title, body) = notification_text(
+            "Alert in web01\u{202E}: Error",
+            &format!("3 lines\r\nmatched {}", "x".repeat(500)),
+        )
+        .unwrap();
+        assert_eq!(title, "Alert in web01: Error");
+        assert!(body.starts_with("3 linesmatched"), "{body}");
+        assert_eq!(body.chars().count(), MAX_BODY);
+        assert!(notification_text(" \u{7}", "body").is_err(), "a title is needed");
+    }
 
     #[test]
     fn a_manual_page_on_a_documentation_site_reaches_the_browser() {

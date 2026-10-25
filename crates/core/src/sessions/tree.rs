@@ -234,6 +234,7 @@ mod tests {
             parent_id: parent,
             name: name.into(),
             sort_order: 0,
+            defaults: super::super::FolderDefaults::default(),
         }
     }
 
@@ -264,6 +265,15 @@ mod tests {
             last_hostname: None,
             last_seen_at: None,
             last_opened_at: None,
+            own: super::super::OwnValues {
+                username: Some("alice".into()),
+                auth: super::super::SessionAuth::Agent,
+                jump_session_id: None,
+                jump_direct: false,
+                environment: env,
+                tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+            },
+            inherited: super::super::Inherited::default(),
         }
     }
 

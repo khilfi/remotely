@@ -55,6 +55,7 @@ fn session(name: &str, host: &str, auth: SessionAuth) -> SessionInput {
         username: Some("alice".into()),
         auth,
         jump_session_id: None,
+        jump_direct: false,
         startup_command: None,
         startup_on_reconnect: false,
         prompt_hook: None,

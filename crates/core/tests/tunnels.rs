@@ -118,6 +118,7 @@ async fn host(core: &Core, echo: u16, environment: Environment) -> (TestSshServe
                     password_id: Some(secret),
                 },
                 jump_session_id: None,
+                jump_direct: false,
                 startup_command: None,
                 startup_on_reconnect: false,
                 prompt_hook: None,

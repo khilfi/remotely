@@ -305,6 +305,7 @@ async fn linked_session(core: &Core, name: &str, port: u16, password: Option<&st
                 username: Some("alice".into()),
                 auth: SessionAuth::Password { password_id },
                 jump_session_id: None,
+                jump_direct: false,
                 startup_command: None,
                 startup_on_reconnect: false,
                 prompt_hook: None,

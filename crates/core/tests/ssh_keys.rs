@@ -71,6 +71,7 @@ fn input(name: &str, port: u16, auth: SessionAuth, environment: Environment) -> 
         username: Some("alice".into()),
         auth,
         jump_session_id: None,
+        jump_direct: false,
         startup_command: None,
         startup_on_reconnect: false,
         prompt_hook: None,

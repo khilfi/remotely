@@ -28,9 +28,11 @@ unlock), and locks after 15 minutes without you typing or clicking in Remotely; 
 password again, and so does sending a vault password to a host that doesn't get it yet (see
 [The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
-tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
-Sessions, folders, tags, labels, trusted host keys, VM sizes, images (by path) and launch templates, and (only when
-ticked) vault secrets move to another laptop in one encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
+tier); a folder can set the user, login, jump host, label and tags for the sessions in it (see
+[Folder defaults](#folder-defaults)). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+Sessions, folders (with their defaults), tags, labels, trusted host keys, VM sizes, images (by path) and launch
+templates, saved MultiExec groups, and (only when ticked) vault secrets move to another laptop in one encrypted file
+(Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
 AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
 [What Remotely does by itself](#what-remotely-does-by-itself)). The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
@@ -261,6 +263,31 @@ Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS
   `.git` folder or file in it or above it): the audit log CSV, Compare and MultiExec exports, saved terminal output,
   session logs, downloads and exports to another laptop. The message names the repository; choose a folder outside it.
 
+### Folder defaults
+
+A session folder can set the **user**, the **login** (a key, a vault password, the SSH agent, or a password asked when
+connecting), the **jump host**, the **environment label** and **tags** for the sessions in it and in its subfolders
+(Sessions page, a folder's menu, **Defaults…**). A session uses its own value first, then the nearest folder up the path
+that sets one, then the app's default (no user, a password asked when connecting, no jump host, no label). Everything
+that uses a session follows the same rule: terminals and quick connect, MultiExec, Compare and bulk runs, key pushes,
+containers, the dashboard, host details, reachability dots, exports and imports, and presentation mode.
+
+- The session editor shows each value a folder gives as "from folder X"; typing or choosing one overrides it. Login has
+  **From folder**, the jump host **No jump host (overrides the folder)**. The session list marks values from a folder.
+- **Labels only add**: a session with no label of its own takes its folder's, so a session in a Prod folder is Prod and
+  raises the approval tier. There is no "no label" override; a session or subfolder can choose another label. Taking
+  Prod off a folder asks first.
+- **Tags add up**: a session has its own tags and every folder's up the path.
+- A folder's **jump host** never applies to itself: the jump host session, when it sits in that folder, connects as the
+  folders above say. A jump host chain that would loop through folders is refused.
+- A folder password that would reach hosts that never got it asks for the vault password (below). An SS-02 import into
+  a folder takes the folder's key or agent login for sessions the source says nothing about, never its vault password.
+- Changes are in the audit log like session edits, with the sessions they change, and the read-only lock refuses them.
+- Exports carry folder defaults; an import shows a folder here with other defaults as a choice (keep this laptop's,
+  the default, or take the file's). An export that uses folder defaults (a folder that sets one, or a session that
+  logs in as its folders say) is file format 2, which 0.4.x refuses ("a newer version of Remotely"), since it would
+  drop them; any other export stays format 1, which 0.4.x imports.
+
 ### The vault and where its passwords go
 
 An unlocked vault on a laptop at a customer's site shouldn't let whoever sits at it send the stored passwords anywhere.
@@ -278,7 +305,11 @@ the audit log:
 - a Compare run whose sudo password is new to some of its hosts: its approval asks for the vault password, even for a
   Low command;
 - an import from another laptop whose sessions would use passwords already in this vault (found by label, when the
-  file has no values), or that moves a session that sends vault passwords to another host.
+  file has no values), or that moves a session that sends vault passwords to another host;
+- a folder's defaults (0.5.0) that would send a vault password to hosts that don't get it yet: setting a folder's login
+  password, giving it a jump host while its sessions send vault passwords, moving sessions or a folder under such a
+  folder, or deleting a folder so its sessions move up under one. One prompt covers the whole change, as editing each
+  session would.
 
 For a saved session the answer counts from then on (`vault_secret_allowed` in the audit log), so the same password there
 doesn't ask again: a session's own login password at its own sudo prompt never asks. A right answer also covers the next
@@ -309,6 +340,24 @@ them on this PC, so no host ever receives them.
 - **Changing the vault password** makes a new data key and seals every secret with it again, in one go, so an old copy
   of the database or of its wrapped key opens nothing written since. Deleted and rewritten vault data is overwritten in
   the database file (`secure_delete`), and the database's write-ahead log is emptied after each vault change.
+
+### Highlight and alert rules
+
+Settings, Terminal, **Highlight and alert rules** (0.5.0, QL-17) colours what a regular expression matches in
+terminals. Built-in rules light up errors, fatal errors, panics, Python tracebacks and warnings; each can be turned off,
+and **Duplicate** makes an editable copy. Add your own for every terminal, for sessions with a label (Lab, Staging,
+Prod, the label a session has from its folder included), or for one session, as text in a colour or a coloured fill,
+with or without case.
+
+- Turn a rule's **alert** on to get a Windows notification when a matching line appears while its tab is in the
+  background: one for a burst of lines, then that rule waits a minute in that terminal and counts what it skipped.
+  Full-screen programs (vim, less, top), password prompts and the commands you type never alert. The bell in the
+  terminal toolbar silences a tab. Alerts are off for the built-in rules until you turn them on.
+- Lines are checked once, as they complete, never by rescanning the scrollback. A rule's pattern is at most 200
+  characters, there are at most 50 rules of your own, and patterns that can take very long to match (a repeat inside a
+  repeat, like `(a+)+`) are refused. While presenting, the masked terminal on screen is highlighted on its own text,
+  so a rule naming a real host never lights up its stand-in.
+- Rule changes are in the audit log (without the pattern) and the read-only lock refuses them.
 
 ### Command panel
 
@@ -381,6 +430,18 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   32 MB per session, and 64 KB per terminal per line (the middle of a longer output is cut, as in Compare); the view
   says when a cap was hit. Export a line, or all of them, as CSV, JSON or HTML with groups and diffs; the audit log
   says what was exported and where, never the output.
+- **Saved MultiExec groups** (QL-19, 0.5.0): the Groups button next to the MultiExec switch keeps named sets of saved
+  sessions, such as "all web servers". **Open group** opens a tab for each session, reusing tabs that are already
+  open, and turns MultiExec on for exactly those tabs. **Select group** picks the group's open tabs and says which
+  members aren't open. You can also save the picked tabs as a group (quick connections are left out), and rename,
+  reorder or delete groups under **Manage groups**. Every line you type still goes through the approval rules. Group
+  changes are audited, blocked by the read-only lock while presenting, and carried in the encrypted export to another
+  laptop.
+- **Search all terminals** (QL-18, 0.5.0): Ctrl+Shift+G, the search-all button or the palette searches the scrollback
+  of every open terminal at once, as plain text or a regular expression, with or without case. Results are grouped by
+  tab; click one to jump to its tab, scroll to the line and highlight the match. Results are from when you searched:
+  press Enter or Search again for newer output. At most 200 matches per terminal and 2,000 in all are shown. While
+  presenting, the masked text on screen is what gets searched.
 - **Compare output** (BX-03): runs one command once on the hosts of the picked tabs and of sessions Ctrl+clicked in the
   session tree (Ctrl+click a folder for all of it, handy for 50 hosts), over separate exec channels with the usual
   approval tiers, sudo from the vault, a time limit and the parallel limit from Settings. The results are grouped by
