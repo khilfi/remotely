@@ -453,7 +453,8 @@ impl VirtualBoxAdapter for VBoxManageCli {
         let info = self.vm_info(uuid).await?;
         let mut tree = info.snapshots;
         if let (false, Some(file)) = (tree.snapshots.is_empty(), &info.config_file) {
-            match tokio::fs::read(file).await {
+            // A9: at most MAX_VM_CONFIG_BYTES; a larger one leaves the times out.
+            match crate::untrusted::read_capped(file, crate::untrusted::MAX_VM_CONFIG_BYTES).await {
                 Ok(bytes) => {
                     add_snapshot_times(&mut tree, &parse_vbox_snapshot_times(&String::from_utf8_lossy(&bytes)))
                 }
