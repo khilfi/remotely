@@ -595,6 +595,20 @@ pub fn vault_activity(state: State<'_, AppState>) {
     state.core.vault.note_activity();
 }
 
+/// SS-04, FD-07: how hard a candidate vault password or export passphrase is to guess, for the meter
+/// under the field. The core checks again when it is submitted, and that check decides. Never logged.
+#[tauri::command]
+pub fn password_strength(text: SecretString) -> remotely_core::vault::Strength {
+    remotely_core::vault::password_strength(text.expose())
+}
+
+/// SS-04, FD-07: a random passphrase for the field's Generate button, which shows it once so it can be
+/// written down. Nothing keeps it.
+#[tauri::command]
+pub fn passphrase_generate() -> IpcResult<String> {
+    Ok(remotely_core::vault::generate_passphrase()?.expose().to_owned())
+}
+
 /// Labels and kinds, with how many sessions use each. Works while the vault is locked.
 #[tauri::command]
 pub async fn secrets_list(state: State<'_, AppState>) -> IpcResult<Vec<SecretMeta>> {

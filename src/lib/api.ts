@@ -773,6 +773,16 @@ export interface VaultInfo {
   idleLockMinutes: number;
 }
 
+/** SS-04, FD-07: how hard a new vault password or export passphrase is to guess. The core checks again on submit. */
+export interface PasswordStrength {
+  /** 0 (guessed at once) to 4 (very hard to guess); at most 2 while the length is wrong. */
+  score: number;
+  /** The core would take it as a new vault password or export passphrase. */
+  acceptable: boolean;
+  /** Why it is weak, or how strong it is. Never quotes the password; empty for an empty one. */
+  hint: string;
+}
+
 export type SecretKind = "password" | "privateKey" | "passphrase";
 
 /** A vault item as the UI sees it: its label and kind, never its value. */
@@ -2534,6 +2544,10 @@ export const api = {
   vaultTurnOffWindowsLogin: () => invoke<VaultInfo>("vault_turn_off_windows_login"),
   /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). */
   vaultActivity: () => invoke<void>("vault_activity"),
+  /** SS-04, FD-07: scores a candidate vault password or export passphrase for the meter. Never logged. */
+  passwordStrength: (text: string) => invoke<PasswordStrength>("password_strength", { text }),
+  /** SS-04, FD-07: six random words joined by "-", for the Generate button. */
+  passphraseGenerate: () => invoke<string>("passphrase_generate"),
   /** Status changes, including the lock after the idle time. */
   onVaultStatus: (handler: (status: VaultStatus) => void): Promise<UnlistenFn> =>
     listen<VaultStatus>("vault://status", (e) => handler(e.payload)),

@@ -5,7 +5,7 @@
 //! {
 //!   "format": "remotely-export",
 //!   "version": 1,
-//!   "kdf": { "algorithm": "argon2id", "version": 19, "memoryKib": 65536, "iterations": 3, "parallelism": 1 },
+//!   "kdf": { "algorithm": "argon2id", "version": 19, "memoryKib": 262144, "iterations": 3, "parallelism": 1 },
 //!   "salt": "<16 random bytes, base64>",
 //!   "nonce": "<12 random bytes, base64>",
 //!   "ciphertext": "<AES-256-GCM of the payload JSON, with its tag, base64>"
@@ -13,7 +13,8 @@
 //! ```
 //!
 //! The key is Argon2id(passphrase, salt) with the parameters written in the file, so a file stays
-//! readable when the defaults change. The header (format, version, parameters, salt) is the AES-GCM
+//! readable when the defaults change: exports are written with [`KDF`] (256 MiB, 3 passes), and files
+//! from earlier versions, which used the vault's own setting (64 MiB, 3 passes), open as they are. The header (format, version, parameters, salt) is the AES-GCM
 //! associated data: changing any of it, or one bit of the ciphertext, makes the file fail to open,
 //! exactly like a wrong passphrase. The payload JSON never touches the disk unencrypted.
 
@@ -30,6 +31,14 @@ use crate::vault::SecretString;
 pub const FORMAT: &str = "remotely-export";
 /// The payload layout this version writes and reads. A newer file is refused with a message.
 pub const FORMAT_VERSION: u32 = 1;
+/// How new exports derive their key: Argon2id with 256 MiB and 3 passes on one lane, four times the
+/// vault's memory, since a file can be copied anywhere and attacked offline. About two seconds to export
+/// or open one on a current PC. Older files carry their own (smaller) settings and still open.
+pub const KDF: KdfParams = KdfParams {
+    memory_kib: 256 * 1024,
+    iterations: 3,
+    ..KdfParams::DEFAULT
+};
 /// Largest file opened: far more than any real session list with its secrets.
 pub const MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -45,7 +54,7 @@ struct Envelope {
 }
 
 /// Bounds for parameters read from a file, tighter than the vault's own: a file can come from
-/// anywhere, and opening one must not take gigabytes or minutes.
+/// anywhere, and opening one must not take gigabytes or minutes. [`KDF`] is the most it allows.
 fn check_import_kdf(kdf: &KdfParams) -> Result<()> {
     let ok = kdf.memory_kib <= 256 * 1024 && kdf.iterations <= 10 && kdf.parallelism <= 8;
     if ok {
@@ -201,6 +210,37 @@ mod tests {
         for junk in [&b"hostname,port\nweb01,22\n"[..], b"", b"{}"] {
             assert_eq!(open(junk, &phrase("x")).unwrap_err().code(), "invalid_input");
         }
+    }
+
+    #[test]
+    fn exports_use_the_stronger_setting_and_files_with_the_earlier_one_still_open() {
+        // What exports are written with now: four times the vault's memory, and within what a file may ask.
+        assert_eq!((KDF.memory_kib, KDF.iterations, KDF.parallelism), (256 * 1024, 3, 1));
+        assert!(check_import_kdf(&KDF).is_ok());
+        let file = seal(br#"{"sessions":[]}"#, &phrase("tulip anvil orbit canyon"), &KDF).unwrap();
+        assert_eq!(envelope(&file)["kdf"]["memoryKib"], 262_144);
+        assert_eq!(
+            &open(&file, &phrase("tulip anvil orbit canyon")).unwrap()[..],
+            br#"{"sessions":[]}"#
+        );
+
+        // A file written before (the vault's setting, 64 MiB and 3 passes) opens with this version.
+        let earlier = KdfParams {
+            memory_kib: 64 * 1024,
+            iterations: 3,
+            ..KDF
+        };
+        let old = seal(br#"{"sessions":[1]}"#, &phrase("tulip anvil orbit canyon"), &earlier).unwrap();
+        assert_eq!(envelope(&old)["kdf"]["memoryKib"], 65_536);
+        assert_eq!(envelope(&old)["version"], 1);
+        assert_eq!(
+            &open(&old, &phrase("tulip anvil orbit canyon")).unwrap()[..],
+            br#"{"sessions":[1]}"#
+        );
+        assert!(matches!(
+            open(&old, &phrase("tulip anvil orbit canyoN")),
+            Err(CoreError::WrongPassphrase)
+        ));
     }
 
     #[test]
