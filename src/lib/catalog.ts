@@ -111,14 +111,13 @@ export function imageWhere(image: Image): string {
   return source.path;
 }
 
-/** `VMDK`, `qcow2 (converted before deploy)`, `ISO`; a golden VM has no file format. */
+/** `VMDK`, `qcow2 (converted before deploy)`; null when the kind says it all (an ISO) or there is no file (a golden VM). */
 export function imageFormatText(image: Image): string | null {
   const source = image.source;
   switch (source.kind) {
     case "goldenVm":
-      return null;
     case "iso":
-      return "ISO";
+      return null;
     default:
       return source.format === "qcow2" ? "qcow2 (converted before deploy)" : source.format.toUpperCase();
   }

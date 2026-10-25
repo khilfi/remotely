@@ -119,7 +119,11 @@ test("images say where their OS comes from", () => {
   assert.equal(imageFormatText(golden), null);
   const rocky = image({ source: { kind: "cloudImage", path: "C:\\Images\\rocky.qcow2", format: "qcow2" } });
   assert.equal(imageFormatText(rocky), "qcow2 (converted before deploy)");
-  assert.equal(imageFormatText(image({ source: { kind: "iso", path: "C:\\i.iso" } })), "ISO");
+  assert.equal(
+    imageFormatText(image({ source: { kind: "iso", path: "C:\\i.iso" } })),
+    null,
+    "the kind says ISO already",
+  );
   assert.equal(fileSize(null), "");
   assert.equal(fileSize(512), "512 bytes");
   assert.equal(fileSize(650 * 1024 * 1024), "650 MB");

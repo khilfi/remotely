@@ -50,7 +50,6 @@ import {
   HYPERVISOR_LABEL,
   MAX_DEPLOY_COUNT,
   networkKinds,
-  networkLabel,
   networkOfKind,
   profileHypervisors,
   sizeSummary,
@@ -267,7 +266,7 @@ export function TemplateDialog({ existing, initial, images, sizes, profiles, onS
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="template-image">Image</Label>
-                <Select value={form.imageId || undefined} onValueChange={(v) => set({ imageId: v })}>
+                <Select value={form.imageId} onValueChange={(v) => set({ imageId: v })}>
                   <SelectTrigger id="template-image" className="w-full">
                     <SelectValue placeholder={images.length ? "Pick an image" : "Add an image first"} />
                   </SelectTrigger>
@@ -415,7 +414,6 @@ export function TemplateDialog({ existing, initial, images, sizes, profiles, onS
                     />
                   )}
                 </div>
-                <p className="text-xs text-muted-foreground">{networkLabel(network)}</p>
               </div>
               <div className="grid gap-2">
                 <Label htmlFor="template-key">SSH key</Label>

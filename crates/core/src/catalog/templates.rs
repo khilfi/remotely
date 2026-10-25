@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::Date;
 use uuid::Uuid;
 
-use super::images::{path_problem, Image, ImageFormat, QCOW2_NEEDS_CONVERSION};
+use super::images::{folder_problem, Image, ImageFormat, QCOW2_NEEDS_CONVERSION};
 use super::profiles::{profile, Firmware, OsProfile};
 use super::sizes::{DiskController, Provisioning, Size};
 use crate::adapters::hypervisor::Hypervisor;
@@ -411,13 +411,8 @@ pub fn check_template(input: &TemplateInput) -> Result<TemplateInput> {
     let vm_folder = match input.vm_folder.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
         None => None,
         Some(folder) => {
-            if let Some(problem) = path_problem(folder) {
-                // path_problem speaks of image files; say it of the folder.
-                return invalid(
-                    problem
-                        .replace("images that", "a VM folder that")
-                        .replace("Choose the image's file.", "Choose the VM folder."),
-                );
+            if let Some(problem) = folder_problem(folder) {
+                return invalid(problem);
             }
             Some(folder.to_owned())
         }
@@ -1023,7 +1018,7 @@ mod tests {
         bad(&|t| t.size_id = " ".into(), "Pick the template's size");
         bad(
             &|t| t.vm_folder = Some(r"\\fileserver.example.com\vms".into()),
-            "a VM folder that is on a network share",
+            "That folder is on a network share",
         );
         bad(&|t| t.vm_folder = Some("VMs".into()), "full path");
         bad(&|t| t.network = Network::Vmnet { number: 20 }, "vmnet0 to vmnet19");

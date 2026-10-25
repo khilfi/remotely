@@ -363,24 +363,54 @@ pub(crate) fn clean_hypervisors(asked: &[Hypervisor], allowed: &[Hypervisor]) ->
 /// Why `path` (one the user picked, or one an FD-07 file names) can't be an image's file, checked before the file
 /// system sees it: empty, too long, on a network share or a device path, or not a full path.
 pub fn path_problem(path: &str) -> Option<String> {
+    place_problem(path, false)
+}
+
+/// [`path_problem`] for a launch template's VM folder.
+pub fn folder_problem(path: &str) -> Option<String> {
+    place_problem(path, true)
+}
+
+fn place_problem(path: &str, folder: bool) -> Option<String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        return Some("Choose the image's file.".into());
+        return Some(
+            if folder {
+                "Choose the VM folder."
+            } else {
+                "Choose the image's file."
+            }
+            .into(),
+        );
     }
     if trimmed.chars().count() > MAX_PATH_CHARS {
         return Some(format!("A path can be at most {MAX_PATH_CHARS} characters."));
     }
     if let Some(refusal) = untrusted::path_refusal(trimmed) {
-        return Some(format!(
-            "Remotely doesn't use images that {}: copy it to this PC first.",
-            refusal.describe()
-        ));
+        return Some(if folder {
+            format!(
+                "That folder {}, which Remotely doesn't use: pick a folder on this PC.",
+                refusal.describe()
+            )
+        } else {
+            format!(
+                "That file {}, which Remotely doesn't use: copy it to this PC first.",
+                refusal.describe()
+            )
+        });
     }
     if trimmed.chars().any(|c| c.is_control() || untrusted::is_format_char(c)) {
         return Some("The path holds control or invisible characters.".into());
     }
     if !is_absolute(trimmed) {
-        return Some("Use the file's full path, such as C:\\Images\\noble.vmdk.".into());
+        return Some(
+            if folder {
+                "Use the folder's full path, such as C:\\VMs\\lab."
+            } else {
+                "Use the file's full path, such as C:\\Images\\noble.vmdk."
+            }
+            .into(),
+        );
     }
     None
 }
