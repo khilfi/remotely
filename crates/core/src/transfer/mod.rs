@@ -34,8 +34,11 @@
 //!   end up in a commit by mistake.
 //!
 //! Nothing here touches a VM or a remote host, so it skips the command bus, like the session library.
+//!
+//! QL-19: saved MultiExec groups go along with their member sessions ([`groups`]).
 
 pub mod file;
+mod groups;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -107,6 +110,9 @@ struct Payload {
     /// BX-08, in the order the panel shows them.
     #[serde(default)]
     favourites: Vec<FavouriteEntry>,
+    /// QL-19 saved MultiExec groups, by name. Files from before 0.5.0 have none.
+    #[serde(default)]
+    groups: Vec<groups::GroupEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -356,6 +362,8 @@ pub struct ExportReport {
     pub container_hosts: usize,
     /// QL-16 folders with defaults.
     pub folder_defaults: usize,
+    /// QL-19 saved MultiExec groups.
+    pub groups: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -439,6 +447,8 @@ pub struct TransferPreview {
     pub favourites: Vec<PreviewItem>,
     /// QL-16: the file's folders that set defaults, compared with the folder at the same place here.
     pub folder_defaults: Vec<PreviewItem>,
+    /// QL-19 saved MultiExec groups.
+    pub groups: Vec<PreviewItem>,
     pub warnings: Vec<String>,
 }
 
@@ -463,6 +473,9 @@ pub struct TransferCommit {
     pub secrets: Vec<ItemChoice>,
     #[serde(default)]
     pub favourites: Vec<ItemChoice>,
+    /// QL-19 saved MultiExec groups.
+    #[serde(default)]
+    pub groups: Vec<ItemChoice>,
     /// SS-01: sessions (by index) whose startup command comes along. The others come without it (a
     /// replaced session keeps the one it has here).
     #[serde(default)]
@@ -526,6 +539,8 @@ pub struct TransferReport {
     pub known_hosts: Counts,
     pub secrets: Counts,
     pub favourites: Counts,
+    /// QL-19 saved MultiExec groups.
+    pub groups: Counts,
     /// SS-07: port forwards saved with the imported sessions.
     pub forwards: usize,
     /// SS-01: startup commands in the file that were not ticked, so left out.
@@ -1138,6 +1153,9 @@ struct Decided {
     /// QL-16.
     folder_rows: Vec<RowPlan<Uuid>>,
     folder_actions: Vec<ItemAction>,
+    /// QL-19.
+    group_rows: Vec<RowPlan<Uuid>>,
+    group_actions: Vec<ItemAction>,
 }
 
 /// SS-04: closes an opened file, which may hold secret values, when the vault locks: its secrets are
@@ -1401,6 +1419,8 @@ impl Transfer {
                     description: f.description,
                 })
                 .collect(),
+            // QL-19.
+            groups: groups::entries(&self.store, ctx).await?,
         };
         let report = ExportReport {
             path: path.display().to_string(),
@@ -1413,6 +1433,7 @@ impl Transfer {
             forwards: payload.sessions.iter().map(|s| s.forwards.len()).sum(),
             container_hosts: payload.sessions.iter().filter(|s| !s.containers.is_empty()).count(),
             folder_defaults: payload.folders.iter().filter(|f| !f.defaults.is_empty()).count(),
+            groups: payload.groups.len(),
         };
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
         drop(payload);
@@ -1426,13 +1447,14 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, {}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
             plural(report.favourites, "favourite command"),
             plural(report.forwards, "port forward"),
             plural(report.container_hosts, "container host"),
+            plural(report.groups, "MultiExec group"),
             report.path
         );
         self.audit(
@@ -1748,6 +1770,13 @@ impl Transfer {
                 item(row, f.name.clone(), detail, Vec::new())
             })
             .collect();
+        // QL-19: groups by name, their members as the default choices would leave them.
+        let groups = {
+            let mapped = groups::matched_here(payload, &plan_sessions(payload, &local));
+            let ids_here: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
+            let rows = groups::plan(payload, &groups::here(&self.store, ctx).await?, &mapped, &ids_here);
+            groups::preview(payload, rows, &local.sessions, &mapped)
+        };
 
         let folder_defaults = plan_folder_defaults(payload, &local)
             .into_iter()
@@ -1798,6 +1827,7 @@ impl Transfer {
             secret_values,
             favourites,
             folder_defaults,
+            groups,
             warnings,
         })
     }
@@ -1871,6 +1901,8 @@ impl Transfer {
             favourite_actions,
             folder_rows,
             folder_actions,
+            group_rows,
+            group_actions,
         } = decided;
         let mut report = TransferReport::default();
 
@@ -2159,6 +2191,22 @@ impl Transfer {
             }
         }
 
+        // 6. QL-19 saved MultiExec groups, each saved and audited by the groups module, with the sessions
+        // their members became here.
+        let here_before: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
+        groups::commit(
+            ctx,
+            &self.store,
+            &payload,
+            (&group_rows, &group_actions),
+            groups::Landed {
+                imported: &session_map,
+                here_before: &here_before,
+            },
+            &mut report,
+        )
+        .await?;
+
         let mut detail = format!(
             "from {}: sessions {}; folders {} added; folder defaults {}; known host keys {}; vault secrets {}; favourite commands {}",
             path.display(),
@@ -2169,6 +2217,9 @@ impl Transfer {
             report.secrets.describe(),
             report.favourites.describe()
         );
+        if !payload.groups.is_empty() {
+            detail.push_str(&format!("; MultiExec groups {}", report.groups.describe()));
+        }
         if report.forwards > 0 {
             detail.push_str(&format!(
                 "; {} saved with them",
@@ -2255,6 +2306,15 @@ impl Transfer {
         for row in &folder_rows {
             folder_actions.push(row.action(&folder_choices, &payload.folders[row.index].name)?);
         }
+        // QL-19.
+        let mapped = groups::matched_here(payload, &session_rows);
+        let ids_here: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
+        let group_rows = groups::plan(payload, &groups::here(&self.store, ctx).await?, &mapped, &ids_here);
+        let group_choices = chosen(&request.groups);
+        let mut group_actions = Vec::with_capacity(group_rows.len());
+        for row in &group_rows {
+            group_actions.push(row.action(&group_choices, &payload.groups[row.index].name)?);
+        }
         if secret_actions.iter().any(|a| *a != ItemAction::Skip) {
             match local.vault {
                 VaultStatus::Unlocked => {}
@@ -2274,6 +2334,8 @@ impl Transfer {
             favourite_actions,
             folder_rows,
             folder_actions,
+            group_rows,
+            group_actions,
         })
     }
 

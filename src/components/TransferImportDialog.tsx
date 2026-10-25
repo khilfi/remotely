@@ -1,7 +1,7 @@
 // FD-07: import a Remotely export from another laptop. The core opens the file (chosen in a dialog it
 // opens) with the passphrase typed here and compares it with this library; this shows each session,
-// trusted host key, vault secret and favourite command (BX-08) as new, already here or in conflict, and lets the
-// user choose per item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
+// trusted host key, vault secret, favourite command (BX-08) and saved MultiExec group (QL-19) as new, already here or
+// in conflict, and lets the user choose per item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
 // Startup commands (SS-01) and saved port forwards (SS-07) are shown with a warning and left out unless ticked.
 
 import { useEffect, useMemo, useState } from "react";
@@ -54,7 +54,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Section = "sessions" | "folderDefaults" | "knownHosts" | "secrets" | "favourites";
+type Section = "sessions" | "folderDefaults" | "knownHosts" | "secrets" | "favourites" | "groups";
 type Choices = Record<Section, Record<number, TransferAction>>;
 
 const ACTION_LABEL: Record<TransferAction, string> = {
@@ -77,6 +77,7 @@ const SECTIONS: { key: Section; title: string; empty: string }[] = [
   { key: "knownHosts", title: "Trusted host keys", empty: "No host keys in the file." },
   { key: "secrets", title: "Vault secrets", empty: "" },
   { key: "favourites", title: "Favourite commands", empty: "No favourite commands in the file." },
+  { key: "groups", title: "MultiExec groups", empty: "No MultiExec groups in the file." },
 ];
 
 function defaults(preview: TransferPreview): Choices {
@@ -88,6 +89,8 @@ function defaults(preview: TransferPreview): Choices {
     // Files from before BX-08 have none.
     favourites: of(preview.favourites ?? []),
     folderDefaults: of(preview.folderDefaults ?? []),
+    // QL-19: files from before 0.5.0 have none.
+    groups: of(preview.groups ?? []),
   };
 }
 
@@ -106,6 +109,7 @@ function counts(report: TransferReport) {
     part("Host keys", report.knownHosts),
     part("Secrets", report.secrets),
     part("Favourite commands", report.favourites),
+    part("MultiExec groups", report.groups),
     report.forwards ? `Port forwards: ${report.forwards} saved with their sessions` : null,
     report.startupLeftOut ? `Startup commands: ${report.startupLeftOut} left out` : null,
     report.forwardsLeftOut ? `Port forwards: ${report.forwardsLeftOut} left out` : null,
@@ -123,6 +127,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
     knownHosts: {},
     secrets: {},
     favourites: {},
+    groups: {},
   });
   /** SS-01, SS-07: sessions whose startup command, and whose port forwards, come along; none by default. */
   const [keepStartup, setKeepStartup] = useState<Set<number>>(new Set());
@@ -198,6 +203,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         secrets: list("secrets"),
         favourites: list("favourites"),
         folderDefaults: list("folderDefaults"),
+        groups: list("groups"),
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),
       };

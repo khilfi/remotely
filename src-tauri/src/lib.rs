@@ -8,6 +8,7 @@ mod containers;
 pub mod data_dirs;
 pub mod diagnostics;
 mod files;
+mod groups;
 mod host_details;
 mod ipc;
 mod multiexec;
@@ -548,6 +549,10 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         multiexec::multiexec_recorded_output,
         multiexec::multiexec_recorded_diff,
         multiexec::multiexec_export,
+        groups::multiexec_groups_list,
+        groups::multiexec_group_create,
+        groups::multiexec_group_update,
+        groups::multiexec_group_delete,
         command_panel::favourites_list,
         command_panel::favourite_add,
         command_panel::favourite_update,

@@ -928,6 +928,7 @@ fn commit_all(
         keep_forwards: vec![],
         vault_password: vault_password.map(pw),
         folder_defaults,
+        groups: vec![],
     }
 }
 

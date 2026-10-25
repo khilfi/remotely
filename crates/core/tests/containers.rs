@@ -1077,6 +1077,7 @@ async fn an_export_carries_container_marks_to_another_laptop() {
                 vault_password: None,
                 folder_defaults: vec![],
                 favourites: vec![],
+                groups: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],

@@ -1313,6 +1313,27 @@ export interface FavouriteInput {
   description: string | null;
 }
 
+/** QL-19: one session of a saved MultiExec group. */
+export interface GroupMember {
+  sessionId: string;
+  name: string;
+}
+
+/** QL-19: a saved MultiExec group: a named set of saved sessions, in order. */
+export interface MultiExecGroup {
+  id: string;
+  name: string;
+  members: GroupMember[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** QL-19: what the group editor sends. 1 to 60 characters; 1 to 100 saved sessions. */
+export interface GroupInput {
+  name: string;
+  sessionIds: string[];
+}
+
 /** BX-08: the two sections of the library: symptom runbooks first, then groups by area. */
 export type LibrarySection = "troubleshoot" | "area";
 
@@ -1589,6 +1610,8 @@ export interface ExportReport {
   forwards: number;
   /** QL-16 folders with defaults. */
   folderDefaults: number;
+  /** QL-19 saved MultiExec groups. */
+  groups: number;
 }
 
 export type TransferStatus = "new" | "same" | "conflict";
@@ -1627,6 +1650,8 @@ export interface TransferPreview {
   favourites: TransferItem[];
   /** QL-16: the file's folders that set defaults, compared with the folder at the same place here. */
   folderDefaults: TransferItem[];
+  /** QL-19 saved MultiExec groups. */
+  groups: TransferItem[];
   warnings: string[];
 }
 
@@ -1647,6 +1672,8 @@ export interface TransferReport {
   knownHosts: TransferCounts;
   secrets: TransferCounts;
   favourites: TransferCounts;
+  /** QL-19 saved MultiExec groups. */
+  groups: TransferCounts;
   /** SS-07: port forwards saved with the imported sessions. */
   forwards: number;
   /** SS-01, SS-07: startup commands and port forwards in the file that were not ticked. */
@@ -2863,6 +2890,8 @@ export const api = {
     favourites: TransferChoice[];
     /** QL-16: what to do with each folder's defaults. */
     folderDefaults: TransferChoice[];
+    /** QL-19 saved MultiExec groups. */
+    groups?: TransferChoice[];
     /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
     keepStartup: number[];
     keepForwards: number[];
@@ -3035,6 +3064,12 @@ export const api = {
   /** One folder's favourites in a new order; `folder` null for the top level. */
   reorderFavourites: (folder: string | null, ids: string[]) =>
     invoke<Favourite[]>("favourites_reorder", { folder, ids }),
+  /** QL-19 saved MultiExec groups, by name; changes are audited and refused by the read-only lock. */
+  multiExecGroups: () => invoke<MultiExecGroup[]>("multiexec_groups_list"),
+  createMultiExecGroup: (input: GroupInput) => invoke<MultiExecGroup>("multiexec_group_create", { input }),
+  updateMultiExecGroup: (id: string, input: GroupInput) =>
+    invoke<MultiExecGroup>("multiexec_group_update", { id, input }),
+  deleteMultiExecGroup: (id: string) => invoke<void>("multiexec_group_delete", { id }),
   /** BX-08 built-in commands, classified with the current rules. */
   commandLibrary: () => invoke<LibraryEntry[]>("command_library"),
   /** BX-08: a command's variables and what the policy engine makes of it. */
