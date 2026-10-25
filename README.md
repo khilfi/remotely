@@ -374,6 +374,18 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   32 MB per session, and 64 KB per terminal per line (the middle of a longer output is cut, as in Compare); the view
   says when a cap was hit. Export a line, or all of them, as CSV, JSON or HTML with groups and diffs; the audit log
   says what was exported and where, never the output.
+- **Saved MultiExec groups** (QL-19, 0.5.0): the Groups button next to the MultiExec switch keeps named sets of saved
+  sessions, such as "all web servers". **Open group** opens a tab for each session, reusing tabs that are already
+  open, and turns MultiExec on for exactly those tabs. **Select group** picks the group's open tabs and says which
+  members aren't open. You can also save the picked tabs as a group (quick connections are left out), and rename,
+  reorder or delete groups under **Manage groups**. Every line you type still goes through the approval rules. Group
+  changes are audited, blocked by the read-only lock while presenting, and carried in the encrypted export to another
+  laptop.
+- **Search all terminals** (QL-18, 0.5.0): Ctrl+Shift+G, the search-all button or the palette searches the scrollback
+  of every open terminal at once, as plain text or a regular expression, with or without case. Results are grouped by
+  tab; click one to jump to its tab, scroll to the line and highlight the match. Results are from when you searched:
+  press Enter or Search again for newer output. At most 200 matches per terminal and 2,000 in all are shown. While
+  presenting, the masked text on screen is what gets searched.
 - **Compare output** (BX-03): runs one command once on the hosts of the picked tabs and of sessions Ctrl+clicked in the
   session tree (Ctrl+click a folder for all of it, handy for 50 hosts), over separate exec channels with the usual
   approval tiers, sudo from the vault, a time limit and the parallel limit from Settings. The results are grouped by

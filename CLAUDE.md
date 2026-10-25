@@ -239,6 +239,11 @@ crates/core/          remotely-core: all app logic
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
+    multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
+                      characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
+                      sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
+                      leaves its groups; open_terminals lists a group's open terminals. Groups only choose MultiExec's
+                      targets
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited; a new key type for a host
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
@@ -250,7 +255,9 @@ crates/core/          remotely-core: all app logic
                       opens with the parameters in its header, so older 64 MiB files still import), preview with
                       conflicts (skip, replace, keep both), commit; audited; an export refuses the vault password as
                       its passphrase; QL-16 sessions travel with what they set themselves and folders with their
-                      defaults (a folder here with other defaults: keep or replace)
+                      defaults (a folder here with other defaults: keep or replace); groups.rs QL-19 MultiExec groups
+                      by name with their sessions' ids (members become the sessions imported or matched here, the rest
+                      left out with a note)
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -274,7 +281,7 @@ crates/core/          remotely-core: all app logic
     store/            jobs.rs: the journal stores Command::for_journal (scripts and lines redacted), command_type
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
-                      and verifies and exports with row streams
+                      and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021)
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -288,9 +295,10 @@ crates/core/          remotely-core: all app logic
                       (private or public, rate limits), throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
-  tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation); opt-in
-                      workstation_it.rs and virtualbox_it.rs
-src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
+  tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
+                      QL-16; multiexec_groups.rs: QL-19); opt-in workstation_it.rs and virtualbox_it.rs
+src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
+                      QL-19 saved MultiExec groups), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
                       (command_panel.rs), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
                       copies: selections through terminal_copy_selection, Copy output through terminal_output_copy,
@@ -322,7 +330,9 @@ src/                  React + TypeScript UI
                       and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
                       presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; QL-16
-                      FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values)
+                      FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
+                      MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
+                      (Ctrl+Shift+G))
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3). P6: App memoises every page and passes stable callbacks, and renders
@@ -341,7 +351,10 @@ src/                  React + TypeScript UI
                       through paste.ts, every selection copy scrubbed by the core, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
-                      xterm's internal onUserInput, checked by a test), multiexec.ts, recordings.ts (QL-12 view texts,
+                      xterm's internal onUserInput, checked by a test), multiexec.ts, multiexec-groups.ts (QL-19 which
+                      tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
+                      logical lines, matching, caps, grouping by tab), scrollback-xterm.ts (QL-18 reading a pane's
+                      buffer, showing a match with a decoration), recordings.ts (QL-12 view texts,
                       QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
                       transfers-store.ts (SS-08, P6 every transfer outside React state), job-events.ts (P6, VM-01
                       which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest
