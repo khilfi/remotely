@@ -177,17 +177,20 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
 
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="text-sm text-muted-foreground">
+      <div className="flex items-start gap-4">
+        <p className="flex-1 text-sm text-muted-foreground">
           Snapshots and power on a timetable, and suspending idle VMs. Each schedule is approved when it is saved; each
           run goes through the same checks under that approval and is audited as one of its runs.
         </p>
-        <WhyDisabled reason={readOnly} className="ml-auto">
-          <Button size="sm" disabled={readOnly !== null} onClick={() => void openEditor({})}>
-            <PlusIcon data-icon="inline-start" />
-            New schedule
-          </Button>
-        </WhyDisabled>
+        {/* The empty list has its own button. */}
+        {schedules && schedules.length > 0 && (
+          <WhyDisabled reason={readOnly}>
+            <Button size="sm" disabled={readOnly !== null} onClick={() => void openEditor({})}>
+              <PlusIcon data-icon="inline-start" />
+              New schedule
+            </Button>
+          </WhyDisabled>
+        )}
       </div>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
