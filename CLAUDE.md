@@ -654,6 +654,10 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   `VBox.log.1` to `.3`, and `VBoxHardening.log`), `SnapFldr`, and for a saved VM `VMStateFile` (the `.sav` in the
   snapshot folder), which, unlike `CfgFile`, is printed without escaping its backslashes. `list systemproperties` has
   `Default machine folder:`.
+- Two `showvminfo` calls on the same VM at the same moment: the second fails ("The machine '<name>' already has a lock
+  request pending", or "The session is not locked", "The object is not ready" around a state change). R4's reads ask
+  again up to three times (`host_networks::showvminfo_pairs`, `vbox_busy`), and the waste finder reads each VM once
+  per report, in sequence.
 
 ## Development safety
 
