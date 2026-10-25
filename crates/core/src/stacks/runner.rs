@@ -23,7 +23,7 @@ use uuid::Uuid;
 use super::spec::{Readiness, StackOp};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::network::NetworkAdapter;
-use crate::adapters::vmware::ToolsState;
+use crate::adapters::vmware::{path_key, ToolsState};
 use crate::domain::Context;
 use crate::error::Result;
 use crate::locks;
@@ -352,7 +352,7 @@ impl StackActions for StackRunner {
 
     async fn end(&self, ctx: &Context, op: &StackOp) -> Option<String> {
         let id = op.instance_id();
-        let instance = match self.store.stack_instance(ctx, id).await {
+        let mut instance = match self.store.stack_instance(ctx, id).await {
             Ok(Some(instance)) => instance,
             Ok(None) => return None,
             Err(err) => {
@@ -360,6 +360,23 @@ impl StackActions for StackRunner {
                 return None;
             }
         };
+        if let StackOp::Teardown { .. } = op {
+            // VMs deleted outside Remotely before the teardown leave the instance with it, so it can empty.
+            if let Ok(vms) = self.store.list_vms(ctx).await {
+                let here: std::collections::HashSet<String> =
+                    vms.iter().map(|vm| path_key(Path::new(&vm.vmx_path))).collect();
+                let (gone, kept): (Vec<_>, Vec<_>) = instance
+                    .members
+                    .into_iter()
+                    .partition(|m| !here.contains(&path_key(Path::new(&m.vm_key))));
+                for member in &gone {
+                    if let Err(err) = self.store.remove_stack_vm(ctx, &member.vm_key).await {
+                        tracing::warn!(error = %err, "a gone VM could not leave its stack instance");
+                    }
+                }
+                instance.members = kept;
+            }
+        }
         match op {
             StackOp::Deploy { .. } if instance.members.is_empty() => {
                 self.forget(ctx, &instance, "its deploy made no VM").await
