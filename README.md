@@ -247,8 +247,9 @@ containers, the dashboard, host details, reachability dots, exports and imports,
   a folder takes the folder's key or agent login for sessions the source says nothing about, never its vault password.
 - Changes are in the audit log like session edits, with the sessions they change, and the read-only lock refuses them.
 - Exports carry folder defaults; an import shows a folder here with other defaults as a choice (keep this laptop's,
-  the default, or take the file's). Files exported by 0.5.0 use file format 2, which 0.4.x refuses ("a newer version
-  of Remotely"), since it would drop the defaults.
+  the default, or take the file's). An export that uses folder defaults (a folder that sets one, or a session that
+  logs in as its folders say) is file format 2, which 0.4.x refuses ("a newer version of Remotely"), since it would
+  drop them; any other export stays format 1, which 0.4.x imports.
 
 ### The vault and where its passwords go
 

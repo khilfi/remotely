@@ -259,7 +259,8 @@ crates/core/          remotely-core: all app logic
                       authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
                       and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
-                      format version 2 since 0.5.0, QL-16; new exports use file::KDF, 256 MiB and 3 passes, and a file
+                      format version 2 for an export that uses QL-16 folder defaults, else 1, which 0.4.x reads; new
+                      exports use file::KDF, 256 MiB and 3 passes, and a file
                       opens with the parameters in its header, so older 64 MiB files still import), preview with
                       conflicts (skip, replace, keep both), commit; audited; an export refuses the vault password as
                       its passphrase; QL-16 sessions travel with what they set themselves and folders with their

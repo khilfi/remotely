@@ -913,6 +913,68 @@ async fn export(core: &Core, dir: &Path) -> std::path::PathBuf {
     path
 }
 
+/// The file format an export says (its envelope's `version`), read without the passphrase.
+fn format_of(path: &Path) -> u64 {
+    let envelope: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    envelope["version"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn an_export_says_format_2_only_when_it_uses_folder_defaults() {
+    let core = core().await;
+    let ctx = &core.ctx;
+    let dir = temp_folder("folder-defaults-format");
+    let folder = core.sessions.create_folder(ctx, "Customer", None).await.unwrap();
+    let s = core
+        .sessions
+        .create(
+            ctx,
+            SessionInput {
+                username: Some("alice".into()),
+                auth: SessionAuth::Agent,
+                ..in_folder("web01", "web01.example.com", folder.id)
+            },
+        )
+        .await
+        .unwrap();
+    // Nothing from QL-16 in it: 0.4.x reads it whole, so it says the format 0.4.x knows.
+    assert_eq!(
+        format_of(&export(&core, &dir).await),
+        u64::from(remotely_core::transfer::FORMAT_VERSION_PLAIN)
+    );
+    // A session that takes its login from its folders would lose it on 0.4.x: format 2, which 0.4.x refuses.
+    let mut from_folder = s.input();
+    from_folder.auth = SessionAuth::Folder;
+    core.sessions.update(ctx, s.id, from_folder).await.unwrap();
+    assert_eq!(
+        format_of(&export(&core, &dir).await),
+        u64::from(remotely_core::transfer::FORMAT_VERSION)
+    );
+    // So does a folder with defaults.
+    let mut own = get(&core, s.id).await.input();
+    own.auth = SessionAuth::Agent;
+    core.sessions.update(ctx, s.id, own).await.unwrap();
+    set_defaults(
+        &core,
+        folder.id,
+        FolderDefaults {
+            environment: Some(Environment::Prod),
+            ..FolderDefaults::default()
+        },
+    )
+    .await;
+    let path = export(&core, &dir).await;
+    assert_eq!(format_of(&path), 2);
+    // Either opens here.
+    let preview = core
+        .transfer
+        .open(ctx, &path, pw(PASSPHRASE), &core.vault)
+        .await
+        .unwrap();
+    assert_eq!(preview.folder_defaults.len(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 fn commit_all(
     preview: &remotely_core::transfer::TransferPreview,
     folder_defaults: Vec<ItemChoice>,

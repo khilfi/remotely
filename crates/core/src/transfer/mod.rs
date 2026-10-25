@@ -71,7 +71,7 @@ use crate::vault::{
 };
 use crate::vm_links::VmLink;
 
-pub use file::{FORMAT, FORMAT_VERSION, MAX_FILE_BYTES};
+pub use file::{FORMAT, FORMAT_VERSION, FORMAT_VERSION_PLAIN, MAX_FILE_BYTES};
 
 /// The export file's extension.
 pub const FILE_EXTENSION: &str = "remotely";
@@ -176,6 +176,20 @@ struct SessionEntry {
     /// CT-01: the container engines it is marked with. Files from before 0.4.0 have none.
     #[serde(default)]
     containers: Vec<ContainerEntry>,
+}
+
+impl Payload {
+    /// QL-16: format 2 when a folder sets defaults or a session takes its login from its folders, which 0.4.x would
+    /// drop (a session would lose its folder's user, login or Prod label there); otherwise format 1, which 0.4.x imports.
+    fn format_version(&self) -> u32 {
+        let uses_folder_defaults = self.folders.iter().any(|f| !f.defaults.is_empty())
+            || self.sessions.iter().any(|s| s.auth == SessionAuth::Folder);
+        if uses_folder_defaults {
+            file::FORMAT_VERSION
+        } else {
+            file::FORMAT_VERSION_PLAIN
+        }
+    }
 }
 
 impl SessionEntry {
@@ -1435,10 +1449,11 @@ impl Transfer {
             folder_defaults: payload.folders.iter().filter(|f| !f.defaults.is_empty()).count(),
             groups: payload.groups.len(),
         };
+        let version = payload.format_version();
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
         drop(payload);
         let kdf = *locks::lock(&self.kdf);
-        let sealed = blocking(move || file::seal(&plain, &passphrase, &kdf)).await?;
+        let sealed = blocking(move || file::seal_as(version, &plain, &passphrase, &kdf)).await?;
         write_atomically(path, &sealed).await?;
 
         let secrets = if include_secrets {

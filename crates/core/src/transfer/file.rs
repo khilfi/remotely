@@ -29,10 +29,13 @@ use crate::vault::SecretString;
 
 /// What the envelope's `format` says.
 pub const FORMAT: &str = "remotely-export";
-/// The payload layout this version writes and reads. A newer file is refused with a message. 2 (0.5.0): sessions
+/// The newest payload layout this version writes and reads. A newer file is refused with a message. 2 (0.5.0): sessions
 /// can take their login from their folders and folders carry defaults (QL-16), which an older version would drop or
-/// fail on, so it refuses such a file with that message instead.
+/// fail on, so it refuses such a file with that message instead. An export that uses neither is still written as
+/// [`FORMAT_VERSION_PLAIN`], so 0.4.x can import it (new parts it doesn't know, such as MultiExec groups, it skips).
 pub const FORMAT_VERSION: u32 = 2;
+/// The layout 0.2.1 to 0.4.x read: what an export without QL-16 folder defaults is written as.
+pub const FORMAT_VERSION_PLAIN: u32 = 1;
 /// How new exports derive their key: Argon2id with 256 MiB and 3 passes on one lane, four times the
 /// vault's memory, since a file can be copied anywhere and attacked offline. About two seconds to export
 /// or open one on a current PC. Older files carry their own (smaller) settings and still open.
@@ -85,8 +88,9 @@ pub fn seal(payload: &[u8], passphrase: &SecretString, kdf: &KdfParams) -> Resul
     seal_as(FORMAT_VERSION, payload, passphrase, kdf)
 }
 
-/// [`seal`] as file format `version` wrote it (tests make files of earlier versions with it).
-fn seal_as(version: u32, payload: &[u8], passphrase: &SecretString, kdf: &KdfParams) -> Result<Vec<u8>> {
+/// [`seal`] as file format `version` (at most [`FORMAT_VERSION`]): an export that an older version can read whole says
+/// the older format, so that version imports it.
+pub fn seal_as(version: u32, payload: &[u8], passphrase: &SecretString, kdf: &KdfParams) -> Result<Vec<u8>> {
     let mut salt = [0u8; SALT_LEN];
     crypto::random(&mut salt)?;
     let key = crypto::derive(passphrase, &salt, kdf)?;
