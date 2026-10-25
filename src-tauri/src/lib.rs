@@ -1,5 +1,5 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
-//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
+//! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`], [`navigation`],
 //! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
 mod catalog;
@@ -16,6 +16,8 @@ mod groups;
 mod host_details;
 mod ipc;
 mod multiexec;
+mod navigation;
+mod schedules;
 mod terminal;
 mod terminal_rules;
 mod tunnels;
@@ -377,6 +379,9 @@ fn forward_events(app: &App, core: &Arc<Core>) {
             }
         });
 
+        // VM-14, VM-27: the scheduler on the wall clock; its runs and pauses -> UI.
+        schedules::start(app, core);
+
         // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
         let reachability = Arc::clone(&core.reachability);
         tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -542,6 +547,25 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         dashboard::dashboard_layout_set,
         dashboard::dashboard_layout_reset,
         dashboard::host_services,
+        schedules::schedules_list,
+        schedules::schedule_get,
+        schedules::schedule_runs,
+        schedules::schedule_preview,
+        schedules::schedule_save,
+        schedules::schedule_approve,
+        schedules::schedule_ask_approval,
+        schedules::schedule_pause,
+        schedules::schedule_resume,
+        schedules::schedule_delete,
+        schedules::schedules_for_vm,
+        schedules::schedule_chain_limits,
+        schedules::schedule_chain_limits_set,
+        navigation::notifications_list,
+        navigation::notifications_add,
+        navigation::notifications_mark_read,
+        navigation::notifications_clear,
+        navigation::topology_vm_networks,
+        navigation::vm_folder_pick,
         terminal::terminal_open,
         terminal::terminal_quick_connect,
         terminal::terminal_open_like,

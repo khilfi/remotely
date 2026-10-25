@@ -69,6 +69,8 @@ import {
   templateReason,
 } from "@/lib/catalog";
 import { plural } from "@/lib/format";
+import { reveal } from "@/lib/reveal";
+import { cn } from "@/lib/utils";
 
 export type TemplatesTab = "sizes" | "images" | "templates";
 
@@ -76,7 +78,8 @@ interface Props {
   /** True while the page is shown: it reads the catalogue again when the user comes back. */
   active: boolean;
   /** The palette asked for a tab, or for a new launch template. */
-  request: { tab: TemplatesTab; create?: boolean; n: number } | null;
+  /** R10 `id`: a size, image or template to show (a search result): scrolled to and lit. */
+  request: { tab: TemplatesTab; create?: boolean; id?: string; n: number } | null;
   /** VM-21: opens the Deploy dialog on a template. */
   onDeploy: (templateId: string) => void;
 }
@@ -126,9 +129,19 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
 
   // A new request from the palette: its tab, and the new item's dialog when it asked for one.
   const [handled, setHandled] = useState(0);
+  // R10: the item a search result asked for, lit until it has been seen.
+  const [lit, setLit] = useState<string | null>(null);
+  const litShown = lit !== null && [...sizes, ...images, ...templates].some((item) => item.id === lit);
+  useEffect(() => {
+    if (!litShown || !lit) return;
+    reveal(document.querySelector(`[data-catalog-id="${CSS.escape(lit)}"]`));
+    const timer = window.setTimeout(() => setLit(null), 2500);
+    return () => window.clearTimeout(timer);
+  }, [litShown, lit]);
   if (request && request.n !== handled) {
     setHandled(request.n);
     setTab(request.tab);
+    setLit(request.id ?? null);
     if (request.create && !readOnly) {
       if (request.tab === "sizes") setDialog({ kind: "size" });
       else if (request.tab === "images") setDialog({ kind: "image" });
@@ -201,7 +214,7 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
               </TableHeader>
               <TableBody>
                 {sizes.map((s) => (
-                  <TableRow key={s.id}>
+                  <TableRow key={s.id} data-catalog-id={s.id} className={cn(lit === s.id && "bg-accent")}>
                     <TableCell className="font-mono font-medium">
                       <span className="flex items-center gap-2">
                         {s.name}
@@ -316,7 +329,11 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
                 </TableHeader>
                 <TableBody>
                   {images.map((i) => (
-                    <TableRow key={i.id} className="align-top">
+                    <TableRow
+                      key={i.id}
+                      data-catalog-id={i.id}
+                      className={cn("align-top", lit === i.id && "bg-accent")}
+                    >
                       <TableCell className="font-medium whitespace-normal">
                         {i.name}
                         {i.problem && <div className="text-xs font-normal text-destructive">{i.problem}</div>}
@@ -445,7 +462,11 @@ export function TemplatesPage({ active, request, onDeploy }: Props) {
                   {templates.map((t) => {
                     const why = templateReason(t);
                     return (
-                      <TableRow key={t.id} className="align-top">
+                      <TableRow
+                        key={t.id}
+                        data-catalog-id={t.id}
+                        className={cn("align-top", lit === t.id && "bg-accent")}
+                      >
                         <TableCell className="font-medium whitespace-normal">
                           <span className="flex flex-wrap items-center gap-2">
                             {t.name}

@@ -69,13 +69,23 @@ crates/core/          remotely-core: all app logic
     command_bus.rs    AP-01 approvals expire after APPROVAL_TTL (15 min, audited approval_expired); one whose target
                       became Prod or protected since is asked again (ApprovalChanged, same id) instead of running;
                       AP-06 set_rules_with: a change PolicyRules::loosened names needs the vault password; BX-07 a
-                      sudo password new to some targets adds VaultReauth to the approval, then they may use it
+                      sudo password new to some targets adds VaultReauth to the approval, then they may use it;
+                      command_bus/standing.rs VM-14, VM-27 standing approvals: ask_standing at a schedule's save (the
+                      steps of its highest command, no countdown; Low granted at once), approve_standing records a
+                      StandingGrant (content hash, PolicyRules::fingerprint of the rules that rated it, tier, command
+                      templates, targets with their labels then, the answers; migration 0025), submit_standing checks
+                      each scheduled command (read-only lock; edited, new, Prod or protected targets, rules changed:
+                      StandingChanged, nothing runs; another command or a revoked grant refused, approval_refused),
+                      audits approval_used; ApprovalRecord.standing names the schedule and run in the job's entries
     settings.rs       QL-15 settings this version can't read are set aside (`<key>.unreadable`), audited, and get
                       their defaults at start, instead of stopping the app
     policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit;
                       AP-01 RUNS_ANYTHING: shells, interpreters and command runners can't be read-only entries
                       SS-07 a loopback SOCKS tunnel is at least Medium while other users are signed in to this PC
-                      (set_other_users, from HostCounters::other_users_signed_in: WTSEnumerateSessionsW)
+                      (set_other_users, from HostCounters::other_users_signed_in: WTSEnumerateSessionsW);
+                      standing.rs VM-14, VM-27 evaluate_standing (a schedule rated as the highest of its commands, no
+                      countdown) and PolicyRules::fingerprint (the tiers, thresholds, Prod rule, countdown and safety
+                      default that rate given actions)
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     jobs.rs           QL-15: a failing journal or audit write is logged and the job goes on to its real result
@@ -237,14 +247,34 @@ crates/core/          remotely-core: all app logic
                       session and VM, migration 0014), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
-                      apt or dnf; every command checked read-only by `classify_script` in tests)
+                      apt or dnf; every command checked read-only by `classify_script` in tests), networks.rs (QL-21
+                      every VM's adapters for the map from the stored hardware; only VMs never read are read, `fresh`
+                      reads all, NETWORK_READS_AT_ONCE)
     alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
                       as the grid shows them, rule edits and acknowledge audited and locked (Change::Alerts), the
                       alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
+    schedules/        VM-14, VM-27 (migration 0025, Core.schedules, Change::Schedules): spec.rs ScheduleSpec (action:
+                      snapshot keep N, start, stop, suspend, resume; targets: VMs, tags, stacks once R6 adds them;
+                      content_hash; snapshot_name `Remotely schedule '<name>' <local time> (run <id>)`), timing.rs
+                      (hourly, daily, weekly in local time, idle; next_after: a time the clocks jump over runs at the
+                      first minute after, a repeated one once, both noted; due_between for missed runs), clock.rs
+                      (Clock: SystemClock, Windows' zone; fakes/clock.rs FakeClock and FakeZone with EU and US rules),
+                      idle.rs (VM-14 auto-suspend from the history's 1-minute averages and the live rounds; a gap is
+                      not idle), chains.rs (VM-27 ChainLimits `schedules.chainLimits`, assess from MO-13's disk
+                      chains), mod.rs Schedules: save asks the bus (an edit of the content withdraws the approval),
+                      tick (each active schedule checked: changes pause it, NeedsApproval; due runs start; over 2 min
+                      late is missed, reported once, never caught up; the read-only lock skips; a run still going
+                      skips), runs on the bus under the grant (power runs leave VMs already in the state alone;
+                      snapshot runs record each new snapshot by id, retention deletes only those whose id and name
+                      still match), ScheduleEvent for the UI and QL-25, schedule_* audit events
     dashboard.rs      MO-16 the layout (`dashboard.layout`, per workspace, null is the default): widgets on 4 columns
                       and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout
+    notifications.rs  QL-25 the notification centre's history in memory (no migration; the module says why): the UI
+                      adds entries, titles and bodies through export::redact_secrets and without control or Cf
+                      characters, MAX_NOTIFICATIONS 500, per workspace, read, unread, clear, `once` keys; links are the
+                      UI's AppLink JSON, kept as given; not audited, not locked
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
                       command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
@@ -384,7 +414,8 @@ crates/core/          remotely-core: all app logic
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
                       and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
-                      terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021)
+                      terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021); schedules.rs (VM-14,
+                      VM-27 schedules, their runs (200 kept), the snapshots they took, standing approvals)
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -404,8 +435,9 @@ crates/core/          remotely-core: all app logic
                       chains, tunnels, the Containers page and host details by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
                       QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16;
-                      conversion.rs: CV-01 to CV-03, VM-17); opt-in workstation_it.rs, virtualbox_it.rs and
-                      conversion_it.rs (the real conversion tools on small images in the temp folder)
+                      schedules.rs: VM-14, VM-27 on a FakeClock, no sleeping; conversion.rs: CV-01 to CV-03, VM-17);
+                      opt-in workstation_it.rs, virtualbox_it.rs and conversion_it.rs (the real conversion tools on
+                      small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
@@ -419,7 +451,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
                       (host_details.rs), MO-06, MO-07, MO-16 the dashboard's history, alerts, layout and
-                      services widget, and the alerts' Windows notification (dashboard.rs); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
+                      services widget, and the alerts' Windows notification (dashboard.rs); R10 navigation.rs (QL-25
+                      notifications_*, QL-21 topology_vm_networks, QL-23 vm_folder_pick); QL-15 diagnostics.rs (the daily log file, crash files from the panic hook,
                       startup message boxes, setting an unopenable database aside, Settings About's logs folder, UI
                       crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
                       instance (release builds), closes what a reloaded page had open (on_page_load), and turns
@@ -430,10 +463,12 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       the command library) run on spawn_blocking, never on the window's thread; VM-23, VM-24
                       vm_settings.rs (ISO, shared folder and existing VM dialogs opened here, ISO drops taken from the
                       staged drop, Open console, screenshots, guest OS types); VM-21, VM-10 deploy.rs (the Deploy and
-                      Clone dialogs' checks and submits, host adapters, the default VM folder); CV-01 to CV-03,
-                      VM-17 convert.rs (Image tools' file dialog, Inspect, Convert's options and its save dialog,
-                      Verify with `convert://verify` progress, Export's options and folder dialog, Import's analysis,
-                      check and submit, QEMU's page after checked_qemu_site; Settings' qemu-img path in ipc.rs)
+                      Clone dialogs' checks and submits, host adapters, the default VM folder); VM-14, VM-27
+                      schedules.rs (the scheduler's loop, `schedules://event`, the Schedules page's and VM tab's
+                      commands); CV-01 to CV-03, VM-17 convert.rs (Image tools' file dialog, Inspect, Convert's
+                      options and its save dialog, Verify with `convert://verify` progress, Export's options and
+                      folder dialog, Import's analysis, check and submit, QEMU's page after checked_qemu_site;
+                      Settings' qemu-img path in ipc.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -462,14 +497,23 @@ src/                  React + TypeScript UI
                       QemuImgCard (Settings' Conversion tools; ImportDialog and ExportDialog are SS-02's and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
-                      (Ctrl+Shift+G); TerminalRulesCard for QL-17)
+                      (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
+                      NotificationSources (QL-25: jobs and MO-07 alerts kept whatever page shows), ShortcutSheet
+                      (QL-24, Ctrl+/), FirstRunWizard (QL-23: the Vault page's SetupCard, the import dialog); VM-14,
+                      VM-27 ScheduleDialog (the core's preview of next runs and warnings), ScheduleRunsSheet,
+                      VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
                       templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
                       VM-21 and VM-10, Import... and the selection's Export..., CV-01 and VM-17; ImageToolsPage
-                      after Templates, no shortcut (palette): CV-03 Inspect, Convert, Verify, the tools found and
-                      QEMU's link). P6: App memoises every page and passes
+                      at Ctrl+; after Templates: CV-03 Inspect, Convert, Verify, the tools found and
+                      QEMU's link; MapPage at Ctrl+0: QL-21 HTML nodes over an SVG of lines only, so FD-03's
+                      DOM masking covers it; SchedulesPage at Ctrl+. (VM-14, VM-27; no Ctrl+digit was left), also from the palette and a
+                      VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
+                      take a request to show one item (Sessions `focus`, Activity `focusJob`, Settings `focus` by
+                      settings-index.ts, Containers `request`, Terminal `focusRequest` and `snippetRequest`,
+                      Templates `request.id`). P6: App memoises every page and passes
                       stable callbacks, and renders
                       only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
                       shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
@@ -502,10 +546,11 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form),
-                      deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and packages, a job's steps from its events
-                      and targets), convert.ts and convert-api.ts (CV-01 to CV-03, VM-17 texts, QL-08 reasons, the
-                      Verify verdict; the conversion IPC's types and wrappers), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
+                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0, Image tools Ctrl+;), catalog.ts (VM-19
+                      to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
+                      packages, a job's steps from its events and targets), convert.ts and convert-api.ts (CV-01 to CV-03, VM-17 texts,
+                      QL-08 reasons, the Verify verdict; the conversion IPC's types and wrappers), vm-snapshots.ts
+                      (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
@@ -515,14 +560,25 @@ src/                  React + TypeScript UI
                       with live rounds, gaps), alerts.ts (MO-07 wording, the editor's checks, one notification per
                       round), dashboard-layout.ts (MO-16 add, remove, move, resize, drag snapping),
                       ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
-                      debounce.ts (when a reload after job events runs), retention.ts (BX-02 the retention choices
+                      debounce.ts (when a reload after job events runs), schedules-api.ts and schedules.ts (VM-14,
+                      VM-27 wrappers and types; the editor's form, checks and wording), retention.ts (BX-02 the retention choices
                       and a purge's summary for Settings' DataRetentionCard),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
                       addresses as `mac-N`), rollout.ts (H9 canary, stop after failures, retry choices),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
-                      mentions it, presentation-rescan.ts), presentation-state.ts; pure helpers with
+                      mentions it, presentation-rescan.ts), presentation-state.ts; R10: links.ts (AppLink, isAppLink:
+                      every search result, map node, status bar item and notification), search.ts (QL-20 ranking:
+                      every word matches a field, name > address > tag > detail), search-sources.ts (each kind's
+                      items), search-providers.ts (SEARCH_PROVIDERS: later packages add theirs), settings-index.ts
+                      (Settings cards by label), container-cache.ts (what the Containers page read last; search
+                      makes no logins), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's host
+                      networks, layered layout), open-tunnels.ts (every pane's tunnels, from their events),
+                      status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs), notifications.ts and
+                      notifications-store.ts (QL-25 entries per source, JobNotes, grouping), navigation-api.ts,
+                      density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
+                      shortcut), first-run.ts (QL-23); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```

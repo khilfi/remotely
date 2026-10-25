@@ -14,6 +14,11 @@
 // FD-03: the top bar's Present button (Presenting menu while on) and the palette start and stop presentation mode,
 // its read-only lock and "Hide terminal output" (Presentation.tsx).
 //
+// R10 (0.5.0): every link in the app (QL-20 search results, QL-21 map nodes, QL-22 status bar items, QL-25
+// notifications) is an AppLink (lib/links.ts) that `openLink` below opens; the Map page has Ctrl+0; the status bar runs
+// along the bottom with the notification centre's bell; Ctrl+/ shows every shortcut (QL-24); the first-run wizard
+// offers itself when there is no vault and no session (QL-23).
+//
 // P6: App renders again only when a job is queued or ends, not on each of its progress events (src/lib/job-events.ts),
 // and the pages are memoised with stable callbacks, so a render here doesn't re-render the pages whose props stayed
 // the same. VM-01: a finished job refreshes the VM list only when it may have changed VMs (its scope), and a settings
@@ -22,6 +27,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
+  CalendarClockIcon,
   CameraIcon,
   FilePlusIcon,
   DownloadIcon,
@@ -30,10 +36,15 @@ import {
   DiscIcon,
   GitCompareArrowsIcon,
   HistoryIcon,
+  BellIcon,
+  CompassIcon,
+  KeyboardIcon,
   KeyRoundIcon,
   LayersIcon,
   HardDriveIcon,
   ImportIcon,
+  NetworkIcon,
+  Rows3Icon,
   RocketIcon,
   LayoutDashboardIcon,
   ListTreeIcon,
@@ -96,6 +107,18 @@ import {
 } from "@/components/Presentation";
 import { UpdateBanner, UpdateNotice } from "@/components/UpdateBanner";
 import { AlertNotifier } from "@/components/AlertNotifier";
+import { FirstRunWizard } from "@/components/FirstRunWizard";
+import { NotificationCentre } from "@/components/NotificationCentre";
+import { NotificationSources } from "@/components/NotificationSources";
+import { ShortcutSheet } from "@/components/ShortcutSheet";
+import { StatusBar } from "@/components/StatusBar";
+import { useDensity } from "@/lib/density";
+import { firstRunDismissed, onFirstRunRequest, requestFirstRun, shouldOfferFirstRun } from "@/lib/first-run";
+import type { AppLink } from "@/lib/links";
+import { fromSkipped, fromUpdate } from "@/lib/notifications";
+import { notify } from "@/lib/notifications-store";
+import { opensShortcutSheet } from "@/lib/shortcuts";
+import { reportVault } from "@/lib/status-bar";
 import {
   api,
   errorCode,
@@ -113,9 +136,11 @@ import { useTheme } from "@/lib/theme";
 import { checkMessage, isNotice, recheckDelayMs, UPDATE_CHECK_INTERVAL_MS } from "@/lib/updates";
 import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
-import { ContainersPage, type ContainerShellRequest } from "@/pages/ContainersPage";
+import { ContainersPage, type ContainerRequest, type ContainerShellRequest } from "@/pages/ContainersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
+import { SchedulesPage, type SchedulesRequest } from "@/pages/SchedulesPage";
+import { MapPage } from "@/pages/MapPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
@@ -135,11 +160,14 @@ import {
   type SettingsChange,
 } from "@/lib/job-events";
 import type { VmView } from "@/lib/vm-snapshots";
+import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 
 type PageId =
   | "vms"
   | "templates"
   | "images"
+  | "schedules"
+  | "map"
   | "dashboard"
   | "containers"
   | "sessions"
@@ -153,8 +181,11 @@ type PageId =
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "templates", label: "Templates", title: "VM templates", icon: LayersIcon, shortcut: "Ctrl+9" },
-  // CV-03: no Ctrl+digit is left; the palette opens it.
-  { id: "images", label: "Image tools", title: "Image tools", icon: HardDriveIcon, shortcut: "" },
+  // CV-03: Ctrl+; beside the Schedules page's Ctrl+. (no Ctrl+digit was left).
+  { id: "images", label: "Image tools", title: "Image tools", icon: HardDriveIcon, shortcut: "Ctrl+;" },
+  // VM-14, VM-27: no Ctrl+digit was left.
+  { id: "schedules", label: "Schedules", title: "Schedules", icon: CalendarClockIcon, shortcut: "Ctrl+." },
+  { id: "map", label: "Map", title: "Topology map", icon: NetworkIcon, shortcut: "Ctrl+0" },
   { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
   { id: "containers", label: "Containers", title: "Containers", icon: ContainerIcon, shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
@@ -169,6 +200,8 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 const Vms = memo(VmsPage);
 const Templates = memo(TemplatesPage);
 const ImageTools = memo(ImageToolsPage);
+const Schedules = memo(SchedulesPage);
+const TopologyMap = memo(MapPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
 const Sessions = memo(SessionsPage);
@@ -212,9 +245,24 @@ export default function App() {
   // QL-14: a VM (or the snapshot view) to show on the Virtual machines page.
   const [vmRequest, setVmRequest] = useState<VmPageRequest | null>(null);
   // VM-19 to VM-21: a tab of the Templates page, or a new item there, asked for from the palette.
-  const [templatesRequest, setTemplatesRequest] = useState<{ tab: TemplatesTab; create?: boolean; n: number } | null>(
-    null,
-  );
+  const [templatesRequest, setTemplatesRequest] = useState<{
+    tab: TemplatesTab;
+    create?: boolean;
+    id?: string;
+    n: number;
+  } | null>(null);
+  // R10: what a link (a search result, a map node, a notification, the status bar) asked a page to show.
+  const [sessionsFocus, setSessionsFocus] = useState<{ sessionId: string; n: number } | null>(null);
+  const [terminalFocus, setTerminalFocus] = useState<{ terminalId: string; tunnels?: boolean; n: number } | null>(null);
+  const [snippetRequest, setSnippetRequest] = useState<{ command: string; n: number } | null>(null);
+  const [jobFocus, setJobFocus] = useState<{ jobId: string; n: number } | null>(null);
+  const [settingsFocus, setSettingsFocus] = useState<{ section: string; n: number } | null>(null);
+  const [containerRequest, setContainerRequest] = useState<ContainerRequest | null>(null);
+  // QL-25, QL-24, QL-23: the notification centre, the shortcut sheet and the first-run wizard.
+  const [centreOpen, setCentreOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [firstRunOpen, setFirstRunOpen] = useState(false);
+  const [density, setDensity] = useDensity();
   // VM-21: the Deploy dialog, on a template (its row's Deploy) or on none (the VMs page, the palette).
   const [deploying, setDeploying] = useState<{ templateId: string | null } | null>(null);
   const openDeploy = useCallback((templateId?: string) => setDeploying({ templateId: templateId ?? null }), []);
@@ -228,6 +276,8 @@ export default function App() {
   );
   const [exporting, setExporting] = useState<string | null>(null);
   const openExport = useCallback((vmKey: string) => setExporting(vmKey), []);
+  // VM-14, VM-27: a new schedule (for some VMs) or one schedule's runs, asked from a VM's tab or the palette.
+  const [schedulesRequest, setSchedulesRequest] = useState<SchedulesRequest | null>(null);
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
   const [terminalOpen, setTerminalOpen] = useState<{
     sessionId: string;
@@ -270,6 +320,12 @@ export default function App() {
     setPage("vms");
   }, []);
 
+  /** VM-14, VM-27: the Schedules page, with a new schedule or one schedule's runs open. */
+  const openSchedules = useCallback((ask: ScheduleAsk) => {
+    setSchedulesRequest((prev) => ({ ...ask, n: (prev?.n ?? 0) + 1 }));
+    setPage("schedules");
+  }, []);
+
   /** A page, or a page from before 0.4.0 that is now part of another (Snapshots). */
   const go = useCallback(
     (target: NavTarget) => {
@@ -289,6 +345,13 @@ export default function App() {
     function onKey(e: KeyboardEvent) {
       if (!e.ctrlKey || e.altKey || e.metaKey) return;
       const terminal = inTerminal(e.target);
+      // QL-24: the shortcut sheet (Ctrl+Shift+/ inside a terminal, where Ctrl+/ belongs to the shell).
+      if (opensShortcutSheet(e, terminal) && !paletteOpen.current) {
+        e.preventDefault();
+        e.stopPropagation();
+        setShortcutsOpen((open) => !open);
+        return;
+      }
       if (e.key.toLowerCase() === "k" && (e.shiftKey || !terminal)) {
         // Not over another dialog (an approval in progress keeps the keyboard).
         const otherDialog =
@@ -301,7 +364,7 @@ export default function App() {
         return;
       }
       if (terminal || e.shiftKey || paletteOpen.current) return;
-      const target = /^[1-9,]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
+      const target = /^[0-9,.;]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
       if (target) {
         e.preventDefault();
         go(target);
@@ -319,7 +382,11 @@ export default function App() {
       const now = Date.now();
       if (!shouldPingActivity(last, now)) return;
       last = now;
-      void api.vaultActivity().catch(() => {});
+      // QL-22: the answer moves the status bar's lock countdown on.
+      void api.vaultActivity().then(
+        (info) => reportVault(info),
+        () => {},
+      );
     }
     const events = ["keydown", "pointerdown", "wheel"] as const;
     for (const name of events) window.addEventListener(name, onInput, { capture: true, passive: true });
@@ -361,6 +428,8 @@ export default function App() {
     // A locked vault or a used-up GitHub limit says nothing new: keep showing an update found earlier.
     const nothingNew = result.status === "vaultLocked" || result.status === "rateLimited";
     setUpdateCheck((prev) => (nothingNew && prev?.status === "available" ? prev : result));
+    // QL-25: kept once per version.
+    if (result.status === "available") notify(fromUpdate(result.update));
     // GitHub's limit was used up: one more check just after the time it named (the core makes no call before).
     window.clearTimeout(updateRetry.current);
     const delay = recheckDelayMs(result, Date.now());
@@ -413,6 +482,7 @@ export default function App() {
       // AP-04: a Low action has no dialog, so say which protected targets it left alone.
       const names = outcome.skipped.map((t) => t.name).join(", ");
       toast.info(`Skipped ${outcome.skipped.length} protected: ${names}`, { duration: 8000 });
+      notify(fromSkipped(outcome.skipped.map((t) => t.name)));
     }
   }, []);
 
@@ -518,6 +588,96 @@ export default function App() {
     setTerminalOpen((prev) => ({ sessionId: container.sessionId, n: (prev?.n ?? 0) + 1, container }));
     setPage("terminal");
   }, []);
+
+  // The update banner's state, for links to it, without making openLink change with every check (P6).
+  const offeredRef = useRef(offered);
+  useEffect(() => {
+    offeredRef.current = offered;
+  }, [offered]);
+
+  /** R10: opens what a link is about. A later package adds its kind to lib/links.ts and a case here. */
+  const openLink = useCallback(
+    (link: AppLink) => {
+      switch (link.kind) {
+        case "page":
+          go(navTarget(link.page, PAGES));
+          break;
+        case "vm":
+          openVms([link.vmxPath], link.view ?? "details");
+          break;
+        case "session":
+          setSessionsFocus((prev) => ({ sessionId: link.sessionId, n: (prev?.n ?? 0) + 1 }));
+          setPage("sessions");
+          break;
+        case "terminal":
+          setTerminalFocus((prev) => ({ terminalId: link.terminalId, tunnels: link.tunnels, n: (prev?.n ?? 0) + 1 }));
+          setPage("terminal");
+          break;
+        case "job":
+          setJobFocus((prev) => ({ jobId: link.jobId, n: (prev?.n ?? 0) + 1 }));
+          setPage("activity");
+          break;
+        case "container":
+          setContainerRequest((prev) => ({
+            host: link.host,
+            engine: link.engine,
+            containerId: link.containerId,
+            n: (prev?.n ?? 0) + 1,
+          }));
+          setPage("containers");
+          break;
+        case "catalog":
+          setTemplatesRequest((prev) => ({ tab: link.tab, id: link.id, n: (prev?.n ?? 0) + 1 }));
+          setPage("templates");
+          break;
+        case "setting":
+          setSettingsFocus((prev) => ({ section: link.section, n: (prev?.n ?? 0) + 1 }));
+          setPage("settings");
+          break;
+        case "snippet":
+          setSnippetRequest((prev) => ({ command: link.command, n: (prev?.n ?? 0) + 1 }));
+          setPage("terminal");
+          break;
+        case "alerts":
+          setPage("dashboard");
+          break;
+        case "schedule":
+          openSchedules({ scheduleId: link.scheduleId });
+          break;
+        case "update":
+          // The banner shows on every page; "Later" put it off, so it comes back. Nothing offered: Settings.
+          if (offeredRef.current) setLaterFor(null);
+          else {
+            setSettingsFocus((prev) => ({ section: "updates", n: (prev?.n ?? 0) + 1 }));
+            setPage("settings");
+          }
+          break;
+        case "vault":
+          setPage("vault");
+          break;
+        case "map":
+          setPage("map");
+          break;
+      }
+    },
+    [go, openVms, openSchedules],
+  );
+
+  // QL-23: the wizard offers itself when there is no vault and no session yet (once the vault is known), and opens
+  // again from Settings or the palette.
+  const offeredFirstRun = useRef(false);
+  useEffect(() => {
+    if (offeredFirstRun.current || !vault) return;
+    offeredFirstRun.current = true;
+    if (vault.status !== "notSetUp" || firstRunDismissed()) return;
+    api.sessions().then(
+      (list) => {
+        if (shouldOfferFirstRun({ vaultStatus: vault.status, sessionCount: list.length }, false)) setFirstRunOpen(true);
+      },
+      () => undefined,
+    );
+  }, [vault]);
+  useEffect(() => onFirstRunRequest(() => setFirstRunOpen(true)), []);
 
   /** Pages the others link to, as stable callbacks (P6). */
   const show = useMemo(
@@ -625,6 +785,21 @@ export default function App() {
       },
     },
     {
+      // VM-14, VM-27.
+      id: "new-schedule",
+      label: "New schedule (snapshots, power, auto-suspend)…",
+      icon: CalendarClockIcon,
+      keywords: "schedule timetable nightly snapshot keep retention start stop suspend resume idle cron daily weekly",
+      run: () => openSchedules({ create: true }),
+    },
+    {
+      id: "schedules",
+      label: "Schedules: next runs, history, approvals",
+      icon: CalendarClockIcon,
+      keywords: "schedule timetable missed runs paused approval",
+      run: () => setPage("schedules"),
+    },
+    {
       id: "watch",
       label: "Watch hosts on the dashboard",
       icon: GaugeIcon,
@@ -685,6 +860,34 @@ export default function App() {
           },
         }
       : { id: "unlock", label: "Unlock the vault", icon: LockOpenIcon, run: () => setPage("vault") },
+    {
+      id: "notifications",
+      label: "Notifications",
+      icon: BellIcon,
+      keywords: "notification centre history alerts jobs finished unread",
+      run: () => setCentreOpen(true),
+    },
+    {
+      id: "shortcuts",
+      label: "Keyboard shortcuts (Ctrl+/)",
+      icon: KeyboardIcon,
+      keywords: "keys hotkeys help sheet list",
+      run: () => setShortcutsOpen(true),
+    },
+    {
+      id: "first-run",
+      label: "Open the setup guide",
+      icon: CompassIcon,
+      keywords: "first run wizard welcome getting started vault import sessions",
+      run: () => requestFirstRun(),
+    },
+    {
+      id: "density",
+      label: density === "compact" ? "Comfortable spacing" : "Compact spacing",
+      icon: Rows3Icon,
+      keywords: "density compact comfortable dense rows appearance",
+      run: () => setDensity(density === "compact" ? "comfortable" : "compact"),
+    },
     {
       id: "theme-dark",
       label: resolved === "dark" ? "Turn dark mode off" : "Turn dark mode on",
@@ -856,7 +1059,7 @@ export default function App() {
             <Button
               variant="outline"
               size="sm"
-              className="ml-auto w-64 justify-start text-muted-foreground"
+              className="ml-auto min-w-64 justify-start text-muted-foreground"
               aria-keyshortcuts="Control+K"
               onClick={() => openPalette(null)}
             >
@@ -916,6 +1119,7 @@ export default function App() {
                   onActions={openPalette}
                   request={vmRequest}
                   refreshKey={vmJobs + vmSettings + inventoryVersion}
+                  onSchedules={openSchedules}
                 />
               </ErrorBoundary>
             </section>
@@ -932,6 +1136,21 @@ export default function App() {
                   onImport={openImport}
                   onOpenSettings={show.settings}
                 />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "schedules"}>
+              <ErrorBoundary name="Schedules">
+                <Schedules
+                  active={page === "schedules"}
+                  vault={vault}
+                  onOpenVault={show.vault}
+                  request={schedulesRequest}
+                />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "map"} className="h-full">
+              <ErrorBoundary name="Map">
+                <TopologyMap active={page === "map"} onOpenLink={openLink} />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "dashboard"}>
@@ -951,6 +1170,7 @@ export default function App() {
               <ErrorBoundary name="Containers">
                 <Containers
                   active={page === "containers"}
+                  request={containerRequest}
                   onSubmitted={submitted}
                   onOpenShell={openContainerShell}
                   onOpenSettings={show.settings}
@@ -966,6 +1186,7 @@ export default function App() {
                   onOpenVault={show.vault}
                   onConnect={openTerminal}
                   active={page === "sessions"}
+                  focus={sessionsFocus}
                 />
               </ErrorBoundary>
             </section>
@@ -979,6 +1200,8 @@ export default function App() {
                   compareRequest={terminalCompare}
                   multiExecRequest={terminalMultiExec}
                   searchRequest={terminalSearch}
+                  focusRequest={terminalFocus}
+                  snippetRequest={snippetRequest}
                   vault={vault}
                   onSubmitted={submitted}
                   onOpenVault={show.vault}
@@ -1003,7 +1226,7 @@ export default function App() {
             </section>
             <section hidden={page !== "activity"}>
               <ErrorBoundary name="Activity">
-                <Activity version={jobsVersion} active={page === "activity"} />
+                <Activity version={jobsVersion} active={page === "activity"} focusJob={jobFocus} />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "settings"}>
@@ -1013,10 +1236,18 @@ export default function App() {
                   vault={vault}
                   onVaultChanged={setVault}
                   onOpenVault={show.vault}
+                  focus={settingsFocus}
                 />
               </ErrorBoundary>
             </section>
           </div>
+          <StatusBar
+            vault={vault}
+            updateCheck={updateCheck}
+            updateProblem={updateProblem?.message ?? null}
+            onOpenLink={openLink}
+            onOpenNotifications={() => setCentreOpen(true)}
+          />
         </SidebarInset>
       </SidebarProvider>
 
@@ -1057,6 +1288,7 @@ export default function App() {
           setPage("dashboard");
         }}
         onOpenVm={(vmxPath, view, rename) => openVms([vmxPath], view, rename)}
+        onOpenLink={openLink}
         onOpenConsole={(vmxPath) =>
           void api.vmOpenConsole(vmxPath).then(
             (done) => done.kind === "starting" && submitted(done.outcome),
@@ -1067,6 +1299,19 @@ export default function App() {
       <ReauthDialog />
       {/* MO-07: alerts notify through Windows whatever page shows. */}
       <AlertNotifier />
+      {/* QL-25: jobs and alerts are kept in the notification centre whatever page shows. */}
+      <NotificationSources />
+      <NotificationCentre open={centreOpen} onOpenChange={setCentreOpen} onOpenLink={openLink} />
+      <ShortcutSheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} pages={PAGES} />
+      <FirstRunWizard
+        open={firstRunOpen}
+        onOpenChange={setFirstRunOpen}
+        vault={vault}
+        onVaultChanged={setVault}
+        onOpenVault={show.vault}
+        onSettingsChanged={settingsChanged}
+        onGoTo={(id) => go(navTarget(id, PAGES))}
+      />
       <Toaster theme={resolved} position="bottom-right" />
       <PresentationLayer />
     </TooltipProvider>

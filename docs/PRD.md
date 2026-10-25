@@ -137,6 +137,15 @@ Conversion (0.5.0, `docs/plan-0.5.md` "Approval tiers"; CV-01 to CV-03, VM-17). 
 | Export a VM labelled Prod | Medium |
 | Import a foreign VM or disk as a new VM (CV-01) | As a deploy: Medium, High for Prod |
 
+Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
+
+| Action | Tier |
+| --- | --- |
+| A scheduled snapshot, start, shut down, suspend or resume, or auto-suspend of idle VMs | The action's own tier on the schedule's VMs (Prod raises it, protected VMs are skipped), approved when the schedule is saved with the same steps as running it then, AP-06 included; the countdown is each run's |
+| A snapshot schedule that keeps the last N | The higher of taking and deleting a snapshot (High): retention deletes the schedule's own snapshots |
+| A run after the schedule was edited, a VM became Prod or protected or got its tag, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
+| Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |

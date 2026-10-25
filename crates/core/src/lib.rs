@@ -45,6 +45,7 @@
 //!   metrics::history (MO-06): the rounds' 1-minute averages on disk, pruned daily; alerts (MO-07): rules
 //!     run on each round, an alert list and events for the UI's notifications; dashboard (MO-16): the
 //!     dashboard's layout, per workspace
+//!   notifications (QL-25): the notification centre's history, in memory and redacted
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -76,11 +77,13 @@ pub mod locks;
 pub mod login_guard;
 pub mod metrics;
 pub mod multiexec_groups;
+pub mod notifications;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
 pub mod retention;
 pub mod save_guard;
+pub mod schedules;
 pub mod sessions;
 pub mod settings;
 pub mod snapshots;
@@ -127,6 +130,7 @@ use login_guard::LoginGuard;
 use metrics::history::MetricsHistory;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use multiexec_groups::MultiExecGroups;
+use notifications::Notifications;
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
@@ -213,7 +217,8 @@ impl UiSnapshot {
 pub struct Core {
     pub ctx: Context,
     pub store: Store,
-    /// Shared with the deploy runner, which lists the VMs it makes (VM-21).
+    /// Shared with the deploy runner, which lists the VMs it makes (VM-21), and with [`Core::schedules`], which
+    /// reads the VMs' power states before a scheduled run.
     pub inventory: Arc<Inventory>,
     /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
     /// through [`Core::bus`].
@@ -275,6 +280,12 @@ pub struct Core {
     pub alerts: Arc<Alerts>,
     /// MO-16: the dashboard's layout of this workspace.
     pub layouts: Layouts,
+    /// VM-14, VM-27: snapshot and power schedules, auto-suspend of idle VMs, and the scheduler. Each run submits to
+    /// [`Core::bus`] under the approval given when its schedule was saved. The shell starts it with
+    /// [`schedules::Schedules::run`].
+    pub schedules: schedules::Schedules,
+    /// QL-25: the notification centre's history, in memory (the module says why not on disk).
+    pub notifications: Notifications,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
@@ -553,6 +564,16 @@ impl Core {
         )
         .with_converter(Arc::clone(&converter));
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
+        // VM-14, VM-27: each run goes through the bus under its schedule's standing approval.
+        let schedules = schedules::Schedules::new(schedules::ScheduleParts {
+            ctx,
+            store: store.clone(),
+            bus: Arc::clone(&bus),
+            jobs: Arc::clone(&jobs),
+            hypervisors: hypervisors.clone(),
+            inventory: Arc::clone(&inventory),
+            metrics: Arc::clone(&metrics),
+        });
         let core = Self {
             vm_settings,
             convert,
@@ -563,6 +584,7 @@ impl Core {
             deploy,
             inventory,
             deployer,
+            schedules,
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())
                 .with_bindings(bindings.clone()),
@@ -591,6 +613,7 @@ impl Core {
             history,
             alerts,
             layouts: Layouts::new(store.clone(), ctx),
+            notifications: Notifications::new(),
             host_details,
             login_guard,
             presentation,

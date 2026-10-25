@@ -4,6 +4,7 @@
 //! Compiled for the crate's own unit tests and, through the `fakes` feature, for the integration
 //! tests in `tests/`. The app never enables that feature.
 
+pub mod clock;
 pub mod containers;
 pub mod disk_images;
 pub mod disk_tools;
@@ -3051,6 +3052,7 @@ impl Vault for FakeVault {
             windows_login: false,
             windows_login_available: false,
             idle_lock_minutes: 15,
+            locks_in_secs: Some(15 * 60),
         }
     }
 

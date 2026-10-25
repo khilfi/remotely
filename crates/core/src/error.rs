@@ -104,6 +104,11 @@ pub enum CoreError {
         request: Box<crate::command_bus::ApprovalRequest>,
     },
 
+    /// VM-14, VM-27: something changed since a schedule was approved (it was edited, a target became Prod or
+    /// protected or is new, the approval rules changed), so its run did not start and it waits to be approved again.
+    #[error("{changes} since the schedule was approved, so it waits to be approved again")]
+    StandingChanged { changes: String },
+
     #[error("the vault is locked. Unlock it on the Vault page")]
     VaultLocked,
 
@@ -409,6 +414,7 @@ impl CoreError {
             CoreError::ApprovalRejected(_) => "approval_rejected",
             CoreError::ApprovalExpired { .. } => "approval_expired",
             CoreError::ApprovalChanged { .. } => "approval_changed",
+            CoreError::StandingChanged { .. } => "standing_changed",
             CoreError::VaultLocked => "vault_locked",
             CoreError::VaultNotSetUp => "vault_not_set_up",
             CoreError::WrongVaultPassword => "wrong_vault_password",

@@ -104,6 +104,15 @@ import { plural } from "@/lib/format";
 import { shouldPoll } from "@/lib/polling";
 import { usePoll, useVisibility } from "@/hooks/use-poll";
 import { cn } from "@/lib/utils";
+import { keepContainerHosts, rememberContainers } from "@/lib/container-cache";
+
+/** R10: a container to show (a search result): its host and engine chosen, its details open. */
+export interface ContainerRequest {
+  host: ContainerHost;
+  engine: EngineKind;
+  containerId: string;
+  n: number;
+}
 
 /** "Open a shell": the terminal tab to open for a container. */
 export interface ContainerShellRequest {
@@ -123,6 +132,8 @@ interface Props {
   onOpenSettings: () => void;
   /** Changes when a container action finished or this PC's docker.exe changed (P2): the lists are read again. */
   refreshKey: number;
+  /** R10: a container to show. */
+  request?: ContainerRequest | null;
 }
 
 type Tab = "containers" | "images" | "volumes" | "networks";
@@ -143,7 +154,14 @@ function hostLabel(host: ContainerHostInfo) {
   return host.host.kind === "thisPc" ? "This PC" : host.name;
 }
 
-export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSettings, refreshKey }: Props) {
+export function ContainersPage({
+  active,
+  onSubmitted,
+  onOpenShell,
+  onOpenSettings,
+  refreshKey,
+  request = null,
+}: Props) {
   const readOnlyReason = useReadOnlyReason();
   const readOnly = readOnlyReason !== null;
   const [hosts, setHosts] = useState<ContainerHostInfo[] | null>(null);
@@ -166,6 +184,15 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
   const [submitting, setSubmitting] = useState(false);
   const [dialog, setDialog] = useState<{ kind: "host"; sessionId: string | null } | { kind: "pull" } | null>(null);
 
+  // R10: a container asked for (the palette's search): its host and engine, the containers tab, its details.
+  const [requestHandled, setRequestHandled] = useState(request?.n ?? 0);
+  if (request && request.n !== requestHandled) {
+    setRequestHandled(request.n);
+    setCurrent({ host: request.host, engine: request.engine });
+    setTab("containers");
+    setDetail(request.containerId);
+  }
+
   // The hosts: the marked sessions, then this PC when Docker Desktop is there. No connection is made.
   useEffect(() => {
     if (!active) return;
@@ -175,6 +202,8 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
         if (stale) return;
         setHosts(found);
         setHostsError(null);
+        // QL-20: search forgets the containers of hosts that are no longer marked.
+        keepContainerHosts(found);
         setCurrent((cur) => {
           const still = cur && found.find((h) => sameHost(h.host, cur.host));
           if (still && still.engines.some((e) => e.engine === cur.engine)) return cur;
@@ -215,6 +244,19 @@ export function ContainersPage({ active, onSubmitted, onOpenShell, onOpenSetting
       stale = true;
     };
   }, [current, key, active]);
+
+  // QL-20: the list just read, for the palette to find without a login of its own.
+  const hostName = info?.name;
+  useEffect(() => {
+    if (!current || !list || list.key !== key || !("value" in list)) return;
+    rememberContainers({
+      host: current.host,
+      engine: current.engine,
+      hostName: hostName ?? "a host",
+      containers: list.value.containers,
+      readAt: list.value.readAt,
+    });
+  }, [current, list, key, hostName]);
 
   // Their resource use, now and every 10 s while the page shows the containers and the window is visible: one read at a
   // time, for the list and the details panel's Stats tab alike. Refresh (or another host) reads at once.

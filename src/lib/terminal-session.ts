@@ -51,6 +51,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { toast } from "sonner";
 import { latestOnly } from "@/lib/clipboard-copy";
+import { forgetTerminal, reportTunnels } from "@/lib/open-tunnels";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { masker, TerminalMasker } from "@/lib/presentation";
 import { presentationView, subscribePresentation } from "@/lib/presentation-state";
@@ -748,6 +749,8 @@ export class PaneSession {
           (this.snapshot.tunnels ?? []).filter((t) => t.state.state === "asking").map((t) => t.forward.id),
         );
         this.update({ tunnels: event.tunnels });
+        // QL-21, QL-22: the status bar and the map follow every terminal's tunnels.
+        if (this.coreId) reportTunnels(this.coreId, event.tunnels);
         for (const t of event.tunnels) {
           if (t.state.state === "asking" && !before.has(t.forward.id)) this.onTunnelAsking?.(this, t.forward.id);
         }
@@ -824,6 +827,7 @@ export class PaneSession {
         return;
       }
       this.coreId = id;
+      if (this.snapshot.tunnels) reportTunnels(id, this.snapshot.tunnels);
       this.flush();
     } catch (err) {
       this.started = false;
@@ -869,7 +873,10 @@ export class PaneSession {
     if (this.closed) return;
     this.closed = true;
     this.opener = null;
-    if (this.coreId) void api.terminalClose(this.coreId);
+    if (this.coreId) {
+      forgetTerminal(this.coreId);
+      void api.terminalClose(this.coreId);
+    }
     this.stopFollowing();
     this.showReal();
     this.visibility?.disconnect();
