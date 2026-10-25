@@ -102,6 +102,7 @@ fn session_input(name: &str, host: &str, port: u16, auth: SessionAuth) -> Sessio
         username: Some("alice".into()),
         auth,
         jump_session_id: None,
+        jump_direct: false,
         startup_command: None,
         startup_on_reconnect: false,
         prompt_hook: None,

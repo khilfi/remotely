@@ -162,6 +162,9 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
         return { method, keyId: id, passphraseId: passphraseId === NONE ? null : passphraseId };
       case "agent":
         return { method };
+      // QL-16: the form never offers "as its folders say"; a saved session can be switched to it in the editor.
+      case "folder":
+        return { method };
     }
   }
 

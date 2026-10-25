@@ -873,7 +873,9 @@ export type SessionAuth =
   /** No password chosen: the terminal asks when it connects (SS-03). */
   | { method: "password"; passwordId: string | null }
   | { method: "key"; keyId: string | null; passphraseId: string | null }
-  | { method: "agent" };
+  | { method: "agent" }
+  /** QL-16: as the session's folders say (a session's own choice; what applies to it is never this). */
+  | { method: "folder" };
 
 /** What the session editor sends; the core checks and tidies it. */
 export interface SessionInput {
@@ -884,7 +886,10 @@ export interface SessionInput {
   port: number;
   username: string | null;
   auth: SessionAuth;
+  /** null: as its folders say (QL-16), unless jumpDirect. */
   jumpSessionId: string | null;
+  /** QL-16: no jump host, whatever its folders set. */
+  jumpDirect: boolean;
   startupCommand: string | null;
   /** SS-01: type the startup command again after an automatic reconnect (off: only on connections the user opens). */
   startupOnReconnect: boolean;
@@ -898,9 +903,55 @@ export interface SessionInput {
   vmId: string | null;
 }
 
+/** QL-16: the folder a value comes from. */
+export interface FromFolder {
+  id: string;
+  name: string;
+}
+
+/** QL-16: which folder gives each value a session doesn't set itself (null: its own, or the app's default). */
+export interface Inherited {
+  username: FromFolder | null;
+  auth: FromFolder | null;
+  jump: FromFolder | null;
+  environment: FromFolder | null;
+  /** Tags from folders the session doesn't have itself. */
+  tags: { tag: string; folder: FromFolder }[];
+}
+
+/** QL-16: what a session sets itself, of what a folder can set too (what the editor edits). */
+export interface OwnValues {
+  /** null: from its folders. */
+  username: string | null;
+  /** "folder": from its folders. */
+  auth: SessionAuth;
+  jumpSessionId: string | null;
+  jumpDirect: boolean;
+  /** "none": from its folders. */
+  environment: Environment;
+  tags: string[];
+}
+
+/** QL-16: what applies to a session in a folder that sets nothing itself (the editor's "from folder X"). */
+export interface Effective {
+  username: string | null;
+  auth: SessionAuth;
+  jumpSessionId: string | null;
+  environment: Environment;
+  tags: string[];
+  inherited: Inherited;
+}
+
+/**
+ * A saved session. QL-16: username, auth, jumpSessionId, environment and tags are what applies to it (its own values,
+ * then its folders', then the app's); `own` is what it sets itself, and `inherited` names the folders that give the
+ * rest.
+ */
 export interface SessionRecord extends SessionInput {
   id: string;
   protocol: string;
+  own: OwnValues;
+  inherited: Inherited;
   /** AP-04: bulk actions skip it. */
   protected: boolean;
   /** QL-01: how vmId was set. null: no decision yet, so auto-linking may link it. */
@@ -917,12 +968,36 @@ export interface SessionRecord extends SessionInput {
   lastOpenedAt: string | null;
 }
 
+/** QL-16: what a folder sets for the sessions in it and its subfolders. null (or empty): the folder above decides. */
+export interface FolderDefaults {
+  username: string | null;
+  /** Never "folder". */
+  auth: SessionAuth | null;
+  jumpSessionId: string | null;
+  /** No jump host for its sessions, whatever a folder above sets. */
+  jumpDirect: boolean;
+  /** Never "none": a folder adds a label, it can't take one off. */
+  environment: Environment | null;
+  tags: string[];
+}
+
+export const NO_FOLDER_DEFAULTS: FolderDefaults = {
+  username: null,
+  auth: null,
+  jumpSessionId: null,
+  jumpDirect: false,
+  environment: null,
+  tags: [],
+};
+
 export interface SessionFolder {
   id: string;
   /** null: at the top level. */
   parentId: string | null;
   name: string;
   sortOrder: number;
+  /** QL-16. */
+  defaults: FolderDefaults;
 }
 
 /** SS-01 search. Empty fields match everything. */
@@ -1512,6 +1587,8 @@ export interface ExportReport {
   favourites: number;
   /** SS-07 saved port forwards, over all sessions. */
   forwards: number;
+  /** QL-16 folders with defaults. */
+  folderDefaults: number;
 }
 
 export type TransferStatus = "new" | "same" | "conflict";
@@ -1548,6 +1625,8 @@ export interface TransferPreview {
   secretValues: boolean;
   /** BX-08 favourite commands. */
   favourites: TransferItem[];
+  /** QL-16: the file's folders that set defaults, compared with the folder at the same place here. */
+  folderDefaults: TransferItem[];
   warnings: string[];
 }
 
@@ -1574,6 +1653,8 @@ export interface TransferReport {
   startupLeftOut: number;
   forwardsLeftOut: number;
   foldersAdded: number;
+  /** QL-16: folder defaults taken from the file. */
+  folderDefaults: TransferCounts;
   /** Sessions imported without the password or key they used. */
   withoutCredentials: number;
   problems: { name: string; reason: string }[];
@@ -2695,8 +2776,12 @@ export const api = {
   confirmSessionVmLink: (sessionId: string) => invoke<SessionRecord>("session_confirm_vm_link", { sessionId }),
   /** QL-01: sessions several VMs match, left for the user to pick. */
   ambiguousVmLinks: () => invoke<AmbiguousLink[]>("vm_links_ambiguous"),
-  /** folderId null: the top level. */
-  moveSessions: (ids: string[], folderId: string | null) => invoke<void>("sessions_move", { ids, folderId }),
+  /**
+   * folderId null: the top level. QL-16, SS-04: `reauth_required` when the new folder's login would send a vault
+   * password where no saved session sends it yet.
+   */
+  moveSessions: (ids: string[], folderId: string | null, vaultPassword?: string) =>
+    invoke<void>("sessions_move", { ids, folderId, vaultPassword: vaultPassword ?? null }),
   // SS-07: saved port forwards and a terminal's tunnels.
   forwards: (sessionId: string) => invoke<PortForward[]>("forwards_list", { sessionId }),
   allForwards: () => invoke<Record<string, PortForward[]>>("forwards_all"),
@@ -2715,9 +2800,20 @@ export const api = {
     invoke<void>("terminal_tunnel_stop", { terminalId, forwardId }),
   createFolder: (name: string, parentId: string | null) => invoke<SessionFolder>("folder_create", { name, parentId }),
   renameFolder: (id: string, name: string) => invoke<SessionFolder>("folder_rename", { id, name }),
-  moveFolder: (id: string, parentId: string | null) => invoke<SessionFolder>("folder_move", { id, parentId }),
+  moveFolder: (id: string, parentId: string | null, vaultPassword?: string) =>
+    invoke<SessionFolder>("folder_move", { id, parentId, vaultPassword: vaultPassword ?? null }),
   /** Its sessions and subfolders move up to its parent. */
-  deleteFolder: (id: string) => invoke<void>("folder_delete", { id }),
+  deleteFolder: (id: string, vaultPassword?: string) =>
+    invoke<void>("folder_delete", { id, vaultPassword: vaultPassword ?? null }),
+  /**
+   * QL-16: what a folder gives its sessions. Audited like a session edit; `reauth_required` when it would send a vault
+   * password where no saved session sends it yet.
+   */
+  setFolderDefaults: (id: string, defaults: FolderDefaults, vaultPassword?: string) =>
+    invoke<SessionFolder>("folder_set_defaults", { id, defaults, vaultPassword: vaultPassword ?? null }),
+  /** QL-16: what a session in `folderId` gets when it sets nothing itself (`sessionId`: the one being edited). */
+  sessionInherited: (folderId: string | null, sessionId: string | null) =>
+    invoke<Effective>("session_inherited", { folderId, sessionId }),
 
   /**
    * SS-02: reads a session list (PuTTY's registry, or a file chosen in a dialog the core opens; the
@@ -2765,6 +2861,8 @@ export const api = {
     knownHosts: TransferChoice[];
     secrets: TransferChoice[];
     favourites: TransferChoice[];
+    /** QL-16: what to do with each folder's defaults. */
+    folderDefaults: TransferChoice[];
     /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
     keepStartup: number[];
     keepForwards: number[];

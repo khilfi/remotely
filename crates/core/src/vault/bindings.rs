@@ -55,6 +55,44 @@ impl Destination {
     }
 }
 
+/// SS-04, AP-06: where each vault password goes now: per saved session, its place and the passwords it sends there
+/// (its login as it applies, QL-16 folders included, its container hosts' sudo, and the ones it was allowed).
+/// Read once for a change that touches many sessions (a folder's defaults), then asked in memory.
+#[derive(Debug, Clone, Default)]
+pub struct SecretPlaces {
+    sessions: Vec<(Uuid, Destination, Vec<SecretId>)>,
+}
+
+impl SecretPlaces {
+    pub(crate) fn new(sessions: Vec<(Uuid, Destination, Vec<SecretId>)>) -> Self {
+        Self { sessions }
+    }
+
+    /// Whether a saved session other than `except` at `place` sends `secret` there.
+    pub fn allowed(&self, secret: SecretId, place: &Destination, except: Option<Uuid>) -> bool {
+        self.sessions
+            .iter()
+            .any(|(id, at, sends)| Some(*id) != except && at.same(place) && sends.contains(&secret))
+    }
+
+    /// The vault passwords the session sends to its host.
+    pub fn sent_by(&self, session: Uuid) -> Vec<SecretId> {
+        self.sessions
+            .iter()
+            .find(|(id, _, _)| *id == session)
+            .map(|(_, _, sends)| sends.clone())
+            .unwrap_or_default()
+    }
+
+    /// The session's place.
+    pub fn place_of(&self, session: Uuid) -> Option<&Destination> {
+        self.sessions
+            .iter()
+            .find(|(id, _, _)| *id == session)
+            .map(|(_, at, _)| at)
+    }
+}
+
 /// AP-06: after the vault password was given, how long further steps go without asking again.
 pub const REAUTH_GRACE: Duration = Duration::from_secs(5 * 60);
 
@@ -173,6 +211,27 @@ impl SecretBindings {
     /// The vault passwords a saved session sends to its host now.
     pub(crate) async fn sent_by(&self, ctx: &Context, session_id: Uuid) -> Result<Vec<SecretId>> {
         self.inner.store.session_sent_secrets(ctx, session_id).await
+    }
+
+    /// QL-16: where each vault password goes, with the folders as `folders` says (now, or as a change would make
+    /// them), for checking many places at once with [`Self::may_go_in`].
+    pub(crate) async fn places_in(&self, ctx: &Context, folders: &crate::sessions::Folders) -> Result<SecretPlaces> {
+        self.inner.store.secret_places_in(ctx, folders).await
+    }
+
+    /// [`Self::may_go`], against places read once ([`Self::places_in`], before the change).
+    pub(crate) async fn may_go_in(
+        &self,
+        ctx: &Context,
+        places: &SecretPlaces,
+        secret: SecretId,
+        place: &Destination,
+        except: Option<Uuid>,
+    ) -> Result<bool> {
+        if self.is_fresh(secret) || !self.reaches_hosts(ctx, secret).await? {
+            return Ok(true);
+        }
+        Ok(places.allowed(secret, place, except))
     }
 
     /// AP-06: checks the master password before a step that needs it. `None` (or empty) asks for it with

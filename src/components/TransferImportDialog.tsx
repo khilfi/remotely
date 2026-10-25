@@ -54,7 +54,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Section = "sessions" | "knownHosts" | "secrets" | "favourites";
+type Section = "sessions" | "folderDefaults" | "knownHosts" | "secrets" | "favourites";
 type Choices = Record<Section, Record<number, TransferAction>>;
 
 const ACTION_LABEL: Record<TransferAction, string> = {
@@ -72,6 +72,8 @@ const STATUS: Record<TransferStatus, { label: string; className: string }> = {
 
 const SECTIONS: { key: Section; title: string; empty: string }[] = [
   { key: "sessions", title: "Sessions", empty: "No sessions in the file." },
+  // QL-16: shown only when the file's folders set defaults.
+  { key: "folderDefaults", title: "Folder defaults", empty: "" },
   { key: "knownHosts", title: "Trusted host keys", empty: "No host keys in the file." },
   { key: "secrets", title: "Vault secrets", empty: "" },
   { key: "favourites", title: "Favourite commands", empty: "No favourite commands in the file." },
@@ -85,6 +87,7 @@ function defaults(preview: TransferPreview): Choices {
     secrets: of(preview.secrets),
     // Files from before BX-08 have none.
     favourites: of(preview.favourites ?? []),
+    folderDefaults: of(preview.folderDefaults ?? []),
   };
 }
 
@@ -99,6 +102,7 @@ function counts(report: TransferReport) {
   };
   return [
     part("Sessions", report.sessions),
+    part("Folder defaults", report.folderDefaults),
     part("Host keys", report.knownHosts),
     part("Secrets", report.secrets),
     part("Favourite commands", report.favourites),
@@ -113,7 +117,13 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
   const [file, setFile] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [preview, setPreview] = useState<TransferPreview | null>(null);
-  const [choices, setChoices] = useState<Choices>({ sessions: {}, knownHosts: {}, secrets: {}, favourites: {} });
+  const [choices, setChoices] = useState<Choices>({
+    sessions: {},
+    folderDefaults: {},
+    knownHosts: {},
+    secrets: {},
+    favourites: {},
+  });
   /** SS-01, SS-07: sessions whose startup command, and whose port forwards, come along; none by default. */
   const [keepStartup, setKeepStartup] = useState<Set<number>>(new Set());
   const [keepForwards, setKeepForwards] = useState<Set<number>>(new Set());
@@ -187,6 +197,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         knownHosts: list("knownHosts"),
         secrets: list("secrets"),
         favourites: list("favourites"),
+        folderDefaults: list("folderDefaults"),
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),
       };
@@ -357,7 +368,11 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
                 <VaultUnlock info={vault} onUnlocked={(info) => void refresh(info)} idPrefix="transfer-unlock" />
               </div>
             )}
-            {SECTIONS.filter((s) => s.key !== "secrets" || preview.secretValues).map((section) => (
+            {SECTIONS.filter(
+              (s) =>
+                (s.key !== "secrets" || preview.secretValues) &&
+                (s.key !== "folderDefaults" || (preview.folderDefaults ?? []).length > 0),
+            ).map((section) => (
               <ItemTable
                 key={section.key}
                 title={section.title}

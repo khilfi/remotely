@@ -449,6 +449,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::folder_rename,
         ipc::folder_move,
         ipc::folder_delete,
+        ipc::folder_set_defaults,
+        ipc::session_inherited,
         ipc::import_preview,
         ipc::import_guide,
         ipc::import_save_sample,

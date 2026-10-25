@@ -51,6 +51,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ColorDot, EnvBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ExportDialog } from "@/components/ExportDialog";
+import { FolderDefaultsDialog } from "@/components/FolderDefaultsDialog";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { ImportDialog } from "@/components/ImportDialog";
 import { NameDialog } from "@/components/NameDialog";
@@ -72,6 +73,7 @@ import {
 import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
 import { useThresholds } from "@/lib/metrics";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -90,6 +92,7 @@ type DialogState =
   | { kind: "newFolder"; parentId: string | null }
   | { kind: "renameFolder"; folder: SessionFolder }
   | { kind: "deleteFolder"; folder: SessionFolder }
+  | { kind: "folderDefaults"; folder: SessionFolder }
   | { kind: "import" }
   | { kind: "export" }
   | { kind: "importExport" }
@@ -103,6 +106,11 @@ const LABELS: { value: Environment; label: string; className: string }[] = [
 
 function address(s: SessionRecord) {
   return `${s.username ? `${s.username}@` : ""}${s.host}${s.port === 22 ? "" : `:${s.port}`}`;
+}
+
+/** QL-16: a value the session has from a folder rather than its own. */
+function FromFolderNote({ name }: { name: string }) {
+  return <div className="text-xs text-muted-foreground">from folder &apos;{name}&apos;</div>;
 }
 
 export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, active }: Props) {
@@ -197,12 +205,16 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
         return auth.keyId ? `Key · ${name(auth.keyId)}` : "Key, none chosen";
       case "agent":
         return "SSH agent";
+      // QL-16: what applies to a session is never "as its folders say"; shown only for completeness.
+      case "folder":
+        return "From folder";
     }
   }
 
   async function move(session: SessionRecord, target: string | null) {
     try {
-      await api.moveSessions([session.id], target);
+      // QL-16, SS-04: a folder whose login sends a vault password to new hosts asks for the vault password.
+      await withVaultPassword((password) => api.moveSessions([session.id], target, password));
       reload();
     } catch (err) {
       toast.error(errorMessage(err));
@@ -211,7 +223,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
 
   async function moveFolder(folder: SessionFolder, parentId: string | null) {
     try {
-      await api.moveFolder(folder.id, parentId);
+      await withVaultPassword((password) => api.moveFolder(folder.id, parentId, password));
       reload();
     } catch (err) {
       toast.error(errorMessage(err));
@@ -282,6 +294,9 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setDialog({ kind: "renameFolder", folder })}>
                   Rename…
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setDialog({ kind: "folderDefaults", folder })}>
+                  Defaults…
                 </DropdownMenuItem>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
@@ -505,13 +520,17 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                         </div>
                       )}
                     </TableCell>
-                    <TableCell className="text-sm">{login(s.auth)}</TableCell>
+                    <TableCell className="text-sm">
+                      {login(s.auth)}
+                      {s.inherited.auth && <FromFolderNote name={s.inherited.auth.name} />}
+                    </TableCell>
                     <TableCell className="text-sm" title={chainTitle(s.id)}>
                       {s.jumpSessionId ? (
                         (sessionName.get(s.jumpSessionId) ?? "—")
                       ) : (
                         <span className="text-muted-foreground">—</span>
                       )}
+                      {s.inherited.jump && <FromFolderNote name={s.inherited.jump.name} />}
                     </TableCell>
                     {/* Its own menu: a double-click there doesn't connect. */}
                     <TableCell onDoubleClick={(e) => e.stopPropagation()}>
@@ -519,6 +538,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                     </TableCell>
                     <TableCell>
                       <EnvBadge env={s.environment} />
+                      {s.inherited.environment && <FromFolderNote name={s.inherited.environment.name} />}
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center justify-end gap-0.5">
@@ -648,6 +668,15 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
           onClose={() => setDialog(null)}
         />
       )}
+      {dialog?.kind === "folderDefaults" && (
+        <FolderDefaultsDialog
+          folder={dialog.folder}
+          folders={folders}
+          sessions={all}
+          onSaved={() => reload()}
+          onClose={() => setDialog(null)}
+        />
+      )}
       {dialog?.kind === "deleteFolder" && (
         <ConfirmDialog
           title={`Delete the folder ${dialog.folder.name}?`}
@@ -660,7 +689,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
           )} move to ${dialog.folder.parentId ? folderPath(folders, dialog.folder.parentId) : "the top level"}.`}
           confirmLabel="Delete folder"
           onConfirm={async () => {
-            await api.deleteFolder(dialog.folder.id);
+            await withVaultPassword((password) => api.deleteFolder(dialog.folder.id, password));
             if (folderId === dialog.folder.id) setFolderId(dialog.folder.parentId);
             reload();
           }}
