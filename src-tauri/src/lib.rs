@@ -522,6 +522,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         vm_settings::vm_open_console,
         vm_settings::vm_screenshot,
         vm_settings::vm_guest_os_types,
+        vm_settings::vm_workstation_open,
         dashboard::metrics_history,
         dashboard::history_info,
         dashboard::history_retention_set,

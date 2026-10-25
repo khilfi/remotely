@@ -25,6 +25,8 @@ import {
   vmActionReason,
   vmFolder,
   vmNameProblem,
+  WORKSTATION_OPEN_WARNING,
+  workstationWarning,
 } from "./vm-settings.ts";
 import { PROTECTED_REASON } from "./vm-snapshots.ts";
 
@@ -108,6 +110,14 @@ test("tools, ISOs and the TPM say why they are off", () => {
   assert.match(isoReason(running, null, noDrives)!, /no CD\/DVD drive/);
   assert.match(tpmReason("vmware")!, /encrypted/);
   assert.equal(tpmReason("virtualbox"), null);
+});
+
+test("Workstation's open window is a warning for its own VMs only", () => {
+  assert.equal(workstationWarning([vm("web")], true), WORKSTATION_OPEN_WARNING);
+  assert.equal(workstationWarning([vm("web")], false), null);
+  assert.equal(workstationWarning([vm("db", { hypervisor: "virtualbox" })], true), null);
+  assert.equal(workstationWarning([vm("db", { hypervisor: "virtualbox" }), vm("web")], true), WORKSTATION_OPEN_WARNING);
+  assert.match(WORKSTATION_OPEN_WARNING, /^Close this VM's tab in Workstation first/);
 });
 
 test("a network cable is offered the way it isn't", () => {

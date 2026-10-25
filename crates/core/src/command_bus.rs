@@ -1709,11 +1709,13 @@ impl CommandBus {
         let vm_change = self.impact.vm_change(command, &decision.targets).await;
         if let Some(preview) = &vm_change {
             // VM-23: a Low change (an ISO, a cable) gets a confirm too when a VM would refuse it, so it is seen.
-            let problems: Vec<String> = preview
+            let mut problems: Vec<String> = preview
                 .targets
                 .iter()
                 .filter_map(|t| t.problem.as_ref().map(|p| format!("{}: {p}", t.name)))
                 .collect();
+            // VM-23: Workstation's window is open while a Workstation VM's .vmx or disks change.
+            problems.extend(preview.warnings.iter().cloned());
             decision.add_warnings(problems);
         }
         Previews {

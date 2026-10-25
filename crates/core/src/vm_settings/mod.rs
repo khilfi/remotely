@@ -63,7 +63,13 @@ const DELETE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 #[serde(rename_all = "camelCase")]
 pub struct VmChangePreview {
     pub targets: Vec<VmChangeTarget>,
+    /// Said once for the whole command: Workstation's window is open while its .vmx or disks change.
+    pub warnings: Vec<String>,
 }
+
+/// VM-23: the warning while Workstation's window runs and a change writes a Workstation VM's .vmx or disks.
+pub const WORKSTATION_OPEN_WARNING: &str =
+    "Close this VM's tab in Workstation first, or Workstation may write its own copy of the settings over this change.";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +133,19 @@ struct Plan {
 }
 
 impl Plan {
+    /// VM-23: whether it writes a Workstation VM's .vmx or disks (what Workstation's window may write over).
+    fn writes_vmware_files(&self) -> bool {
+        self.actions.iter().any(|action| match action {
+            Action::WriteVmx(_)
+            | Action::Vdisk { .. }
+            | Action::NewDisk { .. }
+            | Action::DropDisk { .. }
+            | Action::DeleteVmware => true,
+            Action::Vmrun { backup, .. } => *backup,
+            Action::Vbox { .. } | Action::NewVboxDisk { .. } | Action::AddVmx => false,
+        })
+    }
+
     fn one(action: Action, changes: Vec<String>) -> Self {
         Self {
             actions: vec![action],
@@ -189,6 +208,13 @@ fn require_no_snapshots(state: &VmState, what: &str) -> Result<()> {
         "The VM has {}: a disk can't be {what} while snapshots depend on it. Delete the snapshots first.",
         plural(state.snapshots, "snapshot")
     )))
+}
+
+/// VM-23: Workstation's lock beside a file: `<name>.vmx.lck`, `<disk>.vmdk.lck` (a folder).
+fn lock_of(path: &Path) -> PathBuf {
+    let mut lock = path.as_os_str().to_owned();
+    lock.push(".lck");
+    PathBuf::from(lock)
 }
 
 /// VM-16: a new size must be larger than the disk is.
@@ -271,6 +297,7 @@ impl VmEditor {
             None
         };
         let mut out = VmChangePreview::default();
+        let mut writes_vmware_files = false;
         for target in targets {
             let TargetRef::Vm { vmx_path } = &target.target else {
                 continue;
@@ -286,6 +313,8 @@ impl VmEditor {
             };
             match planned {
                 Ok(plan) => {
+                    writes_vmware_files |=
+                        Hypervisor::of_key(vmx_path) == Hypervisor::Vmware && plan.writes_vmware_files();
                     row.changes = plan.changes;
                     row.keeps = plan.keeps;
                     row.deletes = plan
@@ -300,6 +329,9 @@ impl VmEditor {
                 Err(err) => row.problem = Some(err.to_string()),
             }
             out.targets.push(row);
+        }
+        if writes_vmware_files && self.hypervisors.vmware().workstation_window_open().await {
+            out.warnings.push(WORKSTATION_OPEN_WARNING.to_owned());
         }
         Some(out)
     }
@@ -377,9 +409,33 @@ impl VmEditor {
         VmxFile::parse(&self.hypervisors.vmware().vmx_bytes(vmx).await?)
     }
 
+    /// VM-23: nothing writes a Workstation VM's .vmx or disks while Workstation holds its lock on the VM
+    /// (`<name>.vmx.lck`) or one of its disks (`<disk>.vmdk.lck`): a VM that is off but open in a Workstation tab
+    /// keeps its settings in memory and may write them back over the change. Remotely never deletes a lock.
+    async fn require_unlocked(&self, vmx: &Path, file: &VmxFile) -> Result<()> {
+        let vmware = self.hypervisors.vmware();
+        let folder = vmx.parent().unwrap_or(Path::new(""));
+        let mut locks = vec![lock_of(vmx)];
+        for (key, value) in file.pairs() {
+            if key.ends_with(".filename") && value.to_ascii_lowercase().ends_with(".vmdk") {
+                locks.push(lock_of(&vmware::resolve(folder, value)));
+            }
+        }
+        for lock in locks {
+            if vmware.file_exists(&lock).await {
+                return Err(refused(format!(
+                    "Workstation is using the VM: its lock {} is there. Close the VM's tab in Workstation and try again. A lock left after Workstation crashed can be deleted once Workstation is closed; Remotely never deletes one.",
+                    lock.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
     async fn vmware_config(&self, vmx: &Path, edit: &VmConfigEdit, state: &VmState) -> Result<Plan> {
         require_off(state, Hypervisor::Vmware)?;
         let file = self.vmx(vmx).await?;
+        self.require_unlocked(vmx, &file).await?;
         if let VmConfigEdit::UpgradeHardware = edit {
             let now = file.get("virtualHW.version").unwrap_or("not set");
             let call = vec!["upgradevm".into(), vmx.into()];
@@ -447,6 +503,7 @@ impl VmEditor {
         let mut file = self.vmx(vmx).await?;
         let running = state.power.is_on();
         if !running {
+            self.require_unlocked(vmx, &file).await?;
             let changes = match op {
                 VmDeviceOp::AttachIso { slot, path } => vmware::attach_iso_off(&mut file, slot.as_deref(), path)?,
                 VmDeviceOp::EjectIso { slot } => vmware::eject_off(&mut file, slot.as_deref())?,
@@ -572,6 +629,7 @@ impl VmEditor {
         let vmware = self.hypervisors.vmware();
         let folder = vmx.parent().unwrap_or(Path::new("")).to_path_buf();
         let mut file = self.vmx(vmx).await?;
+        self.require_unlocked(vmx, &file).await?;
         match op {
             VmDiskOp::Add { size_mb, thin, bus } => {
                 let stem = vmx
@@ -751,6 +809,7 @@ impl VmEditor {
                     ));
                 }
                 let file = self.vmx(vmx).await?;
+                self.require_unlocked(vmx, &file).await?;
                 let folder = vmx.parent().unwrap_or(Path::new(""));
                 let listing = vmware.folder_files(folder).await?;
                 let (deletes, keeps) = vmware::vm_files_going(vmx, &file, &listing);

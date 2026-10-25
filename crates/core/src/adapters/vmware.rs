@@ -227,6 +227,12 @@ pub trait VmwareAdapter: Send + Sync {
     async fn open_console(&self, _vmx: &Path) -> Result<()> {
         Err(CoreError::VmrunNotFound)
     }
+
+    /// VM-23: whether Workstation's window (`vmware.exe`) runs. A VM that is off but open in one of its tabs keeps
+    /// its settings in memory, and Workstation may write them back over a change to the .vmx.
+    async fn workstation_window_open(&self) -> bool {
+        false
+    }
 }
 
 /// VM-23, VM-16: file operations on this PC for the .vmx and disk changes.
@@ -355,8 +361,11 @@ pub fn locate_vdiskmanager(vmrun: Option<&Path>) -> Option<PathBuf> {
 
 /// VM-24: vmware.exe (Workstation's window): the folder of the vmrun.exe in use, then the registry, then the
 /// default install folders.
+/// VM-23, VM-24: Workstation's window, the program [`locate_vmware_exe`] finds.
+pub const WORKSTATION_WINDOW: &str = "vmware.exe";
+
 pub fn locate_vmware_exe(vmrun: Option<&Path>) -> Option<PathBuf> {
-    locate_beside(vmrun, "vmware.exe", None)
+    locate_beside(vmrun, WORKSTATION_WINDOW, None)
 }
 
 fn locate_beside(vmrun: Option<&Path>, file: &str, env: Option<&str>) -> Option<PathBuf> {
@@ -614,6 +623,10 @@ impl VmwareAdapter for VmrunAdapter {
             .spawn()
             .map(drop)
             .map_err(CoreError::from)
+    }
+
+    async fn workstation_window_open(&self) -> bool {
+        super::host_counters::process_running(WORKSTATION_WINDOW).await
     }
 }
 
@@ -1150,6 +1163,9 @@ impl VmwareAdapter for SwitchableVmware {
     }
     async fn open_console(&self, vmx: &Path) -> Result<()> {
         self.current().open_console(vmx).await
+    }
+    async fn workstation_window_open(&self) -> bool {
+        self.current().workstation_window_open().await
     }
 }
 

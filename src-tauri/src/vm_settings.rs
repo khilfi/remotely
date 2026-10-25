@@ -125,6 +125,12 @@ pub async fn vm_screenshot(state: State<'_, AppState>, vmx_path: String) -> IpcR
     Ok(state.core.vm_settings.screenshot_data_url(&vmx_path).await?)
 }
 
+/// VM-23: whether Workstation's window runs, for the edit dialogs' warning. A read.
+#[tauri::command]
+pub async fn vm_workstation_open(state: State<'_, AppState>) -> IpcResult<bool> {
+    Ok(state.core.vm_settings.workstation_window_open().await)
+}
+
 /// VM-23: the guest OS types the VM's hypervisor offers. A read.
 #[tauri::command]
 pub async fn vm_guest_os_types(state: State<'_, AppState>, vmx_path: String) -> IpcResult<Vec<GuestOsType>> {

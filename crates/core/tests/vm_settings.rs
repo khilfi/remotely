@@ -17,7 +17,7 @@ use remotely_core::jobs::JobStatus;
 use remotely_core::policy::{ApprovalStep, Tier};
 use remotely_core::vault::SecretString;
 use remotely_core::vm_settings::{
-    ConsoleOutcome, Firmware, NicNetwork, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp,
+    ConsoleOutcome, Firmware, NicNetwork, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp, WORKSTATION_OPEN_WARNING,
 };
 use remotely_core::Core;
 use uuid::Uuid;
@@ -222,6 +222,112 @@ async fn a_failed_write_puts_the_backup_back() {
     assert_eq!(fake.vmx_text(&vmx("web")).unwrap(), WEB_VMX, "as it was");
     assert!(fake.calls().iter().any(|c| c.starts_with("restore")));
     assert!(fake.backups().is_empty(), "put back, then deleted");
+}
+
+#[tokio::test]
+async fn workstations_lock_on_a_vm_or_its_disk_refuses_changes_to_their_files() {
+    // VM-23: a VM that is off but open in a Workstation tab keeps its settings in memory, and Workstation may write
+    // them back over a change; its lock (`<name>.vmx.lck`, `<disk>.vmdk.lck`) says so. Remotely never deletes one.
+    let vmx_lock = r"C:\VMs\web\web.vmx.lck";
+    let disk_lock = r"C:\VMs\app\app.vmdk.lck";
+    let setup = Setup::new(workstation().with_file(vmx_lock, 0).with_file(disk_lock, 0));
+    let fake = Arc::clone(&setup.vmware);
+    let core = built(setup).await;
+
+    let request = asked(
+        core.bus
+            .submit(
+                &core.ctx,
+                Command::VmConfig {
+                    targets: vec![vm("web")],
+                    edit: resize(4, 8192),
+                },
+            )
+            .await
+            .unwrap(),
+    );
+    let problem = request.vm_change.as_ref().unwrap().targets[0].problem.clone().unwrap();
+    assert!(problem.starts_with("Workstation is using the VM"), "{problem}");
+    assert!(problem.contains(vmx_lock), "names the lock: {problem}");
+    assert!(
+        problem.contains("can be deleted once Workstation is closed") && problem.contains("never deletes"),
+        "{problem}"
+    );
+    assert!(request
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("web: Workstation is using the VM")));
+    let mut rx = core.jobs.subscribe();
+    let job = approve(&core, &request).await;
+    assert_eq!(wait_finished(&mut rx, job).await, JobStatus::Failed);
+    assert_eq!(fake.vmx_text(&vmx("web")).unwrap(), WEB_VMX, "the .vmx as it was");
+    assert!(
+        !fake.calls().iter().any(|c| c.starts_with("backup")),
+        "nothing was started"
+    );
+
+    // A disk's lock: a disk change, a device change while off and a delete are refused; nothing is deleted.
+    for command in [
+        Command::VmDisk {
+            targets: vec![vm("app")],
+            op: VmDiskOp::Add {
+                size_mb: 1024,
+                thin: true,
+                bus: None,
+            },
+        },
+        Command::VmDevice {
+            targets: vec![vm("app")],
+            op: VmDeviceOp::DisconnectNic {
+                slot: "ethernet0".into(),
+            },
+        },
+        Command::VmLifecycle {
+            targets: vec![vm("app")],
+            op: VmLifecycleOp::Delete,
+        },
+    ] {
+        let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+        let problem = request.vm_change.as_ref().unwrap().targets[0]
+            .problem
+            .clone()
+            .unwrap_or_default();
+        assert!(problem.contains(disk_lock), "{problem}");
+        core.bus.cancel_approval(request.id).await.unwrap();
+    }
+    assert!(
+        fake.has_file(vmx_lock) && fake.has_file(disk_lock),
+        "locks are never deleted"
+    );
+    assert!(!fake.calls().iter().any(|c| c.contains("deleteVM")));
+}
+
+#[tokio::test]
+async fn workstations_window_open_warns_before_a_vmx_change() {
+    // VM-23: a warning, not a refusal: the owner decides.
+    let setup = Setup::new(workstation());
+    let fake = Arc::clone(&setup.vmware);
+    let core = built(setup).await;
+    let command = Command::VmConfig {
+        targets: vec![vm("web")],
+        edit: resize(4, 8192),
+    };
+    let request = asked(core.bus.submit(&core.ctx, command.clone()).await.unwrap());
+    assert!(request.vm_change.as_ref().unwrap().warnings.is_empty());
+    assert!(!request.warnings.iter().any(|w| w == WORKSTATION_OPEN_WARNING));
+    core.bus.cancel_approval(request.id).await.unwrap();
+
+    fake.set_workstation_open(true);
+    assert!(core.vm_settings.workstation_window_open().await);
+    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let preview = request.vm_change.as_ref().unwrap();
+    assert_eq!(preview.warnings, [WORKSTATION_OPEN_WARNING]);
+    assert_eq!(preview.targets[0].problem, None, "not a refusal");
+    assert!(request.warnings.iter().any(|w| w == WORKSTATION_OPEN_WARNING));
+    let mut rx = core.jobs.subscribe();
+    let job = approve(&core, &request).await;
+    assert_eq!(wait_finished(&mut rx, job).await, JobStatus::Succeeded);
+    assert!(fake.vmx_text(&vmx("web")).unwrap().contains("numvcpus = \"4\""));
 }
 
 #[tokio::test]

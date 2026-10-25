@@ -151,6 +151,15 @@ export function cableReason(
   return null;
 }
 
+/** VM-23: said while Workstation's window runs and a Workstation VM's settings are edited (the core's words). */
+export const WORKSTATION_OPEN_WARNING =
+  "Close this VM's tab in Workstation first, or Workstation may write its own copy of the settings over this change.";
+
+/** VM-23: the edit dialogs' warning: only for a Workstation VM, and only while Workstation's window runs. */
+export function workstationWarning(vms: Pick<VmRecord, "hypervisor">[], windowOpen: boolean): string | null {
+  return windowOpen && vms.some((vm) => vm.hypervisor === "vmware") ? WORKSTATION_OPEN_WARNING : null;
+}
+
 /** VM-12: the selected VMs a bulk resize goes to (off and not protected), and why the others are left out. */
 export function resizeTargets(vms: VmRecord[]): { targets: VmRecord[]; left: { name: string; why: string }[] } {
   const targets: VmRecord[] = [];

@@ -498,6 +498,12 @@ src/                  React + TypeScript UI
   running Workstation VM's cable state can't be read. `deleteVM <vmx>` deletes the VM's own files (the .vmx, .vmxf,
   .vmsd, snapshot states, NVRAM, logs, its disks and their snapshot deltas, which sit in the VM's folder even for a disk
   outside it) and the folder when it is then empty; a disk outside the folder and files of other kinds stay.
+- Workstation's locks: a VM that is running or open in a Workstation tab has a `<name>.vmx.lck` folder beside its .vmx
+  and a `<disk>.vmdk.lck` folder beside each disk. A VM that is off but open in a tab keeps its settings in memory, and
+  Workstation may write them back over a change, so Remotely refuses every change that writes the .vmx or a disk while
+  a lock is there (`VmEditor::require_unlocked`; a lock left after a crash can be deleted once Workstation is closed;
+  Remotely never deletes one), and warns in the approval and the edit dialogs while `vmware.exe` runs
+  (`VmwareAdapter::workstation_window_open`, `WORKSTATION_OPEN_WARNING`).
 
 ## VirtualBox facts
 

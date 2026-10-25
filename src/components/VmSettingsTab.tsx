@@ -43,6 +43,7 @@ import {
   ScreenshotDialog,
   SharedFolderDialog,
   type Submit,
+  useWorkstationWarning,
 } from "@/components/VmSettingsDialogs";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
@@ -208,6 +209,8 @@ export function VmSettingsTab({
   const vbox = vm.hypervisor === "virtualbox";
   const running = vm.powerState === "running" || vm.powerState === "paused";
   const folder = vmFolder(vm);
+  // VM-23: asked when the rename dialog opens (the other edit dialogs ask for themselves).
+  const renameWarning = useWorkstationWarning(dialog?.kind === "rename" ? [vm] : []);
 
   async function pickIso(slot: string | null) {
     try {
@@ -714,7 +717,7 @@ export function VmSettingsTab({
           description={
             vbox
               ? "VirtualBox renames the VM's folder and files with it. The VM must be off."
-              : "The name Workstation shows (displayName in its .vmx); its files keep their names. The VM must be off."
+              : `The name Workstation shows (displayName in its .vmx); its files keep their names. The VM must be off.${renameWarning ? ` ${renameWarning}` : ""}`
           }
           label="Name"
           submitLabel="Rename"

@@ -339,6 +339,8 @@ export type VmLifecycleOp = { kind: "delete" } | { kind: "register"; path: strin
 /** AP-02: what a VM settings or lifecycle command does to each VM. */
 export interface VmChangePreview {
   targets: VmChangeTarget[];
+  /** Said once for the command (Workstation's window is open); the approval's warnings list them too. */
+  warnings: string[];
 }
 
 export interface VmChangeTarget {
@@ -3192,6 +3194,8 @@ export const api = {
   /** VM-23: a running VirtualBox VM's screen as a PNG data URL. */
   vmScreenshot: (vmxPath: string) => invoke<string>("vm_screenshot", { vmxPath }),
   vmGuestOsTypes: (vmxPath: string) => invoke<GuestOsType[]>("vm_guest_os_types", { vmxPath }),
+  /** VM-23: whether Workstation's window runs (it may write its own copy of a VM's settings over a change). */
+  vmWorkstationOpen: () => invoke<boolean>("vm_workstation_open"),
   onMetricsRound: (handler: (cost: CollectorCost) => void): Promise<UnlistenFn> =>
     listen<CollectorCost>("metrics://round", (e) => handler(e.payload)),
 

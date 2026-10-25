@@ -95,6 +95,8 @@ pub struct FakeVmware {
     failing_vmx_write: AtomicBool,
     /// VM-16: vdiskmanager fails.
     failing_vdisk: AtomicBool,
+    /// VM-23: Workstation's window (`vmware.exe`) runs.
+    workstation_open: AtomicBool,
 }
 
 /// What the fake writes for a .vmx it was given no text for.
@@ -263,6 +265,11 @@ impl FakeVmware {
     /// VM-23: from now on writing a .vmx fails (or works again).
     pub fn set_failing_vmx_write(&self, failing: bool) {
         self.failing_vmx_write.store(failing, Ordering::SeqCst);
+    }
+
+    /// VM-23: Workstation's window runs (or not) from now on.
+    pub fn set_workstation_open(&self, open: bool) {
+        self.workstation_open.store(open, Ordering::SeqCst);
     }
 
     /// VM-16: from now on vdiskmanager fails (or works again).
@@ -801,6 +808,10 @@ impl VmwareAdapter for FakeVmware {
         self.vmrun()?;
         self.record(format!("console {}", vmx.display()));
         Ok(())
+    }
+
+    async fn workstation_window_open(&self) -> bool {
+        self.workstation_open.load(Ordering::SeqCst)
     }
 }
 

@@ -97,7 +97,9 @@ with its size, and a VM it would refuse (running, snapshots in the way).
   OS type and (Workstation) a hardware version upgrade. Workstation's `.vmx` is changed after a backup copy beside it,
   written whole and put back if anything fails; every other line of it stays as it was. Disks change through
   `vmware-vdiskmanager` (beside `vmrun.exe`) or VBoxManage. A VM with snapshots can't have a disk expanded, compacted
-  or removed until they are deleted, and Remotely removes only disks in the VM's own folder.
+  or removed until they are deleted, and Remotely removes only disks in the VM's own folder. While Workstation has a VM
+  open (its `.lck` lock is beside the files), its .vmx and disks aren't changed, because Workstation could write its own
+  copy back: close the VM's tab first. The approval and the edit dialogs warn while Workstation's window is open.
 - **While it runs**: attach or eject an ISO (or drop an `.iso` on the VM in the list), connect or disconnect a network
   cable, install or upgrade VMware Tools or the Guest Additions (VirtualBox's ISO goes into the DVD drive; nothing
   types guest passwords anywhere), and a screenshot of a running VirtualBox VM (hidden while presenting). On a running

@@ -4,7 +4,7 @@
 // value again and the approval preview shows what changes on each VM.
 
 import { useEffect, useState, type ReactNode } from "react";
-import { FolderOpenIcon } from "lucide-react";
+import { FolderOpenIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,6 +47,7 @@ import {
   resourcesProblem,
   shareNameProblem,
   tpmReason,
+  workstationWarning,
 } from "@/lib/vm-settings";
 
 /** Submits one command; resolves true when the bus took it (queued, or waiting for approval). */
@@ -63,6 +64,7 @@ function EditDialog({
   onClose,
   children,
   wide,
+  vms,
 }: {
   title: string;
   description: ReactNode;
@@ -74,8 +76,11 @@ function EditDialog({
   onClose: () => void;
   children: ReactNode;
   wide?: boolean;
+  /** The VMs it changes: a Workstation one gets the warning while Workstation's window runs. */
+  vms: Pick<VmRecord, "hypervisor">[];
 }) {
   const [busy, setBusy] = useState(false);
+  const warning = useWorkstationWarning(vms);
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className={wide ? "sm:max-w-lg" : "sm:max-w-md"}>
@@ -95,6 +100,12 @@ function EditDialog({
             <DialogDescription>{description}</DialogDescription>
           </DialogHeader>
           {children}
+          {warning && (
+            <Alert>
+              <TriangleAlertIcon />
+              <AlertDescription>{warning}</AlertDescription>
+            </Alert>
+          )}
           {problem && <p className="text-xs text-muted-foreground">{problem}</p>}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
@@ -108,6 +119,26 @@ function EditDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+/** VM-23: the warning while Workstation's window runs, asked once when a dialog for a Workstation VM opens. */
+export function useWorkstationWarning(vms: Pick<VmRecord, "hypervisor">[]): string | null {
+  const vmware = vms.some((vm) => vm.hypervisor === "vmware");
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (!vmware) return;
+    let stale = false;
+    api.vmWorkstationOpen().then(
+      (running) => {
+        if (!stale) setOpen(running);
+      },
+      () => undefined,
+    );
+    return () => {
+      stale = true;
+    };
+  }, [vmware]);
+  return workstationWarning(vms, vmware && open);
 }
 
 function Field({ id, label, children, hint }: { id: string; label: string; children: ReactNode; hint?: string }) {
@@ -199,6 +230,7 @@ export function ResourcesDialog({
   const nestedChanged = one ? nested !== (hardware?.nestedVirtualization ?? false) : nested !== null;
   return (
     <EditDialog
+      vms={vms}
       title={one ? `CPU and memory of ${one.displayName}` : `Resize ${vms.length} VMs`}
       description={
         one
@@ -291,6 +323,7 @@ export function FirmwareDialog({
   const problem = firmware === "bios" && (secureBoot || tpm) ? "Secure Boot and a TPM need UEFI" : null;
   return (
     <EditDialog
+      vms={[vm]}
       title={`Firmware of ${vm.displayName}`}
       description="The VM must be off. A guest installed with BIOS usually doesn't boot with UEFI, and the other way round."
       submitLabel="Save"
@@ -368,6 +401,7 @@ export function GuestOsDialog({
       : [{ id: currentId, description: current }, ...options];
   return (
     <EditDialog
+      vms={[vm]}
       title={`Guest OS type of ${vm.displayName}`}
       description="What the VM is set up for: it decides the defaults the hypervisor uses (devices, drivers). It changes nothing in the guest. The VM must be off."
       submitLabel="Save"
@@ -440,6 +474,7 @@ export function NicDialog({
         : null;
   return (
     <EditDialog
+      vms={[vm]}
       title={nic ? `Network adapter ${nic.slot} of ${vm.displayName}` : `Add a network adapter to ${vm.displayName}`}
       description="The VM must be off. To plug the cable in or out of a running VM, use Connect or Disconnect."
       submitLabel={nic ? "Save" : "Add adapter"}
@@ -552,6 +587,7 @@ export function DiskAddDialog({
   const problem = !sizeMb ? "The size in GB" : sizeMb > 8 * 1024 * 1024 ? "At most 8 TB" : null;
   return (
     <EditDialog
+      vms={[vm]}
       title={`Add a disk to ${vm.displayName}`}
       description="A new disk file in the VM's folder. The VM must be off; the guest still has to partition and format it."
       submitLabel="Add disk"
@@ -621,6 +657,7 @@ export function DiskExpandDialog({
       : null;
   return (
     <EditDialog
+      vms={[vm]}
       title={`Expand disk ${disk.slot} of ${vm.displayName}`}
       description="The disk grows; it can't be shrunk back. The guest's partition and filesystem have to be grown in the guest afterwards. The VM must be off and have no snapshots."
       submitLabel="Expand"
@@ -658,6 +695,7 @@ export function SharedFolderDialog({
   const [error, setError] = useState<string | null>(null);
   return (
     <EditDialog
+      vms={[vm]}
       title={`Share a folder with ${vm.displayName}`}
       description="The guest can read (and with write access, change) everything in the folder you choose next. The VM must be off."
       submitLabel="Choose the folder…"

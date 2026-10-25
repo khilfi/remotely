@@ -165,6 +165,12 @@ impl VmSettings {
         self.bus.submit(&self.ctx, command).await
     }
 
+    /// VM-23: whether Workstation's window (`vmware.exe`) runs, for the edit dialogs' warning that it may write its
+    /// own copy of a VM's settings over a change. A read.
+    pub async fn workstation_window_open(&self) -> bool {
+        self.hypervisors.vmware().workstation_window_open().await
+    }
+
     /// VM-23: the guest OS types the VM's hypervisor offers.
     pub async fn guest_os_types(&self, key: &str) -> Result<Vec<GuestOsType>> {
         match Hypervisor::of_key(key) {
