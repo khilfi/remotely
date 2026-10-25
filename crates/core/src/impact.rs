@@ -20,6 +20,7 @@ use crate::adapters::hypervisor::{Hypervisor, Hypervisors, RunningVms};
 use crate::command_bus::Command;
 use crate::containers::Containers;
 use crate::domain::{Context, PowerState, Target, TargetRef};
+use crate::host_networks::HostNetworks;
 use crate::snapshots;
 use crate::store::Store;
 use crate::vm_settings::{VmChangePreview, VmEditor};
@@ -87,6 +88,8 @@ pub struct ImpactPreviewer {
     containers: Option<Containers>,
     /// VM-23, VM-24: what a VM settings or lifecycle change does to each VM.
     editor: VmEditor,
+    /// VM-11: port forwards.
+    networks: Option<HostNetworks>,
 }
 
 impl ImpactPreviewer {
@@ -96,6 +99,7 @@ impl ImpactPreviewer {
             store,
             hypervisors,
             containers: None,
+            networks: None,
         }
     }
 
@@ -109,6 +113,25 @@ impl ImpactPreviewer {
     pub fn with_containers(mut self, containers: Containers) -> Self {
         self.containers = Some(containers);
         self
+    }
+
+    /// VM-11: port forwards are previewed by the host networks service.
+    pub fn with_host_networks(mut self, networks: HostNetworks) -> Self {
+        self.networks = Some(networks);
+        self
+    }
+
+    /// VM-11: why a command can't run on this PC at all, before anything is asked.
+    pub fn refusal(&self, command: &Command) -> Option<String> {
+        self.networks.as_ref()?.refusal(command)
+    }
+
+    /// VM-11: what a port forward's approval says (who can reach it, whose address, the VMs on the network).
+    pub async fn network_warnings(&self, ctx: &Context, command: &Command) -> Vec<String> {
+        match &self.networks {
+            Some(networks) => networks.warnings(ctx, command).await,
+            None => Vec::new(),
+        }
     }
 
     /// The preview for a command's targets: VMs here, container targets by the containers service.

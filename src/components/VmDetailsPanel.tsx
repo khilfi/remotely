@@ -7,6 +7,7 @@
 // VM-18: the hypervisor comes first in `detailRows`, then its own facts (a VirtualBox VM's UUID), and the guest tools
 // row is named for it ("VMware Tools" or "Guest Additions").
 // MO-13: the System tab (VmSystemTab) shows the VM's virtual hardware and its guest's own facts.
+// VM-25: the Log tab (VmLogTab) reads the VM's own logs, and the Timeline tab (VmTimelineTab) what Remotely did to it.
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -34,6 +35,9 @@ import { VmSessionLinks } from "@/components/VmLinkControls";
 import { VmSystemTab } from "@/components/VmSystemTab";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { VmSettingsTab } from "@/components/VmSettingsTab";
+import { VmLogTab } from "@/components/VmLogTab";
+import { VmTimelineTab } from "@/components/VmTimelineTab";
+import { VmSchedulesTab, type ScheduleAsk } from "@/components/VmSchedulesTab";
 import {
   api,
   type Command,
@@ -90,6 +94,8 @@ interface Props {
   askRename: number;
   renameSeen: number;
   onRenameSeen: (n: number) => void;
+  /** VM-14, VM-27: the Schedules page, for a new schedule on this VM or one schedule's runs. */
+  onSchedules?: (ask: ScheduleAsk) => void;
 }
 
 type Hints = { take: string | null; revert: string | null; delete: string | null };
@@ -141,7 +147,8 @@ export function VmDetailsPanel(props: Props) {
         aria-label={`${vm.displayName}'s details`}
       >
         <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
-          <TabsList>
+          {/* Six tabs wrap in a narrow panel rather than widen it. */}
+          <TabsList className="h-auto! max-w-full flex-wrap justify-start *:flex-none">
             <TabsTrigger value="details">Details</TabsTrigger>
             <TabsTrigger value="settings">Settings</TabsTrigger>
             <TabsTrigger value="system">System</TabsTrigger>
@@ -153,6 +160,9 @@ export function VmDetailsPanel(props: Props) {
                 </Badge>
               )}
             </TabsTrigger>
+            <TabsTrigger value="log">Log</TabsTrigger>
+            <TabsTrigger value="timeline">Timeline</TabsTrigger>
+            <TabsTrigger value="schedules">Schedules</TabsTrigger>
           </TabsList>
           <WhyDisabled reason={props.readOnly} className="ml-auto">
             <Button
@@ -202,6 +212,23 @@ export function VmDetailsPanel(props: Props) {
         </TabsContent>
         <TabsContent value="snapshots" className="min-h-0 overflow-auto p-3">
           <SnapshotsTab {...props} hints={hints} />
+        </TabsContent>
+        {/* VM-25: mounted only while shown, so a followed log stops being read when the tab is left. */}
+        <TabsContent value="log" className="flex min-h-0 flex-col p-3">
+          {view === "log" && <VmLogTab key={vm.vmxPath} vm={vm} />}
+        </TabsContent>
+        <TabsContent value="timeline" className="min-h-0 overflow-auto p-3">
+          {view === "timeline" && <VmTimelineTab key={vm.vmxPath} vm={vm} refreshKey={refreshKey} />}
+        </TabsContent>
+        <TabsContent value="schedules" className="min-h-0 overflow-auto p-3">
+          {view === "schedules" && (
+            <VmSchedulesTab
+              vm={vm}
+              refreshKey={refreshKey}
+              readOnly={props.readOnly}
+              onSchedules={(ask) => props.onSchedules?.(ask)}
+            />
+          )}
         </TabsContent>
       </Tabs>
     </aside>

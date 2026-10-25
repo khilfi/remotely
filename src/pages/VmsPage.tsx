@@ -37,7 +37,9 @@ import {
   InfoIcon,
   ListChecksIcon,
   MonitorOffIcon,
+  NetworkIcon,
   PlayIcon,
+  RecycleIcon,
   RefreshCwIcon,
   RocketIcon,
   ShieldIcon,
@@ -77,11 +79,14 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { EnvBadge, HypervisorLabel, StateBadge, ToolsLabel } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
+import { HostNetworksSheet } from "@/components/HostNetworksSheet";
+import { WasteFinderSheet } from "@/components/WasteFinderSheet";
 import { MetricCell } from "@/components/MetricBits";
 import { NameDialog } from "@/components/NameDialog";
 import { SnapshotActionDialog, type SnapshotAction } from "@/components/SnapshotActionDialog";
 import { SortableHead } from "@/components/SortableHead";
 import { VmDetailsPanel } from "@/components/VmDetailsPanel";
+import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 import { ResourcesDialog } from "@/components/VmSettingsDialogs";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
 import { VmSessionLinks } from "@/components/VmLinkControls";
@@ -128,6 +133,9 @@ import {
 } from "@/lib/vm-snapshots";
 import { bulkResizeReason, resizeTargets } from "@/lib/vm-settings";
 
+/** VM-11, VM-16: the side sheets the page opens. */
+export type VmPanel = "networks" | "waste";
+
 /** QL-14: a VM to show from elsewhere (the palette, a shortcut, an old Snapshots link). `n` counts the requests. */
 export interface VmPageRequest {
   /** The VMs to show; none: the snapshot view of the open or first selected VM. */
@@ -136,6 +144,8 @@ export interface VmPageRequest {
   n: number;
   /** VM-24: open the Settings tab's rename dialog too (the palette's Rename). */
   rename?: boolean;
+  /** VM-11, VM-16: open the host networks or the waste finder instead of a VM. */
+  panel?: VmPanel;
 }
 
 interface Props {
@@ -151,6 +161,8 @@ interface Props {
   request: VmPageRequest | null;
   /** Changes when the list should be read again: a VM job finished or a setting about where VMs are found changed. */
   refreshKey: number;
+  /** VM-14, VM-27: the Schedules page, from a VM's Schedules tab. */
+  onSchedules?: (ask: ScheduleAsk) => void;
 }
 
 interface Action {
@@ -278,7 +290,16 @@ interface Column {
   ownClicks?: boolean;
 }
 
-export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActions, request, refreshKey }: Props) {
+export function VmsPage({
+  active,
+  onSubmitted,
+  onDeploy,
+  onOpenSettings,
+  onActions,
+  request,
+  refreshKey,
+  onSchedules,
+}: Props) {
   // FD-03: power actions, snapshots, protection, tags and labels are off while the read-only lock applies (the core
   // refuses them too); the page's notice says so.
   const readOnly = useReadOnlyReason();
@@ -312,6 +333,8 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
   // QL-14: the VM whose details are open, and the tab they open on (kept when another VM opens).
   const [detail, setDetail] = useState<string | null>(null);
   const [view, setView] = useState<VmView>("details");
+  // VM-11, VM-16: the host networks or the waste finder sheet.
+  const [panel, setPanel] = useState<VmPanel | null>(null);
   // VM-04: snapshot trees read so far, by .vmx path. A refresh, a finished job or a setting change starts afresh.
   const [trees, setTrees] = useState<{ key: string; map: Map<string, VmSnapshots> }>({ key, map: new Map() });
   if (trees.key !== key) setTrees({ key, map: new Map() });
@@ -500,7 +523,10 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
   const [renameAsk, setRenameAsk] = useState(0);
   const [renameSeen, setRenameSeen] = useState(0);
   const listReady = !loading && listedFor === filter;
-  if (request && request.n !== handledRequest && listReady) {
+  if (request && request.n !== handledRequest && request.panel) {
+    setHandledRequest(request.n);
+    setPanel(request.panel);
+  } else if (request && request.n !== handledRequest && listReady) {
     const wanted = new Set(request.vmxPaths.map(keyOf));
     const found = listed.filter((v) => wanted.has(keyOf(v.vmxPath)));
     if (found.length < wanted.size && !isEmptyFilter(filter)) {
@@ -921,6 +947,23 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
             Deploy
           </Button>
         </WhyDisabled>
+        {/* VM-11, VM-16: reads; their actions go through the bus. */}
+        <Button
+          variant="outline"
+          title="Workstation's and VirtualBox's networks and NAT port forwards"
+          onClick={() => setPanel("networks")}
+        >
+          <NetworkIcon data-icon="inline-start" />
+          Networks
+        </Button>
+        <Button
+          variant="outline"
+          title="Idle and suspended VMs, long snapshot chains, VM files no VM uses"
+          onClick={() => setPanel("waste")}
+        >
+          <RecycleIcon data-icon="inline-start" />
+          Waste finder
+        </Button>
         <VmFilterBar
           filter={filter}
           onChange={setFilter}
@@ -1410,6 +1453,7 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
                 askRename={renameAsk}
                 renameSeen={renameSeen}
                 onRenameSeen={setRenameSeen}
+                onSchedules={onSchedules}
               />
             )}
           </ResizablePanel>
@@ -1424,6 +1468,23 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
       )}
 
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+      <HostNetworksSheet
+        open={panel === "networks"}
+        onClose={() => setPanel(null)}
+        readOnly={readOnly}
+        onSubmitted={onSubmitted}
+      />
+      <WasteFinderSheet
+        open={panel === "waste"}
+        onClose={() => setPanel(null)}
+        readOnly={readOnly}
+        onSubmitted={onSubmitted}
+        onOpenVm={(vmxPath, wanted) => {
+          setPanel(null);
+          setView(wanted);
+          setDetail(vmxPath);
+        }}
+      />
 
       {snapshotDialog && limits && (
         <SnapshotActionDialog

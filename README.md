@@ -29,7 +29,7 @@ password again, and so does sending a vault password to a host that doesn't get 
 [The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
 tier); a folder can set the user, login, jump host, label and tags for the sessions in it (see
-[Folder defaults](#folder-defaults)). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
+[Folder defaults](#folder-defaults)). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette that searches VMs, sessions, containers, templates, commands and settings, and runs actions (see [Search, map, status bar and notifications](#search-map-status-bar-and-notifications)). The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
 Sessions, folders (with their defaults), tags, labels, trusted host keys, VM sizes, images (by path) and launch
 templates, saved MultiExec groups, and (only when ticked) vault secrets move to another laptop in one encrypted file
 (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
@@ -112,6 +112,33 @@ with its size, and a VM it would refuse (running, snapshots in the way).
   or VirtualBox's window on a running VM; a VirtualBox VM that is off starts with its window). The console changes
   nothing, so it has no tier, but it is in the audit log and off while presenting with the read-only lock. ISOs, shared
   folders and existing VMs are picked in Windows' own dialogs; a network share or a device path is refused.
+
+### VM insight, host networks and the waste finder
+
+0.5.0 (VM-25, VM-11, VM-16, VM-14). Reads, so no approval and nothing in the audit log; each action they offer goes
+through the bus and its approvals like anywhere else.
+
+- **Log tab** in a VM's details: Workstation's `vmware.log` and its older `vmware-N.log`, VirtualBox's `VBox.log` and
+  `VBox.log.N`, read only, with search. It shows a log's last 256 KB (a huge log is never read whole) and, for the
+  current log of a running VM, follows it: what was added is read every 2 seconds, only while the tab shows and the
+  window is visible.
+- **Timeline tab**: everything Remotely did to the VM, from the audit log (approvals, jobs, label changes, Open
+  console...) with each job's outcome for this VM from the job journal, newest first, 50 at a time.
+- **Networks** (the VMs page's button, or the palette): Workstation's vmnets and VirtualBox's host-only interfaces,
+  NAT networks, bridged and internal networks, the VMs on each, and their NAT port forwards: a Workstation NAT vmnet's,
+  a VirtualBox NAT network's rules and each VirtualBox VM's NAT adapter rules. Adding or removing one is **High** (it
+  reaches every VM on the network; Critical when a VM on it is labelled Prod), and the approval says who can reach it
+  and whose address it leads to. Workstation keeps its forwards in `C:\ProgramData\VMware\vmnetnat.conf`, which only
+  administrators can change, and Remotely never asks to run as administrator: change those in Workstation's Virtual
+  Network Editor, or start Remotely with Run as administrator. VirtualBox's need no administrator rights. The
+  topology map names its networks the way Workstation and VirtualBox list them, shows the ones no VM is on yet, and
+  opens Networks from a network's box; the palette's search finds the networks the map or Networks read last.
+- **Waste finder** (the VMs page's button, or the palette): running VMs idle for days (from the dashboard's history:
+  their busiest hour under 2% of this PC's CPU, and their guest's CPU and network quiet when a linked session is
+  watched), suspended VMs and what their saved state takes, long or large snapshot chains, and folders with VM files no
+  VM in the list uses. Only the scanned folders and the hypervisors' and launch templates' VM folders are searched,
+  never a whole disk; a folder on a network share is skipped and named. Each row offers Suspend, Delete VM, the VM's
+  Snapshots or Open folder.
 
 ### VM templates: sizes, images and launch templates
 
@@ -196,6 +223,43 @@ closes it at once: no SSH handshake, no login, nothing audited.
   rules may count it. On sites like that, turn the dots off or check less often.
 - A session behind jump hosts shows its first jump host's state (see [Jump hosts and tunnels](#jump-hosts-and-tunnels)).
 
+### Schedules
+
+VM-14 and VM-27 (0.5.0): the **Schedules** page (Ctrl+., in the sidebar under Templates; the palette's "New schedule"
+and a VM's **Schedules** tab open it too) runs actions on VMs on a timetable, or suspends VMs that sit idle.
+
+- **What**: take a snapshot of each VM, optionally keeping only the last N it took; start; shut down (through the
+  guest); suspend; or resume (only the suspended VMs: the ones that are off stay off). A power action leaves alone the
+  VMs already in that state, and says so.
+- **On**: VMs by name, and tags (every VM with the tag when it runs).
+- **When**: every hour at a minute, every day at a time, or on chosen days at a time, in local time; or **when idle**
+  (auto-suspend): a running VM whose own CPU stayed under a limit for a set time (10 minutes to 24 hours), measured
+  from the dashboard's history and its live readings. A VM Remotely didn't watch for the whole time (closed, asleep,
+  just started) waits until it has.
+- **Daylight saving** never doubles or skips a run silently: a time the clocks jump over runs at the first minute after
+  the jump (02:30 runs at 03:00), a time they repeat runs once, at the first, and the list and the run both say so.
+  Hourly runs stay an hour apart.
+- **Approval when it is saved**: saving asks with the same steps as running it then (a Prod VM raises the tier, Critical
+  asks for the vault password). A snapshot schedule that keeps the last N asks what deleting a snapshot asks (High). The
+  countdown is each run's: a High run waits it out and can be cancelled in Activity. Each run then goes through the
+  command bus under that approval and is in the audit log as one of its runs (`approval_used`, and the job's entries
+  carry the approval). The dialog shows the next runs and what each does.
+- **It asks again instead of running** when it was edited (a new name alone doesn't count), a VM became Prod or
+  protected, a new VM got its tag, or the approval rules that rated it changed. The schedule then shows "Needs
+  approval" and why, a notification says so, and **Review approval…** asks again. Fewer VMs than approved is fine.
+- **Missed runs** (the PC asleep or off, Remotely closed, or more than 2 minutes late) are reported once in the run
+  history, with how many, and never caught up. While presenting with the read-only lock on, nothing runs (each due run
+  is reported as skipped) and schedules can't be changed. Runs never overlap: a run due while the last one still goes is
+  skipped and reported.
+- **Retention deletes only the schedule's own snapshots**, oldest first: each is recorded by the hypervisor's own id
+  for it when it is taken, and named `Remotely schedule '<name>' <date> <time> (run …)`. A snapshot renamed since is
+  kept and no longer counted; a snapshot that only looks like one is never touched. Deleting a schedule keeps its
+  snapshots on the VMs.
+- **Snapshot chain warnings**: the page's limits (5 snapshots deep and 100 GB by default) flag VMs whose disks' snapshot
+  chains are deeper or larger, in the list and in each VM's Schedules tab; saving a schedule that would keep enough
+  snapshots to pass the depth warns too.
+- **Run history** per schedule (the newest 200 runs): when each was due, how it went and why, and its jobs.
+
 ### What Remotely does by itself
 
 0.4.1: what Remotely does on customers' hosts without you typing it, and how it stays gentle.
@@ -220,6 +284,8 @@ closes it at once: no SSH handshake, no login, nothing audited.
   it on. It is typed only at a line that looks like a shell prompt, starts with a space so `ignorespace` keeps it out
   of the history (nothing edits the history), and each one is in the audit log (`folder_hook_installed`, once per
   connection). Off, Files here starts in the home folder.
+- **Schedules** (VM-14, VM-27): see [Schedules](#schedules). A schedule acts on VMs only under the approval you gave
+  when you saved it, and pauses to ask again when anything that approval depended on changed.
 - **Host keys** (SS-05): a bulk run with "Trust new host keys" never trusts a key of a new type for a host that already
   has a trusted key of another type: someone in between can offer any type, and the run would give them the passwords.
   It blocks like a changed key and is audited. An import from another laptop shows such a key as a conflict, skipped
@@ -699,6 +765,40 @@ compose stacks as a whole (the Compose project shows on each container), creatin
   that isn't watched shows nothing until you watch it. Widgets read only while the dashboard shows and the window is
   visible, and none while you customize.
 
+### Search, map, status bar and notifications
+
+0.5.0 (QL-20 to QL-25):
+
+- **Search** (QL-20): type in the Ctrl+K palette to find VMs (by name, IP, tag, guest OS), sessions (name, host, the
+  address and name they last reached, user, tag), containers, launch templates, sizes, images, commands (favourites and
+  the library) and settings (by their cards' names and what they cover, such as "vmrun" or "idle lock"), with the pages
+  and actions. Every word has to match; names count most, then addresses, tags and details, and the best match is first,
+  so Enter takes it. Choosing a VM or session shows its actions as before; anything else opens where it lives. Search
+  reads only what Remotely already has, once per opening of the palette: containers are the ones the Containers page
+  read last (listing them logs in, and search never does), and it polls nothing.
+- **Map** (QL-21, Ctrl+0): this PC, the networks its VMs are on (Workstation's VMnets and VirtualBox's NAT, bridged,
+  host-only, NAT and internal networks, from each VM's settings), the VMs, the sessions that reach them, the jump hosts
+  on the way and the tunnels open on their terminals, in columns from left to right. Read only: click a node to open
+  it; pointing at one lights up what it connects to. Sessions show when they reach a VM, go through or are a jump host,
+  or have a tunnel open; a switch shows the rest. Opening the map reads no VM file it has read before; **Read the VMs
+  again** reads every one. Presentation mode masks the map like every other page.
+- **Status bar** (QL-22): along the bottom, the vault's lock countdown, the jobs running, the tunnels open, the open
+  alerts and the update state; each opens what it is about. It reads nothing on its own: the countdown starts again
+  each time you type or click.
+- **Notification centre** (QL-25): the bell at the right of the status bar lists what notified since Remotely started:
+  metric alerts (fired and resolved), terminal alert rules, long commands that finished, jobs that finished or failed,
+  an update, and toasts worth keeping (protected targets skipped, a VM still running after its shutdown, a canary
+  waiting). Each entry opens what it is about; read and unread, Mark all read, Clear. The list is kept in memory, not
+  on disk: jobs and alerts stay in Activity and on the dashboard with their own retention, and a terminal's lines are
+  written to disk only by a session log you turn on. Its text is redacted like the audit log's.
+- **First-run wizard** (QL-23): on a PC with no vault and no session, Remotely offers to find Workstation and
+  VirtualBox, create the vault (Windows unlock off unless you turn it on), add folders of VMs and import sessions.
+  Each step is optional and saves exactly what Settings, the Vault page and the Sessions page would. **Skip for now**
+  remembers it on this PC; Settings, General, **Setup guide** opens it again.
+- **Density and shortcuts** (QL-24): Settings, General, **Appearance** has Comfortable (the default) and Compact
+  spacing, kept on this PC like the theme. Ctrl+/ (Ctrl+Shift+/ inside a terminal, where Ctrl+/ is the shell's) lists
+  every keyboard shortcut, with a filter.
+
 ### Host details
 
 MO-13, MO-14 and MO-15 (0.4.0): what a VM or an SSH host is, and what an admin checks first. All of it reads only: no
@@ -1143,11 +1243,16 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's public GitHub Releases, without a token or with the optional one from the vault; install is a Medium-tier job that runs alone                                                                                                         |
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; one refresh at a time, requests meanwhile share the next; filters; audited environment labels                                                                     |
 | VM settings        | `crates/core/src/vm_settings/`, `adapters/vmx_file.rs`            | VM-11, VM-12, VM-15, VM-16, VM-23, VM-24                                                                                                            | Working: the Settings tab's full read of both hypervisors; .vmx edits after a backup (unknown keys kept), vdiskmanager and VBoxManage disk changes, devices on running VMs, bulk resize, delete, rename, add an existing VM, Open console (audited), ISO drops |
+| Host networks      | `crates/core/src/host_networks/`, `adapters/host_networks.rs`     | VM-11                                                                                                                                               | Working: vmnets, VirtualBox host-only interfaces and NAT networks with the VMs on each; NAT port forwards added and removed on the bus (High); Workstation's refused without administrator rights                                                              |
+| VM insight         | `crates/core/src/vm_insight/`, `store/timeline.rs`                | VM-25                                                                                                                                               | Working: a VM's logs (capped tails, following), its timeline from the audit log and the job journal                                                                                                                                                            |
+| Waste finder       | `crates/core/src/waste/`                                          | VM-16, VM-14                                                                                                                                        | Working: idle VMs from the dashboard's history, suspended VMs, long snapshot chains, folders no VM uses                                                                                                                                                        |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                      |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                            |
 | Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                               | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                   |
 | Alerts             | `crates/core/src/alerts/`, `store/alerts.rs`                      | MO-07                                                                                                                                               | Working: rules (threshold and duration, unreachable, stopped outside the app) run each round; alert list with acknowledge; Windows notifications with a cooldown; built-in rules; audited edits                                                                |
+| Notifications      | `crates/core/src/notifications.rs`, `src/lib/notifications*.ts`   | QL-25                                                                                                                                               | Working: the notification centre's history in memory, redacted, per workspace; read, unread and clear                                                                                                                                                          |
 | Dashboard layout   | `crates/core/src/dashboard.rs`, `src/components/Dashboard*.tsx`   | MO-16                                                                                                                                               | Working: widgets on a four-column grid, saved per workspace and audited; drag, keyboard and size menu; services widget on the kept connection                                                                                                                  |
+| Schedules          | `crates/core/src/schedules/`, `command_bus/standing.rs`           | VM-14, VM-27                                                                                                                                        | Working: snapshot (keep the last N), start, shut down, suspend, resume and idle auto-suspend; hourly, daily, weekly in local time across daylight saving; standing approvals at save; missed runs reported; chain warnings                                     |
 | Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                                 |
 | Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                              |
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                   |

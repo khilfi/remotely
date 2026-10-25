@@ -279,11 +279,16 @@ impl Vault for LocalVault {
         let inner = &self.inner;
         let mut state = locks::lock(&inner.state);
         inner.expire_if_idle(&mut state);
+        let idle = inner.options.idle_timeout;
         VaultInfo {
             status: inner.status_of(&state),
             windows_login: state.windows_login.unwrap_or(false),
             windows_login_available: inner.protector.available(),
-            idle_lock_minutes: inner.options.idle_timeout.as_secs().div_ceil(60),
+            idle_lock_minutes: idle.as_secs().div_ceil(60),
+            locks_in_secs: state
+                .open
+                .as_ref()
+                .map(|open| idle.saturating_sub(open.last_used.elapsed()).as_secs()),
         }
     }
 

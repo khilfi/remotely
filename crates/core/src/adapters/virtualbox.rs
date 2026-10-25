@@ -308,6 +308,14 @@ pub trait VirtualBoxAdapter: Send + Sync {
         super::vmware::files::list(folder).await
     }
 
+    /// VM-11, VM-16, VM-25 (R4): VBoxManage with these arguments: `list hostonlyifs`, `list --long natnets`,
+    /// `list systemproperties` and `showvminfo <uuid> --machinereadable` (reads: NAT rules, log and state files),
+    /// and from the job runner only `natnetwork modify ... --port-forward-4`, `modifyvm <uuid> --natpfN` and
+    /// `controlvm <uuid> natpfN`, built by [`crate::host_networks`]. Never guest credentials.
+    async fn vboxmanage_host(&self, _args: Vec<String>, _timeout: Duration) -> Result<String> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
     /// VM-21: VirtualBox's default machine folder (`list systemproperties`), where new VMs go. A read.
     async fn default_machine_folder(&self) -> Result<PathBuf> {
         Err(CoreError::VboxManageNotFound)
@@ -712,6 +720,12 @@ impl VirtualBoxAdapter for VBoxManageCli {
             .await
     }
 
+    async fn vboxmanage_host(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
+        let label = change_label(&args);
+        self.run(&label, args.into_iter().map(OsString::from).collect(), timeout)
+            .await
+    }
+
     async fn os_types(&self) -> Result<Vec<VboxOsType>> {
         let out = self
             .run("list ostypes", vec!["list".into(), "ostypes".into()], LIST_TIMEOUT)
@@ -989,6 +1003,9 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     }
     async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
         self.current().folder_files(folder).await
+    }
+    async fn vboxmanage_host(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
+        self.current().vboxmanage_host(args, timeout).await
     }
 }
 

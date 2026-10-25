@@ -533,6 +533,8 @@ const FIELD_KINDS: Record<string, MaskKind | "address"> = {
   macAddress: "mac",
   lastIp: "ip",
   peerIp: "ip",
+  guestIp: "ip",
+  hostIp: "ip",
   username: "user",
   user: "user",
   address: "address",

@@ -6,6 +6,7 @@
 import { Channel, invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tauri-apps/api/event";
 import { learnFields, masker } from "@/lib/presentation";
+import type { HostNetworkOp } from "@/lib/vm-insight-api";
 
 // FD-03: every answer and event passes the host, IP and user fields it holds to the presentation masker, so those
 // values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored. Exported for
@@ -44,6 +45,8 @@ export type TargetRef =
   | { kind: "terminal"; terminalId: string; sessionId?: string | null }
   /** CT-01, CT-02: a container, image or volume on a container host, or the engine itself (pull, prune). */
   | { kind: "container"; host: ContainerHost; engine: EngineKind; object: ContainerObject }
+  /** VM-11: a Workstation vmnet or a VirtualBox NAT network whose port forwards change. */
+  | { kind: "network"; hypervisor: Hypervisor; name: string }
   /** VM-21, VM-10: a VM a deploy makes, by the name and label it will have. */
   | { kind: "newVm"; hypervisor: Hypervisor; name: string; environment: Environment };
 
@@ -278,6 +281,8 @@ export type Command =
   | { type: "vmDisk"; targets: TargetRef[]; op: VmDiskOp }
   /** VM-24: deleting VMs (an existing VM is added only through `vmPickExisting`). */
   | { type: "vmLifecycle"; targets: TargetRef[]; op: VmLifecycleOp }
+  /** VM-11: add or remove a NAT port forward on a network, or a VirtualBox VM's NAT adapter (one target). */
+  | { type: "hostNetwork"; targets: TargetRef[]; op: HostNetworkOp }
   /** VM-21, VM-10: new VMs. Never submitted by the UI: `deploySubmit` and `deployCloneSubmit` build it in the core. */
   | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> };
 
@@ -490,6 +495,24 @@ export interface ApprovalRequest {
   deploy: DeployPreview | null;
   /** VM-23, VM-24: what changes on each VM, the files that go, and why a VM would be refused. */
   vmChange: VmChangePreview | null;
+  /** VM-14, VM-27: a schedule's approval: when it runs and what each run does. */
+  standing?: StandingDetails | null;
+}
+
+/** VM-14, VM-27: a schedule as its approval dialog shows it (the approval holds for each of its runs). */
+export interface StandingDetails {
+  scheduleId: string;
+  name: string;
+  /** "Daily at 02:00". */
+  when: string;
+  /** The next runs, local time, with what daylight saving does to one. */
+  nextRuns: string[];
+  /** How its targets were found: "tag 'lab': web01, web02". */
+  resolves: string[];
+  snapshotName: string | null;
+  keep: number | null;
+  /** Each run's job waits this long before it starts (cancellable in Activity). */
+  countdownSeconds: number | null;
 }
 
 /** SS-07: a tunnel as the approval dialog shows it. */
@@ -966,6 +989,8 @@ export interface VaultInfo {
   windowsLoginAvailable: boolean;
   /** The vault locks itself after this many minutes without use. */
   idleLockMinutes: number;
+  /** QL-22: seconds until it does, while unlocked (moves on with each activity ping). */
+  locksInSecs: number | null;
 }
 
 /** SS-04, FD-07: how hard a new vault password or export passphrase is to guess. The core checks again on submit. */
@@ -3323,8 +3348,9 @@ export const api = {
     invoke<VaultInfo>("vault_set_windows_login", { password, enabled }),
   /** SS-04: one click, no password: the Windows login stops unlocking the vault. */
   vaultTurnOffWindowsLogin: () => invoke<VaultInfo>("vault_turn_off_windows_login"),
-  /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). */
-  vaultActivity: () => invoke<void>("vault_activity"),
+  /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). QL-22: the
+   * answer carries the new countdown. */
+  vaultActivity: () => invoke<VaultInfo>("vault_activity"),
   /** SS-04, FD-07: scores a candidate vault password or export passphrase for the meter. Never logged. */
   passwordStrength: (text: string) => invoke<PasswordStrength>("password_strength", { text }),
   /** SS-04, FD-07: six random words joined by "-", for the Generate button. */

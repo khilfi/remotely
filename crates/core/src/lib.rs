@@ -45,6 +45,10 @@
 //!   metrics::history (MO-06): the rounds' 1-minute averages on disk, pruned daily; alerts (MO-07): rules
 //!     run on each round, an alert list and events for the UI's notifications; dashboard (MO-16): the
 //!     dashboard's layout, per workspace
+//!   host_networks (VM-11): the hypervisors' networks, the VMs on each and their NAT port forwards ──►
+//!     adapters::host_networks; changing a forward is a command on the bus. vm_insight (VM-25): a VM's logs and
+//!     timeline; waste (VM-16, VM-14): the waste finder's report. Reads only
+//!   notifications (QL-25): the notification centre's history, in memory and redacted
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -66,6 +70,7 @@ pub mod export;
 pub mod fakes;
 pub mod forwards;
 pub mod host_details;
+pub mod host_networks;
 pub mod impact;
 pub mod import;
 pub mod inventory;
@@ -75,11 +80,13 @@ pub mod locks;
 pub mod login_guard;
 pub mod metrics;
 pub mod multiexec_groups;
+pub mod notifications;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
 pub mod retention;
 pub mod save_guard;
+pub mod schedules;
 pub mod sessions;
 pub mod settings;
 pub mod snapshots;
@@ -91,8 +98,10 @@ pub mod transfer;
 pub mod untrusted;
 pub mod updates;
 pub mod vault;
+pub mod vm_insight;
 pub mod vm_links;
 pub mod vm_settings;
+pub mod waste;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -126,6 +135,7 @@ use login_guard::LoginGuard;
 use metrics::history::MetricsHistory;
 use metrics::{GuestSource, Metrics, MetricsParts};
 use multiexec_groups::MultiExecGroups;
+use notifications::Notifications;
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
@@ -210,7 +220,8 @@ impl UiSnapshot {
 pub struct Core {
     pub ctx: Context,
     pub store: Store,
-    /// Shared with the deploy runner, which lists the VMs it makes (VM-21).
+    /// Shared with the deploy runner, which lists the VMs it makes (VM-21), and with [`Core::schedules`], which
+    /// reads the VMs' power states before a scheduled run.
     pub inventory: Arc<Inventory>,
     /// VM-04: snapshot trees, read from each VM's .vmsd (VirtualBox: `showvminfo`). Changes go
     /// through [`Core::bus`].
@@ -272,6 +283,12 @@ pub struct Core {
     pub alerts: Arc<Alerts>,
     /// MO-16: the dashboard's layout of this workspace.
     pub layouts: Layouts,
+    /// VM-14, VM-27: snapshot and power schedules, auto-suspend of idle VMs, and the scheduler. Each run submits to
+    /// [`Core::bus`] under the approval given when its schedule was saved. The shell starts it with
+    /// [`schedules::Schedules::run`].
+    pub schedules: schedules::Schedules,
+    /// QL-25: the notification centre's history, in memory (the module says why not on disk).
+    pub notifications: Notifications,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
@@ -281,6 +298,13 @@ pub struct Core {
     /// VM-23, VM-24: VM settings the shell builds from dialogs and drops (ISOs, shared folders, an existing
     /// VM), guest OS types, screenshots and Open console. Changes go through [`Core::bus`].
     pub vm_settings: vm_settings::VmSettings,
+    /// VM-11: the hypervisors' host networks, the VMs on each and their NAT port forwards. Reads only; changes go
+    /// through [`Core::bus`].
+    pub networks: host_networks::HostNetworks,
+    /// VM-25: a VM's Log and Timeline tabs. Reads only.
+    pub insight: vm_insight::VmInsight,
+    /// VM-16, VM-14: the waste finder's report. Reads only; each row's action goes through [`Core::bus`].
+    pub waste: waste::WasteFinder,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -477,18 +501,23 @@ impl Core {
         jobs.set_containers(Arc::new(containers.clone()));
         // MO-06: a prune compacts the file only while no job runs.
         history.set_jobs(Arc::clone(&jobs));
+        // VM-11: network targets and port forward previews.
+        let networks = host_networks::HostNetworks::new(store.clone(), hypervisors.clone(), host_details.clone());
         let bus = Arc::new(CommandBus::new(
             policy,
             Arc::new(
                 StoreDirectory::new(store.clone())
                     .with_terminals(terminals.clone())
-                    .with_containers(containers.clone()),
+                    .with_containers(containers.clone())
+                    .with_host_networks(networks.clone()),
             ),
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
             CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
-            ImpactPreviewer::new(store.clone(), hypervisors.clone()).with_containers(containers.clone()),
+            ImpactPreviewer::new(store.clone(), hypervisors.clone())
+                .with_containers(containers.clone())
+                .with_host_networks(networks.clone()),
         ));
         bus.set_bindings(bindings.clone());
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
@@ -531,14 +560,30 @@ impl Core {
             Arc::clone(&bus),
         );
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
+        let insight = vm_insight::VmInsight::new(ctx, store.clone(), hypervisors.clone());
+        let waste = waste::WasteFinder::new(ctx, store.clone(), hypervisors.clone());
+        // VM-14, VM-27: each run goes through the bus under its schedule's standing approval.
+        let schedules = schedules::Schedules::new(schedules::ScheduleParts {
+            ctx,
+            store: store.clone(),
+            bus: Arc::clone(&bus),
+            jobs: Arc::clone(&jobs),
+            hypervisors: hypervisors.clone(),
+            inventory: Arc::clone(&inventory),
+            metrics: Arc::clone(&metrics),
+        });
         let core = Self {
             vm_settings,
+            networks,
+            insight,
+            waste,
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog,
             deploy,
             inventory,
             deployer,
+            schedules,
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())
                 .with_bindings(bindings.clone()),
@@ -567,6 +612,7 @@ impl Core {
             history,
             alerts,
             layouts: Layouts::new(store.clone(), ctx),
+            notifications: Notifications::new(),
             host_details,
             login_guard,
             presentation,

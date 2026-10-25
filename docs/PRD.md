@@ -119,6 +119,8 @@ VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-la
 | Remove a disk (deletes its files); delete a VM | Critical |
 | Add an existing VM (a `.vmx` to the list, a `.vbox` to VirtualBox) | Low |
 | Open a VM's console (the hypervisor's own window; it changes nothing) | No tier; audited |
+| Add or remove a NAT port forward: a Workstation vmnet's, a VirtualBox NAT network's, or a VirtualBox VM's NAT adapter rule (it reaches every VM on the network; a network counts as Prod when a VM on it is) | High |
+| Read a VM's logs and timeline, the host networks, the waste finder's report | No tier; not audited (reads) |
 
 Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM is a target, labelled as the deploy labels it, so a Prod label moves the tier up one; a new VM is never protected:
 
@@ -127,6 +129,15 @@ Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM i
 | Deploy 1 to 4 VMs: create, clone (a VM-10 bulk clone too) or import | Medium |
 | Deploy 5 or more VMs (the bulk tier for deploys, from 5 VMs by default), or VMs labelled Prod | High |
 | Deploy 5 or more VMs labelled Prod | Critical |
+
+Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
+
+| Action | Tier |
+| --- | --- |
+| A scheduled snapshot, start, shut down, suspend or resume, or auto-suspend of idle VMs | The action's own tier on the schedule's VMs (Prod raises it, protected VMs are skipped), approved when the schedule is saved with the same steps as running it then, AP-06 included; the countdown is each run's |
+| A snapshot schedule that keeps the last N | The higher of taking and deleting a snapshot (High): retention deletes the schedule's own snapshots |
+| A run after the schedule was edited, a VM became Prod or protected or got its tag, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
+| Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
 
 | ID | Requirement | Phase |
 | --- | --- | --- |

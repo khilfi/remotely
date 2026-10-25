@@ -21,6 +21,7 @@ use crate::domain::{now_rfc3339, ContainerHost, Context, Environment, Target, Ta
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
 use crate::forwards::PortForward;
+use crate::host_networks::{ops as net_ops, HostNetworkOp};
 use crate::impact::{ImpactPreviewer, TargetImpact};
 use crate::jobs::{JobRunner, JobSpec, TargetStatus};
 use crate::locks;
@@ -32,6 +33,10 @@ use crate::store::{NewAuditEntry, Store};
 use crate::terminal::multiexec::{self, RunKey};
 use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
 use crate::vm_settings::{ops as vm_ops, VmChangePreview, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
+
+// VM-14, VM-27: schedules are approved when they are saved; each run submits under that standing approval.
+mod standing;
+pub use standing::{StandingAsk, StandingDetails, StandingDraft, StandingGrant, StandingRun, StandingUse};
 
 /// A state-changing request. Reads (inventory, metrics) do not go through the bus.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,6 +156,10 @@ pub enum Command {
     VmDisk { targets: Vec<TargetRef>, op: VmDiskOp },
     /// VM-24: deleting VMs, and adding an existing one.
     VmLifecycle { targets: Vec<TargetRef>, op: VmLifecycleOp },
+    /// VM-11: add or remove a NAT port forward on a Workstation vmnet or a VirtualBox NAT network
+    /// ([`TargetRef::Network`]), or on a VirtualBox VM's NAT adapter ([`TargetRef::Vm`]); one target
+    /// ([`crate::host_networks`]).
+    HostNetwork { targets: Vec<TargetRef>, op: HostNetworkOp },
     /// VM-21, VM-22, VM-10: make new VMs, from a launch template or the Deploy dialog's own values (a clone of a
     /// golden VM, a cloud image with cloud-init, an ISO install or an OVA/OVF import), or clones of the VMs
     /// picked on the VMs page. Every target is one of the spec's [`TargetRef::NewVm`]s. Never built by the UI:
@@ -653,6 +662,7 @@ impl Command {
             Command::VmDevice { targets, op } => vm_ops::validate_device(targets, op),
             Command::VmDisk { targets, op } => vm_ops::validate_disk(targets, op),
             Command::VmLifecycle { targets, op } => vm_ops::validate_lifecycle(targets, op),
+            Command::HostNetwork { targets, op } => net_ops::validate(targets, op),
             _ => Ok(()),
         }
     }
@@ -683,9 +693,11 @@ impl Command {
             }
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
+            // VM-11: a forward belongs to its network or VM.
             Command::AppUpdate { .. }
             | Command::TerminalLine { .. }
             | Command::OpenTunnel { .. }
+            | Command::HostNetwork { .. }
             | Command::VmLifecycle {
                 op: VmLifecycleOp::Register { .. },
                 ..
@@ -710,6 +722,7 @@ impl Command {
             | Command::VmDevice { targets, .. }
             | Command::VmDisk { targets, .. }
             | Command::VmLifecycle { targets, .. }
+            | Command::HostNetwork { targets, .. }
             | Command::Deploy { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
@@ -734,6 +747,7 @@ impl Command {
             Command::VmDevice { .. } => "vmDevice",
             Command::VmDisk { .. } => "vmDisk",
             Command::VmLifecycle { .. } => "vmLifecycle",
+            Command::HostNetwork { .. } => "hostNetwork",
         }
     }
 
@@ -863,6 +877,7 @@ impl Command {
             Command::VmDevice { op, .. } => op.summary(target_count),
             Command::VmDisk { op, .. } => op.summary(target_count),
             Command::VmLifecycle { op, .. } => op.summary(target_count),
+            Command::HostNetwork { targets, op } => op.summary(targets),
         }
     }
 }
@@ -915,6 +930,8 @@ pub struct ApprovalRequest {
     /// VM-23, VM-24: for a VM settings or lifecycle change, what changes on each VM, every file that is
     /// deleted, and why a VM would be refused.
     pub vm_change: Option<Box<VmChangePreview>>,
+    /// VM-14, VM-27: for a schedule's approval, when it runs and what each run does.
+    pub standing: Option<Box<StandingDetails>>,
 }
 
 /// What [`CommandBus`] read about the targets before asking (AP-02).
@@ -1094,6 +1111,9 @@ pub struct ApprovalRecord {
     pub safety_snapshot: bool,
     pub vault_reauth: bool,
     pub approved_at: String,
+    /// VM-14, VM-27: a scheduled run's job: the standing approval it runs under, and which run it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standing: Option<StandingUse>,
 }
 
 /// AP-01: how long an approval waits for its answer. After that the targets' state, labels and protection
@@ -1108,6 +1128,8 @@ struct Pending {
     retry_of: Option<Uuid>,
     /// When it was asked (or asked again), for [`APPROVAL_TTL`].
     asked: Instant,
+    /// VM-14, VM-27: a schedule's approval, answered with [`CommandBus::approve_standing`].
+    standing: Option<Box<StandingDraft>>,
 }
 
 impl Pending {
@@ -1695,6 +1717,11 @@ impl CommandBus {
             return Err(CoreError::NoTargets);
         }
         command.validate()?;
+        // VM-11: what this PC can't do at all (Workstation's NAT forwards need administrator rights) is refused
+        // before anything is asked.
+        if let Some(why) = self.impact.refusal(&command) {
+            return Err(CoreError::HostNetworkRefused(why));
+        }
         self.check_sudo_password(ctx, &command).await?;
         let targets = self.resolve_targets(ctx, &command).await?;
 
@@ -1744,6 +1771,7 @@ impl CommandBus {
                 request: request.clone(),
                 retry_of,
                 asked: Instant::now(),
+                standing: None,
             },
         );
         Ok(SubmitOutcome::NeedsApproval { request })
@@ -1773,6 +1801,8 @@ impl CommandBus {
             problems.extend(preview.warnings.iter().cloned());
             decision.add_warnings(problems);
         }
+        // VM-11: who can reach a forward, whose address it leads to, and the VMs on the network.
+        decision.add_warnings(self.impact.network_warnings(ctx, command).await);
         Previews {
             impact: self.add_power_warnings(ctx, command, decision).await,
             vm_change,
@@ -1857,6 +1887,7 @@ impl CommandBus {
                 .await
                 .map(Box::new),
             vm_change: vm_change.map(Box::new),
+            standing: None,
         })
     }
 
@@ -1978,6 +2009,7 @@ impl CommandBus {
                 request: request.clone(),
                 retry_of: pending.retry_of,
                 asked: Instant::now(),
+                standing: None,
             },
         );
         CoreError::ApprovalChanged {
@@ -1995,6 +2027,13 @@ impl CommandBus {
         let pending = locks::lock(&self.pending)
             .remove(&request_id)
             .ok_or(CoreError::UnknownApproval(request_id))?;
+        // VM-14, VM-27: a schedule's approval is answered on its own way, which records the grant instead of a job.
+        if pending.standing.is_some() {
+            locks::lock(&self.pending).insert(request_id, pending);
+            return Err(CoreError::InvalidInput(
+                "That approval is for a schedule: answer it from the Schedules page.".into(),
+            ));
+        }
         let ttl = self.approval_ttl();
         if pending.expired(ttl) {
             self.audit_expired(&pending, ttl).await;
@@ -2161,6 +2200,7 @@ impl CommandBus {
             safety_snapshot,
             vault_reauth,
             approved_at: now_rfc3339(),
+            standing: None,
         })
     }
 }
@@ -2246,6 +2286,20 @@ mod tests {
             Command::Container {
                 targets: vec![],
                 op: ContainerOp::Start,
+            },
+            Command::HostNetwork {
+                targets: vec![],
+                op: HostNetworkOp::RemoveForward {
+                    forward: crate::host_networks::NatForward {
+                        name: Some("web".into()),
+                        protocol: crate::adapters::host_networks::ForwardProtocol::Tcp,
+                        host_ip: None,
+                        host_port: 8080,
+                        guest_ip: Some("203.0.113.10".into()),
+                        guest_port: 80,
+                        slot: None,
+                    },
+                },
             },
         ]
     }

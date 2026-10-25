@@ -488,6 +488,57 @@ async fn vm_hardware_is_read_from_its_files_and_kept_for_when_they_cant_be() {
 }
 
 #[tokio::test]
+async fn the_topology_map_reads_each_vms_networks_once_then_uses_what_was_read() {
+    // QL-21: R3's adapters (connection and network name) for every VM, Workstation and VirtualBox alike.
+    let mut hardware = web_hardware();
+    hardware.nics.push(VirtualNic {
+        slot: "ethernet1".into(),
+        connection: Some("custom (VMnet2)".into()),
+        network_name: Some("VMnet2".into()),
+        ..VirtualNic::default()
+    });
+    let fake = FakeVmware::with_running([vmx("web")])
+        .in_library(&vmx("web"), Some("web"))
+        .with_hardware(&vmx("web"), hardware.clone());
+    let fake = std::sync::Arc::new(fake);
+    let vbox = FakeVirtualBox::new().with_vm(VBOX, "vbox-web", PowerState::Running);
+    let core = Setup {
+        vmware: std::sync::Arc::clone(&fake),
+        virtualbox: std::sync::Arc::new(vbox),
+        ..Setup::new(FakeVmware::default())
+    }
+    .build()
+    .await;
+    core.inventory.refresh(&core.ctx).await.unwrap();
+
+    let first = core.host_details.vm_networks(&core.ctx, false).await.unwrap();
+    assert_eq!(first.len(), 2);
+    let web = first.iter().find(|v| v.vmx_path == vmx("web")).unwrap();
+    assert!(!web.stored, "never read before: read now");
+    assert_eq!(web.nics, hardware.nics);
+    assert_eq!(web.nics[1].network_name.as_deref(), Some("VMnet2"));
+    let vb = first.iter().find(|v| v.vmx_path == VBOX).unwrap();
+    assert_eq!(vb.nics[0].connection.as_deref(), Some("nat"));
+
+    // Opening the map again reads nothing: the files may be gone and it still shows what was read.
+    fake.set_hardware_failing(true);
+    let again = core.host_details.vm_networks(&core.ctx, false).await.unwrap();
+    let web = again.iter().find(|v| v.vmx_path == vmx("web")).unwrap();
+    assert!(web.stored);
+    assert_eq!(web.problem, None, "nothing was read");
+    assert_eq!(web.nics, hardware.nics);
+
+    // A Refresh reads every VM; one that can't be read keeps what was read before, and says why.
+    let fresh = core.host_details.vm_networks(&core.ctx, true).await.unwrap();
+    let web = fresh.iter().find(|v| v.vmx_path == vmx("web")).unwrap();
+    assert!(web.stored);
+    assert!(web.problem.as_deref().unwrap().contains("not there"));
+    assert_eq!(web.nics, hardware.nics);
+    let vb = fresh.iter().find(|v| v.vmx_path == VBOX).unwrap();
+    assert!(!vb.stored && vb.problem.is_none());
+}
+
+#[tokio::test]
 async fn a_virtualbox_vm_shows_its_disks_adapters_and_guest_os() {
     let fake = FakeVirtualBox::new()
         .with_vm(VBOX, "vbox-web", PowerState::Running)

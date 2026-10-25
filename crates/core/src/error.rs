@@ -104,6 +104,11 @@ pub enum CoreError {
         request: Box<crate::command_bus::ApprovalRequest>,
     },
 
+    /// VM-14, VM-27: something changed since a schedule was approved (it was edited, a target became Prod or
+    /// protected or is new, the approval rules changed), so its run did not start and it waits to be approved again.
+    #[error("{changes} since the schedule was approved, so it waits to be approved again")]
+    StandingChanged { changes: String },
+
     #[error("the vault is locked. Unlock it on the Vault page")]
     VaultLocked,
 
@@ -309,6 +314,10 @@ pub enum CoreError {
     #[error("{0}")]
     VmSettingRefused(String),
 
+    /// VM-11: a port forward change that can't be made here or now, and why in words: Workstation's NAT forwards
+    /// need administrator rights, the host port is taken, the rule is gone...
+    #[error("{0}")]
+    HostNetworkRefused(String),
     /// VM-21: ovftool.exe (the OVFTool folder next to vmrun.exe, `REMOTELY_OVFTOOL` or the Settings path) is not
     /// there, so an OVA or OVF can't be imported into Workstation.
     #[error("ovftool.exe was not found: it comes with Workstation, in its OVFTool folder. Set its path in Settings, or import the appliance into VirtualBox")]
@@ -394,6 +403,7 @@ impl CoreError {
             CoreError::ApprovalRejected(_) => "approval_rejected",
             CoreError::ApprovalExpired { .. } => "approval_expired",
             CoreError::ApprovalChanged { .. } => "approval_changed",
+            CoreError::StandingChanged { .. } => "standing_changed",
             CoreError::VaultLocked => "vault_locked",
             CoreError::VaultNotSetUp => "vault_not_set_up",
             CoreError::WrongVaultPassword => "wrong_vault_password",
@@ -437,6 +447,7 @@ impl CoreError {
             CoreError::VdiskManagerNotFound => "vdiskmanager_not_found",
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",
             CoreError::VmSettingRefused(_) => "vm_setting_refused",
+            CoreError::HostNetworkRefused(_) => "host_network_refused",
             CoreError::OvftoolNotFound => "ovftool_not_found",
             CoreError::Ovftool { .. } => "ovftool_failed",
             CoreError::DeployFailed { .. } => "deploy_failed",

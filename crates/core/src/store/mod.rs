@@ -18,12 +18,14 @@ mod multiexec_groups;
 mod quick_connect;
 #[cfg(test)]
 mod retention_tests;
+mod schedules;
 mod sessions;
 mod ssh_keys;
 mod tags;
 mod terminal_rules;
 #[cfg(test)]
 mod tests;
+mod timeline;
 #[cfg(test)]
 mod upgrade_tests;
 mod vault;
@@ -53,10 +55,13 @@ pub use jobs::{JobSummary, JobTargetRecord, PurgedBodies, TargetResult};
 pub use metrics::{HistoryPruned, HistorySize};
 pub(crate) use multiexec_groups::GroupRow;
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
+pub use schedules::MAX_RUNS_KEPT;
+pub(crate) use schedules::{RunRow, ScheduleRow, SnapshotEnd, TakenSnapshot};
 pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
 pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};
+pub use timeline::{vm_needle, JobTargetBrief};
 pub(crate) use vault::VaultMetaRow;
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";
