@@ -1,7 +1,8 @@
 // VM-19 to VM-21: the spec catalogue, like a cloud provider's. Sizes (twelve built-ins, read only, with Duplicate; the
 // owner's own beside them), images (golden VMs' snapshots, cloud images, ISOs, OVA/OVF appliances, each file checked
 // and hashed when added, with links to the official cloud image pages) and launch templates (an image and a size with
-// everything a deploy needs, each saying why it can't deploy when it can't). Deploying is the deploy package's (R2).
+// everything a deploy needs, each saying why it can't deploy when it can't). VM-21: Deploy on a template's row opens
+// the Deploy dialog on it.
 //
 // Edits are the app's own data: audited in the core with no approval tier, and refused by the read-only lock (FD-03).
 // P6: the page reads nothing while it is hidden.
@@ -10,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   CopyIcon,
+  RocketIcon,
   DiscIcon,
   ExternalLinkIcon,
   FileBoxIcon,
@@ -75,6 +77,8 @@ interface Props {
   active: boolean;
   /** The palette asked for a tab, or for a new launch template. */
   request: { tab: TemplatesTab; create?: boolean; n: number } | null;
+  /** VM-21: opens the Deploy dialog on a template. */
+  onDeploy: (templateId: string) => void;
 }
 
 type Dialog =
@@ -85,7 +89,7 @@ type Dialog =
   | { kind: "deleteImage"; image: Image }
   | { kind: "deleteTemplate"; template: LaunchTemplate };
 
-export function TemplatesPage({ active, request }: Props) {
+export function TemplatesPage({ active, request, onDeploy }: Props) {
   const readOnly = useReadOnlyReason();
   const [tab, setTab] = useState<TemplatesTab>("templates");
   const [sizes, setSizes] = useState<Size[]>([]);
@@ -480,13 +484,34 @@ export function TemplatesPage({ active, request }: Props) {
                               )}
                             </>
                           ) : (
-                            <Badge variant="outline" className="border-success/40 text-success">
-                              Ready
-                            </Badge>
+                            <span className="flex flex-wrap items-center gap-2">
+                              <Badge variant="outline" className="border-success/40 text-success">
+                                Ready
+                              </Badge>
+                              <WhyDisabled reason={readOnly}>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={readOnly !== null}
+                                  onClick={() => onDeploy(t.id)}
+                                >
+                                  <RocketIcon data-icon="inline-start" />
+                                  Deploy
+                                </Button>
+                              </WhyDisabled>
+                            </span>
                           )}
                         </TableCell>
                         <TableCell>
                           <RowMenu label={t.name}>
+                            <DropdownMenuItem disabled={(readOnly ?? why) !== null} onSelect={() => onDeploy(t.id)}>
+                              <RocketIcon />
+                              <span>
+                                Deploy…
+                                <ReasonLine reason={readOnly ?? why} />
+                              </span>
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
                             <DropdownMenuItem
                               disabled={readOnly !== null}
                               onSelect={() => setDialog({ kind: "template", existing: t })}

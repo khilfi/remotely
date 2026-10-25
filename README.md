@@ -115,8 +115,8 @@ with its size, and a VM it would refuse (running, snapshots in the way).
 
 ### VM templates: sizes, images and launch templates
 
-VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does. Deploying from it
-arrives with the deploy package; until then the VMs page's **Deploy** button says so.
+VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does, and **Deploy**
+makes VMs from it (see "Deploy" below).
 
 - **Sizes**: CPU (sockets × cores per socket), RAM and disks (the first boots; each thin, taking only what the guest
   writes, or thick). Twelve built-ins, read only: `gp.nano` (1 vCPU, 512 MB, 8 GB), `gp.micro`, `gp.small`,
@@ -138,11 +138,45 @@ arrives with the deploy package; until then the VMs page's **Deploy** button say
   host-only, bridged, a custom vmnet, or a VirtualBox NAT or internal network), an SSH key (only its public half goes to
   the VMs), a naming pattern (`{n}` the VM's number, `{template}` its name, `{date}` today: `web-{n}`), a default count,
   an environment label and tags, and what happens after each VM is deployed (save an SSH session to its IP, link it to
-  the VM, take a "clean" snapshot, open the console). The editor shows the names a deploy would give (VMs already here
-  are skipped) and why it couldn't deploy; a template whose image, size or key was deleted later stays and says so.
+  the VM, take a "clean" snapshot, open the console). For a cloud image's first boot (cloud-init) a template can name a
+  guest user (made with sudo and the SSH key; without one the image's own user, such as `ubuntu`, gets the key) and
+  packages to install; for a golden VM it says full clone (the default: a copy that stands alone) or linked clone
+  (quicker and smaller, but it needs the golden VM's snapshot, and its disk can't grow). The editor shows the names a
+  deploy would give (VMs already here are skipped) and why it couldn't deploy; a template whose image, size or key was
+  deleted later stays and says so.
 - Every change is in the audit log (no approval: it is the app's own data, like the session library) and is refused
   while presenting with the read-only lock on. Exports to another laptop carry your own sizes, the images by path (the
   import says when a file isn't on that laptop) and the templates, pointed at that laptop's images, sizes and keys.
+
+### Deploy
+
+VM-21, VM-22, VM-10 (0.5.0): **Deploy** on the VMs page, the command palette or a template's row makes VMs from a
+launch template, or from **Custom** values typed in the dialog.
+
+- Pick the template (or Custom), how many VMs and their names (from the naming pattern; you can change each). The
+  preview says, per VM and in all, the name, hypervisor, folder, size, network and disk space (thin disks counted at
+  full size, since they can grow to it). A thick disk that doesn't fit on the drive, or a VM folder that is there
+  already, stops the deploy; thin disks that might not fit only warn.
+- It goes through the approval like every change: **Medium** for 1 to 4 VMs, **High** for 5 or more (Policy rules:
+  "Bulk threshold for deploys") or for Prod. The job has one step per VM, two at a time, and can be cancelled. When a
+  VM fails or the job is cancelled, Remotely removes what it made for that VM (never a folder that was there before);
+  VMs already made stay. The audit log has the deploy's start and each VM's result.
+- **Golden VM**: a full or linked clone of the snapshot the image names. **Cloud image**: a copy of the image (the
+  file itself never changes) as the boot disk, grown to the size's disk; its first boot (cloud-init) sets the hostname,
+  the guest user, the SSH key's public half and the packages, through the `.vmx`'s `guestinfo` keys on Workstation and
+  a small `cidata` disc on VirtualBox, taken out after the first boot. A password never goes into these: they are
+  readable on this PC. **ISO**: a blank VM from the size and the OS profile that boots the ISO first; on VirtualBox,
+  an ISO it can install unattended can do so with a guest password from the vault (asked for again in the approval,
+  and given to VirtualBox only as a file only you can read, deleted at once). **OVA/OVF**: imported (on Workstation
+  with VMware's `ovftool.exe`, which Workstation installs; Settings has its path), then given the size's CPU and
+  memory.
+- After each VM: the size's CPU and memory, the boot disk grown when the size's is larger (never shrunk; not for a
+  linked clone, and the job says so), the "clean" snapshot before the first boot, power on, then up to 5 minutes for
+  its IP (a VM without VMware Tools or Guest Additions may not report one: the job says so and goes on), its SSH
+  session saved and linked to it, and its console, as the template says.
+- **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
+  job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
+  VMs they copy: started as they are, they would use their source's name and addresses.
 
 ### Reachability dots
 
@@ -805,7 +839,8 @@ so the migrations it applies never reach the installed app's database and the tw
 process. To use another folder, set `REMOTELY_DATA_DIR` to an absolute path outside the repository. The app finds
 `vmrun.exe` from Settings, then the `REMOTELY_VMRUN` environment variable, then the registry, then the default install
 folders, and `VBoxManage.exe` the same way (Settings, `REMOTELY_VBOXMANAGE`, the registry's `InstallDir`, then
-`C:\Program Files\Oracle\VirtualBox`).
+`C:\Program Files\Oracle\VirtualBox`). `ovftool.exe`, for OVA and OVF deploys on Workstation, comes from Settings,
+then `REMOTELY_OVFTOOL`, then the `OVFTool` folder beside `vmrun.exe`.
 
 Logs and crash reports are in the `logs` folder of the same data folder (`%LOCALAPPDATA%\com.remotely.desktop\logs`,
 `...desktop.dev\logs` for a development build, or `logs` under `REMOTELY_DATA_DIR`); Settings, About opens it:
@@ -1119,6 +1154,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                        | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each                                                       |
 | Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                               | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                          |
 | Spec catalogue     | `crates/core/src/catalog/`                                        | VM-19, VM-20, VM-21, FD-07                                                                                                                          | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                          |
+| Deploy             | `crates/core/src/deploy/`                                         | VM-10, VM-21, VM-22, AP-02                                                                                                                          | Working: deploys from a template or Custom values (golden VM clone, cloud image with cloud-init, ISO, OVA/OVF) and bulk clones, one job step per VM with cleanup after a failure or cancel; preview with disk space; Medium, High from 5 VMs                   |
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                               | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                      |
 | Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                       | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec    |
 | MultiExec          | `crates/core/src/terminal/multiexec.rs`                           | SS-10, QL-07, QL-12                                                                                                                                 | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                    |

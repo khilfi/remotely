@@ -8,6 +8,7 @@ mod command_panel;
 mod containers;
 mod dashboard;
 pub mod data_dirs;
+mod deploy;
 pub mod diagnostics;
 mod files;
 mod groups;
@@ -430,6 +431,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::audit_export_csv,
         ipc::settings_get,
         ipc::settings_set_vmrun_path,
+        ipc::settings_set_ovftool_path,
         ipc::settings_set_vboxmanage_path,
         ipc::settings_set_scan_folders,
         ipc::settings_set_power_on_limit,
@@ -637,6 +639,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         catalog::catalog_template_update,
         catalog::catalog_template_delete,
         catalog::catalog_open_site,
+        deploy::deploy_check,
+        deploy::deploy_submit,
+        deploy::deploy_clone_check,
+        deploy::deploy_clone_submit,
+        deploy::deploy_host_adapters,
+        deploy::deploy_default_folder,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,

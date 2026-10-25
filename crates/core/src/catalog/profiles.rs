@@ -13,13 +13,13 @@
 //!
 //! Profiles are part of the app, not stored: an image names one by its id.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::sizes::DiskController;
 use crate::adapters::hypervisor::Hypervisor;
 
 /// How the VM boots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Firmware {
     Bios,
@@ -38,7 +38,7 @@ impl Firmware {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum GuestFamily {
     Linux,
