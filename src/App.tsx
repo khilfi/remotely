@@ -38,8 +38,10 @@ import {
   LockOpenIcon,
   MonitorIcon,
   MoonIcon,
+  NetworkIcon,
   PresentationIcon,
   RadioTowerIcon,
+  RecycleIcon,
   RefreshCwIcon,
   SearchIcon,
   ServerIcon,
@@ -115,7 +117,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
-import { VmsPage, type VmPageRequest } from "@/pages/VmsPage";
+import { VmsPage, type VmPageRequest, type VmPanel } from "@/pages/VmsPage";
 import { navTarget, shortcutTarget, type NavTarget } from "@/lib/navigation";
 import {
   changesAppInfo,
@@ -243,6 +245,12 @@ export default function App() {
   /** QL-14: the Virtual machines page with these VMs' details, or (none) the snapshot view of the open one. */
   const openVms = useCallback((vmxPaths: string[], view: VmView, rename?: boolean) => {
     setVmRequest((prev) => ({ vmxPaths, view, rename, n: (prev?.n ?? 0) + 1 }));
+    setPage("vms");
+  }, []);
+
+  /** VM-11, VM-16: the VM page's host networks or waste finder. */
+  const openVmsPanel = useCallback((panel: VmPanel) => {
+    setVmRequest((prev) => ({ vmxPaths: [], view: "details", panel, n: (prev?.n ?? 0) + 1 }));
     setPage("vms");
   }, []);
 
@@ -544,6 +552,20 @@ export default function App() {
       icon: CameraIcon,
       keywords: "snapshot safety restore vm virtual machines",
       run: () => openVms([], "snapshots"),
+    },
+    {
+      id: "host-networks",
+      label: "Host networks and NAT port forwards",
+      icon: NetworkIcon,
+      keywords: "vmnet nat network port forward forwarding host-only natnetwork virtualbox workstation",
+      run: () => openVmsPanel("networks"),
+    },
+    {
+      id: "waste-finder",
+      label: "Waste finder: idle VMs, suspended VMs, snapshot chains, unused files",
+      icon: RecycleIcon,
+      keywords: "disk space cleanup idle suspended snapshots orphan unused reclaim",
+      run: () => openVmsPanel("waste"),
     },
     {
       id: "new-template",

@@ -10,7 +10,9 @@ import {
   CameraIcon,
   EyeIcon,
   EyeOffIcon,
+  FileTextIcon,
   GaugeIcon,
+  HistoryIcon,
   InfoIcon,
   MonitorIcon,
   PauseIcon,
@@ -331,6 +333,24 @@ export function CommandPalette({
                   }}
                 >
                   <CameraIcon /> Snapshots…
+                </CommandItem>
+                <CommandItem
+                  value="log vmware.log vbox.log errors"
+                  onSelect={() => {
+                    close();
+                    onOpenVm(vm.vmxPath, "log");
+                  }}
+                >
+                  <FileTextIcon /> Its log
+                </CommandItem>
+                <CommandItem
+                  value="timeline history audit what happened"
+                  onSelect={() => {
+                    close();
+                    onOpenVm(vm.vmxPath, "timeline");
+                  }}
+                >
+                  <HistoryIcon /> Its timeline
                 </CommandItem>
                 <CommandItem
                   value="settings hardware cpu memory disks network firmware resize"
