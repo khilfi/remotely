@@ -28,6 +28,7 @@
 //!     jump hosts (SS-07): every SSH connection goes through the session's jump host chain
 //!     tunnels (SS-07): saved port forwards (forwards) open on a terminal's connection; opening one is
 //!     a command on the bus, which the job runner carries out in the terminal; closing is audited
+//!     highlight and alert rules (QL-17): the UI colours matches; each pane alerts once per burst of matching lines
 //!   snippets (BX-08): favourite and built-in commands for the terminal, classified by the policy engine
 //!   reachability (QL-04): background TCP checks of the sessions the tree shows, skipping hosts with an
 //!     open connection and backing off from hosts that are down ──► adapters::network
@@ -120,6 +121,7 @@ use ssh_keys::KeyManager;
 use store::{NewAuditEntry, Store};
 use terminal::files::FileTransfers;
 use terminal::multiexec::MultiExec;
+use terminal::rules::TerminalRules;
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use transfer::Transfer;
 use vault::{Dpapi, LocalVault, SecretBindings, Vault, VaultOptions, VaultService, VaultStatus};
@@ -222,6 +224,8 @@ pub struct Core {
     /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
     /// classified by the bus's policy engine.
     pub snippets: Snippets,
+    /// QL-17: highlight and alert rules for terminal output; open panes follow their alert rules.
+    pub terminal_rules: TerminalRules,
     /// QL-04: background checks of the sessions the Terminal page's tree shows. Reads only. The shell
     /// starts it with [`ReachabilityChecker::run`].
     pub reachability: Arc<ReachabilityChecker>,
@@ -369,6 +373,9 @@ impl Core {
             Arc::clone(&links),
         );
         terminals.set_bindings(bindings.clone());
+        // QL-17: every pane matches its output against the rules with an alert on, as they change.
+        let terminal_rules = TerminalRules::load(store.clone(), &ctx).await?;
+        terminals.set_rules(terminal_rules.subscribe());
         // MO-13: terminals and the dashboard's kept connections read a session's facts as they go.
         let specs = SpecsCollector::new(store.clone());
         terminals.set_specs(specs.clone());
@@ -480,6 +487,7 @@ impl Core {
             multiexec,
             files,
             snippets,
+            terminal_rules,
             reachability,
             metrics,
             host_details,

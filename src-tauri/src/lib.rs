@@ -12,6 +12,7 @@ mod host_details;
 mod ipc;
 mod multiexec;
 mod terminal;
+mod terminal_rules;
 mod tunnels;
 pub mod updater;
 mod wake;
@@ -556,7 +557,15 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         command_panel::command_fill,
         command_panel::terminal_type_secret,
         command_panel::notify_command_finished,
+        command_panel::notify_terminal_alert,
         command_panel::open_manual,
+        terminal_rules::terminal_rules_list,
+        terminal_rules::terminal_rule_validate,
+        terminal_rules::terminal_rule_add,
+        terminal_rules::terminal_rule_update,
+        terminal_rules::terminal_rule_delete,
+        terminal_rules::terminal_rules_reorder,
+        terminal_rules::terminal_rule_set_builtin,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,
