@@ -243,15 +243,7 @@ pub trait VirtualBoxAdapter: Send + Sync {
         let (mut os_name, mut kernel, mut ips) = (None, None, Vec::new());
         if info.power_state().is_on() {
             let props = self.guest_properties(uuid).await.unwrap_or_default();
-            let read = |name: &str| props.get(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
-            let (product, release) = (read(GUEST_OS_PRODUCT), read(GUEST_OS_RELEASE));
-            match (product, release) {
-                (Some(p), Some(r)) if p.eq_ignore_ascii_case("linux") => kernel = Some(r),
-                (Some(p), None) if p.eq_ignore_ascii_case("linux") => {}
-                (Some(p), Some(r)) => os_name = Some(format!("{p} {r}")),
-                (Some(p), None) => os_name = Some(p),
-                _ => {}
-            }
+            (os_name, kernel) = guest_os_and_kernel(&props);
             ips = guest_ips(&props);
         }
         let extras = self.settings_extras(&info).await;
@@ -355,6 +347,19 @@ pub fn parse_os_types(out: &str) -> Vec<VboxOsType> {
     }
     types.retain(|t| !t.id.is_empty());
     types
+}
+
+/// MO-13: the guest's OS name and kernel from its Guest Additions. Linux guests report only "Linux" and the kernel:
+/// the kernel is kept, and the OS type chosen for the VM says more than "Linux".
+pub fn guest_os_and_kernel(props: &GuestProperties) -> (Option<String>, Option<String>) {
+    let read = |name: &str| props.get(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    match (read(GUEST_OS_PRODUCT), read(GUEST_OS_RELEASE)) {
+        (Some(p), Some(r)) if p.eq_ignore_ascii_case("linux") => (None, Some(r)),
+        (Some(p), None) if p.eq_ignore_ascii_case("linux") => (None, None),
+        (Some(p), Some(r)) => (Some(format!("{p} {r}")), None),
+        (Some(p), None) => (Some(p), None),
+        _ => (None, None),
+    }
 }
 
 /// VM-23: every IPv4 address the Guest Additions report, one per adapter, in their order.

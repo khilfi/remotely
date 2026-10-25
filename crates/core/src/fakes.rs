@@ -1684,7 +1684,8 @@ impl VirtualBoxAdapter for FakeVirtualBox {
         let props = self.guest_properties(uuid).await.unwrap_or_default();
         let mut stripped = info.clone();
         stripped.disks.clear();
-        let mut hardware = crate::adapters::vm_hardware::read_virtualbox(&stripped, None, None).await;
+        let (os_name, kernel) = vbox::guest_os_and_kernel(&props);
+        let mut hardware = crate::adapters::vm_hardware::read_virtualbox(&stripped, os_name, kernel).await;
         {
             let sizes = locks::lock(&self.disk_sizes);
             let files = locks::lock(&self.files);
@@ -1696,15 +1697,17 @@ impl VirtualBoxAdapter for FakeVirtualBox {
                     .nth(2)
                     .and_then(|name| info.controllers.iter().find(|c| c.name == name))
                     .and_then(|c| c.kind.clone());
+                let there = files.contains_key(&key);
                 hardware.disks.push(crate::adapters::vm_hardware::VirtualDisk {
                     slot: disk.slot.clone(),
                     path: disk.path.display().to_string(),
-                    format: Some("VDI (dynamic)".into()),
+                    format: there.then(|| "VDI (dynamic)".into()),
                     provisioned_bytes: sizes.get(&key).map(|mb| mb * 1024 * 1024),
                     on_disk_bytes: files.get(&key).map(|(_, size)| *size),
-                    files: 1,
+                    files: u32::from(there),
                     controller,
-                    thin: Some(true),
+                    thin: there.then_some(true),
+                    problem: (!there).then(|| "the disk file is not there".to_owned()),
                     ..Default::default()
                 });
             }
