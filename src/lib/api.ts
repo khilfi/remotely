@@ -195,6 +195,22 @@ export interface SnapshotNode {
   safety: boolean;
   /** The VM's current state was taken from this snapshot. */
   current: boolean;
+  /** VM-04, VM-21: linked clones made from this snapshot; it is not deleted while there are any. */
+  linkedClones: LinkedClone[];
+}
+
+/** VM-04, VM-21: a VM made as a linked clone of another VM's snapshot. */
+export interface LinkedClone {
+  name: string;
+  /** Its key: the .vmx path for Workstation, the UUID for VirtualBox. */
+  key: string;
+}
+
+/** VM-04, VM-21, VM-24: one snapshot and the linked clones made from it. */
+export interface SnapshotClones {
+  snapshot: string;
+  uid: number;
+  clones: LinkedClone[];
 }
 
 export interface VmSnapshots {
@@ -396,6 +412,8 @@ export interface TargetImpact {
   notes: string[];
   /** CT-01, CT-02: a container target as it is now (the VM fields are empty then). */
   container?: ContainerImpact;
+  /** VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it deletes; such a VM is refused. */
+  linkedClones: SnapshotClones[];
 }
 
 /** CT-01, CT-02: one container, image or volume target now, or what a pull or prune does on a host. */
