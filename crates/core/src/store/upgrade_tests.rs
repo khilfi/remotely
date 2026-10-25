@@ -262,10 +262,24 @@ async fn a_setting_set_aside_keeps_its_value_under_another_key() {
     );
 }
 
-/// QL-15: a database that fails to migrate is closed before the error comes back, so the shell can set the
-/// file aside at once.
+/// QL-15: renames the database, and its `-wal` and `-shm` files if there are any, right away, as the shell does
+/// after a failed start (Windows refuses while anything holds one open); then deletes them.
+fn set_aside_at_once(path: &Path) {
+    for suffix in ["", "-wal", "-shm"] {
+        let file = std::path::PathBuf::from(format!("{}{suffix}", path.display()));
+        if suffix.is_empty() || file.exists() {
+            let aside = format!("{}.aside", file.display());
+            std::fs::rename(&file, &aside).expect("nothing holds the file open any more");
+            let _ = std::fs::remove_file(&aside);
+        }
+    }
+}
+
+/// QL-15: a file that is not a database (damaged, or something else) is closed before the error comes back, so
+/// the shell can set it aside at once. It fails on the store's own first connection (`Store::check_file`): one in
+/// sqlx's pool would have been closed later, on sqlx's worker thread, and the rename failed now and then under load.
 #[tokio::test]
-async fn a_database_that_fails_to_migrate_is_closed_before_the_error() {
+async fn a_file_that_is_not_a_database_is_closed_before_the_error() {
     let path = std::env::temp_dir().join(format!("remotely-broken-{}.db", Uuid::new_v4()));
     std::fs::write(
         &path,
@@ -277,12 +291,30 @@ async fn a_database_that_fails_to_migrate_is_closed_before_the_error() {
         Err(err) => err,
     };
     assert!(err.is_database(), "{err}");
-    let aside = path.with_extension("aside");
-    std::fs::rename(&path, &aside).expect("nothing holds the file open any more");
-    let _ = std::fs::remove_file(&aside);
-    for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
-    }
+    assert!(!err.is_newer_database(), "{err}");
+    set_aside_at_once(&path);
+}
+
+/// QL-15: a database that a newer version migrated further opens, then fails its migrations; the pool is closed
+/// before the error comes back, so the shell can set the file aside at once.
+#[tokio::test]
+async fn a_database_from_a_newer_version_is_closed_before_the_error() {
+    let path = std::env::temp_dir().join(format!("remotely-newer-{}.db", Uuid::new_v4()));
+    let store = Store::open(&path).await.unwrap();
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) \
+         VALUES (9999, 'from a newer version', 1, x'00', 0)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+    store.close().await;
+    let err = match Store::open(&path).await {
+        Ok(_) => panic!("a database from a newer version does not open"),
+        Err(err) => err,
+    };
+    assert!(err.is_newer_database(), "{err}");
+    set_aside_at_once(&path);
 }
 
 /// BX-02, AP-03, BX-03: a 0.4.2 database (migrations to 0015) with jobs in it gets each job's command type, the old
