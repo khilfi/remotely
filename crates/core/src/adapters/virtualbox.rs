@@ -307,6 +307,23 @@ pub trait VirtualBoxAdapter: Send + Sync {
     async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
         super::vmware::files::list(folder).await
     }
+
+    /// VM-21: VirtualBox's default machine folder (`list systemproperties`), where new VMs go. A read.
+    async fn default_machine_folder(&self) -> Result<PathBuf> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
+    /// VM-21: this PC's host-only adapters (`list hostonlyifs`), or with `bridged` its network adapters a VM can
+    /// bridge to (`list bridgedifs`), by the names `modifyvm` takes. A read.
+    async fn host_adapters(&self, _bridged: bool) -> Result<Vec<String>> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
+    /// VM-21: whether VirtualBox can install the OS on this ISO by itself (`unattended detect`), and the OS type it
+    /// found. A read: it only looks into the ISO.
+    async fn unattended_detect(&self, _iso: &Path) -> Result<(bool, Option<String>)> {
+        Err(CoreError::VboxManageNotFound)
+    }
 }
 
 /// VM-23: a guest OS type VirtualBox knows: the id `modifyvm --ostype` takes and its description.
@@ -382,6 +399,44 @@ pub fn guest_ips(props: &GuestProperties) -> Vec<String> {
         }
     }
     ips
+}
+
+/// Parses `unattended detect --machine-readable`: whether VirtualBox can install the ISO by itself, and the OS
+/// it found.
+pub fn parse_unattended_detect(out: &str) -> (bool, Option<String>) {
+    let mut supported = false;
+    let mut os = None;
+    for line in out.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        match key.trim() {
+            "IsInstallSupported" => supported = value.eq_ignore_ascii_case("yes") || value == "true",
+            "OSTypeId" if !value.is_empty() => os = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    (supported, os)
+}
+
+/// VM-21: `Default machine folder:` from `list systemproperties`.
+pub fn parse_default_machine_folder(out: &str) -> Option<PathBuf> {
+    out.lines()
+        .find_map(|line| line.trim().strip_prefix("Default machine folder:"))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// VM-21: each adapter's `Name:` from `list hostonlyifs` or `list bridgedifs`, in their order.
+pub fn parse_host_adapters(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|line| line.strip_prefix("Name:"))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Builds the adapter for this machine. Without VirtualBox the app still starts, with no VirtualBox
@@ -716,6 +771,47 @@ impl VirtualBoxAdapter for VBoxManageCli {
             .map(|dir| dir.join("VBoxGuestAdditions.iso"))
             .filter(|p| p.is_file())
     }
+
+    async fn default_machine_folder(&self) -> Result<PathBuf> {
+        let out = self
+            .run(
+                "list systemproperties",
+                vec!["list".into(), "systemproperties".into()],
+                LIST_TIMEOUT,
+            )
+            .await?;
+        parse_default_machine_folder(&out).ok_or_else(|| CoreError::VboxManage {
+            command: "list systemproperties".into(),
+            message: "it names no default machine folder".into(),
+        })
+    }
+
+    async fn unattended_detect(&self, iso: &Path) -> Result<(bool, Option<String>)> {
+        if let Some(refusal) = crate::untrusted::path_refusal(iso) {
+            return Err(CoreError::InvalidInput(format!(
+                "{} {}",
+                iso.display(),
+                refusal.describe()
+            )));
+        }
+        let args = vec![
+            "unattended".into(),
+            "detect".into(),
+            "--iso".into(),
+            iso.as_os_str().to_owned(),
+            "--machine-readable".into(),
+        ];
+        let out = self.run("unattended detect", args, LIST_TIMEOUT).await?;
+        Ok(parse_unattended_detect(&out))
+    }
+
+    async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
+        let what = if bridged { "bridgedifs" } else { "hostonlyifs" };
+        let out = self
+            .run(&format!("list {what}"), vec!["list".into(), what.into()], LIST_TIMEOUT)
+            .await?;
+        Ok(parse_host_adapters(&out))
+    }
 }
 
 /// A screenshot of a 4K screen is a few MB; more than this is refused, never read in part (A9).
@@ -860,6 +956,15 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     }
     async fn hardware(&self, uuid: &str) -> Result<VmHardware> {
         self.current().hardware(uuid).await
+    }
+    async fn default_machine_folder(&self) -> Result<PathBuf> {
+        self.current().default_machine_folder().await
+    }
+    async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
+        self.current().host_adapters(bridged).await
+    }
+    async fn unattended_detect(&self, iso: &Path) -> Result<(bool, Option<String>)> {
+        self.current().unattended_detect(iso).await
     }
     async fn settings_extras(&self, info: &VboxVmInfo) -> Option<VboxSettingsExtras> {
         self.current().settings_extras(info).await
@@ -1554,6 +1659,72 @@ CurrentSnapshotName="before upgrade"
 CurrentSnapshotUUID="5b1c0000-0000-4000-8000-000000000002"
 CurrentSnapshotNode="SnapshotName-1"
 "#;
+
+    #[test]
+    fn unattended_detect_says_what_virtualbox_can_install() {
+        let out = "OSTypeId=\"Ubuntu24_LTS_64\"\nOSVersion=\"24.04\"\nIsInstallSupported=\"yes\"\n";
+        assert_eq!(parse_unattended_detect(out), (true, Some("Ubuntu24_LTS_64".into())));
+        assert_eq!(parse_unattended_detect("IsInstallSupported=\"no\"\n"), (false, None));
+    }
+
+    /// VM-21: the real adapter against a stand-in VBoxManage (a batch file made at run time) that writes its
+    /// arguments to a file: a deploy's calls arrive whole, a password only as its file's path.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn deploy_calls_reach_vboxmanage_whole() {
+        let dir = std::env::temp_dir().join(format!("remotely-vbox-deploy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("VBoxManage.cmd");
+        let args_file = dir.join("args.txt");
+        std::fs::write(
+            &tool,
+            format!("@echo off\r\necho %*>> \"{}\"\r\nexit /b 0\r\n", args_file.display()),
+        )
+        .unwrap();
+        let cli = VBoxManageCli::new(tool);
+        let uuid = "3f0c1a2b-1111-4222-8333-444455556666";
+        cli.change(
+            crate::deploy::virtualbox::createvm_args("web-1", uuid, "Ubuntu_64", &dir),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        let password_file = dir.join("password");
+        cli.change(
+            crate::deploy::virtualbox::unattended_args(uuid, &dir.join("noble.iso"), "alice", &password_file, "web-1"),
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        let lines: Vec<&str> = args.lines().collect();
+        assert!(lines[0].starts_with("createvm --name web-1 --uuid 3f0c1a2b-"), "{args}");
+        assert!(lines[0].ends_with("--register"), "{args}");
+        assert!(lines[1].starts_with("unattended install 3f0c1a2b-"), "{args}");
+        assert!(lines[1].contains("--password-file"), "{args}");
+        assert!(lines[1].contains("--hostname web-1.localdomain"), "{args}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parses_the_default_folder_and_host_adapters() {
+        // VirtualBox 7.2's `list systemproperties` (shortened) and `list hostonlyifs`.
+        let props = "API version:                     7_2\nMaximum guest RAM size:          4194304 Megabytes\nDefault machine folder:          C:\\Users\\alice\\VirtualBox VMs\nRaw-mode Supported:              no\n";
+        assert_eq!(
+            parse_default_machine_folder(props),
+            Some(PathBuf::from(r"C:\Users\alice\VirtualBox VMs"))
+        );
+        assert_eq!(parse_default_machine_folder("Default machine folder:   \n"), None);
+        let ifs = "Name:            VirtualBox Host-Only Ethernet Adapter\nGUID:            0d2c-...\nDHCP:            Disabled\nIPAddress:       192.0.2.1\n\nName:            VirtualBox Host-Only Ethernet Adapter #2\nGUID:            1e3d-...\n";
+        assert_eq!(
+            parse_host_adapters(ifs),
+            [
+                "VirtualBox Host-Only Ethernet Adapter",
+                "VirtualBox Host-Only Ethernet Adapter #2"
+            ]
+        );
+        assert!(parse_host_adapters("").is_empty());
+    }
 
     #[test]
     fn parses_showvminfo() {

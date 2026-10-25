@@ -309,6 +309,19 @@ pub enum CoreError {
     #[error("{0}")]
     VmSettingRefused(String),
 
+    /// VM-21: ovftool.exe (the OVFTool folder next to vmrun.exe, `REMOTELY_OVFTOOL` or the Settings path) is not
+    /// there, so an OVA or OVF can't be imported into Workstation.
+    #[error("ovftool.exe was not found: it comes with Workstation, in its OVFTool folder. Set its path in Settings, or import the appliance into VirtualBox")]
+    OvftoolNotFound,
+
+    /// VM-21: ovftool answered with an error; `message` is its own text.
+    #[error("ovftool failed: {message}")]
+    Ovftool { message: String },
+
+    /// VM-21: a VM a deploy was making failed; `message` says why and what was removed of what it had made.
+    #[error("{vm} was not made: {message}")]
+    DeployFailed { vm: String, message: String },
+
     /// CT-01, CT-02: a container CLI could not do what was asked. The message says why in words and
     /// never holds a secret, a log line or an environment value.
     #[error("{message}")]
@@ -424,6 +437,9 @@ impl CoreError {
             CoreError::VdiskManagerNotFound => "vdiskmanager_not_found",
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",
             CoreError::VmSettingRefused(_) => "vm_setting_refused",
+            CoreError::OvftoolNotFound => "ovftool_not_found",
+            CoreError::Ovftool { .. } => "ovftool_failed",
+            CoreError::DeployFailed { .. } => "deploy_failed",
             CoreError::Container { problem, .. } => problem.code(),
         }
     }

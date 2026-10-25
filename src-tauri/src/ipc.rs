@@ -381,6 +381,10 @@ pub struct Settings {
     vmrun_path_saved: Option<String>,
     /// What the app is using now; `None` means Workstation was not found.
     vmrun_path_in_use: Option<String>,
+    /// VM-21: the ovftool.exe path the user chose; `None`: find it beside vmrun.exe.
+    ovftool_path_saved: Option<String>,
+    /// VM-21: the ovftool.exe in use; `None`: not found (OVA and OVF imports into Workstation can't run).
+    ovftool_path_in_use: Option<String>,
     /// VM-18: what the user chose; `None` means "find VBoxManage.exe automatically".
     vboxmanage_path_saved: Option<String>,
     /// VM-18: what the app is using now; `None` means VirtualBox was not found.
@@ -409,6 +413,8 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
     Ok(Settings {
         vmrun_path_saved: core.saved_vmrun_path().await?.map(|p| p.display().to_string()),
         vmrun_path_in_use: core.vmrun_path().map(|p| p.display().to_string()),
+        ovftool_path_saved: core.saved_ovftool_path().await?.map(|p| p.display().to_string()),
+        ovftool_path_in_use: core.ovftool_path().map(|p| p.display().to_string()),
         vboxmanage_path_saved: core.saved_vboxmanage_path().await?.map(|p| p.display().to_string()),
         vboxmanage_path_in_use: core.vboxmanage_path().map(|p| p.display().to_string()),
         update_checks: core.update_checks_enabled().await?,
@@ -441,6 +447,17 @@ pub async fn settings_set_vmrun_path(state: State<'_, AppState>, path: Option<St
         .filter(|p| !p.is_empty())
         .map(PathBuf::from);
     state.core.set_vmrun_path(path).await?;
+    settings(&state.core).await
+}
+
+/// VM-21: `None` or an empty string goes back to finding ovftool.exe automatically.
+#[tauri::command]
+pub async fn settings_set_ovftool_path(state: State<'_, AppState>, path: Option<String>) -> IpcResult<Settings> {
+    let path = path
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    state.core.set_ovftool_path(path).await?;
     settings(&state.core).await
 }
 

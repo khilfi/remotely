@@ -26,7 +26,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     keywords: "present mask screen share read-only lock hide terminal output",
   },
   { id: "first-run", tab: "general", title: "Setup guide", keywords: "first run wizard welcome start getting started" },
-  { id: "vmware", tab: "general", title: "VMware Workstation", keywords: "vmrun path vmrun.exe hypervisor" },
+  {
+    id: "vmware",
+    tab: "general",
+    title: "VMware Workstation",
+    keywords: "vmrun path vmrun.exe hypervisor ovftool ova ovf",
+  },
   {
     id: "virtualbox",
     tab: "general",

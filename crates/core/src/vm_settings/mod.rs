@@ -41,7 +41,7 @@ pub use ops::{
 
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors, RunningVms};
 use crate::adapters::vm_hardware::VmHardware;
-use crate::adapters::vmware::path_key;
+use crate::adapters::vmware::{path_key, VmwareAdapter};
 use crate::adapters::vmx_file::VmxFile;
 use crate::command_bus::Command;
 use crate::domain::{Context, PowerState, Target, TargetRef};
@@ -215,6 +215,25 @@ fn lock_of(path: &Path) -> PathBuf {
     let mut lock = path.as_os_str().to_owned();
     lock.push(".lck");
     PathBuf::from(lock)
+}
+
+/// VM-23: the first lock Workstation holds on a VM: its `<name>.vmx.lck`, or a disk's `<disk>.vmdk.lck`; `None` when
+/// there is none. A VM that is running, or off but open in a Workstation tab, has one. VM-21's linked clones check it
+/// too, since `vmrun clone ... linked` records the clone in the golden VM's .vmsd.
+pub(crate) async fn workstation_lock(vmware: &dyn VmwareAdapter, vmx: &Path, file: &VmxFile) -> Option<PathBuf> {
+    let folder = vmx.parent().unwrap_or(Path::new(""));
+    let mut locks = vec![lock_of(vmx)];
+    for (key, value) in file.pairs() {
+        if key.ends_with(".filename") && value.to_ascii_lowercase().ends_with(".vmdk") {
+            locks.push(lock_of(&vmware::resolve(folder, value)));
+        }
+    }
+    for lock in locks {
+        if vmware.file_exists(&lock).await {
+            return Some(lock);
+        }
+    }
+    None
 }
 
 /// VM-16: a new size must be larger than the disk is.
@@ -413,23 +432,13 @@ impl VmEditor {
     /// (`<name>.vmx.lck`) or one of its disks (`<disk>.vmdk.lck`): a VM that is off but open in a Workstation tab
     /// keeps its settings in memory and may write them back over the change. Remotely never deletes a lock.
     async fn require_unlocked(&self, vmx: &Path, file: &VmxFile) -> Result<()> {
-        let vmware = self.hypervisors.vmware();
-        let folder = vmx.parent().unwrap_or(Path::new(""));
-        let mut locks = vec![lock_of(vmx)];
-        for (key, value) in file.pairs() {
-            if key.ends_with(".filename") && value.to_ascii_lowercase().ends_with(".vmdk") {
-                locks.push(lock_of(&vmware::resolve(folder, value)));
-            }
+        match workstation_lock(self.hypervisors.vmware().as_ref(), vmx, file).await {
+            Some(lock) => Err(refused(format!(
+                "Workstation is using the VM: its lock {} is there. Close the VM's tab in Workstation and try again. A lock left after Workstation crashed can be deleted once Workstation is closed; Remotely never deletes one.",
+                lock.display()
+            ))),
+            None => Ok(()),
         }
-        for lock in locks {
-            if vmware.file_exists(&lock).await {
-                return Err(refused(format!(
-                    "Workstation is using the VM: its lock {} is there. Close the VM's tab in Workstation and try again. A lock left after Workstation crashed can be deleted once Workstation is closed; Remotely never deletes one.",
-                    lock.display()
-                )));
-            }
-        }
-        Ok(())
     }
 
     async fn vmware_config(&self, vmx: &Path, edit: &VmConfigEdit, state: &VmState) -> Result<Plan> {
