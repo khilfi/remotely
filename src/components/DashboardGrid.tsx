@@ -186,9 +186,12 @@ export function DashboardGrid({ layout, editing, onChange, renderWidget, titleOf
                   <GripVerticalIcon className="size-4" />
                 </button>
                 <span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
-                <span className="text-xs text-muted-foreground tabular-nums">
-                  {widget.w}×{widget.h}
-                </span>
+                {/* A one-column widget's bar keeps its room for the title; the size menu says the size. */}
+                {widget.w > 1 && (
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {widget.w}×{widget.h}
+                  </span>
+                )}
                 <Button
                   variant="ghost"
                   size="icon-sm"

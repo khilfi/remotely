@@ -903,8 +903,12 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   );
 
   const rows = useMemo(() => overview?.rows ?? [], [overview]);
-  // A row by its key, or by the watched session a VM row shows (an alert on a VM's guest).
-  const selectedRow = rows.find((r) => r.key === selected) ?? rows.find((r) => r.watchedSession === selected) ?? null;
+  // A row by its key, or by the watched session a VM row shows (an alert on a VM's guest). Nothing selected, no row:
+  // a VM row nobody watches has a null watched session too.
+  const selectedRow =
+    selected === null
+      ? null
+      : (rows.find((r) => r.key === selected) ?? rows.find((r) => r.watchedSession === selected) ?? null);
   const rowName = (key: string | null | undefined) =>
     key ? (rows.find((r) => r.key === key || r.watchedSession === key)?.name ?? null) : null;
   const titleOf = (w: Widget) =>
@@ -954,7 +958,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
       case "capacity":
         return <CapacityPanel capacity={capacity} />;
       case "thisPcMemory":
-        return <ThisPcMemoryChart round={round} live={reading} theme={theme} height={height - 116} />;
+        return <ThisPcMemoryChart round={round} live={reading} theme={theme} height={height - 150} />;
       case "alerts":
         return <AlertsWidget live={reading} onOpenTarget={(target) => setSelected(target.key)} />;
       case "services":
@@ -974,7 +978,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
             round={round}
             live={reading}
             theme={theme}
-            height={height - 96}
+            height={height - 112}
           />
         );
     }

@@ -83,12 +83,12 @@ export function ServicesWidget({
     ];
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-2">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-2 text-xs whitespace-nowrap text-muted-foreground">
           <span className={cn(report.failed.length > 0 && "font-medium text-status-critical")}>
             {report.failed.length} failed
           </span>
-          <span>· {report.running.length} running</span>
-          {MANAGER[report.serviceManager] && <span>· {MANAGER[report.serviceManager]}</span>}
+          <span>{report.running.length} running</span>
+          {MANAGER[report.serviceManager] && <span>{MANAGER[report.serviceManager]}</span>}
           <span className="ml-auto tabular-nums" title="Read every minute while the dashboard shows">
             {new Date(report.collectedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
           </span>

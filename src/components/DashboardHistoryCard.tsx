@@ -50,9 +50,10 @@ export function DashboardHistoryCard() {
           <Label htmlFor="history-retention">Keep the history and resolved alerts for</Label>
           <WhyDisabled reason={readOnly} className="w-48">
             <Select
-              value={info?.retention}
+              // Controlled from the start: "" shows the placeholder until the setting is read.
+              value={info?.retention ?? ""}
               disabled={!info || readOnly !== null}
-              onValueChange={(value) => void save(value as HistoryRetention)}
+              onValueChange={(value) => value && void save(value as HistoryRetention)}
             >
               <SelectTrigger id="history-retention" className="w-48">
                 <SelectValue placeholder="…" />

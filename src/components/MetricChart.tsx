@@ -179,12 +179,13 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
 
   return (
     <div className="rounded-lg border bg-card p-3">
-      <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="text-sm font-medium">{title}</div>
-          {subtitle && <div className="text-xs text-muted-foreground">{subtitle}</div>}
+      <div className="mb-2">
+        {/* The controls share the title's line, so a narrow chart doesn't give them a line of their own. */}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0 truncate text-sm font-medium">{title}</div>
+          {actions}
         </div>
-        {actions}
+        {subtitle && <div className="text-xs text-muted-foreground">{subtitle}</div>}
       </div>
       <div className="relative" style={{ minHeight: plotHeight }}>
         {/* uPlot owns this element's children; React renders nothing inside it. */}
