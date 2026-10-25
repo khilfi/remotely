@@ -4,7 +4,9 @@
 //! character, so the file reads like the screen did.
 //!
 //! The writer runs in a task of its own, so a slow disk never holds up the terminal. What it writes
-//! has had the terminal's login secrets scrubbed first ([`Scrubber`]).
+//! has had the terminal's login secrets scrubbed ([`Scrubber`]) twice: from the bytes as they arrive, and
+//! from each rendered line, where a secret the terminal drew in pieces (split by a colour code, a cursor
+//! move or a backspace, as in `hun\x1b[0mter2`) reads whole.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -16,6 +18,7 @@ use tokio::io::{AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::adapters::exec_output::Scrubber;
 use crate::error::Result;
@@ -38,7 +41,7 @@ enum Escape {
     StringEsc,
 }
 
-/// Turns terminal output into timestamped text lines.
+/// Turns terminal output into timestamped text lines, with secrets scrubbed from the rendered text.
 pub struct LineLogger {
     /// Bytes of a UTF-8 character split across two reads.
     partial: Vec<u8>,
@@ -46,6 +49,9 @@ pub struct LineLogger {
     escape: Escape,
     /// A `\r` that may be the start of `\r\n`.
     carriage_return: bool,
+    /// SS-11: scrubs each line as rendered, so a secret split by escapes or backspaces in the output is caught.
+    /// It holds back only the end of a line cut at [`MAX_LINE_CHARS`] that may start a secret, for the next piece.
+    scrubber: Scrubber,
 }
 
 impl Default for LineLogger {
@@ -55,13 +61,25 @@ impl Default for LineLogger {
 }
 
 impl LineLogger {
+    /// Scrubs nothing.
     pub fn new() -> Self {
+        Self::scrubbing(&[])
+    }
+
+    /// Replaces `secrets` with `[redacted]` in the lines it renders.
+    pub fn scrubbing(secrets: &[&SecretString]) -> Self {
         Self {
             partial: Vec::new(),
             line: String::new(),
             escape: Escape::None,
             carriage_return: false,
+            scrubber: Scrubber::new(secrets),
         }
+    }
+
+    /// One more secret to scrub (QL-06), from the line being drawn on.
+    pub fn add_secret(&mut self, secret: &SecretString) {
+        self.scrubber.add(secret);
     }
 
     /// Takes the next output bytes; returns the lines they completed, stamped with `now`.
@@ -91,8 +109,22 @@ impl LineLogger {
             let rest = String::from_utf8_lossy(&std::mem::take(&mut self.partial)).into_owned();
             self.line.push_str(&rest);
         }
-        let line = std::mem::take(&mut self.line);
+        let line = self.scrubbed(true);
         (!line.trim().is_empty()).then(|| stamp(now, &line))
+    }
+
+    /// Takes the line drawn so far, scrubbed. `whole`: it ended (a line break, or the log stopped); otherwise it was
+    /// cut at [`MAX_LINE_CHARS`], and an end that may start a secret waits for the next piece.
+    fn scrubbed(&mut self, whole: bool) -> String {
+        // The text as drawn is wiped once scrubbed: it may hold a secret the raw bytes had in pieces.
+        let drawn = Zeroizing::new(std::mem::take(&mut self.line));
+        let mut out = Vec::with_capacity(drawn.len());
+        self.scrubber.push(drawn.as_bytes(), &mut out);
+        if whole {
+            self.scrubber.finish(&mut out);
+        }
+        // Valid UTF-8: what is held back starts where a secret does, so on a character boundary.
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     fn push(&mut self, ch: char, now: OffsetDateTime, lines: &mut Vec<String>) {
@@ -133,7 +165,7 @@ impl LineLogger {
         match ch {
             '\x1b' => self.escape = Escape::Started,
             '\r' => self.carriage_return = true,
-            '\n' => lines.push(stamp(now, &std::mem::take(&mut self.line))),
+            '\n' => lines.push(stamp(now, &self.scrubbed(true))),
             '\x08' => {
                 self.line.pop();
             }
@@ -142,7 +174,7 @@ impl LineLogger {
             c => {
                 self.line.push(c);
                 if self.line.chars().count() >= MAX_LINE_CHARS {
-                    lines.push(stamp(now, &std::mem::take(&mut self.line)));
+                    lines.push(stamp(now, &self.scrubbed(false)));
                 }
             }
         }
@@ -257,8 +289,12 @@ pub(crate) fn start_with<W: AsyncWrite + Unpin + Send + 'static>(
     let writer = tokio::spawn(async move {
         let mut out = BufWriter::new(file);
         let refs: Vec<&SecretString> = secrets.iter().collect();
+        // Scrubbed twice. From the raw bytes: a secret the output has whole goes before the renderer sees it, so a
+        // backspace or carriage return that redraws part of it later can't leave the rest showing. And from each
+        // rendered line (the LineLogger's own scrubber): a secret the output drew in pieces (`hun\x1b[0mter2`,
+        // `hunx\x08ter2`) reads whole only there.
         let mut scrubber = Scrubber::new(&refs);
-        let mut lines = LineLogger::new();
+        let mut lines = LineLogger::scrubbing(&refs);
         let mut clean = Vec::new();
         let mut failure = out.write_all(format!("{heading}\r\n").as_bytes()).await.err();
         let mut flush = tokio::time::interval(FLUSH_EVERY);
@@ -275,7 +311,10 @@ pub(crate) fn start_with<W: AsyncWrite + Unpin + Send + 'static>(
                             }
                         }
                     }
-                    Some(LogMessage::Secret(secret)) => scrubber.add(&secret),
+                    Some(LogMessage::Secret(secret)) => {
+                        scrubber.add(&secret);
+                        lines.add_secret(&secret);
+                    }
                     Some(LogMessage::Stop) | None => break,
                 },
                 _ = flush.tick() => {
@@ -396,6 +435,126 @@ mod tests {
         assert!(text.contains("] ok\r\n"), "{text}");
         assert!(!text.contains(secret.expose()), "{text}");
         assert!(text.trim_end().ends_with("Remotely stopped logging"), "{text}");
+    }
+
+    /// What a log in the system temp folder holds after `messages`: the heading, the lines, the ending.
+    async fn logged(secrets: Vec<SecretString>, messages: Vec<LogMessage>) -> String {
+        let path = std::env::temp_dir().join(format!("remotely-log-{}.log", uuid::Uuid::new_v4()));
+        let log = start(&path, "Remotely session log".into(), secrets, never_fails())
+            .await
+            .unwrap();
+        for message in messages {
+            log.sender.send(message).await.unwrap();
+        }
+        log.stop().await;
+        let text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+        let _ = std::fs::remove_file(&path);
+        text
+    }
+
+    /// The logged lines without their time stamps.
+    fn texts(log: &str) -> Vec<&str> {
+        log.split("\r\n")
+            .filter_map(|line| line.split_once("] ").map(|(_, text)| text))
+            .collect()
+    }
+
+    fn output(bytes: &[u8]) -> LogMessage {
+        LogMessage::Output(bytes.to_vec())
+    }
+
+    const PW: &str = "hunter2";
+
+    #[tokio::test]
+    async fn a_secret_split_by_a_colour_code_is_scrubbed_from_the_rendered_line() {
+        let text = logged(
+            vec![SecretString::new(PW)],
+            vec![output(b"echo hun\x1b[0mter2\r\nok\r\n")],
+        )
+        .await;
+        assert_eq!(
+            texts(&text),
+            ["echo [redacted]", "ok", "Remotely stopped logging"],
+            "{text}"
+        );
+        assert!(!text.contains(PW), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_secret_drawn_over_a_backspace_is_scrubbed_from_the_rendered_line() {
+        let text = logged(vec![SecretString::new(PW)], vec![output(b"echo hunx\x08ter2\r\n")]).await;
+        assert_eq!(texts(&text), ["echo [redacted]", "Remotely stopped logging"], "{text}");
+        assert!(!text.contains(PW), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_secret_split_across_two_output_chunks_is_scrubbed() {
+        // The escape itself is cut in two as well.
+        let text = logged(
+            vec![SecretString::new(PW)],
+            vec![output(b"echo hun\x1b[0"), output(b"mter2 done\r\n")],
+        )
+        .await;
+        assert_eq!(
+            texts(&text),
+            ["echo [redacted] done", "Remotely stopped logging"],
+            "{text}"
+        );
+        assert!(!text.contains(PW), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_secret_added_later_is_scrubbed_from_rendered_lines_too() {
+        // QL-06: a vault password typed into the terminal, sent to the log as it is typed.
+        let text = logged(
+            Vec::new(),
+            vec![
+                output(b"hunter1 is not it\r\n"),
+                LogMessage::Secret(SecretString::new(PW)),
+                output(b"echo hu\x1b[1mnter\x1b[0m2\r\n"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            texts(&text),
+            ["hunter1 is not it", "echo [redacted]", "Remotely stopped logging"],
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_text_is_logged_unchanged() {
+        // "hunt" starts the secret: held back while it might, then written as it was.
+        let text = logged(
+            vec![SecretString::new(PW)],
+            vec![
+                output(b"alice@web01:~$ uptime\r\n 10:00 up 3 days\r\nhunt"),
+                output(b"ing\r\n"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            texts(&text),
+            [
+                "alice@web01:~$ uptime",
+                " 10:00 up 3 days",
+                "hunting",
+                "Remotely stopped logging"
+            ],
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_secret_across_a_long_line_cut_is_scrubbed() {
+        let secret = SecretString::new(PW);
+        let mut logger = LineLogger::scrubbing(&[&secret]);
+        let long = format!("{}{PW}\r\n", "x".repeat(MAX_LINE_CHARS - 3));
+        let mut out = logger.feed(long.as_bytes(), AT);
+        out.extend(logger.finish(AT));
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert_eq!(out[0], stamp(AT, &"x".repeat(MAX_LINE_CHARS - 3)));
+        assert_eq!(out[1], "[2026-10-19 14:03:22] [redacted]");
     }
 
     fn never_fails() -> OnFailure {
