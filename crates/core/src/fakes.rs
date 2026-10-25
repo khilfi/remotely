@@ -104,6 +104,8 @@ pub struct FakeVmware {
     failing: Mutex<HashSet<String>>,
     /// VM-21: no ovftool.exe on this PC.
     no_ovftool: bool,
+    /// VM-21: a clone takes this long once its files are there (so a test can cancel it halfway).
+    clone_delay: Duration,
 }
 
 /// What the fake writes for a .vmx it was given no text for.
@@ -298,6 +300,12 @@ impl FakeVmware {
 
     fn fails(&self, op: &str) -> bool {
         locks::lock(&self.failing).contains(op)
+    }
+
+    /// VM-21: each clone takes this long after it has written its files, as a large one does.
+    pub fn with_clone_delay(mut self, delay: Duration) -> Self {
+        self.clone_delay = delay;
+        self
     }
 
     /// VM-21: Workstation without its OVFTool folder.
@@ -888,6 +896,9 @@ impl VmwareAdapter for FakeVmware {
                     return Err(failed("clone", "The destination file already exists"));
                 }
                 self.clone_vm(&vmx, &target, &name)?;
+                if !self.clone_delay.is_zero() {
+                    tokio::time::sleep(self.clone_delay).await;
+                }
                 if self.fails("clone") {
                     return Err(failed("clone", "Insufficient permission to access the file"));
                 }
@@ -1663,6 +1674,14 @@ impl FakeVirtualBox {
                             }
                             "--ostype" => vm.os_type = Some(value.to_owned()),
                             "--tpm-type" => {}
+                            // VM-21: what a new VM gets that the fake doesn't show.
+                            "--ioapic"
+                            | "--graphicscontroller"
+                            | "--vram"
+                            | "--boot1"
+                            | "--boot2"
+                            | "--boot3"
+                            | "--boot4" => {}
                             _ => {
                                 let slot = |n: u32, nics: &mut Vec<VboxNic>| -> usize {
                                     if let Some(i) = nics.iter().position(|x| x.slot == n) {

@@ -1826,7 +1826,11 @@ snapshot2.disk0.node = "scsi0:0"
         .unwrap();
         let vmrun = dir.join("vmrun.cmd");
         let vmrun_args = dir.join("vmrun-args.txt");
-        std::fs::write(&vmrun, format!("@echo off\r\necho %*> \"{}\"\r\nexit /b 0\r\n", vmrun_args.display())).unwrap();
+        std::fs::write(
+            &vmrun,
+            format!("@echo off\r\necho %*> \"{}\"\r\nexit /b 0\r\n", vmrun_args.display()),
+        )
+        .unwrap();
         let adapter = VmrunAdapter::with_tools(vmrun, None, None).with_ovftool(Some(ovftool));
         let target = dir.join("app-1").join("app-1.vmx");
         let out = adapter
@@ -1844,7 +1848,10 @@ snapshot2.disk0.node = "scsi0:0"
         assert!(out.contains("Completed successfully"));
         // A batch file gets `=` arguments quoted; ovftool.exe gets them as they are.
         let args = std::fs::read_to_string(&ovf_args).unwrap().replace('"', "");
-        assert!(args.starts_with("--name=app-1 --diskMode=monolithicSparse --noSSLVerify "), "{args}");
+        assert!(
+            args.starts_with("--name=app-1 --diskMode=monolithicSparse --noSSLVerify "),
+            "{args}"
+        );
         assert!(args.contains("app-1.vmx"), "{args}");
         let err = adapter
             .ovftool(
@@ -1879,7 +1886,11 @@ snapshot2.disk0.node = "scsi0:0"
         assert!(args.contains("linked -snapshot=base -cloneName=web-1"), "{args}");
         let missing = VmrunAdapter::with_tools(dir.join("vmrun.exe"), None, None);
         assert_eq!(
-            missing.ovftool(Vec::new(), Duration::from_secs(1)).await.unwrap_err().code(),
+            missing
+                .ovftool(Vec::new(), Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .code(),
             "ovftool_not_found"
         );
         std::fs::remove_dir_all(&dir).unwrap();

@@ -49,6 +49,8 @@ const START: Duration = Duration::from_secs(10 * 60);
 pub struct DeployTuning {
     /// How often the guest's IP is asked for while the deploy waits for it.
     pub ip_poll: Duration,
+    /// At most this long, whatever the deploy's own wait (tests).
+    pub ip_wait_cap: Option<Duration>,
     /// VirtualBox may still hold a VM whose clone was cancelled: removing it is tried this often...
     pub cleanup_tries: u32,
     /// ...this long apart.
@@ -59,6 +61,7 @@ impl Default for DeployTuning {
     fn default() -> Self {
         Self {
             ip_poll: Duration::from_secs(5),
+            ip_wait_cap: None,
             cleanup_tries: 10,
             cleanup_pause: Duration::from_secs(3),
         }
@@ -980,8 +983,13 @@ impl Deployer {
 
     /// Waits for the guest's IP, at most the deploy's wait; `None` when it doesn't show (or the job is cancelled).
     async fn wait_for_ip(&self, spec: &DeploySpec, key: &str, token: &CancellationToken) -> Option<String> {
-        let poll = self.tuning().ip_poll;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(spec.ip_wait_secs));
+        let tuning = self.tuning();
+        let mut wait = Duration::from_secs(u64::from(spec.ip_wait_secs));
+        if let Some(cap) = tuning.ip_wait_cap {
+            wait = wait.min(cap);
+        }
+        let poll = tuning.ip_poll;
+        let deadline = tokio::time::Instant::now() + wait;
         loop {
             if let Some(ip) = self.guest_ip(spec, key).await {
                 return Some(ip);
