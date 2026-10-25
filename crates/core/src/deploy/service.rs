@@ -43,6 +43,10 @@ pub struct DeployRequest {
     /// VirtualBox's host-only or bridged adapter, when the network needs one (`None`: the first).
     #[serde(default)]
     pub host_adapter: Option<String>,
+    /// VirtualBox, an ISO it can install by itself: the vault password its guest user gets. `None`: the VM boots the
+    /// ISO and the OS is installed from the console.
+    #[serde(default)]
+    pub guest_password_id: Option<crate::vault::SecretId>,
 }
 
 /// VM-10: what the VMs page's Clone sends.
@@ -193,9 +197,61 @@ impl Deploys {
             }
             _ => None,
         };
-        let spec = DeploySpec::from_plan(&plan, origin, folder, host_adapter);
+        let mut spec = DeploySpec::from_plan(&plan, origin, folder, host_adapter);
+        if let Some(password_id) = request.guest_password_id {
+            match self
+                .unattended(ctx, &spec, password_id, plan.guest_user.as_deref())
+                .await?
+            {
+                Ok(unattended) => spec.unattended = Some(unattended),
+                Err(problem) => return Ok(Err(vec![problem])),
+            }
+        }
         spec.validate()?;
         Ok(Ok(spec))
+    }
+
+    /// VirtualBox's unattended install of the spec's ISO, with the guest user and this vault password; or why not.
+    async fn unattended(
+        &self,
+        ctx: &Context,
+        spec: &DeploySpec,
+        password_id: crate::vault::SecretId,
+        user: Option<&str>,
+    ) -> Result<std::result::Result<super::spec::UnattendedSpec, Problem>> {
+        let DeploySource::Iso { path } = &spec.source else {
+            return Ok(Err(problem("Only an ISO install takes a guest password.")));
+        };
+        if spec.hypervisor != Hypervisor::VirtualBox {
+            return Ok(Err(problem(
+                "Workstation installs from an ISO through its console; only VirtualBox installs one by itself.",
+            )));
+        }
+        let Some(user) = user else {
+            return Ok(Err(problem(
+                "An unattended install needs a guest user: set one in the template (or Custom).",
+            )));
+        };
+        match self.store.vault_item_kind(ctx, password_id).await? {
+            Some(crate::vault::SecretKind::Password) => {}
+            Some(_) => return Ok(Err(problem("The guest password must be a vault password."))),
+            None => return Ok(Err(problem("That guest password is not in the vault."))),
+        }
+        let (supported, _) = self
+            .hypervisors
+            .virtualbox()
+            .unattended_detect(Path::new(path))
+            .await
+            .unwrap_or((false, None));
+        if !supported {
+            return Ok(Err(problem(format!(
+                "VirtualBox can't install {path} by itself: deploy it without a guest password and install it from the console."
+            ))));
+        }
+        Ok(Ok(super::spec::UnattendedSpec {
+            user: user.to_owned(),
+            password_id,
+        }))
     }
 
     /// The Deploy dialog's check: why it can't deploy, or its AP-02 preview. A read.
@@ -362,6 +418,7 @@ impl Deploys {
                 open_console: false,
             },
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
+            unattended: None,
             vms,
         };
         spec.validate()?;

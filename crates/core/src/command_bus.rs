@@ -1165,6 +1165,30 @@ impl CommandBus {
         Ok(())
     }
 
+    /// SS-04, AP-06 (VM-21): an unattended install gives a vault password to new VMs, which no saved session reaches
+    /// yet, so the approval asks for the vault password, and says so.
+    async fn ask_for_guest_password(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Result<()> {
+        let Command::Deploy { spec, .. } = command else {
+            return Ok(());
+        };
+        let Some(unattended) = &spec.unattended else {
+            return Ok(());
+        };
+        let what = self.bindings().describe(ctx, unattended.password_id).await?;
+        let vms = match spec.vms.len() {
+            1 => "the new VM".to_owned(),
+            n => format!("{n} new VMs"),
+        };
+        decision.add_warnings(vec![format!(
+            "VirtualBox's unattended install gives the {what} to {vms} (user {}), and writes it into their install files in each VM's folder. Approving asks for the vault password",
+            unattended.user
+        )]);
+        if !decision.steps.contains(&ApprovalStep::VaultReauth) {
+            decision.steps.push(ApprovalStep::VaultReauth);
+        }
+        Ok(())
+    }
+
     /// SS-04, AP-06: after an approval that asked for the vault password, the sessions the run's sudo
     /// password was new to may use it from now on (audited `vault_secret_allowed`).
     async fn allow_sudo_places(&self, ctx: &Context, command: &Command, targets: &[Target]) -> Result<()> {
@@ -1615,6 +1639,7 @@ impl CommandBus {
         }
         let impact = self.add_warnings(ctx, &command, &mut decision).await;
         self.ask_for_sudo_places(ctx, &command, &mut decision).await?;
+        self.ask_for_guest_password(ctx, &command, &mut decision).await?;
         let summary = command.summary(decision.targets.len());
 
         if decision.steps.is_empty() {
@@ -1839,6 +1864,9 @@ impl CommandBus {
         }
         let impact = self.add_warnings(&ctx, &pending.command, &mut decision).await;
         if let Err(err) = self.ask_for_sudo_places(&ctx, &pending.command, &mut decision).await {
+            return err;
+        }
+        if let Err(err) = self.ask_for_guest_password(&ctx, &pending.command, &mut decision).await {
             return err;
         }
         let request = match self

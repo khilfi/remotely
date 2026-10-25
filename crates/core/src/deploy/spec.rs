@@ -172,6 +172,16 @@ pub struct FirstBootSpec {
     pub packages: Vec<String>,
 }
 
+/// VirtualBox's unattended install of an ISO: the user it makes and the vault password it gets. Only the vault
+/// item's id is here; the job reads the password from the vault into a file only this Windows user can read,
+/// which VBoxManage reads (`--password-file`) and Remotely deletes at once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnattendedSpec {
+    pub user: String,
+    pub password_id: SecretId,
+}
+
 /// One VM the deploy makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -213,6 +223,9 @@ pub struct DeploySpec {
     pub after_deploy: AfterDeploy,
     /// How long the after-deploy steps wait for a guest IP, in seconds.
     pub ip_wait_secs: u32,
+    /// VirtualBox: an ISO it installs by itself (`unattended install`), as this user with a vault password.
+    #[serde(default)]
+    pub unattended: Option<UnattendedSpec>,
     pub vms: Vec<DeployVm>,
 }
 
@@ -301,6 +314,7 @@ impl DeploySpec {
             tags: plan.tags.clone(),
             after_deploy: plan.after_deploy,
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
+            unattended: None,
             vms: plan
                 .vms
                 .iter()
@@ -453,6 +467,14 @@ impl DeploySpec {
         if let Some(adapter) = &self.host_adapter {
             if adapter.is_empty() || adapter.len() > 200 || adapter.chars().any(char::is_control) {
                 return invalid("The VirtualBox host adapter's name is damaged.");
+            }
+        }
+        if let Some(unattended) = &self.unattended {
+            if self.hypervisor != Hypervisor::VirtualBox || !matches!(self.source, DeploySource::Iso { .. }) {
+                return invalid("Only VirtualBox installs an ISO unattended.");
+            }
+            if check_guest_user(Some(&unattended.user))?.as_deref() != Some(unattended.user.as_str()) {
+                return invalid("The unattended install's user isn't one VirtualBox can make.");
             }
         }
         if self.ip_wait_secs > MAX_IP_WAIT_SECS {

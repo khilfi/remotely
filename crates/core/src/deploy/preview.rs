@@ -251,10 +251,14 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
                 ));
             }
         }
-        DeploySource::Iso { .. } => notes.push(
-            "An ISO install starts with no OS: install it from the console. Steps that need the guest's IP wait for an OS, so they are left out."
+        DeploySource::Iso { .. } => notes.push(match &spec.unattended {
+            Some(unattended) => format!(
+                "VirtualBox installs the OS by itself, as user {} with the vault password chosen; that goes on for 10 to 30 minutes after the job ends. Steps that need the guest's IP are left out: make the session once it is installed.",
+                unattended.user
+            ),
+            None => "An ISO install starts with no OS: install it from the console. Steps that need the guest's IP wait for an OS, so they are left out."
                 .into(),
-        ),
+        }),
         DeploySource::BulkClone => {
             notes.push("Each clone is a full copy of its VM as it is now, with its CPU, memory, disks and network.".into())
         }

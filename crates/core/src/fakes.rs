@@ -541,6 +541,8 @@ pub struct FakeVirtualBox {
     /// VM-21: VirtualBox's default machine folder and host-only adapters.
     default_folder: Option<PathBuf>,
     host_only: Option<Vec<String>>,
+    /// VM-21: ISOs `unattended detect` says it can install, by path in lower case.
+    unattended_isos: HashSet<String>,
 }
 
 /// The VBoxManage `VMState` for a power state.
@@ -558,6 +560,12 @@ impl FakeVirtualBox {
     /// VM-21: where VirtualBox would put new VMs (by default a made-up folder under alice's profile).
     pub fn with_default_folder(mut self, folder: impl Into<PathBuf>) -> Self {
         self.default_folder = Some(folder.into());
+        self
+    }
+
+    /// VM-21: an ISO VirtualBox can install by itself (`unattended detect`).
+    pub fn with_unattended_iso(mut self, iso: &str) -> Self {
+        self.unattended_isos.insert(iso.to_lowercase());
         self
     }
 
@@ -951,6 +959,12 @@ impl VirtualBoxAdapter for FakeVirtualBox {
             .default_folder
             .clone()
             .unwrap_or_else(|| PathBuf::from(r"C:\Users\alice\VirtualBox VMs")))
+    }
+
+    async fn unattended_detect(&self, iso: &Path) -> Result<(bool, Option<String>)> {
+        self.installed()?;
+        let supported = self.unattended_isos.contains(&iso.display().to_string().to_lowercase());
+        Ok((supported, supported.then(|| "Ubuntu24_LTS_64".to_owned())))
     }
 
     async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {

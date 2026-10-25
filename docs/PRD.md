@@ -107,6 +107,14 @@ Every action that changes something gets one of four risk tiers, and the tier de
 | High | Stop, reset or suspend 2 or more VMs; revert or delete snapshots; any command flagged dangerous | Impact preview, safety snapshot (on by default), type the number of targets, give a reason or ticket number, 10-second countdown with cancel |
 | Critical | Hard power-off, bulk network disconnect, deleting VMs or disks, any High action on Prod | All High steps, then the vault password again |
 
+Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM is a target, labelled as the deploy labels it, so a Prod label moves the tier up one; a new VM is never protected:
+
+| Action | Tier |
+| --- | --- |
+| Deploy 1 to 4 VMs: create, clone (a VM-10 bulk clone too) or import | Medium |
+| Deploy 5 or more VMs (the bulk tier for deploys, from 5 VMs by default), or VMs labelled Prod | High |
+| Deploy 5 or more VMs labelled Prod | Critical |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |

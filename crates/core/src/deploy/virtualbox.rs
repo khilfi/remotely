@@ -337,25 +337,6 @@ pub fn eject_args(uuid: &str, controller: DiskController, port: u32) -> Vec<Stri
     attach_args(uuid, controller, port, true, "emptydrive")
 }
 
-/// Parses `unattended detect --machine-readable`: whether VirtualBox can install the ISO by itself, and the OS
-/// it found.
-pub fn parse_unattended_detect(out: &str) -> (bool, Option<String>) {
-    let mut supported = false;
-    let mut os = None;
-    for line in out.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"');
-        match key.trim() {
-            "IsInstallSupported" => supported = value.eq_ignore_ascii_case("yes") || value == "true",
-            "OSTypeId" if !value.is_empty() => os = Some(value.to_owned()),
-            _ => {}
-        }
-    }
-    (supported, os)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,12 +580,5 @@ mod tests {
             "never the password itself"
         );
         assert_eq!(unregister_args("u"), ["unregistervm", "u", "--delete"]);
-    }
-
-    #[test]
-    fn unattended_detect_says_what_virtualbox_can_install() {
-        let out = "OSTypeId=\"Ubuntu24_LTS_64\"\nOSVersion=\"24.04\"\nIsInstallSupported=\"yes\"\n";
-        assert_eq!(parse_unattended_detect(out), (true, Some("Ubuntu24_LTS_64".into())));
-        assert_eq!(parse_unattended_detect("IsInstallSupported=\"no\"\n"), (false, None));
     }
 }

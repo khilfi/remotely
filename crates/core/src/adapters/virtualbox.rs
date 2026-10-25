@@ -206,6 +206,31 @@ pub trait VirtualBoxAdapter: Send + Sync {
     async fn host_adapters(&self, _bridged: bool) -> Result<Vec<String>> {
         Err(CoreError::VboxManageNotFound)
     }
+
+    /// VM-21: whether VirtualBox can install the OS on this ISO by itself (`unattended detect`), and the OS type it
+    /// found. A read: it only looks into the ISO.
+    async fn unattended_detect(&self, _iso: &Path) -> Result<(bool, Option<String>)> {
+        Err(CoreError::VboxManageNotFound)
+    }
+}
+
+/// Parses `unattended detect --machine-readable`: whether VirtualBox can install the ISO by itself, and the OS
+/// it found.
+pub fn parse_unattended_detect(out: &str) -> (bool, Option<String>) {
+    let mut supported = false;
+    let mut os = None;
+    for line in out.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        match key.trim() {
+            "IsInstallSupported" => supported = value.eq_ignore_ascii_case("yes") || value == "true",
+            "OSTypeId" if !value.is_empty() => os = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    (supported, os)
 }
 
 /// VM-21: `Default machine folder:` from `list systemproperties`.
@@ -508,6 +533,25 @@ impl VirtualBoxAdapter for VBoxManageCli {
         })
     }
 
+    async fn unattended_detect(&self, iso: &Path) -> Result<(bool, Option<String>)> {
+        if let Some(refusal) = crate::untrusted::path_refusal(iso) {
+            return Err(CoreError::InvalidInput(format!(
+                "{} {}",
+                iso.display(),
+                refusal.describe()
+            )));
+        }
+        let args = vec![
+            "unattended".into(),
+            "detect".into(),
+            "--iso".into(),
+            iso.as_os_str().to_owned(),
+            "--machine-readable".into(),
+        ];
+        let out = self.run("unattended detect", args, LIST_TIMEOUT).await?;
+        Ok(parse_unattended_detect(&out))
+    }
+
     async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
         let what = if bridged { "bridgedifs" } else { "hostonlyifs" };
         let out = self
@@ -646,6 +690,9 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     }
     async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
         self.current().host_adapters(bridged).await
+    }
+    async fn unattended_detect(&self, iso: &Path) -> Result<(bool, Option<String>)> {
+        self.current().unattended_detect(iso).await
     }
 }
 
@@ -1113,6 +1160,13 @@ CurrentSnapshotName="before upgrade"
 CurrentSnapshotUUID="5b1c0000-0000-4000-8000-000000000002"
 CurrentSnapshotNode="SnapshotName-1"
 "#;
+
+    #[test]
+    fn unattended_detect_says_what_virtualbox_can_install() {
+        let out = "OSTypeId=\"Ubuntu24_LTS_64\"\nOSVersion=\"24.04\"\nIsInstallSupported=\"yes\"\n";
+        assert_eq!(parse_unattended_detect(out), (true, Some("Ubuntu24_LTS_64".into())));
+        assert_eq!(parse_unattended_detect("IsInstallSupported=\"no\"\n"), (false, None));
+    }
 
     #[test]
     fn parses_the_default_folder_and_host_adapters() {

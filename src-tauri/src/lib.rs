@@ -3,11 +3,11 @@
 //! [`files`] and [`clipboard`], never vmrun or SSH directly.
 
 mod catalog;
-mod deploy;
 mod clipboard;
 mod command_panel;
 mod containers;
 pub mod data_dirs;
+mod deploy;
 pub mod diagnostics;
 mod files;
 mod host_details;
