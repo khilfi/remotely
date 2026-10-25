@@ -92,8 +92,10 @@ test("the dialog says what is wrong with a forward before saving", () => {
 });
 
 test("who can use a tunnel is said plainly", () => {
-  assert.equal(exposureText({ kind: "local", bindAddress: "" }), "Only this PC can use it.");
-  assert.equal(exposureText({ kind: "remote", bindAddress: "localhost" }), "Only programs on the host can use it.");
+  assert.match(exposureText({ kind: "local", bindAddress: "" }), /every user signed in to this PC/);
+  // sshd's GatewayPorts yes listens on every address whatever was asked for.
+  assert.match(exposureText({ kind: "remote", bindAddress: "localhost" }), /GatewayPorts yes/);
+  assert.match(exposureText({ kind: "dynamic", bindAddress: "127.0.0.1" }), /anything the host reaches.*every user/);
   assert.match(exposureText({ kind: "dynamic", bindAddress: "0.0.0.0" }), /other computers that reach this PC/);
 });
 

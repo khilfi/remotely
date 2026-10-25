@@ -107,11 +107,18 @@ export function forwardProblem(f: ForwardInput): string | null {
   return null;
 }
 
-/** P9 will mask addresses; until then the user sees who can use a listener. */
+/** Who can use a listener, in plain words (FD-03 masks the address in it while presenting). */
 export function exposureText(f: Pick<PortForward, "kind" | "bindAddress">): string {
   const bind = f.bindAddress.trim() || defaultBind(f.kind);
-  if (isLoopback(bind))
-    return f.kind === "remote" ? "Only programs on the host can use it." : "Only this PC can use it.";
+  if (isLoopback(bind)) {
+    // sshd ignores the address asked for when its GatewayPorts is yes, and listens on every address.
+    if (f.kind === "remote")
+      return "Programs on the host can use it. If the host's SSH server has GatewayPorts yes, it listens on every address there instead, so other computers that reach the host can use it too.";
+    // Loopback is per computer, not per user: on a shared server everyone signed in reaches it.
+    if (f.kind === "dynamic")
+      return "Programs on this PC can use it to reach anything the host reaches, and that means every user signed in to this PC, not only you. On a shared server, prefer a local forward to one destination.";
+    return "Programs on this PC can use it: every user signed in to this PC, not only you.";
+  }
   return f.kind === "remote"
     ? `The host listens on ${bind}: other computers that reach the host can use it. It asks before it opens.`
     : `It listens on ${bind}: other computers that reach this PC can use it, without logging in. It asks before it opens.`;
