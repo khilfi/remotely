@@ -128,10 +128,16 @@ pub fn check(items: &[TerminalText]) -> Result<()> {
     if items.is_empty() {
         return Err(CoreError::InvalidInput("Choose at least one terminal to save.".into()));
     }
+    check_size(items)
+}
+
+/// P10: refuses more than [`MAX_OUTPUT_BYTES`] of text at once (a copy, a print or a save), before
+/// any of it is scrubbed.
+pub fn check_size(items: &[TerminalText]) -> Result<()> {
     let total: usize = items.iter().map(|i| i.text.len()).sum();
     if total > MAX_OUTPUT_BYTES {
         return Err(CoreError::InvalidInput(format!(
-            "That is more than {} MB of text; save fewer terminals at once.",
+            "That is more than {} MB of text; choose fewer terminals at once.",
             MAX_OUTPUT_BYTES / (1024 * 1024)
         )));
     }

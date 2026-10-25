@@ -259,10 +259,15 @@ pub fn reachability_watch(state: State<'_, AppState>, session_ids: Vec<Uuid>) ->
 
 // ---- SS-11 output ---------------------------------------------------------------------------------
 
-/// SS-11: the terminals' text with their login secrets scrubbed, for the clipboard.
+/// SS-11: the terminals' text with their login secrets scrubbed, for the clipboard. Whole scrollbacks
+/// can be megabytes, so the scrubbing runs on a blocking thread, never on the window's thread (P10), and
+/// more than [`output::MAX_OUTPUT_BYTES`] at once is refused.
 #[tauri::command]
-pub fn terminal_output_text(state: State<'_, AppState>, items: Vec<TerminalText>) -> Vec<TerminalText> {
-    state.core.terminals.scrub_output(items)
+pub async fn terminal_output_text(
+    state: State<'_, AppState>,
+    items: Vec<TerminalText>,
+) -> IpcResult<Vec<TerminalText>> {
+    scrubbed(&state.core, items).await
 }
 
 /// SS-11: the same for printing, audited as printed (which terminals, never the text).
@@ -272,9 +277,18 @@ pub async fn terminal_output_print(
     items: Vec<TerminalText>,
 ) -> IpcResult<Vec<TerminalText>> {
     let core = &state.core;
-    let items = core.terminals.scrub_output(items);
+    let items = scrubbed(core, items).await?;
     core.terminals.record_printed(&core.ctx, &items).await?;
     Ok(items)
+}
+
+/// SS-11: `items` with their login secrets scrubbed, on a blocking thread.
+async fn scrubbed(core: &Arc<Core>, items: Vec<TerminalText>) -> IpcResult<Vec<TerminalText>> {
+    output::check_size(&items)?;
+    let core = Arc::clone(core);
+    tokio::task::spawn_blocking(move || core.terminals.scrub_output(items))
+        .await
+        .map_err(|err| IpcError::new("internal", format!("The text could not be read: {err}")))
 }
 
 /// Waits for the user's choice in a save or folder dialog; `None` when they closed it.

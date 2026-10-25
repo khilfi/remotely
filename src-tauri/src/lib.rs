@@ -14,6 +14,7 @@ mod multiexec;
 mod terminal;
 mod tunnels;
 pub mod updater;
+mod wake;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -343,6 +344,9 @@ fn forward_events(app: &App, core: &Arc<Core>) {
             }
         });
 
+        // SS-03 (R9): Windows resuming or a new network address wakes terminals waiting to reconnect.
+        wake::watch(Arc::clone(core));
+
         // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
         let reachability = Arc::clone(&core.reachability);
         tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -400,6 +404,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::settings_set_power_on_limit,
         ipc::settings_set_shutdown_wait,
         ipc::settings_set_update_checks,
+        ipc::settings_set_guest_poll,
         ipc::settings_set_bulk_parallel,
         ipc::presentation_get,
         ipc::presentation_set,
