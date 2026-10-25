@@ -906,7 +906,7 @@ impl Terminals {
         let input = library.check(ctx, None, input).await?;
         let spec = crate::store::unsaved_spec(&input)?;
         // SS-04, AP-06: a vault password sent to a host no saved session sends it to asks first.
-        let mut asked = false;
+        let mut asked = None;
         if let (Some(bindings), Some(secret)) = (self.inner.bindings.get(), input.sent_secret()) {
             let place = Destination::new(&input.host, input.port, None);
             if !bindings.may_go(ctx, secret, &place, None).await? {
@@ -916,10 +916,11 @@ impl Terminals {
                     place.host, place.port
                 );
                 let action = format!("Failed to open a quick-connect terminal to {}", spec.address());
-                bindings
-                    .confirm(ctx, request.vault_password.as_ref(), &action, &reason)
-                    .await?;
-                asked = true;
+                asked = Some(
+                    bindings
+                        .confirm(ctx, request.vault_password.as_ref(), &action, &reason)
+                        .await?,
+                );
             }
             bindings.settle(&[secret]);
         }
@@ -927,10 +928,9 @@ impl Terminals {
             (AuthMethod::Password(None), Some(_)) => "password typed in the quick-connect form",
             (auth, _) => describe_auth(auth),
         };
-        let auth = if asked {
-            format!("{auth} (the vault password was asked again, AP-06)")
-        } else {
-            auth.to_owned()
+        let auth = match asked {
+            Some(how) => format!("{auth}; {how}"),
+            None => auth.to_owned(),
         };
         let address = spec.address();
         let pane = NewPane {
@@ -1515,7 +1515,7 @@ impl Terminals {
         let hop = *locks::lock(&control.hop);
         let (place, session) = self.place_of(ctx, &control, hop).await?;
         let what = format!("the {} '{}'", meta.kind.label(), meta.label);
-        let mut asked = false;
+        let mut asked = None;
         let mut allow = false;
         if let Some(bindings) = self.inner.bindings.get() {
             let goes = bindings.goes_to(ctx, secret_id, &place, None).await?;
@@ -1530,8 +1530,7 @@ impl Terminals {
                     format!("No password prompt is showing, so {what} would be typed at the command line")
                 };
                 let action = format!("Failed to type {what} into the terminal to {}", quoted_name(&control));
-                bindings.confirm(ctx, vault_password, &action, &reason).await?;
-                asked = true;
+                asked = Some(bindings.confirm(ctx, vault_password, &action, &reason).await?);
             }
             // Typed into a saved session's terminal for the first time: from now on it may be again.
             allow = !goes;
@@ -1583,8 +1582,8 @@ impl Terminals {
         if let Some((_, name)) = session.as_ref().filter(|(s, _)| hop == Some(*s)) {
             detail.push_str(&format!("; for the login to the jump host '{name}'"));
         }
-        if asked {
-            detail.push_str("; the vault password was asked again (AP-06)");
+        if let Some(how) = asked {
+            detail.push_str(&format!("; {how}"));
         }
         audit(
             &self.inner.store,
@@ -1598,7 +1597,8 @@ impl Terminals {
         if let Some(bindings) = self.inner.bindings.get() {
             bindings.settle(&[secret_id]);
             if let (true, Some((session_id, name))) = (allow, &session) {
-                bindings.allow(ctx, *session_id, name, secret_id).await?;
+                let how = asked.unwrap_or("typed into its terminal for the first time");
+                bindings.allow(ctx, *session_id, name, secret_id, how).await?;
             }
         }
         Ok(())

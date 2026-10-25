@@ -238,6 +238,8 @@ pub struct Core {
     vmware: Arc<SwitchableVmware>,
     /// VM-18: swapped when the VBoxManage path changes in Settings.
     virtualbox: Arc<SwitchableVirtualBox>,
+    /// SS-04, AP-06: where vault passwords may go without the vault password (shared by every module).
+    bindings: SecretBindings,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -252,7 +254,7 @@ struct LockParts {
 
 impl LockParts {
     async fn vault_locked(&self) {
-        self.bindings.forget_fresh();
+        self.bindings.vault_locked();
         self.terminals.forget_logins();
         let file_closed = self.transfer_closed.close();
         self.containers.close_all().await;
@@ -455,7 +457,7 @@ impl Core {
             keys,
             transfer: Transfer::new(store.clone())
                 .with_policy(bus.policy())
-                .with_bindings(bindings),
+                .with_bindings(bindings.clone()),
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
             containers,
             terminals,
@@ -474,6 +476,7 @@ impl Core {
             updater: adapters.updater,
             vmware,
             virtualbox,
+            bindings,
         };
         core.spawn_lock_watch(vault_status);
         Ok(core)
@@ -504,6 +507,11 @@ impl Core {
                 was = now;
             }
         });
+    }
+
+    /// SS-04, AP-06: where vault passwords may go without asking; tests shorten its grace period.
+    pub fn secret_bindings(&self) -> &SecretBindings {
+        &self.bindings
     }
 
     /// QL-15: what the window shows now, taken when its page starts loading again (a reload, or a crash

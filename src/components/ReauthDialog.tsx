@@ -57,8 +57,8 @@ export function ReauthDialog() {
             <DialogDescription>{prompt?.reason}</DialogDescription>
           </DialogHeader>
           <p className="text-sm text-muted-foreground">
-            The vault password confirms it is you, however the vault was unlocked. For a saved session the answer counts
-            from now on: the same password there doesn&apos;t ask again.
+            The vault password confirms it is you, however the vault was unlocked. It also covers the next 5 minutes,
+            and for a saved session the answer counts from then on.
           </p>
           <div className="grid gap-2">
             <Label htmlFor="reauth-password">Vault password</Label>

@@ -1016,7 +1016,9 @@ impl CommandBus {
         };
         let bindings = self.bindings();
         for (session_id, name) in self.new_sudo_places(ctx, *secret, targets).await? {
-            bindings.allow(ctx, session_id, &name, *secret).await?;
+            bindings
+                .allow(ctx, session_id, &name, *secret, crate::vault::bindings::ASKED_NOW)
+                .await?;
         }
         Ok(())
     }
@@ -1151,6 +1153,7 @@ impl CommandBus {
             return Ok(changes);
         }
         let loosened = before.loosened(&rules);
+        let mut asked = None;
         if !loosened.is_empty() {
             let shown: Vec<&str> = loosened.iter().take(3).map(String::as_str).collect();
             let more = loosened.len().saturating_sub(shown.len());
@@ -1162,17 +1165,19 @@ impl CommandBus {
             } else {
                 format!("This loosens the approval rules ({})", shown.join("; "))
             };
-            self.bindings()
-                .confirm(ctx, vault_password, "Failed to change the approval rules", &reason)
-                .await?;
+            asked = Some(
+                self.bindings()
+                    .confirm(ctx, vault_password, "Failed to change the approval rules", &reason)
+                    .await?,
+            );
         }
         self.store
             .put_setting(ctx, crate::store::POLICY_RULES_KEY, &rules)
             .await?;
         *locks::write(&self.policy) = engine;
         let mut detail = changes.join("; ");
-        if !loosened.is_empty() {
-            detail.push_str("; looser, so the vault password was asked again (AP-06)");
+        if let Some(how) = asked {
+            detail.push_str(&format!("; looser, so {how}"));
         }
         self.store
             .append_audit(

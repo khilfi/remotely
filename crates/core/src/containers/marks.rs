@@ -181,8 +181,8 @@ impl ContainerMarks {
                     place.port
                 );
                 let action = format!("Failed to change the container engines of '{}'", session.name);
-                bindings.confirm(ctx, vault_password, &action, &reason).await?;
-                changed.push("the vault password was asked again (AP-06)".into());
+                let how = bindings.confirm(ctx, vault_password, &action, &reason).await?;
+                changed.push(how.into());
             }
         }
         self.store.replace_container_marks(ctx, session_id, &after).await?;

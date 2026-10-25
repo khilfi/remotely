@@ -48,7 +48,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
 
-pub use bindings::{Destination, SecretBindings};
+pub use bindings::{Destination, SecretBindings, REAUTH_GRACE};
 pub use crypto::KdfParams;
 pub use local::{LocalVault, VaultOptions, IDLE_TIMEOUT};
 pub use protector::{Dpapi, KeyProtector};

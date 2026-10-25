@@ -557,7 +557,8 @@ impl SessionLibrary {
     }
 
     /// AP-06: the vault passwords in `secrets` may go to `place` (through this session, `except` when it is
-    /// an edit), or the master password must come with the request. True when it was asked and given.
+    /// an edit), or the master password must come with the request. How it was confirmed, when it was
+    /// needed (for the audit entry).
     #[allow(clippy::too_many_arguments)]
     async fn confirm_place(
         &self,
@@ -568,9 +569,9 @@ impl SessionLibrary {
         already: &[SecretId],
         reauth: Reauth<'_>,
         action: &str,
-    ) -> Result<bool> {
+    ) -> Result<Option<&'static str>> {
         let Some(bindings) = &self.bindings else {
-            return Ok(false);
+            return Ok(None);
         };
         let mut new = Vec::new();
         for secret in secrets {
@@ -580,10 +581,10 @@ impl SessionLibrary {
             new.push(bindings.describe(ctx, *secret).await?);
         }
         if new.is_empty() {
-            return Ok(false);
+            return Ok(None);
         }
         let vault_password = match reauth {
-            Reauth::Given => return Ok(true),
+            Reauth::Given => return Ok(Some(crate::vault::bindings::ASKED_NOW)),
             Reauth::Ask(password) => password,
         };
         let reason = format!(
@@ -592,8 +593,7 @@ impl SessionLibrary {
             place.host,
             place.port
         );
-        bindings.confirm(ctx, vault_password, action, &reason).await?;
-        Ok(true)
+        Ok(Some(bindings.confirm(ctx, vault_password, action, &reason).await?))
     }
 
     fn settle(&self, secrets: &[SecretId]) {
@@ -698,8 +698,8 @@ impl SessionLibrary {
         }
         let session = self.get(ctx, id).await?;
         let mut detail = self.describe(ctx, &session).await?;
-        if asked {
-            detail.push_str("; the vault password was asked again (AP-06)");
+        if let Some(how) = asked {
+            detail.push_str(&format!("; {how}"));
         }
         self.audit(
             ctx,
@@ -853,8 +853,8 @@ impl SessionLibrary {
         self.settle(&sent);
         let after = self.get(ctx, id).await?;
         let mut changes = self.changes(ctx, &before, &after).await?;
-        if asked {
-            changes.push("the vault password was asked again (AP-06)".into());
+        if let Some(how) = asked {
+            changes.push(how.into());
         }
         self.audit(
             ctx,

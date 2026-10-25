@@ -8,6 +8,8 @@
 
 mod common;
 
+use std::time::Duration;
+
 use common::{fake_private_key, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::containers::EngineKind;
 use remotely_core::adapters::remote::PtySize;
@@ -18,7 +20,7 @@ use remotely_core::fakes::FakeVmware;
 use remotely_core::policy::{ApprovalStep, PolicyRules};
 use remotely_core::sessions::{SessionAuth, SessionInput, SessionRecord};
 use remotely_core::terminal::quick::QuickConnect;
-use remotely_core::vault::{SecretId, SecretKind, SecretString};
+use remotely_core::vault::{SecretId, SecretKind, SecretString, UnlockMethod, REAUTH_GRACE};
 use remotely_core::{Core, CoreError};
 
 const SIZE: PtySize = PtySize { cols: 80, rows: 24 };
@@ -27,8 +29,11 @@ fn pw(text: &str) -> SecretString {
     SecretString::new(text)
 }
 
+/// Asks every time: no grace period after a right answer (that has its own test).
 async fn core() -> Core {
-    Setup::new(FakeVmware::default()).with_real_vault().build().await
+    let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    core.secret_bindings().set_grace(Duration::ZERO);
+    core
 }
 
 /// A password that was in the vault before this run (not just added on the Vault page), like every customer
@@ -459,4 +464,45 @@ async fn loosening_the_approval_rules_needs_the_vault_password_and_tightening_do
         core.bus.set_rules_with(ctx, shell, Some(&pw(VAULT_PASSWORD))).await,
         Err(CoreError::InvalidRule { .. })
     ));
+}
+
+#[tokio::test]
+async fn one_right_answer_covers_the_next_five_minutes_until_the_vault_locks() {
+    assert_eq!(REAUTH_GRACE, Duration::from_secs(5 * 60));
+    let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    let ctx = &core.ctx;
+    let shared = existing(&core, "customer root").await;
+
+    // Setting up several sessions that share a password asks once.
+    saved(&core, with_password("web01", "web01.example.com", shared)).await;
+    core.sessions
+        .create(ctx, with_password("web02", "web02.example.com", shared))
+        .await
+        .unwrap();
+    let entries = audit_events(&core).await;
+    let created = entries
+        .iter()
+        .find(|e| e.event == "session_changed" && e.action.contains("web02"))
+        .unwrap();
+    assert!(
+        created
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("given in the last 5 minutes"),
+        "{created:?}"
+    );
+
+    // Locking ends it: whoever unlocks next is asked again.
+    core.vault.lock(ctx).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    core.vault
+        .unlock(ctx, UnlockMethod::MasterPassword(pw(VAULT_PASSWORD)))
+        .await
+        .unwrap();
+    let after = core
+        .sessions
+        .create(ctx, with_password("web03", "web03.example.com", shared))
+        .await;
+    assert!(reauth_required(&after), "{after:?}");
 }

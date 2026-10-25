@@ -375,8 +375,8 @@ impl Containers {
                     place.port
                 );
                 let action = format!("Failed to look for container engines on '{}'", spec.name);
-                bindings.confirm(ctx, vault_password, &action, &reason).await?;
-                bindings.allow(ctx, session_id, &spec.name, secret).await?;
+                let how = bindings.confirm(ctx, vault_password, &action, &reason).await?;
+                bindings.allow(ctx, session_id, &spec.name, secret, how).await?;
             }
         }
         // The user's own click, like Retry.

@@ -15,9 +15,13 @@
 //! * Private keys and key passphrases are not checked: a login only signs with them on this PC, so no
 //!   host ever receives them.
 //! * Failed answers are audited (`vault_auth_failed`), so guessing shows.
+//! * After a right answer, the next steps within [`REAUTH_GRACE`] don't ask again (as sudo does), so
+//!   setting up several sessions that share a password asks once. Each is still audited, saying so.
+//!   Locking ends it.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
@@ -51,6 +55,13 @@ impl Destination {
     }
 }
 
+/// AP-06: after the vault password was given, how long further steps go without asking again.
+pub const REAUTH_GRACE: Duration = Duration::from_secs(5 * 60);
+
+/// How a step that needed the vault password was confirmed, for its audit entry.
+pub const ASKED_NOW: &str = "the vault password was asked again (AP-06)";
+pub const ASKED_RECENTLY: &str = "the vault password was given in the last 5 minutes (AP-06)";
+
 /// The checks every module that sends a vault password to a host makes first. Cloning gives another
 /// handle to the same state.
 #[derive(Clone)]
@@ -61,8 +72,12 @@ pub struct SecretBindings {
 struct Inner {
     store: Store,
     vault: Arc<dyn Vault>,
-    /// Secrets added since the app started and not yet given to anything.
+    /// Secrets added since the vault was unlocked and not yet given to anything.
     fresh: Mutex<HashSet<SecretId>>,
+    /// When the vault password was last given right.
+    confirmed: Mutex<Option<Instant>>,
+    /// [`REAUTH_GRACE`]; tests shorten it.
+    grace: RwLock<Duration>,
 }
 
 impl SecretBindings {
@@ -72,8 +87,20 @@ impl SecretBindings {
                 store,
                 vault,
                 fresh: Mutex::default(),
+                confirmed: Mutex::default(),
+                grace: RwLock::new(REAUTH_GRACE),
             }),
         }
+    }
+
+    /// How long a right answer covers the next steps ([`REAUTH_GRACE`]; zero asks every time).
+    pub fn set_grace(&self, grace: Duration) {
+        *locks::write(&self.inner.grace) = grace;
+    }
+
+    fn recently_confirmed(&self) -> bool {
+        let grace = *locks::read(&self.inner.grace);
+        locks::lock(&self.inner.confirmed).is_some_and(|at| at.elapsed() < grace)
     }
 
     /// The Vault page or the session editor added `id`: its first place needs no master password.
@@ -89,10 +116,11 @@ impl SecretBindings {
         locks::lock(&self.inner.fresh).contains(&id)
     }
 
-    /// SS-04: the vault locked, so whoever unlocks it next may not be who added them: secrets added
-    /// before ask like any other from now on.
-    pub(crate) fn forget_fresh(&self) {
+    /// SS-04: the vault locked, so whoever unlocks it next may not be who was here: secrets added before
+    /// ask like any other from now on, and the next step asks for the vault password whatever was given.
+    pub(crate) fn vault_locked(&self) {
         locks::lock(&self.inner.fresh).clear();
+        locks::lock(&self.inner.confirmed).take();
     }
 
     /// `ids` went somewhere: a secret added since the app started asks like any other from now on.
@@ -148,34 +176,47 @@ impl SecretBindings {
     }
 
     /// AP-06: checks the master password before a step that needs it. `None` (or empty) asks for it with
-    /// `reason`; a wrong one is audited under `action` and refused. Works locked or unlocked.
+    /// `reason`, unless it was given right within [`REAUTH_GRACE`]; a wrong one is audited under `action`
+    /// and refused. Works locked or unlocked. Says how it was confirmed, for the step's audit entry
+    /// ([`ASKED_NOW`] or [`ASKED_RECENTLY`]).
     pub async fn confirm(
         &self,
         ctx: &Context,
         password: Option<&SecretString>,
         action: &str,
         reason: &str,
-    ) -> Result<()> {
+    ) -> Result<&'static str> {
         // No vault, no password to ask for (as for Critical actions): set it up first.
         if self.inner.vault.status() == VaultStatus::NotSetUp {
             return Err(CoreError::VaultNotSetUp);
         }
         let Some(password) = password.filter(|p| !p.is_empty()) else {
+            if self.recently_confirmed() {
+                return Ok(ASKED_RECENTLY);
+            }
             return Err(CoreError::ReauthRequired {
                 reason: reason.to_owned(),
             });
         };
         if self.inner.vault.verify_password(password).await? {
-            return Ok(());
+            *locks::lock(&self.inner.confirmed) = Some(Instant::now());
+            return Ok(ASKED_NOW);
         }
         self.audit(ctx, "vault_auth_failed", action, "wrong vault password", &[])
             .await?;
         Err(CoreError::WrongVaultPassword)
     }
 
-    /// Lets a saved session use `secret` from now on, after the master password was given. Audited when
-    /// it is new.
-    pub async fn allow(&self, ctx: &Context, session_id: Uuid, session_name: &str, secret: SecretId) -> Result<()> {
+    /// Lets a saved session use `secret` from now on, after the master password was given (`how`, from
+    /// [`Self::confirm`]). Audited when it is new.
+    pub async fn allow(
+        &self,
+        ctx: &Context,
+        session_id: Uuid,
+        session_name: &str,
+        secret: SecretId,
+        how: &str,
+    ) -> Result<()> {
         self.take_fresh(secret);
         if !self.inner.store.grant_secret(ctx, session_id, secret).await? {
             return Ok(());
@@ -190,14 +231,8 @@ impl SecretBindings {
             environment: crate::domain::Environment::None,
             protected: false,
         };
-        self.audit(
-            ctx,
-            "vault_secret_allowed",
-            &action,
-            "the vault password was asked again (AP-06)",
-            std::slice::from_ref(&target),
-        )
-        .await
+        self.audit(ctx, "vault_secret_allowed", &action, how, std::slice::from_ref(&target))
+            .await
     }
 
     /// "password 'web root'": kind and label, never the value.
