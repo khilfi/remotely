@@ -76,7 +76,10 @@ test("disk actions wait for the snapshots and refuse what can't be done", () => 
   const disk = { hypervisor: "vmware" as const, diskPath: "C:\\VMs\\web\\web.vmdk", vmFolder: "C:\\VMs\\web" };
   assert.equal(diskActionReason({ ...disk, action: "expand", snapshots: 0 }), null);
   assert.equal(diskActionReason({ ...disk, action: "expand", snapshots: null }), "Reading the VM's snapshots…");
-  assert.match(diskActionReason({ ...disk, action: "compact", snapshots: "failed" })!, /^Could not read the VM's snapshots/);
+  assert.match(
+    diskActionReason({ ...disk, action: "compact", snapshots: "failed" })!,
+    /^Could not read the VM's snapshots/,
+  );
   assert.equal(
     diskActionReason({ ...disk, action: "expand", snapshots: 2 }),
     "The VM has 2 snapshots: a disk can't be expanded while snapshots depend on it. Delete the snapshots first",
