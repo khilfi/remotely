@@ -368,6 +368,8 @@ pub struct Settings {
     shutdown_wait_secs: u64,
     /// BX-02: how many hosts a bulk run reaches at once.
     bulk_parallel_limit: usize,
+    /// MO-02: seconds between two polls of a host the dashboard watches (5, 15, 30 or 60).
+    guest_poll_secs: u64,
     /// CT-02: the docker.exe path the user chose; `None`: find it.
     docker_path_saved: Option<String>,
     /// CT-02: the docker.exe in use; `None`: Docker Desktop was not found.
@@ -391,6 +393,7 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
         power_on_limit: core.power_on_limit(),
         shutdown_wait_secs: core.shutdown_wait_secs(),
         bulk_parallel_limit: core.bulk_parallel_limit(),
+        guest_poll_secs: core.guest_poll_secs(),
         docker_path_saved: core.saved_docker_path().await?.map(|p| p.display().to_string()),
         docker_path_in_use: core.docker_path().map(|p| p.display().to_string()),
     })
@@ -465,6 +468,13 @@ pub async fn settings_set_shutdown_wait(state: State<'_, AppState>, secs: u64) -
 #[tauri::command]
 pub async fn settings_set_bulk_parallel(state: State<'_, AppState>, limit: usize) -> IpcResult<Settings> {
     state.core.set_bulk_parallel_limit(limit).await?;
+    settings(&state.core).await
+}
+
+/// MO-02: how often the dashboard polls each watched host over SSH (5, 15, 30 or 60 seconds).
+#[tauri::command]
+pub async fn settings_set_guest_poll(state: State<'_, AppState>, secs: u64) -> IpcResult<Settings> {
+    state.core.set_guest_poll_secs(secs).await?;
     settings(&state.core).await
 }
 

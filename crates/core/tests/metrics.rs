@@ -257,6 +257,8 @@ async fn ssh_core() -> Core {
         .build()
         .await;
     core.metrics.guest().set_tuning(tuning());
+    // Rounds here follow each other at once; each one polls (the interval has its own test).
+    core.metrics.guest().set_interval(Duration::ZERO);
     core
 }
 
@@ -315,6 +317,58 @@ async fn linked_session(core: &Core, name: &str, port: u16, password: Option<&st
         .await
         .unwrap()
         .id
+}
+
+#[tokio::test]
+async fn a_watched_host_is_polled_at_its_interval_with_one_grep_and_df_once_a_minute() {
+    // MO-02, P8: the polling interval from Settings, and what each poll runs on the host.
+    let password = new_password();
+    let server = linux_server(&password).await;
+    let core = ssh_core().await;
+    trust(&core, &server, None).await;
+    let id = session(&core, "web01", server.port(), Some(&password)).await;
+    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    // The collector's rounds come every 5 s; a host is polled once its interval (less 1 s) has passed.
+    core.metrics.guest().set_interval(Duration::from_millis(1500));
+    let execs = || {
+        server
+            .log()
+            .into_iter()
+            .filter(|l| l.starts_with("exec grep"))
+            .collect::<Vec<_>>()
+    };
+
+    let cost = core.metrics.collect_once().await;
+    assert_eq!(cost.guest_interval_secs, 1);
+    assert_eq!(execs().len(), 1);
+    assert!(
+        execs()[0].contains("df -k -P -l"),
+        "the first poll reads the mounts too"
+    );
+    core.metrics.collect_once().await;
+    assert_eq!(execs().len(), 1, "polled less than an interval ago");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    serve_round(&server, 1);
+    core.metrics.collect_once().await;
+    let polls = execs();
+    assert_eq!(polls.len(), 2);
+    assert!(!polls[1].contains("df"), "df waits for its minute: {}", polls[1]);
+    let guest = core.metrics.hub().latest(MetricSource::Guest, &id.to_string()).unwrap();
+    assert_eq!(guest.cpu_pct, Some(25.0));
+    let mounts: Vec<&str> = guest.mounts.iter().map(|m| m.mount.as_str()).collect();
+    assert_eq!(
+        mounts,
+        ["/", "/boot/efi", "/var/lib/my data"],
+        "the last df's mounts stand in"
+    );
+
+    // Saved in Settings: only the offered intervals, audited.
+    assert!(core.set_guest_poll_secs(7).await.is_err());
+    core.set_guest_poll_secs(30).await.unwrap();
+    assert_eq!(core.guest_poll_secs(), 30);
+    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    assert_eq!(audit[0].action, "Set how often the dashboard polls watched hosts");
+    assert_eq!(audit[0].detail.as_deref(), Some("every 30 s"));
 }
 
 #[tokio::test]
@@ -410,6 +464,7 @@ async fn a_vm_with_a_linked_session_shows_host_and_guest_metrics_in_one_row() {
     let processes = Arc::clone(&setup.host.processes);
     setup.host.free_disk_pct = 40.0;
     let core = setup.build().await;
+    core.metrics.guest().set_interval(Duration::ZERO);
     core.metrics.guest().set_tuning(tuning());
     core.inventory.refresh(&core.ctx).await.unwrap();
     *processes.lock().unwrap() = vec![process(1, &vmx("web"), Some(2.0))];

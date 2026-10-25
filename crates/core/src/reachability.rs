@@ -308,7 +308,16 @@ impl ReachabilityChecker {
             .get_setting::<TerminalSettings>(&self.ctx, TERMINAL_SETTINGS_KEY)
             .await?
             .unwrap_or_default();
-        let sessions = self.store.list_sessions(&self.ctx).await?;
+        let watched = locks::lock(&self.watched).clone();
+        // P8: with checks off, or no session on screen to check, the session list isn't read at all.
+        if settings.reachability != ReachabilityMode::Off && watched.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sessions = if settings.reachability == ReachabilityMode::Off {
+            Vec::new()
+        } else {
+            self.store.list_sessions(&self.ctx).await?
+        };
         let enabled = match settings.reachability {
             ReachabilityMode::Off => false,
             ReachabilityMode::On => true,
@@ -323,7 +332,6 @@ impl ReachabilityChecker {
             return Ok(Vec::new());
         }
 
-        let watched = locks::lock(&self.watched).clone();
         let interval = tuning
             .interval
             .unwrap_or(Duration::from_secs(settings.reachability_secs));

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::containers::DOCKER_PATH_KEY;
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
-use crate::metrics::guest::WATCHED_KEY;
+use crate::metrics::guest::{POLL_KEY, WATCHED_KEY};
 use crate::policy::PolicyRules;
 use crate::store::{self, NewAuditEntry, Store};
 use crate::terminal::{TerminalSettings, TERMINAL_SETTINGS_KEY};
@@ -79,6 +79,14 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
     .await?;
     check::<TerminalSettings>(store, ctx, TERMINAL_SETTINGS_KEY, "the terminal settings", &mut reset).await?;
     check::<Vec<Uuid>>(store, ctx, WATCHED_KEY, "the hosts the dashboard watches", &mut reset).await?;
+    check::<u64>(
+        store,
+        ctx,
+        POLL_KEY,
+        "how often the dashboard polls watched hosts",
+        &mut reset,
+    )
+    .await?;
     Ok(reset)
 }
 

@@ -182,6 +182,8 @@ impl GuestStatus {
 pub struct CollectorCost {
     pub rounds: u64,
     pub interval_secs: u64,
+    /// MO-02, P8: seconds between two polls of a watched host (Settings).
+    pub guest_interval_secs: u64,
     /// Wall time of the last round, and of each source in it (they run side by side).
     pub round_ms: f64,
     pub host_ms: f64,
@@ -244,6 +246,10 @@ impl MetricsSource for HostProcessSource {
 
     async fn collect(&self) -> Result<SourceRound> {
         let processes = self.counters.vm_processes().await?;
+        // P8: no VM runs, so there is nothing to name or size: the inventory isn't read.
+        if processes.is_empty() {
+            return Ok(SourceRound::default());
+        }
         let ts = now_rfc3339();
         // One read of the host's totals per round gives both shares of the host (MO-01).
         let totals = self.counters.host_totals().await.ok();
@@ -596,6 +602,8 @@ pub struct Metrics {
     rounds: Mutex<u64>,
     cpu: Mutex<Option<CpuWatch>>,
     tx: broadcast::Sender<CollectorCost>,
+    /// MO-13: the rows' one-line summaries, parsed once per reading of a host's facts.
+    briefs: crate::host_details::Briefs,
 }
 
 impl Metrics {
@@ -616,6 +624,7 @@ impl Metrics {
             rounds: Mutex::new(0),
             cpu: Mutex::new(None),
             tx,
+            briefs: crate::host_details::Briefs::default(),
         }
     }
 
@@ -673,6 +682,7 @@ impl Metrics {
         let cost = CollectorCost {
             rounds,
             interval_secs: self.interval.as_secs(),
+            guest_interval_secs: self.guest.interval().as_secs(),
             round_ms,
             host_ms,
             guest_ms,
@@ -763,7 +773,7 @@ impl Metrics {
         let names: HashMap<Uuid, &crate::sessions::SessionRecord> = sessions.iter().map(|s| (s.id, s)).collect();
         let guest_of = |id: Uuid| self.hub.latest(MetricSource::Guest, &id.to_string());
         // MO-13: each session's stored facts, for the one-line summary under a row.
-        let briefs = crate::host_details::briefs(&self.store, ctx).await.unwrap_or_default();
+        let briefs = self.briefs.get(&self.store, ctx).await.unwrap_or_default();
 
         let mut rows = Vec::new();
         let mut on_vm_rows: HashSet<Uuid> = HashSet::new();

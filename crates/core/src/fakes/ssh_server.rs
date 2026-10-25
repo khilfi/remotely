@@ -168,6 +168,8 @@ struct State {
     no_docker_group: AtomicBool,
     /// MO-13, MO-14: what the host's own programs say about it.
     host: Mutex<Option<HostFixture>>,
+    /// R9: new connections are closed at once, as when sshd is down or the network is gone.
+    refusing: AtomicBool,
 }
 
 struct Link {
@@ -467,6 +469,12 @@ impl TestSshServer {
         self.state.drop_links();
     }
 
+    /// R9: closes new connections at once (or, with `false`, takes them again), like a host whose
+    /// network went away and came back. Open connections are left as they are.
+    pub fn set_refusing(&self, on: bool) {
+        self.state.refusing.store(on, Ordering::SeqCst);
+    }
+
     /// Swallows all traffic on the open connections from now on; the sockets stay open.
     pub fn freeze_connections(&self) {
         for link in locks::lock(&self.state.links).iter() {
@@ -505,6 +513,10 @@ impl Drop for TestSshServer {
 async fn accept_loop(listener: TcpListener, state: Arc<State>) {
     while let Ok((socket, _)) = listener.accept().await {
         let link = state.connections.fetch_add(1, Ordering::SeqCst) + 1;
+        if state.refusing.load(Ordering::SeqCst) {
+            drop(socket);
+            continue;
+        }
         let Some(host_key) = locks::lock(&state.host_key).clone() else {
             continue;
         };
@@ -2007,54 +2019,73 @@ impl<'a> ToyShell<'a> {
                 status
             }
             "grep" => {
-                // Fixed strings only: `grep [-q] [-F] [-x] [-e PATTERN | PATTERN] [FILE]`.
+                // Fixed strings, or one anchored at the start with `^` (MO-02's guest script):
+                // `grep [-q] [-v] [-F] [-x] [-e PATTERN]... | PATTERN [FILE]...`. With several files,
+                // each line starts with its file's name, as real grep prints it.
                 let mut quiet = false;
                 let mut whole_line = false;
-                let mut pattern = None;
+                let mut invert = false;
+                let mut patterns: Vec<String> = Vec::new();
                 let mut files = Vec::new();
                 let mut rest = args.iter();
                 while let Some(arg) = rest.next() {
                     if arg == "-e" {
-                        pattern = rest.next().cloned();
-                    } else if arg.starts_with('-') && arg.len() > 1 && pattern.is_none() {
+                        patterns.extend(rest.next().cloned());
+                    } else if arg.starts_with('-') && arg.len() > 1 && files.is_empty() {
                         quiet |= arg.contains('q');
                         whole_line |= arg.contains('x');
-                    } else if pattern.is_none() {
-                        pattern = Some(arg.clone());
+                        invert |= arg.contains('v');
+                    } else if patterns.is_empty() {
+                        patterns.push(arg.clone());
                     } else {
                         files.push(arg.clone());
                     }
                 }
-                let Some(pattern) = pattern else {
+                if patterns.is_empty() {
                     self.err("grep: no pattern\n");
                     return 2;
+                }
+                let matches = |line: &str| {
+                    patterns.iter().any(|pattern| match pattern.strip_prefix('^') {
+                        _ if whole_line => line == pattern,
+                        Some(start) => line.starts_with(start),
+                        None => line.contains(pattern.as_str()),
+                    }) != invert
                 };
-                let text = match files.first() {
-                    None => String::from_utf8_lossy(&std::mem::take(&mut self.stdin)).into_owned(),
-                    Some(file) => match self.read_file(file) {
-                        Some(text) => text,
+                let mut inputs: Vec<(Option<String>, String)> = Vec::new();
+                let mut status = 1;
+                if files.is_empty() {
+                    let stdin = String::from_utf8_lossy(&std::mem::take(&mut self.stdin)).into_owned();
+                    inputs.push((None, stdin));
+                }
+                for file in &files {
+                    match self.read_file(file) {
+                        Some(text) => inputs.push((Some(file.clone()), text)),
                         None => {
                             self.err(&format!("grep: {file}: No such file or directory\n"));
-                            return 2;
+                            status = 2;
                         }
-                    },
-                };
-                let hits: Vec<&str> = text
-                    .lines()
-                    .filter(|l| {
-                        if whole_line {
-                            *l == pattern
-                        } else {
-                            l.contains(&pattern)
-                        }
-                    })
-                    .collect();
-                if !quiet {
-                    for hit in &hits {
-                        self.print(&format!("{hit}\n"));
                     }
                 }
-                u32::from(hits.is_empty())
+                let named = files.len() > 1;
+                let mut found = false;
+                for (file, text) in &inputs {
+                    for line in text.lines().filter(|l| matches(l)) {
+                        found = true;
+                        if quiet {
+                            continue;
+                        }
+                        match file {
+                            Some(file) if named => self.print(&format!("{file}:{line}\n")),
+                            _ => self.print(&format!("{line}\n")),
+                        }
+                    }
+                }
+                if found {
+                    0
+                } else {
+                    status
+                }
             }
             name @ ("[" | "test") => {
                 let mut a: Vec<&str> = args.iter().map(String::as_str).collect();
