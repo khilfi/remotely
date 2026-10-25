@@ -485,7 +485,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
           <CardContent className="grid gap-2">
             <Label htmlFor="guest-poll">Poll each watched host every</Label>
             <Select
-              value={settings ? String(settings.guestPollSecs) : undefined}
+              value={settings ? String(settings.guestPollSecs) : ""}
               disabled={!settings}
               onValueChange={(v) => void saveGuestPoll(Number(v))}
             >

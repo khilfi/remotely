@@ -701,9 +701,12 @@ impl Core {
         let choices = metrics::guest::POLL_CHOICES;
         if !choices.contains(&secs) {
             let offered: Vec<String> = choices.iter().map(u64::to_string).collect();
+            let text = match offered.split_last() {
+                Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+                _ => offered.concat(),
+            };
             return Err(CoreError::InvalidSetting(format!(
-                "watched hosts are polled every {} seconds",
-                offered.join(", ")
+                "watched hosts can be polled every {text} seconds"
             )));
         }
         self.store

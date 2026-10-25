@@ -363,7 +363,8 @@ async fn a_watched_host_is_polled_at_its_interval_with_one_grep_and_df_once_a_mi
     );
 
     // Saved in Settings: only the offered intervals, audited.
-    assert!(core.set_guest_poll_secs(7).await.is_err());
+    let refused = core.set_guest_poll_secs(7).await.unwrap_err().to_string();
+    assert!(refused.contains("every 5, 15, 30 or 60 seconds"), "{refused}");
     core.set_guest_poll_secs(30).await.unwrap();
     assert_eq!(core.guest_poll_secs(), 30);
     let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
