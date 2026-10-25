@@ -663,11 +663,62 @@ struct Shared {
     key_presented: bool,
     /// Why the verifier refused the key.
     verify_error: Option<CoreError>,
-    banners: Vec<String>,
+    banners: Banners,
     /// Why the connection ended, once it has.
     disconnect: Option<String>,
     /// SS-07: remote forwards the server listens for, and where their connections go.
     routes: Vec<forward::Route>,
+}
+
+/// Banner text kept per connection at most; a hostile server could send banners without end.
+const MAX_BANNER_BYTES: usize = 64 * 1024;
+/// Banners kept per connection at most.
+const MAX_BANNERS: usize = 16;
+/// Shown once in place of the banners over the caps.
+const BANNERS_CUT: &str = "(the server sent more banner text; not shown)";
+
+/// A9: the server's login banners waiting to be shown, at most [`MAX_BANNERS`] and
+/// [`MAX_BANNER_BYTES`] over the connection's life; what comes after is dropped, with one note.
+#[derive(Default)]
+struct Banners {
+    waiting: Vec<String>,
+    bytes: usize,
+    count: usize,
+    cut: bool,
+}
+
+impl Banners {
+    fn push(&mut self, banner: &str) {
+        if self.cut {
+            return;
+        }
+        let room = MAX_BANNER_BYTES - self.bytes;
+        if self.count < MAX_BANNERS && banner.len() <= room {
+            self.bytes += banner.len();
+            self.count += 1;
+            self.waiting.push(banner.to_owned());
+            return;
+        }
+        // Over a cap: what fits of this one, then the note, then nothing more.
+        if self.count < MAX_BANNERS && room > 0 {
+            let mut end = room;
+            while !banner.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end > 0 {
+                self.bytes += end;
+                self.count += 1;
+                self.waiting.push(banner[..end].to_owned());
+            }
+        }
+        self.waiting.push(BANNERS_CUT.to_owned());
+        self.cut = true;
+    }
+
+    /// The banners not shown yet.
+    fn take(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.waiting)
+    }
 }
 
 struct Handler {
@@ -731,7 +782,7 @@ impl client::Handler for Handler {
     }
 
     async fn auth_banner(&mut self, banner: &str, _: &mut client::Session) -> std::result::Result<(), Self::Error> {
-        locks::lock(&self.shared).banners.push(banner.to_owned());
+        locks::lock(&self.shared).banners.push(banner);
         Ok(())
     }
 
@@ -1116,7 +1167,7 @@ where
 }
 
 async fn show_banners(shared: &Arc<Mutex<Shared>>, prompter: &mut dyn Prompter) {
-    let banners = std::mem::take(&mut locks::lock(shared).banners);
+    let banners = locks::lock(shared).banners.take();
     for banner in banners {
         prompter.show(&banner).await;
     }
@@ -1955,6 +2006,38 @@ async fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn banners_are_capped_in_count_and_bytes_with_one_note() {
+        let mut banners = Banners::default();
+        for n in 0..1000 {
+            banners.push(&format!("Authorized use only ({n})\n"));
+        }
+        let shown = banners.take();
+        assert_eq!(shown.len(), MAX_BANNERS + 1);
+        assert_eq!(shown[0], "Authorized use only (0)\n");
+        assert_eq!(shown.last().map(String::as_str), Some(BANNERS_CUT));
+        banners.push("more");
+        assert!(banners.take().is_empty(), "nothing after the note");
+
+        // One huge banner: what fits (cut on a character boundary), then the note.
+        let mut banners = Banners::default();
+        banners.push("ok\n");
+        banners.push(&"é".repeat(MAX_BANNER_BYTES));
+        let shown = banners.take();
+        assert_eq!(shown.len(), 3);
+        let kept: usize = shown[..2].iter().map(String::len).sum();
+        assert!((MAX_BANNER_BYTES - 1..=MAX_BANNER_BYTES).contains(&kept), "{kept}");
+        assert!(shown[1].chars().all(|c| c == 'é'));
+        assert_eq!(shown[2], BANNERS_CUT);
+
+        // Banners shown on the way count toward the caps too.
+        let mut banners = Banners::default();
+        banners.push(&"a".repeat(MAX_BANNER_BYTES));
+        assert_eq!(banners.take().len(), 1);
+        banners.push("b");
+        assert_eq!(banners.take(), [BANNERS_CUT]);
+    }
 
     #[test]
     fn the_host_key_types_already_trusted_are_asked_for_first() {
