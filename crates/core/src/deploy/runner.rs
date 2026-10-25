@@ -26,6 +26,7 @@ use super::{seed, virtualbox as vb, vmx, workstation as ws, DeployActions};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::vmx_file::VmxFile;
 use crate::catalog::images::ImageFormat;
+use crate::convert::formats::{DiskFormat, OutputKind};
 use crate::catalog::sizes::{DiskController, Provisioning};
 use crate::catalog::templates::Network;
 use crate::command_bus::{PowerOp, SnapshotOp};
@@ -97,6 +98,8 @@ pub struct Deployer {
     tuning: RwLock<DeployTuning>,
     /// One scanned-folder change at a time (two VMs of a deploy finish together).
     scan_folders: tokio::sync::Mutex<()>,
+    /// CV-01, CV-03: converts what the hypervisor's own copy can't read (qcow2, VHDX; VHD and VDI on Workstation).
+    converter: RwLock<Option<Arc<crate::convert::Converter>>>,
 }
 
 impl Deployer {
@@ -115,6 +118,7 @@ impl Deployer {
             vault,
             tuning: RwLock::new(DeployTuning::default()),
             scan_folders: tokio::sync::Mutex::new(()),
+            converter: RwLock::new(None),
         }
     }
 
@@ -122,8 +126,52 @@ impl Deployer {
         *locks::write(&self.tuning) = tuning;
     }
 
+    /// CV-01, CV-03: what converts imported disks and qcow2 cloud images.
+    pub fn set_converter(&self, converter: Arc<crate::convert::Converter>) {
+        *locks::write(&self.converter) = Some(converter);
+    }
+
+    /// CV-01, CV-03: `source` (of `format`) converted into `target`, the new VM's disk of `kind`, through a work
+    /// folder inside the VM's own folder.
+    async fn convert_disk(&self, source: &str, format: DiskFormat, target: &Path, kind: OutputKind) -> Result<()> {
+        let converter = locks::read(&self.converter)
+            .clone()
+            .ok_or(CoreError::NotImplemented("conversions"))?;
+        let info = crate::convert::inspect::inspect(Path::new(source)).await?;
+        if info.format != format {
+            return Err(CoreError::ConversionRefused(format!(
+                "{source} is a {} now, not the {} it was when the deploy was asked.",
+                info.format.label(),
+                format.label()
+            )));
+        }
+        if let Some(problem) = info.problems.first() {
+            return Err(CoreError::ConversionRefused(format!("{source}: {problem}.")));
+        }
+        let work = target
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(format!(".convert-{}", Uuid::new_v4().simple()));
+        tokio::fs::create_dir(&work).await?;
+        // The deploy's cancel stops this (the runner's select); this token is the conversion's own.
+        let ran = converter
+            .convert_into(Path::new(source), &info, kind, target, &work, &CancellationToken::new())
+            .await;
+        let _ = tokio::fs::remove_dir_all(&work).await;
+        ran.map(drop)
+    }
+
     fn tuning(&self) -> DeployTuning {
         *locks::read(&self.tuning)
+    }
+}
+
+/// A cloud image's format as a disk format (an OVA named as a cloud image goes to vdiskmanager as before).
+fn disk_format(format: ImageFormat) -> DiskFormat {
+    match format {
+        ImageFormat::Raw => DiskFormat::Raw,
+        ImageFormat::Qcow2 => DiskFormat::Qcow2,
+        ImageFormat::Vmdk | ImageFormat::Ova | ImageFormat::Ovf | ImageFormat::Iso => DiskFormat::Vmdk,
     }
 }
 
@@ -306,14 +354,22 @@ impl Deployer {
             }
             DeploySource::CloudImage { path, format } => {
                 let disks = self
-                    .new_workstation_disks(spec, vm, folder, Some((path, *format)))
+                    .new_workstation_disks(spec, vm, folder, &[(path.clone(), disk_format(*format))])
                     .await?;
                 made.vmx = Some(vmx_path.clone());
                 self.write_new_vmx(spec, vm, &vmx_path, disks, None, guestinfo).await?;
                 self.grow_workstation(&vmx_path, spec, made).await?;
             }
+            // CV-01: each imported disk converted into the VM's folder.
+            DeploySource::Import { disks: sources, .. } => {
+                let sources: Vec<(String, DiskFormat)> = sources.iter().map(|d| (d.path.clone(), d.format)).collect();
+                let disks = self.new_workstation_disks(spec, vm, folder, &sources).await?;
+                made.vmx = Some(vmx_path.clone());
+                self.write_new_vmx(spec, vm, &vmx_path, disks, None, guestinfo).await?;
+                self.grow_workstation(&vmx_path, spec, made).await?;
+            }
             DeploySource::Iso { path } => {
-                let disks = self.new_workstation_disks(spec, vm, folder, None).await?;
+                let disks = self.new_workstation_disks(spec, vm, folder, &[]).await?;
                 made.vmx = Some(vmx_path.clone());
                 self.write_new_vmx(spec, vm, &vmx_path, disks, Some(path.clone()), guestinfo)
                     .await?;
@@ -322,14 +378,15 @@ impl Deployer {
         Ok(vmx_path.display().to_string())
     }
 
-    /// The disks of a new Workstation VM: the boot disk a copy of the cloud image when there is one, the others
-    /// new, each `-t 0` (thin) or `-t 2` (thick).
+    /// The disks of a new Workstation VM: the first ones copies of the cloud image or the imported disks when there
+    /// are some, the others new, each `-t 0` (thin) or `-t 2` (thick). A VMDK or raw source is copied by
+    /// vdiskmanager itself; any other format (qcow2, VHD, VHDX, VDI) through the conversion plan (CV-01, CV-03).
     async fn new_workstation_disks(
         &self,
         spec: &DeploySpec,
         vm: &DeployVm,
         folder: &Path,
-        image: Option<(&String, ImageFormat)>,
+        images: &[(String, DiskFormat)],
     ) -> Result<Vec<vmx::VmxDisk>> {
         let vmware = self.hypervisors.vmware();
         let size = spec
@@ -340,9 +397,14 @@ impl Deployer {
         for (i, disk) in size.disks.iter().enumerate() {
             let file_name = ws::disk_file_name(&vm.name, i);
             let path = folder.join(&file_name);
-            match (i, image) {
-                (0, Some((image, format))) => {
-                    let source = if format == ImageFormat::Raw {
+            match images.get(i) {
+                Some((image, format)) if !crate::convert::import::copied_by_deploy(Hypervisor::Vmware, *format) => {
+                    let kind = crate::convert::import::native_kind(Hypervisor::Vmware, disk.provisioning == Provisioning::Thin);
+                    self.convert_disk(image, *format, &path, kind).await?;
+                }
+                Some((image, format)) => {
+                    let (image, format) = (image, *format);
+                    let source = if format == DiskFormat::Raw {
                         let bytes = tokio::fs::metadata(image).await?.len();
                         let descriptor = folder.join(format!("{}-image.vmdk", vm.name));
                         tokio::fs::write(&descriptor, ws::raw_descriptor(Path::new(image), bytes)).await?;
@@ -353,12 +415,12 @@ impl Deployer {
                     let copied = vmware
                         .vdiskmanager(ws::convert_args(&source, &path, disk.provisioning), LONG)
                         .await;
-                    if format == ImageFormat::Raw {
+                    if format == DiskFormat::Raw {
                         let _ = tokio::fs::remove_file(&source).await;
                     }
                     copied?;
                 }
-                _ => {
+                None => {
                     let adapter = if disk.controller == DiskController::Ide {
                         "ide"
                     } else {
@@ -541,14 +603,24 @@ impl Deployer {
             DeploySource::CloudImage { path, format } => {
                 made.vbox = Some(uuid.clone());
                 let dvd = self.new_vbox_vm(&uuid, spec, vm, false).await?;
-                self.vbox_disks(&uuid, spec, vm, folder, Some((path, *format))).await?;
+                self.vbox_disks(&uuid, spec, vm, folder, &[(path.clone(), disk_format(*format))])
+                    .await?;
+                self.grow_virtualbox(&uuid, spec, made).await?;
+                self.attach_seed(&uuid, folder, vm, first_boot, Some(dvd), made).await?;
+            }
+            // CV-01: each imported disk converted into the VM's folder.
+            DeploySource::Import { disks, .. } => {
+                made.vbox = Some(uuid.clone());
+                let dvd = self.new_vbox_vm(&uuid, spec, vm, false).await?;
+                let sources: Vec<(String, DiskFormat)> = disks.iter().map(|d| (d.path.clone(), d.format)).collect();
+                self.vbox_disks(&uuid, spec, vm, folder, &sources).await?;
                 self.grow_virtualbox(&uuid, spec, made).await?;
                 self.attach_seed(&uuid, folder, vm, first_boot, Some(dvd), made).await?;
             }
             DeploySource::Iso { path } => {
                 made.vbox = Some(uuid.clone());
                 let (controller, port) = self.new_vbox_vm(&uuid, spec, vm, true).await?;
-                self.vbox_disks(&uuid, spec, vm, folder, None).await?;
+                self.vbox_disks(&uuid, spec, vm, folder, &[]).await?;
                 self.vbox(vb::attach_args(&uuid, controller, port, true, path), SHORT)
                     .await?;
                 if let Some(unattended) = &spec.unattended {
@@ -617,14 +689,16 @@ impl Deployer {
         Ok(dvd)
     }
 
-    /// The disks of a new VirtualBox VM: the boot disk a copy of the cloud image when there is one, the others new.
+    /// The disks of a new VirtualBox VM: the first ones copies of the cloud image or the imported disks when there are
+    /// some, the others new. VMDK, VDI, VHD and raw sources are copied by VirtualBox itself (`clonemedium`,
+    /// `convertfromraw`); qcow2 and VHDX through the conversion plan (CV-01, CV-03).
     async fn vbox_disks(
         &self,
         uuid: &str,
         spec: &DeploySpec,
         vm: &DeployVm,
         folder: &Path,
-        image: Option<(&String, ImageFormat)>,
+        images: &[(String, DiskFormat)],
     ) -> Result<()> {
         let size = spec
             .size
@@ -637,15 +711,22 @@ impl Deployer {
             } else {
                 folder.join(format!("{}-{i}.vdi", vm.name))
             };
-            match (i, image) {
-                (0, Some((image, format))) => {
+            match images.get(i) {
+                Some((image, format)) if !crate::convert::import::copied_by_deploy(Hypervisor::VirtualBox, *format) => {
+                    let kind = crate::convert::import::native_kind(
+                        Hypervisor::VirtualBox,
+                        disk.provisioning == Provisioning::Thin,
+                    );
+                    self.convert_disk(image, *format, &path, kind).await?;
+                }
+                Some((image, format)) => {
                     self.vbox(
-                        vb::copy_image_args(Path::new(image), format == ImageFormat::Raw, &path, disk.provisioning),
+                        vb::copy_image_args(Path::new(image), *format == DiskFormat::Raw, &path, disk.provisioning),
                         LONG,
                     )
                     .await?;
                 }
-                _ => {
+                None => {
                     self.vbox(vb::createmedium_args(&path, disk.size_gb, disk.provisioning), LONG)
                         .await?;
                 }

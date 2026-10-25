@@ -82,6 +82,8 @@ pub struct Catalog {
     hypervisors: Option<Hypervisors>,
     /// Images being hashed, by the request id the UI gave, so Cancel can stop one.
     hashing: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
+    /// CV-03: whether qemu-img is installed, for qcow2 images. `None` (FD-07's own copy): not checked.
+    disk_tools: Option<Arc<dyn crate::adapters::disk_tools::DiskTools>>,
 }
 
 /// What a check of templates needs, read once.
@@ -130,12 +132,19 @@ impl Catalog {
             store,
             hypervisors: None,
             hashing: Arc::default(),
+            disk_tools: None,
         }
     }
 
     /// Golden VM images check that their snapshot is still there.
     pub fn with_hypervisors(mut self, hypervisors: Hypervisors) -> Self {
         self.hypervisors = Some(hypervisors);
+        self
+    }
+
+    /// CV-03: qcow2 images deploy only while qemu-img is installed.
+    pub fn with_disk_tools(mut self, tools: Arc<dyn crate::adapters::disk_tools::DiskTools>) -> Self {
+        self.disk_tools = Some(tools);
         self
     }
 
@@ -226,6 +235,16 @@ impl Catalog {
                     }
                 }
                 Err(err) => image.problem = Some(format!("Its VM's snapshots can't be read: {err}")),
+            }
+        }
+        // CV-03: a qcow2 cloud image deploys through qemu-img (converted into each VM's folder), when it is installed.
+        if let Some(tools) = &self.disk_tools {
+            if tools.qemu_img().is_none() {
+                for image in &mut images {
+                    if image.problem.is_none() && image.source.format() == Some(ImageFormat::Qcow2) {
+                        image.problem = Some(images::QCOW2_NEEDS_QEMU_IMG.into());
+                    }
+                }
             }
         }
         Ok(images)

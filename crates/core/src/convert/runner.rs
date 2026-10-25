@@ -166,6 +166,11 @@ impl Converter {
         }
     }
 
+    /// A VM's virtual hardware and disks (MO-13's reader). A read.
+    pub async fn hardware(&self, key: &str) -> Result<crate::adapters::vm_hardware::VmHardware> {
+        self.hypervisors.hardware(key).await
+    }
+
     /// Free space on the drive `folder` is on, when it can be read.
     pub async fn free_bytes(&self, folder: &Path) -> Option<u64> {
         self.host.disk_space(folder).await.ok().map(|d| d.free_bytes)
@@ -393,7 +398,7 @@ impl Converter {
     }
 
     /// VM-17: refuses a VM that isn't powered off, or that Workstation holds.
-    async fn require_off(&self, key: &str) -> Result<()> {
+    pub async fn require_off(&self, key: &str) -> Result<()> {
         let power = match Hypervisor::of_key(key) {
             Hypervisor::Vmware => {
                 let vmware = self.hypervisors.vmware();

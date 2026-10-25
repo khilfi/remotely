@@ -39,6 +39,7 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
     )
     .await?;
     check::<Option<String>>(store, ctx, DOCKER_PATH_KEY, "the docker.exe path", &mut reset).await?;
+    check::<Option<String>>(store, ctx, store::QEMU_IMG_PATH_KEY, "the qemu-img.exe path", &mut reset).await?;
     check::<Vec<String>>(
         store,
         ctx,

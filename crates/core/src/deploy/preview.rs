@@ -167,7 +167,7 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
 
     // Each VM's disks, by where its OS comes from.
     let (per_vm, per_vm_thick): (Option<u64>, u64) = match (&spec.source, &spec.size) {
-        (DeploySource::CloudImage { .. } | DeploySource::Iso { .. }, Some(size)) => {
+        (DeploySource::CloudImage { .. } | DeploySource::Iso { .. } | DeploySource::Import { .. }, Some(size)) => {
             let (all, thick) = size_disks(size, None);
             (Some(all), thick)
         }
@@ -291,7 +291,10 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
         } => notes.push(format!(
             "Linked clones need '{vm_name}' and its snapshot '{snapshot_name}' to stay; their disks keep the golden VM's size, which a linked clone can't grow."
         )),
-        DeploySource::GoldenVm { .. } | DeploySource::CloudImage { .. } | DeploySource::Appliance { .. } => {
+        DeploySource::GoldenVm { .. }
+        | DeploySource::CloudImage { .. }
+        | DeploySource::Appliance { .. }
+        | DeploySource::Import { .. } => {
             if let Some(size) = &spec.size {
                 notes.push(format!(
                     "CPU and memory are the size's ({} vCPU, {} MB); a boot disk smaller than {} GB grows to it, and none shrinks. {}",

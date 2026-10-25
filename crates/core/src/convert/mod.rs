@@ -7,12 +7,16 @@
 //!   only when the owner installed it) and their command lines.
 
 pub mod args;
+pub mod describe;
 pub mod formats;
+pub mod import;
 pub mod inspect;
 pub mod plan;
 pub mod runner;
+pub mod service;
 pub mod spec;
 pub mod targets;
+pub mod verify;
 
 pub use self::runner::{ConvertActions, Converter};
 pub use self::spec::{ConvertSpec, ExportSpec, ExportTarget};
