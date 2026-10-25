@@ -186,6 +186,9 @@ What Remotely runs while you look at something else, and how it stays light on t
   behind one jump host don't all log in at the same moment. When Windows resumes from sleep or this PC gets a new
   network address, waiting terminals try within 3 seconds, and one that had given up starts its tries again.
 - **Reachability dots** read nothing while they are off or the session tree isn't shown.
+- **Dashboard history and alerts** (MO-06, MO-07): one database write a minute for every series together;
+  the alert rules run on each round in memory and read names and tags at most once a minute; the services
+  widget runs one command a minute on the dashboard's kept connection.
 
 ### Safer operations on hosts
 
@@ -249,6 +252,8 @@ Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS
 - **Deleted means gone**: the database overwrites what it deletes (`secure_delete`), empties its write-ahead log after a
   purge, and compacts its file (`VACUUM`) after a purge that freed a lot of space, while no job runs (a job submitted
   meanwhile waits for it).
+- **Dashboard history** (MO-06, MO-07): 1-minute averages of the VMs, watched hosts and this PC, and the alert
+  list, kept 7 days by default (Settings, General, Dashboard history), pruned at start and daily, never exported.
 - **The audit log** is never purged: it is append-only and hash-chained. Verify and Export read it row by row, however
   long it is, and the export is written next to the file you chose, then renamed, so a failed export leaves no half
   file.
@@ -535,6 +540,35 @@ CT-01 and CT-02 (0.4.0), Ctrl+3: Docker and Podman on SSH hosts, and Docker Desk
 
 Not done here: a shell in Docker Desktop's containers (it needs a terminal on this PC, which Remotely doesn't have),
 compose stacks as a whole (the Compose project shows on each container), creating containers, and image builds.
+
+### Dashboard: history, alerts and layout
+
+- **History** (MO-06): once a minute the dashboard writes, in one go, an average of each running VM's host-side
+  readings, each watched host's guest readings and this PC's CPU, RAM and paging files, with the minute's lowest and
+  highest CPU and its highest memory, load and fullest disk. The charts' range picker (Live, 1 h, 6 h, 24 h, 7 d) reads
+  it in points of 1 minute (up to 6 hours), 5 minutes (a day) or 30 minutes (a week) and carries on with the live
+  rounds; over a range, a chart widget's CPU also shows each point's highest reading. It is kept 7 days by default
+  (Settings, General, **Dashboard history**: 1, 3, 7, 14 or 30 days) and pruned at start and daily with the alert
+  list's resolved alerts. It stays on this PC: no export carries it. A VM or host takes about 180 bytes a minute, so 50
+  VMs and 20 watched hosts running around the clock for a week take about 125 MB, and ten VMs on working days with five
+  watched hosts about 15 MB.
+- **Alerts** (MO-07): a rule watches CPU, memory, disk or swap above a threshold for a while, a watched host that
+  can't be reached, or a VM that stopped with no Remotely job on it (powered off, suspended or crashed outside the
+  app), on every VM, one VM, a tag, every watched host, one watched host or this PC, as a warning or critical. Rules
+  run on every round; an alert resolves after a minute back under its threshold. Windows notifies at most once per rule
+  and target in half an hour, one notification for the alerts of a round, masked while presenting. Built-in rules, on:
+  a VM stopped without a Remotely action, a watched host's disk above 85% for 5 minutes, a watched host unreachable for
+  5 minutes, this PC's memory above 90% for 5 minutes; off until you turn them on: a VM's CPU above 90% for 5 minutes,
+  a VM's memory above 95% for 10 minutes and a watched host's CPU above 90% for 5 minutes (builds and caches push these
+  high on purpose). The Rules button on the alert list edits them. Rule changes and acknowledgements are audited, and
+  the read-only lock refuses them. Desktop only: no email, Teams or Slack.
+- **Layout** (MO-16): **Customize** adds, removes, moves and resizes the widgets (the overview grid, host capacity,
+  this PC's memory, the alerts, a watched host's services, and charts of a VM, a watched host or this PC) on a grid of
+  four columns: drag a widget's handle or press the arrow keys on it, drag its corner or pick its size. **Save** keeps
+  the layout for this workspace (audited); **Reset to default** brings back the standard dashboard. The services widget
+  reads a watched host's services once a minute on the dashboard's own connection to it, so it adds no logins; a host
+  that isn't watched shows nothing until you watch it. Widgets read only while the dashboard shows and the window is
+  visible, and none while you customize.
 
 ### Host details
 
@@ -980,6 +1014,9 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; one refresh at a time, requests meanwhile share the next; filters; audited environment labels                                                                  |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                   |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                         |
+| Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                               | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                |
+| Alerts             | `crates/core/src/alerts/`, `store/alerts.rs`                      | MO-07                                                                                                                                               | Working: rules (threshold and duration, unreachable, stopped outside the app) run each round; alert list with acknowledge; Windows notifications with a cooldown; built-in rules; audited edits                                                             |
+| Dashboard layout   | `crates/core/src/dashboard.rs`, `src/components/Dashboard*.tsx`   | MO-16                                                                                                                                               | Working: widgets on a four-column grid, saved per workspace and audited; drag, keyboard and size menu; services widget on the kept connection                                                                                                               |
 | Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                              |
 | Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                           |
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                |

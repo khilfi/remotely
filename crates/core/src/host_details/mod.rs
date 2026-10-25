@@ -135,6 +135,33 @@ pub struct AdminReport {
     pub via: Via,
 }
 
+/// MO-16: what the dashboard's services widget shows of a watched host.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServicesReport {
+    pub session_id: Uuid,
+    pub service_manager: admin::ServiceManager,
+    pub running: Vec<admin::Service>,
+    pub failed: Vec<admin::Service>,
+    /// Without systemd: the services the init system lists as stopped or unknown.
+    pub other: Vec<admin::Service>,
+    pub collected_at: String,
+}
+
+/// MO-16: the services widget's read: done on the dashboard's kept connection, or not at all.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "state", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ServicesRead {
+    Read {
+        report: ServicesReport,
+    },
+    /// Nothing was read and nobody logged in for it: the host is not watched (`watched: false`), or the
+    /// dashboard's connection to it is not up just now.
+    NotConnected {
+        watched: bool,
+    },
+}
+
 /// MO-14: pending updates.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -495,6 +522,30 @@ impl HostDetails {
             details: admin::parse(&result.output.stdout),
             collected_at: now_rfc3339(),
             via,
+        })
+    }
+
+    /// MO-16: the services widget's read of a watched host, every minute while the dashboard shows: on the
+    /// dashboard's kept connection only, so it adds no login (MO-02's login guard rules stand as they are).
+    /// A host that is not watched, or whose connection is down, reads nothing.
+    pub async fn services(&self, session_id: Uuid) -> Result<ServicesRead> {
+        let guest = self.inner.metrics.guest();
+        let Some(exec) = guest.kept_connection(session_id).await else {
+            let watched = guest.watched().await?.contains(&session_id);
+            return Ok(ServicesRead::NotConnected { watched });
+        };
+        let timeout = self.inner.collector.tuning().admin_timeout;
+        let result = run_with_timeout(exec.as_ref(), admin::SERVICES_SCRIPT, admin::MAX_OUTPUT, timeout).await?;
+        let details = admin::parse(&result.output.stdout);
+        Ok(ServicesRead::Read {
+            report: ServicesReport {
+                session_id,
+                service_manager: details.service_manager,
+                running: details.running,
+                failed: details.failed,
+                other: details.other_services,
+                collected_at: now_rfc3339(),
+            },
         })
     }
 

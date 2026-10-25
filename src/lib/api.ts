@@ -8,14 +8,15 @@ import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tau
 import { learnFields, masker } from "@/lib/presentation";
 
 // FD-03: every answer and event passes the host, IP and user fields it holds to the presentation masker, so those
-// values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored.
-async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+// values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored. Exported for
+// the other wrappers (dashboard-api.ts), which go through them too.
+export async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
   const answer = await tauriInvoke<T>(cmd, args, options);
   learnFields(masker, answer);
   return answer;
 }
 
-function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+export function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
   return tauriListen<T>(event, (e) => {
     learnFields(masker, e.payload);
     handler(e);
@@ -2008,7 +2009,7 @@ export interface VmHostUsage {
   ts: string;
 }
 
-/** MO-03 drill-down: one point of a chart. In memory only (history in SQLite is MO-06, v2). */
+/** MO-03 drill-down: one point of a chart, kept in memory for 30 minutes (MO-06's history on disk: dashboard-api.ts). */
 export interface MetricPoint {
   /** Unix time in milliseconds. */
   t: number;

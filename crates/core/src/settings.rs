@@ -12,9 +12,11 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::containers::DOCKER_PATH_KEY;
+use crate::dashboard::{DashboardLayout, LAYOUT_KEY};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::metrics::guest::{POLL_KEY, WATCHED_KEY};
+use crate::metrics::history::{HistoryRetention, HISTORY_RETENTION_KEY};
 use crate::policy::PolicyRules;
 use crate::retention::{Retention, RETENTION_KEY};
 use crate::store::{self, NewAuditEntry, Store};
@@ -89,6 +91,15 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
         &mut reset,
     )
     .await?;
+    check::<HistoryRetention>(
+        store,
+        ctx,
+        HISTORY_RETENTION_KEY,
+        "how long the dashboard keeps its history",
+        &mut reset,
+    )
+    .await?;
+    check::<Option<DashboardLayout>>(store, ctx, LAYOUT_KEY, "the dashboard layout", &mut reset).await?;
     Ok(reset)
 }
 

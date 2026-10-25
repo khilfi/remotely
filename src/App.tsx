@@ -87,6 +87,7 @@ import {
   useReadOnlyReason,
 } from "@/components/Presentation";
 import { UpdateBanner, UpdateNotice } from "@/components/UpdateBanner";
+import { AlertNotifier } from "@/components/AlertNotifier";
 import {
   api,
   errorCode,
@@ -959,6 +960,8 @@ export default function App() {
         onOpenVm={(vmxPath, view) => openVms([vmxPath], view)}
       />
       <ReauthDialog />
+      {/* MO-07: alerts notify through Windows whatever page shows. */}
+      <AlertNotifier />
       <Toaster theme={resolved} position="bottom-right" />
       <PresentationLayer />
     </TooltipProvider>
