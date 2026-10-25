@@ -2132,6 +2132,10 @@ impl VirtualBoxAdapter for FakeVirtualBox {
         let state = vm.power_state();
         let not_running = || Self::failed("controlvm", &format!("Machine '{}' is not currently running", vm.name));
         match op {
+            // VM-21: a VM that can't start, for deploy cleanup tests.
+            PowerOp::Start { .. } if self.fails("startvm") => {
+                return Err(Self::failed("startvm", "VT-x is not available (VERR_VMX_NO_VMX)"))
+            }
             PowerOp::Start { .. } if state.is_on() => {
                 return Err(Self::failed(
                     "startvm",

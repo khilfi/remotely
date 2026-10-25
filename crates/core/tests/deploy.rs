@@ -713,6 +713,46 @@ async fn a_failed_virtualbox_clone_is_unregistered_with_its_files() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// A VirtualBox VM that fails after its NoCloud seed is attached: cleanup unregisters it, closes the seed in
+/// VirtualBox's media list (`unregistervm --delete` leaves DVD images there) and removes its folder.
+#[tokio::test]
+async fn a_virtualbox_deploy_that_fails_to_start_closes_its_seed() {
+    let dir = temp_folder("deploy-vbox-start");
+    let image_file = write(&dir, "noble.vmdk", &vmdk_bytes());
+    let setup = Setup::new(FakeVmware::default());
+    let fake = Arc::clone(&setup.virtualbox);
+    let core = setup.build().await;
+    fast(&core);
+    let ctx = &core.ctx;
+    let image = add_image(
+        &core,
+        "Noble",
+        SourceInput::CloudImage {
+            path: image_file.display().to_string(),
+        },
+        "ubuntu",
+    )
+    .await;
+    let input = template("web", &image, Hypervisor::VirtualBox, &dir, Network::Nat);
+    let saved = core.catalog.add_template(ctx, input).await.unwrap();
+    fake.set_failing("startvm", true);
+    let approval = needs_approval(core.deploy.submit(ctx, &request(saved.id, 1)).await.unwrap());
+    let (job, status) = approve_and_wait(&core, &approval).await;
+    assert_eq!(status, JobStatus::Failed);
+    let seed = dir.join("web-1").join("web-1-cidata.iso");
+    let calls = fake.calls().join("\n");
+    assert!(
+        calls.contains(&format!("change closemedium dvd {}", seed.display())),
+        "{calls}"
+    );
+    assert!(fake.vm_named("web-1").is_none(), "unregistered");
+    assert!(!dir.join("web-1").exists());
+    let error = job_outputs(&core, job).await[0].3.clone().unwrap();
+    assert!(error.contains("VT-x is not available"), "{error}");
+    assert!(error.contains("what it made was removed"), "{error}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[tokio::test]
 async fn appliances_import_on_both_hypervisors_with_the_sizes_cpu_and_memory() {
     let dir = temp_folder("deploy-ova");
@@ -946,6 +986,13 @@ async fn a_bulk_clone_copies_the_picked_vms_as_one_job() {
         "{calls:?}"
     );
     assert!(fake.has_vm(&dir.join("db01-clone").join("db01-clone.vmx").display().to_string()));
+    // The copies of VMs that are shut down stay off.
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.starts_with("power Start") && c.contains("-clone")),
+        "{calls:?}"
+    );
     let clone = core
         .store
         .find_vm(

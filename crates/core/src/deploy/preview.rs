@@ -14,10 +14,29 @@ use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::catalog::profiles::GuestFamily;
 use crate::catalog::sizes::Provisioning;
 use crate::catalog::templates::{hypervisor_label, AfterDeploy, Network};
-use crate::command_bus::human_size;
 use crate::domain::Environment;
 
 const GIB: u64 = 1 << 30;
+
+/// Disk space as a size names it: GB of 1024 MB (a size's "40 GB" disk is 40 × 2^30 bytes), like the UI's
+/// `bytesText`, so the preview's texts and its numbers agree.
+pub fn size_text(bytes: u64) -> String {
+    let gib = bytes as f64 / GIB as f64;
+    if gib >= 1024.0 {
+        let tib = gib / 1024.0;
+        if tib >= 10.0 {
+            format!("{tib:.0} TB")
+        } else {
+            format!("{tib:.1} TB")
+        }
+    } else if gib >= 10.0 {
+        format!("{gib:.0} GB")
+    } else if gib >= 1.0 {
+        format!("{gib:.1} GB")
+    } else {
+        format!("{} MB", (bytes as f64 / (1u64 << 20) as f64).round().max(1.0))
+    }
+}
 
 /// One VM as the preview shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -212,16 +231,16 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
         if thick_bytes > free {
             refusals.push(format!(
                 "The thick disks need {}, and the drive of {} has {} free.",
-                human_size(thick_bytes),
+                size_text(thick_bytes),
                 spec.folder,
-                human_size(free)
+                size_text(free)
             ));
         } else if disk_bytes > free {
             warnings.push(format!(
                 "If the guests fill their thin disks, they take up to {}, and the drive of {} has {} free.",
-                human_size(disk_bytes),
+                size_text(disk_bytes),
                 spec.folder,
-                human_size(free)
+                size_text(free)
             ));
         }
     }
@@ -243,10 +262,14 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
                     size.vcpus(),
                     size.memory_mb,
                     size.boot_disk_gb(),
-                    if spec.first_boot.is_some() {
-                        "cloud-init's growpart fills a grown disk on first boot."
-                    } else {
-                        "Grow the guest's partition into a grown disk yourself."
+                    match (&spec.first_boot, &spec.source) {
+                        (Some(_), DeploySource::CloudImage { .. }) => {
+                            "cloud-init's growpart fills a grown disk on first boot."
+                        }
+                        (Some(_), _) => {
+                            "A guest with cloud-init fills a grown disk on first boot; grow the partition in others yourself."
+                        }
+                        (None, _) => "Grow the guest's partition into a grown disk yourself.",
                     }
                 ));
             }
@@ -260,7 +283,7 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
                 .into(),
         }),
         DeploySource::BulkClone => {
-            notes.push("Each clone is a full copy of its VM as it is now, with its CPU, memory, disks and network.".into())
+            notes.push("Each clone is a full copy of its VM as it is now, with its CPU, memory, disks and network, and stays off like it.".into())
         }
     }
     if let (Some(profile), None) = (&spec.profile, &spec.first_boot) {
@@ -268,8 +291,17 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
             notes.push("Windows guests get no first-boot setup: set the computer name and users in the guest.".into());
         }
     }
-    if let Some(FirstBootSpec { public_key: None, .. }) = &spec.first_boot {
-        warnings.push("No SSH key: cloud images have no password, so no one can log in to them over SSH.".into());
+    let cloud_image = matches!(spec.source, DeploySource::CloudImage { .. });
+    match &spec.first_boot {
+        // A cloud image's only way in is the key; a golden VM or an appliance keeps its own users.
+        Some(FirstBootSpec { public_key: None, .. }) if cloud_image => {
+            warnings.push("No SSH key: cloud images have no password, so no one can log in to them over SSH.".into())
+        }
+        Some(_) if !cloud_image => notes.push(
+            "The first-boot settings (hostname, guest user, SSH key, packages) take effect only if the guest has cloud-init; a guest without it keeps its own name and users."
+                .into(),
+        ),
+        _ => {}
     }
     if spec.hypervisor == Hypervisor::VirtualBox
         && spec.after_deploy.create_session
@@ -348,6 +380,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("remotely-deploy-preview-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn disk_space_is_in_the_sizes_own_gb() {
+        assert_eq!(size_text(8 * GIB), "8.0 GB");
+        assert_eq!(size_text(40 * GIB), "40 GB");
+        assert_eq!(size_text(3 * GIB + GIB / 2), "3.5 GB");
+        assert_eq!(size_text(2048 * GIB), "2.0 TB");
+        assert_eq!(size_text(300 << 20), "300 MB");
+        assert_eq!(size_text(1), "1 MB");
     }
 
     #[tokio::test]
@@ -443,6 +485,20 @@ mod tests {
             "{:?}",
             p.notes
         );
+        // A golden VM keeps its own users: no key is a note about cloud-init, not the cloud image's warning.
+        let mut keyless = golden.clone();
+        keyless.first_boot.as_mut().unwrap().public_key = None;
+        let p = preview(&keyless, &hypervisors(), &FakeHostCounters::default()).await;
+        assert!(!p.warnings.iter().any(|w| w.contains("No SSH key")), "{:?}", p.warnings);
+        assert!(
+            p.notes.iter().any(|n| n.contains("only if the guest has cloud-init")),
+            "{:?}",
+            p.notes
+        );
+        let mut cloud_keyless = spec_in(&dir, cloud(), 1);
+        cloud_keyless.first_boot.as_mut().unwrap().public_key = None;
+        let p = preview(&cloud_keyless, &hypervisors(), &FakeHostCounters::default()).await;
+        assert!(p.warnings.iter().any(|w| w.contains("No SSH key")), "{:?}", p.warnings);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

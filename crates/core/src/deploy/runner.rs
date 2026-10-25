@@ -209,6 +209,11 @@ impl Deployer {
                 Err(err) => made.notes.push(format!("the 'clean' snapshot wasn't taken: {err}")),
             }
         }
+        if matches!(spec.source, DeploySource::BulkClone) {
+            // VM-10: a copy of a VM that is shut down stays off; it would start with its source's name and addresses.
+            made.notes.push("left off, like the VM it copies".into());
+            return Ok(key);
+        }
         let start = PowerOp::Start { gui: false };
         match spec.hypervisor {
             Hypervisor::Vmware => tokio::time::timeout(START, self.hypervisors.vmware().power(Path::new(&key), start))
@@ -439,8 +444,8 @@ impl Deployer {
                     .await?;
                 made.notes.push(format!(
                     "boot disk grown from {} to {}",
-                    crate::command_bus::human_size(now),
-                    crate::command_bus::human_size(want)
+                    super::preview::size_text(now),
+                    super::preview::size_text(want)
                 ));
             }
             Some(_) => {}
@@ -676,8 +681,8 @@ impl Deployer {
                 self.vbox(vb::resize_args(&boot.path, gb), LONG).await?;
                 made.notes.push(format!(
                     "boot disk grown from {} to {}",
-                    crate::command_bus::human_size(now),
-                    crate::command_bus::human_size(want)
+                    super::preview::size_text(now),
+                    super::preview::size_text(want)
                 ));
             }
             Some(_) => {}
@@ -929,6 +934,11 @@ impl Deployer {
                     if let Some(problem) = self.unregister(&uuid).await {
                         left.push(problem);
                     }
+                }
+                if let Some(seed) = &made.seed_file {
+                    // `unregistervm --delete` deletes the VM's disks but leaves a DVD image in VirtualBox's media list.
+                    let close = vec!["closemedium".into(), "dvd".into(), seed.display().to_string()];
+                    let _ = self.hypervisors.virtualbox().change(close, SHORT).await;
                 }
             }
         }
