@@ -689,7 +689,7 @@ async fn finish_with_still_running(
                 JobEvent::StillRunning { job_id, targets } if job_id == job => {
                     still_running = targets.into_iter().map(|t| t.name).collect();
                 }
-                JobEvent::Finished { job_id, status } if job_id == job => return (status, still_running.clone()),
+                JobEvent::Finished { job_id, status, .. } if job_id == job => return (status, still_running.clone()),
                 _ => {}
             }
         }

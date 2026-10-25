@@ -257,6 +257,75 @@ async fn the_guest_ip_is_the_one_the_host_can_reach_not_the_nat_one() {
     assert_eq!(report.vms[0].guest_os_name.as_deref(), Some("Windows 11 10.0.22631"));
 }
 
+/// `count` running VMs, each with a NAT and a host-only adapter and Guest Additions that report both
+/// (the host-only one 192.0.2.N) and the OS.
+fn busy_lab(count: u8) -> FakeVirtualBox {
+    let mut fake = FakeVirtualBox::new();
+    for n in 1..=count {
+        let uuid = format!("3f0c1a2b-1111-4222-8333-4444555566{n:02x}");
+        fake = fake
+            .with_vm(&uuid, &format!("lab{n:02}"), PowerState::Running)
+            .with_info(&uuid, |vm| {
+                vm.nics.push(remotely_core::adapters::virtualbox::VboxNic {
+                    slot: 2,
+                    attachment: "hostonly".into(),
+                    mac: Some("080027000002".into()),
+                    ..Default::default()
+                });
+            })
+            .with_guest_property(&uuid, "/VirtualBox/GuestInfo/Net/Count", "2")
+            .with_guest_property(&uuid, "/VirtualBox/GuestInfo/Net/0/V4/IP", "10.0.2.15")
+            .with_guest_property(&uuid, "/VirtualBox/GuestInfo/Net/0/MAC", "080027000001")
+            .with_guest_property(&uuid, "/VirtualBox/GuestInfo/Net/1/V4/IP", &format!("192.0.2.{n}"))
+            .with_guest_property(&uuid, "/VirtualBox/GuestInfo/Net/1/MAC", "080027000002")
+            .with_guest_property(&uuid, "/VirtualBox/GuestInfo/OS/Product", "Linux")
+            .with_guest_property(&uuid, "/VirtualBox/GuestInfo/OS/Release", "6.8.0-45-generic");
+    }
+    fake
+}
+
+#[tokio::test]
+async fn a_refresh_asks_virtualbox_twice_per_running_vm() {
+    // VM-01: `showvminfo`, then one `guestproperty enumerate` for the address and the OS (it was one
+    // `guestproperty get` per property: 7 per VM with two adapters).
+    let setup = Setup::new(FakeVmware::default()).with_virtualbox(busy_lab(40));
+    let vbox = Arc::clone(&setup.virtualbox);
+    let core = setup.build().await;
+    let before = vbox.vboxmanage_runs();
+    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let runs = vbox.vboxmanage_runs() - before;
+    eprintln!("VBoxManage runs for one refresh of 40 running VMs: {runs}");
+    assert_eq!(
+        runs,
+        1 + 40 * 2,
+        "list vms, then showvminfo and guestproperty enumerate per VM"
+    );
+    let lab07 = report.vms.iter().find(|vm| vm.display_name == "lab07").unwrap();
+    assert_eq!(lab07.ip_address.as_deref(), Some("192.0.2.7"), "the host-only address");
+    assert_eq!(lab07.guest_os_name.as_deref(), Some("Linux 6.8.0-45-generic"));
+}
+
+#[tokio::test]
+async fn refreshes_asked_for_while_one_runs_share_one_more_run() {
+    // VM-01: ten refreshes at once (ten uploads finishing, say) run the inventory twice: the one that
+    // was running, and one more for everything asked for while it ran.
+    let setup =
+        Setup::new(FakeVmware::default()).with_virtualbox(busy_lab(3).with_list_delay(Duration::from_millis(200)));
+    let (vbox, vmware) = (Arc::clone(&setup.virtualbox), Arc::clone(&setup.vmware));
+    let core = setup.build().await;
+    let (vbox_before, vmrun_before) = (vbox.vboxmanage_runs(), vmware.vmrun_runs());
+    let reports = futures::future::join_all((0..10).map(|_| core.inventory.refresh(&core.ctx))).await;
+    assert!(reports.iter().all(|r| r.as_ref().is_ok_and(|r| r.vms.len() == 3)));
+    let (vbox_runs, vmrun_runs) = (vbox.vboxmanage_runs() - vbox_before, vmware.vmrun_runs() - vmrun_before);
+    eprintln!("ten overlapping refreshes: {vbox_runs} VBoxManage runs, {vmrun_runs} vmrun runs");
+    assert_eq!(vbox_runs, 2 * (1 + 3 * 2), "two refreshes");
+    assert_eq!(vmrun_runs, 2, "vmrun list, twice");
+
+    // One asked for after they are done runs again: nothing it could share was still running.
+    core.inventory.refresh(&core.ctx).await.unwrap();
+    assert_eq!(vbox.vboxmanage_runs() - vbox_before, 3 * (1 + 3 * 2));
+}
+
 // ---- Tiers: the same for both hypervisors, Prod and protected included --------------------------
 
 #[tokio::test]
@@ -442,7 +511,7 @@ async fn a_guest_that_ignores_the_acpi_button_is_left_running_until_a_critical_f
         loop {
             match events.recv().await.unwrap() {
                 JobEvent::StillRunning { job_id, targets } if job_id == job => still_running = targets,
-                JobEvent::Finished { job_id, status } if job_id == job => return status,
+                JobEvent::Finished { job_id, status, .. } if job_id == job => return status,
                 _ => {}
             }
         }

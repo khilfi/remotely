@@ -78,6 +78,8 @@ pub struct FakeVmware {
     max_in_flight: AtomicUsize,
     calls: Mutex<Vec<String>>,
     snapshot_reads: Mutex<Vec<String>>,
+    /// Calls that would each start a vmrun process.
+    vmrun_runs: AtomicUsize,
 }
 
 impl FakeVmware {
@@ -206,6 +208,11 @@ impl FakeVmware {
         locks::lock(&self.calls).clone()
     }
 
+    /// VM-01: how many vmrun processes the real adapter would have started so far.
+    pub fn vmrun_runs(&self) -> usize {
+        self.vmrun_runs.load(Ordering::SeqCst)
+    }
+
     /// QL-14: the VMs whose .vmsd was read, in order (lower-case paths).
     pub fn snapshot_reads(&self) -> Vec<String> {
         locks::lock(&self.snapshot_reads).clone()
@@ -261,6 +268,7 @@ impl FakeVmware {
     }
 
     fn vmrun(&self) -> Result<()> {
+        self.vmrun_runs.fetch_add(1, Ordering::SeqCst);
         if self.no_vmrun {
             Err(CoreError::VmrunNotFound)
         } else {
@@ -510,6 +518,10 @@ pub struct FakeVirtualBox {
     max_in_flight: AtomicUsize,
     calls: Mutex<Vec<String>>,
     snapshot_reads: Mutex<Vec<String>>,
+    /// Calls that would each start a VBoxManage process.
+    vboxmanage_runs: AtomicUsize,
+    /// VM-01: `list vms` takes this long (a busy VirtualBox), so refreshes overlap.
+    list_delay: Duration,
 }
 
 /// The VBoxManage `VMState` for a power state.
@@ -652,6 +664,17 @@ impl FakeVirtualBox {
         locks::lock(&self.calls).clone()
     }
 
+    /// VM-01: how many VBoxManage processes the real adapter would have started so far.
+    pub fn vboxmanage_runs(&self) -> usize {
+        self.vboxmanage_runs.load(Ordering::SeqCst)
+    }
+
+    /// VM-01: `list vms` takes this long, so a second refresh can start while one runs.
+    pub fn with_list_delay(mut self, delay: Duration) -> Self {
+        self.list_delay = delay;
+        self
+    }
+
     /// The VMs whose snapshot tree was read, in order.
     pub fn snapshot_reads(&self) -> Vec<String> {
         locks::lock(&self.snapshot_reads).clone()
@@ -691,6 +714,7 @@ impl FakeVirtualBox {
     }
 
     fn installed(&self) -> Result<()> {
+        self.vboxmanage_runs.fetch_add(1, Ordering::SeqCst);
         if self.not_installed {
             Err(CoreError::VboxManageNotFound)
         } else {
@@ -733,6 +757,9 @@ impl VirtualBoxAdapter for FakeVirtualBox {
 
     async fn list_vms(&self) -> Result<Vec<VboxListedVm>> {
         self.installed()?;
+        if !self.list_delay.is_zero() {
+            tokio::time::sleep(self.list_delay).await;
+        }
         if self.failing_list.load(Ordering::SeqCst) {
             return Err(Self::failed("list vms", "The object is not ready"));
         }
@@ -772,15 +799,10 @@ impl VirtualBoxAdapter for FakeVirtualBox {
         Ok(info)
     }
 
-    async fn guest_property(&self, uuid: &str, name: &str) -> Result<Option<String>> {
+    async fn guest_properties(&self, uuid: &str) -> Result<vbox::GuestProperties> {
         self.installed()?;
         let on = self.find(uuid).is_some_and(|vm| vm.power_state().is_on());
-        Ok(self
-            .properties
-            .get(uuid)
-            .and_then(|props| props.get(name))
-            .cloned()
-            .filter(|_| on))
+        Ok(self.properties.get(uuid).filter(|_| on).cloned().unwrap_or_default())
     }
 
     async fn power(&self, uuid: &str, op: PowerOp) -> Result<()> {
@@ -1826,6 +1848,8 @@ pub struct FakeNetwork {
     reverse: Mutex<HashMap<std::net::IpAddr, String>>,
     open_ports: Mutex<HashSet<(String, u16)>>,
     lookup_delay: Option<Duration>,
+    /// QL-01: names whose lookup takes this long (others answer at once).
+    slow_names: HashMap<String, Duration>,
     probe_delay: Mutex<Option<Duration>>,
     lookups: Mutex<Vec<String>>,
     calls: Mutex<Vec<String>>,
@@ -1863,6 +1887,12 @@ impl FakeNetwork {
     /// answer.
     pub fn with_lookup_delay(mut self, delay: Duration) -> Self {
         self.lookup_delay = Some(delay);
+        self
+    }
+
+    /// A lookup of `name` (any letter case) waits this long first; other names answer as usual.
+    pub fn with_slow_name(mut self, name: &str, delay: Duration) -> Self {
+        self.slow_names.insert(name.to_ascii_lowercase(), delay);
         self
     }
 
@@ -1919,6 +1949,9 @@ impl NetworkAdapter for FakeNetwork {
             return Ok(vec![ip]);
         }
         self.wait_for_dns().await;
+        if let Some(delay) = self.slow_names.get(&host.to_ascii_lowercase()) {
+            tokio::time::sleep(*delay).await;
+        }
         let found = locks::lock(&self.forward).get(&host.to_ascii_lowercase()).cloned();
         match found {
             Some(ips) if !ips.is_empty() => Ok(ips),

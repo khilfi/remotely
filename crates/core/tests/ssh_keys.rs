@@ -147,7 +147,7 @@ async fn run(core: &Core, command: Command) -> (Uuid, Tier) {
 async fn finished(rx: &mut Receiver<JobEvent>, job: Uuid) -> JobStatus {
     tokio::time::timeout(WAIT, async {
         loop {
-            if let JobEvent::Finished { job_id, status } = rx.recv().await.unwrap() {
+            if let JobEvent::Finished { job_id, status, .. } = rx.recv().await.unwrap() {
                 if job_id == job {
                     return status;
                 }

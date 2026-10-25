@@ -180,7 +180,7 @@ async fn the_sudo_password_never_leaks() {
         loop {
             let event = events.recv().await.unwrap();
             seen.push(serde_json::to_string(&event).unwrap());
-            if let JobEvent::Finished { job_id, status } = event {
+            if let JobEvent::Finished { job_id, status, .. } = event {
                 if job_id == job {
                     return status;
                 }
