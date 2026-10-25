@@ -33,6 +33,8 @@
 //!     open connection and backing off from hosts that are down ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //!     (the Terminal page's Compare output)
+//!   retention (BX-02): the job journal keeps outputs and command text for as long as Settings says, then
+//!     a daily purge removes them; save_guard: no save path writes into a Git working tree
 //!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
 //!     ──► adapters::containers (their CLIs, over adapters::remote or on this PC); reads skip the bus,
 //!     changes are commands on it that the job runner carries out there
@@ -64,6 +66,7 @@ pub mod metrics;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
+pub mod retention;
 pub mod save_guard;
 pub mod sessions;
 pub mod settings;
@@ -107,6 +110,7 @@ use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
+use retention::JournalRetention;
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
@@ -222,6 +226,9 @@ pub struct Core {
     pub reachability: Arc<ReachabilityChecker>,
     /// BX-01, BX-03, BX-05: Compare targets, results, diffs and exports. Running is the bus.
     pub bulk: BulkRuns,
+    /// BX-02: how long the job journal keeps outputs and command text, and the purge. The shell starts its
+    /// schedule with [`JournalRetention::run`].
+    pub retention: Arc<JournalRetention>,
     /// CT-01, CT-02: container hosts, their containers, images, volumes and networks. Reads only;
     /// changes go through [`Core::bus`].
     pub containers: Containers,
@@ -406,6 +413,7 @@ impl Core {
         let snippets = Snippets::new(store.clone(), bus.policy());
         let multiexec = MultiExec::new(ctx, terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
+        let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         Ok(Self {
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
@@ -419,6 +427,7 @@ impl Core {
             keys,
             transfer: Transfer::new(store.clone()).with_policy(bus.policy()),
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
+            retention,
             containers,
             terminals,
             multiexec,

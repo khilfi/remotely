@@ -1,7 +1,8 @@
 // Settings: the vmrun.exe and (VM-18) VBoxManage.exe paths (configurable, never hard-coded), the folders scanned for
 // VMs (VM-01),
-// power-on limit (VM-06), shutdown wait (VM-03), hosts Compare output reaches at once (BX-02), and update
-// checks with the GitHub update token (FD-14) under General, keep-alive,
+// power-on limit (VM-06), shutdown wait (VM-03), hosts Compare output reaches at once (BX-02), how long job outputs
+// and command text are kept with Purge now (BX-02), and update checks with the GitHub update token (FD-14) under
+// General, keep-alive,
 // auto-reconnect and copy-on-select under Terminal (SS-03), and the editable approval rules (AP-01) under
 // Approval rules. QL-11: "Follow Windows" for the theme is under General; the Dark mode switch is in the top bar. QL-15:
 // About has the version and opens the logs folder (logs and crash reports).
@@ -14,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DataRetentionCard } from "@/components/DataRetentionCard";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { PresentationCard } from "@/components/Presentation";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
@@ -455,6 +457,8 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
             </Button>
           </CardFooter>
         </Card>
+
+        <DataRetentionCard />
 
         <Card>
           <CardHeader>

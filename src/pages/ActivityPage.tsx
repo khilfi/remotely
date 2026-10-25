@@ -2,10 +2,20 @@
 // shows the time left and touches nothing if cancelled, and a running job stops targets that have
 // not started and stops waiting for VM power actions in progress (Workstation or VirtualBox may still finish
 // those). A job's results show each target's outcome and the safety snapshot taken on it. The audit
-// log can be verified and exported to CSV.
+// log can be verified and exported to CSV. Job events come in bursts (a MultiExec line on 50 terminals sends
+// about 100), so the lists reload once per burst. BX-02: a job older than the retention period (Settings, General)
+// keeps its results but no longer its outputs or command text, which its results say.
 
 import { useEffect, useState } from "react";
-import { CameraIcon, DownloadIcon, ListChecksIcon, ScrollTextIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
+import {
+  CameraIcon,
+  DownloadIcon,
+  EraserIcon,
+  ListChecksIcon,
+  ScrollTextIcon,
+  ShieldCheckIcon,
+  ShieldXIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -15,6 +25,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge, TierBadge } from "@/components/Badges";
+import { useDebounced } from "@/hooks/use-debounced";
 import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary, type JobTarget } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 
@@ -30,7 +41,8 @@ function secondsLeft(job: JobSummary, now: number) {
  * `version` changes on every job event; `active` is true while the page is shown, so entries written
  * without a job (terminals, host keys, imports, settings) show up when the user comes back.
  */
-export function ActivityPage({ version, active }: { version: number; active: boolean }) {
+export function ActivityPage({ version: eventVersion, active }: { version: number; active: boolean }) {
+  const version = useDebounced(eventVersion);
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [check, setCheck] = useState<ChainCheck | null>(null);
@@ -313,6 +325,25 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
           </SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-4 overflow-auto px-4 pb-4">
+          {job.bodiesRemoved && (
+            <Alert>
+              <EraserIcon />
+              <AlertTitle>Outputs removed</AlertTitle>
+              <AlertDescription>
+                This job is older than the retention period set in Settings, General, so its outputs and its script or
+                line text were removed. Its targets, results and audit entries are kept.
+              </AlertDescription>
+            </Alert>
+          )}
+          {!job.bodiesRemoved && job.commandRedacted && (
+            <Alert>
+              <EraserIcon />
+              <AlertTitle>Secret redacted</AlertTitle>
+              <AlertDescription>
+                The command had something that looked like a password or token. The journal keeps it as [redacted].
+              </AlertDescription>
+            </Alert>
+          )}
           {safety.map((name) => (
             <Alert key={name}>
               <CameraIcon />
