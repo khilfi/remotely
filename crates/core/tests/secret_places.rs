@@ -352,6 +352,7 @@ fn compare(targets: &[SessionRecord], sudo_password: SecretId) -> Command {
         sudo_password_id: Some(sudo_password),
         trust_new_host_keys: false,
         timeout_secs: Some(30),
+        rollout: Default::default(),
     }
 }
 

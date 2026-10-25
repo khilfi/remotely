@@ -28,7 +28,8 @@ use crate::adapters::remote::forward::{
 };
 use crate::adapters::remote::{
     ConnectRequest, Credentials, EntryKind, ExecRequest, ExecResult, ExecSession, PromptShell, Prompter, RemoteAdapter,
-    RemoteEntry, RemoteFiles, RemoteRead, RemoteWrite, ShellEnd, ShellHandle, ShellInput, ShellOutput, ShellRequest,
+    RemoteEntry, RemoteFiles, RemoteListing, RemoteRead, RemoteWrite, ShellEnd, ShellHandle, ShellInput, ShellOutput,
+    ShellRequest, Written,
 };
 use crate::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
 use crate::adapters::virtualbox::{
@@ -78,6 +79,8 @@ pub struct FakeVmware {
     max_in_flight: AtomicUsize,
     calls: Mutex<Vec<String>>,
     snapshot_reads: Mutex<Vec<String>>,
+    /// Calls that would each start a vmrun process.
+    vmrun_runs: AtomicUsize,
 }
 
 impl FakeVmware {
@@ -206,6 +209,11 @@ impl FakeVmware {
         locks::lock(&self.calls).clone()
     }
 
+    /// VM-01: how many vmrun processes the real adapter would have started so far.
+    pub fn vmrun_runs(&self) -> usize {
+        self.vmrun_runs.load(Ordering::SeqCst)
+    }
+
     /// QL-14: the VMs whose .vmsd was read, in order (lower-case paths).
     pub fn snapshot_reads(&self) -> Vec<String> {
         locks::lock(&self.snapshot_reads).clone()
@@ -261,6 +269,7 @@ impl FakeVmware {
     }
 
     fn vmrun(&self) -> Result<()> {
+        self.vmrun_runs.fetch_add(1, Ordering::SeqCst);
         if self.no_vmrun {
             Err(CoreError::VmrunNotFound)
         } else {
@@ -510,6 +519,10 @@ pub struct FakeVirtualBox {
     max_in_flight: AtomicUsize,
     calls: Mutex<Vec<String>>,
     snapshot_reads: Mutex<Vec<String>>,
+    /// Calls that would each start a VBoxManage process.
+    vboxmanage_runs: AtomicUsize,
+    /// VM-01: `list vms` takes this long (a busy VirtualBox), so refreshes overlap.
+    list_delay: Duration,
 }
 
 /// The VBoxManage `VMState` for a power state.
@@ -652,6 +665,17 @@ impl FakeVirtualBox {
         locks::lock(&self.calls).clone()
     }
 
+    /// VM-01: how many VBoxManage processes the real adapter would have started so far.
+    pub fn vboxmanage_runs(&self) -> usize {
+        self.vboxmanage_runs.load(Ordering::SeqCst)
+    }
+
+    /// VM-01: `list vms` takes this long, so a second refresh can start while one runs.
+    pub fn with_list_delay(mut self, delay: Duration) -> Self {
+        self.list_delay = delay;
+        self
+    }
+
     /// The VMs whose snapshot tree was read, in order.
     pub fn snapshot_reads(&self) -> Vec<String> {
         locks::lock(&self.snapshot_reads).clone()
@@ -691,6 +715,7 @@ impl FakeVirtualBox {
     }
 
     fn installed(&self) -> Result<()> {
+        self.vboxmanage_runs.fetch_add(1, Ordering::SeqCst);
         if self.not_installed {
             Err(CoreError::VboxManageNotFound)
         } else {
@@ -733,6 +758,9 @@ impl VirtualBoxAdapter for FakeVirtualBox {
 
     async fn list_vms(&self) -> Result<Vec<VboxListedVm>> {
         self.installed()?;
+        if !self.list_delay.is_zero() {
+            tokio::time::sleep(self.list_delay).await;
+        }
         if self.failing_list.load(Ordering::SeqCst) {
             return Err(Self::failed("list vms", "The object is not ready"));
         }
@@ -772,15 +800,10 @@ impl VirtualBoxAdapter for FakeVirtualBox {
         Ok(info)
     }
 
-    async fn guest_property(&self, uuid: &str, name: &str) -> Result<Option<String>> {
+    async fn guest_properties(&self, uuid: &str) -> Result<vbox::GuestProperties> {
         self.installed()?;
         let on = self.find(uuid).is_some_and(|vm| vm.power_state().is_on());
-        Ok(self
-            .properties
-            .get(uuid)
-            .and_then(|props| props.get(name))
-            .cloned()
-            .filter(|_| on))
+        Ok(self.properties.get(uuid).filter(|_| on).cloned().unwrap_or_default())
     }
 
     async fn power(&self, uuid: &str, op: PowerOp) -> Result<()> {
@@ -1018,6 +1041,7 @@ impl RemoteAdapter for FakeRemote {
             signal: None,
             output: OutputCollector::collect(stdout.as_bytes(), b"", &secrets, request.max_output),
             duration_ms: 1,
+            peer_ip: None,
         })
     }
 
@@ -1083,6 +1107,7 @@ impl ExecSession for FakeSession {
             signal: None,
             output: OutputCollector::collect(self.stdout.as_bytes(), b"", &[], max_output),
             duration_ms: 1,
+            peer_ip: None,
         })
     }
 
@@ -1096,6 +1121,7 @@ impl ExecSession for FakeSession {
             signal: None,
             output: OutputCollector::collect(self.stdout.as_bytes(), b"", &[password], max_output),
             duration_ms: 1,
+            peer_ip: None,
         })
     }
 
@@ -1223,6 +1249,11 @@ struct FakeFs {
     delay: Duration,
     /// The next write fails once this many bytes of it went through.
     fail_after: Option<u64>,
+    /// H8: the host renames over a file in one step (OpenSSH's posix-rename); without it a replaced
+    /// file is kept as a `.bak`.
+    atomic_rename: bool,
+    /// For temporary file names.
+    next_temp: u64,
 }
 
 impl Default for FakeFiles {
@@ -1240,6 +1271,8 @@ impl Default for FakeFiles {
                 protected: vec!["/etc".into(), "/root".into(), "/usr".into()],
                 delay: Duration::ZERO,
                 fail_after: None,
+                atomic_rename: true,
+                next_temp: 1,
             })),
         }
     }
@@ -1285,8 +1318,21 @@ impl FakeFiles {
         locks::lock(&self.inner).fail_after = Some(bytes);
     }
 
+    /// H8: like a server without posix-rename: a replaced file is renamed to a `.bak` first.
+    pub fn without_atomic_rename(self) -> Self {
+        locks::lock(&self.inner).atomic_rename = false;
+        self
+    }
+
     pub fn file(&self, path: &str) -> Option<Vec<u8>> {
         locks::lock(&self.inner).files.get(path).cloned()
+    }
+
+    /// Every file's path, sorted: to see nothing temporary was left.
+    pub fn paths(&self) -> Vec<String> {
+        let mut paths: Vec<String> = locks::lock(&self.inner).files.keys().cloned().collect();
+        paths.sort();
+        paths
     }
 
     fn entry(fs: &FakeFs, path: &str) -> Option<RemoteEntry> {
@@ -1322,7 +1368,7 @@ impl RemoteFiles for FakeFiles {
         Ok(locks::lock(&self.inner).home.clone())
     }
 
-    async fn list(&self, folder: &str) -> Result<Vec<RemoteEntry>> {
+    async fn list(&self, folder: &str) -> Result<RemoteListing> {
         let fs = locks::lock(&self.inner);
         if !fs.dirs.contains(folder) {
             return Err(CoreError::RemoteNotFound {
@@ -1337,7 +1383,12 @@ impl RemoteFiles for FakeFiles {
             .chain(fs.files.keys().filter(inside))
             .collect();
         paths.sort();
-        Ok(paths.into_iter().filter_map(|path| Self::entry(&fs, path)).collect())
+        let more = paths.len() > crate::adapters::remote::MAX_LISTING;
+        paths.truncate(crate::adapters::remote::MAX_LISTING);
+        Ok(RemoteListing {
+            entries: paths.into_iter().filter_map(|path| Self::entry(&fs, path)).collect(),
+            more,
+        })
     }
 
     async fn stat(&self, path: &str) -> Result<Option<RemoteEntry>> {
@@ -1358,7 +1409,7 @@ impl RemoteFiles for FakeFiles {
     }
 
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
-        let fail_after = {
+        let opened = {
             let mut fs = locks::lock(&self.inner);
             let folder = fake_parent(path);
             if fs
@@ -1376,17 +1427,31 @@ impl RemoteFiles for FakeFiles {
             if !fs.dirs.contains(&folder) {
                 return Err(CoreError::RemoteNotFound { path: folder });
             }
-            if fs.files.contains_key(path) && !replace {
+            let there = fs.files.contains_key(path);
+            if there && !replace {
                 return Err(CoreError::RemoteFileExists { path: path.to_owned() });
             }
-            fs.files.insert(path.to_owned(), Vec::new());
-            fs.fail_after.take()
+            // H8: a replacement goes to a temporary file beside the old one.
+            let target = (there && replace).then(|| path.to_owned());
+            let written_to = if target.is_some() {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                let temp = format!("{folder}/.{name}.remotely-{}.part", fs.next_temp).replace("//", "/");
+                fs.next_temp += 1;
+                temp
+            } else {
+                path.to_owned()
+            };
+            fs.files.insert(written_to.clone(), Vec::new());
+            (written_to, target, fs.fail_after.take())
         };
+        let (path, target, fail_after) = opened;
         Ok(Box::new(FakeWrite {
             files: self.clone(),
-            path: path.to_owned(),
+            path,
+            target,
             written: 0,
             fail_after,
+            settled: false,
         }))
     }
 
@@ -1420,9 +1485,22 @@ impl RemoteRead for FakeRead {
 
 struct FakeWrite {
     files: FakeFiles,
+    /// What is written to: the file itself, or a replacement's temporary file.
     path: String,
+    /// H8: the file a replacement takes the place of.
+    target: Option<String>,
     written: u64,
     fail_after: Option<u64>,
+    /// Finished or aborted; until then dropping it deletes what it made.
+    settled: bool,
+}
+
+impl Drop for FakeWrite {
+    fn drop(&mut self) {
+        if !self.settled {
+            locks::lock(&self.files.inner).files.remove(&self.path);
+        }
+    }
 }
 
 #[async_trait]
@@ -1447,8 +1525,32 @@ impl RemoteWrite for FakeWrite {
         Ok(())
     }
 
-    async fn finish(self: Box<Self>) -> Result<()> {
-        Ok(())
+    async fn finish(mut self: Box<Self>) -> Result<Written> {
+        self.settled = true;
+        let Some(target) = self.target.clone() else {
+            return Ok(Written::Created);
+        };
+        let mut fs = locks::lock(&self.files.inner);
+        let content = fs.files.remove(&self.path).unwrap_or_default();
+        if fs.atomic_rename {
+            fs.files.insert(target, content);
+            return Ok(Written::Replaced);
+        }
+        let backup = format!("{target}.20261025-120000.bak");
+        if let Some(old) = fs.files.remove(&target) {
+            fs.files.insert(backup.clone(), old);
+        }
+        fs.files.insert(target, content);
+        Ok(Written::ReplacedKeepingBackup { backup })
+    }
+
+    async fn abort(mut self: Box<Self>) -> String {
+        self.settled = true;
+        locks::lock(&self.files.inner).files.remove(&self.path);
+        match &self.target {
+            Some(target) => format!("{target} on the host is as it was"),
+            None => "nothing was left on the host".to_owned(),
+        }
     }
 }
 
@@ -1631,6 +1733,8 @@ pub struct FakeHostCounters {
     pub paging: Option<crate::adapters::paging::PagingInfo>,
     pub free_disk_pct: f64,
     pub unavailable: bool,
+    /// SS-07: other users signed in to this PC.
+    pub other_users: usize,
     readings: AtomicUsize,
 }
 
@@ -1655,6 +1759,7 @@ impl Default for FakeHostCounters {
             )),
             free_disk_pct: 50.0,
             unavailable: false,
+            other_users: 0,
             readings: AtomicUsize::new(0),
         }
     }
@@ -1719,6 +1824,11 @@ impl HostCounters for FakeHostCounters {
         Ok(self.free_disk_pct)
     }
 
+    async fn other_users_signed_in(&self) -> Result<usize> {
+        self.available()?;
+        Ok(self.other_users)
+    }
+
     async fn paging(&self) -> Result<crate::adapters::paging::PagingInfo> {
         self.available()?;
         self.paging.clone().ok_or(CoreError::NotImplemented("paging files"))
@@ -1726,8 +1836,11 @@ impl HostCounters for FakeHostCounters {
 }
 
 /// An update server that offers at most one version. Records the versions installed and the calls
-/// it got. With [`FakeUpdater::accepting`] it takes one token only and refuses any other the way
-/// GitHub refuses a revoked one; by default it takes any.
+/// it got. Its releases are public by default: it answers calls without a token, and takes any token.
+/// With [`FakeUpdater::accepting`] it takes one token only and refuses any other the way GitHub
+/// refuses a revoked one. [`FakeUpdater::set_private`] hides the releases from calls without a token
+/// (GitHub's 404 for a private repository), and [`FakeUpdater::rate_limit_anonymous`] refuses those
+/// calls the way GitHub does once its limit for them is used up.
 #[derive(Default)]
 pub struct FakeUpdater {
     offered: Option<UpdateInfo>,
@@ -1735,8 +1848,13 @@ pub struct FakeUpdater {
     expires_on: Option<String>,
     /// Revoked (or expired) on GitHub: every token is refused.
     revoked: AtomicBool,
+    /// Calls without a token see no releases.
+    private: AtomicBool,
+    /// Calls without a token are refused until this time (RFC 3339).
+    anonymous_limit: Mutex<Option<String>>,
     installed: Mutex<Vec<String>>,
     calls: AtomicUsize,
+    anonymous_calls: AtomicUsize,
     /// QL-15: the download never ends (a connection that stalls).
     stalls: bool,
 }
@@ -1772,6 +1890,16 @@ impl FakeUpdater {
         self.revoked.store(true, Ordering::SeqCst);
     }
 
+    /// The repository is private (again), or public.
+    pub fn set_private(&self, private: bool) {
+        self.private.store(private, Ordering::SeqCst);
+    }
+
+    /// Calls without a token are refused until `until` (RFC 3339), or answered again with `None`.
+    pub fn rate_limit_anonymous(&self, until: Option<&str>) {
+        *locks::lock(&self.anonymous_limit) = until.map(str::to_owned);
+    }
+
     pub fn installed(&self) -> Vec<String> {
         locks::lock(&self.installed).clone()
     }
@@ -1781,8 +1909,28 @@ impl FakeUpdater {
         self.calls.load(Ordering::SeqCst)
     }
 
-    fn authorize(&self, token: &SecretString) -> Result<()> {
+    /// Of [`Self::calls`], those made without a token.
+    pub fn anonymous_calls(&self) -> usize {
+        self.anonymous_calls.load(Ordering::SeqCst)
+    }
+
+    fn authorize(&self, token: Option<&SecretString>) -> Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let Some(token) = token else {
+            self.anonymous_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(until) = locks::lock(&self.anonymous_limit).clone() {
+                return Err(CoreError::UpdateRateLimited {
+                    until,
+                    with_token: false,
+                });
+            }
+            return match self.private.load(Ordering::SeqCst) {
+                true => Err(CoreError::UpdateTokenNeeded {
+                    repo: "alice/remotely".into(),
+                }),
+                false => Ok(()),
+            };
+        };
         let refused = self.revoked.load(Ordering::SeqCst)
             || self.token.as_ref().is_some_and(|accepted| accepted != token.expose());
         match refused {
@@ -1794,15 +1942,16 @@ impl FakeUpdater {
 
 #[async_trait]
 impl UpdaterAdapter for FakeUpdater {
-    async fn check(&self, token: &SecretString) -> Result<ReleaseCheck> {
+    async fn check(&self, token: Option<&SecretString>) -> Result<ReleaseCheck> {
         self.authorize(token)?;
         Ok(ReleaseCheck {
             update: self.offered.clone(),
-            token_expires_on: self.expires_on.clone(),
+            // GitHub sends the expiry only with answers to a token.
+            token_expires_on: token.and(self.expires_on.clone()),
         })
     }
 
-    async fn install(&self, token: &SecretString, version: &str) -> Result<()> {
+    async fn install(&self, token: Option<&SecretString>, version: &str) -> Result<()> {
         self.authorize(token)?;
         if self.stalls {
             std::future::pending::<()>().await;
@@ -1812,7 +1961,7 @@ impl UpdaterAdapter for FakeUpdater {
     }
 
     async fn test_token(&self, token: &SecretString) -> Result<TokenReport> {
-        self.authorize(token)?;
+        self.authorize(Some(token))?;
         Ok(TokenReport {
             repository: "alice/remotely".into(),
             latest_release: self.offered.as_ref().map(|u| format!("v{}", u.version)),
@@ -1830,6 +1979,8 @@ pub struct FakeNetwork {
     reverse: Mutex<HashMap<std::net::IpAddr, String>>,
     open_ports: Mutex<HashSet<(String, u16)>>,
     lookup_delay: Option<Duration>,
+    /// QL-01: names whose lookup takes this long (others answer at once).
+    slow_names: HashMap<String, Duration>,
     probe_delay: Mutex<Option<Duration>>,
     lookups: Mutex<Vec<String>>,
     calls: Mutex<Vec<String>>,
@@ -1867,6 +2018,12 @@ impl FakeNetwork {
     /// answer.
     pub fn with_lookup_delay(mut self, delay: Duration) -> Self {
         self.lookup_delay = Some(delay);
+        self
+    }
+
+    /// A lookup of `name` (any letter case) waits this long first; other names answer as usual.
+    pub fn with_slow_name(mut self, name: &str, delay: Duration) -> Self {
+        self.slow_names.insert(name.to_ascii_lowercase(), delay);
         self
     }
 
@@ -1923,6 +2080,9 @@ impl NetworkAdapter for FakeNetwork {
             return Ok(vec![ip]);
         }
         self.wait_for_dns().await;
+        if let Some(delay) = self.slow_names.get(&host.to_ascii_lowercase()) {
+            tokio::time::sleep(*delay).await;
+        }
         let found = locks::lock(&self.forward).get(&host.to_ascii_lowercase()).cloned();
         match found {
             Some(ips) if !ips.is_empty() => Ok(ips),

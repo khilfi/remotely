@@ -231,8 +231,10 @@ export type Command =
       sudoPasswordId?: string | null;
       /** SS-05: trust (and save, audited) host keys never seen before. A changed key always blocks. */
       trustNewHostKeys?: boolean;
-      /** Seconds each host may take; null: no limit. */
+      /** Seconds each host may take; null: no limit. One that takes longer ends with its outcome unknown. */
       timeoutSecs?: number | null;
+      /** H9: one host first, and a stop after failures. */
+      rollout?: Rollout;
     }
   | { type: "appUpdate"; version: string }
   /** SS-09: adds a public key to ~/.ssh/authorized_keys on each host, unless it is there already. */
@@ -240,6 +242,16 @@ export type Command =
       type: "pushSshKey";
       targets: TargetRef[];
       /** The OpenSSH public key line; the core writes its own form of it. */
+      publicKey: string;
+      trustNewHostKeys?: boolean;
+      timeoutSecs?: number | null;
+      /** SS-09: restrictions written before the key (expiry-time, from). */
+      options?: KeyOptions;
+    }
+  | {
+      /** SS-09: remove a public key from the hosts' ~/.ssh/authorized_keys (every line with its data). */
+      type: "removeSshKey";
+      targets: TargetRef[];
       publicKey: string;
       trustNewHostKeys?: boolean;
       timeoutSecs?: number | null;
@@ -318,6 +330,22 @@ export interface DangerousMatch {
   line: number;
 }
 
+/** SS-09: what a pushed key may do (OpenSSH's authorized_keys options). */
+export interface KeyOptions {
+  /** `YYYY-MM-DD`: the key stops working at 00:00 UTC that day (expiry-time, OpenSSH 8.2+). */
+  expiresOn: string | null;
+  /** Hosts or networks it may log in from (from="..."). */
+  from: string[];
+}
+
+/** H9: a bulk run's blast-radius controls. */
+export interface Rollout {
+  /** The first host runs alone; the rest wait until the user, who sees its result, says go on. */
+  canary: boolean;
+  /** Start no more hosts once this many failed or ended with the outcome unknown; null: off. */
+  stopAfterFailures: number | null;
+}
+
 /** BX-02, BX-06, BX-07: a remote command as the approval dialog shows it. */
 export interface ExecDetails {
   script: string;
@@ -335,6 +363,8 @@ export interface ExecDetails {
   unreliable: boolean;
   /** SS-10: the key that runs the line when it is not Enter ("Ctrl+O", "Esc then A"...). */
   runKey: string | null;
+  /** H9: one host first, and a stop after failures. */
+  rollout: Rollout;
 }
 
 export interface ApprovalRequest {
@@ -384,7 +414,8 @@ export interface ApprovalAnswers {
 export type JobStatus =
   "queued" | "countdown" | "running" | "succeeded" | "failed" | "partially_failed" | "cancelled" | "interrupted";
 
-export type TargetStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled";
+/** H9 `unknown`: timed out, or cancelled while its command ran: it may have run. */
+export type TargetStatus = "pending" | "running" | "succeeded" | "failed" | "skipped" | "cancelled" | "unknown";
 
 export type JobEvent =
   /** `quiet`: a MultiExec line, whose terminals show what happened (no toasts). */
@@ -407,9 +438,15 @@ export type JobEvent =
       /** VM-05: the safety snapshot taken on this target first. */
       safetySnapshot: string | null;
     }
+  /** H9: the canary host finished well; `rest` hosts wait until `until` for the go-ahead (`bulkGoOn`). */
+  | { event: "canaryWaiting"; jobId: string; target: string; name: string; rest: number; until: string }
   /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
   | { event: "stillRunning"; jobId: string; targets: Target[] }
-  | { event: "finished"; jobId: string; status: JobStatus };
+  /** VM-01: `scope` says what the job may have changed, so only that page reads it again. */
+  | { event: "finished"; jobId: string; status: JobStatus; scope: JobScope };
+
+/** VM-01: what a finished job may have changed: VMs (power, snapshots, protection), containers, or neither. */
+export type JobScope = "vms" | "containers" | "other";
 
 /** SS-10: how MultiExec handled a line's keys. */
 export type LineMode = "command" | "password" | "fullScreen";
@@ -589,10 +626,16 @@ export interface JobSummary {
   targetsTotal: number;
   targetsSucceeded: number;
   targetsFailed: number;
+  /** H9: targets that timed out or were cancelled while their command ran. */
+  targetsUnknown: number;
   /** AP-03: when the countdown ends, while the job is in it. */
   countdownUntil: string | null;
   /** BX-04: the job whose failed targets this one retries. */
   retryOf: string | null;
+  /** BX-02: the retention purge removed its outputs and its script or line text (Settings, General). */
+  bodiesRemoved: boolean;
+  /** BX-04: its script or line had something that looked like a secret, now [redacted], so it can't be retried. */
+  commandRedacted: boolean;
 }
 
 /** One target of a job and how it went. */
@@ -660,6 +703,7 @@ export type ActionKind =
   | "execOther"
   | "execDangerous"
   | "sshKeyPush"
+  | "sshKeyRemove"
   | "fileUpload"
   | "fileReplace"
   | "tunnelLocal"
@@ -718,6 +762,29 @@ export interface PolicySaved {
   changes: string[];
 }
 
+/** BX-02: how long the job journal keeps job outputs and command text. */
+export type Retention = "days30" | "days90" | "year" | "forever";
+
+/** BX-02: what a retention purge removed. */
+export interface PurgeReport {
+  at: string;
+  retention: Retention;
+  /** Jobs created before this lost their outputs and command text; null when kept forever. */
+  before: string | null;
+  removed: { jobs: number; outputs: number; commands: number; bytes: number };
+  /** Older commands that had something that looked like a secret, now [redacted]. */
+  redacted: number;
+  /** The database file was compacted afterwards. */
+  compacted: boolean;
+  byHand: boolean;
+}
+
+export interface RetentionInfo {
+  retention: Retention;
+  /** The last purge since Remotely started (one runs at start and daily). */
+  lastPurge: PurgeReport | null;
+}
+
 /** AP-05: what an audit export wrote. */
 export interface AuditExport {
   path: string;
@@ -757,6 +824,8 @@ export interface Settings {
   dockerPathSaved: string | null;
   /** CT-02: the docker.exe in use; null: Docker Desktop was not found. */
   dockerPathInUse: string | null;
+  /** MO-02: seconds between two dashboard polls of each watched host over SSH: 5 (default), 15, 30 or 60. */
+  guestPollSecs: number;
 }
 
 /** SS-04. */
@@ -1124,6 +1193,8 @@ export interface TerminalSettings {
   notifyQuietSecs: number;
   /** SS-08: type the folder prompt hook into bash and zsh (a session can say otherwise; Prod: off unless it does). */
   promptHook: boolean;
+  /** QL-05: ask before pasting text that holds a line break (see paste.ts). */
+  confirmMultilinePaste: boolean;
 }
 
 // ---- BX-08 command panel ----
@@ -1540,10 +1611,23 @@ export interface VmWithoutSession {
   via: string[];
 }
 
+/** A4, H11: a picked VM reached only through a session linked automatically (by the guest's own IP). */
+export interface UnconfirmedLink {
+  vmxPath: string;
+  name: string;
+  sessionId: string;
+  sessionName: string;
+  /** `user@host:port` of the session. */
+  address: string;
+  via: string[];
+}
+
 export interface ResolvedTargets {
   hosts: BulkHost[];
   /** Picked VMs no session reaches; guest commands without SSH (VM-09) come in v2. */
   vmsWithoutSession: VmWithoutSession[];
+  /** A4, H11: picked VMs whose only link is automatic: not reached until the user confirms it. */
+  vmsUnconfirmed: UnconfirmedLink[];
   notes: string[];
 }
 
@@ -1585,6 +1669,10 @@ export interface HostResult {
   group: number | null;
   startedAt: string | null;
   finishedAt: string | null;
+  /** The address this PC reached (a host reached directly). */
+  peerIp: string | null;
+  /** The host key the host presented and the run accepted: `ssh-ed25519 SHA256:...`. */
+  hostKey: string | null;
 }
 
 /** BX-03: hosts with the same result. */
@@ -1615,6 +1703,10 @@ export interface BulkCounts {
   succeeded: number;
   failed: number;
   cancelled: number;
+  /** H9: timed out, or cancelled while the command ran. */
+  unknown: number;
+  /** H9: never started (the run stopped after its failures or its canary). */
+  skipped: number;
 }
 
 export interface BulkResults {
@@ -1626,6 +1718,8 @@ export interface BulkResults {
   /** "48 hosts same, 2 differ". */
   headline: string;
   ignoreTrailingWhitespace: boolean;
+  /** H9: the canary host finished and the rest wait for the go-ahead, until `until`. */
+  canary: { name: string; rest: number; until: string } | null;
 }
 
 export interface HostOutput {
@@ -1757,6 +1851,8 @@ export interface GuestStatus {
 export interface CollectorCost {
   rounds: number;
   intervalSecs: number;
+  /** MO-02: seconds between two polls of each watched host (the Settings value in force). */
+  guestIntervalSecs: number;
   roundMs: number;
   hostMs: number;
   guestMs: number;
@@ -2106,13 +2202,18 @@ export interface UpdateInfo {
   pubDate: string | null;
 }
 
-/** FD-14: what an update check found, or why it did not ask GitHub. */
+/**
+ * FD-14: what an update check found, or why it found nothing. The releases are public, so checks run
+ * without a token; the GitHub update token goes along when the vault can give it.
+ */
 export type UpdateCheck =
   | { status: "off" }
-  /** No GitHub update token in the vault: the private repository's releases can't be read. */
-  | { status: "noToken" }
-  /** The token is in the vault, which is locked. Check again once it is unlocked. */
+  /** GitHub doesn't show the releases without a token (the repository is private again), and there is none. */
+  | { status: "tokenNeeded"; repository: string }
+  /** Same, with the token in the vault, which is locked. Check again once it is unlocked. */
   | { status: "vaultLocked" }
+  /** GitHub's API limit is used up; no call goes to GitHub before `until` (RFC 3339). */
+  | { status: "rateLimited"; until: string; withToken: boolean }
   | { status: "upToDate" }
   | { status: "available"; update: UpdateInfo };
 
@@ -2133,7 +2234,12 @@ export interface TokenReport {
 }
 
 /** FD-14: error codes that mean the token needs attention in Settings. */
-export const UPDATE_TOKEN_ERRORS = ["update_token_refused", "update_token_no_access", "update_token_missing"];
+export const UPDATE_TOKEN_ERRORS = [
+  "update_token_refused",
+  "update_token_no_access",
+  "update_token_missing",
+  "update_token_needed",
+];
 
 export interface AppInfo {
   version: string;
@@ -2453,6 +2559,13 @@ export const api = {
   /** AP-05: asks where to save, then writes the audit log there as CSV. null when the user cancels. */
   exportAudit: () => invoke<AuditExport | null>("audit_export_csv"),
 
+  /** BX-02: how long job outputs and command text are kept, and the last purge. */
+  retention: () => invoke<RetentionInfo>("journal_retention"),
+  /** BX-02: applies at the next purge (daily, or Purge now). Audited; refused while presenting. */
+  setRetention: (retention: Retention) => invoke<RetentionInfo>("journal_retention_set", { retention }),
+  /** BX-02: purges now with the setting. Audited; refused while presenting. */
+  purgeNow: () => invoke<PurgeReport>("journal_purge_now"),
+
   /** VM-04: snapshot trees read from each VM's .vmsd (no vmrun call; VirtualBox: showvminfo). Changes go through `submit`. */
   snapshots: (vmxPaths?: string[]) => invoke<VmSnapshots[]>("snapshots_list", { vmxPaths: vmxPaths ?? null }),
   snapshotLimits: () => invoke<SnapshotLimits>("snapshot_limits"),
@@ -2486,6 +2599,8 @@ export const api = {
   setShutdownWait: (secs: number) => invoke<Settings>("settings_set_shutdown_wait", { secs }),
   /** BX-02: how many hosts a bulk run reaches at once. */
   setBulkParallel: (limit: number) => invoke<Settings>("settings_set_bulk_parallel", { limit }),
+  /** MO-02: 5, 15, 30 or 60 seconds between two dashboard polls of each watched host. */
+  setGuestPoll: (secs: number) => invoke<Settings>("settings_set_guest_poll", { secs }),
   /** FD-14: installing is the `appUpdate` command. */
   checkForUpdate: () => invoke<UpdateCheck>("update_check"),
   /** FD-14: write-only; stored in the vault, replacing the one there. Needs the vault unlocked. */
@@ -2676,8 +2791,14 @@ export const api = {
   bulkHostOutput: (jobId: string, targetKey: string) => invoke<HostOutput>("bulk_host_output", { jobId, targetKey }),
   bulkDiff: (jobId: string, left: string, right: string, options: GroupOptions) =>
     invoke<OutputDiff>("bulk_diff", { jobId, left, right, options }),
-  /** BX-04: the failed hosts again, as a new job through the bus (it may need approval). */
-  bulkRetryFailed: (jobId: string) => invoke<SubmitOutcome>("bulk_retry_failed", { jobId }),
+  /**
+   * BX-04: the failed hosts again, as a new job through the bus (it may need approval). H9: hosts whose outcome is
+   * unknown only with `includeUnknown` (the command may run there twice).
+   */
+  bulkRetryFailed: (jobId: string, includeUnknown = false) =>
+    invoke<SubmitOutcome>("bulk_retry_failed", { jobId, includeUnknown }),
+  /** H9: run on the hosts waiting after the canary. False when the job no longer waits. */
+  bulkGoOn: (jobId: string) => invoke<boolean>("bulk_go_on", { jobId }),
   /** BX-05: asks where to save, then writes the results; null when the user cancels. */
   bulkExport: (jobId: string, format: ExportFormat, options: GroupOptions) =>
     invoke<BulkExport | null>("bulk_export", { jobId, format, options }),

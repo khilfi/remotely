@@ -194,6 +194,7 @@ async fn the_log_file_never_holds_a_secret() {
         sudo_password_id: Some(sudo_id),
         trust_new_host_keys: false,
         timeout_secs: Some(30),
+        rollout: Default::default(),
     };
     // SS-04, AP-06: the chosen sudo password is new to these hosts, so the run asks for the vault password.
     let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
@@ -213,7 +214,7 @@ async fn the_log_file_never_holds_a_secret() {
         .unwrap();
     let status = tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            if let JobEvent::Finished { job_id, status } = events.recv().await.unwrap() {
+            if let JobEvent::Finished { job_id, status, .. } = events.recv().await.unwrap() {
                 if job_id == job {
                     return status;
                 }

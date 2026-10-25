@@ -154,6 +154,12 @@ struct State {
     sftp_delay: Mutex<Option<Duration>>,
     /// SS-08: no SFTP subsystem, like a host without sftp-server.
     sftp_off: AtomicBool,
+    /// H8: SFTP does not offer `posix-rename@openssh.com`, so it can't rename over a file.
+    sftp_no_posix_rename: AtomicBool,
+    /// H8: mode, uid and gid SFTP reports for a host path (else 0644 or 0755, and alice's 1000:1000).
+    sftp_meta: Mutex<HashMap<String, (u32, u32, u32)>>,
+    /// A9: host folders whose listing never ends: each read of one sends another batch of names.
+    sftp_endless: Mutex<Vec<String>>,
     /// SS-08: what the shell probe says the login shell is.
     login_shell: Mutex<Option<String>>,
     /// SS-07: names that lead to a port on 127.0.0.1 (lower case), as an internal DNS would.
@@ -168,6 +174,8 @@ struct State {
     no_docker_group: AtomicBool,
     /// MO-13, MO-14: what the host's own programs say about it.
     host: Mutex<Option<HostFixture>>,
+    /// R9: new connections are closed at once, as when sshd is down or the network is gone.
+    refusing: AtomicBool,
 }
 
 struct Link {
@@ -274,6 +282,32 @@ impl TestSshServer {
     /// SS-08: each SFTP read and write waits this long, so a transfer takes a while.
     pub fn with_sftp_delay(self, delay: Duration) -> Self {
         *locks::lock(&self.state.sftp_delay) = Some(delay);
+        self
+    }
+
+    /// H8: an SFTP server without OpenSSH's `posix-rename`: a plain rename refuses to replace a file,
+    /// as OpenSSH's own does.
+    pub fn without_posix_rename(self) -> Self {
+        self.state.sftp_no_posix_rename.store(true, Ordering::SeqCst);
+        self
+    }
+
+    /// H8: SFTP reports this mode and owner for `path`. The login user (uid and gid 1000) can't give a
+    /// file another owner, as a user who is not root can't.
+    pub fn with_sftp_owner(self, path: &str, mode: u32, uid: u32, gid: u32) -> Self {
+        locks::lock(&self.state.sftp_meta).insert(path.into(), (mode, uid, gid));
+        self
+    }
+
+    /// H8: the mode, uid and gid SFTP reports for `path`, if a test or a client set them.
+    pub fn sftp_meta(&self, path: &str) -> Option<(u32, u32, u32)> {
+        locks::lock(&self.state.sftp_meta).get(path).copied()
+    }
+
+    /// A9: a folder whose listing never ends, like a hostile server's.
+    pub fn with_endless_folder(self, folder: &str) -> Self {
+        let _ = std::fs::create_dir_all(self.sftp_path(folder));
+        locks::lock(&self.state.sftp_endless).push(folder.into());
         self
     }
 
@@ -467,6 +501,12 @@ impl TestSshServer {
         self.state.drop_links();
     }
 
+    /// R9: closes new connections at once (or, with `false`, takes them again), like a host whose
+    /// network went away and came back. Open connections are left as they are.
+    pub fn set_refusing(&self, on: bool) {
+        self.state.refusing.store(on, Ordering::SeqCst);
+    }
+
     /// Swallows all traffic on the open connections from now on; the sockets stay open.
     pub fn freeze_connections(&self) {
         for link in locks::lock(&self.state.links).iter() {
@@ -505,6 +545,10 @@ impl Drop for TestSshServer {
 async fn accept_loop(listener: TcpListener, state: Arc<State>) {
     while let Ok((socket, _)) = listener.accept().await {
         let link = state.connections.fetch_add(1, Ordering::SeqCst) + 1;
+        if state.refusing.load(Ordering::SeqCst) {
+            drop(socket);
+            continue;
+        }
         let Some(host_key) = locks::lock(&state.host_key).clone() else {
             continue;
         };
@@ -1518,9 +1562,10 @@ const INTERACTIVE_TOY: [&str; 10] = [
 ];
 
 /// What `command -v` finds besides the fake programs.
-const BUILTINS: [&str; 26] = [
+const BUILTINS: [&str; 28] = [
     "echo", "hostname", "whoami", "uptime", "cat", "head", "seq", "sleep", "exit", "true", "false", "exec", "sh",
-    "sudo", "umask", "cd", "mkdir", "chmod", "touch", "grep", "tail", "[", "test", "printf", "command", "type",
+    "sudo", "umask", "cd", "mkdir", "chmod", "touch", "grep", "tail", "[", "test", "printf", "command", "type", "rm",
+    "mv",
 ];
 
 /// Where a command's output goes (`>`, `>>`, `2>&1`, `>/dev/null`, ...).
@@ -1992,6 +2037,40 @@ impl<'a> ToyShell<'a> {
                 }
                 status
             }
+            "rm" => {
+                // `rm [-f] FILE...`: files only.
+                let force = args.iter().any(|a| a.starts_with('-') && a.contains('f'));
+                let mut status = 0;
+                for p in args.iter().filter(|a| !a.starts_with('-')) {
+                    let path = self.path(p);
+                    let gone = locks::lock(&self.state.files).remove(&path).is_some();
+                    locks::lock(&self.state.modes).remove(&path);
+                    if !gone && !force {
+                        self.err(&format!("rm: cannot remove '{p}': No such file or directory\n"));
+                        status = 1;
+                    }
+                }
+                status
+            }
+            "mv" => {
+                // `mv [-f] FROM TO`: one file, replacing TO in one step.
+                let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+                let [from, to] = paths.as_slice() else {
+                    self.err("mv: missing file operand\n");
+                    return 1;
+                };
+                let (from, to) = (self.path(from), self.path(to));
+                let Some(text) = locks::lock(&self.state.files).remove(&from) else {
+                    self.err(&format!("mv: cannot stat '{from}': No such file or directory\n"));
+                    return 1;
+                };
+                locks::lock(&self.state.files).insert(to.clone(), text);
+                let mode = locks::lock(&self.state.modes).remove(&from);
+                if let Some(mode) = mode {
+                    locks::lock(&self.state.modes).insert(to, mode);
+                }
+                0
+            }
             "touch" => {
                 let mut status = 0;
                 for p in args {
@@ -2007,54 +2086,73 @@ impl<'a> ToyShell<'a> {
                 status
             }
             "grep" => {
-                // Fixed strings only: `grep [-q] [-F] [-x] [-e PATTERN | PATTERN] [FILE]`.
+                // Fixed strings, or one anchored at the start with `^` (MO-02's guest script):
+                // `grep [-q] [-v] [-F] [-x] [-e PATTERN]... | PATTERN [FILE]...`. With several files,
+                // each line starts with its file's name, as real grep prints it.
                 let mut quiet = false;
                 let mut whole_line = false;
-                let mut pattern = None;
+                let mut invert = false;
+                let mut patterns: Vec<String> = Vec::new();
                 let mut files = Vec::new();
                 let mut rest = args.iter();
                 while let Some(arg) = rest.next() {
                     if arg == "-e" {
-                        pattern = rest.next().cloned();
-                    } else if arg.starts_with('-') && arg.len() > 1 && pattern.is_none() {
+                        patterns.extend(rest.next().cloned());
+                    } else if arg.starts_with('-') && arg.len() > 1 && files.is_empty() {
                         quiet |= arg.contains('q');
                         whole_line |= arg.contains('x');
-                    } else if pattern.is_none() {
-                        pattern = Some(arg.clone());
+                        invert |= arg.contains('v');
+                    } else if patterns.is_empty() {
+                        patterns.push(arg.clone());
                     } else {
                         files.push(arg.clone());
                     }
                 }
-                let Some(pattern) = pattern else {
+                if patterns.is_empty() {
                     self.err("grep: no pattern\n");
                     return 2;
+                }
+                let matches = |line: &str| {
+                    patterns.iter().any(|pattern| match pattern.strip_prefix('^') {
+                        _ if whole_line => line == pattern,
+                        Some(start) => line.starts_with(start),
+                        None => line.contains(pattern.as_str()),
+                    }) != invert
                 };
-                let text = match files.first() {
-                    None => String::from_utf8_lossy(&std::mem::take(&mut self.stdin)).into_owned(),
-                    Some(file) => match self.read_file(file) {
-                        Some(text) => text,
+                let mut inputs: Vec<(Option<String>, String)> = Vec::new();
+                let mut status = 1;
+                if files.is_empty() {
+                    let stdin = String::from_utf8_lossy(&std::mem::take(&mut self.stdin)).into_owned();
+                    inputs.push((None, stdin));
+                }
+                for file in &files {
+                    match self.read_file(file) {
+                        Some(text) => inputs.push((Some(file.clone()), text)),
                         None => {
                             self.err(&format!("grep: {file}: No such file or directory\n"));
-                            return 2;
+                            status = 2;
                         }
-                    },
-                };
-                let hits: Vec<&str> = text
-                    .lines()
-                    .filter(|l| {
-                        if whole_line {
-                            *l == pattern
-                        } else {
-                            l.contains(&pattern)
-                        }
-                    })
-                    .collect();
-                if !quiet {
-                    for hit in &hits {
-                        self.print(&format!("{hit}\n"));
                     }
                 }
-                u32::from(hits.is_empty())
+                let named = files.len() > 1;
+                let mut found = false;
+                for (file, text) in &inputs {
+                    for line in text.lines().filter(|l| matches(l)) {
+                        found = true;
+                        if quiet {
+                            continue;
+                        }
+                        match file {
+                            Some(file) if named => self.print(&format!("{file}:{line}\n")),
+                            _ => self.print(&format!("{line}\n")),
+                        }
+                    }
+                }
+                if found {
+                    0
+                } else {
+                    status
+                }
             }
             name @ ("[" | "test") => {
                 let mut a: Vec<&str> = args.iter().map(String::as_str).collect();

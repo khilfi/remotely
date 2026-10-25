@@ -89,6 +89,7 @@ async fn the_bus_refuses_every_command_while_locked_and_runs_them_again_after() 
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     };
     locked_out(core.bus.submit(&core.ctx, exec).await, "Run a read-only command");
     locked_out(

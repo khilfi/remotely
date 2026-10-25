@@ -36,6 +36,8 @@ argon2 = { version = "0.6", default-features = false, features = ["alloc", "zero
 # SysRng: the random source for generating SSH keys (SS-09).
 getrandom = { version = "0.4", features = ["sys_rng"] }
 futures = { version = "0.3", optional = true }
+# AP-05: the audit log is verified and exported row by row (sqlx's row streams). The version sqlx already pulls in.
+futures-util = { version = "0.3", default-features = false }
 zeroize = "1"
 # SS-02: session lists imported from CSV.
 csv = "1"
@@ -72,6 +74,8 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",
     "Win32_Security_Cryptography",
+    # SS-07: other users signed in to this PC (WTSEnumerateSessionsW), who share its loopback.
+    "Win32_System_RemoteDesktop",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_ProcessStatus",

@@ -12,6 +12,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::store::AuditEntry;
+use crate::untrusted::is_format_char;
 
 // Constant patterns, compiled by the tests below; `expect` cannot fire on user input here.
 #[allow(clippy::expect_used)]
@@ -116,64 +117,79 @@ pub const AUDIT_CSV_COLUMNS: [&str; 23] = [
 ];
 
 /// The audit entries as CSV (RFC 4180, CRLF line ends, UTF-8 with a byte-order mark so Excel reads
-/// it as UTF-8). Returns the text and how many rows had something redacted.
+/// it as UTF-8). Returns the text and how many rows had something redacted. The app writes a long log
+/// row by row instead ([`audit_csv_header`], [`audit_csv_row`]).
 pub fn audit_csv(entries: &[AuditEntry]) -> (String, usize) {
-    let mut out = String::from("\u{FEFF}");
-    push_row(&mut out, AUDIT_CSV_COLUMNS.iter().map(|c| (*c).to_owned()));
+    let mut out = audit_csv_header();
     let mut redacted_rows = 0;
     for e in entries {
-        let mut redacted = false;
-        let mut clean = |text: &str| {
-            let (text, changed) = redact_secrets(text);
-            redacted |= changed;
-            text
-        };
-        let targets: Vec<Value> = serde_json::from_str(&e.targets_json).unwrap_or_default();
-        let names: Vec<&str> = targets
-            .iter()
-            .filter_map(|t| t.get("name").and_then(Value::as_str))
-            .collect();
-        let approval: Option<Value> = e.approval_json.as_deref().and_then(|a| serde_json::from_str(a).ok());
-        let field = |key: &str| -> String {
-            match approval.as_ref().and_then(|a| a.get(key)) {
-                None | Some(Value::Null) => String::new(),
-                Some(Value::String(s)) => s.clone(),
-                Some(other) => other.to_string(),
-            }
-        };
-        let mut row = vec![
-            e.seq.to_string(),
-            e.id.clone(),
-            e.ts.clone(),
-            e.event.clone(),
-            clean(&e.action),
-            e.tier.clone().unwrap_or_default(),
-            e.job_id.clone().unwrap_or_default(),
-            names.join("; "),
-            targets.len().to_string(),
-            field("typedTargetCount"),
-            clean(&field("reason")),
-            field("safetySnapshot"),
-            field("vaultReauth"),
-            field("approvedAt"),
-            clean(e.result.as_deref().unwrap_or_default()),
-            clean(e.detail.as_deref().unwrap_or_default()),
-            e.workspace_id.clone(),
-            e.user_id.clone(),
-            e.targets_json.clone(),
-            {
-                let (json, changed) = redact_json(e.approval_json.as_deref().unwrap_or_default());
-                redacted |= changed;
-                json
-            },
-            e.prev_hash.clone(),
-            e.hash.clone(),
-        ];
-        row.push(redacted.to_string());
+        let (row, redacted) = audit_csv_row(e);
+        out.push_str(&row);
         redacted_rows += usize::from(redacted);
-        push_row(&mut out, row.into_iter());
     }
     (out, redacted_rows)
+}
+
+/// The start of the CSV file: the byte-order mark and the header row.
+pub fn audit_csv_header() -> String {
+    let mut out = String::from("\u{FEFF}");
+    push_row(&mut out, AUDIT_CSV_COLUMNS.iter().map(|c| (*c).to_owned()));
+    out
+}
+
+/// One entry's CSV row, with its line end, and whether something in it was redacted.
+pub fn audit_csv_row(e: &AuditEntry) -> (String, bool) {
+    let mut out = String::new();
+    let mut redacted = false;
+    let mut clean = |text: &str| {
+        let (text, changed) = redact_secrets(text);
+        redacted |= changed;
+        text
+    };
+    let targets: Vec<Value> = serde_json::from_str(&e.targets_json).unwrap_or_default();
+    let names: Vec<&str> = targets
+        .iter()
+        .filter_map(|t| t.get("name").and_then(Value::as_str))
+        .collect();
+    let approval: Option<Value> = e.approval_json.as_deref().and_then(|a| serde_json::from_str(a).ok());
+    let field = |key: &str| -> String {
+        match approval.as_ref().and_then(|a| a.get(key)) {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        }
+    };
+    let mut row = vec![
+        e.seq.to_string(),
+        e.id.clone(),
+        e.ts.clone(),
+        e.event.clone(),
+        clean(&e.action),
+        e.tier.clone().unwrap_or_default(),
+        e.job_id.clone().unwrap_or_default(),
+        names.join("; "),
+        targets.len().to_string(),
+        field("typedTargetCount"),
+        clean(&field("reason")),
+        field("safetySnapshot"),
+        field("vaultReauth"),
+        field("approvedAt"),
+        clean(e.result.as_deref().unwrap_or_default()),
+        clean(e.detail.as_deref().unwrap_or_default()),
+        e.workspace_id.clone(),
+        e.user_id.clone(),
+        e.targets_json.clone(),
+        {
+            let (json, changed) = redact_json(e.approval_json.as_deref().unwrap_or_default());
+            redacted |= changed;
+            json
+        },
+        e.prev_hash.clone(),
+        e.hash.clone(),
+    ];
+    row.push(redacted.to_string());
+    push_row(&mut out, row.into_iter());
+    (out, redacted)
 }
 
 pub(crate) fn push_row(out: &mut String, cells: impl Iterator<Item = String>) {
@@ -188,20 +204,33 @@ pub(crate) fn push_row(out: &mut String, cells: impl Iterator<Item = String>) {
     out.push_str("\r\n");
 }
 
-/// Quotes a cell when it needs it, and stops a spreadsheet from running it as a formula: a cell
-/// starting with `=`, `+`, `-`, `@` or a tab or carriage return gets a leading `'`. VM names come
-/// from .vmx files, which anyone could have written.
+/// Quotes a cell when it needs it, and stops a spreadsheet from running it as a formula (A10): a cell
+/// that could start one gets a leading `'` ([`needs_formula_guard`]). A cell holding `,`, `"`, a line
+/// break, `;` (the separator Excel uses in many locales) or a tab is quoted. Every CSV the core writes
+/// (the audit log, BX-05 Compare and QL-12 MultiExec exports) goes through here: VM names come from
+/// .vmx files and command output from hosts, which anyone could have written.
 fn csv_cell(value: &str) -> String {
-    let guarded = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+    let guarded = if needs_formula_guard(value) {
         format!("'{value}")
     } else {
         value.to_owned()
     };
-    if guarded.contains([',', '"', '\n', '\r']) {
+    if guarded.contains([',', '"', '\n', '\r', ';', '\t']) {
         format!("\"{}\"", guarded.replace('"', "\"\""))
     } else {
         guarded
     }
+}
+
+/// A spreadsheet may read the cell as a formula: it starts with a tab or carriage return, or, after any
+/// leading whitespace and invisible format characters (` =HYPERLINK(...)` is a formula in some
+/// apps), with `=`, `+`, `-`, `@` or their full-width forms.
+fn needs_formula_guard(value: &str) -> bool {
+    if value.starts_with(['\t', '\r']) {
+        return true;
+    }
+    let start = value.trim_start_matches(|c: char| c.is_whitespace() || c.is_control() || is_format_char(c));
+    start.starts_with(['=', '+', '-', '@', '\u{FF1D}', '\u{FF0B}', '\u{FF0D}', '\u{FF20}'])
 }
 
 #[cfg(test)]
@@ -296,6 +325,38 @@ mod tests {
         assert_eq!(csv_cell("@sum"), "'@sum");
     }
 
+    #[test]
+    fn semicolons_and_tabs_are_quoted() {
+        assert_eq!(csv_cell("web01; db01"), "\"web01; db01\"");
+        assert_eq!(csv_cell("a\tb"), "\"a\tb\"");
+        assert_eq!(csv_cell("a;b,c"), "\"a;b,c\"");
+        assert_eq!(csv_cell("plain text"), "plain text");
+    }
+
+    #[test]
+    fn formulas_are_guarded_after_leading_whitespace_too() {
+        assert_eq!(
+            csv_cell(" =HYPERLINK(\"http://example.com\")"),
+            "\"' =HYPERLINK(\"\"http://example.com\"\")\""
+        );
+        assert_eq!(csv_cell("   +1"), "'   +1");
+        assert_eq!(csv_cell("\n-2"), "\"'\n-2\"");
+        assert_eq!(csv_cell("\u{a0}@sum"), "'\u{a0}@sum", "a no-break space");
+        assert_eq!(
+            csv_cell("\u{200B}=1+1"),
+            "'\u{200B}=1+1",
+            "an invisible format character"
+        );
+        assert_eq!(csv_cell("\u{FF1D}SUM(A1)"), "'\u{FF1D}SUM(A1)", "a full-width =");
+        assert_eq!(csv_cell("\tx"), "\"'\tx\"", "a tab: guarded and quoted");
+        assert_eq!(csv_cell("\rx"), "\"'\rx\"");
+        // Not formulas: a sign inside the text, or text after the spaces.
+        assert_eq!(csv_cell("a=b"), "a=b");
+        assert_eq!(csv_cell("  web01"), "  web01");
+        assert_eq!(csv_cell("1-2"), "1-2");
+        assert_eq!(csv_cell(""), "");
+    }
+
     fn entry(seq: i64, action: &str, approval_json: Option<&str>) -> AuditEntry {
         AuditEntry {
             seq,
@@ -324,7 +385,8 @@ mod tests {
         assert!(csv.starts_with('\u{FEFF}'));
         let lines: Vec<&str> = csv.trim_start_matches('\u{FEFF}').split("\r\n").collect();
         assert_eq!(lines[0], AUDIT_CSV_COLUMNS.join(","));
-        assert!(lines[1].starts_with("1,id-1,2026-10-18T01:59:23Z,approval_granted,Suspend 2 VMs,high,,web01; =db01,2,2,\"CHG-1234, lab\",true,false,2026-10-18T01:59:00Z,"), "{}", lines[1]);
+        // The target names are quoted: `;` splits cells in many locales' Excel.
+        assert!(lines[1].starts_with("1,id-1,2026-10-18T01:59:23Z,approval_granted,Suspend 2 VMs,high,,\"web01; =db01\",2,2,\"CHG-1234, lab\",true,false,2026-10-18T01:59:00Z,"), "{}", lines[1]);
         assert!(lines[1].ends_with(",false"));
         assert_eq!(lines[2], "", "the file ends with a line break");
     }

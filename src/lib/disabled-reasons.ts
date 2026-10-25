@@ -19,6 +19,8 @@ export function compareRunReason(input: {
   unsavedTabs: number;
   script: string;
   timeoutOk: boolean;
+  /** H9: the "Stop after" field holds a valid number of failures (or nothing). */
+  stopAfterOk?: boolean;
   submitting: boolean;
   /** FD-03: the read-only lock applies. */
   readOnly?: boolean;
@@ -34,6 +36,7 @@ export function compareRunReason(input: {
   if (input.hosts.every((h) => h.protected)) return "All selected targets are protected";
   if (!input.script.trim()) return "Type a command first";
   if (!input.timeoutOk) return "The time limit must be a whole number of seconds, 1 to 86400 (or empty)";
+  if (input.stopAfterOk === false) return "Stop after must be a whole number of failures, 1 to 1000 (or empty)";
   if (input.submitting) return "Starting the run…";
   return null;
 }

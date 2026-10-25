@@ -1,9 +1,10 @@
-// SS-03, QL-04, QL-05 and QL-07 terminal settings: keep-alive, auto-reconnect, copy-on-select, font size,
-// scrollback, the session tree's reachability checks (each shows in the host's sshd log, which the card says), and
+// SS-03, QL-04, QL-05 and QL-07 terminal settings: keep-alive, auto-reconnect, copy-on-select, asking before a
+// multi-line paste, font size, scrollback, the session tree's reachability checks (each shows in the host's sshd log,
+// which the card says), and
 // notifications when a command finishes while the user is away (a background tab, another page, or Remotely not in
 // front): commands longer than N seconds, or any command whatever its length. A MultiExec line notifies once for all its terminals. Saved in the core and audited.
-// Connection settings apply to terminals opened from then on; font size, scrollback and notifications to open ones
-// too.
+// Connection settings apply to terminals opened from then on; font size, scrollback, the paste question and
+// notifications to open ones too.
 
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
@@ -123,6 +124,22 @@ export function TerminalSettingsCard() {
           <Label htmlFor="copy-on-select" className="font-normal">
             Copy text as soon as it is selected (like PuTTY)
           </Label>
+        </div>
+        <div className="grid gap-1">
+          <div className="flex items-center gap-3">
+            <Switch
+              id="confirm-multiline-paste"
+              checked={settings.confirmMultilinePaste}
+              onCheckedChange={(confirmMultilinePaste) => void save({ ...settings, confirmMultilinePaste })}
+            />
+            <Label htmlFor="confirm-multiline-paste" className="font-normal">
+              Ask before pasting text with line breaks
+            </Label>
+          </div>
+          <p className="pl-12 text-xs text-muted-foreground">
+            Each line break presses Enter, so a shell without bracketed paste runs every line as it arrives. Either way,
+            a paste loses its control characters (tabs and line breaks aside) and bracketed-paste markers.
+          </p>
         </div>
         <div className="grid gap-1">
           <div className="flex items-center gap-3">

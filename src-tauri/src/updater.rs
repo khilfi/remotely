@@ -1,15 +1,19 @@
-//! FD-14: the real updater adapter, on `tauri-plugin-updater`. The app's repository is private while
-//! it is field-tested, so every check and download carries the GitHub update token from the vault:
+//! FD-14: the real updater adapter, on `tauri-plugin-updater`. The app's repository is public, so a
+//! check needs no token; the GitHub update token from the vault is optional, and used when it can be read:
 //!
-//! 1. The latest release is found through the GitHub API ([`GithubReleases`], in the core).
-//! 2. The plugin fetches that release's latest.json from its API asset URL, with the token and
-//!    `Accept: application/octet-stream`. GitHub answers with a redirect to its storage, and the
-//!    token is dropped on the way (reqwest removes `Authorization` when a redirect leaves the origin).
-//! 3. The installer comes the same way. latest.json names it by its API asset URL (tauri-action
-//!    writes those); any other URL is mapped to the release's file of the same name, or refused, so
-//!    the token never goes anywhere but the API.
+//! 1. The latest release is found through the GitHub API ([`GithubReleases`], in the core), with the
+//!    token or without one.
+//! 2. Without a token, the plugin fetches that release's latest.json and then the installer from their
+//!    public download links on github.com, which redirect to GitHub's storage. No `Authorization`
+//!    header is sent anywhere. latest.json names the installer by its API asset URL (the release
+//!    workflow writes those); it is mapped to the same file's public link, or refused.
+//! 3. With a token, they come from their API asset URLs instead, with the token and
+//!    `Accept: application/octet-stream`. GitHub answers with a redirect to its storage, and the token
+//!    is dropped on the way (reqwest removes `Authorization` when a redirect leaves the origin). Any
+//!    other URL is mapped to the release's file of the same name, or refused, so the token never goes
+//!    anywhere but the API.
 //! 4. The plugin verifies the download against `plugins.updater.pubkey` in tauri.conf.json, exactly
-//!    as before: a tampered or unsigned package fails.
+//!    as before, with or without a token: a tampered or unsigned package fails.
 //!
 //! Before an update is offered, its signature must name the installer for the version latest.json
 //! announces (`check_signed_release`, C3), so an old signed installer can't come back as a newer
@@ -26,7 +30,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use remotely_core::adapters::github::{scrub, GithubReleases, GithubRepo, Release, GITHUB_API};
+use remotely_core::adapters::github::{scrub_any, GithubReleases, GithubRepo, Release, GITHUB_API, GITHUB_WEB};
 use remotely_core::adapters::updater::{check_signed_release, ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
 use remotely_core::locks;
 use remotely_core::vault::SecretString;
@@ -51,57 +55,71 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The name tauri-action gives the update manifest in each release.
 const MANIFEST: &str = "latest.json";
 
+/// The update the last check found, with the release it came from, so `install` can fetch its installer
+/// the way the install asks (with the token or without one) whichever way the check went.
+#[derive(Clone)]
+struct Offer {
+    /// Kept without its headers, so the token stays in memory no longer than a call that needs it (the
+    /// vault's idle lock still counts).
+    update: Update,
+    release: Release,
+}
+
 pub struct TauriUpdater<R: Runtime = Wry> {
     app: AppHandle<R>,
     github: GithubReleases,
-    /// The update found by the last check, reused by `install`. Kept without its headers, so the
-    /// token stays in memory no longer than a call that needs it (the vault's idle lock still counts).
-    offered: Mutex<Option<Update>>,
+    offered: Mutex<Option<Offer>>,
 }
 
 impl<R: Runtime> TauriUpdater<R> {
     pub fn new(app: AppHandle<R>) -> Result<Self> {
-        let api = Url::parse(GITHUB_API).map_err(|err| CoreError::Update(err.to_string()))?;
-        Self::with_api(app, api)
+        let parse = |url: &str| Url::parse(url).map_err(|err| CoreError::Update(err.to_string()));
+        Self::with_github(app, parse(GITHUB_API)?, parse(GITHUB_WEB)?)
     }
 
-    /// `api` in place of `https://api.github.com`: tests point it at a local fake.
-    pub fn with_api(app: AppHandle<R>, api: Url) -> Result<Self> {
+    /// `api` and `web` in place of `https://api.github.com` and `https://github.com`: tests point them at
+    /// a local fake.
+    pub fn with_github(app: AppHandle<R>, api: Url, web: Url) -> Result<Self> {
         let repo = configured_repo(&app)?;
         Ok(Self {
             app,
-            github: GithubReleases::new(api, repo)?,
+            github: GithubReleases::new(api, repo)?.with_web(web),
             offered: Mutex::new(None),
         })
     }
 
     /// The latest release, and the update it offers this version, if any.
-    async fn fetch(&self, token: &SecretString) -> Result<(Option<Update>, Option<String>)> {
+    async fn fetch(&self, token: Option<&SecretString>) -> Result<(Option<Offer>, Option<String>)> {
         let lookup = self.github.latest_release(token).await?;
         let Some(release) = lookup.release else {
             *locks::lock(&self.offered) = None;
             return Ok((None, lookup.token_expires_on));
         };
-        let update = self.check_release(&release, token).await?;
-        *locks::lock(&self.offered) = update.clone().map(|mut u| {
-            u.headers.clear();
-            u
+        let offer = self
+            .check_release(&release, token)
+            .await?
+            .map(|update| Offer { update, release });
+        *locks::lock(&self.offered) = offer.clone().map(|mut o| {
+            o.update.headers.clear();
+            o
         });
-        Ok((update, lookup.token_expires_on))
+        Ok((offer, lookup.token_expires_on))
     }
 
-    async fn check_release(&self, release: &Release, token: &SecretString) -> Result<Option<Update>> {
+    async fn check_release(&self, release: &Release, token: Option<&SecretString>) -> Result<Option<Update>> {
         let manifest = release.asset(MANIFEST).ok_or_else(|| {
             CoreError::Update(format!(
                 "the release {} has no {MANIFEST}, so it can't be installed from the app",
                 release.tag_name
             ))
         })?;
+        // Its API asset URL with a token, its public download link without one.
+        let manifest_url = self.github.file_url(release, &manifest.url, token)?;
         let app = self.app.clone();
         let updater = self
             .app
             .updater_builder()
-            .endpoints(vec![manifest.url.clone()])
+            .endpoints(vec![manifest_url])
             .map_err(|err| update_error(err, token))?
             .headers(self.github.download_headers(token)?)
             // QL-15: neither a check nor a download can hang; the download gets its own total below.
@@ -122,23 +140,26 @@ impl<R: Runtime> TauriUpdater<R> {
             &product_name(&self.app)?,
             &update.version,
         )?;
-        // The token goes with the download, so only to an API asset URL of this release.
-        update.download_url = self.github.asset_url(release, &update.download_url)?;
+        // A file of this release only: with the token, at an API asset URL of it.
+        update.download_url = self.github.file_url(release, &update.download_url, token)?;
         Ok(Some(update))
     }
 
     /// Downloads `version` and verifies its signature. The bytes are what the installer runs.
-    pub async fn download(&self, token: &SecretString, version: &str) -> Result<(Update, Vec<u8>)> {
+    pub async fn download(&self, token: Option<&SecretString>, version: &str) -> Result<(Update, Vec<u8>)> {
         let cached = locks::lock(&self.offered).clone();
-        let mut update = match cached {
-            Some(u) if u.version == version => u,
+        let Offer { mut update, release } = match cached {
+            Some(offer) if offer.update.version == version => offer,
             _ => self
                 .fetch(token)
                 .await?
                 .0
-                .filter(|u| u.version == version)
+                .filter(|offer| offer.update.version == version)
                 .ok_or_else(|| CoreError::Update(format!("version {version} is no longer offered")))?,
         };
+        // The check may have gone the other way (the vault was locked then, or is now), so the installer's
+        // URL is mapped again: the token only ever goes to an API asset URL of this release.
+        update.download_url = self.github.file_url(&release, &update.download_url, token)?;
         update.headers = self.github.download_headers(token)?;
         update.timeout = Some(DOWNLOAD_TIMEOUT);
         // Downloads and verifies the signature; a tampered or unsigned package fails here.
@@ -153,10 +174,10 @@ impl<R: Runtime> TauriUpdater<R> {
 
 #[async_trait]
 impl<R: Runtime> UpdaterAdapter for TauriUpdater<R> {
-    async fn check(&self, token: &SecretString) -> Result<ReleaseCheck> {
-        let (update, token_expires_on) = self.fetch(token).await?;
+    async fn check(&self, token: Option<&SecretString>) -> Result<ReleaseCheck> {
+        let (offer, token_expires_on) = self.fetch(token).await?;
         Ok(ReleaseCheck {
-            update: update.map(|u| UpdateInfo {
+            update: offer.map(|Offer { update: u, .. }| UpdateInfo {
                 current_version: u.current_version.clone(),
                 version: u.version.clone(),
                 notes: u.body.clone(),
@@ -166,7 +187,7 @@ impl<R: Runtime> UpdaterAdapter for TauriUpdater<R> {
         })
     }
 
-    async fn install(&self, token: &SecretString, version: &str) -> Result<()> {
+    async fn install(&self, token: Option<&SecretString>, version: &str) -> Result<()> {
         let (update, bytes) = self.download(token, version).await?;
         tracing::info!(version, "update downloaded and verified");
 
@@ -186,7 +207,7 @@ impl<R: Runtime> UpdaterAdapter for TauriUpdater<R> {
     }
 
     async fn test_token(&self, token: &SecretString) -> Result<TokenReport> {
-        let lookup = self.github.latest_release(token).await?;
+        let lookup = self.github.latest_release(Some(token)).await?;
         Ok(TokenReport {
             repository: self.github.repo().to_string(),
             latest_release: lookup.release.map(|r| r.tag_name),
@@ -241,6 +262,6 @@ fn product_name<R: Runtime>(app: &AppHandle<R>) -> Result<String> {
 }
 
 /// The plugin's errors name URLs and statuses, never headers; scrubbed all the same.
-fn update_error(err: tauri_plugin_updater::Error, token: &SecretString) -> CoreError {
-    CoreError::Update(scrub(&err.to_string(), token))
+fn update_error(err: tauri_plugin_updater::Error, token: Option<&SecretString>) -> CoreError {
+    CoreError::Update(scrub_any(&err.to_string(), token))
 }

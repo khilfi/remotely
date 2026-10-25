@@ -56,9 +56,14 @@ pub enum Command {
         /// run can't ask; without this such a host fails. A changed key always blocks.
         #[serde(default)]
         trust_new_host_keys: bool,
-        /// Seconds each host may take before it counts as failed. `None`: no limit.
+        /// Seconds each host may take; one that takes longer ends with its outcome unknown (H9: the
+        /// command may still run there). `None`: no limit.
         #[serde(default)]
         timeout_secs: Option<u64>,
+        /// H9: how far the run spreads before the user sees a result: one host first, and a stop after
+        /// failures. Both off unless asked.
+        #[serde(default)]
+        rollout: Rollout,
     },
     /// FD-14 install a checked, signed update. Runs once no other job is open.
     AppUpdate { version: String },
@@ -70,6 +75,20 @@ pub enum Command {
         /// own form, never as typed.
         public_key: String,
         /// As for [`Command::RemoteExec`]: a run can't ask about a host key it has not seen.
+        #[serde(default)]
+        trust_new_host_keys: bool,
+        #[serde(default)]
+        timeout_secs: Option<u64>,
+        /// SS-09: restrictions written before the key (`expiry-time`, `from`).
+        #[serde(default)]
+        options: ssh_keys::KeyOptions,
+    },
+    /// SS-09 remove a public key from `~/.ssh/authorized_keys` on many hosts: every line holding its
+    /// data (see [`ssh_keys::remove_key_script`]).
+    RemoveSshKey {
+        targets: Vec<TargetRef>,
+        /// The public key in OpenSSH's one-line form; only its data is looked for.
+        public_key: String,
         #[serde(default)]
         trust_new_host_keys: bool,
         #[serde(default)]
@@ -464,6 +483,47 @@ fn validate_script(script: &str, timeout_secs: Option<u64>) -> Result<()> {
     validate_timeout(timeout_secs)
 }
 
+/// H9: the most failures a run may be told to stop after.
+pub const MAX_STOP_AFTER_FAILURES: u32 = 1000;
+
+/// H9: a bulk run's blast-radius controls (BX-01, BX-02).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Rollout {
+    /// A canary: the first host runs alone, and the others wait until the user, who sees its result,
+    /// says to go on ([`CommandBus::go_on`]); a canary that fails stops the run. With one host it
+    /// changes nothing.
+    pub canary: bool,
+    /// Start no more hosts once this many failed or ended with their outcome unknown; the hosts
+    /// already running finish. `None`: off.
+    pub stop_after_failures: Option<u32>,
+}
+
+impl Rollout {
+    fn validate(&self) -> Result<()> {
+        match self.stop_after_failures {
+            Some(n) if !(1..=MAX_STOP_AFTER_FAILURES).contains(&n) => Err(CoreError::InvalidInput(format!(
+                "Stop after 1 to {MAX_STOP_AFTER_FAILURES} failures, or turn the stop off."
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// For the job's start in the audit log; `None` when both are off.
+    pub fn describe(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if self.canary {
+            parts.push("one host first, then the rest once confirmed".to_owned());
+        }
+        match self.stop_after_failures {
+            Some(1) => parts.push("stops after the first failure".to_owned()),
+            Some(n) => parts.push(format!("stops after {n} failures")),
+            None => {}
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
 /// BX-02: a per-host time limit within bounds.
 fn validate_timeout(timeout_secs: Option<u64>) -> Result<()> {
     if let Some(secs) = timeout_secs {
@@ -500,9 +560,25 @@ impl Command {
         match self {
             Command::VmSnapshot { op, targets } => op.validate(targets),
             Command::RemoteExec {
-                script, timeout_secs, ..
-            } => validate_script(script, *timeout_secs),
+                script,
+                timeout_secs,
+                rollout,
+                ..
+            } => {
+                rollout.validate()?;
+                validate_script(script, *timeout_secs)
+            }
             Command::PushSshKey {
+                public_key,
+                timeout_secs,
+                options,
+                ..
+            } => {
+                ssh_keys::parse_public_key(public_key)?;
+                options.validate(time::OffsetDateTime::now_utc().date())?;
+                validate_timeout(*timeout_secs)
+            }
+            Command::RemoveSshKey {
                 public_key,
                 timeout_secs,
                 ..
@@ -539,6 +615,7 @@ impl Command {
             | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. }
             | Command::PushSshKey { targets, .. }
+            | Command::RemoveSshKey { targets, .. }
             | Command::FileUpload { targets, .. }
             | Command::Container { targets, .. } => *targets = new,
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
@@ -555,12 +632,51 @@ impl Command {
             | Command::VmProtect { targets, .. }
             | Command::RemoteExec { targets, .. }
             | Command::PushSshKey { targets, .. }
+            | Command::RemoveSshKey { targets, .. }
             | Command::TerminalLine { targets, .. }
             | Command::FileUpload { targets, .. }
             | Command::OpenTunnel { targets, .. }
             | Command::Container { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
+    }
+
+    /// The command's type as the journal names it (serde's `type` tag): `remoteExec`, `terminalLine`...
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Command::VmPower { .. } => "vmPower",
+            Command::VmSnapshot { .. } => "vmSnapshot",
+            Command::VmProtect { .. } => "vmProtect",
+            Command::RemoteExec { .. } => "remoteExec",
+            Command::AppUpdate { .. } => "appUpdate",
+            Command::PushSshKey { .. } => "pushSshKey",
+            Command::RemoveSshKey { .. } => "removeSshKey",
+            Command::TerminalLine { .. } => "terminalLine",
+            Command::FileUpload { .. } => "fileUpload",
+            Command::OpenTunnel { .. } => "openTunnel",
+            Command::Container { .. } => "container",
+        }
+    }
+
+    /// BX-02, SS-10: the command as the job journal keeps it. What looks like a secret in a script or a typed line
+    /// (`--password=...`, a token, a password in a URL) is `[redacted]`, as in the audit export
+    /// ([`redact_secrets`]). Returns whether anything was. The job itself runs the command as it was given.
+    pub fn for_journal(&self) -> (Command, bool) {
+        fn clean(text: &mut String) -> bool {
+            let (redacted, changed) = redact_secrets(text);
+            if changed {
+                *text = redacted;
+            }
+            changed
+        }
+        let mut kept = self.clone();
+        let changed = match &mut kept {
+            Command::RemoteExec { script, .. } => clean(script),
+            // The keys hold a paste's later lines too.
+            Command::TerminalLine { line, keys, .. } => clean(line) | clean(keys),
+            _ => false,
+        };
+        (kept, changed)
     }
 
     /// Short human summary for dialogs, job lists and the audit log.
@@ -600,9 +716,18 @@ impl Command {
                 format!("Run `{sudo}{first_line}` on {}", noun("host"))
             }
             Command::AppUpdate { version } => format!("Install update {version}"),
-            Command::PushSshKey { public_key, .. } => match ssh_keys::parse_public_key(public_key) {
-                Ok(key) => format!("Add the SSH key {} to {}", key.describe(), noun("host")),
-                Err(_) => format!("Add an SSH key to {}", noun("host")),
+            Command::PushSshKey {
+                public_key, options, ..
+            } => {
+                let with = options.describe().map(|o| format!(" ({o})")).unwrap_or_default();
+                match ssh_keys::parse_public_key(public_key) {
+                    Ok(key) => format!("Add the SSH key {}{with} to {}", key.describe(), noun("host")),
+                    Err(_) => format!("Add an SSH key{with} to {}", noun("host")),
+                }
+            }
+            Command::RemoveSshKey { public_key, .. } => match ssh_keys::parse_public_key(public_key) {
+                Ok(key) => format!("Remove the SSH key {} from {}", key.describe(), noun("host")),
+                Err(_) => format!("Remove an SSH key from {}", noun("host")),
             },
             Command::TerminalLine { line, keys, .. } => {
                 // Kept in the audit log for good, like a bulk run's summary: no secret typed into it.
@@ -729,7 +854,11 @@ impl TunnelDetails {
                     _ => format!("{}, reached from the host", spec.destination()),
                 };
                 let exposes = if spec.loopback_only() {
-                    "Only programs on this PC can use it.".to_owned()
+                    // Loopback is per computer, not per user.
+                    match spec.kind {
+                        ForwardKind::Dynamic => "Programs on this PC can use it to reach anything the host reaches: every user signed in to this PC, not only you.".to_owned(),
+                        _ => "Programs on this PC can use it: every user signed in to this PC, not only you.".to_owned(),
+                    }
                 } else {
                     format!(
                         "It listens on {}, so other computers that can reach this PC can use it to reach what the host reaches, without logging in.",
@@ -740,8 +869,9 @@ impl TunnelDetails {
             }
             ForwardKind::Remote => {
                 let exposes = if spec.loopback_only() {
+                    // sshd ignores the address asked for when its GatewayPorts is yes.
                     format!(
-                        "Programs on the host can reach {} through it, as if they were on this PC.",
+                        "Programs on the host can reach {} through it, as if they were on this PC. If the host's SSH server has GatewayPorts yes, it listens on every address there instead, so other computers that reach the host can use it too.",
                         spec.destination()
                     )
                 } else {
@@ -824,6 +954,8 @@ pub struct ExecDetails {
     pub unreliable: bool,
     /// SS-10: the key that runs the line when it is not Enter ("Ctrl+O", "Esc then A"...: [`RunKey::label`]).
     pub run_key: Option<String>,
+    /// H9: one host first, and a stop after failures.
+    pub rollout: Rollout,
 }
 
 /// What a command would need, without submitting it (BX-06: the bulk run editor shows the tier and
@@ -1201,10 +1333,20 @@ impl CommandBus {
         self.submit_job(ctx, command, None).await
     }
 
+    /// H9: the user saw the canary host's result and says to run on the other hosts. The run was
+    /// approved for all of them; this only lets the rest start. Refused while the read-only lock is
+    /// on (FD-03), and audited by the job runner. False when the job is not waiting.
+    pub async fn go_on(&self, ctx: &Context, job_id: Uuid) -> Result<bool> {
+        crate::policy::read_only_refusal(self.store.read_only().is_locked(), ActionKind::ExecOther)?;
+        Ok(self.jobs.go_on(ctx, job_id))
+    }
+
     /// BX-04: runs the same command again on the targets that failed in `job_id`, as a new job that
     /// points back at it. It goes through the policy engine like any command, so its tier and approval
-    /// steps are decided again for the targets it has now.
-    pub async fn retry_failed(&self, ctx: &Context, job_id: Uuid) -> Result<SubmitOutcome> {
+    /// steps are decided again for the targets it has now. H9: targets whose outcome is unknown (they
+    /// timed out, or were cancelled while the command ran, so it may have run) are left out unless
+    /// `include_unknown` says otherwise: running them again may run the command twice.
+    pub async fn retry_failed(&self, ctx: &Context, job_id: Uuid, include_unknown: bool) -> Result<SubmitOutcome> {
         let (job, command) = self
             .store
             .job_detail(ctx, job_id)
@@ -1215,16 +1357,39 @@ impl CommandBus {
                 "That job is still running. Retry its failed targets once it has ended.".into(),
             ));
         }
-        let failed: Vec<TargetRef> = self
-            .store
-            .job_targets(ctx, job_id)
-            .await?
+        // BX-02: what the journal no longer holds can't run again as it ran.
+        if job.bodies_removed && matches!(command, Command::RemoteExec { .. }) {
+            return Err(CoreError::InvalidInput(
+                "That run's script was removed from the journal when it got older than the retention period (Settings, General), so it can't be retried. Run it again from Compare.".into(),
+            ));
+        }
+        if job.command_redacted {
+            return Err(CoreError::InvalidInput(
+                "That run's script had something that looked like a secret, which the journal doesn't keep, so it can't be retried as it ran. Run it again from Compare.".into(),
+            ));
+        }
+        let targets = self.store.job_targets(ctx, job_id).await?;
+        let unknown = targets
             .iter()
-            .filter(|t| t.status == TargetStatus::Failed.as_str())
+            .filter(|t| t.status == TargetStatus::Unknown.as_str())
+            .count();
+        let failed: Vec<TargetRef> = targets
+            .iter()
+            .filter(|t| {
+                t.status == TargetStatus::Failed.as_str()
+                    || (include_unknown && t.status == TargetStatus::Unknown.as_str())
+            })
             .filter_map(|t| t.target_ref())
             .collect();
         if failed.is_empty() {
-            return Err(CoreError::InvalidInput("No target failed in that job.".into()));
+            let message = if unknown > 0 {
+                format!(
+                    "No target failed in that job. {unknown} ended with their outcome unknown (the command may have run there); retry them only on purpose."
+                )
+            } else {
+                "No target failed in that job.".to_owned()
+            };
+            return Err(CoreError::InvalidInput(message));
         }
         let retry = command
             .with_targets(failed)
@@ -1239,6 +1404,7 @@ impl CommandBus {
         for target in command.targets() {
             targets.push(self.directory.resolve(ctx, target).await?);
         }
+        self.note_signed_in(command).await;
         let policy = locks::read(&self.policy);
         let decision = policy.evaluate(command, &targets);
         let dangerous = match command {
@@ -1265,17 +1431,34 @@ impl CommandBus {
         command: &Command,
         retry_of: Option<Uuid>,
     ) -> Result<Option<Box<ExecDetails>>> {
-        if let Command::PushSshKey {
-            public_key,
-            trust_new_host_keys,
-            timeout_secs,
-            ..
-        } = command
-        {
+        let key_script = match command {
+            Command::PushSshKey {
+                public_key,
+                trust_new_host_keys,
+                timeout_secs,
+                options,
+                ..
+            } => Some((
+                ssh_keys::authorized_keys_script(&ssh_keys::parse_public_key(public_key)?, options),
+                trust_new_host_keys,
+                timeout_secs,
+            )),
+            Command::RemoveSshKey {
+                public_key,
+                trust_new_host_keys,
+                timeout_secs,
+                ..
+            } => Some((
+                ssh_keys::remove_key_script(&ssh_keys::parse_public_key(public_key)?),
+                trust_new_host_keys,
+                timeout_secs,
+            )),
+            _ => None,
+        };
+        if let Some((script, trust_new_host_keys, timeout_secs)) = key_script {
             // SS-09: the dialog shows the script each host runs.
-            let key = ssh_keys::parse_public_key(public_key)?;
             return Ok(Some(Box::new(ExecDetails {
-                script: ssh_keys::authorized_keys_script(&key),
+                script,
                 sudo: false,
                 sudo_password_label: None,
                 trust_new_host_keys: *trust_new_host_keys,
@@ -1285,6 +1468,7 @@ impl CommandBus {
                 multi_exec: false,
                 unreliable: false,
                 run_key: None,
+                rollout: Rollout::default(),
             })));
         }
         if let Command::TerminalLine {
@@ -1302,6 +1486,7 @@ impl CommandBus {
                 multi_exec: true,
                 unreliable: *unreliable,
                 run_key: run_key(keys).map(|key| key.label().to_owned()),
+                rollout: Rollout::default(),
             })));
         }
         let Command::RemoteExec {
@@ -1310,6 +1495,7 @@ impl CommandBus {
             sudo_password_id,
             trust_new_host_keys,
             timeout_secs,
+            rollout,
             ..
         } = command
         else {
@@ -1336,7 +1522,27 @@ impl CommandBus {
             multi_exec: false,
             unreliable: false,
             run_key: None,
+            rollout: *rollout,
         })))
+    }
+
+    /// SS-07: before a SOCKS tunnel on loopback is rated, how many other users are signed in to this
+    /// PC. A failed read counts as nobody else (the tunnel is rated as before).
+    async fn note_signed_in(&self, command: &Command) {
+        let Command::OpenTunnel { forward, .. } = command else {
+            return;
+        };
+        if forward.spec.kind != ForwardKind::Dynamic || !forward.spec.loopback_only() {
+            return;
+        }
+        let others = match self.capacity.host().other_users_signed_in().await {
+            Ok(n) => n,
+            Err(err) => {
+                tracing::debug!(error = %err, "could not read who is signed in to this PC");
+                0
+            }
+        };
+        locks::write(&self.policy).set_other_users(others);
     }
 
     /// BX-07: a sudo password chosen from the vault must be a password that is there.
@@ -1372,6 +1578,7 @@ impl CommandBus {
         self.check_sudo_password(ctx, &command).await?;
         let targets = self.resolve_targets(ctx, &command).await?;
 
+        self.note_signed_in(&command).await;
         let mut decision = locks::read(&self.policy).evaluate(&command, &targets);
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
@@ -1450,6 +1657,9 @@ impl CommandBus {
             // VM-07: capacity check before power-on.
             let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
             decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
+            // VM-02: VMs that join this PC's own network when they start.
+            let bridged = self.capacity.bridged(ctx, &decision.targets).await;
+            decision.add_warnings(bridged);
         }
         // VM-18: VirtualBox restores a snapshot only on a VM that is not running, so the revert powers
         // a running one off first; the preview says which, and the user confirms it.
@@ -1560,6 +1770,7 @@ impl CommandBus {
     /// error carries the new request for the dialog to show.
     async fn ask_again(&self, request_id: Uuid, pending: Pending, now: Vec<Target>, changes: Vec<String>) -> CoreError {
         let ctx = pending.ctx;
+        self.note_signed_in(&pending.command).await;
         let mut decision = locks::read(&self.policy).evaluate(&pending.command, &now);
         let changes = changes.join("; ");
         if decision.targets.is_empty() {
@@ -1796,5 +2007,138 @@ impl CommandBus {
             vault_reauth,
             approved_at: now_rfc3339(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::adapters::remote::forward::ForwardSpec;
+
+    fn every_kind() -> Vec<Command> {
+        let terminal = TargetRef::Terminal {
+            terminal_id: Uuid::nil(),
+            session_id: None,
+        };
+        vec![
+            Command::VmPower {
+                targets: vec![],
+                op: PowerOp::Suspend,
+            },
+            Command::VmSnapshot {
+                targets: vec![],
+                op: SnapshotOp::Take { name: "base".into() },
+            },
+            Command::VmProtect {
+                targets: vec![],
+                protected: true,
+            },
+            Command::RemoteExec {
+                targets: vec![],
+                script: "uptime".into(),
+                sudo: false,
+                sudo_password_id: None,
+                trust_new_host_keys: false,
+                timeout_secs: None,
+                rollout: Rollout {
+                    canary: true,
+                    stop_after_failures: Some(2),
+                },
+            },
+            Command::AppUpdate {
+                version: "1.0.0".into(),
+            },
+            Command::PushSshKey {
+                targets: vec![],
+                public_key: "ssh-ed25519 AAAA alice@example.com".into(),
+                trust_new_host_keys: false,
+                timeout_secs: None,
+                options: ssh_keys::KeyOptions::default(),
+            },
+            Command::RemoveSshKey {
+                targets: vec![],
+                public_key: "ssh-ed25519 AAAA alice@example.com".into(),
+                trust_new_host_keys: false,
+                timeout_secs: None,
+            },
+            Command::TerminalLine {
+                targets: vec![terminal.clone()],
+                line: "uptime".into(),
+                unreliable: false,
+                keys: "\r".into(),
+            },
+            Command::FileUpload {
+                targets: vec![terminal.clone()],
+                folder: "/tmp".into(),
+                files: vec![],
+            },
+            Command::OpenTunnel {
+                targets: vec![terminal],
+                forward: PortForward {
+                    id: Uuid::nil(),
+                    session_id: Uuid::nil(),
+                    label: None,
+                    spec: ForwardSpec {
+                        kind: ForwardKind::Local,
+                        bind_address: "127.0.0.1".into(),
+                        bind_port: 0,
+                        dest_host: "db01.example.com".into(),
+                        dest_port: 5432,
+                    },
+                    auto_start: false,
+                },
+            },
+            Command::Container {
+                targets: vec![],
+                op: ContainerOp::Start,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_type_name_is_serdes_tag() {
+        for command in every_kind() {
+            let value = serde_json::to_value(&command).unwrap();
+            assert_eq!(value["type"], command.type_name(), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn the_journal_keeps_scripts_and_lines_without_their_secrets() {
+        let exec = Command::RemoteExec {
+            targets: vec![],
+            script: "mysql --password=hunter2 -e 'select 1'\ncurl https://alice:s3cret@example.com/x".into(),
+            sudo: false,
+            sudo_password_id: None,
+            trust_new_host_keys: false,
+            timeout_secs: None,
+            rollout: Rollout::default(),
+        };
+        let (kept, redacted) = exec.for_journal();
+        assert!(redacted);
+        let Command::RemoteExec { script, .. } = &kept else {
+            panic!("{kept:?}")
+        };
+        assert_eq!(
+            script,
+            "mysql --password=[redacted] -e 'select 1'\ncurl https://alice:[redacted]@example.com/x"
+        );
+        // Every line, not just the first one the summary shows.
+        assert!(!script.contains("s3cret"));
+
+        let line = Command::TerminalLine {
+            targets: vec![],
+            line: "export TOKEN=abc123\nrun --api-key xyz".into(),
+            unreliable: false,
+            keys: "\rrun --api-key xyz\r".into(),
+        };
+        let (kept, redacted) = line.for_journal();
+        assert!(redacted);
+        let text = serde_json::to_string(&kept).unwrap();
+        assert!(!text.contains("abc123") && !text.contains("xyz"), "{text}");
+
+        for plain in every_kind() {
+            assert_eq!(plain.for_journal(), (plain.clone(), false), "{plain:?}");
+        }
     }
 }

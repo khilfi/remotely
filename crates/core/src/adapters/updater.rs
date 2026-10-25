@@ -1,12 +1,13 @@
 //! Updater adapter (FD-14): checks the GitHub Releases of the app's repository for a newer signed
-//! version and installs it. The repository is private while the app is field-tested, so each call
-//! gets the read-only GitHub update token from the vault ([`crate::updates`]).
+//! version and installs it. The repository is public, so a call needs no token; with the optional
+//! read-only GitHub update token from the vault ([`crate::updates`]) it carries that token instead.
 //!
 //! The real implementation lives in the Tauri shell: it finds the latest release through the GitHub
 //! API ([`super::github`]) and has `tauri-plugin-updater` fetch latest.json and the installer from
-//! their API asset URLs, verifying every update's signature. Checking is a read. Installing is a
-//! state change: it is the [`Command::AppUpdate`](crate::command_bus::Command::AppUpdate) command,
-//! Medium tier, and the job runner starts it only once no other job is open.
+//! their public download links (without a token) or their API asset URLs (with one), verifying every
+//! update's signature either way. Checking is a read. Installing is a state change: it is the
+//! [`Command::AppUpdate`](crate::command_bus::Command::AppUpdate) command, Medium tier, and the job
+//! runner starts it only once no other job is open.
 //!
 //! latest.json's `version` is not signed, so on its own it doesn't say which installer it points to:
 //! someone who can edit a release but has no signing key could pair an old, validly signed
@@ -42,7 +43,8 @@ pub struct UpdateInfo {
 pub struct ReleaseCheck {
     /// `None` when this is the latest version (or nothing is published yet).
     pub update: Option<UpdateInfo>,
-    /// When the token expires (`YYYY-MM-DD`), as GitHub reported it. `None` for a token with no expiry.
+    /// When the token expires (`YYYY-MM-DD`), as GitHub reported it. `None` without a token, and for
+    /// a token with no expiry.
     pub token_expires_on: Option<String>,
 }
 
@@ -58,11 +60,14 @@ pub struct TokenReport {
     pub expires_on: Option<String>,
 }
 
+/// `token` is the GitHub update token, or `None` to read the public releases without one. Without a
+/// token, a repository GitHub doesn't show fails with [`CoreError::UpdateTokenNeeded`]; with or
+/// without one, a used-up API limit fails with [`CoreError::UpdateRateLimited`].
 #[async_trait]
 pub trait UpdaterAdapter: Send + Sync {
-    async fn check(&self, token: &SecretString) -> Result<ReleaseCheck>;
+    async fn check(&self, token: Option<&SecretString>) -> Result<ReleaseCheck>;
     /// Downloads, verifies and installs `version`. Only the job runner calls this.
-    async fn install(&self, token: &SecretString, version: &str) -> Result<()>;
+    async fn install(&self, token: Option<&SecretString>, version: &str) -> Result<()>;
     /// Settings' "Test": can the token read the releases?
     async fn test_token(&self, token: &SecretString) -> Result<TokenReport>;
 }
@@ -72,11 +77,11 @@ pub struct DisabledUpdater;
 
 #[async_trait]
 impl UpdaterAdapter for DisabledUpdater {
-    async fn check(&self, _token: &SecretString) -> Result<ReleaseCheck> {
+    async fn check(&self, _token: Option<&SecretString>) -> Result<ReleaseCheck> {
         Ok(ReleaseCheck::default())
     }
 
-    async fn install(&self, _token: &SecretString, _version: &str) -> Result<()> {
+    async fn install(&self, _token: Option<&SecretString>, _version: &str) -> Result<()> {
         Err(CoreError::NotImplemented("FD-14 auto-update"))
     }
 

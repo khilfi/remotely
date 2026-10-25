@@ -44,6 +44,7 @@ import {
   type VaultInfo,
 } from "@/lib/api";
 import { containerTargetKey, formatBytes } from "@/lib/containers";
+import { rolloutText } from "@/lib/rollout";
 import { isLoopback } from "@/lib/tunnels";
 import { approveReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
@@ -507,6 +508,7 @@ function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exe
     exec.trustNewHostKeys && "Trusts host keys it has not seen before",
     exec.timeoutSecs != null && `Time limit ${exec.timeoutSecs} s per host`,
     exec.retryOf && "Retries the hosts that failed in an earlier run",
+    rolloutText(exec.rollout, targets),
   ].filter((x): x is string => Boolean(x));
   return (
     <div className="grid gap-2">

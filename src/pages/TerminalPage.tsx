@@ -81,6 +81,7 @@ import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
+import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
 import { usePresentation } from "@/components/Presentation";
 import { SessionTree } from "@/components/SessionTree";
 import { TunnelsButton } from "@/components/TunnelsPanel";
@@ -127,10 +128,12 @@ import {
   type PaneOpener,
   type PaneOptions,
   type PaneSnapshot,
+  type PasteAsk,
 } from "@/lib/terminal-session";
 import { maskedOutside, readOnlyLocked } from "@/lib/presentation-state";
 import type { ResolvedTheme } from "@/lib/theme";
-import { formatSize, isActive, mergeTransfer } from "@/lib/transfers";
+import { formatSize } from "@/lib/transfers";
+import { transferStore } from "@/lib/transfers-store";
 import { routeText, viaText } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 
@@ -341,10 +344,11 @@ export function TerminalPage({
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   /** Bumped when a pane's state changes, so what depends on terminal ids and statuses is recomputed. */
   const [paneTick, setPaneTick] = useState(0);
-  /** SS-08: the "Files here" drawer, and every transfer (newest last) less the ones cleared from the panel. */
+  /**
+   * SS-08: the "Files here" drawer. P6: the transfers themselves are in the transfers store (src/lib/transfers-store.ts),
+   * which the drawer and its panel read, so a transfer's progress doesn't re-render this page.
+   */
   const [filesShown, setFilesShown] = useState(() => readShown(FILES_KEY, false));
-  const [transfers, setTransfers] = useState<TransferInfo[]>([]);
-  const [clearedTransfers, setClearedTransfers] = useState<string[]>([]);
   /** SS-08: files picked or dropped for upload that are in the folder already. */
   const [conflict, setConflict] = useState<{
     pane: PaneSession;
@@ -370,7 +374,12 @@ export function TerminalPage({
     api.sessionFolders().then(setFolders, () => undefined);
     api.terminalSettings().then(
       (s) => {
-        setOptions({ fontSize: s.fontSize, scrollback: s.scrollback, copyOnSelect: s.copyOnSelect });
+        setOptions({
+          fontSize: s.fontSize,
+          scrollback: s.scrollback,
+          copyOnSelect: s.copyOnSelect,
+          confirmMultilinePaste: s.confirmMultilinePaste,
+        });
         setNotify({ on: s.notifyFinished, when: s.notifyWhen, afterSecs: s.notifyAfterSecs });
       },
       () => undefined,
@@ -423,11 +432,20 @@ export function TerminalPage({
   const finishedRef = useRef<(pane: PaneSession, finished: CommandFinished) => void>(() => undefined);
   // SS-08: a file name right-clicked in a pane, too.
   const fileWordRef = useRef<(pane: PaneSession, word: string, x: number, y: number) => void>(() => undefined);
+  // QL-05: a paste with a line break waits for the confirm (one at a time: a newer one cancels the one shown).
+  const pasteAskRef = useRef<(pane: PaneSession, ask: PasteAsk) => Promise<boolean>>(() => Promise.resolve(false));
   const createPane = useCallback(
     (opener: PaneOpener, label: string, fixedTitle = false) => {
       const pane = new PaneSession(newKey(), opener, label, theme, options, fixedTitle);
       pane.onCommandFinished = (finished) => finishedRef.current(pane, finished);
       pane.onFileWord = (word, x, y) => fileWordRef.current(pane, word, x, y);
+      pane.onPasteConfirm = (p, ask) => pasteAskRef.current(p, ask);
+      // OSC 8 links from the host are never opened: the address shows, to copy.
+      pane.onLink = (uri) =>
+        toast.info("Links from a host don't open in Remotely", {
+          description: uri.length > 300 ? `${uri.slice(0, 299)}…` : uri,
+          action: { label: "Copy", onClick: () => void navigator.clipboard?.writeText(uri) },
+        });
       // SS-07: a tunnel that starts with the terminal may ask first (a Prod host): show its approval.
       pane.onTunnelAsking = (p, forwardId) => {
         p.tunnelRequest(forwardId).then(
@@ -767,6 +785,27 @@ export function TerminalPage({
       );
     }
   });
+
+  // QL-05: a paste with a line break asks first; with MultiExec on for that pane, it says how many terminals get it.
+  const [pasteAsk, setPasteAsk] = useState<(PasteAsk & { multiExecTerminals: number | null }) | null>(null);
+  const pasteAnswer = useRef<((paste: boolean) => void) | null>(null);
+  useEffect(() => {
+    pasteAskRef.current = (pane, ask) => {
+      const routed = multiExec && pickedPanes.some((p) => p.key === pane.key);
+      const terminals = routed ? Math.max(1, pickedPanes.filter((p) => p.connected).length) : null;
+      pasteAnswer.current?.(false);
+      return new Promise<boolean>((resolve) => {
+        pasteAnswer.current = resolve;
+        setPasteAsk({ ...ask, multiExecTerminals: terminals });
+      });
+    };
+  });
+  function answerPaste(paste: boolean) {
+    const answer = pasteAnswer.current;
+    pasteAnswer.current = null;
+    setPasteAsk(null);
+    answer?.(paste);
+  }
   // Which picked terminals receive keys now (a password prompt or a full-screen program changes it).
   useEffect(() => {
     if (!multiExec || !active) return;
@@ -870,24 +909,19 @@ export function TerminalPage({
     }
   }, [filesShown]);
 
-  // Every transfer, then each change as it comes. A transfer that ends while the drawer is hidden says so.
-  const transferStates = useRef(new Map<string, TransferInfo["state"]>());
+  // Every transfer, then each change as it comes, into the transfers store (no state here). A transfer that ends
+  // while the drawer is hidden says so.
   const endedRef = useRef<(transfer: TransferInfo) => void>(() => undefined);
   useEffect(() => {
     let gone = false;
     api.filesTransfers().then(
       (list) => {
-        if (gone) return;
-        list.forEach((t) => transferStates.current.set(t.id, t.state));
-        setTransfers(list);
+        if (!gone) transferStore.load(list);
       },
       () => undefined,
     );
     const unlisten = api.onTransfer((changed) => {
-      const before = transferStates.current.get(changed.id);
-      transferStates.current.set(changed.id, changed.state);
-      if (before && before !== changed.state && !isActive(changed)) endedRef.current(changed);
-      setTransfers((prev) => mergeTransfer(prev, changed));
+      if (transferStore.apply(changed)) endedRef.current(changed);
     });
     return () => {
       gone = true;
@@ -1061,10 +1095,6 @@ export function TerminalPage({
     };
   });
 
-  const shownTransfers = transfers.filter((t) => !clearedTransfers.includes(t.id));
-  const uploadsHere = transfers.filter(
-    (t) => t.terminalId === currentPane?.terminalId && t.direction === "upload" && t.state === "done",
-  ).length;
   const uploadBlocked = uploadReason({
     open: Boolean(currentPane),
     connected: currentConnected,
@@ -1076,16 +1106,11 @@ export function TerminalPage({
       snapshot={currentSnapshot}
       name={currentPane ? nameOf(currentPane) : "No terminal"}
       multiExecTerminals={multiExec ? pickedPanes.length : 0}
-      transfers={shownTransfers}
-      refresh={uploadsHere}
       onUpload={(folder) => void pickAndUpload(currentPane, folder)}
       onDownload={(paths, to) => {
         if (currentPane) void download(currentPane, paths, to);
       }}
       onRetry={(t) => void retryTransfer(t)}
-      onClearTransfers={() =>
-        setClearedTransfers((prev) => [...prev, ...transfers.filter((t) => !isActive(t)).map((t) => t.id)])
-      }
       onClose={() => setFilesShown(false)}
     />
   );
@@ -1461,10 +1486,11 @@ export function TerminalPage({
       )}
       <p className="text-xs text-muted-foreground">
         {options.copyOnSelect ? "Selecting text copies it. " : "Ctrl+Shift+C copies a selection. "}
-        Ctrl+Shift+V or right-click pastes, Ctrl+Shift+F searches. Ctrl+click tabs to pick several for Output, MultiExec
-        and Compare. Typing into one terminal is not audited; each line MultiExec sends is (the command, the sessions,
-        the tier), and so are opening and closing a terminal, saving its output, typing a vault password and every file
-        uploaded or downloaded (its name, size and SHA-256).
+        Ctrl+Shift+V or right-click pastes{options.confirmMultilinePaste ? " (text with line breaks asks first)" : ""},
+        Ctrl+Shift+F searches. Ctrl+click tabs to pick several for Output, MultiExec and Compare. Typing into one
+        terminal is not audited; each line MultiExec sends is (the command, the sessions, the tier), and so are opening
+        and closing a terminal, saving its output, typing a vault password and every file uploaded or downloaded (its
+        name, size and SHA-256).
       </p>
     </div>
   );
@@ -1574,6 +1600,14 @@ export function TerminalPage({
             <DropdownMenuItem onSelect={() => void fileMenu.pane.pasteFromClipboard()}>Paste</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+      )}
+      {pasteAsk && (
+        <PasteConfirmDialog
+          preview={pasteAsk.preview}
+          bracketed={pasteAsk.bracketed}
+          multiExecTerminals={pasteAsk.multiExecTerminals}
+          onAnswer={answerPaste}
+        />
       )}
       {tunnelApprovals.length > 0 && !mxApproval && (
         <ApprovalDialog

@@ -2,10 +2,25 @@
 // shows the time left and touches nothing if cancelled, and a running job stops targets that have
 // not started and stops waiting for VM power actions in progress (Workstation or VirtualBox may still finish
 // those). A job's results show each target's outcome and the safety snapshot taken on it. The audit
-// log can be verified and exported to CSV.
+// log can be verified and exported to CSV. BX-02: a job older than the retention period (Settings, General) keeps its
+// results but no longer its outputs or command text, which its results say.
+//
+// P6, AP-03: job events come in bursts (a MultiExec line on 50 terminals sends about 100), so they reach the lists
+// through one path. App bumps `version` only when a job is queued or ends; while this page shows, a job's progress
+// (its countdown, its start, each target's result) asks too. Asks within a second of the first are one reload, a
+// second later (PROGRESS_READ_MS), so the lists are read at most once a second, and never per event. Nothing is read
+// while the page is hidden; showing it reads once.
 
-import { useEffect, useState } from "react";
-import { CameraIcon, DownloadIcon, ListChecksIcon, ScrollTextIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  CameraIcon,
+  DownloadIcon,
+  EraserIcon,
+  ListChecksIcon,
+  ScrollTextIcon,
+  ShieldCheckIcon,
+  ShieldXIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -17,6 +32,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { StatusBadge, TierBadge } from "@/components/Badges";
 import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary, type JobTarget } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
+import { progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
 
 const OPEN = new Set(["queued", "countdown", "running"]);
 
@@ -27,7 +43,7 @@ function secondsLeft(job: JobSummary, now: number) {
 }
 
 /**
- * `version` changes on every job event; `active` is true while the page is shown, so entries written
+ * `version` changes when a job is queued or ends; `active` is true while the page is shown, so entries written
  * without a job (terminals, host keys, imports, settings) show up when the user comes back.
  */
 export function ActivityPage({ version, active }: { version: number; active: boolean }) {
@@ -42,6 +58,35 @@ export function ActivityPage({ version, active }: { version: number; active: boo
   const opened = jobs.find((j) => j.id === openedId);
   const [exporting, setExporting] = useState(false);
   const counting = jobs.some((j) => j.status === "countdown");
+
+  // One reload path (see the top of the file): `asked` moves at most once a second, a second after the first ask.
+  const [asked, setAsked] = useState(0);
+  const askTimer = useRef<number | undefined>(undefined);
+  const ask = useCallback(() => {
+    if (askTimer.current !== undefined) return;
+    askTimer.current = window.setTimeout(() => {
+      askTimer.current = undefined;
+      setAsked((n) => n + 1);
+    }, PROGRESS_READ_MS);
+  }, []);
+  useEffect(() => () => window.clearTimeout(askTimer.current), []);
+
+  // A job queued or ended. While hidden it asks nothing: showing the page reads anyway.
+  const seenVersion = useRef(version);
+  useEffect(() => {
+    if (version === seenVersion.current) return;
+    seenVersion.current = version;
+    if (active) ask();
+  }, [version, active, ask]);
+
+  // A job's progress, while the page shows.
+  useEffect(() => {
+    if (!active) return;
+    const unlisten = api.onJobEvent((event) => {
+      if (progressesJob(event)) ask();
+    });
+    return () => void unlisten.then((stop) => stop());
+  }, [active, ask]);
 
   useEffect(() => {
     if (!active) return;
@@ -60,7 +105,7 @@ export function ActivityPage({ version, active }: { version: number; active: boo
     return () => {
       stale = true;
     };
-  }, [version, reloads, active]);
+  }, [asked, reloads, active]);
 
   // AP-03: the time left ticks while a job is in its countdown.
   useEffect(() => {
@@ -271,7 +316,7 @@ export function ActivityPage({ version, active }: { version: number; active: boo
         </CardContent>
       </Card>
 
-      {opened && <JobResults job={opened} version={version} onClose={() => setOpenedId(null)} />}
+      {opened && <JobResults job={opened} version={asked + reloads} onClose={() => setOpenedId(null)} />}
     </div>
   );
 }
@@ -313,6 +358,25 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
           </SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-4 overflow-auto px-4 pb-4">
+          {job.bodiesRemoved && (
+            <Alert>
+              <EraserIcon />
+              <AlertTitle>Outputs removed</AlertTitle>
+              <AlertDescription>
+                This job is older than the retention period set in Settings, General, so its outputs and its script or
+                line text were removed. Its targets, results and audit entries are kept.
+              </AlertDescription>
+            </Alert>
+          )}
+          {!job.bodiesRemoved && job.commandRedacted && (
+            <Alert>
+              <EraserIcon />
+              <AlertTitle>Secret redacted</AlertTitle>
+              <AlertDescription>
+                The command had something that looked like a password or token. The journal keeps it as [redacted].
+              </AlertDescription>
+            </Alert>
+          )}
           {safety.map((name) => (
             <Alert key={name}>
               <CameraIcon />
@@ -359,7 +423,9 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
                         <div className="mt-1 text-xs text-muted-foreground">exit code {t.exitCode}</div>
                       )}
                     </TableCell>
-                    <TableCell className="capitalize">{t.status}</TableCell>
+                    <TableCell className="capitalize">
+                      {t.status === "unknown" ? "Outcome unknown" : t.status}
+                    </TableCell>
                     <TableCell className="text-right text-muted-foreground tabular-nums">
                       {t.durationMs != null ? `${(t.durationMs / 1000).toFixed(1)} s` : "—"}
                     </TableCell>

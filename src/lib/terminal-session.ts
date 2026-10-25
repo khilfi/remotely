@@ -7,25 +7,38 @@
 //
 // A pane opens a saved session, a quick connection from the New terminal form (QL-02) or another
 // connection like an open pane (a split). QL-05: search (Ctrl+Shift+F), Ctrl+Shift+C / Ctrl+Shift+V,
-// right-click paste, and the font size, scrollback and copy-on-select settings, applied live. Every copy of a
-// selection goes through the core, which scrubs this terminal's secrets from it, and the shell writes the clipboard
-// (kept out of Windows' clipboard history and cloud clipboard); never the browser's clipboard API. SS-11:
-// the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if typed;
-// QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
-// command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's keys go
-// to `inputRouter` instead (see multiexec.ts). SS-08: the core says which folder the shell is in (`folder`), and a
-// right-click on a file name in the output goes to `onFileWord` (the page offers to download it) instead of pasting.
+// right-click paste, and the font size, scrollback, copy-on-select and multi-line paste settings, applied live. Every
+// paste (Ctrl+V and Ctrl+Shift+V, caught before xterm.js sees them, right-click, the menu, the command panel) is
+// cleaned by paste.ts first, and one with a line break asks the page (`onPasteConfirm`) unless the setting is off.
+// QL-05: every copy of a selection goes through the core, which scrubs this terminal's secrets from it, and the shell
+// writes the clipboard (kept out of Windows' clipboard history and cloud clipboard); never the browser's clipboard API.
+// SS-11: the whole buffer as text, and logging to a file. BX-08: a command from the command panel is pasted as if
+// typed; QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
+// command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's input
+// (keys, pastes, mouse reports) goes to `inputRouter` instead (see multiexec.ts); xterm.js's replies to the host's
+// queries go to this pane's own connection only (terminal-input.ts tells them apart). OSC 8 links from the host are
+// never opened: a click hands the address to `onLink` (the page shows it, to copy). SS-08: the core says which
+// folder the shell is in (`folder`), and a right-click on a file name in the output goes to `onFileWord` (the page
+// offers to download it) instead of pasting.
 // SS-07: the core reports the session's tunnels (`tunnels`); one that waits for approval (e.g. one that starts with
 // a Prod session's terminal) goes to `onTunnelAsking`, so the page can show the dialog. Host key questions name the
 // jump host that asks.
+//
+// SS-03 rendering: a pane on screen draws with WebGL (@xterm/addon-webgl), which keeps the DOM small and the main
+// thread free while a host prints a lot. A pane that is hidden (another tab, another page) gives its WebGL context back
+// after WEBGL_RELEASE_MS and draws with xterm.js's DOM renderer, so dozens of panes never run into the browser's limit
+// of about 16 contexts; so does a pane whose WebGL failed too often, or every pane when WebGL can't start in this
+// window (terminal-render.ts has the limits).
 //
 // FD-03: while presenting, the pane shows a second, masked terminal in front of the real one. Output goes to both:
 // as it is to the real one, through presentation.ts's TerminalMasker to the masked one, whose stand-ins keep the
 // width of what they replace, so both hold the same cells in the same places. Keys, pastes and the host's queries
 // are answered by the one on screen; copies (selection, Ctrl+Shift+C, copy-on-select), the whole-buffer text that
 // SS-11 saves and prints, and the file name under a right-click are read from the real one at the same place. The
-// masked one starts from the real one's screen and scrollback (serialized, then masked) and is dropped when
-// presenting stops. Nothing changes in what is sent to the host.
+// masked one keeps less scrollback (MASKED_SCROLLBACK lines, so search while presenting looks only that far back). It
+// starts from the real one's screen and the end of its scrollback, serialized, then masked and written in pieces cut at
+// line breaks, one at a time, so a long scrollback never holds the page up; output that arrives meanwhile waits and
+// follows in order. It is dropped when presenting stops. Nothing changes in what is sent to the host.
 
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -33,6 +46,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { toast } from "sonner";
 import { latestOnly } from "@/lib/clipboard-copy";
+import { WebglAddon } from "@xterm/addon-webgl";
 import { masker, TerminalMasker } from "@/lib/presentation";
 import { presentationView, subscribePresentation } from "@/lib/presentation-state";
 import { withVaultPassword } from "@/lib/reauth-prompt";
@@ -54,7 +68,16 @@ import {
   type TunnelInfo,
   type TunnelStart,
 } from "@/lib/api";
+import { pasteHasLineBreak, pastePreview, sanitizePaste, type PastePreview } from "@/lib/paste";
+import { InputOrigin } from "@/lib/terminal-input";
 import type { ResolvedTheme } from "@/lib/theme";
+import {
+  MASK_CHUNK_CHARS,
+  maskedScrollback,
+  splitAtLineBreaks,
+  WEBGL_RELEASE_MS,
+  wantsWebgl,
+} from "@/lib/terminal-render";
 import { fileWordAt } from "@/lib/transfers";
 
 const MONO = "'Cascadia Mono', 'Cascadia Code', Consolas, monospace";
@@ -122,9 +145,23 @@ export interface PaneOptions {
   fontSize: number;
   scrollback: number;
   copyOnSelect: boolean;
+  /** Ask (`onPasteConfirm`) before a paste that holds a line break. */
+  confirmMultilinePaste: boolean;
 }
 
-export const DEFAULT_PANE_OPTIONS: PaneOptions = { fontSize: 13, scrollback: 10000, copyOnSelect: true };
+export const DEFAULT_PANE_OPTIONS: PaneOptions = {
+  fontSize: 13,
+  scrollback: 10000,
+  copyOnSelect: true,
+  confirmMultilinePaste: true,
+};
+
+/** QL-05: a paste with a line break, for the page to confirm. */
+export interface PasteAsk {
+  preview: PastePreview;
+  /** The shell asked for bracketed paste (it holds pasted text until Enter). */
+  bracketed: boolean;
+}
 
 /** QL-07: a command that ran long has ended in this pane. */
 export interface CommandFinished {
@@ -145,6 +182,13 @@ const copySelectionText = latestOnly<{ id: string | null; text: string }>(
 
 /** FD-03: how long the masked terminal waits for the rest of a value split across reads. */
 const MASK_HOLD_MS = 25;
+
+/** SS-03: the panes holding a WebGL context now. */
+const webglPanes = new Set<PaneSession>();
+/** SS-03: WebGL could not start in this window at all (no WebGL 2): every pane draws with the DOM renderer. */
+let webglUnavailable = false;
+/** SS-03: how long after a lost WebGL context a pane on screen tries again. */
+const WEBGL_RETRY_MS = 1000;
 
 /** FD-03: the masked terminal on screen while presenting. */
 interface MaskedView {
@@ -198,6 +242,13 @@ export class PaneSession {
   private readonly searchAddon: SearchAddon;
   private readonly serializer: SerializeAddon;
   private masked: MaskedView | null = null;
+  /** SS-03: the WebGL renderer on the terminal on screen, while the pane shows. */
+  private webgl: { term: Terminal; addon: WebglAddon } | null = null;
+  private webglFailures = 0;
+  private webglTimer: number | null = null;
+  /** SS-03: the pane is on screen (laid out and in view), as its IntersectionObserver last said. */
+  private visible = false;
+  private readonly visibility: IntersectionObserver | null;
   private readonly stopFollowing: () => void;
   private theme: ResolvedTheme;
   private opener: PaneOpener | null;
@@ -208,7 +259,18 @@ export class PaneSession {
   private readonly listeners = new Set<() => void>();
   private pending: Uint8Array[] = [];
   private writing = false;
+  /** SS-10: each terminal's input told from its replies (the real one, and the masked one while presenting). */
+  private readonly origins = new WeakMap<Terminal, InputOrigin>();
   copyOnSelect = true;
+  /** QL-05: a paste with a line break asks first. */
+  confirmMultilinePaste = true;
+  /**
+   * QL-05: asks the user about a paste with a line break; resolves true to paste. Without it, such a paste goes
+   * without asking.
+   */
+  onPasteConfirm: ((pane: PaneSession, ask: PasteAsk) => Promise<boolean>) | null = null;
+  /** An OSC 8 link from the host was clicked: the page shows its address (to copy). Nothing opens it. */
+  onLink: ((uri: string) => void) | null = null;
   /** QL-07: called when the core reports a long command that finished here. */
   onCommandFinished: ((finished: CommandFinished) => void) | null = null;
   /**
@@ -259,6 +321,7 @@ export class PaneSession {
     this.realHost.className = "absolute inset-0";
     this.element.appendChild(this.realHost);
     this.copyOnSelect = options.copyOnSelect;
+    this.confirmMultilinePaste = options.confirmMultilinePaste;
     this.term = this.newTerminal(theme, options);
     this.fitAddon = new FitAddon();
     this.term.loadAddon(this.fitAddon);
@@ -267,6 +330,15 @@ export class PaneSession {
     this.term.loadAddon(this.serializer);
     this.term.open(this.realHost);
     this.wire(this.term);
+    // SS-03: WebGL while the pane is on screen; hidden (another tab or page, detached), the DOM renderer.
+    this.visibility =
+      typeof IntersectionObserver === "undefined"
+        ? null
+        : new IntersectionObserver((entries) => {
+            const last = entries[entries.length - 1];
+            if (last) this.setVisible(last.isIntersecting && this.element.isConnected);
+          });
+    this.visibility?.observe(this.element);
     // QL-05: right-click pastes, like PuTTY; SS-08: on a file name, the page may offer to download it first.
     this.element.addEventListener("contextmenu", (ev) => {
       ev.preventDefault();
@@ -285,6 +357,17 @@ export class PaneSession {
       },
       true,
     );
+    // QL-05: Ctrl+V, Ctrl+Shift+V and any other paste the browser makes, caught on the way down (capture), before
+    // xterm.js's own handler would send the text as it is.
+    this.element.addEventListener(
+      "paste",
+      (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void this.paste(ev.clipboardData?.getData("text/plain") ?? "");
+      },
+      true,
+    );
     // FD-03: masked from its first output when the app is presenting, and from the moment it starts.
     this.stopFollowing = subscribePresentation(() => this.present(presentationView().presenting));
     this.present(presentationView().presenting);
@@ -299,6 +382,12 @@ export class PaneSession {
       theme: TERMINAL_PALETTE[theme],
       // The search addon's match highlights use the decorations API.
       allowProposedApi: true,
+      // OSC 8 hyperlinks come from the host, which can put any address behind any text: never opened. Only http(s)
+      // ones are links at all (xterm.js drops the rest); a click hands the address to the page to show and copy.
+      linkHandler: {
+        activate: (_event, uri) => this.onLink?.(uri),
+        allowNonHttpProtocols: false,
+      },
     });
   }
 
@@ -311,12 +400,21 @@ export class PaneSession {
     return search;
   }
 
-  /** Keys, pastes, the host's queries and size changes come from the terminal on screen only. */
+  /**
+   * Keys, pastes, the host's queries and size changes come from the terminal on screen only. SS-10: input goes
+   * through `send` (MultiExec, when it has this pane); xterm.js's replies to the host go to this pane alone.
+   */
   private wire(term: Terminal) {
+    const origin = new InputOrigin(term);
+    this.origins.set(term, origin);
     term.onData((data) => {
-      if (term === this.screen) this.send(encoder.encode(data));
+      // Asked for every event, in order, so a mark never outlives its own data.
+      const input = origin.isInput(data);
+      if (term !== this.screen) return;
+      if (input) this.send(encoder.encode(data));
+      else this.reply(encoder.encode(data));
     });
-    // Binary data (some mouse reports) is one byte per character.
+    // Binary data (mouse reports in the default encoding) is one byte per character: input, like other mouse reports.
     term.onBinary((data) => {
       if (term === this.screen) this.send(Uint8Array.from(data, (c) => c.charCodeAt(0) & 0xff));
     });
@@ -338,6 +436,90 @@ export class PaneSession {
     return this.masked?.term ?? this.term;
   }
 
+  // ---- SS-03 rendering ----
+
+  private setVisible(visible: boolean) {
+    this.visible = visible;
+    this.syncRenderer();
+  }
+
+  /**
+   * WebGL on the terminal on screen while the pane shows; a hidden pane gives its context back after a moment (a quick
+   * tab switch keeps it). A terminal that is no longer on screen (presenting started or stopped) gives it back at once.
+   */
+  private syncRenderer() {
+    const screen = this.closed ? null : this.screen;
+    if (this.webgl && this.webgl.term !== screen) this.dropWebgl();
+    if (!screen) return;
+    if (!this.visible) {
+      if (this.webgl && this.webglTimer === null)
+        this.webglTimer = window.setTimeout(() => {
+          this.webglTimer = null;
+          if (!this.visible) this.dropWebgl();
+        }, WEBGL_RELEASE_MS);
+      return;
+    }
+    this.clearWebglTimer();
+    if (this.webgl) return;
+    const check = {
+      visible: true,
+      failures: this.webglFailures,
+      unavailable: webglUnavailable,
+      others: webglPanes.size,
+    };
+    if (!wantsWebgl(check)) return;
+    let addon: WebglAddon | null = null;
+    try {
+      addon = new WebglAddon();
+      screen.loadAddon(addon);
+    } catch (err) {
+      // No WebGL 2 here, or no context to be had: the DOM renderer draws. With no other pane on WebGL, none will be.
+      this.webglFailures += 1;
+      if (webglPanes.size === 0) webglUnavailable = true;
+      try {
+        addon?.dispose();
+      } catch {
+        // It never started.
+      }
+      console.warn("WebGL renderer unavailable; drawing the terminal with the DOM renderer", err);
+      return;
+    }
+    const held = { term: screen, addon };
+    this.webgl = held;
+    webglPanes.add(this);
+    addon.onContextLoss(() => {
+      if (this.webgl !== held) return;
+      // The GPU process restarted or the browser took the context back: the DOM renderer draws, and a pane still on
+      // screen tries again in a moment, until it failed too often.
+      this.webglFailures += 1;
+      this.dropWebgl();
+      this.webglTimer = window.setTimeout(() => {
+        this.webglTimer = null;
+        this.syncRenderer();
+      }, WEBGL_RETRY_MS);
+    });
+  }
+
+  /** Back to xterm.js's DOM renderer (disposing the addon puts it back). */
+  private dropWebgl() {
+    this.clearWebglTimer();
+    const held = this.webgl;
+    if (!held) return;
+    this.webgl = null;
+    webglPanes.delete(this);
+    try {
+      held.addon.dispose();
+    } catch {
+      // Its terminal was disposed first.
+    }
+  }
+
+  private clearWebglTimer() {
+    if (this.webglTimer === null) return;
+    window.clearTimeout(this.webglTimer);
+    this.webglTimer = null;
+  }
+
   // ---- FD-03 presentation mode ----
 
   private present(on: boolean) {
@@ -351,11 +533,15 @@ export class PaneSession {
     this.realHost.style.visibility = "hidden";
     const host = document.createElement("div");
     host.className = "absolute inset-0";
+    // Shown once it holds the real screen, so it never scrolls through the copied scrollback on screen.
+    host.style.visibility = "hidden";
     this.element.appendChild(host);
+    const scrollback = maskedScrollback(this.term.options.scrollback ?? DEFAULT_PANE_OPTIONS.scrollback);
     const term = this.newTerminal(this.theme, {
       fontSize: this.term.options.fontSize ?? DEFAULT_PANE_OPTIONS.fontSize,
-      scrollback: this.term.options.scrollback ?? DEFAULT_PANE_OPTIONS.scrollback,
+      scrollback,
       copyOnSelect: this.copyOnSelect,
+      confirmMultilinePaste: this.confirmMultilinePaste,
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -375,16 +561,27 @@ export class PaneSession {
     term.resize(this.term.cols, this.term.rows);
     this.wire(term);
     this.searchAddon.clearDecorations();
-    // Once the real terminal has parsed what it was given so far, its screen and scrollback, masked, start the copy;
-    // output that arrived since follows in order.
+    this.syncRenderer();
+    // Once the real terminal has parsed what it was given so far, its screen and the end of its scrollback start the
+    // copy: masked and written a piece at a time, each once the one before was parsed and in a task of its own, so
+    // the page stays responsive. Output that arrived meanwhile follows in order.
     this.term.write("", () => {
       if (this.masked !== view) return;
-      const screen = this.serializer.serialize({ scrollback: this.term.options.scrollback });
-      term.write(view.mask.mask(screen));
-      view.ready = true;
-      for (const chunk of view.queue) term.write(chunk);
-      view.queue = [];
-      if (hadFocus) term.focus();
+      const pieces = splitAtLineBreaks(this.serializer.serialize({ scrollback }), MASK_CHUNK_CHARS);
+      const next = () => {
+        if (this.masked !== view) return;
+        const piece = pieces.shift();
+        if (piece !== undefined) {
+          term.write(view.mask.mask(piece), () => window.setTimeout(next, 0));
+          return;
+        }
+        view.ready = true;
+        for (const chunk of view.queue) term.write(chunk);
+        view.queue = [];
+        host.style.visibility = "";
+        if (hadFocus) term.focus();
+      };
+      next();
     });
   }
 
@@ -394,9 +591,12 @@ export class PaneSession {
     this.masked = null;
     if (view.timer !== null) window.clearTimeout(view.timer);
     const hadFocus = view.host.contains(document.activeElement);
+    // SS-03: its WebGL context goes with it; the real terminal gets one if the pane shows.
+    if (this.webgl?.term === view.term) this.dropWebgl();
     view.term.dispose();
     view.host.remove();
     this.realHost.style.visibility = "";
+    this.syncRenderer();
     this.fit();
     this.term.refresh(0, this.term.rows - 1);
     if (this.snapshot.searching) this.update({ searchResults: null });
@@ -432,7 +632,7 @@ export class PaneSession {
 
   /**
    * The real text of what is selected on screen. Both terminals hold the same cells, counted from the bottom (the
-   * masked one may have less scrollback when it started late).
+   * masked one keeps less scrollback: MASKED_SCROLLBACK lines at most).
    */
   private selectionText(): string {
     const view = this.masked;
@@ -639,11 +839,15 @@ export class PaneSession {
     if (this.coreId) void api.terminalClose(this.coreId);
     this.stopFollowing();
     this.showReal();
+    this.visibility?.disconnect();
+    this.dropWebgl();
     this.term.dispose();
     this.listeners.clear();
     this.onCommandFinished = null;
     this.onFileWord = null;
     this.onTunnelAsking = null;
+    this.onPasteConfirm = null;
+    this.onLink = null;
   }
 
   // ---- SS-07 tunnels ----
@@ -700,6 +904,7 @@ export class PaneSession {
 
   // ---- input ----
 
+  /** The user's input: keys, pastes, mouse reports. */
   private send(bytes: Uint8Array) {
     // Always, so no key typed with MultiExec on skips its checks (one typed just before may still be writing; the
     // core then knows that terminal's line holds text it did not see).
@@ -707,6 +912,15 @@ export class PaneSession {
       this.inputRouter(this, bytes);
       return;
     }
+    this.pending.push(bytes);
+    this.flush();
+  }
+
+  /**
+   * SS-10: xterm.js's reply to the host's query (cursor position, device attributes, colours, focus): to this pane's
+   * own connection only, never through MultiExec. The core still counts it as text MultiExec did not see on the line.
+   */
+  private reply(bytes: Uint8Array) {
     this.pending.push(bytes);
     this.flush();
   }
@@ -758,10 +972,40 @@ export class PaneSession {
 
   /**
    * BX-08: a command pasted as if typed, through xterm.js (bracketed when the shell asked for it, so the shell waits
-   * for Enter even when the command has several lines). See `sendCommand` in command-send.ts.
+   * for Enter even when the command has several lines). See `sendCommand` in command-send.ts. Cleaned like any paste
+   * (QL-05), but never asked about: the panel shows the command it pastes.
    */
   pasteCommand(command: string) {
-    this.screen.paste(command);
+    const clean = sanitizePaste(command);
+    if (clean) this.pasteText(clean);
+  }
+
+  /**
+   * QL-05: a paste from the clipboard (keys, right-click, the menu): cleaned (paste.ts), and asked about first when
+   * it holds a line break, unless the setting is off.
+   */
+  async paste(text: string) {
+    const clean = sanitizePaste(text);
+    if (!clean || this.closed) return;
+    if (this.confirmMultilinePaste && this.onPasteConfirm && pasteHasLineBreak(clean)) {
+      const ask = { preview: pastePreview(clean), bracketed: this.screen.modes.bracketedPasteMode };
+      const ok = await this.onPasteConfirm(this, ask);
+      if (!ok || this.closed) return;
+      this.pasteText(clean);
+      this.focus();
+      return;
+    }
+    this.pasteText(clean);
+  }
+
+  /**
+   * Into the terminal on screen, as the user's input: xterm.js turns each CRLF or LF into CR and brackets the text
+   * when the shell asked for bracketed paste.
+   */
+  private pasteText(text: string) {
+    const term = this.screen;
+    this.origins.get(term)?.mark();
+    term.paste(text);
   }
 
   /** BX-08 Shift+click: runs what was pasted. */
@@ -784,12 +1028,14 @@ export class PaneSession {
    * for permission, and fail while the window is not focused.
    */
   async pasteFromClipboard() {
+    let text: string | null;
     try {
-      const text = await api.clipboardReadText();
-      if (text) this.screen.paste(text);
+      text = await api.clipboardReadText();
     } catch {
       this.say("\r\n\x1b[2m[Paste with Ctrl+V]\x1b[0m\r\n");
+      return;
     }
+    if (text) await this.paste(text);
   }
 
   // ---- QL-05 search ----
@@ -866,13 +1112,16 @@ export class PaneSession {
     if (this.masked) this.masked.term.options.theme = TERMINAL_PALETTE[theme];
   }
 
-  /** QL-05: font size, scrollback and copy-on-select, applied to an open pane. */
+  /** QL-05: font size, scrollback, copy-on-select and the paste question, applied to an open pane. */
   setOptions(options: PaneOptions) {
     this.copyOnSelect = options.copyOnSelect;
+    this.confirmMultilinePaste = options.confirmMultilinePaste;
     for (const term of [this.term, this.masked?.term]) {
       if (!term) continue;
       if (term.options.fontSize !== options.fontSize) term.options.fontSize = options.fontSize;
-      if (term.options.scrollback !== options.scrollback) term.options.scrollback = options.scrollback;
+      // FD-03: the masked copy keeps less scrollback than the setting.
+      const scrollback = term === this.term ? options.scrollback : maskedScrollback(options.scrollback);
+      if (term.options.scrollback !== scrollback) term.options.scrollback = scrollback;
     }
     this.fit();
   }

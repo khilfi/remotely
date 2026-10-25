@@ -890,23 +890,10 @@ fn check_passphrase(passphrase: &SecretString) -> Result<()> {
     check_new_password(passphrase, "passphrase")
 }
 
-/// FD-07: an export is never written into a Git working tree, where it could be committed by mistake.
+/// FD-07: an export is never written into a Git working tree, where it could be committed by mistake
+/// ([`crate::save_guard`], which every other save path uses too).
 pub fn refuse_repository(path: &Path) -> Result<()> {
-    let folder = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let folder = std::path::absolute(folder)?;
-    for ancestor in folder.ancestors() {
-        if ancestor.join(".git").exists() {
-            return Err(CoreError::InvalidInput(format!(
-                "{} is inside a Git repository ({}). An export holds your sessions, and maybe your secrets, and could end up in a commit there. Choose a folder outside it, such as Documents.",
-                folder.display(),
-                ancestor.display()
-            )));
-        }
-    }
-    Ok(())
+    crate::save_guard::refuse_repository(path, crate::save_guard::Saved::Transfer)
 }
 
 /// Writes next to the target first, then renames, so a failed export never leaves half a file.

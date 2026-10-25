@@ -6,7 +6,10 @@
 // A MutationObserver masks new and changed text in the microtask after the change, which runs before the browser
 // paints: a page, dialog or toast never shows a real value first. The real text is kept per node (in memory, next to
 // the node) and put back when presenting stops; React keeps writing real text, which is masked again as it lands.
-// Adjacent text nodes are masked together, so `{user}@{host}` in JSX is still seen as user@host.
+// Adjacent text nodes are masked together, so `{user}@{host}` in JSX is still seen as user@host. A value the masker
+// learns later (from an answer that arrived after the text) is masked in what is on screen already: the values learnt
+// in one go are gathered, and in the next microtask (still before paint) only the text and attributes that mention one
+// of them are masked again (presentation-rescan.ts), not the whole window.
 //
 // Not rewritten:
 // - Terminals (`data-presentation-skip`): each pane masks its output stream itself (terminal-session.ts).
@@ -15,6 +18,7 @@
 //   typed into).
 
 import { masker, type MaskKind, type Replacement } from "@/lib/presentation";
+import { LearnedBatch, mentionsAny } from "@/lib/presentation-rescan";
 
 const SKIP = "[data-presentation-skip]";
 /** Attributes whose text the user can see (a tooltip, a placeholder, the drop label's CSS `content`). */
@@ -31,7 +35,8 @@ const attributes = new WeakMap<Element, Map<string, Kept>>();
 
 let observer: MutationObserver | null = null;
 let stopListening: (() => void) | null = null;
-let rescanQueued = false;
+/** Values learnt since the last rescan of what is on screen. */
+const learnt = new LearnedBatch();
 
 /**
  * React sets an input's value as a property, which no event or mutation reports, so the inputs' `value` setter is
@@ -68,7 +73,9 @@ export function startDomMasking() {
     attributeFilter: TEXT_ATTRIBUTES,
   });
   // A value learnt from an answer that arrived later is masked in what is on screen already.
-  const unlisten = masker.onChange(queueRescan);
+  const unlisten = masker.onChange((learned) => {
+    if (learnt.add(learned)) queueMicrotask(rescan);
+  });
   document.addEventListener("input", onInput, true);
   stopListening = () => {
     unlisten();
@@ -86,13 +93,44 @@ export function stopDomMasking() {
   restoreTree(document.body);
 }
 
-function queueRescan() {
-  if (rescanQueued) return;
-  rescanQueued = true;
-  queueMicrotask(() => {
-    rescanQueued = false;
-    if (observer) maskTree(document.body);
+/** Masks again the text, attributes and inputs on screen that mention a value learnt since the last rescan. */
+function rescan() {
+  const mentions = mentionsAny(learnt.take());
+  if (!observer || !mentions) return;
+  const body = document.body;
+  // Text: each element holding text is looked at once, its runs of text nodes cut as `maskChildren` cuts them.
+  const looked = new Set<Element>();
+  const parents: Element[] = [];
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+    acceptNode: (node) => {
+      if (node instanceof Element) {
+        if (node.matches(SKIP)) return NodeFilter.FILTER_REJECT;
+        return NO_TEXT.has(node.tagName) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP;
+      }
+      return NodeFilter.FILTER_ACCEPT;
+    },
   });
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    const parent = node.parentElement;
+    if (!parent || looked.has(parent)) continue;
+    looked.add(parent);
+    if (textRuns(parent).some(mentions)) parents.push(parent);
+  }
+  for (const el of parents) maskChildren(el);
+  // Attributes that show text, and inputs whose value may now hold something to mask.
+  for (const el of body.querySelectorAll(TEXT_ATTRIBUTES.map((name) => `[${name}]`).join(","))) {
+    if (el.closest(SKIP)) continue;
+    for (const name of TEXT_ATTRIBUTES) {
+      const value = el.getAttribute(name);
+      if (value === null) continue;
+      const before = attributes.get(el)?.get(name);
+      if (mentions(before && value === before.shown ? before.real : value)) maskAttribute(el, name);
+    }
+  }
+  for (const el of body.querySelectorAll("input, textarea")) {
+    const value = (el as HTMLInputElement | HTMLTextAreaElement).value;
+    if (mentions(value) && !el.closest(SKIP)) checkInput(el);
+  }
 }
 
 function onInput(event: Event) {
@@ -154,6 +192,21 @@ function maskChildren(el: Element) {
     }
   }
   maskRun(run, kind);
+}
+
+/** The real text of each run of text nodes `maskChildren` masks as one (comments don't end a run; elements do). */
+function textRuns(el: Element): string[] {
+  const runs: string[] = [];
+  let run: string | null = null;
+  for (let node = el.firstChild; node; node = node.nextSibling) {
+    if (node.nodeType === Node.TEXT_NODE) run = (run ?? "") + realText(node as Text);
+    else if (node.nodeType !== Node.COMMENT_NODE && run !== null) {
+      runs.push(run);
+      run = null;
+    }
+  }
+  if (run !== null) runs.push(run);
+  return runs;
 }
 
 function realText(node: Text): string {

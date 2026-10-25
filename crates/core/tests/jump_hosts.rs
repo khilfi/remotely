@@ -48,6 +48,9 @@ async fn core() -> Core {
         first_retry: Duration::from_millis(50),
         max_retry: Duration::from_millis(200),
         max_attempts: 5,
+        slow_retry: Duration::from_millis(200),
+        slow_attempts: 0,
+        wake_spread: Duration::from_millis(50),
         keepalive_interval: None,
         keepalive_max: 2,
         agent: no_agent(),
@@ -398,6 +401,7 @@ async fn commands_and_compare_runs_go_through_the_chain() {
         sudo_password_id: None,
         trust_new_host_keys,
         timeout_secs: Some(30),
+        rollout: Default::default(),
     };
     let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, run(false)).await.unwrap() else {
         panic!("a read-only command on a Lab host runs at once");
@@ -472,6 +476,7 @@ async fn guest_metrics_are_read_through_the_chain() {
     ] {
         chain.db.set_file(path, text);
     }
+    core.metrics.guest().set_interval(Duration::ZERO);
     core.metrics.guest().set_tuning(GuestTuning {
         connect_timeout: Duration::from_secs(5),
         command_timeout: Duration::from_secs(5),

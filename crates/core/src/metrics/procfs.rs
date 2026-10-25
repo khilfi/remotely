@@ -8,13 +8,35 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-/// Everything in one exec, each part after a marker line. Plain commands and `;` only, so any
-/// `sh` (dash, bash, busybox ash) runs it the same way. `head -n 1` keeps /proc/stat to its first
-/// line (the rest can be long on many-CPU hosts), and `df -l` leaves out network mounts, which can
-/// hang. Reads only; changes nothing on the guest.
-pub const GUEST_SCRIPT: &str = "echo @@stat; head -n 1 /proc/stat; echo @@meminfo; cat /proc/meminfo; \
-echo @@loadavg; cat /proc/loadavg; echo @@uptime; cat /proc/uptime; echo @@diskstats; cat /proc/diskstats; \
-echo @@netdev; cat /proc/net/dev; echo @@df; df -k -P -l";
+/// The rounds between two `df`s: the /proc files a round reads, all with one `grep`, which starts each
+/// line with its file's name when it reads several (POSIX; GNU, BSD and busybox grep do). `-v` leaves
+/// out /proc/stat's `intr` and `softirq` lines, which run to thousands of numbers on many-CPU hosts.
+/// One process instead of six (`head` and five `cat`s), so a SIEM that logs every execve on a watched
+/// host sees two a round (the login shell and `grep`), not eight. Disk space changes slowly, so the
+/// mounts of the last `df` stand in ([`DF_EVERY`]).
+pub const GUEST_SCRIPT_WITHOUT_DF: &str =
+    "grep -v -e '^intr ' -e '^softirq ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/diskstats /proc/net/dev";
+
+/// Everything in one exec: the /proc files, then `df` after a marker line. Plain commands and `;`
+/// only, so any login shell runs it the same way. `df -l` leaves out network mounts, which can hang.
+/// Reads only; changes nothing on the guest.
+pub const GUEST_SCRIPT: &str = concat!(
+    "grep -v -e '^intr ' -e '^softirq ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/diskstats /proc/net/dev",
+    "; echo @@df; df -k -P -l"
+);
+
+/// How often a watched host runs `df` (that round's script is [`GUEST_SCRIPT`]).
+pub const DF_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Which section a line `grep` named after its file belongs to.
+const FILES: [(&str, &str); 6] = [
+    ("/proc/stat:", "stat"),
+    ("/proc/meminfo:", "meminfo"),
+    ("/proc/loadavg:", "loadavg"),
+    ("/proc/uptime:", "uptime"),
+    ("/proc/diskstats:", "diskstats"),
+    ("/proc/net/dev:", "netdev"),
+];
 
 /// Output kept per round and stream. A busy host's /proc/diskstats can run to a few hundred lines.
 pub const MAX_OUTPUT: usize = 256 * 1024;
@@ -88,8 +110,6 @@ pub struct GuestRates {
 /// be read leaves its fields empty; the rest still count.
 pub fn parse(output: &str) -> GuestReading {
     let mut reading = GuestReading::default();
-    let mut section = "";
-    let mut lines: Vec<&str> = Vec::new();
     let flush = |section: &str, lines: &[&str], reading: &mut GuestReading| match section {
         "stat" => reading.cpu = lines.iter().find_map(|l| parse_cpu(l)),
         "meminfo" => {
@@ -106,16 +126,33 @@ pub fn parse(output: &str) -> GuestReading {
         "df" => reading.mounts = parse_df(lines),
         _ => {}
     };
+    // Lines `grep` named after their file (before any marker), and lines after a marker (`@@df`;
+    // before 0.4.3 every part had one).
+    let mut sections: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut marked: Option<&str> = None;
     for line in output.lines() {
         if let Some(name) = line.trim().strip_prefix("@@") {
-            flush(section, &lines, &mut reading);
-            section = name;
-            lines.clear();
-        } else {
-            lines.push(line);
+            marked = Some(name);
+            continue;
+        }
+        let (section, line) = match marked {
+            Some(name) => (name, line),
+            None => match FILES
+                .iter()
+                .find_map(|(prefix, name)| line.strip_prefix(prefix).map(|rest| (*name, rest)))
+            {
+                Some(found) => found,
+                None => continue,
+            },
+        };
+        match sections.iter_mut().find(|(name, _)| *name == section) {
+            Some((_, lines)) => lines.push(line),
+            None => sections.push((section, vec![line])),
         }
     }
-    flush(section, &lines, &mut reading);
+    for (section, lines) in &sections {
+        flush(section, lines, &mut reading);
+    }
     reading
 }
 
@@ -356,18 +393,34 @@ pub mod samples {
     }
 
     impl Sample {
-        /// The whole output of [`super::GUEST_SCRIPT`].
+        /// The whole output of [`super::GUEST_SCRIPT`]: each file's lines after its name, as `grep`
+        /// prints them, then `df`.
         pub fn output(&self) -> String {
-            format!(
-                "@@stat\n{}@@meminfo\n{}@@loadavg\n{}@@uptime\n{}@@diskstats\n{}@@netdev\n{}@@df\n{}",
-                self.stat.lines().next().map(|l| format!("{l}\n")).unwrap_or_default(),
-                self.meminfo,
-                self.loadavg,
-                self.uptime,
-                self.diskstats,
-                self.netdev,
-                self.df
-            )
+            let mut out = self.proc_output();
+            out.push_str("@@df\n");
+            out.push_str(&self.df);
+            out
+        }
+
+        /// The output of [`super::GUEST_SCRIPT_WITHOUT_DF`].
+        pub fn proc_output(&self) -> String {
+            let files = [
+                ("/proc/stat", &self.stat),
+                ("/proc/meminfo", &self.meminfo),
+                ("/proc/loadavg", &self.loadavg),
+                ("/proc/uptime", &self.uptime),
+                ("/proc/diskstats", &self.diskstats),
+                ("/proc/net/dev", &self.netdev),
+            ];
+            let mut out = String::new();
+            for (path, text) in files {
+                for line in text.lines() {
+                    if !line.starts_with("intr ") && !line.starts_with("softirq ") {
+                        out.push_str(&format!("{path}:{line}\n"));
+                    }
+                }
+            }
+            out
         }
     }
 }
@@ -414,6 +467,40 @@ mod tests {
         assert_eq!(reading.mounts[0].total_bytes, 40_000_000 * 1024);
         assert_eq!(reading.mounts[0].filesystem, "/dev/sda2");
         assert!(!reading.is_empty());
+    }
+
+    #[test]
+    fn the_older_marked_output_still_reads() {
+        let s = samples::ubuntu(0);
+        let marked = format!(
+            "@@stat\n{}@@meminfo\n{}@@loadavg\n{}@@uptime\n{}@@diskstats\n{}@@netdev\n{}@@df\n{}",
+            s.stat, s.meminfo, s.loadavg, s.uptime, s.diskstats, s.netdev, s.df
+        );
+        assert_eq!(parse(&marked), parse(&s.output()));
+    }
+
+    #[test]
+    fn a_round_without_df_reads_everything_but_the_mounts() {
+        let reading = parse(&samples::ubuntu(0).proc_output());
+        assert!(reading.cpu.is_some() && reading.mem_total_bytes.is_some() && reading.load.is_some());
+        assert!(reading.disk_sectors.is_some() && reading.net_bytes.is_some());
+        assert!(reading.mounts.is_empty());
+    }
+
+    #[test]
+    fn a_round_runs_one_program_and_df_once_a_minute() {
+        // P8, MO-02: what a SIEM logging every execve sees each round, besides the login shell. It was
+        // seven: `head`, five `cat`s and `df`.
+        let programs = |script: &str| {
+            script
+                .split(';')
+                .filter_map(|command| command.split_whitespace().next())
+                .filter(|program| *program != "echo")
+                .count()
+        };
+        assert_eq!(programs(GUEST_SCRIPT_WITHOUT_DF), 1);
+        assert_eq!(programs(GUEST_SCRIPT), 2);
+        assert!(GUEST_SCRIPT.starts_with(GUEST_SCRIPT_WITHOUT_DF));
     }
 
     #[test]

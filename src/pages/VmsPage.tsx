@@ -11,9 +11,14 @@
 // snapshots, so the page stays fast with many VMs. They are read again after a job finishes, a setting changes or
 // Refresh.
 //
+// VM-01, P2: the list is refreshed (every VM read again: vmrun, VBoxManage) only while the page shows. A finished VM job
+// or a settings change while another page shows marks it stale, and it refreshes once when it shows again; the core
+// also runs one refresh at a time and joins requests that come meanwhile.
+//
 // Each running VM shows its share of this host's CPU and RAM (MO-01), read from the metrics collector's latest
-// 5-second round in memory: no extra polling. The sessions linked to each VM (QL-01, made automatically by IP address)
-// show in their own column, where they can be kept, changed or removed. Columns sort by a click on their header.
+// 5-second round in memory, while the page shows and the window is visible: no extra polling. The sessions linked to
+// each VM (QL-01, made automatically by IP address) show in their own column, where they can be kept, changed or
+// removed. Columns sort by a click on their header.
 //
 // VM-18: each VM's hypervisor (VMware or VirtualBox) has its own column after Name and a filter in VmFilterBar (the
 // `hypervisors` field of VmFilter, matched by the core like the others); VmDetailsPanel shows its own facts. A
@@ -97,8 +102,11 @@ import {
   type VmRecord,
   type VmSnapshots,
 } from "@/lib/api";
+import { useVisibility } from "@/hooks/use-poll";
 import { hypervisorName, vmLocation } from "@/lib/hypervisors";
+import { refreshDue } from "@/lib/job-events";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
+import { shouldPoll } from "@/lib/polling";
 import { cn } from "@/lib/utils";
 import {
   bulkSnapshotReasons,
@@ -120,7 +128,7 @@ export interface VmPageRequest {
 }
 
 interface Props {
-  /** True while the page is shown: the host shares (MO-01) follow the metrics rounds only then. */
+  /** True while the page is shown: the host shares (MO-01) follow the metrics rounds, and refreshes run, only then. */
   active: boolean;
   /** Shows the approval dialog for commands the policy engine says need one. */
   onSubmitted: (outcome: SubmitOutcome) => void;
@@ -128,7 +136,7 @@ interface Props {
   /** FD-01: the command palette on one VM's actions. */
   onActions: (vmxPath: string) => void;
   request: VmPageRequest | null;
-  /** Changes when the list should be read again: a job finished or a setting changed. */
+  /** Changes when the list should be read again: a VM job finished or a setting about where VMs are found changed. */
   refreshKey: number;
 }
 
@@ -299,12 +307,19 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
     api.snapshotLimits().then(setLimits, () => setLimits(null));
   }, []);
 
-  // Finds every VM on open, on Refresh, after a job finishes and after a setting changes.
+  // Finds every VM when the page first shows, on Refresh, after a VM job finishes and after a setting changes; a key
+  // that moved while the page was hidden refreshes once when it shows (refreshDue). A refresh still out when the page
+  // is hidden lands all the same; one for a key that moved on since is dropped.
+  const latestKey = useRef(key);
+  const refreshedFor = useRef<string | null>(null);
   useEffect(() => {
-    let stale = false;
+    latestKey.current = key;
+    if (!refreshDue(active, key, refreshedFor.current)) return;
+    refreshedFor.current = key;
+    const stale = () => latestKey.current !== key;
     api.vmRefresh().then(
       (report) => {
-        if (stale) return;
+        if (stale()) return;
         const news = linkNews(report.links);
         if (news) toast.info(news, { id: "vm-links" });
         setWarnings(report.warnings);
@@ -317,15 +332,12 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
         setListVersion((v) => v + 1);
       },
       (err) => {
-        if (stale) return;
+        if (stale()) return;
         setError({ code: errorCode(err), message: errorMessage(err) });
         setLoadedKey(key);
       },
     );
-    return () => {
-      stale = true;
-    };
-  }, [key]);
+  }, [key, active]);
 
   // The shown list: what the last refresh saved, narrowed by the filter in the core (VM-02).
   useEffect(() => {
@@ -371,9 +383,12 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
   }, [active, listVersion, linksVersion]);
   const linksChanged = useCallback(() => setLinksVersion((v) => v + 1), []);
 
-  // MO-01: each running VM's share of the host, after every metrics round while the page shows.
+  // MO-01: each running VM's share of the host, after every metrics round while the page shows and the window is
+  // visible (P8), and once when it shows again.
+  const visibility = useVisibility();
+  const readUsage = shouldPoll(active, visibility);
   useEffect(() => {
-    if (!active) return;
+    if (!readUsage) return;
     let stale = false;
     const read = () =>
       api.metricsHostUsage().then(
@@ -390,7 +405,7 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
       stale = true;
       void unlisten.then((stop) => stop());
     };
-  }, [active]);
+  }, [readUsage]);
 
   const usageOf = useCallback((vm: VmRecord) => usage.get(keyOf(vm.vmxPath)), [usage]);
   // The shown order. Selection and shift-click ranges follow it.

@@ -13,6 +13,8 @@ mod jobs;
 mod known_hosts;
 mod metrics;
 mod quick_connect;
+#[cfg(test)]
+mod retention_tests;
 mod sessions;
 mod ssh_keys;
 mod tags;
@@ -41,7 +43,7 @@ pub(crate) use favourites::{FavouriteFields, FavouriteRow};
 pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
-pub use jobs::{JobSummary, JobTargetRecord, TargetResult};
+pub use jobs::{JobSummary, JobTargetRecord, PurgedBodies, TargetResult};
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
@@ -84,10 +86,11 @@ impl Store {
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
-            // SS-04: a deleted or rewritten row (an old wrapped key, a secret's old ciphertext) is overwritten
-            // on disk, not left in a free page for a copy of the file to give back.
-            .pragma("secure_delete", "ON")
-            .busy_timeout(Duration::from_secs(5));
+            .busy_timeout(Duration::from_secs(5))
+            // SS-04, BX-02: a deleted or rewritten row (an old wrapped key or ciphertext, job outputs and scripts the
+            // retention purge removes) is overwritten on disk, not left in a free page for a copy of the file to give
+            // back.
+            .pragma("secure_delete", "ON");
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(options)

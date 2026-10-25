@@ -94,7 +94,7 @@ async fn a_journal_that_fails_mid_job_stops_no_target_and_the_job_still_ends_aud
         loop {
             match events.recv().await.unwrap() {
                 JobEvent::TargetFinished { job_id, .. } if job_id == job => finished_targets += 1,
-                JobEvent::Finished { job_id, status } if job_id == job => return status,
+                JobEvent::Finished { job_id, status, .. } if job_id == job => return status,
                 _ => {}
             }
         }

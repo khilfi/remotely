@@ -10,6 +10,7 @@
 //! core's allow-list of documentation sites takes its address (`snippets::manual::checked`).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use remotely_core::snippets::manual;
 use remotely_core::snippets::{CommandInfo, Favourite, FavouriteInput, LibraryEntry};
@@ -68,9 +69,14 @@ pub async fn favourites_reorder(
 }
 
 /// BX-08: the built-in commands, each with what the policy engine makes of it under the current rules.
+/// Classifying some 600 commands takes a moment, so it runs on a blocking thread, never on the
+/// window's thread (P10).
 #[tauri::command]
-pub fn command_library(state: State<'_, AppState>) -> Vec<LibraryEntry> {
-    state.core.snippets.library()
+pub async fn command_library(state: State<'_, AppState>) -> IpcResult<Vec<LibraryEntry>> {
+    let core = Arc::clone(&state.core);
+    tokio::task::spawn_blocking(move || core.snippets.library())
+        .await
+        .map_err(|err| IpcError::new("internal", format!("The command library could not be read: {err}")))
 }
 
 /// BX-08: a command's `{{variables}}` and what the policy engine makes of it, while it is typed.

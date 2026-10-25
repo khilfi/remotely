@@ -12,7 +12,7 @@ The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work 
 - Windows 10/11 x64 with VMware Workstation Pro 17 or later, and from 0.4.0 Oracle VirtualBox (`docs/plan-0.4.md`, VM-18). No Linux host support. macOS on Apple Silicon is a separate track after 0.4.0 with its own plan; until then nothing is built for it.
 - RDP means launching `mstsc.exe` with a generated .rdp file (v3).
 - Ansible: inventory export only (v2). The app never runs playbooks.
-- **The repository is public** (the owner's decision, confirmed on 22 Oct 2026; it was private while field-tested from 0.2.0 to 0.4.0), so the "Public repository rules" below apply to everything, including history. Code and releases live in one GitHub repo, and installed apps auto-update from its GitHub Releases (FD-14). The updater still reads them with a read-only token in each app's vault (`docs/post-mvp-plan.md`, P1), built while the repo was private, until it is changed to read public releases without one.
+- **The repository is public** (the owner's decision, confirmed on 22 Oct 2026; it was private while field-tested from 0.2.0 to 0.4.0), so the "Public repository rules" below apply to everything, including history. Code and releases live in one GitHub repo, and installed apps auto-update from its GitHub Releases (FD-14). The updater reads the public releases without a token; the read-only token in each app's vault (`docs/post-mvp-plan.md`, P1, built while the repo was private) is optional.
 - The MVP (32 requirements: VM-01 to VM-07, SS-01 to SS-06, BX-01 to BX-07, AP-01 to AP-06, MO-01 to MO-04, FD-01 and FD-14) shipped in 0.2.0. Post-MVP scope is exactly what `docs/post-mvp-plan.md` and `docs/plan-0.4.md` list. Do not build other v2/v3 items unless asked; if a change would add or drop scope, stop and say so.
 
 ## Public repository rules (no credentials, PII or secrets)
@@ -36,9 +36,9 @@ Everything committed here is public, and git history is forever.
 - CI minutes: the repo is public, so Actions runs on standard GitHub-hosted runners don't use the owner's minutes. Still keep CI lean: a `ci.yml` run takes about 6 to 8 minutes of runner time and a release about 14, so push when a change is ready rather than after every small commit, and keep `paths-ignore` working (README "CI minutes"). If the repo ever goes private again, runs bill against the 2,000-minute GitHub Free allowance and Windows minutes count double.
 - `.github/workflows/release.yml` runs on `v*` tags in two jobs (C1). **build** (`windows-latest`, no secrets, read-only token): the tagged commit must be on main and match the three version files; it builds the NSIS installer with `--locked`, the pinned toolchains and no cache, and uploads it as a workflow artifact. **publish** (`ubuntu-latest`, Environment `release`: the owner approves each run, `v*` tags only): signs the installer with `tauri signer sign --app-version`, checks the signature with `scripts/verify-update-signature.mjs --version`, then `scripts/publish-release.mjs` creates the **draft** release with the installer, its `.sig` and `latest.json` (tauri-action's format, API asset URLs), checking `latest.json` and fetching the installer back before it uploads it, and deleting the draft if anything fails (C6). The tag message is the release notes (written to a file, never `$GITHUB_OUTPUT`); the release page adds the installer's SHA-256 and how to check it (`releaseBody`; the installer isn't Authenticode-signed, by the owner's choice for now, so SmartScreen warns on a manual install: README "Installing"), while `latest.json`'s notes, which the update banner shows, stay the tag message alone. README "Release settings on GitHub" has the owner's settings (Environment, secrets, tag ruleset) and "Signing key compromise or loss" the runbook. The user publishes the draft after a smoke test; installed apps only see published releases.
 - `tauri.conf.json`: `bundle.createUpdaterArtifacts: false` (the publish job signs, so no build needs the key); `plugins.updater.pubkey` holds the public key; `plugins.updater.requireSignedVersion: true` (C3: the plugin refuses a signature whose trusted comment names another version than `latest.json`); `plugins.updater.endpoints` is `["https://github.com/khilfi/remotely/releases/latest/download/latest.json"]`, which names the repository the app updates from (the app doesn't fetch that URL, see the next point); `plugins.updater.windows.installMode: "passive"`.
-- Update token (FD-14, `docs/post-mvp-plan.md` P1, built while the repo was private; the releases are public now, but the updater still requires it): update checks need the **GitHub update token**, a fine-grained token for this repository only with Contents: Read-only and an expiry, which the owner enters in Settings → Updates on each machine (README "GitHub update token" says how to create, enter and replace it). It is a vault secret (`password` kind, label "GitHub update token"; its id is the setting `updates.tokenId`, the expiry GitHub reports is `updates.tokenExpiresOn`), write-only in the UI with Test, Replace and Remove. The updater (`src-tauri/src/updater.rs`) finds the latest release through the GitHub API with it (`crates/core/src/adapters/github.rs`), then has `tauri-plugin-updater` fetch `latest.json` and the installer from their API asset URLs with `Authorization` and `Accept: application/octet-stream`; GitHub redirects to its storage, and reqwest drops the token on that redirect. The release workflow writes API asset URLs into `latest.json`; any other URL is mapped to the release's file of the same name, or refused, so the token only goes to the API. Signatures are verified against the public key exactly as before. Before an update is offered, `adapters::updater::check_signed_release` (C3) checks the signature's trusted comment against the public key and requires `file:<productName>_<version>_x64-setup.exe` and `version:<version>` for the version `latest.json` announces, so an old signed installer can't come back as a newer version. Without a token, or with the vault locked, a check makes no network call and says why (`updates::UpdateCheck`). The token never reaches logs, errors, the UI state, the audit log or exports. Tests use `fakes::github_server::FakeGithub` (API and storage on 127.0.0.1) and `UpdateSigner` (a throwaway minisign key); never a real token. Copies on 0.2.0 or older can't update this way and need one manual install of 0.2.1 or later.
+- Update checks and the update token (FD-14; the token is `docs/post-mvp-plan.md` P1, built while the repo was private, and **optional while it is public**): the updater (`src-tauri/src/updater.rs`) finds the latest release through the GitHub API (`crates/core/src/adapters/github.rs`), then has `tauri-plugin-updater` fetch `latest.json` and the installer. **Without a token** (none in the vault, or the vault locked) no request carries `Authorization`: the API call goes without one, and the files come from the release's public download links (`browser_download_url` on github.com, which redirect to GitHub's storage; `latest.json`'s API asset URLs are mapped to the same file's link, anything else is refused). GitHub allows 60 API calls an hour per internet address without a token (one per check; the downloads don't count). A 403 or 429 for a used-up limit backs off until GitHub's reset (`retry-after`, else `x-ratelimit-reset`; at least a minute, at most a day; `github::rate_limited_until`): until then a check makes no call and says `UpdateCheck::RateLimited`, and the UI checks once more after the reset. A 404 without a token means the repo went private again: `UpdateCheck::TokenNeeded`, or `VaultLocked` when the vault holds a token but is locked. **With the GitHub update token** (a fine-grained token for this repository only with Contents: Read-only and an expiry, entered in Settings → Updates; README "GitHub update token" says when it's worth having and how to create, enter and replace it), every check and install uses it as while the repo was private: the API with `Authorization`, then `latest.json` and the installer from their API asset URLs with `Accept: application/octet-stream`; GitHub redirects to its storage, and reqwest drops the token on that redirect. Any other URL is mapped to the release's file of the same name, or refused, so the token only goes to the API, never to github.com; an install maps the installer's URL again for its own way (the vault may have locked or unlocked since the check). A refused token or one without access is an error that says to replace or remove it; it doesn't fall back to no token. The token is a vault secret (`password` kind, label "GitHub update token"; its id is the setting `updates.tokenId`, the expiry GitHub reports is `updates.tokenExpiresOn`), write-only in the UI with Test, Replace and Remove. The release workflow keeps writing API asset URLs into `latest.json`: copies from 0.2.1 to 0.4.2 require a token and fetch through them. Signatures are verified against the public key exactly as before, either way. Before an update is offered, `adapters::updater::check_signed_release` (C3) checks the signature's trusted comment against the public key and requires `file:<productName>_<version>_x64-setup.exe` and `version:<version>` for the version `latest.json` announces, so an old signed installer can't come back as a newer version. The token never reaches logs, errors, the UI state, the audit log or exports. Tests use `fakes::github_server::FakeGithub` (API, github.com and storage on 127.0.0.1; private until `set_public`; both rate limits) and `UpdateSigner` (a throwaway minisign key); never a real token. Copies on 0.2.0 or older can't update this way and need one manual install of 0.2.1 or later.
 - Windows installer: NSIS only (`bundle.targets: ["nsis"]`), installed per user (`bundle.windows.nsis.installMode: "currentUser"`), so installing and auto-updating never need admin rights. Decided before v0.1.0; switching installer type after release would strand existing installs.
-- In the app (FD-14): check at start and every 24 hours, and show the new version and its release notes. Installing is a Medium-tier command through the command bus, and it waits until no job is running. A setting turns update checks off for air-gapped sites.
+- In the app (FD-14): check at start and every 24 hours (and once more after a used-up GitHub limit resets), and show the new version and its release notes. Installing is a Medium-tier command through the command bus, and it waits until no job is running. A setting turns update checks off for air-gapped sites.
 
 ## Architecture rules (non-negotiable)
 
@@ -74,29 +74,50 @@ crates/core/          remotely-core: all app logic
                       their defaults at start, instead of stopping the app
     policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit;
                       AP-01 RUNS_ANYTHING: shells, interpreters and command runners can't be read-only entries
+                      SS-07 a loopback SOCKS tunnel is at least Medium while other users are signed in to this PC
+                      (set_other_users, from HostCounters::other_users_signed_in: WTSEnumerateSessionsW)
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     jobs.rs           QL-15: a failing journal or audit write is logged and the job goes on to its real result
-                      (job_finished always tried); the update install races the job's cancel token
+                      (job_finished always tried); the update install races the job's cancel token; BX-02 when_idle:
+                      compaction holds new jobs back and runs only while none is open. H9 `Rollout` of
+                      a RemoteExec: canary (first host alone, then JobEvent::CanaryWaiting until CommandBus::go_on,
+                      CANARY_WAIT 15 min, audited canary_go_on) and stop_after_failures (no new hosts; running ones
+                      finish; skipped); TargetStatus::Unknown for CommandTimedOut and in-flight cancels (retry_failed
+                      leaves them out unless include_unknown, and refuses redacted or purged runs); each remote target
+                      journals peer_ip and the accepted host_key (BulkVerifier; migration 0018), listed at job_finished
+    retention.rs      BX-02 how long the job journal keeps outputs and command text (Settings: 30 days, 90 by default,
+                      1 year, forever; `jobs.retention`): the purge at start and daily (JournalRetention::run, wall
+                      clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
+                      purge; the read-only lock refuses the setting and Purge now, never the schedule
+    save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
+                      output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
     adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec;
-                      keyboard-interactive answers are SecretStrings until russh's respond call; every path
-                      through the SS-07 jump host chain over
+                      keyboard-interactive answers are SecretStrings until russh's respond call; A9 at most 16 login
+                      banners and 64 KB per connection, then one note; every path through the SS-07 jump host
+                      chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
-                      terminal's own connection, behind the RemoteFiles trait; remote/forward.rs SS-07 port forwards on
+                      terminal's own connection, behind the RemoteFiles trait (H8: a replace writes a hidden temp
+                      file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; A9
+                      a second RawSftpSession for capped listings, MAX_LISTING); remote/forward.rs SS-07 port forwards on
                       it, local, remote and SOCKS, behind RemoteForwards; remote/socks.rs SOCKS 4/4a/5),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
                       VBoxHeadless.exe; MO-15 `paging()`), paging.rs (MO-15 this PC's paging files and commit charge:
                       GlobalMemoryStatusEx and NtQuerySystemInformation's page file list), vm_hardware.rs (MO-13 a VM's
                       hardware from its .vmx or showvminfo; VMDK descriptor and sparse header, VDI, VHD and qcow2
-                      headers for provisioned sizes; size on disk down a snapshot chain), updater.rs, github.rs (FD-14
-                      GitHub Releases API with the
-                      update token), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
+                      headers for provisioned sizes; size on disk down a snapshot chain; A3 a disk, extent or parent
+                      whose resolved path is on a share or a device path is never opened, so a .vmx kept on a share
+                      shows its disks as not read; A9 the .vmx up to 4 MB, a text descriptor up to 1 MB, read whole or
+                      refused; VmFiles: LocalFiles, or memory in tests), updater.rs, github.rs (FD-14
+                      GitHub Releases API without a token or with the optional update token, public download links,
+                      rate-limit backoff), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
                       the docker and podman CLIs over a kept SSH connection's exec channels, with sudo from the vault
-                      (ExecSession::run_sudo) or NOPASSWD, and docker.exe on this PC, found like vmrun; parse.rs both
+                      (ExecSession::run_sudo) or NOPASSWD, and docker.exe on this PC, found like vmrun, its output
+                      streamed through exec_output's OutputCollector (A9: capped, never buffered whole); parse.rs both
                       CLIs' JSON field by field (env values never leave it; a command and entrypoint go through
                       export::redact_secrets, parse::command_line); names.rs checked ids, volume names and
                       image references, every word shell-quoted on hosts)
@@ -111,19 +132,29 @@ crates/core/          remotely-core: all app logic
                       agent, refused sudo, changed host key or missing secret parks the session until its login key
                       changes, credentials_changed (vault unlock, secret add/replace/delete, host key trust/remove) or
                       Retry (Core::retry_background_logins); at most 10 logins per host per hour, jump hosts included
-    updates.rs        FD-14 update checks and the GitHub update token in the vault
+    updates.rs        FD-14 update checks (UpdateCheck: without a token unless the vault gives one) and the optional
+                      GitHub update token in the vault
     inventory.rs      VM-01 Workstation's and (VM-18) VirtualBox's VMs; a VirtualBox VM is kept when VirtualBox can't
-                      be asked
-    capacity.rs       VM-07 capacity check before power-on
+                      be asked; P2 refreshes single-flight and coalesced (RefreshGate: requests while one runs share
+                      the next run)
+    capacity.rs       VM-07 capacity check before power-on; VM-02 `bridged`: starting 2+ VMs warns about bridged
+                      adapters plugged in at power-on (one confirm)
     snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
                       names
     impact.rs         AP-02 impact preview for the approval dialog
-    export.rs         AP-05 audit log CSV export and secret redaction
+    export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
+                      Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
+                      formula (=, +, -, @, their full-width forms, tab or CR, also after leading whitespace), quoted
+                      for `,` `"` `;` tab and line breaks
+    untrusted.rs      A3, A8, A9 hostile input: path_refusal (shares `\\x` `//x`, `\\?\` `\\.\` `\??\`, DOS device
+                      names; by text alone, never the file system), read_capped (a file whole up to a cap, or
+                      TooLarge; MAX_VM_CONFIG_BYTES 4 MB), is_format_char (Unicode 16.0's Cf table), is_device_name
     metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
                       and this PC's RAM and paging files per round), guest.rs (MO-02 SSH polling, kept connections,
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
-                      GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old),
-                      procfs.rs (/proc and df parsers)
+                      GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
+                      POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
+                      minute (DF_EVERY), and their parsers); HostProcessSource reads no inventory with no VM process
     host_details/     MO-13, MO-14 (reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
                       (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
                       channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the
@@ -138,8 +169,13 @@ crates/core/          remotely-core: all app logic
                       or label) for the Terminal page
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
-    vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
-    terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
+    vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited);
+                      P3 a name looked up once at a time and cached, lookups done by the deadline kept and the rest
+                      finished in the background, sessions behind a jump host never looked up; A4 never linked
+                      behind a jump host or across environment labels (not_linkable)
+    terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:
+                      R9 TerminalTuning::retry_delay, 10 fast tries then 12 slow ones, each spread at random;
+                      Terminals::wake_reconnects on a resume or a new address, from the shell's wake.rs,
                       QL-03 host name and IP, QL-06 a vault password typed at a prompt (a new place, or with force,
                       asks for the vault password; a jump host's login prompt is that hop's place; forget_logins on
                       lock); SS-01 the startup command typed
@@ -151,7 +187,8 @@ crates/core/          remotely-core: all app logic
                       output (secrets scrubbed); QL-05 selections copied (copy-on-select, Ctrl+C, Ctrl+Shift+C,
                       Ctrl+Insert) are scrubbed by Terminals::scrub_for_copy (a closed terminal's are refused);
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
-                      detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
+                      detection (prompt back, or quiet); password prompts (QL-06) and, wider, secret prompts (SS-10:
+                      passwords, passphrases, PINs, one-time codes and tokens, in English and translated); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
                       a line buffer, Enter and every other key that runs a line in bash or zsh held (RunKey: Ctrl+O,
                       Esc then Enter...; a lone Esc waits for its next key; the table of bindings is in the file) and
                       the line rated on the bus (Command::TerminalLine; the bus and the job runner send only the held
@@ -171,7 +208,9 @@ crates/core/          remotely-core: all app logic
                       RemoteFiles::user) and who the shell may run as (the hook's report, a prompt that stopped
                       reporting after su or sudo -i, a prompt naming a user); files.rs SS-08 the "Files here" listing
                       (QL-09: a folder that can't be opened comes back with its path and the reason; typed paths go on
-                      from the folder shown; Back through the folders that opened), downloads (audited reads), the
+                      from the folder shown; Back through the folders that opened), downloads (audited reads; A8 Cf
+                      characters such as U+202E in a name become `_`, and each file gets a Mark of the Web, its
+                      `Zone.Identifier` stream with ZoneId=3 and no host, or a note when its drive has no streams), the
                       upload job's work (Command::FileUpload on the bus), the transfers list with cancel and retry, and
                       FileTransfers (Core.files: staged files, uploads, retries);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
@@ -189,7 +228,8 @@ crates/core/          remotely-core: all app logic
                       and TrackedRemote, the remote adapter every service uses, noting kept connections: dashboard,
                       Containers page, host details); SS-07 the first jump host's for a session behind one, never the
                       session itself
-    bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters), BX-03 grouped results and diff,
+    bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters; A4, H11 a VM only through a
+                      chosen or confirmed link, else ResolvedTargets::vms_unconfirmed), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
@@ -197,14 +237,18 @@ crates/core/          remotely-core: all app logic
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
-                      authorized_keys push script (the push itself is Command::PushSshKey on the bus)
+                      authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
+                      and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
                       format version; new exports use file::KDF, 256 MiB and 3 passes, and a file opens with the
                       parameters in its header, so older 64 MiB files still import), preview with conflicts (skip,
                       replace, keep both), commit; audited; an export refuses the vault password as its passphrase
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
-                      ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample)
+                      ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
+                      Include on a share or a device path is never opened (a note or warning; the key or include left
+                      out); A9 the source up to 10 MB, included files 1 MB each and 4 MB and 256 files in all
+                      (openssh.rs IncludeFiles: DiskIncludes, or memory in tests)
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI (opt-in for new vaults; turn_off_windows_login
                       needs no password), LocalVault (idle lock from note_activity only, never from get; a password
                       change makes a new data key and reseals every item in one transaction; secure_delete and a WAL
@@ -218,8 +262,12 @@ crates/core/          remotely-core: all app logic
                       zxcvbn-style score of at least 3 of 4: common passwords and words, repeats, sequences,
                       keyboard rows, years and dates; hints never quote it), passphrase.rs (Generate: six words from
                       a built-in list of 1327, the OS CSPRNG)
-    store/
-    fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18
+    store/            jobs.rs: the journal stores Command::for_journal (scripts and lines redacted), command_type
+                      (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
+                      purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
+                      and verifies and exports with row streams
+    fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
+                      vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
                       subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
@@ -227,7 +275,8 @@ crates/core/          remotely-core: all app logic
                       ssh_server/docker.rs CT-01 its `docker` and `podman` programs (each CLI's JSON from a fixture);
                       ssh_server/host.rs MO-13, MO-14 a HostFixture (ubuntu, rhel) its exec shell describes itself with
     fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
-    fakes/github_server.rs  FD-14 fake GitHub API and release storage on 127.0.0.1, throwaway update-signing key
+    fakes/github_server.rs  FD-14 fake GitHub API, github.com download links and release storage on 127.0.0.1
+                      (private or public, rate limits), throwaway update-signing key
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation); opt-in
@@ -246,12 +295,15 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       crash reports) and data_dirs.rs (the data folder, known before Tauri starts); lib.rs runs one
                       instance (release builds), closes what a reloaded page had open (on_page_load), and turns
                       WebView2's browser keys off in release builds; updater.rs timeouts and core.shutdown() before
-                      the installer exits the app
+                      the installer exits the app; SS-03 (R9) wake.rs: Windows resume
+                      (PowerRegisterSuspendResumeNotification) and new-address (NotifyUnicastIpAddressChange)
+                      notifications wake terminals waiting to reconnect; P10 heavy commands (terminal output scrub,
+                      the command library) run on spawn_blocking, never on the window's thread
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
                       (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both), MultiExec
-                      bar, WhyDisabled for QL-08,
+                      bar, WhyDisabled for QL-08, PasteConfirmDialog for QL-05,
                       FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
@@ -263,16 +315,29 @@ src/                  React + TypeScript UI
                       presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
-                      ContainersPage at Ctrl+3)
+                      ContainersPage at Ctrl+3). P6: App memoises every page and passes stable callbacks, and renders
+                      only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
+                      shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
   hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
-                      each timed from when the last one finished; useVisibility), use-password-strength.ts;
-                      use-mobile.ts is shadcn's
+                      each timed from when the last one finished; useVisibility); use-transfers.ts (SS-08, P6 the
+                      transfers store through useSyncExternalStore); use-debounced.ts (Compare reloads once per burst
+                      of job events; Activity coalesces its own asks, at most one read a second);
+                      use-password-strength.ts; use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), reauth.ts and reauth-prompt.ts (SS-04, AP-06: on `reauth_required` ask for the vault
                       password in ReauthDialog and send the request again; the vault idle lock's activity ping),
                       clipboard-copy.ts (QL-05 terminal copies one at a time, the last selection last), theme.ts,
-                      utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
-                      and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
+                      utils.ts, terminal-session.ts (SS-03 a pane: its xterm.js, its connection, every paste
+                      through paste.ts, every selection copy scrubbed by the core, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
+                      multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
+                      terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
+                      xterm's internal onUserInput, checked by a test), multiexec.ts, recordings.ts (QL-12 view texts,
+                      QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
+                      transfers-store.ts (SS-08, P6 every transfer outside React state), job-events.ts (P6, VM-01
+                      which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest
+                      polled less often keeps its line on a VM's charts), terminal-render.ts (SS-03 WebGL for panes on
+                      screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
+                      1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
@@ -280,10 +345,14 @@ src/                  React + TypeScript UI
                       delay, longer after failures), host-details.ts
                       (MO-13, MO-14 summaries, wording and the commands offered to copy),
                       ui-errors.ts (QL-15 a crashed page's text, the browser keys a release build ignores),
+                      debounce.ts (when a reload after job events runs), retention.ts (BX-02 the retention choices
+                      and a purge's summary for Settings' DataRetentionCard),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
-                      addresses as `mac-N`),
+                      addresses as `mac-N`), rollout.ts (H9 canary, stop after failures, retry choices),
+                      key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
-                      `data-presentation-skip` for terminals), presentation-state.ts; pure helpers with
+                      `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
+                      mentions it, presentation-rescan.ts), presentation-state.ts; pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```
@@ -358,7 +427,9 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   checks VMware Tools), `savestate` (suspend; needs nothing from the guest), `pause`, `resume`. `controlvm` on a VM that
   is not running fails ("is not currently running"). Each call has vmrun's time limit for its operation
   (`adapters::vmware::power_timeout`); job cancel kills VBoxManage, but VirtualBox may still finish.
-- Guest properties (`guestproperty get <uuid> <name>` prints `Value: <value>` or `No value set!`):
+- Guest properties: the app reads them all with one `guestproperty enumerate <uuid>` (VirtualBox 7 prints
+  `<name> = '<value>' @ <time> (<flags>)` a line, the name padded; before 7.0 `Name: <name>, value: <value>, timestamp:
+  <ns>, flags: <flags>`; `adapters::virtualbox::parse_guest_properties` reads both). Used:
   `/VirtualBox/GuestInfo/Net/Count`, `/Net/N/V4/IP`, `/Net/N/MAC` (as in `macaddressN`), `/OS/Product` ("Linux" for any
   distribution, "Windows 11"), `/OS/Release`. A NAT adapter's guest address (10.0.2.15 by default, in every VM) can't be
   reached from the host, so with a NAT and a host-only or bridged adapter the app takes the other one's address, matched
@@ -377,14 +448,22 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
+- Never let a `\\server\share`, `//server/share`, `\\?\` or `\\.\` path reach the real file system in a test, not
+  even a made-up one (Windows would send the sign-in to it). Tests of refused paths (A3) go through in-memory fakes
+  that fail when asked for one (`import::openssh::IncludeFiles`, `adapters::vm_hardware::VmFiles`) or an injected
+  check (`import::importer::key_file`); an end-to-end test may use a DOS device name such as `NUL` instead.
 - Tests against real Workstation or VirtualBox are opt-in: they run only when `REMOTELY_IT=1` is set, read only, and only touch VMs whose display name starts with `it-`.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
-  (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, and runs exec requests in a toy
-  shell with sudo modes, /proc files and fake programs such as `df`; its interactive shell has `sudo`, Ctrl+C, a
+  (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, or refuse new ones for a while
+  (`set_refusing`, R9 reconnect tests), and runs exec requests in a toy shell with sudo modes, /proc files, a `grep`
+  that reads several files the way the guest metrics script does, and fake programs such as `df`; its interactive
+  shell has `sudo`, Ctrl+C, a
   full-screen `top`, and the exec shell's `hostname`, `uptime`, `cat`, `seq`... and fake programs, slowed by
   `with_exec_delay`), with `common::Setup::with_ssh()` for the real russh adapter. MultiExec tests open several of
   them (`tests/multiexec.rs`, QL-12 recording included). SS-08: it serves SFTP from a temp folder deleted with it
-  (`with_sftp_file`, `with_protected`, `with_unreadable`, `without_sftp`), and with `with_login_shell("bash")` its
+  (`with_sftp_file`, `with_protected`, `with_unreadable`, `without_sftp`; H8 renames like OpenSSH's, with
+  `posix-rename` unless `without_posix_rename`, modes and owners from `with_sftp_owner`; A9 `with_endless_folder`),
+  its exec shell knows `rm`, `mv` and `grep -v` (SS-09 key removal), and with `with_login_shell("bash")` its
   shell answers the folder hook (OSC 7 and the QL-09 user report) and knows `cd`, `pwd` and `su [-] [user]` (a shell
   without the hook, as a real switch); `fakes::FakeFiles` is the in-memory version for the fake remote adapter
   (`tests/files.rs`). Uploads
@@ -448,4 +527,7 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   notifications) goes through `maskedOutside`. A new IPC field holding a host, IP or user should use one of the names
   `learnFields` knows (`host`, `hostname`, `ip`, `username`, ...). A new state-changing core method that skips the bus
   starts with `store.read_only().check(Change::…)`.
+- A new path that saves a file the user chose calls `save_guard::refuse_repository` (or `_folder`) first, so customer
+  data never lands in a Git working tree. Free text kept in the journal or the audit log goes through
+  `export::redact_secrets` (the audit store and `Command::for_journal` already do it).
 - Commit messages start with the requirement ID where one applies, e.g. `VM-02: bulk suspend and resume`.

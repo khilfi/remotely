@@ -14,6 +14,7 @@ mod multiexec;
 mod terminal;
 mod tunnels;
 pub mod updater;
+mod wake;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -343,6 +344,13 @@ fn forward_events(app: &App, core: &Arc<Core>) {
             }
         });
 
+        // SS-03 (R9): Windows resuming or a new network address wakes terminals waiting to reconnect.
+        wake::watch(Arc::clone(core));
+
+        // BX-02: the job journal's retention purge, at start and daily.
+        let retention = Arc::clone(&core.retention);
+        tauri::async_runtime::spawn(async move { retention.run(CancellationToken::new()).await });
+
         // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
         let reachability = Arc::clone(&core.reachability);
         tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -392,6 +400,9 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::policy_set_rules,
         ipc::audit_recent,
         ipc::audit_verify,
+        ipc::journal_retention,
+        ipc::journal_retention_set,
+        ipc::journal_purge_now,
         ipc::audit_export_csv,
         ipc::settings_get,
         ipc::settings_set_vmrun_path,
@@ -400,6 +411,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::settings_set_power_on_limit,
         ipc::settings_set_shutdown_wait,
         ipc::settings_set_update_checks,
+        ipc::settings_set_guest_poll,
         ipc::settings_set_bulk_parallel,
         ipc::presentation_get,
         ipc::presentation_set,
@@ -460,6 +472,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::bulk_host_output,
         ipc::bulk_diff,
         ipc::bulk_retry_failed,
+        ipc::bulk_go_on,
         ipc::bulk_export,
         ipc::command_preview,
         ipc::metrics_overview,

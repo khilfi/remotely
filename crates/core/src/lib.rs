@@ -33,6 +33,8 @@
 //!     open connection and backing off from hosts that are down ──► adapters::network
 //!   bulk (BX-01, BX-03, BX-05): targets, grouped results, diffs and exports of remote command runs
 //!     (the Terminal page's Compare output)
+//!   retention (BX-02): the job journal keeps outputs and command text for as long as Settings says, then
+//!     a daily purge removes them; save_guard: no save path writes into a Git working tree
 //!   containers (CT-01, CT-02): Docker and Podman on marked sessions, Docker Desktop on this PC
 //!     ──► adapters::containers (their CLIs, over adapters::remote or on this PC); reads skip the bus,
 //!     changes are commands on it that the job runner carries out there
@@ -64,6 +66,8 @@ pub mod metrics;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
+pub mod retention;
+pub mod save_guard;
 pub mod sessions;
 pub mod settings;
 pub mod snapshots;
@@ -72,6 +76,7 @@ pub mod ssh_keys;
 pub mod store;
 pub mod terminal;
 pub mod transfer;
+pub mod untrusted;
 pub mod updates;
 pub mod vault;
 pub mod vm_links;
@@ -106,6 +111,7 @@ use metrics::{GuestSource, Metrics, MetricsParts};
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
+use retention::JournalRetention;
 use serde::Serialize;
 use sessions::SessionLibrary;
 use snapshots::SnapshotReader;
@@ -221,6 +227,9 @@ pub struct Core {
     pub reachability: Arc<ReachabilityChecker>,
     /// BX-01, BX-03, BX-05: Compare targets, results, diffs and exports. Running is the bus.
     pub bulk: BulkRuns,
+    /// BX-02: how long the job journal keeps outputs and command text, and the purge. The shell starts its
+    /// schedule with [`JournalRetention::run`].
+    pub retention: Arc<JournalRetention>,
     /// CT-01, CT-02: container hosts, their containers, images, volumes and networks. Reads only;
     /// changes go through [`Core::bus`].
     pub containers: Containers,
@@ -381,6 +390,11 @@ impl Core {
             login_guard.clone(),
         );
         guest.set_specs(specs.clone());
+        if let Some(secs) = store.get_setting::<u64>(&ctx, metrics::guest::POLL_KEY).await? {
+            if metrics::guest::POLL_CHOICES.contains(&secs) {
+                guest.set_interval(Duration::from_secs(secs));
+            }
+        }
         let metrics = Arc::new(Metrics::new(MetricsParts {
             store: store.clone(),
             ctx,
@@ -439,6 +453,7 @@ impl Core {
         let snippets = Snippets::new(store.clone(), bus.policy());
         let multiexec = MultiExec::new(ctx, terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
+        let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
         let core = Self {
             ctx,
@@ -459,6 +474,7 @@ impl Core {
                 .with_policy(bus.policy())
                 .with_bindings(bindings.clone()),
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
+            retention,
             containers,
             terminals,
             multiexec,
@@ -760,6 +776,37 @@ impl Core {
             .await
     }
 
+    /// MO-02, P8: seconds between two polls of a host the dashboard watches (default 5).
+    pub fn guest_poll_secs(&self) -> u64 {
+        self.metrics.guest().interval().as_secs()
+    }
+
+    /// MO-02, P8: one of [`metrics::guest::POLL_CHOICES`] (5, 15, 30 or 60 s). Applies from each host's
+    /// next poll on. Audited.
+    pub async fn set_guest_poll_secs(&self, secs: u64) -> Result<()> {
+        self.store.read_only().check(Change::Settings)?;
+        let choices = metrics::guest::POLL_CHOICES;
+        if !choices.contains(&secs) {
+            let offered: Vec<String> = choices.iter().map(u64::to_string).collect();
+            let text = match offered.split_last() {
+                Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),
+                _ => offered.concat(),
+            };
+            return Err(CoreError::InvalidSetting(format!(
+                "watched hosts can be polled every {text} seconds"
+            )));
+        }
+        self.store
+            .put_setting(&self.ctx, metrics::guest::POLL_KEY, &secs)
+            .await?;
+        self.metrics.guest().set_interval(Duration::from_secs(secs));
+        self.audit_setting(
+            "Set how often the dashboard polls watched hosts",
+            &format!("every {secs} s"),
+        )
+        .await
+    }
+
     /// FD-14: whether update checks are on. Defaults to on.
     pub async fn update_checks_enabled(&self) -> Result<bool> {
         Ok(self
@@ -780,11 +827,12 @@ impl Core {
     }
 
     /// AP-05: writes the workspace's whole audit log to `path` as CSV (see [`export::audit_csv`]) and
-    /// logs that it did. A read, so it skips the bus.
+    /// logs that it did. A read, so it skips the bus. Never into a Git working tree ([`save_guard`]). The rows
+    /// are read and written one by one into a file next to `path`, which then takes its name, so a long log is
+    /// never all in memory and a failed export leaves no half file.
     pub async fn export_audit_csv(&self, path: &Path) -> Result<AuditExport> {
-        let entries = self.store.audit_for_export(&self.ctx).await?;
-        let (csv, redacted) = export::audit_csv(&entries);
-        tokio::fs::write(path, csv).await?;
+        save_guard::refuse_repository(path, save_guard::Saved::AuditLog)?;
+        let (entries, redacted) = save_guard::write_atomically(path, |file| self.write_audit_csv(file)).await?;
         let file = path
             .file_name()
             .map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
@@ -799,15 +847,36 @@ impl Core {
                     targets: &[],
                     approval: None,
                     result: None,
-                    detail: Some(&format!("{} entries to {file}", entries.len())),
+                    detail: Some(&format!("{entries} entries to {file}")),
                 },
             )
             .await?;
         Ok(AuditExport {
             path: path.display().to_string(),
-            entries: entries.len(),
+            entries,
             redacted,
         })
+    }
+
+    /// The audit log's CSV into `file`, row by row. Returns how many entries, and how many had something redacted.
+    async fn write_audit_csv(&self, file: tokio::fs::File) -> Result<(usize, usize)> {
+        use futures_util::TryStreamExt;
+        use tokio::io::AsyncWriteExt;
+        let mut out = tokio::io::BufWriter::new(file);
+        out.write_all(export::audit_csv_header().as_bytes()).await?;
+        let (mut entries, mut redacted) = (0, 0);
+        // Dropped before anything else reads the database: it holds a connection.
+        let mut rows = self.store.audit_entries(&self.ctx);
+        while let Some(entry) = rows.try_next().await? {
+            let (row, was) = export::audit_csv_row(&entry);
+            out.write_all(row.as_bytes()).await?;
+            entries += 1;
+            redacted += usize::from(was);
+        }
+        drop(rows);
+        out.flush().await?;
+        out.into_inner().sync_all().await?;
+        Ok((entries, redacted))
     }
 
     async fn audit_setting(&self, action: &str, detail: &str) -> Result<()> {

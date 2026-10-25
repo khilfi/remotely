@@ -293,6 +293,9 @@ pub struct ExecResult {
     pub signal: Option<String>,
     pub output: CollectedOutput,
     pub duration_ms: u64,
+    /// The address this PC connected to; `None` behind jump hosts (this PC reached only the first)
+    /// and where a fake has no connection. Bulk runs journal it per target.
+    pub peer_ip: Option<IpAddr>,
 }
 
 /// Input to an interactive shell.
@@ -403,17 +406,32 @@ pub trait RemoteFiles: Send + Sync {
     fn user(&self) -> String;
     /// The folder SFTP starts in: the login's home folder.
     async fn home(&self) -> Result<String>;
-    /// A folder's entries, without `.` and `..`.
-    async fn list(&self, folder: &str) -> Result<Vec<RemoteEntry>>;
+    /// A folder's entries, without `.` and `..`, at most [`MAX_LISTING`] of them (A9: a hostile host
+    /// can't fill this PC's memory with a folder that never ends).
+    async fn list(&self, folder: &str) -> Result<RemoteListing>;
     /// What is at `path` (a link followed), or `None` when nothing is.
     async fn stat(&self, path: &str) -> Result<Option<RemoteEntry>>;
     /// Opens a file to read.
     async fn read(&self, path: &str) -> Result<Box<dyn RemoteRead>>;
     /// Creates a file to write. Without `replace` it fails with [`CoreError::RemoteFileExists`] when
-    /// one is there; with it, an existing file is emptied and keeps its owner and permissions.
+    /// one is there. With it (H8), the new content goes to a temporary file in the same folder, which
+    /// takes the old file's place only once all of it arrived ([`RemoteWrite::finish`]), keeping its
+    /// permissions and owner; until then the old file stays as it was. [`Written`] says how it went.
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>>;
     /// Deletes a file (a transfer's own leftover).
     async fn remove(&self, path: &str) -> Result<()>;
+}
+
+/// A9: a folder listing stops after this many entries, and [`RemoteListing::more`] says so. Folders
+/// of real hosts that hold more (a mail spool, a cache) are better looked at in the terminal.
+pub const MAX_LISTING: usize = 20_000;
+
+/// SS-08: a folder's entries, as many as [`MAX_LISTING`] lets through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteListing {
+    pub entries: Vec<RemoteEntry>,
+    /// The folder holds more than was listed.
+    pub more: bool,
 }
 
 /// SS-08: a remote file being read.
@@ -427,8 +445,44 @@ pub trait RemoteRead: Send {
 #[async_trait]
 pub trait RemoteWrite: Send {
     async fn write_all(&mut self, data: &[u8]) -> Result<()>;
-    /// Waits for every write to be confirmed and closes the file.
-    async fn finish(self: Box<Self>) -> Result<()>;
+    /// Waits for every write to be confirmed and closes the file; a replacement then takes the old
+    /// file's place. On an error the old file is as it was (or, for [`Written::InPlace`], as the
+    /// error says) and nothing temporary is left.
+    async fn finish(self: Box<Self>) -> Result<Written>;
+    /// The write will not finish (it failed, or was cancelled): a new file is deleted, and a
+    /// replacement's temporary file too, so the old file stays as it was. Says what is left on the
+    /// host, for the transfers panel.
+    async fn abort(self: Box<Self>) -> String;
+}
+
+/// H8: how an upload's file landed on the host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Written {
+    /// A new file.
+    Created,
+    /// The new content took the old file's place in one step (OpenSSH's `posix-rename`), with the old
+    /// file's permissions and owner. Nobody on the host ever saw half a file.
+    Replaced,
+    /// The host can't replace a file in one step, so the old one was renamed to `backup` first and
+    /// the new one renamed into place; the backup is kept.
+    ReplacedKeepingBackup { backup: String },
+    /// The file was written over where it is, because a replacement could not keep it as it was
+    /// (`why`): the old way, which leaves an incomplete file if the transfer breaks.
+    InPlace { why: String },
+}
+
+impl Written {
+    /// What the audit log and the transfers panel add about it ("" for a new file).
+    pub fn note(&self) -> String {
+        match self {
+            Self::Created => String::new(),
+            Self::Replaced => "replaced in one step, keeping its permissions and owner".into(),
+            Self::ReplacedKeepingBackup { backup } => {
+                format!("the host can't replace a file in one step, so the old file was kept as {backup}")
+            }
+            Self::InPlace { why } => format!("written over in place: {why}"),
+        }
+    }
 }
 
 /// QL-03: the host name in what `hostname` printed: its first line, if that looks like one.
@@ -521,6 +575,7 @@ impl RemoteAdapter for RusshAdapter {
             signal,
             output,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            peer_ip: connected.peer_ip,
         })
     }
 
@@ -618,6 +673,7 @@ impl ExecSession for RusshSession {
             signal,
             output,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            peer_ip: None,
         })
     }
 
@@ -643,6 +699,7 @@ impl ExecSession for RusshSession {
             signal,
             output,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            peer_ip: None,
         })
     }
 
@@ -663,11 +720,62 @@ struct Shared {
     key_presented: bool,
     /// Why the verifier refused the key.
     verify_error: Option<CoreError>,
-    banners: Vec<String>,
+    banners: Banners,
     /// Why the connection ended, once it has.
     disconnect: Option<String>,
     /// SS-07: remote forwards the server listens for, and where their connections go.
     routes: Vec<forward::Route>,
+}
+
+/// Banner text kept per connection at most; a hostile server could send banners without end.
+const MAX_BANNER_BYTES: usize = 64 * 1024;
+/// Banners kept per connection at most.
+const MAX_BANNERS: usize = 16;
+/// Shown once in place of the banners over the caps.
+const BANNERS_CUT: &str = "(the server sent more banner text; not shown)";
+
+/// A9: the server's login banners waiting to be shown, at most [`MAX_BANNERS`] and
+/// [`MAX_BANNER_BYTES`] over the connection's life; what comes after is dropped, with one note.
+#[derive(Default)]
+struct Banners {
+    waiting: Vec<String>,
+    bytes: usize,
+    count: usize,
+    cut: bool,
+}
+
+impl Banners {
+    fn push(&mut self, banner: &str) {
+        if self.cut {
+            return;
+        }
+        let room = MAX_BANNER_BYTES - self.bytes;
+        if self.count < MAX_BANNERS && banner.len() <= room {
+            self.bytes += banner.len();
+            self.count += 1;
+            self.waiting.push(banner.to_owned());
+            return;
+        }
+        // Over a cap: what fits of this one, then the note, then nothing more.
+        if self.count < MAX_BANNERS && room > 0 {
+            let mut end = room;
+            while !banner.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end > 0 {
+                self.bytes += end;
+                self.count += 1;
+                self.waiting.push(banner[..end].to_owned());
+            }
+        }
+        self.waiting.push(BANNERS_CUT.to_owned());
+        self.cut = true;
+    }
+
+    /// The banners not shown yet.
+    fn take(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.waiting)
+    }
 }
 
 struct Handler {
@@ -731,7 +839,7 @@ impl client::Handler for Handler {
     }
 
     async fn auth_banner(&mut self, banner: &str, _: &mut client::Session) -> std::result::Result<(), Self::Error> {
-        locks::lock(&self.shared).banners.push(banner.to_owned());
+        locks::lock(&self.shared).banners.push(banner);
         Ok(())
     }
 
@@ -1116,7 +1224,7 @@ where
 }
 
 async fn show_banners(shared: &Arc<Mutex<Shared>>, prompter: &mut dyn Prompter) {
-    let banners = std::mem::take(&mut locks::lock(shared).banners);
+    let banners = locks::lock(shared).banners.take();
     for banner in banners {
         prompter.show(&banner).await;
     }
@@ -1744,6 +1852,7 @@ impl ExecSession for ShellCommands {
             signal,
             output,
             duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            peer_ip: None,
         })
     }
 
@@ -1959,6 +2068,38 @@ async fn run_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn banners_are_capped_in_count_and_bytes_with_one_note() {
+        let mut banners = Banners::default();
+        for n in 0..1000 {
+            banners.push(&format!("Authorized use only ({n})\n"));
+        }
+        let shown = banners.take();
+        assert_eq!(shown.len(), MAX_BANNERS + 1);
+        assert_eq!(shown[0], "Authorized use only (0)\n");
+        assert_eq!(shown.last().map(String::as_str), Some(BANNERS_CUT));
+        banners.push("more");
+        assert!(banners.take().is_empty(), "nothing after the note");
+
+        // One huge banner: what fits (cut on a character boundary), then the note.
+        let mut banners = Banners::default();
+        banners.push("ok\n");
+        banners.push(&"é".repeat(MAX_BANNER_BYTES));
+        let shown = banners.take();
+        assert_eq!(shown.len(), 3);
+        let kept: usize = shown[..2].iter().map(String::len).sum();
+        assert!((MAX_BANNER_BYTES - 1..=MAX_BANNER_BYTES).contains(&kept), "{kept}");
+        assert!(shown[1].chars().all(|c| c == 'é'));
+        assert_eq!(shown[2], BANNERS_CUT);
+
+        // Banners shown on the way count toward the caps too.
+        let mut banners = Banners::default();
+        banners.push(&"a".repeat(MAX_BANNER_BYTES));
+        assert_eq!(banners.take().len(), 1);
+        banners.push("b");
+        assert_eq!(banners.take(), [BANNERS_CUT]);
+    }
 
     #[test]
     fn the_host_key_types_already_trusted_are_asked_for_first() {

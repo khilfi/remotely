@@ -121,6 +121,7 @@ fn exec(script: &str, sessions: &[Uuid]) -> Command {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     }
 }
 
@@ -131,6 +132,7 @@ fn with_sudo(command: Command, password: Option<remotely_core::vault::SecretId>)
             script,
             trust_new_host_keys,
             timeout_secs,
+            rollout,
             ..
         } => Command::RemoteExec {
             targets,
@@ -139,6 +141,7 @@ fn with_sudo(command: Command, password: Option<remotely_core::vault::SecretId>)
             sudo_password_id: password,
             trust_new_host_keys,
             timeout_secs,
+            rollout,
         },
         other => other,
     }
@@ -175,7 +178,7 @@ async fn run(core: &Core, command: Command) -> Uuid {
 async fn finished(rx: &mut Receiver<JobEvent>, job: Uuid) -> JobStatus {
     tokio::time::timeout(WAIT, async {
         loop {
-            if let JobEvent::Finished { job_id, status } = rx.recv().await.unwrap() {
+            if let JobEvent::Finished { job_id, status, .. } = rx.recv().await.unwrap() {
                 if job_id == job {
                     return status;
                 }
@@ -488,11 +491,14 @@ async fn each_host_has_the_runs_time_limit() {
         .results(&core.ctx, job, GroupOptions::default())
         .await
         .unwrap();
-    assert_eq!(results.hosts[0].error_code.as_deref(), Some("timeout"));
+    // H9: the command may have started, so the host is not counted as failed.
+    assert_eq!(results.hosts[0].status, "unknown");
+    assert_eq!(results.hosts[0].error_code.as_deref(), Some("command_timed_out"));
     assert_eq!(
         results.hosts[0].error.as_deref(),
-        Some("the command timed out after 1s")
+        Some("the command did not finish within 1 s; it may have run, or may still finish, on the host")
     );
+    assert_eq!((results.counts.failed, results.counts.unknown), (0, 1));
 }
 
 #[tokio::test]
@@ -678,14 +684,16 @@ async fn cancelling_stops_hosts_in_flight_and_those_not_started() {
         .results(&core.ctx, job, GroupOptions::default())
         .await
         .unwrap();
-    assert_eq!(results.counts.cancelled, 3);
+    // H9: the host that was running may still finish the command: its outcome is unknown.
+    assert_eq!((results.counts.cancelled, results.counts.unknown), (2, 1));
     let in_flight: Vec<_> = results
         .hosts
         .iter()
         .filter(|h| h.error_code.as_deref() == Some("cancelled_remote"))
         .collect();
     assert_eq!(in_flight.len(), 1, "one host was running when it was cancelled");
-    assert!(results.groups.is_empty());
+    assert_eq!(in_flight[0].status, "unknown");
+    assert_eq!(results.groups.len(), 1, "the unknown host is a group of its own");
     let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
     let end = audit.iter().find(|e| e.event == "job_finished").unwrap();
     assert!(end.detail.as_deref().unwrap().contains("the host may still finish it"));
@@ -706,7 +714,8 @@ async fn retrying_reruns_only_the_failed_hosts_as_a_new_linked_job() {
     let first = run(&core, exec("cat /etc/app.conf", &ids)).await;
     assert_eq!(finished(&mut events, first).await, JobStatus::PartiallyFailed);
 
-    let SubmitOutcome::Queued { job_id: retry, .. } = core.bus.retry_failed(&core.ctx, first).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id: retry, .. } = core.bus.retry_failed(&core.ctx, first, false).await.unwrap()
+    else {
         panic!("a read-only command on one host is Low");
     };
     assert_eq!(finished(&mut events, retry).await, JobStatus::Failed);
@@ -738,7 +747,7 @@ async fn retrying_reruns_only_the_failed_hosts_as_a_new_linked_job() {
     // Nothing left to retry in a job where everything worked.
     let fine = run(&core, exec("cat /etc/app.conf", &ids[..1])).await;
     finished(&mut events, fine).await;
-    let err = core.bus.retry_failed(&core.ctx, fine).await.unwrap_err();
+    let err = core.bus.retry_failed(&core.ctx, fine, false).await.unwrap_err();
     assert_eq!(err.code(), "invalid_input");
 }
 
@@ -1286,4 +1295,293 @@ async fn recent_runs_list_only_remote_commands() {
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, job.to_string());
     assert_eq!(runs[0].summary, "Run `uptime` on 1 host");
+}
+
+// ---- H9: blast radius: canary, stop after failures, outcome unknown ------------------------------
+
+/// A core on the fake remote with `count` sessions h0.example.com, h1... (in that order).
+async fn fake_hosts(remote: FakeRemote, count: usize) -> (Core, Arc<FakeRemote>, Vec<Uuid>) {
+    let remote = Arc::new(remote);
+    let mut setup = Setup::new(FakeVmware::default());
+    setup.remote = remote.clone();
+    let core = setup.build().await;
+    let mut ids = Vec::new();
+    for i in 0..count {
+        let input = SessionInput {
+            host: format!("h{i}.example.com"),
+            ..session_input(&format!("h{i}"), 22, SessionAuth::Agent)
+        };
+        ids.push(core.sessions.create(&core.ctx, input).await.unwrap().id);
+    }
+    (core, remote, ids)
+}
+
+fn with_rollout(mut command: Command, canary: bool, stop_after_failures: Option<u32>) -> Command {
+    if let Command::RemoteExec { rollout, .. } = &mut command {
+        rollout.canary = canary;
+        rollout.stop_after_failures = stop_after_failures;
+    }
+    command
+}
+
+/// Waits for the job's canary to finish and the rest to wait; returns how many wait.
+async fn canary_waiting(rx: &mut Receiver<JobEvent>, job: Uuid) -> (String, usize) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if let JobEvent::CanaryWaiting { job_id, name, rest, .. } = rx.recv().await.unwrap() {
+                if job_id == job {
+                    return (name, rest);
+                }
+            }
+        }
+    })
+    .await
+    .expect("the canary finished")
+}
+
+fn ran_on(remote: &FakeRemote) -> Vec<String> {
+    let mut hosts: Vec<String> = remote
+        .calls()
+        .iter()
+        .filter_map(|c| c.split(':').next().map(str::to_owned))
+        .collect();
+    hosts.sort();
+    hosts
+}
+
+#[tokio::test]
+async fn a_canary_runs_on_one_host_and_the_rest_wait_for_the_go_ahead() {
+    let (core, remote, ids) = fake_hosts(FakeRemote::default(), 4).await;
+    let mut events = core.jobs.subscribe();
+    let job = run(&core, with_rollout(exec("uptime", &ids), true, None)).await;
+    let (name, rest) = canary_waiting(&mut events, job).await;
+    assert_eq!((name.as_str(), rest), ("h0", 3));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(ran_on(&remote), ["h0.example.com"], "only the canary ran");
+    assert_eq!(core.jobs.waiting_for_go_ahead(), [job]);
+    let wait = core.jobs.canary_wait(job).unwrap();
+    assert_eq!((wait.name.as_str(), wait.rest), ("h0", 3));
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let pending = targets.iter().filter(|t| t.status == "pending").count();
+    assert_eq!(pending, 3);
+
+    assert!(core.bus.go_on(&core.ctx, job).await.unwrap());
+    assert_eq!(finished(&mut events, job).await, JobStatus::Succeeded);
+    assert_eq!(ran_on(&remote).len(), 4);
+    assert!(!core.bus.go_on(&core.ctx, job).await.unwrap(), "nothing waits any more");
+    let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
+    let go = audit
+        .iter()
+        .find(|e| e.event == "canary_go_on")
+        .expect("the go-ahead is audited");
+    assert!(go.detail.as_deref().unwrap().contains("'h0' succeeded"), "{go:?}");
+    let started = audit.iter().find(|e| e.event == "job_started").unwrap();
+    assert_eq!(
+        started.detail.as_deref(),
+        Some("one host first, then the rest once confirmed")
+    );
+}
+
+#[tokio::test]
+async fn a_canary_that_fails_stops_the_run_and_cancel_stops_the_wait() {
+    let remote = FakeRemote::default().with_exit_code("h0.example.com", 3);
+    let (core, remote, ids) = fake_hosts(remote, 3).await;
+    let mut events = core.jobs.subscribe();
+    let job = run(&core, with_rollout(exec("systemctl restart app", &ids), true, None)).await;
+    assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
+    assert_eq!(ran_on(&remote), ["h0.example.com"]);
+    let results = core
+        .bulk
+        .results(&core.ctx, job, GroupOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((results.counts.failed, results.counts.skipped), (1, 2));
+    let skipped = results.hosts.iter().find(|h| h.name == "h1").unwrap();
+    assert_eq!(skipped.status, "skipped");
+    assert!(
+        skipped
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("canary host did not succeed"),
+        "{skipped:?}"
+    );
+    assert!(results.headline.contains("2 hosts not started"), "{}", results.headline);
+
+    // Cancelling while the rest wait: they are cancelled, never run.
+    let (core, remote, ids) = fake_hosts(FakeRemote::default(), 3).await;
+    let mut events = core.jobs.subscribe();
+    let job = run(&core, with_rollout(exec("systemctl restart app", &ids), true, None)).await;
+    canary_waiting(&mut events, job).await;
+    assert!(core.jobs.cancel(job));
+    assert_eq!(finished(&mut events, job).await, JobStatus::Cancelled);
+    assert_eq!(ran_on(&remote), ["h0.example.com"]);
+}
+
+#[tokio::test]
+async fn the_go_ahead_is_refused_while_presenting_read_only() {
+    let (core, _remote, ids) = fake_hosts(FakeRemote::default(), 2).await;
+    let mut events = core.jobs.subscribe();
+    let job = run(&core, with_rollout(exec("uptime", &ids), true, None)).await;
+    canary_waiting(&mut events, job).await;
+    core.presentation
+        .set(remotely_core::presentation::Presentation {
+            enabled: true,
+            read_only: true,
+        })
+        .await
+        .unwrap();
+    let err = core.bus.go_on(&core.ctx, job).await.unwrap_err();
+    assert_eq!(err.code(), "read_only_lock");
+    assert_eq!(core.jobs.waiting_for_go_ahead(), [job], "still waiting");
+    assert!(core.jobs.cancel(job));
+    finished(&mut events, job).await;
+}
+
+#[tokio::test]
+async fn a_run_stops_starting_hosts_after_its_failures() {
+    let mut remote = FakeRemote::default();
+    for i in 0..10 {
+        remote = remote.with_exit_code(&format!("h{i}.example.com"), 1);
+    }
+    let (core, remote, ids) = fake_hosts(remote, 10).await;
+    core.set_bulk_parallel_limit(1).await.unwrap();
+    let mut events = core.jobs.subscribe();
+    let job = run(
+        &core,
+        with_rollout(exec("grep -q x /etc/app.conf", &ids), false, Some(2)),
+    )
+    .await;
+    assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
+    assert_eq!(ran_on(&remote).len(), 2, "two failed, then none started");
+    let results = core
+        .bulk
+        .results(&core.ctx, job, GroupOptions::default())
+        .await
+        .unwrap();
+    assert_eq!((results.counts.failed, results.counts.skipped), (2, 8));
+    let audit = core.store.recent_audit(&core.ctx, 5).await.unwrap();
+    let end = audit.iter().find(|e| e.event == "job_finished").unwrap();
+    let detail = end.detail.as_deref().unwrap();
+    assert!(detail.contains("8 not started"), "{detail}");
+    assert!(detail.contains("stopped after 2 failures"), "{detail}");
+
+    // A stop of 0 failures makes no sense.
+    let err = core
+        .bus
+        .submit(&core.ctx, with_rollout(exec("uptime", &ids), false, Some(0)))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "invalid_input");
+}
+
+#[tokio::test]
+async fn hosts_already_running_finish_when_the_stop_comes() {
+    let remote = FakeRemote::default()
+        .with_exit_code("h0.example.com", 1)
+        .with_delay("h1.example.com", Duration::from_millis(400))
+        .with_delay("h2.example.com", Duration::from_millis(400));
+    let (core, remote, ids) = fake_hosts(remote, 6).await;
+    core.set_bulk_parallel_limit(3).await.unwrap();
+    let mut events = core.jobs.subscribe();
+    let job = run(&core, with_rollout(exec("uptime", &ids), false, Some(1))).await;
+    assert_eq!(finished(&mut events, job).await, JobStatus::PartiallyFailed);
+    let results = core
+        .bulk
+        .results(&core.ctx, job, GroupOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        (results.counts.failed, results.counts.succeeded, results.counts.skipped),
+        (1, 2, 3),
+        "h1 and h2 were running and finished; h3 to h5 never started"
+    );
+    assert_eq!(ran_on(&remote).len(), 3);
+}
+
+#[tokio::test]
+async fn a_timed_out_host_is_retried_only_when_asked() {
+    let core = ssh_core().await;
+    let password = new_password();
+    let pw = add_password(&core, "lab", &password).await;
+    let slow = TestSshServer::start()
+        .await
+        .with_password("alice", &password)
+        .with_exec_delay(Duration::from_secs(10));
+    let bad = TestSshServer::start().await.with_password("alice", &password);
+    let ids = [host(&core, &slow, "slow", pw).await, host(&core, &bad, "bad", pw).await];
+    let mut events = core.jobs.subscribe();
+    let mut command = exec("cat /etc/app.conf", &ids);
+    if let Command::RemoteExec { timeout_secs, .. } = &mut command {
+        *timeout_secs = Some(1);
+    }
+    let first = run(&core, command).await;
+    finished(&mut events, first).await;
+    let summary = core.store.recent_jobs(&core.ctx, 1).await.unwrap().remove(0);
+    assert_eq!((summary.targets_failed, summary.targets_unknown), (1, 1));
+
+    // By default only the host that failed runs again.
+    let SubmitOutcome::Queued { job_id: retry, .. } = core.bus.retry_failed(&core.ctx, first, false).await.unwrap()
+    else {
+        panic!("a read-only command on one host is Low");
+    };
+    finished(&mut events, retry).await;
+    let targets = core.store.job_targets(&core.ctx, retry).await.unwrap();
+    let names: Vec<&str> = targets.iter().map(|t| t.target_name.as_str()).collect();
+    assert_eq!(names, ["bad"]);
+
+    // Asked, the host whose outcome is unknown runs again too.
+    let outcome = core.bus.retry_failed(&core.ctx, first, true).await.unwrap();
+    let job = match outcome {
+        SubmitOutcome::Queued { job_id, .. } => job_id,
+        SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, answers(&request)).await.unwrap(),
+    };
+    finished(&mut events, job).await;
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let mut names: Vec<&str> = targets.iter().map(|t| t.target_name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["bad", "slow"]);
+
+    // A job with only unknown hosts left says so instead of retrying them.
+    let mut command = exec("uptime", &ids[..1]);
+    if let Command::RemoteExec { timeout_secs, .. } = &mut command {
+        *timeout_secs = Some(1);
+    }
+    let only_unknown = run(&core, command).await;
+    finished(&mut events, only_unknown).await;
+    let err = core.bus.retry_failed(&core.ctx, only_unknown, false).await.unwrap_err();
+    assert!(err.to_string().contains("outcome unknown"), "{err}");
+}
+
+#[tokio::test]
+async fn each_host_is_journaled_with_the_address_reached_and_the_key_accepted() {
+    let core = ssh_core().await;
+    let password = new_password();
+    let pw = add_password(&core, "lab", &password).await;
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let id = host(&core, &server, "web01", pw).await;
+    let mut events = core.jobs.subscribe();
+    let job = run(&core, exec("uptime", &[id])).await;
+    assert_eq!(finished(&mut events, job).await, JobStatus::Succeeded);
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    assert_eq!(targets[0].peer_ip.as_deref(), Some("127.0.0.1"));
+    let key = format!("ssh-ed25519 {}", server.host_key_fingerprint());
+    assert_eq!(targets[0].host_key.as_deref(), Some(key.as_str()));
+    let audit = core.store.recent_audit(&core.ctx, 5).await.unwrap();
+    let end = audit.iter().find(|e| e.event == "job_finished").unwrap();
+    let detail = end.detail.as_deref().unwrap();
+    assert!(
+        detail.contains(&format!("reached 'web01' at 127.0.0.1, key {key}")),
+        "{detail}"
+    );
+
+    // A host that refused the login still names the key it presented.
+    let wrong = add_password(&core, "wrong", "not-the-password").await;
+    let other = host(&core, &server, "web02", wrong).await;
+    let job = run(&core, exec("uptime", &[other])).await;
+    finished(&mut events, job).await;
+    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    assert_eq!(targets[0].status, "failed");
+    assert_eq!(targets[0].host_key.as_deref(), Some(key.as_str()));
+    assert_eq!(targets[0].peer_ip, None);
 }

@@ -59,6 +59,9 @@ async fn core() -> Core {
         first_retry: Duration::from_millis(50),
         max_retry: Duration::from_millis(200),
         max_attempts: 5,
+        slow_retry: Duration::from_millis(200),
+        slow_attempts: 0,
+        wake_spread: Duration::from_millis(50),
         keepalive_interval: None,
         keepalive_max: 2,
         agent: AgentSource::NamedPipe(format!(r"\\.\pipe\remotely-test-none-{}", Uuid::new_v4())),
@@ -670,6 +673,7 @@ async fn a_pager_is_not_read_only_in_multiexec_but_is_in_compare() {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     };
     let preview = fleet.core.bus.preview(&fleet.core.ctx, &compare).await.unwrap();
     assert_eq!(preview.action, ActionKind::ExecReadOnly);
@@ -711,6 +715,7 @@ async fn the_bus_refuses_a_line_whose_keys_are_not_what_was_rated() {
         sudo_password_id: None,
         trust_new_host_keys: false,
         timeout_secs: None,
+        rollout: Default::default(),
     };
     assert!(compare.check_from_ui().is_ok());
 

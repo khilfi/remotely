@@ -16,7 +16,7 @@ use remotely_core::fakes::FakeVmware;
 use remotely_core::known_hosts::HostKey;
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::AuditEntry;
-use remotely_core::terminal::{TerminalEvent, TerminalHandle, TerminalStatus, TerminalTuning};
+use remotely_core::terminal::{TerminalEvent, TerminalHandle, TerminalStatus, TerminalTuning, WakeReason};
 use remotely_core::vault::{SecretId, SecretKind, SecretString};
 use remotely_core::Core;
 use tokio::time::timeout;
@@ -36,6 +36,9 @@ fn tuning() -> TerminalTuning {
         first_retry: Duration::from_millis(50),
         max_retry: Duration::from_millis(200),
         max_attempts: 5,
+        slow_retry: Duration::from_millis(200),
+        slow_attempts: 0,
+        wake_spread: Duration::from_millis(50),
         keepalive_interval: None,
         keepalive_max: 2,
         agent: AgentSource::NamedPipe(format!(r"\\.\pipe\remotely-test-none-{}", Uuid::new_v4())),
@@ -660,6 +663,72 @@ async fn reconnecting_gives_up_after_its_tries_and_waits_for_the_user() {
     assert!(code == "ssh" || code == "timeout", "{code}");
     pane.expect_output("Not connected").await;
     assert_eq!(pane.all_output().matches("Reconnecting in").count(), 2);
+}
+
+#[tokio::test]
+async fn a_pane_that_gave_up_tries_again_when_the_network_comes_back() {
+    // R9: Windows says the network changed (the shell's wake.rs): a pane out of tries starts again.
+    let password = new_password();
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let core = core().await;
+    core.terminals.set_tuning(TerminalTuning {
+        max_attempts: 2,
+        ..tuning()
+    });
+    trust_server(&core, &server).await;
+    let id = secret(&core, SecretKind::Password, "lab alice", &SecretString::new(&password)).await;
+    let session_id = create(&core, session(&server, SessionAuth::Password { password_id: Some(id) })).await;
+    let mut pane = Pane::open(&core, session_id).await;
+    pane.connected().await;
+    assert_eq!(
+        core.terminals.wake_reconnects(WakeReason::NetworkChanged),
+        0,
+        "a connected pane is not waiting"
+    );
+
+    // The network goes away: both tries fail and the pane waits.
+    server.set_refusing(true);
+    server.drop_connections();
+    pane.expect_status(|s| matches!(s, TerminalStatus::Disconnected { .. }))
+        .await;
+    pane.expect_output("it tries by itself when the network comes back")
+        .await;
+    let tried = server.connections();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(server.connections(), tried, "no more tries on its own");
+
+    server.set_refusing(false);
+    assert_eq!(core.terminals.wake_reconnects(WakeReason::NetworkChanged), 1);
+    pane.expect_output("The network changed: reconnecting").await;
+    pane.connected().await;
+}
+
+#[tokio::test]
+async fn a_resume_cuts_the_wait_before_the_next_try_short() {
+    // R9: a minute's backoff, but Windows resumed: the pane tries within the wake spread.
+    let password = new_password();
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let core = core().await;
+    core.terminals.set_tuning(TerminalTuning {
+        first_retry: Duration::from_secs(60),
+        max_retry: Duration::from_secs(60),
+        ..tuning()
+    });
+    trust_server(&core, &server).await;
+    let id = secret(&core, SecretKind::Password, "lab alice", &SecretString::new(&password)).await;
+    let session_id = create(&core, session(&server, SessionAuth::Password { password_id: Some(id) })).await;
+    let mut pane = Pane::open(&core, session_id).await;
+    pane.connected().await;
+
+    server.drop_connections();
+    pane.expect_status(|s| matches!(s, TerminalStatus::Reconnecting { .. }))
+        .await;
+    let woke = std::time::Instant::now();
+    assert_eq!(core.terminals.wake_reconnects(WakeReason::Resumed), 1);
+    pane.expect_output("Windows resumed: reconnecting now").await;
+    pane.connected().await;
+    assert!(woke.elapsed() < Duration::from_secs(10), "{:?}", woke.elapsed());
+    assert_eq!(server.connections(), 2);
 }
 
 #[tokio::test]

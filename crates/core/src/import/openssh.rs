@@ -9,22 +9,82 @@
 //! Read: `HostName`, `User`, `Port`, `IdentityFile` (the first one is the key), `ProxyJump` (the first
 //! hop is the jump host), `RemoteCommand` (the startup command) and `Include`. `ProxyCommand` is not
 //! imported. Without an `IdentityFile` a session logs in with the SSH agent, as ssh would.
+//!
+//! Includes (A3, A9): an `Include` on a network share or a device path (`\\server\share`,
+//! `//server/share`, `\\?\`, `\\.\`: [`path_refusal`]) is never opened, since Windows would send the
+//! user's sign-in to that server; the import warns and leaves it out. An included file is read only
+//! when it is at most [`MAX_INCLUDE_BYTES`], all of them together at most [`MAX_INCLUDES_TOTAL`], and
+//! at most [`MAX_INCLUDED_FILES`] files, [`MAX_INCLUDE_DEPTH`] deep.
 
 use std::path::{Path, PathBuf};
 
-use super::{count, finish, parse_port, Candidate, CandidateAuth, Parsed, Skipped, DEFAULT_PORT};
+use super::{count, finish, parse_port, text, Candidate, CandidateAuth, Parsed, Skipped, DEFAULT_PORT};
+use crate::untrusted::{path_refusal, read_capped_blocking, size_words, ReadError};
 
 /// Includes inside includes, as deep as ssh itself goes.
-const MAX_INCLUDE_DEPTH: usize = 16;
+pub const MAX_INCLUDE_DEPTH: usize = 16;
+/// Bytes of one included file read at most; a larger one is left out with a warning.
+pub const MAX_INCLUDE_BYTES: u64 = 1024 * 1024;
+/// Bytes of all included files together (as text); the includes after that are left out.
+pub const MAX_INCLUDES_TOTAL: u64 = 4 * 1024 * 1024;
+/// Included files read at most, counting every match of a wildcard and every pass of a loop.
+pub const MAX_INCLUDED_FILES: usize = 256;
+
+/// How the parser reaches the files `Include` names: this PC's disk in the app ([`DiskIncludes`]),
+/// memory in tests. It is only asked for paths [`path_refusal`] lets through.
+pub trait IncludeFiles {
+    /// The text of an included file of at most `cap` bytes.
+    fn read(&self, path: &Path, cap: u64) -> IncludeRead;
+    /// The regular files in `dir`, for an include with `*` or `?` in its file name.
+    fn files_in(&self, dir: &Path) -> Vec<PathBuf>;
+}
+
+/// What reading an included file gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncludeRead {
+    Text(String),
+    NotFound,
+    /// Larger than the cap: not read.
+    TooLarge,
+    Failed(String),
+}
+
+/// Included files on this PC's disk.
+pub struct DiskIncludes;
+
+impl IncludeFiles for DiskIncludes {
+    fn read(&self, path: &Path, cap: u64) -> IncludeRead {
+        match read_capped_blocking(path, cap) {
+            Ok(bytes) => IncludeRead::Text(text::decode_text(&bytes)),
+            Err(err) if err.is_not_found() => IncludeRead::NotFound,
+            Err(ReadError::TooLarge { .. }) => IncludeRead::TooLarge,
+            Err(err) => IncludeRead::Failed(err.to_string()),
+        }
+    }
+
+    fn files_in(&self, dir: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect()
+    }
+}
 
 /// The hosts in an ssh config. `home` is the user's home folder (for `~`, `%d` and relative
 /// includes, which are under `home/.ssh`), `local_user` the Windows user name (`%u`, and `%r` without
-/// a `User`). `read_include` returns the text of an included file, or `None` when it does not exist;
-/// an include with `*` or `?` in its file name lists the folder on disk and reads each match with it.
-pub fn parse(text: &str, home: &Path, local_user: &str, read_include: &dyn Fn(&Path) -> Option<String>) -> Parsed {
+/// a `User`). Included files are read through `includes`; an include with `*` or `?` in its file name
+/// lists the folder and reads each match.
+pub fn parse(text: &str, home: &Path, local_user: &str, includes: &dyn IncludeFiles) -> Parsed {
     let mut config = Config {
         home,
-        read_include,
+        includes,
+        included_files: 0,
+        included_bytes: 0,
+        includes_stopped: false,
         blocks: Vec::new(),
         aliases: Vec::new(),
         parsed: Parsed::default(),
@@ -64,7 +124,12 @@ struct Block {
 
 struct Config<'a> {
     home: &'a Path,
-    read_include: &'a dyn Fn(&Path) -> Option<String>,
+    includes: &'a dyn IncludeFiles,
+    /// Included files read so far, and the bytes of their text.
+    included_files: usize,
+    included_bytes: u64,
+    /// A cap was reached: no more includes are read.
+    includes_stopped: bool,
     blocks: Vec<Block>,
     /// Concrete aliases, in the order they first appear.
     aliases: Vec<String>,
@@ -154,23 +219,99 @@ impl Config<'_> {
             return;
         }
         let path = self.include_path(arg);
+        if self.refused(&path) {
+            return;
+        }
         let wildcard = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .filter(|n| n.contains(['*', '?']));
         let paths = match wildcard {
             // ssh skips a pattern that matches nothing.
-            Some(pattern) => matching_files(path.parent(), &pattern),
+            Some(pattern) => self.matching_files(path.parent(), &pattern),
             None => vec![path],
         };
         for path in paths {
-            match (self.read_include)(&path) {
-                Some(text) => self.read(&text, scope, depth + 1),
-                None => self
+            if self.includes_stopped || self.refused(&path) {
+                continue;
+            }
+            if self.included_files >= MAX_INCLUDED_FILES {
+                self.stop_includes(format!(
+                    "More than {MAX_INCLUDED_FILES} files were included, so the rest were not read"
+                ));
+                continue;
+            }
+            self.included_files += 1;
+            match self.includes.read(&path, MAX_INCLUDE_BYTES) {
+                IncludeRead::Text(text) => {
+                    let size = text.len() as u64;
+                    if self.included_bytes.saturating_add(size) > MAX_INCLUDES_TOTAL {
+                        self.stop_includes(format!(
+                            "The included files add up to more than {}, so {} and the includes after it were not read",
+                            size_words(MAX_INCLUDES_TOTAL),
+                            path.display()
+                        ));
+                        continue;
+                    }
+                    self.included_bytes += size;
+                    self.read(&text, scope, depth + 1);
+                }
+                IncludeRead::NotFound => self
                     .parsed
                     .warn(format!("Include {}: the file was not found", path.display())),
+                IncludeRead::TooLarge => self.parsed.warn(format!(
+                    "Include {}: the file is larger than {}, so Remotely didn't read it",
+                    path.display(),
+                    size_words(MAX_INCLUDE_BYTES)
+                )),
+                IncludeRead::Failed(reason) => self.parsed.warn(format!(
+                    "Include {}: the file could not be read: {reason}",
+                    path.display()
+                )),
             }
         }
+    }
+
+    /// A3: an include on a network share or a device path is never opened; the import says so.
+    fn refused(&mut self, path: &Path) -> bool {
+        let Some(refusal) = path_refusal(path) else {
+            return false;
+        };
+        self.parsed.warn(format!(
+            "Include {}: the file {}, so Remotely didn't read it. Copy it to this PC to import from it",
+            path.display(),
+            refusal.describe()
+        ));
+        true
+    }
+
+    /// A9: a cap was reached, so no more includes are read.
+    fn stop_includes(&mut self, warning: String) {
+        if !self.includes_stopped {
+            self.includes_stopped = true;
+            self.parsed.warn(warning);
+        }
+    }
+
+    /// The files in `dir` whose names match `pattern`, sorted, as ssh reads them.
+    fn matching_files(&mut self, dir: Option<&Path>, pattern: &str) -> Vec<PathBuf> {
+        let Some(dir) = dir else {
+            return Vec::new();
+        };
+        if self.refused(dir) {
+            return Vec::new();
+        }
+        let mut files: Vec<PathBuf> = self
+            .includes
+            .files_in(dir)
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| glob(pattern, &name.to_string_lossy()))
+            })
+            .collect();
+        files.sort();
+        files
     }
 
     /// `~/x` under the home folder, a relative path under `home/.ssh`.
@@ -470,27 +611,9 @@ fn join(base: &Path, rest: &str) -> PathBuf {
         .fold(base.to_path_buf(), |path, part| path.join(part))
 }
 
-/// The files in `dir` whose names match `pattern`, sorted, as ssh reads them.
-fn matching_files(dir: Option<&Path>, pattern: &str) -> Vec<PathBuf> {
-    let Some(entries) = dir.and_then(|d| std::fs::read_dir(d).ok()) else {
-        return Vec::new();
-    };
-    let mut files: Vec<PathBuf> = entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .file_name()
-                    .is_some_and(|name| glob(pattern, &name.to_string_lossy()))
-        })
-        .collect();
-    files.sort();
-    files
-}
-
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::HashMap;
 
     use super::*;
@@ -499,12 +622,49 @@ mod tests {
         Path::new(r"C:\Users\alice")
     }
 
-    fn no_includes(_: &Path) -> Option<String> {
-        None
+    /// Included files in memory, so no test touches the file system. Asked for a path the parser must
+    /// refuse (a share, a device), it fails the test instead of opening anything.
+    #[derive(Default)]
+    struct Memory {
+        files: HashMap<PathBuf, String>,
+        /// The text of any other path (an include that loops).
+        any: Option<String>,
+        asked: RefCell<Vec<PathBuf>>,
+    }
+
+    impl Memory {
+        fn with(files: &[(PathBuf, &str)]) -> Self {
+            Self {
+                files: files.iter().map(|(p, t)| (p.clone(), (*t).to_owned())).collect(),
+                ..Self::default()
+            }
+        }
+    }
+
+    impl IncludeFiles for Memory {
+        fn read(&self, path: &Path, cap: u64) -> IncludeRead {
+            assert_eq!(path_refusal(path), None, "asked to read {}", path.display());
+            self.asked.borrow_mut().push(path.to_path_buf());
+            match self.files.get(path).or(self.any.as_ref()) {
+                Some(text) if text.len() as u64 > cap => IncludeRead::TooLarge,
+                Some(text) => IncludeRead::Text(text.clone()),
+                None => IncludeRead::NotFound,
+            }
+        }
+
+        fn files_in(&self, dir: &Path) -> Vec<PathBuf> {
+            assert_eq!(path_refusal(dir), None, "asked to list {}", dir.display());
+            self.asked.borrow_mut().push(dir.to_path_buf());
+            self.files.keys().filter(|p| p.parent() == Some(dir)).cloned().collect()
+        }
+    }
+
+    fn no_includes() -> Memory {
+        Memory::default()
     }
 
     fn parse_alone(text: &str) -> Parsed {
-        parse(text, home(), "alice", &no_includes)
+        parse(text, home(), "alice", &no_includes())
     }
 
     fn find<'a>(parsed: &'a Parsed, name: &str) -> &'a Candidate {
@@ -654,7 +814,7 @@ Host web01
 ",
             home(),
             "alice",
-            &no_includes,
+            &no_includes(),
         );
         let db01 = find(&parsed, "db01");
         assert_eq!(db01.auth, key(r"C:\Users\alice\.ssh\bob@db01.example.com_alice%"));
@@ -665,7 +825,7 @@ Host web01
             "Host lab01\n IdentityFile ~/.ssh/id_%u\n",
             Path::new("/home/alice/"),
             "alice",
-            &no_includes,
+            &no_includes(),
         );
         assert_eq!(unix.candidates[0].auth, key("/home/alice/.ssh/id_alice"));
     }
@@ -703,7 +863,7 @@ Host \"web 04\"
     #[test]
     fn includes_are_read_through_the_callback() {
         let ssh = home().join(".ssh");
-        let files: HashMap<PathBuf, &str> = HashMap::from([
+        let read = Memory::with(&[
             (
                 ssh.join("work.conf"),
                 // Before any Host line, so it is not conditional on work01.
@@ -716,7 +876,6 @@ Host \"web 04\"
             (home().join("extra.conf"), "Host extra01\n HostName 192.0.2.40\n"),
             (ssh.join("web-options.conf"), "User alice\n"),
         ]);
-        let read = |path: &Path| files.get(path).map(|t| (*t).to_owned());
         let parsed = parse(
             "Include work.conf missing.conf ~/extra.conf
 Host home01
@@ -749,12 +908,119 @@ Host web02
 
     #[test]
     fn includes_stop_at_the_depth_limit() {
-        let read = |_: &Path| Some("Include loop.conf\nHost loop01\n HostName loop01.example.com\n".to_owned());
+        let read = Memory {
+            any: Some("Include loop.conf\nHost loop01\n HostName loop01.example.com\n".to_owned()),
+            ..Memory::default()
+        };
         let parsed = parse("Include loop.conf\n", home(), "alice", &read);
         assert_eq!(parsed.candidates.len(), 1);
         assert_eq!(parsed.candidates[0].name, "loop01");
         assert_eq!(parsed.warnings.len(), 1);
         assert!(parsed.warnings[0].contains("16"), "{:?}", parsed.warnings);
+    }
+
+    #[test]
+    fn includes_on_network_shares_or_device_paths_are_never_opened() {
+        // The memory files would answer each of these; the parser must not even ask. ssh reads `\\` as
+        // one backslash, so a config writes a share as `\\\\server\share` or `//server/share`.
+        let read = Memory {
+            any: Some("Host trap01\n HostName trap01.example.com\n".to_owned()),
+            ..Memory::default()
+        };
+        let parsed = parse(
+            r"Include \\\\nas.example.com\cfg\work.conf
+Include //nas.example.com/cfg/*.conf
+Include \/nas.example.com\cfg\mixed.conf
+Include \\\\?\C:\Users\alice\.ssh\dev.conf
+Include \\\\.\pipe\remotely
+Include \??\C:\Users\alice\.ssh\nt.conf
+Include NUL
+Host web01
+  HostName web01.example.com
+",
+            home(),
+            "alice",
+            &read,
+        );
+        assert!(read.asked.borrow().is_empty(), "{:?}", read.asked.borrow());
+        let names: Vec<_> = parsed.candidates.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["web01"]);
+        assert_eq!(parsed.warnings.len(), 7, "{:?}", parsed.warnings);
+        assert!(parsed.warnings.iter().all(|w| w.contains("so Remotely didn't read it")));
+        assert!(
+            parsed.warnings[0].starts_with(r"Include \\nas.example.com\cfg\work.conf: the file is on a network share"),
+            "{}",
+            parsed.warnings[0]
+        );
+        assert!(
+            parsed.warnings[3].contains("has a Windows device path"),
+            "{}",
+            parsed.warnings[3]
+        );
+        assert!(
+            parsed.warnings[6].contains("names a Windows device"),
+            "{}",
+            parsed.warnings[6]
+        );
+
+        // Nor when a local include names one.
+        let nested = Memory::with(&[(home().join(".ssh").join("work.conf"), r"Include \\\\nas.example.com\x")]);
+        let parsed = parse("Include work.conf\n", home(), "alice", &nested);
+        assert_eq!(nested.asked.borrow().len(), 1, "only the local file");
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("network share")),
+            "{:?}",
+            parsed.warnings
+        );
+    }
+
+    #[test]
+    fn includes_are_capped_in_size_count_and_total() {
+        let ssh = home().join(".ssh");
+        let big = "#".repeat(MAX_INCLUDE_BYTES as usize + 1);
+        let read = Memory::with(&[
+            (ssh.join("big.conf"), big.as_str()),
+            (ssh.join("small.conf"), "Host small01\n HostName small01.example.com\n"),
+        ]);
+        let parsed = parse("Include big.conf small.conf\n", home(), "alice", &read);
+        assert_eq!(parsed.candidates.len(), 1, "the small one is read");
+        assert_eq!(parsed.warnings.len(), 1, "{:?}", parsed.warnings);
+        assert!(parsed.warnings[0].contains("big.conf: the file is larger than 1 MB"));
+
+        // Five files just under the cap each: the fifth would go over the total.
+        let almost = "#".repeat(MAX_INCLUDE_BYTES as usize - 100);
+        let files: Vec<(PathBuf, &str)> = (1..=5)
+            .map(|n| (ssh.join(format!("{n}.conf")), almost.as_str()))
+            .collect();
+        let read = Memory::with(&files);
+        let parsed = parse(
+            "Include 1.conf 2.conf 3.conf 4.conf 5.conf\nInclude 1.conf\n",
+            home(),
+            "alice",
+            &read,
+        );
+        assert_eq!(read.asked.borrow().len(), 5);
+        assert!(
+            parsed
+                .warnings
+                .iter()
+                .any(|w| w.contains("add up to more than 4 MB") && w.contains("5.conf")),
+            "{:?}",
+            parsed.warnings
+        );
+
+        // Two includes of itself in each file would be 2^16 reads; the count stops them.
+        let fan = Memory {
+            any: Some("Include a.conf b.conf\n".to_owned()),
+            ..Memory::default()
+        };
+        let parsed = parse("Include a.conf\n", home(), "alice", &fan);
+        assert_eq!(fan.asked.borrow().len(), MAX_INCLUDED_FILES);
+        assert!(
+            parsed.warnings.iter().any(|w| w.contains("More than 256 files")),
+            "{:?}",
+            parsed.warnings
+        );
     }
 
     #[test]
@@ -772,14 +1038,13 @@ Host web02
         )
         .unwrap();
         std::fs::write(dir.join("config.d").join("notes.txt"), "Host n01\n").unwrap();
-        let read = |path: &Path| std::fs::read_to_string(path).ok();
         let main = format!("Include \"{}\"\n", dir.join("config.d").join("*.conf").display());
-        let parsed = parse(&main, home(), "alice", &read);
+        let parsed = parse(&main, home(), "alice", &DiskIncludes);
         let none = parse(
             &format!("Include \"{}\"\n", dir.join("empty.d").join("*").display()),
             home(),
             "alice",
-            &read,
+            &DiskIncludes,
         );
         std::fs::remove_dir_all(&dir).unwrap();
 

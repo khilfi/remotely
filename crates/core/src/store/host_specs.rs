@@ -65,6 +65,21 @@ impl Store {
         .transpose()
     }
 
+    /// When each session's stored facts were read, without the facts (P8: the dashboard's summaries
+    /// are parsed again only for facts read since).
+    pub(crate) async fn session_specs_times(&self, ctx: &Context) -> Result<HashMap<Uuid, String>> {
+        let rows = sqlx::query("SELECT session_id, collected_at FROM session_specs WHERE workspace_id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(|row| {
+                let id: String = row.try_get("session_id")?;
+                Ok((parse_uuid(&id)?, row.try_get("collected_at")?))
+            })
+            .collect()
+    }
+
     /// Every session's stored facts (the dashboard's one-line summaries).
     pub(crate) async fn all_session_specs(&self, ctx: &Context) -> Result<HashMap<Uuid, StoredSpecs>> {
         let rows = sqlx::query(

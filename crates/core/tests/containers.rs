@@ -923,7 +923,7 @@ async fn failed_container_targets_can_be_retried_and_rated_again() {
     )
     .await;
     assert_eq!(status, JobStatus::Failed);
-    let request = match core.bus.retry_failed(&core.ctx, job).await.unwrap() {
+    let request = match core.bus.retry_failed(&core.ctx, job, false).await.unwrap() {
         SubmitOutcome::NeedsApproval { request } => request,
         SubmitOutcome::Queued { .. } => panic!("pausing 2 asks"),
     };

@@ -121,7 +121,7 @@ interface Props {
   onSubmitted: (outcome: SubmitOutcome) => void;
   onOpenShell: (request: ContainerShellRequest) => void;
   onOpenSettings: () => void;
-  /** Changes when a job finished or a setting changed: the lists are read again. */
+  /** Changes when a container action finished or this PC's docker.exe changed (P2): the lists are read again. */
   refreshKey: number;
 }
 

@@ -6,8 +6,8 @@
 //!
 //! * Inventory: `list vms`, then `showvminfo <uuid> --machinereadable` for the name, state, OS type,
 //!   CPUs, memory, disks, network adapters, settings file, Guest Additions run level and snapshots.
-//! * Guest IP and OS name: `guestproperty get` of the Guest Additions' `/VirtualBox/GuestInfo/...`
-//!   properties ([`guest_ip`], [`guest_os_name`]).
+//! * Guest IP and OS name: one `guestproperty enumerate` of the Guest Additions'
+//!   `/VirtualBox/GuestInfo/...` properties ([`guest_ip`], [`guest_os_name`]), not one `get` each.
 //! * Power: `startvm --type headless|gui`, and `controlvm` `acpipowerbutton` (soft stop: the guest
 //!   OS must handle ACPI, no Guest Additions needed), `poweroff`, `reset`, `reboot` (soft restart:
 //!   needs Guest Additions), `savestate` (suspend), `pause`, `resume`. Each call has the same time
@@ -165,8 +165,9 @@ pub trait VirtualBoxAdapter: Send + Sync {
     async fn list_running(&self) -> Result<Vec<String>>;
     /// `showvminfo <uuid> --machinereadable`.
     async fn vm_info(&self, uuid: &str) -> Result<VboxVmInfo>;
-    /// `guestproperty get <uuid> <name>`; `None` when the guest has not set it.
-    async fn guest_property(&self, uuid: &str, name: &str) -> Result<Option<String>>;
+    /// VM-01: `guestproperty enumerate <uuid>`: every property the guest has set, by name. One
+    /// VBoxManage run for the address and the OS, where a `get` each took up to seven.
+    async fn guest_properties(&self, uuid: &str) -> Result<GuestProperties>;
     /// VM-02, VM-03. Only the job runner calls this. A soft stop presses the ACPI power button and
     /// waits until the VM is off.
     async fn power(&self, uuid: &str, op: PowerOp) -> Result<()>;
@@ -181,10 +182,9 @@ pub trait VirtualBoxAdapter: Send + Sync {
         let info = self.vm_info(uuid).await?;
         let (mut os_name, mut kernel) = (None, None);
         if info.power_state().is_on() {
-            let product = self.guest_property(uuid, GUEST_OS_PRODUCT).await.ok().flatten();
-            let release = self.guest_property(uuid, GUEST_OS_RELEASE).await.ok().flatten();
-            let product = product.map(|p| p.trim().to_owned()).filter(|p| !p.is_empty());
-            let release = release.map(|r| r.trim().to_owned()).filter(|r| !r.is_empty());
+            let props = self.guest_properties(uuid).await.unwrap_or_default();
+            let read = |name: &str| props.get(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+            let (product, release) = (read(GUEST_OS_PRODUCT), read(GUEST_OS_RELEASE));
             match (product, release) {
                 (Some(p), Some(r)) if p.eq_ignore_ascii_case("linux") => kernel = Some(r),
                 (Some(p), None) if p.eq_ignore_ascii_case("linux") => {}
@@ -395,10 +395,10 @@ impl VirtualBoxAdapter for VBoxManageCli {
         Ok(parse_showvminfo(&out))
     }
 
-    async fn guest_property(&self, uuid: &str, name: &str) -> Result<Option<String>> {
-        let args = vec!["guestproperty".into(), "get".into(), uuid.into(), name.into()];
-        let out = self.run("guestproperty get", args, QUERY_TIMEOUT).await?;
-        Ok(parse_guest_property(&out))
+    async fn guest_properties(&self, uuid: &str) -> Result<GuestProperties> {
+        let args = vec!["guestproperty".into(), "enumerate".into(), uuid.into()];
+        let out = self.run("guestproperty enumerate", args, QUERY_TIMEOUT).await?;
+        Ok(parse_guest_properties(&out))
     }
 
     async fn power(&self, uuid: &str, op: PowerOp) -> Result<()> {
@@ -453,7 +453,8 @@ impl VirtualBoxAdapter for VBoxManageCli {
         let info = self.vm_info(uuid).await?;
         let mut tree = info.snapshots;
         if let (false, Some(file)) = (tree.snapshots.is_empty(), &info.config_file) {
-            match tokio::fs::read(file).await {
+            // A9: at most MAX_VM_CONFIG_BYTES; a larger one leaves the times out.
+            match crate::untrusted::read_capped(file, crate::untrusted::MAX_VM_CONFIG_BYTES).await {
                 Ok(bytes) => {
                     add_snapshot_times(&mut tree, &parse_vbox_snapshot_times(&String::from_utf8_lossy(&bytes)))
                 }
@@ -523,7 +524,7 @@ impl VirtualBoxAdapter for MissingVirtualBox {
     async fn vm_info(&self, _: &str) -> Result<VboxVmInfo> {
         Err(CoreError::VboxManageNotFound)
     }
-    async fn guest_property(&self, _: &str, _: &str) -> Result<Option<String>> {
+    async fn guest_properties(&self, _: &str) -> Result<GuestProperties> {
         Err(CoreError::VboxManageNotFound)
     }
     async fn power(&self, _: &str, _: PowerOp) -> Result<()> {
@@ -573,8 +574,8 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     async fn vm_info(&self, uuid: &str) -> Result<VboxVmInfo> {
         self.current().vm_info(uuid).await
     }
-    async fn guest_property(&self, uuid: &str, name: &str) -> Result<Option<String>> {
-        self.current().guest_property(uuid, name).await
+    async fn guest_properties(&self, uuid: &str) -> Result<GuestProperties> {
+        self.current().guest_properties(uuid).await
     }
     async fn power(&self, uuid: &str, op: PowerOp) -> Result<()> {
         self.current().power(uuid, op).await
@@ -589,6 +590,9 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
         self.current().hardware(uuid).await
     }
 }
+
+/// VM-01: the guest's properties by name, as `guestproperty enumerate` lists them.
+pub type GuestProperties = HashMap<String, String>;
 
 /// The Guest Additions' count of network adapters, and each one's address and MAC.
 pub const GUEST_NET_COUNT: &str = "/VirtualBox/GuestInfo/Net/Count";
@@ -605,42 +609,40 @@ fn guest_net(index: u32, what: &str) -> String {
 /// behind VirtualBox's NAT has an address (10.0.2.15 in every VM, by default) that the host can't
 /// reach, so when the VM also has another kind of adapter (host-only, bridged), its address wins: the
 /// guest's adapters are matched to the VM's by MAC address. `None` when the guest reports none.
-pub async fn guest_ip(vbox: &dyn VirtualBoxAdapter, uuid: &str, nics: &[VboxNic]) -> Result<Option<String>> {
-    let count = vbox
-        .guest_property(uuid, GUEST_NET_COUNT)
-        .await?
+pub fn guest_ip(props: &GuestProperties, nics: &[VboxNic]) -> Option<String> {
+    let count = props
+        .get(GUEST_NET_COUNT)
         .and_then(|c| c.trim().parse::<u32>().ok())
         .unwrap_or(0)
         .min(MAX_GUEST_NICS);
-    let mut found: Vec<(u32, String)> = Vec::new();
-    for index in 0..count {
-        let ip = vbox.guest_property(uuid, &guest_net(index, "V4/IP")).await?;
-        if let Some(ip) = ip.as_deref().and_then(usable_ip) {
-            found.push((index, ip));
-        }
-    }
+    let found: Vec<(u32, String)> = (0..count)
+        .filter_map(|index| {
+            let ip = props.get(&guest_net(index, "V4/IP")).and_then(|ip| usable_ip(ip))?;
+            Some((index, ip))
+        })
+        .collect();
     let enabled: Vec<&VboxNic> = nics.iter().filter(|n| n.enabled()).collect();
     let mixed = enabled.iter().any(|n| n.behind_nat()) && enabled.iter().any(|n| !n.behind_nat());
     if found.len() < 2 || !mixed {
-        return Ok(found.into_iter().next().map(|(_, ip)| ip));
+        return found.into_iter().next().map(|(_, ip)| ip);
     }
     let mut first_unknown = None;
     for (index, ip) in &found {
-        let mac = vbox.guest_property(uuid, &guest_net(*index, "MAC")).await?;
-        let nic = mac.as_deref().and_then(|mac| {
+        let mac = props.get(&guest_net(*index, "MAC"));
+        let nic = mac.and_then(|mac| {
             enabled
                 .iter()
                 .find(|n| n.mac.as_deref().is_some_and(|m| same_mac(m, mac)))
         });
         match nic {
-            Some(nic) if !nic.behind_nat() => return Ok(Some(ip.clone())),
+            Some(nic) if !nic.behind_nat() => return Some(ip.clone()),
             Some(_) => {}
             None => {
                 first_unknown.get_or_insert_with(|| ip.clone());
             }
         }
     }
-    Ok(first_unknown.or_else(|| found.into_iter().next().map(|(_, ip)| ip)))
+    first_unknown.or_else(|| found.into_iter().next().map(|(_, ip)| ip))
 }
 
 fn usable_ip(text: &str) -> Option<String> {
@@ -660,16 +662,13 @@ fn same_mac(a: &str, b: &str) -> bool {
 
 /// What the guest calls its OS through the Guest Additions, e.g. "Windows 11 10.0.22631" or
 /// "Linux 6.8.0-45-generic" (Linux guests report the kernel, not the distribution).
-pub async fn guest_os_name(vbox: &dyn VirtualBoxAdapter, uuid: &str) -> Result<Option<String>> {
-    let Some(product) = vbox.guest_property(uuid, GUEST_OS_PRODUCT).await? else {
-        return Ok(None);
-    };
-    let release = vbox.guest_property(uuid, GUEST_OS_RELEASE).await?;
-    let name = match release.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+pub fn guest_os_name(props: &GuestProperties) -> Option<String> {
+    let product = props.get(GUEST_OS_PRODUCT)?;
+    let name = match props.get(GUEST_OS_RELEASE).map(|r| r.trim()).filter(|r| !r.is_empty()) {
         Some(release) => format!("{} {release}", product.trim()),
         None => product.trim().to_owned(),
     };
-    Ok(Some(name).filter(|n| !n.is_empty()))
+    Some(name).filter(|n| !n.is_empty())
 }
 
 /// Parses `VBoxManage list vms` (and `list runningvms`):
@@ -694,11 +693,31 @@ pub fn parse_list_vms(out: &str) -> Vec<VboxListedVm> {
         .collect()
 }
 
-/// `guestproperty get` prints `Value: <value>`, or `No value set!`.
-pub fn parse_guest_property(out: &str) -> Option<String> {
+/// Parses `guestproperty enumerate`. VirtualBox 7 prints one property a line: the name, padded, then
+/// its value in single quotes and after it the time it was set and its flags:
+///
+/// ```text
+/// /VirtualBox/GuestInfo/Net/0/V4/IP = '192.0.2.15' @ 2026-10-25T08:00:00.000000000Z (TRANSIENT, TRANSRESET)
+/// ```
+///
+/// Before 7.0 (and with `--old-format`) a line is `Name: <name>, value: <value>, timestamp: <ns>,
+/// flags: <flags>`. Both are read; `No properties found.` and anything else are skipped.
+pub fn parse_guest_properties(out: &str) -> GuestProperties {
     out.lines()
-        .find_map(|line| line.trim().strip_prefix("Value:"))
-        .map(|v| v.trim().to_owned())
+        .filter_map(|line| {
+            let line = line.trim_end_matches('\r');
+            if let Some(rest) = line.trim_start().strip_prefix("Name: ") {
+                let (name, rest) = rest.split_once(", value: ")?;
+                let value = rest.rsplit_once(", timestamp: ").map_or(rest, |(value, _)| value);
+                return Some((name.trim().to_owned(), value.to_owned()));
+            }
+            let (name, rest) = line.split_once(" = '")?;
+            // The value ends at the last quote: the time and flags after it have none.
+            let value = rest.rfind('\'').map_or(rest, |end| &rest[..end]);
+            let name = name.trim();
+            name.starts_with('/').then(|| (name.to_owned(), value.to_owned()))
+        })
+        .collect()
 }
 
 /// Splits VBoxManage's machine-readable output into `key=value` pairs, in order. Keys may be quoted
@@ -1190,12 +1209,70 @@ CurrentSnapshotNode="SnapshotName-1"
     }
 
     #[test]
-    fn parses_guest_properties() {
+    fn parses_guest_properties_in_both_formats() {
+        let new =
+            "/VirtualBox/GuestInfo/Net/Count      = '2' @ 2026-10-25T08:00:00.000000000Z (TRANSIENT, TRANSRESET)\r\n\
+/VirtualBox/GuestInfo/Net/0/V4/IP    = '10.0.2.15' @ 2026-10-25T08:00:00.000000000Z (TRANSIENT, TRANSRESET)\r\n\
+/VirtualBox/GuestInfo/OS/Product     = 'Linux' @ 2026-10-25T08:00:00.000000000Z\r\n\
+/VirtualBox/GuestInfo/User/Note      = 'it's a \\ fine note'\r\n\
+/VirtualBox/GuestInfo/Empty          = ''\r\n";
+        let props = parse_guest_properties(new);
+        let get = |props: &GuestProperties, name: &str| props.get(name).cloned();
+        assert_eq!(get(&props, GUEST_NET_COUNT).as_deref(), Some("2"));
         assert_eq!(
-            parse_guest_property("Value: 192.0.2.15\r\n").as_deref(),
-            Some("192.0.2.15")
+            get(&props, "/VirtualBox/GuestInfo/Net/0/V4/IP").as_deref(),
+            Some("10.0.2.15")
         );
-        assert_eq!(parse_guest_property("No value set!\r\n"), None);
+        assert_eq!(get(&props, GUEST_OS_PRODUCT).as_deref(), Some("Linux"));
+        assert_eq!(
+            get(&props, "/VirtualBox/GuestInfo/User/Note").as_deref(),
+            Some("it's a \\ fine note")
+        );
+        assert_eq!(get(&props, "/VirtualBox/GuestInfo/Empty").as_deref(), Some(""));
+
+        let old = "Name: /VirtualBox/GuestInfo/OS/Release, value: 6.8.0-45-generic, timestamp: 1761379200000000000, flags: \r\n\
+Name: /VirtualBox/GuestInfo/Net/0/MAC, value: 080027000001, timestamp: 1761379200000000000, flags: TRANSIENT\r\n";
+        let props = parse_guest_properties(old);
+        assert_eq!(get(&props, GUEST_OS_RELEASE).as_deref(), Some("6.8.0-45-generic"));
+        assert_eq!(
+            get(&props, "/VirtualBox/GuestInfo/Net/0/MAC").as_deref(),
+            Some("080027000001")
+        );
+
+        assert!(parse_guest_properties("No properties found.\r\n").is_empty());
+        assert!(parse_guest_properties("").is_empty());
+    }
+
+    #[test]
+    fn the_guest_address_and_os_come_from_one_enumeration() {
+        let props: GuestProperties = [
+            (GUEST_NET_COUNT, "2"),
+            ("/VirtualBox/GuestInfo/Net/0/V4/IP", "10.0.2.15"),
+            ("/VirtualBox/GuestInfo/Net/0/MAC", "080027000001"),
+            ("/VirtualBox/GuestInfo/Net/1/V4/IP", "192.0.2.31"),
+            ("/VirtualBox/GuestInfo/Net/1/MAC", "08:00:27:00:00:02"),
+            (GUEST_OS_PRODUCT, "Windows 11"),
+            (GUEST_OS_RELEASE, "10.0.22631"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        let nic = |slot, attachment: &str, mac: &str| VboxNic {
+            slot,
+            attachment: attachment.into(),
+            mac: Some(mac.into()),
+            ..Default::default()
+        };
+        let nat_and_host_only = [nic(1, "nat", "080027000001"), nic(2, "hostonly", "080027000002")];
+        assert_eq!(guest_ip(&props, &nat_and_host_only).as_deref(), Some("192.0.2.31"));
+        // Only NAT: its address is all there is.
+        assert_eq!(
+            guest_ip(&props, &[nic(1, "nat", "080027000001")]).as_deref(),
+            Some("10.0.2.15")
+        );
+        assert_eq!(guest_os_name(&props).as_deref(), Some("Windows 11 10.0.22631"));
+        assert_eq!(guest_ip(&GuestProperties::new(), &nat_and_host_only), None);
+        assert_eq!(guest_os_name(&GuestProperties::new()), None);
     }
 
     #[test]

@@ -311,7 +311,7 @@ impl Vault for LocalVault {
             .insert_vault_meta(ctx, &salt, &inner.options.kdf, &wrapped, dpapi_key.as_deref())
             .await?;
         inner.open_with(key, windows_login);
-        inner.store.checkpoint().await;
+        inner.store.vault_checkpoint().await;
         Ok(())
     }
 
@@ -401,7 +401,7 @@ impl Vault for LocalVault {
                 open.key = key;
             }
         }
-        inner.store.checkpoint().await;
+        inner.store.vault_checkpoint().await;
         Ok(())
     }
 
@@ -420,7 +420,7 @@ impl Vault for LocalVault {
         };
         inner.store.set_vault_dpapi_key(&inner.ctx, blob.as_deref()).await?;
         locks::lock(&inner.state).windows_login = Some(enabled);
-        inner.store.checkpoint().await;
+        inner.store.vault_checkpoint().await;
         Ok(())
     }
 
@@ -433,7 +433,7 @@ impl Vault for LocalVault {
         }
         inner.store.set_vault_dpapi_key(&inner.ctx, None).await?;
         locks::lock(&inner.state).windows_login = Some(false);
-        inner.store.checkpoint().await;
+        inner.store.vault_checkpoint().await;
         Ok(true)
     }
 
@@ -465,7 +465,7 @@ impl Vault for LocalVault {
             .store
             .insert_vault_item(ctx, id.0, kind, &label, &nonce, &ciphertext)
             .await?;
-        inner.store.checkpoint().await;
+        inner.store.vault_checkpoint().await;
         Ok(id)
     }
 
@@ -489,7 +489,7 @@ impl Vault for LocalVault {
         {
             return Err(CoreError::UnknownTarget(format!("secret {id}")));
         }
-        inner.store.checkpoint().await;
+        inner.store.vault_checkpoint().await;
         Ok(())
     }
 
@@ -517,7 +517,7 @@ impl Vault for LocalVault {
         if !inner.store.delete_vault_item(ctx, id).await? {
             return Err(CoreError::UnknownTarget(format!("secret {id}")));
         }
-        inner.store.checkpoint().await;
+        inner.store.vault_checkpoint().await;
         Ok(())
     }
 

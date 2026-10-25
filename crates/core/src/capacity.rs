@@ -6,8 +6,12 @@
 //! It only warns: the command bus shows the warnings and asks for a confirm (see
 //! [`crate::policy::Decision::add_warnings`]); the user decides. A check that cannot run is a
 //! warning too, so a failed read never passes silently.
+//!
+//! VM-02: starting several VMs also names the ones with a bridged network adapter that is plugged in
+//! at power-on ([`CapacityChecker::bridged`]): such a VM joins the network this PC is on, so a clone
+//! with a fixed IP address can take an address the customer's network already uses.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
@@ -21,6 +25,9 @@ use crate::store::{Store, VmRecord};
 
 /// A VM folder's drive with less free space than this is flagged.
 pub const MIN_FREE_DISK_PCT: f64 = 10.0;
+
+/// VM-02: how long reading the starting VMs' adapters may take before the rest are left unchecked.
+pub const BRIDGED_CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -126,6 +133,11 @@ pub struct CapacityChecker {
 }
 
 impl CapacityChecker {
+    /// This PC's counters (SS-07: who else is signed in to it).
+    pub fn host(&self) -> &Arc<dyn HostCounters> {
+        &self.host
+    }
+
     pub fn new(store: Store, hypervisors: Hypervisors, host: Arc<dyn HostCounters>) -> Self {
         Self {
             store,
@@ -181,13 +193,14 @@ impl CapacityChecker {
             return warnings;
         }
 
+        let known = by_key(&inventory);
         let mut running_mb = 0;
         for path in &running {
-            running_mb += self.memsize_mb(ctx, path).await;
+            running_mb += self.memsize_mb(&known, path).await;
         }
         let mut starting_mb = 0;
         for path in &starting {
-            starting_mb += self.memsize_mb(ctx, path).await;
+            starting_mb += self.memsize_mb(&known, path).await;
         }
         let physical_mb = match self.host.host_totals().await {
             Ok(totals) => totals.physical_ram_mb,
@@ -200,7 +213,7 @@ impl CapacityChecker {
         // One free-space read per drive, through one of its VM folders.
         let mut folders: BTreeMap<String, PathBuf> = BTreeMap::new();
         for path in &starting {
-            if let Some(folder) = self.folder(ctx, path).await {
+            if let Some(folder) = self.folder(&known, path).await {
                 folders.entry(drive_of(&folder)).or_insert(folder);
             }
         }
@@ -216,17 +229,73 @@ impl CapacityChecker {
         warnings
     }
 
-    /// The VM's assigned RAM: from the inventory, else its .vmx; 0 when neither says.
-    async fn memsize_mb(&self, ctx: &Context, vmx_path: &str) -> u64 {
-        self.size(ctx, vmx_path).await.0.map_or(0, u64::from)
+    /// VM-02: for a start of two or more VMs, a warning for those with a bridged adapter plugged in at
+    /// power-on, which put them on this PC's own network. Read from each VM's .vmx or `showvminfo`
+    /// within [`BRIDGED_CHECK_BUDGET`]; VMs that can't be read in time are left out.
+    pub async fn bridged(&self, ctx: &Context, targets: &[Target]) -> Vec<String> {
+        let mut vms: Vec<(&str, &str)> = Vec::new();
+        for t in targets {
+            let TargetRef::Vm { vmx_path } = &t.target else {
+                continue;
+            };
+            // A VM that runs already is on its network; starting it changes nothing.
+            let running = matches!(
+                self.store.find_vm(ctx, vmx_path).await,
+                Ok(Some(vm)) if vm.power_state == crate::domain::PowerState::Running
+            );
+            if !running {
+                vms.push((vmx_path.as_str(), t.name.as_str()));
+            }
+        }
+        if vms.len() < 2 {
+            return Vec::new();
+        }
+        let started = std::time::Instant::now();
+        let mut bridged = Vec::new();
+        for (key, name) in vms {
+            let left = BRIDGED_CHECK_BUDGET.saturating_sub(started.elapsed());
+            match tokio::time::timeout(left, self.hypervisors.hardware(key)).await {
+                Ok(Ok(hardware)) => {
+                    let nics: Vec<&str> = hardware
+                        .nics
+                        .iter()
+                        .filter(|n| n.connection.as_deref() == Some("bridged") && n.connected != Some(false))
+                        .map(|n| n.slot.as_str())
+                        .collect();
+                    if !nics.is_empty() {
+                        bridged.push(format!("'{name}' ({})", nics.join(", ")));
+                    }
+                }
+                // Like the RAM check, a VM whose files can't be read is left out (its start fails anyway).
+                Ok(Err(err)) => tracing::debug!(vm = %name, error = %err, "could not read a VM's adapters"),
+                Err(_) => {
+                    tracing::debug!(vm = %name, "no time left to read a VM's adapters");
+                    break;
+                }
+            }
+        }
+        let joins = match bridged.len() {
+            0 => return Vec::new(),
+            1 => "joins",
+            _ => "join",
+        };
+        vec![format!(
+            "Bridged network adapter: {} {joins} the network this PC is on. A clone keeps the fixed IP address of the VM it was made from, which may clash with a machine on that network.",
+            bridged.join(", ")
+        )]
     }
 
-    /// The VM's assigned RAM (MB) and vCPUs: from the inventory, else its .vmx (VirtualBox:
-    /// `showvminfo`).
-    async fn size(&self, ctx: &Context, vmx_path: &str) -> (Option<u32>, Option<u32>) {
-        let (mut ram, mut cpus) = match self.store.find_vm(ctx, vmx_path).await {
-            Ok(Some(vm)) => (vm.memsize_mb, vm.num_vcpus),
-            _ => (None, None),
+    /// The VM's assigned RAM: from the inventory, else its .vmx; 0 when neither says.
+    async fn memsize_mb(&self, known: &HashMap<String, &VmRecord>, vmx_path: &str) -> u64 {
+        self.size(known, vmx_path).await.0.map_or(0, u64::from)
+    }
+
+    /// The VM's assigned RAM (MB) and vCPUs: from the inventory (`known`, read once per check: P8),
+    /// else its .vmx (VirtualBox: `showvminfo`).
+    async fn size(&self, known: &HashMap<String, &VmRecord>, vmx_path: &str) -> (Option<u32>, Option<u32>) {
+        let (mut ram, mut cpus) = match known.get(&path_key(Path::new(vmx_path))) {
+            Some(vm) => (vm.memsize_mb, vm.num_vcpus),
+            None => (None, None),
         };
         if ram.is_none() || cpus.is_none() {
             match Hypervisor::of_key(vmx_path) {
@@ -250,11 +319,9 @@ impl CapacityChecker {
 
     /// The folder holding a VM's files: from the inventory, else the .vmx's folder (VirtualBox: the
     /// .vbox's, from `showvminfo`).
-    async fn folder(&self, ctx: &Context, key: &str) -> Option<PathBuf> {
-        if let Ok(Some(vm)) = self.store.find_vm(ctx, key).await {
-            if let Some(folder) = vm.folder() {
-                return Some(folder.to_path_buf());
-            }
+    async fn folder(&self, known: &HashMap<String, &VmRecord>, key: &str) -> Option<PathBuf> {
+        if let Some(folder) = known.get(&path_key(Path::new(key))).and_then(|vm| vm.folder()) {
+            return Some(folder.to_path_buf());
         }
         match Hypervisor::of_key(key) {
             Hypervisor::Vmware => Path::new(key).parent().map(Path::to_path_buf),
@@ -289,8 +356,9 @@ impl CapacityChecker {
             None => self.running(&inventory).await,
         };
         capacity.running_vms = running.len();
+        let known = by_key(&inventory);
         for path in &running {
-            match self.size(ctx, path).await {
+            match self.size(&known, path).await {
                 (Some(ram), Some(cpus)) => {
                     capacity.assigned_ram_mb += u64::from(ram);
                     capacity.assigned_vcpus += cpus;
@@ -369,6 +437,14 @@ fn unchecked(what: &str, err: &crate::error::CoreError) -> CapacityWarning {
 }
 
 /// `C:` for `C:\VMs\web`, `\\server\share` for a UNC path; the folder itself otherwise.
+/// The inventory by [`path_key`], so each VM is looked up without a query.
+fn by_key(inventory: &[VmRecord]) -> HashMap<String, &VmRecord> {
+    inventory
+        .iter()
+        .map(|vm| (path_key(Path::new(&vm.vmx_path)), vm))
+        .collect()
+}
+
 fn drive_of(folder: &Path) -> String {
     match folder.components().next() {
         Some(Component::Prefix(prefix)) => prefix.as_os_str().to_string_lossy().into_owned(),

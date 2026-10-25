@@ -191,7 +191,7 @@ pub fn running(fake: &FakeVmware) -> Vec<String> {
 pub async fn wait_finished(rx: &mut Receiver<JobEvent>, job: Uuid) -> JobStatus {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let JobEvent::Finished { job_id, status } = rx.recv().await.unwrap() {
+            if let JobEvent::Finished { job_id, status, .. } = rx.recv().await.unwrap() {
                 if job_id == job {
                     return status;
                 }

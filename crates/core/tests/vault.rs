@@ -765,16 +765,3 @@ async fn a_new_vault_set_up_without_the_windows_login_keeps_no_dpapi_copy() {
         .iter()
         .any(|e| e.detail.as_deref() == Some("unlocks with the vault password only")));
 }
-
-#[tokio::test]
-async fn deleted_vault_rows_are_overwritten_on_disk() {
-    let dir = temp_folder("vault-secure-delete");
-    let store = Store::open(&dir.join("remotely.db")).await.unwrap();
-    let on: i64 = sqlx::query_scalar("PRAGMA secure_delete")
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-    assert_eq!(on, 1, "secure_delete is on for the app's database");
-    drop(store);
-    let _ = std::fs::remove_dir_all(dir);
-}

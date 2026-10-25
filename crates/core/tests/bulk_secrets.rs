@@ -173,6 +173,7 @@ async fn the_sudo_password_never_leaks() {
         sudo_password_id: Some(sudo_id),
         trust_new_host_keys: false,
         timeout_secs: Some(30),
+        rollout: Default::default(),
     };
     // Read-only commands, so Low; but SS-04, AP-06: the chosen sudo password goes to these hosts for the first
     // time, so the run asks for a confirm and the vault password. The secret never reaches the approval.
@@ -202,7 +203,7 @@ async fn the_sudo_password_never_leaks() {
         loop {
             let event = events.recv().await.unwrap();
             seen.push(serde_json::to_string(&event).unwrap());
-            if let JobEvent::Finished { job_id, status } = event {
+            if let JobEvent::Finished { job_id, status, .. } = event {
                 if job_id == job {
                     return status;
                 }

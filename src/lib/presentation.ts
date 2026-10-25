@@ -22,6 +22,12 @@
 
 export type MaskKind = "host" | "ip" | "user" | "mac";
 
+/** A value the masker learnt, masked from now on wherever it appears as a whole word. */
+export interface Learned {
+  kind: "host" | "user";
+  value: string;
+}
+
 /** A part of a text to show differently: [start, end) in the original string, and the stand-in for it. */
 export interface Replacement {
   start: number;
@@ -214,10 +220,10 @@ export class Masker {
   /** Known values masked as bare words, by kind. */
   private readonly known: Record<"host" | "user", Set<string>> = { host: new Set(), user: new Set() };
   private matchers: { re: RegExp; kind: "host" | "user" }[] | null = null;
-  private readonly listeners = new Set<() => void>();
+  private readonly listeners = new Set<(learned: Learned) => void>();
 
-  /** Called when a new known value arrived, so text already on screen can be masked again. */
-  onChange(listener: () => void): () => void {
+  /** Called with each new known value, so text already on screen that holds it can be masked again. */
+  onChange(listener: (learned: Learned) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -259,7 +265,8 @@ export class Masker {
     if (set.has(key)) return false;
     set.add(key);
     this.matchers = null;
-    this.listeners.forEach((l) => l());
+    const learned: Learned = { kind: as, value };
+    this.listeners.forEach((l) => l(learned));
     return true;
   }
 

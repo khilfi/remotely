@@ -14,10 +14,15 @@
 //!
 //! After each refresh, saved sessions are linked to the VMs whose new guest IPs they reach (QL-01,
 //! [`crate::vm_links`]).
+//!
+//! A refresh starts processes (vmrun, and VBoxManage twice per running VirtualBox VM), so refreshes
+//! run one at a time, and all those asked for while one runs share one more run after it
+//! ([`Inventory::refresh`]): ten uploads finishing together cost two refreshes, not ten.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -30,6 +35,7 @@ use crate::adapters::vmware::{path_key, with_backslashes, ToolsState, VmxInfo};
 use crate::command_bus::TargetDirectory;
 use crate::domain::{Context, Environment, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::locks;
 use crate::presentation::Change;
 use crate::store::{self, DiscoveredVm, NewAuditEntry, Store, VmRecord};
 use crate::terminal::Terminals;
@@ -131,6 +137,17 @@ pub struct Inventory {
     store: Store,
     hypervisors: Hypervisors,
     links: Arc<VmLinks>,
+    refreshes: RefreshGate,
+}
+
+/// VM-01: one refresh at a time. Each request takes a ticket; a run covers every ticket taken before
+/// it started, so a request whose ticket an earlier run covers takes that run's report.
+#[derive(Default)]
+struct RefreshGate {
+    tickets: AtomicU64,
+    running: tokio::sync::Mutex<()>,
+    /// The last good run: the newest ticket it covers, and its report.
+    last: Mutex<Option<(u64, RefreshReport)>>,
 }
 
 /// A .vmx path found by one of the sources, before its file is read.
@@ -145,6 +162,7 @@ impl Inventory {
             store,
             hypervisors,
             links,
+            refreshes: RefreshGate::default(),
         }
     }
 
@@ -159,7 +177,29 @@ impl Inventory {
 
     /// VM-01: finds every VM, saves what it found and returns the full list. A source that cannot be
     /// read (vmrun missing, a folder gone) becomes a warning instead of failing the refresh.
+    ///
+    /// Single-flight and coalesced: while a refresh runs, the requests that come in wait, and when it
+    /// is done the first of them runs once more for all of them (what they asked about may have changed
+    /// after the running one read it); the others take that run's report. A request made after a run
+    /// started never takes an older report. A run that fails is shared with nobody: the next waiting
+    /// request runs again.
     pub async fn refresh(&self, ctx: &Context) -> Result<RefreshReport> {
+        let gate = &self.refreshes;
+        let ticket = gate.tickets.fetch_add(1, Ordering::SeqCst) + 1;
+        let _running = gate.running.lock().await;
+        if let Some((covers, report)) = locks::lock(&gate.last).as_ref() {
+            if *covers >= ticket {
+                return Ok(report.clone());
+            }
+        }
+        // Every ticket taken so far was asked for before this run reads anything.
+        let covers = gate.tickets.load(Ordering::SeqCst);
+        let report = self.refresh_now(ctx).await?;
+        *locks::lock(&gate.last) = Some((covers, report.clone()));
+        Ok(report)
+    }
+
+    async fn refresh_now(&self, ctx: &Context) -> Result<RefreshReport> {
         let mut warnings = Vec::new();
         let mut found = self.refresh_vmware(ctx, &mut warnings).await?;
         let mut read = vec![Hypervisor::Vmware];
@@ -451,20 +491,18 @@ async fn read_virtualbox_vm(vbox: &dyn VirtualBoxAdapter, listed: &VboxListedVm)
     let power_state = info.power_state();
     let tools = info.tools_state();
     let (mut ip, mut os_name) = (None, None);
-    // A paused guest can't answer; the store keeps what it last reported.
+    // A paused guest can't answer; the store keeps what it last reported. One `guestproperty
+    // enumerate` gives both the address and the OS.
     if power_state == PowerState::Running && tools == Some(ToolsState::Running) {
-        ip = virtualbox::guest_ip(vbox, &listed.uuid, &info.nics)
-            .await
-            .unwrap_or_else(|err| {
-                tracing::debug!(uuid = %listed.uuid, error = %err, "could not read the guest's IP address");
-                None
-            });
-        os_name = virtualbox::guest_os_name(vbox, &listed.uuid)
-            .await
-            .unwrap_or_else(|err| {
-                tracing::debug!(uuid = %listed.uuid, error = %err, "could not read the guest's OS name");
-                None
-            });
+        match vbox.guest_properties(&listed.uuid).await {
+            Ok(props) => {
+                ip = virtualbox::guest_ip(&props, &info.nics);
+                os_name = virtualbox::guest_os_name(&props);
+            }
+            Err(err) => {
+                tracing::debug!(uuid = %listed.uuid, error = %err, "could not read the guest's properties");
+            }
+        }
     }
     Ok(Some(virtualbox_discovered(listed, info, tools, ip, os_name)))
 }

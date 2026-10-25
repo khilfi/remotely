@@ -13,6 +13,8 @@
 //! The text is the user's own data. It goes to the UI or the clipboard only, never into a log, the audit log or
 //! an error.
 
+use std::sync::Arc;
+
 use remotely_core::terminal::output::TerminalText;
 use tauri::State;
 use uuid::Uuid;
@@ -36,7 +38,8 @@ pub async fn clipboard_read_text() -> IpcResult<Option<String>> {
 /// that never opened. A terminal that has closed is refused: its secrets are gone, so its text can't be checked.
 #[tauri::command]
 pub async fn terminal_copy_selection(state: State<'_, AppState>, id: Option<Uuid>, text: String) -> IpcResult<()> {
-    let clean = state.core.terminals.scrub_for_copy(id, &text)?;
+    let core = Arc::clone(&state.core);
+    let clean = off_the_window(move || core.terminals.scrub_for_copy(id, &text)).await?;
     write_private(clean).await
 }
 
@@ -44,8 +47,16 @@ pub async fn terminal_copy_selection(state: State<'_, AppState>, id: Option<Uuid
 /// there are several, onto the clipboard like a selection.
 #[tauri::command]
 pub async fn terminal_output_copy(state: State<'_, AppState>, items: Vec<TerminalText>) -> IpcResult<()> {
-    let clean = state.core.terminals.copy_output_text(items)?;
+    let core = Arc::clone(&state.core);
+    let clean = off_the_window(move || core.terminals.copy_output_text(items)).await?;
     write_private(clean).await
+}
+
+/// Whole scrollbacks can be megabytes, so scrubbing runs on a blocking thread, as printing does.
+async fn off_the_window(scrub: impl FnOnce() -> remotely_core::Result<String> + Send + 'static) -> IpcResult<String> {
+    Ok(tauri::async_runtime::spawn_blocking(scrub)
+        .await
+        .map_err(|err| IpcError::new("internal", format!("The text could not be read: {err}")))??)
 }
 
 /// Puts text on the clipboard, kept out of Windows' clipboard history, cloud clipboard and clipboard monitors.

@@ -1,6 +1,7 @@
 // MO-15: this PC's memory over the last 30 minutes, on the dashboard under the capacity panel: RAM in use against
 // all the RAM there is, and the paging files in use against their size, each limit dashed in its line's colour. Read
-// from the metrics rounds (nothing extra is polled for it), every round while the dashboard shows.
+// from the metrics rounds (nothing extra is polled for it), every round while the dashboard shows and the window is
+// visible (`live`, P8): hidden, it reads nothing.
 
 import { useEffect, useState } from "react";
 import { MetricChart } from "@/components/MetricChart";
@@ -8,10 +9,11 @@ import { api, type ThisPcSeries } from "@/lib/api";
 import { formatBytes } from "@/lib/metrics";
 import type { ResolvedTheme } from "@/lib/theme";
 
-export function ThisPcMemoryChart({ round, theme }: { round: number; theme: ResolvedTheme }) {
+export function ThisPcMemoryChart({ round, live, theme }: { round: number; live: boolean; theme: ResolvedTheme }) {
   const [series, setSeries] = useState<ThisPcSeries | null>(null);
 
   useEffect(() => {
+    if (!live) return;
     let stale = false;
     api.metricsThisPc().then(
       (s) => !stale && setSeries(s),
@@ -20,7 +22,7 @@ export function ThisPcMemoryChart({ round, theme }: { round: number; theme: Reso
     return () => {
       stale = true;
     };
-  }, [round]);
+  }, [round, live]);
 
   const points = series?.points ?? [];
   const pick = (f: (p: (typeof points)[number]) => number | null) => points.map(f);

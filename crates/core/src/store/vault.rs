@@ -189,11 +189,11 @@ impl Store {
             .collect()
     }
 
-    /// SS-04: after a vault change, the write-ahead log is folded into the database file and emptied, so
-    /// an old wrapped key or ciphertext does not linger in `-wal` (secure_delete overwrites the pages in
-    /// the file itself). Best effort: a busy reader only delays it.
-    pub(crate) async fn checkpoint(&self) {
-        if let Err(err) = sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)").execute(&self.pool).await {
+    /// SS-04: after a vault change, the write-ahead log is folded into the database file and emptied
+    /// ([`Store::checkpoint`]), so an old wrapped key or ciphertext does not linger in `-wal` (secure_delete
+    /// overwrites the pages in the file itself). Best effort: a busy reader only delays it.
+    pub(crate) async fn vault_checkpoint(&self) {
+        if let Err(err) = self.checkpoint().await {
             tracing::warn!(error = %err, "could not checkpoint the database after a vault change");
         }
     }

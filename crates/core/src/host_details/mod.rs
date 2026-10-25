@@ -747,17 +747,44 @@ fn decode(session_id: Uuid, stored: &crate::store::StoredSpecs) -> Option<Sessio
     ))
 }
 
-/// MO-13: each session's one-line summary for the dashboard, from the stored facts.
-pub(crate) async fn briefs(store: &Store, ctx: &Context) -> Result<HashMap<Uuid, SpecsBrief>> {
-    Ok(store
-        .all_session_specs(ctx)
-        .await?
-        .into_iter()
-        .filter_map(|(id, stored)| {
-            let specs: HostSpecs = serde_json::from_str(&stored.specs).ok()?;
-            Some((id, SpecsBrief::of(&specs, &stored.collected_at)))
-        })
-        .collect())
+/// MO-13: each session's one-line summary for the dashboard, from the stored facts. The dashboard asks
+/// every round, so the summaries are kept (P8): a round reads only when each session's facts were read,
+/// and parses the stored JSON again only when one of them changed.
+#[derive(Default)]
+pub(crate) struct Briefs {
+    /// By session: when its facts were read, and their summary (`None`: they don't parse).
+    kept: Mutex<HashMap<Uuid, (String, Option<SpecsBrief>)>>,
+}
+
+impl Briefs {
+    pub(crate) async fn get(&self, store: &Store, ctx: &Context) -> Result<HashMap<Uuid, SpecsBrief>> {
+        let times = store.session_specs_times(ctx).await?;
+        let changed = {
+            let kept = locks::lock(&self.kept);
+            times.len() != kept.len()
+                || times
+                    .iter()
+                    .any(|(id, at)| kept.get(id).is_none_or(|(kept_at, _)| kept_at != at))
+        };
+        if changed {
+            let parsed: HashMap<Uuid, (String, Option<SpecsBrief>)> = store
+                .all_session_specs(ctx)
+                .await?
+                .into_iter()
+                .map(|(id, stored)| {
+                    let brief = serde_json::from_str::<HostSpecs>(&stored.specs)
+                        .ok()
+                        .map(|specs| SpecsBrief::of(&specs, &stored.collected_at));
+                    (id, (stored.collected_at, brief))
+                })
+                .collect();
+            *locks::lock(&self.kept) = parsed;
+        }
+        Ok(locks::lock(&self.kept)
+            .iter()
+            .filter_map(|(id, (_, brief))| Some((*id, brief.clone()?)))
+            .collect())
+    }
 }
 
 #[cfg(test)]
