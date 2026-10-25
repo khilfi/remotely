@@ -506,7 +506,10 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   `modifymedium --resize` on a base disk under a snapshot resizes the base while the guest keeps seeing the
   differencing image's old size, so Remotely refuses disk changes on a VM with snapshots. `unregistervm <uuid>` keeps
   the files; `--delete` removes the .vbox, .vbox-prev, .nvram, attached disks (snapshot ones too), Logs and Snapshots,
-  and keeps other files and the folder. `registervm <file.vbox>` refuses a VM whose UUID is registered already.
+  and keeps other files and the folder. After a snapshot the VM runs on differencing images (`Snapshots/{uuid}.vdi`)
+  and the snapshot keeps the base disks; `--delete` deletes both, so the preview reads every `<Image uuid>` under an
+  `<AttachedDevice type="HardDisk">` in the .vbox (machine and snapshots) by its `<HardDisk location>` in the media
+  registry. `registervm <file.vbox>` refuses a VM whose UUID is registered already.
   `controlvm <uuid> screenshotpng <file>` (running), `VirtualBoxVM.exe --startvm <uuid> --separate` (a window on a
   running VM), `VBoxGuestAdditions.iso` beside VBoxManage.
 

@@ -9,6 +9,7 @@ mod common;
 use std::sync::Arc;
 
 use common::{vbox_vm, vm, vmx, wait_finished, Setup, VAULT_PASSWORD};
+use remotely_core::adapters::virtualbox::VboxSettingsExtras;
 use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, Command, SubmitOutcome};
 use remotely_core::domain::{Environment, PowerState};
 use remotely_core::fakes::{FakeVirtualBox, FakeVmware};
@@ -879,6 +880,65 @@ async fn deleting_a_virtualbox_vm_lists_its_files_and_unregisters_it() {
         .calls()
         .iter()
         .any(|c| c == &format!("change unregistervm {DB} --delete")));
+}
+
+#[tokio::test]
+async fn deleting_a_virtualbox_vm_with_a_snapshot_lists_the_base_disks_it_keeps() {
+    // VM-24, AP-02: after a snapshot the VM runs on a differencing image and the snapshot keeps the base disk;
+    // VirtualBox deletes both, and a disk outside the folder it uses too, so the preview lists them all.
+    let folder = r"C:\Users\alice\VirtualBox VMs\db";
+    let diff = r"C:\Users\alice\VirtualBox VMs\db\Snapshots\{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}.vdi";
+    let fake = virtualbox()
+        .with_snapshot(DB, "before", time::OffsetDateTime::UNIX_EPOCH)
+        .with_file(diff, 2_000_000)
+        .with_file(r"D:\Disks\data.vdi", 5_000_000)
+        .with_file(r"C:\Users\alice\VirtualBox VMs\db\notes.txt", 10)
+        .with_extras(
+            DB,
+            VboxSettingsExtras {
+                hard_disks: vec![
+                    "db.vdi".into(),
+                    "Snapshots/{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}.vdi".into(),
+                    r"D:\Disks\data.vdi".into(),
+                ],
+                ..VboxSettingsExtras::default()
+            },
+        );
+    let setup = Setup::new(FakeVmware::default()).with_virtualbox(fake);
+    let vbox = Arc::clone(&setup.virtualbox);
+    let core = built(setup).await;
+    let command = Command::VmLifecycle {
+        targets: vec![vbox_vm(DB)],
+        op: VmLifecycleOp::Delete,
+    };
+    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let target = &request.vm_change.as_ref().unwrap().targets[0];
+    let going: Vec<(&str, Option<u64>)> = target.deletes.iter().map(|f| (f.path.as_str(), f.bytes)).collect();
+    let base = format!(r"{folder}\db.vdi");
+    for file in [base.as_str(), diff, r"D:\Disks\data.vdi"] {
+        assert!(
+            going.iter().any(|(p, _)| p.eq_ignore_ascii_case(file)),
+            "{file} in {going:?}"
+        );
+    }
+    assert!(
+        going.contains(&(r"D:\Disks\data.vdi", Some(5_000_000))),
+        "a disk outside the folder with its size: {going:?}"
+    );
+    assert!(!going.iter().any(|(p, _)| p.ends_with("notes.txt")));
+    assert!(
+        target.keeps.iter().any(|k| k.starts_with("1 other file(s)")),
+        "only notes.txt is kept: {:?}",
+        target.keeps
+    );
+
+    let mut rx = core.jobs.subscribe();
+    let job = approve(&core, &request).await;
+    assert_eq!(wait_finished(&mut rx, job).await, JobStatus::Succeeded);
+    for file in [base.as_str(), diff, r"D:\Disks\data.vdi"] {
+        assert!(!vbox.has_file(file), "{file} deleted");
+    }
+    assert!(vbox.has_file(r"C:\Users\alice\VirtualBox VMs\db\notes.txt"));
 }
 
 #[tokio::test]

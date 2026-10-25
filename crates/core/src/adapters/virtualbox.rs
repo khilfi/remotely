@@ -104,6 +104,10 @@ pub struct VboxSettingsExtras {
     pub shared_folders: HashMap<String, (Option<bool>, Option<bool>)>,
     /// `HDA`, `AC97`, `SB16`.
     pub audio_controller: Option<String>,
+    /// VM-24: the hard disk images the VM uses now or in a snapshot (a snapshot keeps the base disk, the VM its
+    /// differencing image), by their `location` in the media registry: relative to the .vbox's folder, or whole.
+    /// `unregistervm --delete` deletes them with the VM.
+    pub hard_disks: Vec<String>,
 }
 
 /// MO-13: a hard disk image attached to a VM, and where (`SATA-0-0`: controller, port, device).
@@ -1286,7 +1290,62 @@ pub fn parse_vbox_settings_extras(xml: &str) -> VboxSettingsExtras {
         .first()
         .filter(|tag| flag(tag, "enabled") != Some(false))
         .and_then(|tag| xml_attribute(tag, "controller"));
+    extras.hard_disks = attached_hard_disks(xml);
     extras
+}
+
+/// VM-24: each `<Image uuid>` inside an `<AttachedDevice type="HardDisk">`, in the machine's hardware or a
+/// snapshot's, by the `location` its `<HardDisk>` has in the media registry. An image registered in another VM's
+/// file has no location here and is left out.
+fn attached_hard_disks(xml: &str) -> Vec<String> {
+    let key = |uuid: &str| uuid.trim_matches(['{', '}']).to_ascii_lowercase();
+    let mut locations: HashMap<String, String> = HashMap::new();
+    let mut attached: Vec<String> = Vec::new();
+    let mut hard_disk_attachment = false;
+    let mut rest = xml;
+    while let Some(start) = rest.find('<') {
+        let after = &rest[start + 1..];
+        let end = after.find('>').unwrap_or(after.len());
+        let tag = &after[..end];
+        let name: String = tag.chars().take_while(char::is_ascii_alphanumeric).collect();
+        match name.as_str() {
+            "HardDisk" => {
+                if let (Some(uuid), Some(location)) = (xml_attribute(tag, "uuid"), xml_attribute(tag, "location")) {
+                    locations.insert(key(&uuid), xml_unescape(&location));
+                }
+            }
+            "AttachedDevice" => {
+                hard_disk_attachment = xml_attribute(tag, "type").is_some_and(|t| t.eq_ignore_ascii_case("HardDisk"))
+                    && !tag.ends_with('/');
+            }
+            "Image" if hard_disk_attachment => {
+                if let Some(uuid) = xml_attribute(tag, "uuid") {
+                    attached.push(key(&uuid));
+                }
+            }
+            _ if tag.starts_with("/AttachedDevice") => hard_disk_attachment = false,
+            _ => {}
+        }
+        rest = &after[end..];
+    }
+    let mut disks: Vec<String> = Vec::new();
+    for uuid in attached {
+        if let Some(location) = locations.get(&uuid) {
+            if !disks.contains(location) {
+                disks.push(location.clone());
+            }
+        }
+    }
+    disks
+}
+
+/// The five predefined XML entities, as VirtualBox writes them in attribute values.
+fn xml_unescape(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 fn nic_slot(nics: &mut HashMap<u32, VboxNic>, slot: u32) -> &mut VboxNic {
@@ -1862,6 +1921,61 @@ SecureBoot="on"
         assert_eq!(
             parse_vbox_settings_extras("<TrustedPlatformModule type=\"None\"/>").tpm,
             None
+        );
+    }
+
+    #[test]
+    fn the_disks_a_vm_uses_include_the_base_disks_its_snapshots_keep() {
+        // VM-24, from VirtualBox 7.2 after a snapshot: the machine is on differencing images, the snapshot on the
+        // base disks, and `unregistervm --delete` deletes all four. An image only in the registry (another VM's,
+        // registered here first) and a DVD's are not the VM's disks.
+        let xml = r#"<Machine uuid="{7eeedfae-8668-460f-9a40-71b160d82799}" name="it-r3-hvbox">
+    <MediaRegistry>
+      <HardDisks>
+        <HardDisk uuid="{9fe5365d-533e-46e6-a058-8c2404a68ca9}" location="it-r3-hvbox.vdi" format="VDI" type="Normal">
+          <HardDisk uuid="{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}" location="Snapshots/{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}.vdi" format="VDI"/>
+        </HardDisk>
+        <HardDisk uuid="{fe8e614d-c7bc-44f0-83af-ad4162cdf3d0}" location="D:\Disks\data &amp; logs.vdi" format="VDI" type="Normal"/>
+        <HardDisk uuid="{0b3d1c9e-0000-4000-8000-000000000001}" location="other-vm.vdi" format="VDI" type="Normal"/>
+      </HardDisks>
+      <DVDImages>
+        <Image uuid="{0b3d1c9e-0000-4000-8000-000000000002}" location="C:\ISOs\ubuntu.iso"/>
+      </DVDImages>
+    </MediaRegistry>
+    <Snapshot uuid="{5ffddc23-5eea-46a8-ad71-2df104ee9506}" name="before">
+      <Hardware>
+        <StorageControllers>
+          <StorageController name="SATA" type="AHCI" PortCount="3">
+            <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0">
+              <Image uuid="{9fe5365d-533e-46e6-a058-8c2404a68ca9}"/>
+            </AttachedDevice>
+            <AttachedDevice passthrough="false" type="DVD" hotpluggable="false" port="1" device="0">
+              <Image uuid="{0b3d1c9e-0000-4000-8000-000000000002}"/>
+            </AttachedDevice>
+          </StorageController>
+        </StorageControllers>
+      </Hardware>
+    </Snapshot>
+    <Hardware>
+      <StorageControllers>
+        <StorageController name="SATA" type="AHCI" PortCount="3">
+          <AttachedDevice type="HardDisk" hotpluggable="false" port="0" device="0">
+            <Image uuid="{157A4207-B28B-4AE2-A0B7-FC64B88EB5AE}"/>
+          </AttachedDevice>
+          <AttachedDevice passthrough="false" type="DVD" hotpluggable="false" port="1" device="0"/>
+          <AttachedDevice type="HardDisk" hotpluggable="false" port="2" device="0">
+            <Image uuid="{fe8e614d-c7bc-44f0-83af-ad4162cdf3d0}"/>
+          </AttachedDevice>
+        </StorageController>
+      </StorageControllers>
+    </Hardware>"#;
+        assert_eq!(
+            parse_vbox_settings_extras(xml).hard_disks,
+            [
+                "it-r3-hvbox.vdi",
+                "Snapshots/{157a4207-b28b-4ae2-a0b7-fc64b88eb5ae}.vdi",
+                r"D:\Disks\data & logs.vdi"
+            ]
         );
     }
 

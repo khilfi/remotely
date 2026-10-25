@@ -1406,13 +1406,31 @@ impl FakeVirtualBox {
                         .and_then(|f| f.parent())
                         .map(path_key)
                         .unwrap_or_default();
-                    let disks: Vec<String> = info.disks.iter().map(|d| path_key(&d.path)).collect();
+                    // Its disks now and those its snapshots keep, as VirtualBox deletes them.
+                    let mut disks: Vec<String> = info.disks.iter().map(|d| path_key(&d.path)).collect();
+                    if let Some(extras) = locks::lock(&self.extras).get(uuid.as_str()) {
+                        let base = info
+                            .config_file
+                            .as_ref()
+                            .and_then(|f| f.parent())
+                            .unwrap_or(Path::new(""));
+                        disks.extend(
+                            extras
+                                .hard_disks
+                                .iter()
+                                .map(|location| path_key(&crate::vm_settings::vmware::resolve(base, location))),
+                        );
+                    }
+                    let snapshots = format!("{folder}\\snapshots");
                     locks::lock(&self.files).retain(|key, (path, _)| {
                         let own_disk = disks.contains(key);
                         let in_folder = path.parent().is_some_and(|f| {
                             let f = path_key(f);
                             f == folder || f.starts_with(&format!("{folder}\\"))
                         });
+                        if path.parent().is_some_and(|f| path_key(f) == snapshots) {
+                            return false;
+                        }
                         let name = path
                             .file_name()
                             .map(|n| n.to_string_lossy().to_lowercase())

@@ -791,8 +791,20 @@ impl VmEditor {
                     ));
                 }
                 let info = vbox.vm_info(uuid).await?;
+                let extras = vbox.settings_extras(&info).await.unwrap_or_default();
                 let mut deletes: Vec<(PathBuf, u64)> = Vec::new();
                 let mut keeps = Vec::new();
+                // The disks it uses now and those its snapshots keep (the base disks under its differencing
+                // images): VirtualBox deletes them all.
+                let mut disks: Vec<PathBuf> = info.disks.iter().map(|d| d.path.clone()).collect();
+                if let Some(folder) = info.config_file.as_deref().and_then(Path::parent) {
+                    for location in &extras.hard_disks {
+                        let path = vmware::resolve(folder, location);
+                        if !disks.iter().any(|d| path_key(d) == path_key(&path)) {
+                            disks.push(path);
+                        }
+                    }
+                }
                 if let Some(cfg) = &info.config_file {
                     let folder = cfg.parent().unwrap_or(Path::new(""));
                     let stem = cfg
@@ -808,7 +820,7 @@ impl VmEditor {
                         let own = [".vbox", ".vbox-prev", ".nvram"]
                             .iter()
                             .any(|ext| name == format!("{stem}{ext}"))
-                            || info.disks.iter().any(|d| path_key(&d.path) == path_key(&path));
+                            || disks.iter().any(|d| path_key(d) == path_key(&path));
                         if own {
                             deletes.push((path, size));
                         } else {
@@ -825,18 +837,24 @@ impl VmEditor {
                         ));
                     }
                 }
-                for disk in &info.disks {
-                    if !deletes.iter().any(|(p, _)| path_key(p) == path_key(&disk.path)) {
-                        deletes.push((disk.path.clone(), 0));
+                for disk in &disks {
+                    if deletes.iter().any(|(p, _)| path_key(p) == path_key(disk)) {
+                        continue;
                     }
+                    // A disk outside the VM's folder: its size from a listing of its own folder.
+                    let size = match disk.parent() {
+                        Some(parent) => vbox
+                            .folder_files(parent)
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .find(|(file, _)| path_key(file) == path_key(disk))
+                            .map_or(0, |(_, size)| size),
+                        None => 0,
+                    };
+                    deletes.push((disk.clone(), size));
                 }
-                if info.snapshots.snapshots.is_empty() {
-                    keeps.push("ISO images in its DVD drives (VirtualBox only lets go of them)".into());
-                } else {
-                    keeps.push(
-                        "ISO images in its DVD drives (VirtualBox only lets go of them); the base disks its snapshots use go too".into(),
-                    );
-                }
+                keeps.push("ISO images in its DVD drives (VirtualBox only lets go of them)".into());
                 let total: u64 = deletes.iter().map(|(_, size)| size).sum();
                 Ok(Plan {
                     actions: vec![Action::Vbox {
