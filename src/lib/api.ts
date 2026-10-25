@@ -695,6 +695,7 @@ export type ActionKind =
   | "execOther"
   | "execDangerous"
   | "sshKeyPush"
+  | "sshKeyRemove"
   | "fileUpload"
   | "fileReplace"
   | "tunnelLocal"
