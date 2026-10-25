@@ -48,7 +48,7 @@ Everything committed here is public, and git history is forever.
 4. **Audit everything that changes state.** Append-only audit log, written when an action starts and when it ends, each entry hash-chained to the previous one.
 5. **Every record carries `workspace_id` and `user_id`** from day one, even though the MVP has one workspace and one user.
 6. **One adapter per outside system** (VMware, remote/SSH, host counters), each behind a Rust trait so tests can use a fake.
-7. **Secrets live only in the vault.** Never put passwords, keys or passphrases in logs, audit entries, job output, exports, error messages or the UI state. The vault hands secrets to adapters only.
+7. **Secrets live only in the vault.** Never put passwords, keys or passphrases in logs, audit entries, job output, exports, error messages or the UI state. The vault hands secrets to adapters only. A vault password goes to a host without the vault password being asked again only where it already goes (`vault::bindings`): anything that sends one somewhere new checks `SecretBindings::may_go` and asks with `SecretBindings::confirm` (`reauth_required`).
 
 ## Layout
 
@@ -67,17 +67,21 @@ crates/core/          remotely-core: all app logic
   migrations/         sqlx migrations
   src/
     command_bus.rs    AP-01 approvals expire after APPROVAL_TTL (15 min, audited approval_expired); one whose target
-                      became Prod or protected since is asked again (ApprovalChanged, same id) instead of running
+                      became Prod or protected since is asked again (ApprovalChanged, same id) instead of running;
+                      AP-06 set_rules_with: a change PolicyRules::loosened names needs the vault password; BX-07 a
+                      sudo password new to some targets adds VaultReauth to the approval, then they may use it
     settings.rs       QL-15 settings this version can't read are set aside (`<key>.unreadable`), audited, and get
                       their defaults at start, instead of stopping the app
-    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit
+    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit;
+                      AP-01 RUNS_ANYTHING: shells, interpreters and command runners can't be read-only entries
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     jobs.rs           QL-15: a failing journal or audit write is logged and the job goes on to its real result
                       (job_finished always tried); the update install races the job's cancel token
     adapters/         vmware.rs, virtualbox.rs (VM-18 VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path), hypervisor.rs (VM-18 Hypervisor, and
-                      Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec, every path
+                      Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec;
+                      keyboard-interactive answers are SecretStrings until russh's respond call; every path
                       through the SS-07 jump host chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
                       terminal's own connection, behind the RemoteFiles trait; remote/forward.rs SS-07 port forwards on
@@ -93,7 +97,8 @@ crates/core/          remotely-core: all app logic
                       TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
                       the docker and podman CLIs over a kept SSH connection's exec channels, with sudo from the vault
                       (ExecSession::run_sudo) or NOPASSWD, and docker.exe on this PC, found like vmrun; parse.rs both
-                      CLIs' JSON field by field (env values never leave it); names.rs checked ids, volume names and
+                      CLIs' JSON field by field (env values never leave it; a command and entrypoint go through
+                      export::redact_secrets, parse::command_line); names.rs checked ids, volume names and
                       image references, every word shell-quoted on hosts)
     containers/       CT-01, CT-02 container hosts: marks.rs (sessions marked Docker or Podman, how each runs: as the
                       user or with sudo; migration 0013, audited like session edits, Change::ContainerHosts, FD-07);
@@ -135,11 +140,16 @@ crates/core/          remotely-core: all app logic
                       Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect,
-                      QL-03 host name and IP, QL-06 a vault password typed at a prompt; SS-01 the startup command typed
+                      QL-03 host name and IP, QL-06 a vault password typed at a prompt (a new place, or with force,
+                      asks for the vault password; a jump host's login prompt is that hop's place; forget_logins on
+                      lock); SS-01 the startup command typed
                       at the first shell prompt, or not at all within STARTUP_WAIT, and after an automatic reconnect
                       only with startup_on_reconnect); quick.rs QL-02 quick connect;
-                      log.rs and output.rs SS-11 session logs (one that can't be written stops: LogStopped, audited;
-                      stopping waits for the last lines) and saved, printed or copied output (secrets scrubbed);
+                      log.rs and output.rs SS-11 session logs (secrets scrubbed from the raw bytes and again from each
+                      rendered line, so one split by colour codes or backspaces is caught; one that can't be written
+                      stops: LogStopped, audited; stopping waits for the last lines) and saved, printed or copied
+                      output (secrets scrubbed); QL-05 selections copied (copy-on-select, Ctrl+C, Ctrl+Shift+C,
+                      Ctrl+Insert) are scrubbed by Terminals::scrub_for_copy (a closed terminal's are refused);
                       activity.rs the cursor's line, full-screen programs (alternate screen) and QL-07 long-run
                       detection (prompt back, or quiet); multiexec.rs SS-10 MultiExec: keys to every picked terminal,
                       a line buffer, Enter and every other key that runs a line in bash or zsh held (RunKey: Ctrl+O,
@@ -189,11 +199,25 @@ crates/core/          remotely-core: all app logic
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
                       authorized_keys push script (the push itself is Command::PushSshKey on the bus)
     transfer/         FD-07 encrypted export/import between laptops: file.rs (Argon2id + AES-256-GCM envelope,
-                      format version), preview with conflicts (skip, replace, keep both), commit; audited
+                      format version; new exports use file::KDF, 256 MiB and 3 passes, and a file opens with the
+                      parameters in its header, so older 64 MiB files still import), preview with conflicts (skip,
+                      replace, keep both), commit; audited; an export refuses the vault password as its passphrase
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample)
-    vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI, LocalVault, VaultService
+    vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI (opt-in for new vaults; turn_off_windows_login
+                      needs no password), LocalVault (idle lock from note_activity only, never from get; a password
+                      change makes a new data key and reseals every item in one transaction; secure_delete and a WAL
+                      checkpoint after vault changes), VaultService; bindings.rs SS-04, AP-06 SecretBindings: where a
+                      vault password may go without asking (a saved session at that host, port and jump host logs in
+                      with it, gives it to sudo, or a session_secret_grants row from an earlier answer, migration
+                      0016; one added since the unlock goes to its first place free; keys and key passphrases never
+                      ask; a right answer covers REAUTH_GRACE, 5 min, ended by a lock);
+                      Core::spawn_lock_watch closes kept connections, forgets typed logins and an open FD-07 file;
+                      strength.rs (a new vault password or FD-07 export passphrase: 10 to 1024 characters and a
+                      zxcvbn-style score of at least 3 of 4: common passwords and words, repeats, sequences,
+                      keyboard rows, years and dates; hints never quote it), passphrase.rs (Generate: six words from
+                      a built-in list of 1327, the OS CSPRNG)
     store/
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -210,7 +234,10 @@ crates/core/          remotely-core: all app logic
                       workstation_it.rs and virtualbox_it.rs
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
-                      (command_panel.rs), clipboard read for right-click paste, SS-08 file
+                      (command_panel.rs), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
+                      copies: selections through terminal_copy_selection, Copy output through terminal_output_copy,
+                      scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
+                      formats), SS-08 file
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
                       SS-07 port forwards and tunnels (tunnels.rs), CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
@@ -231,14 +258,20 @@ src/                  React + TypeScript UI
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
-                      and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload)
+                      and dashed limit lines; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
+                      SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
+                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3)
   hooks/              use-poll.ts (CT-01 usePoll: a background read while the page shows and the window is visible,
-                      each timed from when the last one finished; useVisibility); use-mobile.ts is shadcn's
+                      each timed from when the last one finished; useVisibility), use-password-strength.ts;
+                      use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
-                      masker), theme.ts, utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
+                      masker), reauth.ts and reauth-prompt.ts (SS-04, AP-06: on `reauth_required` ask for the vault
+                      password in ReauthDialog and send the request again; the vault idle lock's activity ping),
+                      clipboard-copy.ts (QL-05 terminal copies one at a time, the last selection last), theme.ts,
+                      utils.ts, multiexec.ts, recordings.ts (QL-12 view texts, QL-07 notify choice
                       and the one notification per MultiExec line), transfers.ts, tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
                       Containers has Ctrl+3), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), containers.ts
