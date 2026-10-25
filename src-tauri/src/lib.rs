@@ -413,6 +413,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::vault_lock,
         ipc::vault_change_password,
         ipc::vault_set_windows_login,
+        ipc::password_strength,
+        ipc::passphrase_generate,
         ipc::secrets_list,
         ipc::secret_add,
         ipc::secret_import_key,

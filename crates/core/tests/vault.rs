@@ -21,7 +21,7 @@ use remotely_core::vault::{
 };
 use remotely_core::CoreError;
 
-const PASSWORD: &str = "correct horse battery staple";
+const PASSWORD: &str = "violet harbor anvil kettle";
 
 fn pw(p: &str) -> SecretString {
     SecretString::new(p)
@@ -148,7 +148,7 @@ async fn a_wrong_master_password_does_not_unlock_and_the_attempt_is_audited() {
     let service = VaultService::new(Arc::new(open(&store, ctx, protector).await), store.clone());
 
     let err = service
-        .unlock(&ctx, UnlockMethod::MasterPassword(pw("correct horse battery stapl")))
+        .unlock(&ctx, UnlockMethod::MasterPassword(pw("violet harbor anvil kettl")))
         .await
         .unwrap_err();
     assert!(matches!(err, CoreError::WrongVaultPassword));
@@ -240,13 +240,25 @@ async fn without_dpapi_only_the_master_password_unlocks() {
 }
 
 #[tokio::test]
-async fn a_short_master_password_is_refused() {
+async fn a_short_or_guessable_master_password_is_refused() {
     let (store, ctx) = store().await;
     let vault = open(&store, ctx, Arc::new(FakeKeyProtector::new())).await;
-    let err = vault.setup(&ctx, pw("hunter2"), true).await.unwrap_err();
-    assert!(matches!(err, CoreError::InvalidInput(_)));
-    assert!(!err.to_string().contains("hunter2"));
-    assert_eq!(vault.status(), VaultStatus::NotSetUp);
+    for weak in [
+        "hunter2",
+        "Password123!",
+        "aaaaaaaaaaaa",
+        "qwertyuiop12",
+        "Remotely2026!",
+    ] {
+        let err = vault.setup(&ctx, pw(weak), true).await.unwrap_err();
+        assert!(matches!(err, CoreError::InvalidInput(_)), "{weak}: {err}");
+        assert!(!err.to_string().contains(weak), "{err}");
+        assert_eq!(vault.status(), VaultStatus::NotSetUp);
+    }
+    // SS-04: a passphrase Remotely made up always passes.
+    let generated = remotely_core::vault::generate_passphrase().unwrap();
+    vault.setup(&ctx, generated.clone(), false).await.unwrap();
+    assert!(vault.verify_password(&generated).await.unwrap());
 }
 
 /// A vault that locks after `idle` instead of 15 minutes. (Tokio's paused clock can't stand in:

@@ -14,6 +14,9 @@
 //! * The master password is what Critical actions ask for again (AP-06), whichever way the vault is
 //!   unlocked. It is checked by unwrapping the data key with it, so nothing that could be compared
 //!   against is stored besides the wrapped key itself.
+//! * A new master password, like an FD-07 export passphrase, needs 10 characters and must be hard to
+//!   guess ([`strength`]); Remotely can make one up ([`generate_passphrase`]). An existing vault keeps
+//!   the password it has.
 //! * The vault locks after 15 minutes without use ([`IDLE_TIMEOUT`]) and on demand. Locking drops
 //!   the data key, which zeroizes it.
 //! * Secrets never reach logs, the audit log, job output, error messages, exports or the UI. The UI
@@ -23,8 +26,11 @@
 /// Also seals FD-07 export files (`crate::transfer`), with a key from the user's passphrase.
 pub(crate) mod crypto;
 mod local;
+mod passphrase;
 mod protector;
 mod service;
+/// SS-04, FD-07: how hard a new vault password or export passphrase is to guess.
+pub mod strength;
 
 use std::fmt;
 use std::mem;
@@ -40,8 +46,10 @@ use crate::error::{CoreError, Result};
 
 pub use crypto::KdfParams;
 pub use local::{LocalVault, VaultOptions, IDLE_TIMEOUT};
+pub use passphrase::{generate_passphrase, PASSPHRASE_WORDS};
 pub use protector::{Dpapi, KeyProtector};
 pub use service::VaultService;
+pub use strength::{password_strength, Strength};
 
 #[cfg(any(test, feature = "fakes"))]
 pub(crate) use crypto::{open as decrypt, seal as encrypt, Key};
@@ -179,7 +187,7 @@ pub struct SecretMeta {
     pub updated_at: String,
 }
 
-/// Shortest master password the vault takes.
+/// Shortest new master password (and FD-07 export passphrase) the vault takes.
 pub const MIN_PASSWORD_LEN: usize = 10;
 /// Longest label, master password and secret the vault takes.
 pub const MAX_LABEL_LEN: usize = 80;
@@ -251,18 +259,33 @@ pub(crate) fn clean_label(label: &str) -> Result<String> {
     Ok(label.to_owned())
 }
 
-/// SS-04: a master password long enough to resist guessing, since the wrapped key can be attacked
-/// offline by anyone who copies the database.
+/// SS-04: a new master password that resists guessing, since the wrapped key can be attacked offline by
+/// anyone who copies the database. Checked when the vault is set up and when the password changes;
+/// an existing vault keeps opening with the password it has.
 pub(crate) fn check_master_password(password: &SecretString) -> Result<()> {
-    let length = password.expose().chars().count();
-    if password.expose().trim().is_empty() || length < MIN_PASSWORD_LEN {
+    check_new_password(password, "vault password")
+}
+
+/// SS-04, FD-07: a new vault password or export passphrase: [`MIN_PASSWORD_LEN`] to [`MAX_PASSWORD_LEN`]
+/// characters and at least [`strength::MIN_SCORE`]. `what` names it in messages, which never quote it.
+pub(crate) fn check_new_password(password: &SecretString, what: &str) -> Result<()> {
+    let text = password.expose();
+    let length = text.chars().count();
+    if text.trim().is_empty() || length < MIN_PASSWORD_LEN {
         return Err(CoreError::InvalidInput(format!(
-            "The vault password needs at least {MIN_PASSWORD_LEN} characters. A few unrelated words make a good one."
+            "The {what} needs at least {MIN_PASSWORD_LEN} characters. A few unrelated words make a good one."
         )));
     }
     if length > MAX_PASSWORD_LEN {
         return Err(CoreError::InvalidInput(format!(
-            "The vault password can be at most {MAX_PASSWORD_LEN} characters."
+            "The {what} can be at most {MAX_PASSWORD_LEN} characters."
+        )));
+    }
+    let strength = password_strength(text);
+    if !strength.acceptable {
+        return Err(CoreError::InvalidInput(format!(
+            "The {what} is too easy to guess. {}",
+            strength.hint
         )));
     }
     Ok(())
@@ -347,12 +370,74 @@ mod tests {
     }
 
     #[test]
-    fn master_passwords_must_be_long_enough() {
+    fn master_passwords_must_be_long_enough_and_hard_to_guess() {
         assert!(check_master_password(&SecretString::new("short")).is_err());
         assert!(check_master_password(&SecretString::new("          ")).is_err());
-        assert!(check_master_password(&SecretString::new("correct horse battery")).is_ok());
+        assert!(check_master_password(&SecretString::new("tulip anvil orbit canyon")).is_ok());
         let err = check_master_password(&SecretString::new("hunter2")).unwrap_err();
         assert!(!err.to_string().contains("hunter2"));
+        assert!(err.to_string().contains("at least 10 characters"), "{err}");
+        for weak in ["Password123!", "aaaaaaaaaaaa", "qwertyuiop12"] {
+            let err = check_master_password(&SecretString::new(weak)).unwrap_err();
+            assert_eq!(err.code(), "invalid_input");
+            assert!(
+                err.to_string().starts_with("The vault password is too easy to guess."),
+                "{err}"
+            );
+            assert!(!err.to_string().contains(weak), "{err}");
+        }
+        let long = SecretString::new("tulip ".repeat(MAX_PASSWORD_LEN));
+        assert!(check_master_password(&long)
+            .unwrap_err()
+            .to_string()
+            .contains("at most"));
+        let err = check_new_password(&SecretString::new("Summer2026!"), "passphrase").unwrap_err();
+        assert!(
+            err.to_string().starts_with("The passphrase is too easy to guess."),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vault_set_up_before_the_strength_check_keeps_its_password() {
+        use std::sync::Arc;
+        let store = crate::store::Store::open_in_memory().await.unwrap();
+        let ctx = store.ensure_identity(r"LAB\alice", "Alice").await.unwrap();
+        // What an earlier version stored for a password today's check refuses (the data key wrapped by
+        // it, with LocalVault's associated data).
+        let weak = SecretString::new("Password123!");
+        assert!(check_master_password(&weak).is_err());
+        let params = KdfParams::INSECURE_FAST;
+        let salt = [3u8; crypto::SALT_LEN];
+        let kek = crypto::derive(&weak, &salt, &params).unwrap();
+        let aad = format!("remotely/vault-key/v1/{}", ctx.workspace_id);
+        let wrapped = crypto::wrap(&kek, &Key::generate().unwrap(), aad.as_bytes()).unwrap();
+        store
+            .insert_vault_meta(&ctx, &salt, &params, &wrapped, None)
+            .await
+            .unwrap();
+        let vault = LocalVault::open(
+            store,
+            ctx,
+            Arc::new(crate::fakes::FakeKeyProtector::new()),
+            VaultOptions::insecure_fast(),
+        )
+        .await
+        .unwrap();
+
+        // It still unlocks and confirms Critical actions; only a new password has to pass the check.
+        vault.unlock(UnlockMethod::MasterPassword(weak.clone())).await.unwrap();
+        assert!(vault.verify_password(&weak).await.unwrap());
+        let err = vault
+            .change_password(&weak, SecretString::new("Password1234!"))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too easy to guess"), "{err}");
+        vault
+            .change_password(&weak, SecretString::new("violet harbor anvil kettle"))
+            .await
+            .unwrap();
+        assert!(!vault.verify_password(&weak).await.unwrap());
     }
 
     #[test]

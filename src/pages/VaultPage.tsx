@@ -47,13 +47,15 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { SECRET_KIND_LABEL } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
+import { NewPasswordField } from "@/components/NewPasswordField";
 import { SecretDialog } from "@/components/SecretDialog";
 import { SshKeysCard } from "@/components/SshKeysCard";
 import { VaultUnlock } from "@/components/VaultUnlock";
 import { api, errorMessage, type SecretKind, type SecretMeta, type SubmitOutcome, type VaultInfo } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
+import { usePasswordStrength } from "@/hooks/use-password-strength";
 
-/** The vault password's minimum length, as the core checks it. */
+/** The vault password's minimum length, as the core checks it (with how hard it is to guess). */
 const MIN_PASSWORD = 10;
 
 interface Props {
@@ -297,7 +299,8 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
   const [windowsLogin, setWindowsLogin] = useState(vault.windowsLoginAvailable);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const tooShort = password.length > 0 && password.length < MIN_PASSWORD;
+  const strength = usePasswordStrength(password);
+  const weak = !strength?.acceptable;
   const mismatch = repeat.length > 0 && repeat !== password;
 
   async function setup() {
@@ -322,7 +325,7 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
         className="contents"
         onSubmit={(e) => {
           e.preventDefault();
-          if (!tooShort && !mismatch && password && repeat) void setup();
+          if (!weak && !mismatch && password && repeat) void setup();
         }}
       >
         <CardHeader>
@@ -337,21 +340,16 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
-          <div className="grid gap-2">
-            <Label htmlFor="vault-new-password">Vault password</Label>
-            <Input
-              id="vault-new-password"
-              type="password"
-              autoComplete="new-password"
-              className="max-w-sm"
-              value={password}
-              onChange={(e) => setPassword(e.currentTarget.value)}
-              aria-invalid={tooShort || undefined}
-            />
-            <p className={tooShort ? "text-sm text-destructive" : "text-sm text-muted-foreground"}>
-              At least {MIN_PASSWORD} characters. A few unrelated words make a good one. There is no way to recover it.
-            </p>
-          </div>
+          <NewPasswordField
+            id="vault-new-password"
+            label="Vault password"
+            className="max-w-sm"
+            value={password}
+            onChange={setPassword}
+            onGenerated={setRepeat}
+            strength={strength}
+            description={`At least ${MIN_PASSWORD} characters and hard to guess. A few unrelated words make a good one. There is no way to recover it.`}
+          />
           <div className="grid gap-2">
             <Label htmlFor="vault-repeat-password">Type it again</Label>
             <Input
@@ -388,7 +386,7 @@ function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultIn
           )}
         </CardContent>
         <CardFooter>
-          <Button type="submit" disabled={!password || !repeat || tooShort || mismatch || busy}>
+          <Button type="submit" disabled={!password || !repeat || weak || mismatch || busy}>
             Set up the vault
           </Button>
         </CardFooter>
@@ -455,7 +453,8 @@ function PasswordCard({
   const [repeat, setRepeat] = useState("");
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const tooShort = next.length > 0 && next.length < MIN_PASSWORD;
+  const strength = usePasswordStrength(next);
+  const weak = !strength?.acceptable;
   const mismatch = repeat.length > 0 && repeat !== next;
 
   async function change() {
@@ -488,7 +487,7 @@ function PasswordCard({
           className="grid max-w-sm gap-3"
           onSubmit={(e) => {
             e.preventDefault();
-            if (current && next && !tooShort && !mismatch && repeat) void change();
+            if (current && next && !weak && !mismatch && repeat) void change();
           }}
         >
           <div className="grid gap-2">
@@ -501,18 +500,15 @@ function PasswordCard({
               onChange={(e) => setCurrent(e.currentTarget.value)}
             />
           </div>
-          <div className="grid gap-2">
-            <Label htmlFor="vault-next">New password</Label>
-            <Input
-              id="vault-next"
-              type="password"
-              autoComplete="new-password"
-              value={next}
-              onChange={(e) => setNext(e.currentTarget.value)}
-              aria-invalid={tooShort || undefined}
-            />
-            {tooShort && <p className="text-sm text-destructive">At least {MIN_PASSWORD} characters.</p>}
-          </div>
+          <NewPasswordField
+            id="vault-next"
+            label="New password"
+            value={next}
+            onChange={setNext}
+            onGenerated={setRepeat}
+            strength={strength}
+            description={`At least ${MIN_PASSWORD} characters and hard to guess.`}
+          />
           <div className="grid gap-2">
             <Label htmlFor="vault-next-repeat">Type it again</Label>
             <Input
@@ -529,7 +525,7 @@ function PasswordCard({
             type="submit"
             variant="outline"
             className="justify-self-start"
-            disabled={!current || !next || !repeat || tooShort || mismatch || busy}
+            disabled={!current || !next || !repeat || weak || mismatch || busy}
           >
             Change the password
           </Button>
