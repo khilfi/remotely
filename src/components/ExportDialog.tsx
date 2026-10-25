@@ -99,8 +99,8 @@ export function ExportDialog({ sessions, folders, vault, onVaultChanged, onExpor
             </DialogTitle>
             <DialogDescription>
               Writes {plural(sessions, "session")} and {plural(folders, "folder")}, with their tags, labels, colours,
-              jump hosts and port forwards, and your favourite commands to one encrypted file. Import it on the other
-              laptop with the passphrase you choose here.
+              jump hosts and port forwards, your favourite commands and your saved MultiExec groups to one encrypted
+              file. Import it on the other laptop with the passphrase you choose here.
             </DialogDescription>
           </DialogHeader>
 

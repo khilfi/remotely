@@ -800,6 +800,7 @@ async fn favourites_travel_in_the_encrypted_export() {
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
+                groups: vec![],
                 favourites: vec![ItemChoice {
                     index: logs_row.index,
                     action: ItemAction::KeepBoth,
@@ -852,6 +853,7 @@ async fn favourites_travel_in_the_encrypted_export() {
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
+                groups: vec![],
                 favourites: vec![ItemChoice {
                     index: logs_row.index,
                     action: ItemAction::Replace,

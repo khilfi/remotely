@@ -9,6 +9,7 @@
 //! QL-12: each line sent is recorded in each terminal until its prompt comes back, grouped and diffed
 //! like a Compare run, with password prompts, full-screen keys and cancelled lines left out, secrets
 //! scrubbed, caps kept, and exports audited without their output. QL-07: one notification per line.
+//! QL-19: a saved group's open terminals, picked as MultiExec's targets, each get the line.
 //!
 //! SSH goes to `fakes::ssh_server` on 127.0.0.1 (one server per host, passwords made at run time); its
 //! toy interactive shell logs each line it runs, and each line Ctrl+C dropped. No real host is touched.
@@ -27,6 +28,7 @@ use remotely_core::domain::{Environment, TargetRef};
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::fakes::FakeVmware;
 use remotely_core::known_hosts::HostKey;
+use remotely_core::multiexec_groups::GroupInput;
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::AuditEntry;
@@ -1604,4 +1606,65 @@ async fn a_hooked_shell_records_without_its_reports_and_still_notices_a_switched
             "{leak:?} in {recorded:?}"
         );
     }
+}
+
+// ---- QL-19 saved groups --------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_saved_group_picks_its_terminals_and_a_line_reaches_each_of_them() {
+    let mut fleet = Fleet::new(4).await;
+    let ctx = fleet.core.ctx;
+    // Three of the four sessions, in an order of their own.
+    let members = vec![fleet.sessions[2], fleet.sessions[0], fleet.sessions[1]];
+    let group = fleet
+        .core
+        .groups
+        .create(
+            &ctx,
+            GroupInput {
+                name: "web servers".into(),
+                session_ids: members,
+            },
+        )
+        .await
+        .unwrap();
+    let open = fleet
+        .core
+        .groups
+        .open_terminals(&ctx, group.id, &fleet.core.terminals)
+        .await
+        .unwrap();
+    assert_eq!(
+        open.terminal_ids,
+        [fleet.id(2), fleet.id(0), fleet.id(1)],
+        "in the group's order"
+    );
+    assert!(open.not_open.is_empty());
+
+    // The group only picks the terminals: the line still goes through the bus, rated as usual.
+    fleet.core.multiexec.set_targets(open.terminal_ids).await.unwrap();
+    let mut events = fleet.core.multiexec.subscribe();
+    let (line, tier, request, job) = held(fleet.type_in(1, "echo grouped\r").await);
+    assert_eq!(tier, Tier::Low);
+    assert!(request.is_none() && job.is_some());
+    assert!(line_done(&mut events, line).await);
+    for i in 0..3 {
+        fleet.panes[i].expect("grouped\r\n$ ").await;
+        assert_eq!(fleet.ran(i), ["echo grouped"], "web{:02} is in the group", i + 1);
+    }
+    fleet.panes[3].settle().await;
+    assert!(fleet.ran(3).is_empty(), "web04 is not in the group: {:?}", fleet.log(3));
+
+    // A member whose terminal closed is one to open again; the others stay picked.
+    fleet.core.terminals.close(fleet.id(0)).await;
+    let open = fleet
+        .core
+        .groups
+        .open_terminals(&ctx, group.id, &fleet.core.terminals)
+        .await
+        .unwrap();
+    assert_eq!(open.terminal_ids, [fleet.id(2), fleet.id(1)]);
+    let not_open: Vec<&str> = open.not_open.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(not_open, ["web01"]);
+    fleet.core.multiexec.stop().await.unwrap();
 }

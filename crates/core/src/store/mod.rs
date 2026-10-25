@@ -12,6 +12,7 @@ mod inventory;
 mod jobs;
 mod known_hosts;
 mod metrics;
+mod multiexec_groups;
 mod quick_connect;
 #[cfg(test)]
 mod retention_tests;
@@ -44,6 +45,7 @@ pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, JobTargetRecord, PurgedBodies, TargetResult};
+pub(crate) use multiexec_groups::GroupRow;
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};

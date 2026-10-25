@@ -23,6 +23,7 @@
 //!     vault passwords typed at a prompt (QL-06), long runs finishing (QL-07)
 //!     MultiExec (SS-10): typed into several at once; each line's Enter is a command on the bus, and the
 //!     job runner sends it to the terminals
+//!     multiexec_groups (QL-19): saved sets of sessions that choose MultiExec's terminals; edits audited
 //!     files (SS-08): SFTP on each terminal's connection; the shell's folder (OSC 7); downloads are
 //!     audited reads, uploads are commands on the bus that the job runner carries out in the terminal
 //!     jump hosts (SS-07): every SSH connection goes through the session's jump host chain
@@ -63,6 +64,7 @@ pub mod known_hosts;
 pub mod locks;
 pub mod login_guard;
 pub mod metrics;
+pub mod multiexec_groups;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
@@ -108,6 +110,7 @@ use jobs::{JobLimits, JobRunner};
 use known_hosts::KnownHosts;
 use login_guard::LoginGuard;
 use metrics::{GuestSource, Metrics, MetricsParts};
+use multiexec_groups::MultiExecGroups;
 use policy::{PolicyEngine, PolicyRules};
 use presentation::{Change, PresentationMode};
 use reachability::{ReachabilityChecker, TrackedRemote};
@@ -217,6 +220,8 @@ pub struct Core {
     pub terminals: Terminals,
     /// SS-10: what is typed into one terminal goes to several; each line's Enter goes through the bus.
     pub multiexec: MultiExec,
+    /// QL-19: saved MultiExec groups (named sets of sessions). They only choose MultiExec's targets.
+    pub groups: MultiExecGroups,
     /// SS-08: uploads (commands on the bus) and retries; listing and downloads are on [`Core::terminals`].
     pub files: FileTransfers,
     /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
@@ -478,6 +483,7 @@ impl Core {
             containers,
             terminals,
             multiexec,
+            groups: MultiExecGroups::new(store.clone()),
             files,
             snippets,
             reachability,

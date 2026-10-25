@@ -80,6 +80,8 @@ import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
+import { MultiExecGroupsDialog, type GroupsDialogStart } from "@/components/MultiExecGroupsDialog";
+import { MultiExecGroupsMenu } from "@/components/MultiExecGroupsMenu";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
 import { usePresentation } from "@/components/Presentation";
@@ -96,6 +98,7 @@ import {
   type Environment,
   type LeftOut,
   type MultiExecEvent,
+  type MultiExecGroup,
   type MultiExecOutcome,
   type MultiExecStatus,
   type QuickConnectRequest,
@@ -110,10 +113,11 @@ import {
   type VaultInfo,
 } from "@/lib/api";
 import { sendCommand } from "@/lib/command-send";
-import { connectedReason, multiExecReason, splitReason, uploadReason } from "@/lib/disabled-reasons";
+import { connectedReason, multiExecReason, READ_ONLY_REASON, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { useThresholds } from "@/lib/metrics";
 import { MultiExecSender } from "@/lib/multiexec";
+import { groupTabs, memberNames, saveGroupReason, sessionsOfTabs, type GroupTab } from "@/lib/multiexec-groups";
 import { lineNotification, shouldNotify, type NotifyChoice } from "@/lib/recordings";
 import type { PickableTab } from "@/lib/multiexec-picks";
 import { clickTab, isMulti, NO_SELECTION, pruneSelection, type TabSelection } from "@/lib/tab-selection";
@@ -365,9 +369,16 @@ export function TerminalPage({
     x: number;
     y: number;
   } | null>(null);
+  /** QL-19: saved MultiExec groups, and the dialog that manages them. */
+  const [groups, setGroups] = useState<MultiExecGroup[]>([]);
+  const [groupsDialog, setGroupsDialog] = useState<GroupsDialogStart | null>(null);
   const handled = useRef(0);
   // For closing every pane when the page goes away (the app closing).
   const tabsRef = useRef(tabs);
+
+  const loadGroups = useCallback(() => {
+    api.multiExecGroups().then(setGroups, () => undefined);
+  }, []);
 
   const loadSessions = useCallback(() => {
     api.sessions().then(setSessions, (err) => toast.error(errorMessage(err)));
@@ -389,6 +400,9 @@ export function TerminalPage({
   useEffect(() => {
     if (active) loadSessions();
   }, [active, loadSessions, version]);
+  useEffect(() => {
+    if (active) loadGroups();
+  }, [active, loadGroups]);
 
   useEffect(() => {
     tabsRef.current = tabs;
@@ -460,7 +474,8 @@ export function TerminalPage({
 
   // SS-10: a new tab does not join MultiExec by itself (Ctrl+click adds it), and keeps the picked tabs picked.
   const multiExecOn = useRef(false);
-  const addTab = useCallback((pane: PaneSession) => {
+  /** Returns the new tab's key (QL-19 picks the tabs a group opened). */
+  const addTab = useCallback((pane: PaneSession): string => {
     const tab: Tab = {
       key: newKey(),
       layout: { kind: "pane", key: pane.key, pane },
@@ -470,6 +485,7 @@ export function TerminalPage({
     setTabs((prev) => [...prev, tab]);
     setActiveTab(tab.key);
     setSelection((s) => (multiExecOn.current ? s : { keys: [], anchor: tab.key }));
+    return tab.key;
   }, []);
 
   const openSession = useCallback(
@@ -865,6 +881,87 @@ export function TerminalPage({
       unsaved: !pane?.sessionId,
     };
   });
+
+  // ---- QL-19 saved MultiExec groups ------------------------------------------------------------------
+
+  /** Each tab's saved session (its panes share one), for the groups. */
+  const groupTabList: GroupTab[] = tabs.map((t) => ({
+    key: t.key,
+    sessionId: allPanes(t.layout).find((p) => p.sessionId)?.sessionId ?? null,
+  }));
+  const groupsBlocked = multiExecReason({
+    tabs: Math.max(1, tabs.length),
+    on: false,
+    readOnly: readOnlyLocked(presentation),
+  });
+
+  /** A tab for each of the group's sessions (one already open is used, not opened again), then MultiExec on them. */
+  function openGroup(group: MultiExecGroup) {
+    const { keys, missing } = groupTabs(group, groupTabList);
+    const opened = missing.map((m) => {
+      const pane = createPane(
+        { kind: "session", sessionId: m.sessionId },
+        sessionById.get(m.sessionId)?.name ?? m.name,
+      );
+      // Connects now, shown or not, so it can take MultiExec's keys.
+      pane.start().catch(() => undefined);
+      return addTab(pane);
+    });
+    const picked = [...keys, ...opened];
+    setSelection({ keys: picked, anchor: picked[0] ?? null });
+    if (picked[0]) setActiveTab(picked[0]);
+    setMxNote({
+      tone: "info",
+      text:
+        missing.length > 0
+          ? `Group '${group.name}': opened ${plural(missing.length, "tab")}${keys.length > 0 ? `, used ${keys.length} open already` : ""}`
+          : `Group '${group.name}': its ${plural(keys.length, "tab")} picked`,
+    });
+    setMultiExec(true);
+    if (opened.length > 0) window.setTimeout(() => setVersion((v) => v + 1), 500);
+  }
+
+  /** The group's open tabs picked for MultiExec; the ones not open are named. */
+  function selectGroup(group: MultiExecGroup) {
+    const { keys, missing } = groupTabs(group, groupTabList);
+    if (keys.length === 0) {
+      toast.info(`None of the sessions of '${group.name}' is open: use Open group`);
+      return;
+    }
+    setSelection({ keys, anchor: keys[0] });
+    setMxNote(
+      missing.length > 0
+        ? { tone: "warn", text: `Group '${group.name}': not open, so left out: ${memberNames(missing)}` }
+        : { tone: "info", text: `Group '${group.name}': its ${plural(keys.length, "tab")} picked` },
+    );
+    setMultiExec(true);
+  }
+
+  /** "Save picked tabs as a group": MultiExec's tabs, or the Ctrl+clicked ones, or the current one. */
+  const saveTabKeys = multiExec
+    ? pickedTabs.map((t) => t.key)
+    : isMulti(selection)
+      ? selection.keys
+      : current
+        ? [current.key]
+        : [];
+  const saveTabs = groupTabList.filter((t) => saveTabKeys.includes(t.key));
+  const toSave = sessionsOfTabs(saveTabs);
+  const saveReason = saveGroupReason({
+    tabs: saveTabs,
+    readOnly: readOnlyLocked(presentation) ? READ_ONLY_REASON : null,
+  });
+
+  function saveAsGroup() {
+    setGroupsDialog({
+      kind: "new",
+      sessionIds: toSave.sessionIds,
+      note:
+        toSave.quick > 0
+          ? `${plural(toSave.quick, "quick connection")} left out: save ${toSave.quick === 1 ? "it" : "them"} as a session to add ${toSave.quick === 1 ? "it" : "them"}.`
+          : null,
+    });
+  }
 
   // ---- BX-03 Compare ----------------------------------------------------------------------------------
 
@@ -1373,6 +1470,19 @@ export function TerminalPage({
         >
           <RadioTowerIcon />
         </IconButton>
+        <MultiExecGroupsMenu
+          className="mb-1"
+          groups={groups}
+          tabs={groupTabList}
+          multiExecBlocked={groupsBlocked}
+          saveReason={saveReason}
+          saveCount={toSave.sessionIds.length}
+          onOpenGroup={openGroup}
+          onSelectGroup={selectGroup}
+          onSave={saveAsGroup}
+          onManage={() => setGroupsDialog({ kind: "manage" })}
+          onShow={loadGroups}
+        />
         <IconButton
           label={compareOpen ? "Hide Compare output" : "Compare output: one command on several hosts, grouped answers"}
           onClick={() => setCompareOpen((v) => !v)}
@@ -1557,6 +1667,15 @@ export function TerminalPage({
         onOpenSession={(s) => openSession(s)}
       />
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+      {groupsDialog && (
+        <MultiExecGroupsDialog
+          groups={groups}
+          sessions={sessions}
+          start={groupsDialog}
+          onChanged={loadGroups}
+          onClose={() => setGroupsDialog(null)}
+        />
+      )}
       {conflict && (
         <UploadConflictDialog
           folder={conflict.folder}

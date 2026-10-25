@@ -204,6 +204,7 @@ async fn try_commit(
                 keep_forwards: vec![],
                 vault_password: vault_password.map(SecretString::new),
                 favourites: vec![],
+                groups: vec![],
                 sessions: choices(sessions),
                 known_hosts: vec![],
                 secrets: vec![],
@@ -232,6 +233,7 @@ async fn commit_keeping(
                 keep_forwards: keep_forwards.to_vec(),
                 vault_password: None,
                 favourites: vec![],
+                groups: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
@@ -618,6 +620,7 @@ async fn a_closed_preview_can_not_be_imported() {
                 keep_forwards: vec![],
                 vault_password: None,
                 favourites: vec![],
+                groups: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
@@ -840,6 +843,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 keep_forwards: vec![],
                 vault_password: None,
                 favourites: vec![],
+                groups: vec![],
                 sessions: vec![],
                 known_hosts: vec![ItemChoice {
                     index: host_row.index,
@@ -870,6 +874,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 keep_forwards: vec![],
                 vault_password: None,
                 favourites: vec![],
+                groups: vec![],
                 sessions: vec![
                     ItemChoice {
                         index: index_of(&preview, "web01"),
@@ -1063,6 +1068,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
                 keep_forwards: vec![],
                 vault_password: None,
                 favourites: vec![],
+                groups: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![ItemChoice {
