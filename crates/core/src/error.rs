@@ -154,12 +154,25 @@ pub enum CoreError {
     },
     /// FD-14: the token works, but can't read the releases of `repo`.
     #[error(
-        "the GitHub update token can't read the releases of {repo}. Make a fine-grained token for that repository with Contents: Read-only, and replace it in Settings, under Updates"
+        "the GitHub update token can't read the releases of {repo}. Make a fine-grained token for that repository with Contents: Read-only and replace it in Settings, under Updates, or remove it there to check without a token"
     )]
     UpdateTokenNoAccess { repo: String },
-    /// FD-14: checking and installing updates read the private repo's releases with a token.
+    /// FD-14: Settings' Test needs a token to test.
     #[error("there is no GitHub update token in the vault. Add one in Settings, under Updates")]
     UpdateTokenMissing,
+    /// FD-14: without a token GitHub doesn't show the releases of `repo` (404), so it is private again (or gone).
+    #[error(
+        "GitHub doesn't show the releases of {repo} without a token, so the repository may be private again. Add a GitHub update token in Settings, under Updates"
+    )]
+    UpdateTokenNeeded { repo: String },
+    /// FD-14: GitHub's API limit is used up (403 or 429). No call goes to GitHub before `until` (RFC 3339, UTC).
+    #[error("{}", rate_limited(.until, *.with_token))]
+    UpdateRateLimited {
+        until: String,
+        /// The token's limit (5,000 calls an hour), not the one for calls without a token (60 an hour per
+        /// internet address).
+        with_token: bool,
+    },
 
     /// SS-03: reaching or talking to an SSH server failed. Never holds a secret.
     #[error("{0}")]
@@ -362,6 +375,8 @@ impl CoreError {
             CoreError::UpdateTokenRefused { .. } => "update_token_refused",
             CoreError::UpdateTokenNoAccess { .. } => "update_token_no_access",
             CoreError::UpdateTokenMissing => "update_token_missing",
+            CoreError::UpdateTokenNeeded { .. } => "update_token_needed",
+            CoreError::UpdateRateLimited { .. } => "update_rate_limited",
             CoreError::Ssh(_) => "ssh",
             CoreError::AuthFailed(_) => "auth_failed",
             CoreError::AgentUnavailable(_) => "agent_unavailable",
@@ -411,8 +426,22 @@ fn key_place(address: &str, jump: Option<&str>) -> String {
 fn token_refused(expired_on: Option<&str>) -> String {
     match expired_on {
         Some(date) => format!(
-            "the GitHub update token expired on {date}. Make a new one and replace it in Settings, under Updates"
+            "the GitHub update token expired on {date}. Make a new one and replace it in Settings, under Updates, or remove it there to check without a token"
         ),
-        None => "GitHub refused the update token: it was revoked, has expired or was mistyped. Make a new one and replace it in Settings, under Updates".into(),
+        None => "GitHub refused the update token: it was revoked, has expired or was mistyped. Make a new one and replace it in Settings, under Updates, or remove it there to check without a token".into(),
+    }
+}
+
+/// `until` is RFC 3339 in UTC; the message names its time of day.
+fn rate_limited(until: &str, with_token: bool) -> String {
+    let at = match until.get(11..16) {
+        Some(time) => format!("until {time} UTC"),
+        None => "for now".into(),
+    };
+    match with_token {
+        true => format!("GitHub's API limit for the update token is used up {at}. Remotely checks again after that"),
+        false => format!(
+            "GitHub's limit for update checks without a token (60 an hour from one internet address) is used up {at}. Remotely checks again after that; a GitHub update token, in Settings under Updates, has a limit of its own"
+        ),
     }
 }
