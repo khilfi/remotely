@@ -8,14 +8,15 @@ import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tau
 import { learnFields, masker } from "@/lib/presentation";
 
 // FD-03: every answer and event passes the host, IP and user fields it holds to the presentation masker, so those
-// values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored.
-async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
+// values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored. Exported for
+// the other wrappers (dashboard-api.ts), which go through them too.
+export async function invoke<T>(cmd: string, args?: InvokeArgs, options?: InvokeOptions): Promise<T> {
   const answer = await tauriInvoke<T>(cmd, args, options);
   learnFields(masker, answer);
   return answer;
 }
 
-function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
+export function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
   return tauriListen<T>(event, (e) => {
     learnFields(masker, e.payload);
     handler(e);
@@ -290,7 +291,8 @@ export type NicNetwork =
 
 export type MacAddress = { kind: "generated" } | { kind: "static"; mac: string };
 
-export type Firmware = "bios" | "efi";
+/** VM-23: a VM's firmware in a settings edit (the catalogue's `Firmware` also has Secure Boot in it). */
+export type VmFirmware = "bios" | "efi";
 
 /** VM-23, VM-12, VM-11 (crates/core/src/vm_settings/ops.rs). A field left out keeps its value. */
 export type VmConfigEdit =
@@ -301,7 +303,7 @@ export type VmConfigEdit =
       memoryMb?: number | null;
       nestedVirtualization?: boolean | null;
     }
-  | { kind: "firmware"; firmware: Firmware; secureBoot: boolean; tpm?: boolean | null }
+  | { kind: "firmware"; firmware: VmFirmware; secureBoot: boolean; tpm?: boolean | null }
   | { kind: "rename"; name: string }
   | { kind: "guestOs"; osType: string }
   | { kind: "addNic"; network: NicNetwork; model?: string | null }
@@ -1618,6 +1620,8 @@ export interface ExportReport {
   favourites: number;
   /** SS-07 saved port forwards, over all sessions. */
   forwards: number;
+  /** VM-19 to VM-21: own sizes, images and launch templates. */
+  catalog: { sizes: number; images: number; templates: number };
 }
 
 export type TransferStatus = "new" | "same" | "conflict";
@@ -1654,6 +1658,8 @@ export interface TransferPreview {
   secretValues: boolean;
   /** BX-08 favourite commands. */
   favourites: TransferItem[];
+  /** VM-19 to VM-21: own sizes, images (by path) and launch templates. */
+  catalog: { sizes: TransferItem[]; images: TransferItem[]; templates: TransferItem[] };
   warnings: string[];
 }
 
@@ -1674,6 +1680,8 @@ export interface TransferReport {
   knownHosts: TransferCounts;
   secrets: TransferCounts;
   favourites: TransferCounts;
+  /** VM-19 to VM-21; imagesMissingHere: imported without their file (or golden VM) on this laptop. */
+  catalog: { sizes: TransferCounts; images: TransferCounts; templates: TransferCounts; imagesMissingHere: number };
   /** SS-07: port forwards saved with the imported sessions. */
   forwards: number;
   /** SS-01, SS-07: startup commands and port forwards in the file that were not ticked. */
@@ -1683,6 +1691,196 @@ export interface TransferReport {
   /** Sessions imported without the password or key they used. */
   withoutCredentials: number;
   problems: { name: string; reason: string }[];
+}
+
+// ---- VM-19 to VM-21: the spec catalogue (sizes, OS profiles, images, launch templates) ----
+
+export type Provisioning = "thin" | "thick";
+export type DiskController = "scsi" | "sata" | "nvme" | "ide";
+
+export interface DiskSpec {
+  sizeGb: number;
+  provisioning: Provisioning;
+  /** null: the OS profile's controller. */
+  controller: DiskController | null;
+}
+
+/** VM-19: a size. Built-ins go by their name and are read only; own sizes go by a UUID. */
+export interface Size {
+  id: string;
+  name: string;
+  builtIn: boolean;
+  sockets: number;
+  coresPerSocket: number;
+  memoryMb: number;
+  /** The first is the boot disk. */
+  disks: DiskSpec[];
+  description: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface SizeInput {
+  name: string;
+  sockets: number;
+  coresPerSocket: number;
+  memoryMb: number;
+  disks: DiskSpec[];
+  description: string | null;
+}
+
+export type Firmware = "bios" | "efi" | "efiSecureBoot";
+
+/** VM-19: what the guest needs, per hypervisor. */
+export interface OsProfile {
+  id: string;
+  name: string;
+  family: "linux" | "windows";
+  firmware: Firmware;
+  /** null: not on Workstation (workstationNote says why). */
+  workstation: {
+    guestOs: string;
+    hardwareVersion: number;
+    controller: DiskController;
+    scsiAdapter: string | null;
+    nic: string;
+  } | null;
+  virtualbox: { osType: string; controller: DiskController; controllerModel: string; nic: string; tpm: string | null };
+  workstationNote: string | null;
+}
+
+export type ImageKind = "goldenVm" | "cloudImage" | "iso" | "appliance";
+export type ImageFormat = "vmdk" | "ova" | "ovf" | "raw" | "qcow2" | "iso";
+
+export type ImageSource =
+  | { kind: "goldenVm"; vmKey: string; snapshotId: string; snapshotName: string }
+  | { kind: "cloudImage"; path: string; format: ImageFormat }
+  | { kind: "iso"; path: string }
+  | { kind: "appliance"; path: string; format: ImageFormat };
+
+/** VM-20: an image. */
+export interface Image {
+  id: string;
+  name: string;
+  source: ImageSource;
+  hypervisors: Hypervisor[];
+  osProfile: string;
+  /** Of the file when it was added; null for a golden VM. */
+  sha256: string | null;
+  sizeBytes: number | null;
+  notes: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Why it can't deploy now; null when it can. */
+  problem: string | null;
+  /** A golden VM's name in the VM list. */
+  vmName: string | null;
+}
+
+export type ImageSourceInput =
+  | { kind: "goldenVm"; vmKey: string; snapshot: string }
+  | { kind: "cloudImage"; path: string }
+  | { kind: "iso"; path: string }
+  | { kind: "appliance"; path: string };
+
+export interface ImageInput {
+  name: string;
+  source: ImageSourceInput;
+  /** Empty: every hypervisor it can deploy on. */
+  hypervisors: Hypervisor[];
+  osProfile: string;
+  notes: string | null;
+}
+
+export interface ImageEdit {
+  name: string;
+  hypervisors: Hypervisor[];
+  osProfile: string;
+  notes: string | null;
+}
+
+/** An official cloud image download page (an allow-list in the core). */
+export interface ImageSite {
+  id: string;
+  name: string;
+  url: string;
+  hint: string;
+}
+
+export interface HashProgress {
+  request: string;
+  done: number;
+  total: number;
+}
+
+export type TemplateNetwork =
+  | { kind: "nat" }
+  | { kind: "hostOnly" }
+  | { kind: "bridged" }
+  | { kind: "vmnet"; number: number }
+  | { kind: "natNetwork"; name: string }
+  | { kind: "internal"; name: string };
+
+export interface AfterDeploy {
+  createSession: boolean;
+  linkSession: boolean;
+  cleanSnapshot: boolean;
+  openConsole: boolean;
+}
+
+/** VM-21: what the template editor sends. */
+export interface TemplateInput {
+  name: string;
+  imageId: string;
+  sizeId: string;
+  hypervisor: Hypervisor;
+  vmFolder: string | null;
+  network: TemplateNetwork;
+  sshKeyId: string | null;
+  namingPattern: string;
+  defaultCount: number;
+  environment: Environment;
+  tags: string[];
+  afterDeploy: AfterDeploy;
+}
+
+export type ProblemCode =
+  | "imageGone"
+  | "imageUnavailable"
+  | "needsConversion"
+  | "unknownProfile"
+  | "sizeGone"
+  | "hypervisorMismatch"
+  | "notOnHypervisor"
+  | "networkMismatch"
+  | "keyGone"
+  | "keyNotRead"
+  | "patternNeedsNumber"
+  | "countOutOfRange"
+  | "nameTaken";
+
+export interface TemplateProblem {
+  code: ProblemCode;
+  message: string;
+}
+
+export interface LaunchTemplate extends TemplateInput {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  /** Why it can't deploy now; empty when it can. */
+  problems: TemplateProblem[];
+}
+
+export interface PlannedVm {
+  number: number;
+  name: string;
+  hostname: string;
+}
+
+export interface TemplatePreview {
+  problems: TemplateProblem[];
+  vms: PlannedVm[];
 }
 
 /** BX-01: what is picked: tabs and tree sessions for Compare, sessions, VMs, tags and filters for a key push. */
@@ -1918,7 +2116,7 @@ export interface VmHostUsage {
   ts: string;
 }
 
-/** MO-03 drill-down: one point of a chart. In memory only (history in SQLite is MO-06, v2). */
+/** MO-03 drill-down: one point of a chart, kept in memory for 30 minutes (MO-06's history on disk: dashboard-api.ts). */
 export interface MetricPoint {
   /** Unix time in milliseconds. */
   t: number;
@@ -2944,6 +3142,8 @@ export const api = {
     knownHosts: TransferChoice[];
     secrets: TransferChoice[];
     favourites: TransferChoice[];
+    /** VM-19 to VM-21. */
+    catalog?: { sizes: TransferChoice[]; images: TransferChoice[]; templates: TransferChoice[] };
     /** SS-01, SS-07: sessions (by index) whose startup command, and whose port forwards, come along. */
     keepStartup: number[];
     keepForwards: number[];
@@ -3220,4 +3420,34 @@ export const api = {
   },
   /** CT-02: Docker Desktop's docker.exe; null or "" goes back to finding it. */
   setDockerPath: (path: string | null) => invoke<Settings>("settings_set_docker_path", { path }),
+
+  // VM-19 to VM-21: the spec catalogue. Edits are audited and refused by the read-only lock.
+  catalogProfiles: () => invoke<OsProfile[]>("catalog_profiles"),
+  catalogSites: () => invoke<ImageSite[]>("catalog_sites"),
+  /** The twelve built-ins, then the owner's own. */
+  catalogSizes: () => invoke<Size[]>("catalog_sizes"),
+  catalogSizeAdd: (input: SizeInput) => invoke<Size>("catalog_size_add", { input }),
+  catalogSizeUpdate: (id: string, input: SizeInput) => invoke<Size>("catalog_size_update", { id, input }),
+  catalogSizeDelete: (id: string) => invoke<void>("catalog_size_delete", { id }),
+  catalogImages: () => invoke<Image[]>("catalog_images"),
+  /** A file picked in a dialog the core opens (Downloads by default); null when cancelled. */
+  catalogImagePick: (kind: ImageKind) => invoke<string | null>("catalog_image_pick", { kind }),
+  /** A folder for a template's VMs, picked in a dialog the core opens; null when cancelled. */
+  catalogFolderPick: () => invoke<string | null>("catalog_folder_pick"),
+  /** A file is checked and hashed first; progress comes as catalogHashProgress events under `request`. */
+  catalogImageAdd: (request: string, input: ImageInput) => invoke<Image>("catalog_image_add", { request, input }),
+  catalogImageCancel: (request: string) => invoke<boolean>("catalog_image_cancel", { request }),
+  onCatalogHash: (handler: (progress: HashProgress) => void): Promise<UnlistenFn> =>
+    listen<HashProgress>("catalog://hash", (e) => handler(e.payload)),
+  catalogImageUpdate: (id: string, edit: ImageEdit) => invoke<Image>("catalog_image_update", { id, edit }),
+  /** The catalogue's entry only; the file or VM stays. */
+  catalogImageDelete: (id: string) => invoke<void>("catalog_image_delete", { id }),
+  catalogTemplates: () => invoke<LaunchTemplate[]>("catalog_templates"),
+  catalogTemplatePreview: (input: TemplateInput) => invoke<TemplatePreview>("catalog_template_preview", { input }),
+  catalogTemplateAdd: (input: TemplateInput) => invoke<LaunchTemplate>("catalog_template_add", { input }),
+  catalogTemplateUpdate: (id: string, input: TemplateInput) =>
+    invoke<LaunchTemplate>("catalog_template_update", { id, input }),
+  catalogTemplateDelete: (id: string) => invoke<void>("catalog_template_delete", { id }),
+  /** Opens an official cloud image page; the core refuses any other address. */
+  catalogOpenSite: (url: string) => invoke<void>("catalog_open_site", { url }),
 };

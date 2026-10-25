@@ -3,7 +3,9 @@
 //!
 //! Queries are checked at runtime, not with `query!`, so building needs no `DATABASE_URL`.
 
+mod alerts;
 mod audit;
+mod catalog;
 mod containers;
 mod favourites;
 mod forwards;
@@ -39,11 +41,13 @@ use crate::error::Result;
 use crate::presentation::ReadOnlyLock;
 
 pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
+pub(crate) use catalog::{NewImage, TemplateRow};
 pub(crate) use favourites::{FavouriteFields, FavouriteRow};
 pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};
 pub(crate) use jobs::NewJob;
 pub use jobs::{JobSummary, JobTargetRecord, PurgedBodies, TargetResult};
+pub use metrics::{HistoryPruned, HistorySize};
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};

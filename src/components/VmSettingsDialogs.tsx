@@ -25,7 +25,7 @@ import {
   api,
   errorMessage,
   type Command,
-  type Firmware,
+  type VmFirmware,
   type GuestOsType,
   type MacAddress,
   type NicNetwork,
@@ -283,7 +283,7 @@ export function FirmwareDialog({
   onSubmit: Submit;
   onClose: () => void;
 }) {
-  const [firmware, setFirmware] = useState<Firmware>(hardware.firmware === "UEFI" ? "efi" : "bios");
+  const [firmware, setFirmware] = useState<VmFirmware>(hardware.firmware === "UEFI" ? "efi" : "bios");
   const [secureBoot, setSecureBoot] = useState(hardware.secureBoot ?? false);
   const hasTpm = hardware.tpm !== null;
   const [tpm, setTpm] = useState(hasTpm);
@@ -309,7 +309,7 @@ export function FirmwareDialog({
       }
       onClose={onClose}
     >
-      <RadioGroup value={firmware} onValueChange={(v) => setFirmware(v as Firmware)} className="flex gap-6">
+      <RadioGroup value={firmware} onValueChange={(v) => setFirmware(v as VmFirmware)} className="flex gap-6">
         <div className="flex items-center gap-2">
           <RadioGroupItem value="bios" id="fw-bios" />
           <Label htmlFor="fw-bios">BIOS</Label>

@@ -112,11 +112,17 @@ pub enum Change {
     MultiExec,
     /// CT-01: marking sessions as container hosts, and how their engines run.
     ContainerHosts,
+    /// VM-19 to VM-21: sizes, images and launch templates.
+    Catalog,
+    /// MO-07: alert rules, and acknowledging alerts.
+    Alerts,
+    /// MO-16: the dashboard's widgets and their places.
+    DashboardLayout,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 14] = [
+    pub const ALL: [Change; 17] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -131,6 +137,9 @@ impl Change {
         Change::ApprovalRules,
         Change::MultiExec,
         Change::ContainerHosts,
+        Change::Catalog,
+        Change::Alerts,
+        Change::DashboardLayout,
     ];
 
     pub fn label(self) -> &'static str {
@@ -149,6 +158,9 @@ impl Change {
             Change::ApprovalRules => "Change the approval rules",
             Change::MultiExec => "Turn MultiExec on",
             Change::ContainerHosts => "Mark container hosts",
+            Change::Catalog => "Edit sizes, images and launch templates",
+            Change::Alerts => "Change alert rules or acknowledge alerts",
+            Change::DashboardLayout => "Change the dashboard layout",
         }
     }
 }

@@ -2,7 +2,8 @@
 //! laptops (and, later, to a teammate).
 //!
 //! * Export writes one file (see [`file`]) with the session folders, the sessions (with their tags,
-//!   environment labels and colours), the trusted host keys, the favourite commands (BX-08) and, only
+//!   environment labels and colours), the trusted host keys, the favourite commands (BX-08), the spec catalogue
+//!   (VM-19 to VM-21: own sizes, images by path, launch templates; [`catalog`]) and, only
 //!   when the user ticks it, the vault's secrets with their values. The user chooses the passphrase; Argon2id turns it into the
 //!   AES-256-GCM key. The passphrase passes the same strength check as a new vault password (SS-04) and
 //!   may not be the vault password itself. The vault's labels always go along (they are not secret), so
@@ -30,6 +31,7 @@
 //!
 //! Nothing here touches a VM or a remote host, so it skips the command bus, like the session library.
 
+mod catalog;
 pub mod file;
 
 use std::collections::{HashMap, HashSet};
@@ -63,6 +65,7 @@ use crate::vault::{
 };
 use crate::vm_links::VmLink;
 
+pub use catalog::{CatalogChoices, CatalogCounts, CatalogPreview, CatalogReport};
 pub use file::{FORMAT, FORMAT_VERSION, MAX_FILE_BYTES};
 
 /// The export file's extension.
@@ -102,6 +105,9 @@ struct Payload {
     /// BX-08, in the order the panel shows them.
     #[serde(default)]
     favourites: Vec<FavouriteEntry>,
+    /// VM-19 to VM-21. Files from before 0.5.0 have none.
+    #[serde(default)]
+    catalog: catalog::CatalogEntries,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -317,6 +323,8 @@ pub struct ExportReport {
     pub forwards: usize,
     /// CT-01 sessions marked as container hosts.
     pub container_hosts: usize,
+    /// VM-19 to VM-21: own sizes, images and launch templates.
+    pub catalog: CatalogCounts,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -398,6 +406,8 @@ pub struct TransferPreview {
     pub secret_values: bool,
     /// BX-08 favourite commands.
     pub favourites: Vec<PreviewItem>,
+    /// VM-19 to VM-21: sizes, images and launch templates.
+    pub catalog: CatalogPreview,
     pub warnings: Vec<String>,
 }
 
@@ -422,6 +432,9 @@ pub struct TransferCommit {
     pub secrets: Vec<ItemChoice>,
     #[serde(default)]
     pub favourites: Vec<ItemChoice>,
+    /// VM-19 to VM-21.
+    #[serde(default)]
+    pub catalog: CatalogChoices,
     /// SS-01: sessions (by index) whose startup command comes along. The others come without it (a
     /// replaced session keeps the one it has here).
     #[serde(default)]
@@ -482,6 +495,8 @@ pub struct TransferReport {
     pub known_hosts: Counts,
     pub secrets: Counts,
     pub favourites: Counts,
+    /// VM-19 to VM-21.
+    pub catalog: CatalogReport,
     /// SS-07: port forwards saved with the imported sessions.
     pub forwards: usize,
     /// SS-01: startup commands in the file that were not ticked, so left out.
@@ -507,6 +522,7 @@ struct Local {
     secrets: Vec<SecretMeta>,
     vault: VaultStatus,
     favourites: Vec<FavouriteRow>,
+    catalog: catalog::LocalCatalog,
 }
 
 impl Local {
@@ -521,6 +537,7 @@ impl Local {
             secrets: vault.list(ctx).await?,
             vault: vault.info().status,
             favourites: store.list_favourites(ctx).await?,
+            catalog: catalog::LocalCatalog::read(store, ctx).await?,
         })
     }
 
@@ -949,6 +966,7 @@ struct Decided {
     host_actions: Vec<ItemAction>,
     favourite_rows: Vec<RowPlan<Uuid>>,
     favourite_actions: Vec<ItemAction>,
+    catalog: catalog::CatalogDecided,
 }
 
 /// SS-04: closes an opened file, which may hold secret values, when the vault locks: its secrets are
@@ -1209,6 +1227,7 @@ impl Transfer {
                     description: f.description,
                 })
                 .collect(),
+            catalog: catalog::export(&self.store, ctx).await?,
         };
         let report = ExportReport {
             path: path.display().to_string(),
@@ -1220,6 +1239,7 @@ impl Transfer {
             favourites: payload.favourites.len(),
             forwards: payload.sessions.iter().map(|s| s.forwards.len()).sum(),
             container_hosts: payload.sessions.iter().filter(|s| !s.containers.is_empty()).count(),
+            catalog: payload.catalog.counts(),
         };
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
         drop(payload);
@@ -1233,13 +1253,14 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, {}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
             plural(report.favourites, "favourite command"),
             plural(report.forwards, "port forward"),
             plural(report.container_hosts, "container host"),
+            report.catalog.describe(),
             report.path
         );
         self.audit(
@@ -1492,6 +1513,8 @@ impl Transfer {
             })
             .collect();
 
+        let catalog = catalog::preview(&payload.catalog, &local.catalog).await?;
+
         let secret_values = payload.secrets.iter().any(|s| s.value.is_some());
         let mut warnings = Vec::new();
         if secret_values {
@@ -1526,6 +1549,7 @@ impl Transfer {
             secrets,
             secret_values,
             favourites,
+            catalog,
             warnings,
         })
     }
@@ -1597,6 +1621,7 @@ impl Transfer {
             host_actions,
             favourite_rows,
             favourite_actions,
+            catalog: catalog_decided,
         } = decided;
         let mut report = TransferReport::default();
 
@@ -1839,6 +1864,17 @@ impl Transfer {
             }
         }
 
+        // 6. The spec catalogue (VM-19 to VM-21): sizes and images, then the templates that use them.
+        report.catalog = catalog::commit(
+            &self.store,
+            ctx,
+            &payload.catalog,
+            catalog_decided,
+            &secret_map,
+            &mut report.problems,
+        )
+        .await?;
+
         let mut detail = format!(
             "from {}: sessions {}; folders {} added; known host keys {}; vault secrets {}; favourite commands {}",
             path.display(),
@@ -1848,6 +1884,9 @@ impl Transfer {
             report.secrets.describe(),
             report.favourites.describe()
         );
+        if !report.catalog.is_empty() {
+            detail.push_str(&format!("; {}", report.catalog.describe()));
+        }
         if report.forwards > 0 {
             detail.push_str(&format!(
                 "; {} saved with them",
@@ -1928,6 +1967,7 @@ impl Transfer {
         for row in &favourite_rows {
             favourite_actions.push(row.action(&favourite_choices, &payload.favourites[row.index].name)?);
         }
+        let catalog = catalog::decide(&payload.catalog, &local.catalog, &request.catalog)?;
         if secret_actions.iter().any(|a| *a != ItemAction::Skip) {
             match local.vault {
                 VaultStatus::Unlocked => {}
@@ -1945,6 +1985,7 @@ impl Transfer {
             host_actions,
             favourite_rows,
             favourite_actions,
+            catalog,
         })
     }
 

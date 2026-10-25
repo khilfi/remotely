@@ -1,12 +1,14 @@
-// MO-03 dashboard: the host capacity panel (MO-04), then a grid of running VMs and watched hosts with
-// host-side metrics (MO-01, no login, including each VM's share of this host's CPU and RAM) and Linux
-// guest metrics over SSH (MO-02), sorting, filters and colour thresholds, and a drill-down with live
-// charts. Everything here is a read: it goes straight
-// to the core's metrics collector, never through the command bus. Actions open the command palette,
-// which submits to the bus like every other page.
+// MO-03 dashboard: widgets on a grid (MO-16, saved per workspace; Customize adds, removes, moves and resizes them): the
+// host capacity panel (MO-04), this PC's memory (MO-15), the alert list (MO-07), the overview grid of running VMs and
+// watched hosts with host-side metrics (MO-01, no login, including each VM's share of this host's CPU and RAM) and Linux
+// guest metrics over SSH (MO-02), sorting, filters and colour thresholds, services of a watched host (MO-14) and metric
+// charts; and a drill-down with charts, live or over a range from the history on disk (MO-06). Everything here is a
+// read: it goes straight to the core's metrics collector, never through the command bus. Actions open the command
+// palette, which submits to the bus like every other page.
 //
 // P8: the page follows the core's rounds only while it shows and the window is visible (shouldPoll): hidden, it reads
-// nothing and renders nothing each round; shown again, it reads once at once and then follows the rounds.
+// nothing and renders nothing each round; shown again, it reads once at once and then follows the rounds. Each widget
+// reads only while it is on the dashboard, and none while the layout is being customized.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
@@ -15,8 +17,10 @@ import {
   EyeIcon,
   EyeOffIcon,
   GaugeIcon,
+  LayoutDashboardIcon,
   MonitorIcon,
   PlusIcon,
+  RotateCcwIcon,
   SearchIcon,
   ServerIcon,
   SlidersHorizontalIcon,
@@ -43,15 +47,22 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AlertsWidget } from "@/components/AlertsWidget";
 import { EnvBadge, StateBadge } from "@/components/Badges";
 import { CapacityPanel } from "@/components/CapacityPanel";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { DashboardGrid } from "@/components/DashboardGrid";
 import { GuestStatusBadge } from "@/components/GuestStatusBadge";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { MetricCell } from "@/components/MetricBits";
+import { MetricChartWidget } from "@/components/MetricChartWidget";
 import { MetricsDetail } from "@/components/MetricsDetail";
+import { useReadOnlyReason } from "@/components/Presentation";
+import { ServicesWidget } from "@/components/ServicesWidget";
 import { SortableHead } from "@/components/SortableHead";
 import { ThisPcMemoryChart } from "@/components/ThisPcMemoryChart";
 import { AutoBadge } from "@/components/VmLinkControls";
+import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import { useVisibility } from "@/hooks/use-poll";
 import {
   api,
@@ -63,6 +74,8 @@ import {
   type HostCapacity,
   type SessionRecord,
 } from "@/lib/api";
+import { dashboardApi, type DashboardLayout, type LayoutInfo, type Widget } from "@/lib/dashboard-api";
+import { addWidget, cannotAdd, WIDGET_CHOICES, widgetTitle, type WidgetKindName } from "@/lib/dashboard-layout";
 import { formatWhen, plural } from "@/lib/format";
 import { specsSummary } from "@/lib/host-details";
 import { hypervisorName } from "@/lib/hypervisors";
@@ -317,87 +330,40 @@ function RatePairCell({ a, b, labels }: { a: number | null; b: number | null; la
   );
 }
 
-export function DashboardPage({ active, theme, focus, onConnect, onActions, onOpenVms, onOpenSessions }: Props) {
-  const [overview, setOverview] = useState<DashboardOverview | null>(null);
-  const [capacity, setCapacity] = useState<HostCapacity | null>(null);
-  const [round, setRound] = useState(0);
-  const [cost, setCost] = useState<CollectorCost | null>(null);
+interface OverviewProps {
+  overview: DashboardOverview | null;
+  rows: DashboardRow[];
+  cost: CollectorCost | null;
+  thresholds: Thresholds;
+  setThresholds: (t: Thresholds) => void;
+  onSelect: (key: string) => void;
+  onWatch: (sessionId: string, watch: boolean) => void;
+  onConnect: (sessionId: string) => void;
+  onActions: (vmxPath: string) => void;
+  onOpenVms: () => void;
+  onOpenSessions: () => void;
+}
+
+/** MO-03: the overview grid widget: filters, the table of running VMs and watched hosts, and what collecting costs. */
+function OverviewWidget({
+  overview,
+  rows,
+  cost,
+  thresholds,
+  setThresholds,
+  onSelect,
+  onWatch,
+  onConnect,
+  onActions,
+  onOpenVms,
+  onOpenSessions,
+}: OverviewProps) {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
   const [text, setText] = useState("");
   const [kind, setKind] = useState<Kind>("all");
   const [env, setEnv] = useState<Environment | "all">("all");
   const [alertsOnly, setAlertsOnly] = useState(false);
-  const [thresholds, setThresholds] = useThresholds();
-  const [selected, setSelected] = useState<string | null>(null);
-  /** MO-13, MO-14: a session's host details, opened from the drill-down. */
-  const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
 
-  // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
-  // everything reads once at once.
-  const visibility = useVisibility();
-  const live = shouldPoll(active, visibility);
-  const liveRef = useRef(live);
-  useEffect(() => {
-    liveRef.current = live;
-  }, [live]);
-  const [wasLive, setWasLive] = useState(live);
-  if (live !== wasLive) {
-    setWasLive(live);
-    if (live) setRound((n) => n + 1);
-  }
-
-  // Each round the core finishes -> read what it collected (only while this page shows).
-  useEffect(() => {
-    const unlisten = api.onMetricsRound((c) => {
-      if (!liveRef.current) return;
-      setCost(c);
-      setRound((n) => n + 1);
-    });
-    return () => void unlisten.then((stop) => stop());
-  }, []);
-
-  const load = useCallback(() => {
-    api.metricsOverview().then(
-      (o) => {
-        setOverview(o);
-        setCost(o.cost);
-      },
-      (err) => toast.error(errorMessage(err), { id: "dashboard-load" }),
-    );
-  }, []);
-
-  useEffect(() => {
-    if (live) load();
-  }, [live, round, load]);
-
-  // Capacity changes slowly: read when the page shows, then every third round (15 s).
-  const capacityTick = Math.floor(round / 3);
-  useEffect(() => {
-    if (!live) return;
-    api.metricsCapacity().then(setCapacity, () => setCapacity(null));
-  }, [live, capacityTick]);
-
-  // The palette asked to open a row: follow it once per request.
-  const [seenFocus, setSeenFocus] = useState(focus);
-  if (focus !== seenFocus) {
-    setSeenFocus(focus);
-    if (focus) setSelected(focus.key);
-  }
-
-  const watch = useCallback(
-    async (sessionId: string, on: boolean) => {
-      try {
-        await api.metricsWatch(sessionId, on);
-        toast.success(on ? "Watching the guest. The first reading arrives within a round." : "Stopped guest metrics");
-        load();
-      } catch (err) {
-        toast.error(errorMessage(err));
-      }
-    },
-    [load],
-  );
-
-  const rows = useMemo(() => overview?.rows ?? [], [overview]);
   const watched = useMemo(() => new Set(rows.flatMap((r) => (r.watchedSession ? [r.watchedSession] : []))), [rows]);
 
   const shown = useMemo(() => {
@@ -420,7 +386,6 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   }, [rows, text, kind, env, alertsOnly, thresholds, sort]);
 
   const alerts = rows.filter((r) => rowLevel(r, thresholds) !== "ok").length;
-  const selectedRow = rows.find((r) => r.key === selected) ?? null;
 
   function sortBy(key: SortKey) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === 1 ? -1 : 1 } : { key, dir: key === "name" ? 1 : -1 }));
@@ -431,7 +396,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
     const el = e.currentTarget;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      setSelected(row.key);
+      onSelect(row.key);
     } else if (e.key === "ArrowDown") {
       e.preventDefault();
       (el.nextElementSibling as HTMLElement | null)?.focus();
@@ -443,9 +408,6 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
 
   return (
     <div className="flex flex-col gap-4">
-      <CapacityPanel capacity={capacity} />
-      <ThisPcMemoryChart round={round} live={live} theme={theme} />
-
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative w-56">
           <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -490,11 +452,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
         </Toggle>
         <div className="ml-auto flex items-center gap-2">
           <ThresholdsEditor value={thresholds} onChange={setThresholds} />
-          <WatchPicker
-            watched={watched}
-            intervalSecs={cost?.guestIntervalSecs || 5}
-            onWatch={(id, on) => void watch(id, on)}
-          />
+          <WatchPicker watched={watched} intervalSecs={cost?.guestIntervalSecs || 5} onWatch={onWatch} />
         </div>
       </div>
 
@@ -541,186 +499,18 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
               </TableRow>
             </TableHeader>
             <TableBody>
-              {shown.map((row) => {
-                const cpu = rowCpu(row);
-                const memory = rowMemory(row);
-                const hostCpu = rowHostCpu(row);
-                const hostMem = rowHostMem(row);
-                const io = rowDiskIo(row);
-                const net = rowNetwork(row);
-                const used = rowDiskUsed(row);
-                const worst = rowLevel(row, thresholds);
-                return (
-                  <TableRow
-                    key={row.key}
-                    tabIndex={0}
-                    aria-label={`${row.name}: open details`}
-                    onClick={() => setSelected(row.key)}
-                    onKeyDown={(e) => rowKeys(e, row)}
-                    className={cn(
-                      "cursor-pointer focus-visible:bg-muted/60 focus-visible:outline-none",
-                      worst === "critical" && "bg-status-critical/5",
-                    )}
-                  >
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        {row.kind === "vm" ? (
-                          <span title={row.hypervisor ? `${hypervisorName(row.hypervisor)} VM` : "VM"} className="flex">
-                            <MonitorIcon
-                              className="size-4 shrink-0 text-muted-foreground"
-                              aria-label={row.hypervisor ? `${hypervisorName(row.hypervisor)} VM` : "VM"}
-                            />
-                          </span>
-                        ) : (
-                          <ServerIcon className="size-4 shrink-0 text-muted-foreground" aria-label="Host" />
-                        )}
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="truncate font-medium">{row.name}</span>
-                            <EnvBadge env={row.environment} />
-                          </div>
-                          <div className="truncate text-xs text-muted-foreground">{row.address ?? ""}</div>
-                          {/* MO-13: "4 vCPU · 8 GB · Ubuntu 24.04" */}
-                          <div
-                            className="truncate text-xs text-muted-foreground"
-                            title={row.specsAt ? `The host's facts as of ${formatWhen(row.specsAt)}` : undefined}
-                          >
-                            {specsSummary(
-                              row.kind === "vm" ? "vm" : "host",
-                              row.vcpus,
-                              row.memsizeMb ? row.memsizeMb * 1024 * 1024 : null,
-                              row.guestOs,
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      {row.powerState ? (
-                        <StateBadge state={row.powerState} />
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <MetricCell
-                        value={cpu.value}
-                        text={formatPct(cpu.value)}
-                        pct={cpu.value}
-                        limits={thresholds.cpu}
-                        label={`CPU of ${row.name}`}
-                        title={cpu.source ? SOURCE_LABEL[cpu.source] : undefined}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <MetricCell
-                        value={memory.used}
-                        text={`${formatBytes(memory.used)}${memory.total ? ` / ${formatBytes(memory.total)}` : ""}`}
-                        pct={memory.pct}
-                        limits={thresholds.memory}
-                        label={`Memory of ${row.name}`}
-                        title={memory.source ? SOURCE_LABEL[memory.source] : undefined}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <MetricCell
-                        value={hostCpu}
-                        text={formatPct(hostCpu)}
-                        pct={hostCpu}
-                        limits={thresholds.cpu}
-                        label={`${row.name}'s share of this host's CPU`}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <MetricCell
-                        value={hostMem}
-                        text={formatPct(hostMem)}
-                        pct={hostMem}
-                        limits={thresholds.memory}
-                        label={`${row.name}'s share of this host's RAM`}
-                      />
-                    </TableCell>
-                    <TableCell title={io.source ? SOURCE_LABEL[io.source] : undefined}>
-                      <RatePairCell a={io.a} b={io.b} labels={["R", "W"]} />
-                    </TableCell>
-                    <TableCell>
-                      <RatePairCell a={net.a} b={net.b} labels={["In", "Out"]} />
-                    </TableCell>
-                    <TableCell className="tabular-nums">
-                      {row.guest?.load1 != null ? (
-                        row.guest.load1.toFixed(2)
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <MetricCell
-                        value={used.pct}
-                        text={formatPct(used.pct)}
-                        pct={used.pct}
-                        limits={thresholds.disk}
-                        label={`Fullest disk of ${row.name}`}
-                        title={used.mount ? `Fullest: ${used.mount}` : undefined}
-                      />
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      {row.guestStatus ? (
-                        <GuestStatusBadge status={row.guestStatus} />
-                      ) : row.sessions.length > 0 ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void watch(row.sessions[0].id, true)}
-                          title={`Watch the guest through ${row.sessions[0].name}`}
-                        >
-                          <EyeIcon /> Watch
-                        </Button>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">No session</span>
-                      )}
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label={`More for ${row.name}`}>
-                            <EllipsisIcon />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem onSelect={() => setSelected(row.key)}>
-                            <GaugeIcon /> Details and charts
-                          </DropdownMenuItem>
-                          {row.kind === "vm" && (
-                            <DropdownMenuItem onSelect={() => onActions(row.key)}>
-                              <ZapIcon /> Actions…
-                            </DropdownMenuItem>
-                          )}
-                          {row.watchedSession && (
-                            <DropdownMenuItem onSelect={() => onConnect(row.watchedSession!)}>
-                              <SquareTerminalIcon /> Open terminal
-                            </DropdownMenuItem>
-                          )}
-                          <DropdownMenuSeparator />
-                          {row.watchedSession ? (
-                            <DropdownMenuItem onSelect={() => void watch(row.watchedSession!, false)}>
-                              <EyeOffIcon /> Stop guest metrics
-                            </DropdownMenuItem>
-                          ) : row.sessions.length > 0 ? (
-                            row.sessions.map((s) => (
-                              <DropdownMenuItem key={s.id} onSelect={() => void watch(s.id, true)}>
-                                <EyeIcon /> Watch guest via {s.name}
-                                {s.auto && <AutoBadge />}
-                              </DropdownMenuItem>
-                            ))
-                          ) : (
-                            <DropdownMenuItem disabled>Link a session to watch the guest</DropdownMenuItem>
-                          )}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
+              {shown.map((row) => (
+                <OverviewRow
+                  key={row.key}
+                  row={row}
+                  thresholds={thresholds}
+                  onSelect={onSelect}
+                  onKeys={rowKeys}
+                  onWatch={onWatch}
+                  onConnect={onConnect}
+                  onActions={onActions}
+                />
+              ))}
               {overview && shown.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={COLUMNS.length + 1} className="py-6 text-center text-muted-foreground">
@@ -737,12 +527,506 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
         {plural(rows.filter((r) => r.kind === "vm").length, "VM")} and{" "}
         {plural(rows.filter((r) => r.kind === "session").length, "host")} ·{" "}
         {cost?.collectedAt ? `updated at ${new Date(cost.collectedAt).toLocaleTimeString()} · ` : ""}
-        <CostLine cost={cost} /> · history kept in memory for 30 minutes
+        <CostLine cost={cost} /> · live charts keep 30 minutes; longer ranges come from the history on this PC
       </p>
+    </div>
+  );
+}
+
+function OverviewRow({
+  row,
+  thresholds,
+  onSelect,
+  onKeys,
+  onWatch,
+  onConnect,
+  onActions,
+}: {
+  row: DashboardRow;
+  thresholds: Thresholds;
+  onSelect: (key: string) => void;
+  onKeys: (e: KeyboardEvent<HTMLTableRowElement>, row: DashboardRow) => void;
+  onWatch: (sessionId: string, watch: boolean) => void;
+  onConnect: (sessionId: string) => void;
+  onActions: (vmxPath: string) => void;
+}) {
+  const cpu = rowCpu(row);
+  const memory = rowMemory(row);
+  const hostCpu = rowHostCpu(row);
+  const hostMem = rowHostMem(row);
+  const io = rowDiskIo(row);
+  const net = rowNetwork(row);
+  const used = rowDiskUsed(row);
+  const worst = rowLevel(row, thresholds);
+  return (
+    <TableRow
+      tabIndex={0}
+      aria-label={`${row.name}: open details`}
+      onClick={() => onSelect(row.key)}
+      onKeyDown={(e) => onKeys(e, row)}
+      className={cn(
+        "cursor-pointer focus-visible:bg-muted/60 focus-visible:outline-none",
+        worst === "critical" && "bg-status-critical/5",
+      )}
+    >
+      <TableCell>
+        <div className="flex items-center gap-2">
+          {row.kind === "vm" ? (
+            <span title={row.hypervisor ? `${hypervisorName(row.hypervisor)} VM` : "VM"} className="flex">
+              <MonitorIcon
+                className="size-4 shrink-0 text-muted-foreground"
+                aria-label={row.hypervisor ? `${hypervisorName(row.hypervisor)} VM` : "VM"}
+              />
+            </span>
+          ) : (
+            <ServerIcon className="size-4 shrink-0 text-muted-foreground" aria-label="Host" />
+          )}
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="truncate font-medium">{row.name}</span>
+              <EnvBadge env={row.environment} />
+            </div>
+            <div className="truncate text-xs text-muted-foreground">{row.address ?? ""}</div>
+            {/* MO-13: "4 vCPU · 8 GB · Ubuntu 24.04" */}
+            <div
+              className="truncate text-xs text-muted-foreground"
+              title={row.specsAt ? `The host's facts as of ${formatWhen(row.specsAt)}` : undefined}
+            >
+              {specsSummary(
+                row.kind === "vm" ? "vm" : "host",
+                row.vcpus,
+                row.memsizeMb ? row.memsizeMb * 1024 * 1024 : null,
+                row.guestOs,
+              )}
+            </div>
+          </div>
+        </div>
+      </TableCell>
+      <TableCell>
+        {row.powerState ? <StateBadge state={row.powerState} /> : <span className="text-muted-foreground">—</span>}
+      </TableCell>
+      <TableCell>
+        <MetricCell
+          value={cpu.value}
+          text={formatPct(cpu.value)}
+          pct={cpu.value}
+          limits={thresholds.cpu}
+          label={`CPU of ${row.name}`}
+          title={cpu.source ? SOURCE_LABEL[cpu.source] : undefined}
+        />
+      </TableCell>
+      <TableCell>
+        <MetricCell
+          value={memory.used}
+          text={`${formatBytes(memory.used)}${memory.total ? ` / ${formatBytes(memory.total)}` : ""}`}
+          pct={memory.pct}
+          limits={thresholds.memory}
+          label={`Memory of ${row.name}`}
+          title={memory.source ? SOURCE_LABEL[memory.source] : undefined}
+        />
+      </TableCell>
+      <TableCell>
+        <MetricCell
+          value={hostCpu}
+          text={formatPct(hostCpu)}
+          pct={hostCpu}
+          limits={thresholds.cpu}
+          label={`${row.name}'s share of this host's CPU`}
+        />
+      </TableCell>
+      <TableCell>
+        <MetricCell
+          value={hostMem}
+          text={formatPct(hostMem)}
+          pct={hostMem}
+          limits={thresholds.memory}
+          label={`${row.name}'s share of this host's RAM`}
+        />
+      </TableCell>
+      <TableCell title={io.source ? SOURCE_LABEL[io.source] : undefined}>
+        <RatePairCell a={io.a} b={io.b} labels={["R", "W"]} />
+      </TableCell>
+      <TableCell>
+        <RatePairCell a={net.a} b={net.b} labels={["In", "Out"]} />
+      </TableCell>
+      <TableCell className="tabular-nums">
+        {row.guest?.load1 != null ? row.guest.load1.toFixed(2) : <span className="text-muted-foreground">—</span>}
+      </TableCell>
+      <TableCell>
+        <MetricCell
+          value={used.pct}
+          text={formatPct(used.pct)}
+          pct={used.pct}
+          limits={thresholds.disk}
+          label={`Fullest disk of ${row.name}`}
+          title={used.mount ? `Fullest: ${used.mount}` : undefined}
+        />
+      </TableCell>
+      <TableCell onClick={(e) => e.stopPropagation()}>
+        {row.guestStatus ? (
+          <GuestStatusBadge status={row.guestStatus} />
+        ) : row.sessions.length > 0 ? (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => onWatch(row.sessions[0].id, true)}
+            title={`Watch the guest through ${row.sessions[0].name}`}
+          >
+            <EyeIcon /> Watch
+          </Button>
+        ) : (
+          <span className="text-xs text-muted-foreground">No session</span>
+        )}
+      </TableCell>
+      <TableCell onClick={(e) => e.stopPropagation()}>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-sm" aria-label={`More for ${row.name}`}>
+              <EllipsisIcon />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => onSelect(row.key)}>
+              <GaugeIcon /> Details and charts
+            </DropdownMenuItem>
+            {row.kind === "vm" && (
+              <DropdownMenuItem onSelect={() => onActions(row.key)}>
+                <ZapIcon /> Actions…
+              </DropdownMenuItem>
+            )}
+            {row.watchedSession && (
+              <DropdownMenuItem onSelect={() => onConnect(row.watchedSession!)}>
+                <SquareTerminalIcon /> Open terminal
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+            {row.watchedSession ? (
+              <DropdownMenuItem onSelect={() => onWatch(row.watchedSession!, false)}>
+                <EyeOffIcon /> Stop guest metrics
+              </DropdownMenuItem>
+            ) : row.sessions.length > 0 ? (
+              row.sessions.map((s) => (
+                <DropdownMenuItem key={s.id} onSelect={() => onWatch(s.id, true)}>
+                  <EyeIcon /> Watch guest via {s.name}
+                  {s.auto && <AutoBadge />}
+                </DropdownMenuItem>
+              ))
+            ) : (
+              <DropdownMenuItem disabled>Link a session to watch the guest</DropdownMenuItem>
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </TableCell>
+    </TableRow>
+  );
+}
+
+/** MO-16: the top of the page: Customize, or while customizing, Add widget, Reset, Cancel and Save. */
+function LayoutBar({
+  draft,
+  readOnly,
+  saving,
+  onEdit,
+  onAdd,
+  onReset,
+  onCancel,
+  onSave,
+}: {
+  /** The layout being customized; null when not customizing. */
+  draft: DashboardLayout | null;
+  readOnly: string | null;
+  saving: boolean;
+  onEdit: () => void;
+  onAdd: (kind: WidgetKindName) => void;
+  onReset: () => void;
+  onCancel: () => void;
+  onSave: () => void;
+}) {
+  if (!draft) {
+    return (
+      <div className="flex justify-end">
+        <WhyDisabled reason={readOnly}>
+          <Button variant="ghost" size="sm" disabled={readOnly !== null} onClick={onEdit}>
+            <LayoutDashboardIcon /> Customize
+          </Button>
+        </WhyDisabled>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed bg-muted/40 px-3 py-2">
+      <p className="mr-auto text-xs text-muted-foreground">
+        Drag a widget by its handle or press the arrow keys on it; drag its corner to resize. Nothing is saved until you
+        press Save.
+      </p>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button size="sm" variant="outline">
+            <PlusIcon /> Add widget
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-72">
+          {WIDGET_CHOICES.map((choice) => {
+            const why = cannotAdd(draft, choice.kind);
+            return (
+              <DropdownMenuItem key={choice.kind} disabled={why !== null} onSelect={() => onAdd(choice.kind)}>
+                <div className="flex flex-col">
+                  <span>{choice.label}</span>
+                  <span className="text-xs text-muted-foreground">{choice.description}</span>
+                  <ReasonLine reason={why} />
+                </div>
+              </DropdownMenuItem>
+            );
+          })}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <Button size="sm" variant="outline" disabled={saving} onClick={onReset}>
+        <RotateCcwIcon /> Reset to default
+      </Button>
+      <Button size="sm" variant="ghost" disabled={saving} onClick={onCancel}>
+        Cancel
+      </Button>
+      <Button size="sm" disabled={saving} onClick={onSave}>
+        <CheckIcon /> Save layout
+      </Button>
+    </div>
+  );
+}
+
+export function DashboardPage({ active, theme, focus, onConnect, onActions, onOpenVms, onOpenSessions }: Props) {
+  const [overview, setOverview] = useState<DashboardOverview | null>(null);
+  const [capacity, setCapacity] = useState<HostCapacity | null>(null);
+  const [round, setRound] = useState(0);
+  const [cost, setCost] = useState<CollectorCost | null>(null);
+  const [thresholds, setThresholds] = useThresholds();
+  const [selected, setSelected] = useState<string | null>(null);
+  /** MO-13, MO-14: a session's host details, opened from the drill-down. */
+  const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
+  /** MO-16: the saved layout, and a copy being customized. */
+  const [layoutInfo, setLayoutInfo] = useState<LayoutInfo | null>(null);
+  const [draft, setDraft] = useState<DashboardLayout | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [sessionNames, setSessionNames] = useState<Map<string, string>>(new Map());
+  const readOnly = useReadOnlyReason();
+
+  // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
+  // everything reads once at once.
+  const visibility = useVisibility();
+  const live = shouldPoll(active, visibility);
+  const liveRef = useRef(live);
+  useEffect(() => {
+    liveRef.current = live;
+  }, [live]);
+  const [wasLive, setWasLive] = useState(live);
+  if (live !== wasLive) {
+    setWasLive(live);
+    if (live) setRound((n) => n + 1);
+  }
+
+  // Each round the core finishes -> read what it collected (only while this page shows).
+  useEffect(() => {
+    const unlisten = api.onMetricsRound((c) => {
+      if (!liveRef.current) return;
+      setCost(c);
+      setRound((n) => n + 1);
+    });
+    return () => void unlisten.then((stop) => stop());
+  }, []);
+
+  useEffect(() => {
+    dashboardApi.layout().then(setLayoutInfo, (err) => toast.error(errorMessage(err), { id: "dashboard-layout" }));
+  }, []);
+  const layout = draft ?? layoutInfo?.layout ?? null;
+  const editing = draft !== null;
+  const kinds = useMemo(() => new Set(layout?.widgets.map((w) => w.kind) ?? []), [layout]);
+  const servicesIds = useMemo(
+    () =>
+      (layout?.widgets ?? [])
+        .flatMap((w) => (w.kind === "services" && w.sessionId ? [w.sessionId] : []))
+        .sort()
+        .join(","),
+    [layout],
+  );
+
+  // Widgets read only while shown: the grid's rows when the overview (or a drill-down) is on the page, capacity when
+  // its widget is, the services widgets' host names when there are some.
+  const needOverview = kinds.has("overview") || kinds.has("chart") || selected !== null;
+  const load = useCallback(() => {
+    api.metricsOverview().then(
+      (o) => {
+        setOverview(o);
+        setCost(o.cost);
+      },
+      (err) => toast.error(errorMessage(err), { id: "dashboard-load" }),
+    );
+  }, []);
+
+  useEffect(() => {
+    if (live && needOverview) load();
+  }, [live, round, load, needOverview]);
+
+  // Capacity changes slowly: read when the page shows, then every third round (15 s).
+  const capacityTick = Math.floor(round / 3);
+  const needCapacity = kinds.has("capacity");
+  useEffect(() => {
+    if (!live || !needCapacity) return;
+    api.metricsCapacity().then(setCapacity, () => setCapacity(null));
+  }, [live, capacityTick, needCapacity]);
+
+  useEffect(() => {
+    if (!live || !servicesIds) return;
+    api.sessions().then(
+      (sessions) => setSessionNames(new Map(sessions.map((s) => [s.id, s.name]))),
+      () => undefined,
+    );
+  }, [live, servicesIds]);
+
+  // The palette asked to open a row: follow it once per request.
+  const [seenFocus, setSeenFocus] = useState(focus);
+  if (focus !== seenFocus) {
+    setSeenFocus(focus);
+    if (focus) setSelected(focus.key);
+  }
+
+  const watch = useCallback(
+    async (sessionId: string, on: boolean) => {
+      try {
+        await api.metricsWatch(sessionId, on);
+        toast.success(on ? "Watching the guest. The first reading arrives within a round." : "Stopped guest metrics");
+        load();
+      } catch (err) {
+        toast.error(errorMessage(err));
+      }
+    },
+    [load],
+  );
+
+  const rows = useMemo(() => overview?.rows ?? [], [overview]);
+  // A row by its key, or by the watched session a VM row shows (an alert on a VM's guest). Nothing selected, no row:
+  // a VM row nobody watches has a null watched session too.
+  const selectedRow =
+    selected === null
+      ? null
+      : (rows.find((r) => r.key === selected) ?? rows.find((r) => r.watchedSession === selected) ?? null);
+  const rowName = (key: string | null | undefined) =>
+    key ? (rows.find((r) => r.key === key || r.watchedSession === key)?.name ?? null) : null;
+  const titleOf = (w: Widget) =>
+    widgetTitle(
+      w,
+      w.kind === "services"
+        ? (sessionNames.get(w.sessionId ?? "") ?? null)
+        : w.kind === "chart"
+          ? rowName(w.key)
+          : null,
+    );
+
+  async function saveLayout() {
+    if (!draft) return;
+    setSaving(true);
+    try {
+      setLayoutInfo(await dashboardApi.setLayout(draft));
+      setDraft(null);
+      toast.success("Dashboard layout saved");
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function renderWidget(widget: Widget, height: number) {
+    // Nothing reads while the layout is being customized.
+    const reading = live && !editing;
+    switch (widget.kind) {
+      case "overview":
+        return (
+          <OverviewWidget
+            overview={overview}
+            rows={rows}
+            cost={cost}
+            thresholds={thresholds}
+            setThresholds={setThresholds}
+            onSelect={setSelected}
+            onWatch={(id, on) => void watch(id, on)}
+            onConnect={onConnect}
+            onActions={onActions}
+            onOpenVms={onOpenVms}
+            onOpenSessions={onOpenSessions}
+          />
+        );
+      case "capacity":
+        return <CapacityPanel capacity={capacity} />;
+      case "thisPcMemory":
+        return <ThisPcMemoryChart round={round} live={reading} theme={theme} height={height - 150} />;
+      case "alerts":
+        return <AlertsWidget live={reading} onOpenTarget={(target) => setSelected(target.key)} />;
+      case "services":
+        return (
+          <ServicesWidget
+            sessionId={widget.sessionId ?? null}
+            name={widget.sessionId ? (sessionNames.get(widget.sessionId) ?? null) : null}
+            live={reading}
+            onWatch={(id) => void watch(id, true)}
+          />
+        );
+      case "chart":
+        return (
+          <MetricChartWidget
+            widget={widget}
+            name={rowName(widget.key)}
+            round={round}
+            live={reading}
+            theme={theme}
+            height={height - 112}
+          />
+        );
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      {layout && (
+        <LayoutBar
+          draft={draft}
+          readOnly={readOnly}
+          saving={saving}
+          onEdit={() => setDraft(structuredClone(layout))}
+          onAdd={(kind) => setDraft((d) => (d ? addWidget(d, kind) : d))}
+          onReset={() => setConfirmReset(true)}
+          onCancel={() => setDraft(null)}
+          onSave={() => void saveLayout()}
+        />
+      )}
+      {layout && layout.widgets.length === 0 && (
+        <Empty className="border">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <LayoutDashboardIcon />
+            </EmptyMedia>
+            <EmptyTitle>No widgets</EmptyTitle>
+            <EmptyDescription>
+              {editing
+                ? "Add widgets above, then save."
+                : "Customize the dashboard to add some, or reset it to the default."}
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      )}
+      {layout && (
+        <DashboardGrid
+          layout={layout}
+          editing={editing}
+          onChange={setDraft}
+          renderWidget={renderWidget}
+          titleOf={titleOf}
+        />
+      )}
 
       <MetricsDetail
         row={selectedRow}
         round={round}
+        live={live}
         guestIntervalSecs={cost?.guestIntervalSecs || 5}
         thresholds={thresholds}
         theme={theme}
@@ -765,6 +1049,19 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
         }}
       />
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+      {confirmReset && (
+        <ConfirmDialog
+          title="Reset the dashboard?"
+          description="Back to the default widgets: host capacity, this PC's memory, the alerts and the overview grid. Your arrangement and its charts go."
+          confirmLabel="Reset"
+          onConfirm={async () => {
+            setLayoutInfo(await dashboardApi.resetLayout());
+            setDraft(null);
+            toast.success("Dashboard reset to the default");
+          }}
+          onClose={() => setConfirmReset(false)}
+        />
+      )}
     </div>
   );
 }

@@ -29,6 +29,13 @@ test("Ctrl+3 opens the snapshot view until a page takes the slot", () => {
   assert.deepEqual(shortcutTarget("3", withContainers), { page: "containers" });
 });
 
+test("Ctrl+9 opens the Templates page (VM-19 to VM-21)", () => {
+  const withTemplates = [...PAGES, { id: "templates", shortcut: "Ctrl+9" }];
+  assert.deepEqual(shortcutTarget("9", withTemplates), { page: "templates" });
+  assert.deepEqual(navTarget("templates", withTemplates), { page: "templates" });
+  assert.deepEqual(shortcutTarget("1", withTemplates), { page: "vms" }, "the others keep theirs");
+});
+
 test("the old Snapshots page id still opens something", () => {
   assert.deepEqual(navTarget("snapshots", PAGES), { moved: "snapshots" });
   assert.deepEqual(navTarget("dashboard", PAGES), { page: "dashboard" });

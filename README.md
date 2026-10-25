@@ -29,8 +29,8 @@ password again, and so does sending a vault password to a host that doesn't get 
 [The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). The session
 library stores SSH sessions in folders with tags, colours, search and an environment label (Prod raises the approval
 tier). Imports read PuTTY, MobaXterm, OpenSSH config and CSV session lists, each with a short format guide and a sample file to start from. A key file or OpenSSH `Include` on a network share or a device path (`\\server\share`, `//server/share`, `\\?\`, `\\.\`) is never opened, since Windows would send your sign-in to that server: the preview says so and leaves it out (copy it to this PC). Included files are read up to 1 MB each, 4 MB and 256 files in all. The SSH terminal, MultiExec and Compare output work over russh. The Terminal page has a session tree with reachability dots, quick connect (saved or not), the host's own name and IP on each tab, search, saving, printing or logging the output of one terminal or several at once, a command panel with your favourite commands and a library of common ones (with `{{variables}}`, marked by the approval rules), "Type vault password" for sudo prompts, a Windows notification when a command finishes while you're away (long ones, or any), file transfer over the terminal's own connection, MultiExec and Compare output (below). The dashboard shows every running VM's CPU, RAM and disk I/O read from its `vmware-vmx.exe` process (no login), and its share of this host's CPU and RAM (also on the VM list), Linux guest metrics over SSH for watched sessions, colour thresholds, live charts (memory in use against what there is, swap, and this PC's paging files) and a host capacity panel. Host details show each VM's virtual hardware and each SSH host's OS and specs, with an admin view of services, ports, users, boots, processes and pending updates (below). Sessions link to the VMs they reach on their own when their host is a VM's guest IP address, so those VMs show guest metrics without linking by hand; a bulk run or key push reaches a VM through such a link once you confirm it. Ctrl+K opens a command palette for pages, VMs, sessions and actions. The top bar's Dark mode switch picks the theme; "Follow Windows" in Settings, General lets Windows decide (the default), and using the switch turns it off.
-Sessions, folders, tags, labels, trusted host keys and (only when ticked) vault secrets move to another laptop in one
-encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
+Sessions, folders, tags, labels, trusted host keys, VM sizes, images (by path) and launch templates, and (only when
+ticked) vault secrets move to another laptop in one encrypted file (Argon2id with 256 MiB from a passphrase that is hard to guess and not the vault password,
 AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
 [What Remotely does by itself](#what-remotely-does-by-itself)). The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
@@ -108,6 +108,37 @@ with its size, and a VM it would refuse (running, snapshots in the way).
   or VirtualBox's window on a running VM; a VirtualBox VM that is off starts with its window). The console changes
   nothing, so it has no tier, but it is in the audit log and off while presenting with the read-only lock. ISOs, shared
   folders and existing VMs are picked in Windows' own dialogs; a network share or a device path is refused.
+
+### VM templates: sizes, images and launch templates
+
+VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does. Deploying from it
+arrives with the deploy package; until then the VMs page's **Deploy** button says so.
+
+- **Sizes**: CPU (sockets × cores per socket), RAM and disks (the first boots; each thin, taking only what the guest
+  writes, or thick). Twelve built-ins, read only: `gp.nano` (1 vCPU, 512 MB, 8 GB), `gp.micro`, `gp.small`,
+  `gp.medium` (2 vCPU, 4 GB, 40 GB, the default), `gp.large`, `gp.xlarge`, `gp.2xlarge` (8 vCPU, 32 GB, 200 GB),
+  `cpu.large`, `cpu.xlarge`, `mem.large`, `mem.xlarge` and `disk.large` (with a 500 GB data disk). **Duplicate** makes
+  an editable copy; your own sizes can be edited and deleted.
+- **OS profiles** set what depends on the guest: firmware (BIOS, EFI, Secure Boot), disk controller, network card
+  (`vmxnet3` or `e1000e` on Workstation, `virtio` or `82540EM` on VirtualBox), guest OS type and Workstation's hardware
+  version (20, which Workstation 17.0 and later run). Ubuntu, Debian, the RHEL family (RHEL, Rocky, Alma), Windows
+  Server, Windows 10, Windows 11 and Other Linux. Windows 11 deploys on VirtualBox only for now (its own TPM and Secure
+  Boot): Workstation's virtual TPM needs each VM encrypted with its own password.
+- **Images**: a golden VM and one of its snapshots, a cloud image (VMDK, OVA, `.img` or raw; qcow2 too, which deploys
+  once it is converted), an ISO, or an OVA/OVF appliance. Remotely checks that a file is what its name says (its first
+  bytes) and reads it once for its SHA-256, with progress and Stop. Files on network shares (`\\server\share`) are
+  refused: Windows would send your sign-in there, so copy them to this PC first. Deleting an image deletes only its
+  entry, never the file or VM. The Images tab links to the official cloud image pages of Ubuntu, Debian, Rocky Linux and
+  AlmaLinux; Remotely downloads nothing itself.
+- **Launch templates** put an image and a size together with the hypervisor, the VM folder, the network (NAT,
+  host-only, bridged, a custom vmnet, or a VirtualBox NAT or internal network), an SSH key (only its public half goes to
+  the VMs), a naming pattern (`{n}` the VM's number, `{template}` its name, `{date}` today: `web-{n}`), a default count,
+  an environment label and tags, and what happens after each VM is deployed (save an SSH session to its IP, link it to
+  the VM, take a "clean" snapshot, open the console). The editor shows the names a deploy would give (VMs already here
+  are skipped) and why it couldn't deploy; a template whose image, size or key was deleted later stays and says so.
+- Every change is in the audit log (no approval: it is the app's own data, like the session library) and is refused
+  while presenting with the read-only lock on. Exports to another laptop carry your own sizes, the images by path (the
+  import says when a file isn't on that laptop) and the templates, pointed at that laptop's images, sizes and keys.
 
 ### Reachability dots
 
@@ -187,6 +218,9 @@ What Remotely runs while you look at something else, and how it stays light on t
   behind one jump host don't all log in at the same moment. When Windows resumes from sleep or this PC gets a new
   network address, waiting terminals try within 3 seconds, and one that had given up starts its tries again.
 - **Reachability dots** read nothing while they are off or the session tree isn't shown.
+- **Dashboard history and alerts** (MO-06, MO-07): one database write a minute for every series together;
+  the alert rules run on each round in memory and read names and tags at most once a minute; the services
+  widget runs one command a minute on the dashboard's kept connection.
 
 ### Safer operations on hosts
 
@@ -250,6 +284,8 @@ Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS
 - **Deleted means gone**: the database overwrites what it deletes (`secure_delete`), empties its write-ahead log after a
   purge, and compacts its file (`VACUUM`) after a purge that freed a lot of space, while no job runs (a job submitted
   meanwhile waits for it).
+- **Dashboard history** (MO-06, MO-07): 1-minute averages of the VMs, watched hosts and this PC, and the alert
+  list, kept 7 days by default (Settings, General, Dashboard history), pruned at start and daily, never exported.
 - **The audit log** is never purged: it is append-only and hash-chained. Verify and Export read it row by row, however
   long it is, and the export is written next to the file you chose, then renamed, so a failed export leaves no half
   file.
@@ -536,6 +572,35 @@ CT-01 and CT-02 (0.4.0), Ctrl+3: Docker and Podman on SSH hosts, and Docker Desk
 
 Not done here: a shell in Docker Desktop's containers (it needs a terminal on this PC, which Remotely doesn't have),
 compose stacks as a whole (the Compose project shows on each container), creating containers, and image builds.
+
+### Dashboard: history, alerts and layout
+
+- **History** (MO-06): once a minute the dashboard writes, in one go, an average of each running VM's host-side
+  readings, each watched host's guest readings and this PC's CPU, RAM and paging files, with the minute's lowest and
+  highest CPU and its highest memory, load and fullest disk. The charts' range picker (Live, 1 h, 6 h, 24 h, 7 d) reads
+  it in points of 1 minute (up to 6 hours), 5 minutes (a day) or 30 minutes (a week) and carries on with the live
+  rounds; over a range, a chart widget's CPU also shows each point's highest reading. It is kept 7 days by default
+  (Settings, General, **Dashboard history**: 1, 3, 7, 14 or 30 days) and pruned at start and daily with the alert
+  list's resolved alerts. It stays on this PC: no export carries it. A VM or host takes about 180 bytes a minute, so 50
+  VMs and 20 watched hosts running around the clock for a week take about 125 MB, and ten VMs on working days with five
+  watched hosts about 15 MB.
+- **Alerts** (MO-07): a rule watches CPU, memory, disk or swap above a threshold for a while, a watched host that
+  can't be reached, or a VM that stopped with no Remotely job on it (powered off, suspended or crashed outside the
+  app), on every VM, one VM, a tag, every watched host, one watched host or this PC, as a warning or critical. Rules
+  run on every round; an alert resolves after a minute back under its threshold. Windows notifies at most once per rule
+  and target in half an hour, one notification for the alerts of a round, masked while presenting. Built-in rules, on:
+  a VM stopped without a Remotely action, a watched host's disk above 85% for 5 minutes, a watched host unreachable for
+  5 minutes, this PC's memory above 90% for 5 minutes; off until you turn them on: a VM's CPU above 90% for 5 minutes,
+  a VM's memory above 95% for 10 minutes and a watched host's CPU above 90% for 5 minutes (builds and caches push these
+  high on purpose). The Rules button on the alert list edits them. Rule changes and acknowledgements are audited, and
+  the read-only lock refuses them. Desktop only: no email, Teams or Slack.
+- **Layout** (MO-16): **Customize** adds, removes, moves and resizes the widgets (the overview grid, host capacity,
+  this PC's memory, the alerts, a watched host's services, and charts of a VM, a watched host or this PC) on a grid of
+  four columns: drag a widget's handle or press the arrow keys on it, drag its corner or pick its size. **Save** keeps
+  the layout for this workspace (audited); **Reset to default** brings back the standard dashboard. The services widget
+  reads a watched host's services once a minute on the dashboard's own connection to it, so it adds no logins; a host
+  that isn't watched shows nothing until you watch it. Widgets read only while the dashboard shows and the window is
+  visible, and none while you customize.
 
 ### Host details
 
@@ -982,11 +1047,15 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | VM settings        | `crates/core/src/vm_settings/`, `adapters/vmx_file.rs`            | VM-11, VM-12, VM-15, VM-16, VM-23, VM-24                                                                                                            | Working: the Settings tab's full read of both hypervisors; .vmx edits after a backup (unknown keys kept), vdiskmanager and VBoxManage disk changes, devices on running VMs, bulk resize, delete, rename, add an existing VM, Open console (audited), ISO drops |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                      |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                            |
+| Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                               | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                   |
+| Alerts             | `crates/core/src/alerts/`, `store/alerts.rs`                      | MO-07                                                                                                                                               | Working: rules (threshold and duration, unreachable, stopped outside the app) run each round; alert list with acknowledge; Windows notifications with a cooldown; built-in rules; audited edits                                                                |
+| Dashboard layout   | `crates/core/src/dashboard.rs`, `src/components/Dashboard*.tsx`   | MO-16                                                                                                                                               | Working: widgets on a four-column grid, saved per workspace and audited; drag, keyboard and size menu; services widget on the kept connection                                                                                                                  |
 | Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                        | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                                 |
 | Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                        | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                              |
 | Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                          | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                   |
 | Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                        | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each                                                       |
 | Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                               | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                          |
+| Spec catalogue     | `crates/core/src/catalog/`                                        | VM-19, VM-20, VM-21, FD-07                                                                                                                          | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                          |
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                               | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                      |
 | Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                       | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec    |
 | MultiExec          | `crates/core/src/terminal/multiexec.rs`                           | SS-10, QL-07, QL-12                                                                                                                                 | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                    |

@@ -3,6 +3,8 @@
 // trusted host key, vault secret and favourite command (BX-08) as new, already here or in conflict, and lets the
 // user choose per item: import, skip, replace or keep both. The opened file stays in the core; only choices go back.
 // Startup commands (SS-01) and saved port forwards (SS-07) are shown with a warning and left out unless ticked.
+// VM-19 to VM-21: the spec catalogue's own sizes, images (by path, noted when the file isn't here) and launch templates
+// show in their own sections when the file has any.
 
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -54,7 +56,23 @@ interface Props {
   onClose: () => void;
 }
 
-type Section = "sessions" | "knownHosts" | "secrets" | "favourites";
+type Section = "sessions" | "knownHosts" | "secrets" | "favourites" | "sizes" | "images" | "templates";
+/** VM-19 to VM-21: the catalogue's sections, shown only when the file has some. */
+const CATALOG_SECTIONS = new Set<Section>(["sizes", "images", "templates"]);
+
+/** A section's items; files from before BX-08 have no favourites and from before 0.5.0 no catalogue. */
+function itemsOf(preview: TransferPreview, section: Section): TransferItem[] {
+  switch (section) {
+    case "sizes":
+    case "images":
+    case "templates":
+      return preview.catalog?.[section] ?? [];
+    case "favourites":
+      return preview.favourites ?? [];
+    default:
+      return preview[section];
+  }
+}
 type Choices = Record<Section, Record<number, TransferAction>>;
 
 const ACTION_LABEL: Record<TransferAction, string> = {
@@ -75,16 +93,21 @@ const SECTIONS: { key: Section; title: string; empty: string }[] = [
   { key: "knownHosts", title: "Trusted host keys", empty: "No host keys in the file." },
   { key: "secrets", title: "Vault secrets", empty: "" },
   { key: "favourites", title: "Favourite commands", empty: "No favourite commands in the file." },
+  { key: "sizes", title: "VM sizes", empty: "" },
+  { key: "images", title: "Images", empty: "" },
+  { key: "templates", title: "Launch templates", empty: "" },
 ];
 
 function defaults(preview: TransferPreview): Choices {
-  const of = (items: TransferItem[]) => Object.fromEntries(items.map((i) => [i.index, i.defaultAction]));
+  const of = (section: Section) => Object.fromEntries(itemsOf(preview, section).map((i) => [i.index, i.defaultAction]));
   return {
-    sessions: of(preview.sessions),
-    knownHosts: of(preview.knownHosts),
-    secrets: of(preview.secrets),
-    // Files from before BX-08 have none.
-    favourites: of(preview.favourites ?? []),
+    sessions: of("sessions"),
+    knownHosts: of("knownHosts"),
+    secrets: of("secrets"),
+    favourites: of("favourites"),
+    sizes: of("sizes"),
+    images: of("images"),
+    templates: of("templates"),
   };
 }
 
@@ -102,6 +125,12 @@ function counts(report: TransferReport) {
     part("Host keys", report.knownHosts),
     part("Secrets", report.secrets),
     part("Favourite commands", report.favourites),
+    report.catalog && part("VM sizes", report.catalog.sizes),
+    report.catalog && part("Images", report.catalog.images),
+    report.catalog && part("Launch templates", report.catalog.templates),
+    report.catalog?.imagesMissingHere
+      ? `Images: ${report.catalog.imagesMissingHere} without their file or VM on this laptop yet`
+      : null,
     report.forwards ? `Port forwards: ${report.forwards} saved with their sessions` : null,
     report.startupLeftOut ? `Startup commands: ${report.startupLeftOut} left out` : null,
     report.forwardsLeftOut ? `Port forwards: ${report.forwardsLeftOut} left out` : null,
@@ -113,7 +142,15 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
   const [file, setFile] = useState<string | null>(null);
   const [passphrase, setPassphrase] = useState("");
   const [preview, setPreview] = useState<TransferPreview | null>(null);
-  const [choices, setChoices] = useState<Choices>({ sessions: {}, knownHosts: {}, secrets: {}, favourites: {} });
+  const [choices, setChoices] = useState<Choices>({
+    sessions: {},
+    knownHosts: {},
+    secrets: {},
+    favourites: {},
+    sizes: {},
+    images: {},
+    templates: {},
+  });
   /** SS-01, SS-07: sessions whose startup command, and whose port forwards, come along; none by default. */
   const [keepStartup, setKeepStartup] = useState<Set<number>>(new Set());
   const [keepForwards, setKeepForwards] = useState<Set<number>>(new Set());
@@ -187,6 +224,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         knownHosts: list("knownHosts"),
         secrets: list("secrets"),
         favourites: list("favourites"),
+        catalog: { sizes: list("sizes"), images: list("images"), templates: list("templates") },
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),
       };
@@ -206,7 +244,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
     if (!preview) return;
     setChoices((c) => {
       const next = { ...c[section] };
-      for (const item of preview[section]) {
+      for (const item of itemsOf(preview, section)) {
         if (item.status === status && item.choices.includes(action)) next[item.index] = action;
       }
       return { ...c, [section]: next };
@@ -357,12 +395,16 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
                 <VaultUnlock info={vault} onUnlocked={(info) => void refresh(info)} idPrefix="transfer-unlock" />
               </div>
             )}
-            {SECTIONS.filter((s) => s.key !== "secrets" || preview.secretValues).map((section) => (
+            {SECTIONS.filter(
+              (s) =>
+                (s.key !== "secrets" || preview.secretValues) &&
+                (!CATALOG_SECTIONS.has(s.key) || itemsOf(preview, s.key).length > 0),
+            ).map((section) => (
               <ItemTable
                 key={section.key}
                 title={section.title}
                 empty={section.empty}
-                items={preview[section.key]}
+                items={itemsOf(preview, section.key)}
                 choices={choices[section.key]}
                 onChoose={(index, action) =>
                   setChoices((c) => ({ ...c, [section.key]: { ...c[section.key], [index]: action } }))

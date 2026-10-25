@@ -38,6 +38,7 @@ import {
   MonitorOffIcon,
   PlayIcon,
   RefreshCwIcon,
+  RocketIcon,
   ShieldIcon,
   ShieldOffIcon,
   TagIcon,
@@ -108,6 +109,7 @@ import {
   type VmSnapshots,
 } from "@/lib/api";
 import { useVisibility } from "@/hooks/use-poll";
+import { DEPLOY_REASON } from "@/lib/catalog";
 import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { refreshDue } from "@/lib/job-events";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
@@ -905,6 +907,13 @@ export function VmsPage({ active, onSubmitted, onOpenSettings, onActions, reques
           >
             <FilePlusIcon data-icon="inline-start" />
             Add VM…
+          </Button>
+        </WhyDisabled>
+        {/* VM-21: deploying a launch template (Templates page) arrives with the deploy package (R2). */}
+        <WhyDisabled reason={DEPLOY_REASON}>
+          <Button variant="outline" disabled>
+            <RocketIcon data-icon="inline-start" />
+            Deploy
           </Button>
         </WhyDisabled>
         <VmFilterBar

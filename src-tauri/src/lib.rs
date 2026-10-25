@@ -1,10 +1,12 @@
 //! Tauri shell: window, IPC commands and event forwarding. All logic lives in `remotely-core`; the UI
 //! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`],
-//! [`files`] and [`clipboard`], never vmrun or SSH directly.
+//! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
+mod catalog;
 mod clipboard;
 mod command_panel;
 mod containers;
+mod dashboard;
 pub mod data_dirs;
 pub mod diagnostics;
 mod files;
@@ -352,6 +354,25 @@ fn forward_events(app: &App, core: &Arc<Core>) {
         let retention = Arc::clone(&core.retention);
         tauri::async_runtime::spawn(async move { retention.run(CancellationToken::new()).await });
 
+        // MO-06: the dashboard history's prune, at start and daily.
+        let history = Arc::clone(&core.history);
+        tauri::async_runtime::spawn(async move { history.run(CancellationToken::new()).await });
+
+        // MO-07: alerts firing, resolving and acknowledged -> UI (its notifications, the alert list).
+        let mut alerts = core.alerts.subscribe();
+        let handle = app.handle().clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match alerts.recv().await {
+                    Ok(event) => {
+                        let _ = handle.emit("alerts://event", &event);
+                    }
+                    Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed alert events"),
+                    Err(RecvError::Closed) => break,
+                }
+            }
+        });
+
         // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
         let reachability = Arc::clone(&core.reachability);
         tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -497,6 +518,21 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         vm_settings::vm_open_console,
         vm_settings::vm_screenshot,
         vm_settings::vm_guest_os_types,
+        dashboard::metrics_history,
+        dashboard::history_info,
+        dashboard::history_retention_set,
+        dashboard::alerts_list,
+        dashboard::alerts_acknowledge,
+        dashboard::alert_rules,
+        dashboard::alert_rule_create,
+        dashboard::alert_rule_update,
+        dashboard::alert_rule_delete,
+        dashboard::alert_rule_reset,
+        dashboard::alert_notify,
+        dashboard::dashboard_layout,
+        dashboard::dashboard_layout_set,
+        dashboard::dashboard_layout_reset,
+        dashboard::host_services,
         terminal::terminal_open,
         terminal::terminal_quick_connect,
         terminal::terminal_open_like,
@@ -565,6 +601,25 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         command_panel::terminal_type_secret,
         command_panel::notify_command_finished,
         command_panel::open_manual,
+        catalog::catalog_profiles,
+        catalog::catalog_sites,
+        catalog::catalog_sizes,
+        catalog::catalog_size_add,
+        catalog::catalog_size_update,
+        catalog::catalog_size_delete,
+        catalog::catalog_images,
+        catalog::catalog_image_pick,
+        catalog::catalog_folder_pick,
+        catalog::catalog_image_add,
+        catalog::catalog_image_cancel,
+        catalog::catalog_image_update,
+        catalog::catalog_image_delete,
+        catalog::catalog_templates,
+        catalog::catalog_template_preview,
+        catalog::catalog_template_add,
+        catalog::catalog_template_update,
+        catalog::catalog_template_delete,
+        catalog::catalog_open_site,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,
