@@ -93,11 +93,13 @@ crates/core/          remotely-core: all app logic
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
                       output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
     adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
-                      found beside vmrun, vmrun_change), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
+                      found beside vmrun, vmrun_change; VM-21 ovftool found like vmrun, Workstation's default VM
+                      folder), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
                       comments and line endings kept; |XX escapes; non-UTF-8 refused), virtualbox.rs (VM-18
                       VBoxManage: list, showvminfo, guest properties, power,
                       snapshots; SwitchableVirtualBox for the Settings path; VM-23 change(), list ostypes,
-                      screenshotpng, VirtualBoxVM --separate, the .vbox's extras), hypervisor.rs (VM-18 Hypervisor, and
+                      screenshotpng, VirtualBoxVM --separate, the .vbox's extras; VM-21 the default machine folder,
+                      host-only and bridged adapters, unattended detect), hypervisor.rs (VM-18 Hypervisor, and
                       Hypervisors: both adapters, each VM routed by its key), remote.rs (SSH shell and exec;
                       keyboard-interactive answers are SecretStrings until russh's respond call; A9 at most 16 login
                       banners and 64 KB per connection, then one note; every path through the SS-07 jump host
@@ -152,8 +154,29 @@ crates/core/          remotely-core: all app logic
                       OVA/OVF; format by extension checked against the first bytes; SHA-256 on a blocking thread with
                       progress and cancel; untrusted::path_refusal first; IMAGE_SITES and checked_site, the cloud
                       image pages allow-list), templates.rs (check_template, problems, naming {n} {template} {date},
-                      resolve: a template and a count into a DeployPlan per VM, pure); mod.rs the Catalog service
-                      (Core.catalog; `plan` is R2's entry)
+                      resolve: a template and a count into a DeployPlan per VM, pure; VM-22 the guest user,
+                      packages and full or linked clone, migration 0023); mod.rs the Catalog service (Core.catalog;
+                      `plan`, and `plan_input` for the Deploy dialog's Custom, are the deploy's entry)
+    deploy/           VM-21, VM-22, VM-10 deploy. spec.rs DeploySpec: what is approved is what runs (Command::Deploy,
+                      built only by Core.deploy, never from the UI: check_from_ui); one job step per new VM
+                      (TargetRef::NewVm, `new-vm/<hypervisor>/<name>`, target kind `new_vm`, migration 0023);
+                      ActionKind::VmDeploy is Medium, High from PolicyRules.deploy_bulk_threshold VMs (5) or for Prod
+                      (policy/deploy_tests.rs). preview.rs the AP-02 preview: names, hypervisor, folder, size, disk
+                      space per VM and in all (thin disks at full size), network; a thick disk that doesn't fit or a
+                      VM folder that is there already refuses, thin disks that may not fit warn. service.rs Deploys
+                      (Core.deploy: check and submit, check_clone and submit_clone for VM-10's bulk clone; a VirtualBox
+                      unattended install's vault password adds VaultReauth). runner.rs Deployer, the job runner's
+                      DeployActions (PARALLEL_VMS, 2, at a time): each VM made by clone, cloud image, ISO or OVA/OVF;
+                      the size's CPU and memory, the boot disk grown to the size's (never shrunk; not for a linked
+                      clone); its folder joins the scanned folders; the clean snapshot before the first boot; power on;
+                      the IP waited for (300 s; a report, not a failure); its SSH session saved and linked by hand
+                      (QL-01); the console. A failure or a cancel removes only what that VM's step made (`Made`:
+                      deleteVM or unregistervm --delete, retried, then its folder; never a folder that was there);
+                      VMs already made stay. workstation.rs and virtualbox.rs the command lines, pure; vmx.rs a new
+                      VM's .vmx; cloud_init.rs VM-22 meta-data and user-data (hostname, guest user with sudo, SSH
+                      public key, packages; never a password) and Workstation's guestinfo keys; seed.rs the NoCloud
+                      seed (ISO 9660 with Joliet, label `cidata`) and its reader for tests; ovf.rs an OVF's or OVA's
+                      disk capacities for the preview (an OVA's first tar members only)
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
                       Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
@@ -366,7 +389,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       notifications wake terminals waiting to reconnect; P10 heavy commands (terminal output scrub,
                       the command library) run on spawn_blocking, never on the window's thread; VM-23, VM-24
                       vm_settings.rs (ISO, shared folder and existing VM dialogs opened here, ISO drops taken from the
-                      staged drop, Open console, screenshots, guest OS types)
+                      staged drop, Open console, screenshots, guest OS types); VM-21, VM-10 deploy.rs (the Deploy and
+                      Clone dialogs' checks and submits, host adapters, the default VM folder)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -387,13 +411,18 @@ src/                  React + TypeScript UI
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
                       presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; VM-19 to
                       VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check);
+                      VM-21, VM-22, VM-10: TemplateFields (the template editor's fields, also the Deploy dialog's
+                      Custom), DeployDialog (a template or Custom, count, names, the preview, then the job's step per
+                      VM: DeployProgressView, useDeployProgress), DeployPreviewView (also in the approval dialog),
+                      CloneDialog;
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
-                      templates; the VMs page's Deploy button waits for R2). P6: App memoises every page and passes
+                      templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
+                      VM-21 and VM-10). P6: App memoises every page and passes
                       stable callbacks, and renders
                       only when a job is queued or ends; pages that are hidden read nothing (VmsPage refreshes when it
                       shows again if a VM job or setting moved its key; the dashboard follows rounds only while shown)
@@ -426,8 +455,9 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form,
-                      DEPLOY_REASON), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
+                      Containers has Ctrl+3, Templates Ctrl+9), catalog.ts (VM-19 to VM-21 texts, the size form),
+                      deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and packages, a job's steps from its events
+                      and targets), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
@@ -504,6 +534,17 @@ src/                  React + TypeScript UI
   a lock is there (`VmEditor::require_unlocked`; a lock left after a crash can be deleted once Workstation is closed;
   Remotely never deletes one), and warns in the approval and the edit dialogs while `vmware.exe` runs
   (`VmwareAdapter::workstation_window_open`, `WORKSTATION_OPEN_WARNING`).
+- VM-21, VM-10 deploy (`deploy::workstation`): `vmrun -T ws clone <vmx> <new vmx> full|linked [-snapshot=<path>]
+  -cloneName=<name>` (a linked clone needs the golden VM's snapshot and shares its disk, so its disk can't grow). A
+  cloud image is copied, never changed, by `vmware-vdiskmanager -r <image> -t 0|2 <new disk>` (0 growable, 2
+  preallocated); a raw image goes through a flat-extent VMDK descriptor Remotely writes beside the new disk and deletes
+  after; qcow2 needs converting first. A new VM is a written .vmx (with `pciBridge` entries) plus `vdiskmanager -c`.
+  `ovftool --name=<name> --diskMode=monolithicSparse|monolithicFlat --noSSLVerify <ova|ovf> <new vmx>` imports an
+  appliance; without `--acceptAllEulas` one with a licence fails, and the job says so. ovftool.exe is in `OVFTool\`
+  beside vmrun (`adapters::vmware::locate_ovftool`: the Settings path, `REMOTELY_OVFTOOL`, then that folder).
+  cloud-init's VMware datasource reads `guestinfo.metadata` and `guestinfo.userdata` from the .vmx, each with
+  `.encoding = "base64"`. Workstation's default VM folder is `prefvmx.defaultVMPath` in
+  `%APPDATA%\VMware\preferences.ini`, else Documents\Virtual Machines.
 
 ## VirtualBox facts
 
@@ -561,6 +602,18 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 - VBoxManage writes errors to stderr as `VBoxManage.exe: error: <message>` lines, then `Details:` and `Context:` lines;
   the app keeps the first kind. Guest control (`guestcontrol`) would put guest credentials on the command line: the app
   never uses it.
+- VM-21, VM-10 deploy (`deploy::virtualbox`): a new VM is `createvm --name --uuid --ostype --basefolder --register`,
+  then `modifyvm`, `storagectl`, `createmedium disk --format VDI --variant Standard|Fixed` (thin or thick) and
+  `storageattach`. A cloud image becomes the boot disk with `clonemedium disk` (VMDK) or `convertfromraw` (raw),
+  grown with `modifymedium disk --resize <MB>` (it never shrinks). `clonevm <uuid> [--snapshot <uuid>]
+  [--options=Link] --name --uuid --basefolder --register`; `import <ova|ovf> --vsys 0 --vmname --basefolder --cpus
+  --memory`. `unattended detect --iso` says whether VirtualBox can install an ISO; `unattended install <uuid> --iso
+  --user --password-file <file> --hostname <name>.localdomain --install-additions` prepares it (VirtualBox wants a
+  domain in the name). The password goes only into a file this Windows user alone can read, deleted at once. A cloud
+  image's first boot reads a NoCloud seed: an ISO labelled `cidata` with `user-data` and `meta-data`, attached as a
+  DVD, then ejected (`storageattach --medium emptydrive`) and closed after the first boot. `list systemproperties`
+  gives `Default machine folder:`; `list hostonlyifs` and `list bridgedifs` the adapters a network can use. A cancelled
+  `clonevm` may hold the VM for a moment, so cleanup tries `unregistervm --delete` again a few times.
 - MO-13: `showvminfo` also gives `firmware` (`BIOS`, `EFI`...), `nictypeN` (the card, e.g. `82540EM`, `virtio`) and
   `cableconnectedN` (`on`/`off`); the storage key (`"SATA-0-0"`) is the disk's slot. A VDI's header has the signature
   0xbeda107f at 0x40, its type at 0x4c (4 is a snapshot's differencing image) and the disk size at 0x170; a VHD's
@@ -623,6 +676,11 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
   resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on
   127.0.0.1. Tunnel tests bind loopback with port 0; never a network address.
+- Deploy (VM-21, VM-22, VM-10): never create, clone, import or delete real VMs in tests. `tests/deploy.rs` runs
+  deploys through the bus and the job runner on `FakeVmware` and `FakeVirtualBox` (clone, import, create, media copies,
+  `set_failing` for cleanup, `with_clone_delay` to cancel mid-way) in temp folders; the real adapters' command lines
+  are checked against stand-in vmrun, ovftool and VBoxManage `.cmd` files made at run time (a batch file gets an
+  argument with `=` quoted).
 - Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use
   `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).
