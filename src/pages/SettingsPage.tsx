@@ -57,6 +57,8 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
   const [settings, setSettings] = useState<Settings | null>(null);
   const [path, setPath] = useState("");
   const [vmrunMessage, setVmrunMessage] = useState<Message>(null);
+  const [ovftoolPath, setOvftoolPath] = useState("");
+  const [ovftoolMessage, setOvftoolMessage] = useState<Message>(null);
   const [vboxPath, setVboxPath] = useState("");
   const [vboxMessage, setVboxMessage] = useState<Message>(null);
   const [dockerPath, setDockerPath] = useState("");
@@ -77,6 +79,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
       (s) => {
         setSettings(s);
         setPath(s.vmrunPathSaved ?? "");
+        setOvftoolPath(s.ovftoolPathSaved ?? "");
         setVboxPath(s.vboxmanagePathSaved ?? "");
         setDockerPath(s.dockerPathSaved ?? "");
         setPowerOnLimit(String(s.powerOnLimit));
@@ -99,6 +102,21 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
       onChanged("vmrun");
     } catch (err) {
       setVmrunMessage({ ok: false, text: errorMessage(err) });
+    }
+  }
+
+  /** VM-21: ovftool.exe, which imports OVA and OVF appliances into Workstation. */
+  async function saveOvftool(next: string | null) {
+    try {
+      const s = await api.setOvftoolPath(next);
+      setSettings(s);
+      setOvftoolPath(s.ovftoolPathSaved ?? "");
+      setOvftoolMessage({
+        ok: s.ovftoolPathInUse !== null,
+        text: s.ovftoolPathInUse ? `Using ${s.ovftoolPathInUse}` : "ovftool.exe was not found",
+      });
+    } catch (err) {
+      setOvftoolMessage({ ok: false, text: errorMessage(err) });
     }
   }
 
@@ -255,6 +273,27 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault }: 
           <CardFooter className="gap-2">
             <Button onClick={() => void saveVmrun(path)}>Save</Button>
             <Button variant="outline" onClick={() => void saveVmrun(null)}>
+              Find automatically
+            </Button>
+          </CardFooter>
+          <CardContent className="grid gap-2 border-t pt-4">
+            <Label htmlFor="ovftool-path">ovftool.exe path (OVA and OVF imports)</Label>
+            <Input
+              id="ovftool-path"
+              className="font-mono"
+              placeholder="Found automatically, in the OVFTool folder next to vmrun.exe"
+              spellCheck={false}
+              value={ovftoolPath}
+              onChange={(e) => setOvftoolPath(e.currentTarget.value)}
+            />
+            <p className="text-sm text-muted-foreground">
+              In use: <span className="font-mono">{settings?.ovftoolPathInUse ?? "not found"}</span>
+            </p>
+            <StatusLine message={ovftoolMessage} />
+          </CardContent>
+          <CardFooter className="gap-2">
+            <Button onClick={() => void saveOvftool(ovftoolPath)}>Save</Button>
+            <Button variant="outline" onClick={() => void saveOvftool(null)}>
               Find automatically
             </Button>
           </CardFooter>

@@ -926,6 +926,10 @@ export interface Settings {
   vmrunPathSaved: string | null;
   /** What the app is using now; null means Workstation was not found. */
   vmrunPathInUse: string | null;
+  /** VM-21: the ovftool.exe path chosen; null: found beside vmrun.exe. */
+  ovftoolPathSaved: string | null;
+  /** VM-21: the ovftool.exe in use; null: not found, so OVA and OVF imports into Workstation can't run. */
+  ovftoolPathInUse: string | null;
   /** VM-18: what the user chose; null means "find VBoxManage.exe automatically". */
   vboxmanagePathSaved: string | null;
   /** VM-18: what the app is using now; null means VirtualBox was not found. */
@@ -3234,6 +3238,8 @@ export const api = {
     invoke<Presentation>("presentation_set", { enabled: p.enabled, readOnly: p.readOnly }),
   /** null or "" goes back to finding vmrun.exe automatically. */
   setVmrunPath: (path: string | null) => invoke<Settings>("settings_set_vmrun_path", { path }),
+  /** VM-21: null or "" goes back to finding ovftool.exe automatically. */
+  setOvftoolPath: (path: string | null) => invoke<Settings>("settings_set_ovftool_path", { path }),
   /** VM-18: null or "" goes back to finding VBoxManage.exe automatically. */
   setVboxmanagePath: (path: string | null) => invoke<Settings>("settings_set_vboxmanage_path", { path }),
   setUpdateChecks: (enabled: boolean) => invoke<Settings>("settings_set_update_checks", { enabled }),

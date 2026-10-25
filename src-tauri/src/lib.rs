@@ -431,6 +431,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::audit_export_csv,
         ipc::settings_get,
         ipc::settings_set_vmrun_path,
+        ipc::settings_set_ovftool_path,
         ipc::settings_set_vboxmanage_path,
         ipc::settings_set_scan_folders,
         ipc::settings_set_power_on_limit,
