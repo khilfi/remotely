@@ -298,6 +298,10 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     blocked: "Power actions, snapshots (taking, reverting and deleting), protection, tags, labels and saved filters",
     still: "Refreshing, reading the list and each VM's details and snapshots still work.",
   },
+  templates: {
+    blocked: "Adding, editing, duplicating and deleting sizes, images and launch templates",
+    still: "Reading them and opening the cloud image pages still work.",
+  },
   dashboard: { blocked: "Changes to VMs and hosts", still: "Watching hosts and reading metrics still work." },
   containers: {
     blocked: "Starting, stopping and removing containers, pulling and pruning, and marking container hosts",
