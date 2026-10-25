@@ -43,7 +43,7 @@ zeroize = "1"
 csv = "1"
 # FD-07: the encrypted export file's envelope; FD-14's test signatures. The version the dependencies already
 # pull in.
-base64 = "0.22"
+base64 = "0.23"
 # SSH (SS-03, BX-02, MO-02). `ring` instead of the default aws-lc-rs so Windows builds need no CMake/NASM.
 russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
 # SS-08: SFTP on a channel of the terminal's own SSH connection (client), and the test server's SFTP
