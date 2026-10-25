@@ -195,6 +195,36 @@ pub trait VirtualBoxAdapter: Send + Sync {
         }
         Ok(super::vm_hardware::read_virtualbox(&info, os_name, kernel).await)
     }
+
+    /// VM-21: VirtualBox's default machine folder (`list systemproperties`), where new VMs go. A read.
+    async fn default_machine_folder(&self) -> Result<PathBuf> {
+        Err(CoreError::VboxManageNotFound)
+    }
+
+    /// VM-21: this PC's host-only adapters (`list hostonlyifs`), or with `bridged` its network adapters a VM can
+    /// bridge to (`list bridgedifs`), by the names `modifyvm` takes. A read.
+    async fn host_adapters(&self, _bridged: bool) -> Result<Vec<String>> {
+        Err(CoreError::VboxManageNotFound)
+    }
+}
+
+/// VM-21: `Default machine folder:` from `list systemproperties`.
+pub fn parse_default_machine_folder(out: &str) -> Option<PathBuf> {
+    out.lines()
+        .find_map(|line| line.trim().strip_prefix("Default machine folder:"))
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+/// VM-21: each adapter's `Name:` from `list hostonlyifs` or `list bridgedifs`, in their order.
+pub fn parse_host_adapters(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|line| line.strip_prefix("Name:"))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Builds the adapter for this machine. Without VirtualBox the app still starts, with no VirtualBox
@@ -463,6 +493,28 @@ impl VirtualBoxAdapter for VBoxManageCli {
         }
         Ok(tree)
     }
+
+    async fn default_machine_folder(&self) -> Result<PathBuf> {
+        let out = self
+            .run(
+                "list systemproperties",
+                vec!["list".into(), "systemproperties".into()],
+                LIST_TIMEOUT,
+            )
+            .await?;
+        parse_default_machine_folder(&out).ok_or_else(|| CoreError::VboxManage {
+            command: "list systemproperties".into(),
+            message: "it names no default machine folder".into(),
+        })
+    }
+
+    async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
+        let what = if bridged { "bridgedifs" } else { "hostonlyifs" };
+        let out = self
+            .run(&format!("list {what}"), vec!["list".into(), what.into()], LIST_TIMEOUT)
+            .await?;
+        Ok(parse_host_adapters(&out))
+    }
 }
 
 /// What a snapshot change needs before VBoxManage runs, the same for the real adapter and the fake:
@@ -588,6 +640,12 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     }
     async fn hardware(&self, uuid: &str) -> Result<VmHardware> {
         self.current().hardware(uuid).await
+    }
+    async fn default_machine_folder(&self) -> Result<PathBuf> {
+        self.current().default_machine_folder().await
+    }
+    async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
+        self.current().host_adapters(bridged).await
     }
 }
 
@@ -1055,6 +1113,26 @@ CurrentSnapshotName="before upgrade"
 CurrentSnapshotUUID="5b1c0000-0000-4000-8000-000000000002"
 CurrentSnapshotNode="SnapshotName-1"
 "#;
+
+    #[test]
+    fn parses_the_default_folder_and_host_adapters() {
+        // VirtualBox 7.2's `list systemproperties` (shortened) and `list hostonlyifs`.
+        let props = "API version:                     7_2\nMaximum guest RAM size:          4194304 Megabytes\nDefault machine folder:          C:\\Users\\alice\\VirtualBox VMs\nRaw-mode Supported:              no\n";
+        assert_eq!(
+            parse_default_machine_folder(props),
+            Some(PathBuf::from(r"C:\Users\alice\VirtualBox VMs"))
+        );
+        assert_eq!(parse_default_machine_folder("Default machine folder:   \n"), None);
+        let ifs = "Name:            VirtualBox Host-Only Ethernet Adapter\nGUID:            0d2c-...\nDHCP:            Disabled\nIPAddress:       192.168.56.1\n\nName:            VirtualBox Host-Only Ethernet Adapter #2\nGUID:            1e3d-...\n";
+        assert_eq!(
+            parse_host_adapters(ifs),
+            [
+                "VirtualBox Host-Only Ethernet Adapter",
+                "VirtualBox Host-Only Ethernet Adapter #2"
+            ]
+        );
+        assert!(parse_host_adapters("").is_empty());
+    }
 
     #[test]
     fn parses_showvminfo() {

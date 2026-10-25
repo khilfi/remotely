@@ -154,6 +154,54 @@ pub trait VmwareAdapter: Send + Sync {
     async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
         super::vm_hardware::read_vmware(vmx).await
     }
+    /// VM-21: where Workstation puts new VMs: its preference `prefvmx.defaultVMPath`
+    /// (`%APPDATA%\VMware\preferences.ini`), else `Virtual Machines` in the user's Documents. A read.
+    async fn default_vm_folder(&self) -> Result<PathBuf> {
+        read_default_vm_folder().await
+    }
+}
+
+/// VM-21: `prefvmx.defaultVMPath` from Workstation's `preferences.ini`, when it names a folder.
+pub fn parse_default_vm_path(text: &str) -> Option<PathBuf> {
+    text.lines()
+        .filter_map(config_line)
+        .find(|(key, value)| key == "prefvmx.defaultvmpath" && !value.trim().is_empty())
+        .map(|(_, value)| PathBuf::from(value.trim()))
+}
+
+/// The user's Documents folder (it may be moved, e.g. into OneDrive), else `%USERPROFILE%\Documents`.
+fn documents_folder() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let moved = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders")
+            .and_then(|key| key.get_value::<String, _>("Personal"))
+            .ok()
+            .filter(|p| !p.trim().is_empty());
+        if let Some(path) = moved {
+            return Some(PathBuf::from(path));
+        }
+    }
+    std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join("Documents"))
+}
+
+async fn read_default_vm_folder() -> Result<PathBuf> {
+    if let Some(prefs) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("VMware").join("preferences.ini")) {
+        match read_capped(&prefs, MAX_VM_CONFIG_BYTES).await {
+            Ok(bytes) => {
+                if let Some(path) = parse_default_vm_path(&String::from_utf8_lossy(&bytes)) {
+                    return Ok(path);
+                }
+            }
+            Err(err) if err.is_not_found() => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    documents_folder()
+        .map(|docs| docs.join("Virtual Machines"))
+        .ok_or_else(|| CoreError::InvalidInput("Workstation's default VM folder isn't known: choose a VM folder.".into()))
 }
 
 /// Builds the adapter for this machine. When vmrun cannot be found the app still starts: the library,
@@ -812,6 +860,9 @@ impl VmwareAdapter for SwitchableVmware {
     async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
         self.current().hardware(vmx).await
     }
+    async fn default_vm_folder(&self) -> Result<PathBuf> {
+        self.current().default_vm_folder().await
+    }
 }
 
 /// Checks a user-chosen vmrun path before it is saved: it must be an existing file named vmrun.exe.
@@ -1168,6 +1219,14 @@ snapshot2.disk0.node = "scsi0:0"
             Some(time::macros::datetime!(2026-08-08 15:19:28.598 UTC))
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_default_vm_folder_is_workstations_preference() {
+        let prefs = ".encoding = \"windows-1252\"\nprefvmx.defaultVMPath = \"D:\\Labs\\VMs\"\npref.lastUpdateCheckSec = \"1\"\n";
+        assert_eq!(parse_default_vm_path(prefs), Some(PathBuf::from(r"D:\Labs\VMs")));
+        assert_eq!(parse_default_vm_path("prefvmx.defaultVMPath = \"\"\n"), None);
+        assert_eq!(parse_default_vm_path("pref.keyboardAndMouse.maxProfiles = \"4\"\n"), None);
     }
 
     #[test]

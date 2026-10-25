@@ -81,9 +81,17 @@ pub struct FakeVmware {
     snapshot_reads: Mutex<Vec<String>>,
     /// Calls that would each start a vmrun process.
     vmrun_runs: AtomicUsize,
+    /// VM-21: Workstation's default VM folder (`with_default_folder`).
+    default_folder: Option<PathBuf>,
 }
 
 impl FakeVmware {
+    /// VM-21: where Workstation would put new VMs (by default a made-up folder under alice's Documents).
+    pub fn with_default_folder(mut self, folder: impl Into<PathBuf>) -> Self {
+        self.default_folder = Some(folder.into());
+        self
+    }
+
     pub fn with_running<P: Into<PathBuf>>(paths: impl IntoIterator<Item = P>) -> Self {
         Self {
             running: Mutex::new(paths.into_iter().map(Into::into).collect()),
@@ -430,6 +438,13 @@ impl VmwareAdapter for FakeVmware {
         Ok(self.started_at.get(&path_key(vmx)).copied())
     }
 
+    async fn default_vm_folder(&self) -> Result<PathBuf> {
+        Ok(self
+            .default_folder
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(r"C:\Users\alice\Documents\Virtual Machines")))
+    }
+
     async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
         if self.hardware_fails.load(Ordering::SeqCst) {
             return Err(std::io::Error::other("the drive holding the VM is not there").into());
@@ -523,6 +538,9 @@ pub struct FakeVirtualBox {
     vboxmanage_runs: AtomicUsize,
     /// VM-01: `list vms` takes this long (a busy VirtualBox), so refreshes overlap.
     list_delay: Duration,
+    /// VM-21: VirtualBox's default machine folder and host-only adapters.
+    default_folder: Option<PathBuf>,
+    host_only: Option<Vec<String>>,
 }
 
 /// The VBoxManage `VMState` for a power state.
@@ -537,6 +555,18 @@ fn vbox_state(state: PowerState) -> &'static str {
 }
 
 impl FakeVirtualBox {
+    /// VM-21: where VirtualBox would put new VMs (by default a made-up folder under alice's profile).
+    pub fn with_default_folder(mut self, folder: impl Into<PathBuf>) -> Self {
+        self.default_folder = Some(folder.into());
+        self
+    }
+
+    /// VM-21: this PC's host-only adapters (by default VirtualBox's first one).
+    pub fn with_host_only_adapters(mut self, names: &[&str]) -> Self {
+        self.host_only = Some(names.iter().map(|n| (*n).to_owned()).collect());
+        self
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -913,6 +943,25 @@ impl VirtualBoxAdapter for FakeVirtualBox {
             return Err(Self::failed("showvminfo", "The VM's settings could not be read"));
         }
         Ok(self.find(uuid).map(|vm| vm.snapshots).unwrap_or_default())
+    }
+
+    async fn default_machine_folder(&self) -> Result<PathBuf> {
+        self.installed()?;
+        Ok(self
+            .default_folder
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(r"C:\Users\alice\VirtualBox VMs")))
+    }
+
+    async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
+        self.installed()?;
+        Ok(if bridged {
+            vec!["Ethernet".to_owned()]
+        } else {
+            self.host_only
+                .clone()
+                .unwrap_or_else(|| vec!["VirtualBox Host-Only Ethernet Adapter".to_owned()])
+        })
     }
 }
 
