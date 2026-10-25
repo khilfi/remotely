@@ -17,6 +17,7 @@ mod commands;
 mod deploy_tests;
 #[cfg(test)]
 mod stack_tests;
+mod standing;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

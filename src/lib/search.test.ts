@@ -14,6 +14,7 @@ import type {
   Size,
   VmRecord,
 } from "./api.ts";
+import type { ScheduleView } from "./schedules-api.ts";
 import { cachedContainers, keepContainerHosts, rememberContainers, resetContainerCache } from "./container-cache.ts";
 import { groupRanked, matchQuality, normalise, queryWords, rankItems, scoreItem, type SearchItem } from "./search.ts";
 import {
@@ -21,6 +22,7 @@ import {
   containerItems,
   imageItems,
   pageItems,
+  scheduleItems,
   sessionItems,
   settingItems,
   sizeItems,
@@ -282,4 +284,25 @@ test("pages and the palette's actions are searched too", () => {
   const actions = actionItems([{ id: "lock", label: "Lock the vault", keywords: "secure" }]);
   assert.equal(rankItems("secure", actions)[0].item.title, "Lock the vault");
   assert.deepEqual(actions[0].target, { action: "lock" });
+});
+
+test("schedules are found by name, their VMs and tags, and what they do; choosing one shows its runs", () => {
+  const schedule = {
+    id: "s1",
+    name: "nightly lab",
+    action: "Take a snapshot, keep the last 7",
+    when: "Daily at 02:00",
+    state: "needsApproval",
+    targets: [
+      { target: { kind: "vm", vmKey: "C:\\VMs\\web01\\web01.vmx" }, name: "web01", vms: 1 },
+      { target: { kind: "tag", tag: "lab" }, name: "lab", vms: 3 },
+    ],
+  };
+  const items = scheduleItems([schedule as unknown as ScheduleView]);
+  assert.deepEqual(items[0].target, { open: { kind: "schedule", scheduleId: "s1" } });
+  assert.equal(items[0].badge, "needs approval");
+  assert.equal(items[0].detail, "Take a snapshot, keep the last 7 · Daily at 02:00");
+  for (const query of ["nightly", "web01", "lab", "snapshot", "daily"]) {
+    assert.equal(rankItems(query, items).length, 1, query);
+  }
 });

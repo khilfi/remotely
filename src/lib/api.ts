@@ -499,6 +499,24 @@ export interface ApprovalRequest {
   stack?: StackDetails | null;
   /** VM-26: for a deploy, RAM, CPU and disk on this PC after it, next to now. */
   capacity?: DeployCapacity | null;
+  /** VM-14, VM-27: a schedule's approval: when it runs and what each run does. */
+  standing?: StandingDetails | null;
+}
+
+/** VM-14, VM-27: a schedule as its approval dialog shows it (the approval holds for each of its runs). */
+export interface StandingDetails {
+  scheduleId: string;
+  name: string;
+  /** "Daily at 02:00". */
+  when: string;
+  /** The next runs, local time, with what daylight saving does to one. */
+  nextRuns: string[];
+  /** How its targets were found: "tag 'lab': web01, web02". */
+  resolves: string[];
+  snapshotName: string | null;
+  keep: number | null;
+  /** Each run's job waits this long before it starts (cancellable in Activity). */
+  countdownSeconds: number | null;
 }
 
 /** SS-07: a tunnel as the approval dialog shows it. */

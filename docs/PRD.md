@@ -137,6 +137,15 @@ Stacks (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-08). A stack instance's V
 | Tear down a stack instance (deletes the VMs its deploy made, with their files; VMs added by hand only when picked) | Critical |
 | Edit a stack, or add or take a VM out of an instance by hand (nothing in a VM changes) | No tier; audited |
 
+Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
+
+| Action | Tier |
+| --- | --- |
+| A scheduled snapshot, start, shut down, suspend or resume, or auto-suspend of idle VMs | The action's own tier on the schedule's VMs (Prod raises it, protected VMs are skipped), approved when the schedule is saved with the same steps as running it then, AP-06 included; the countdown is each run's |
+| A snapshot schedule that keeps the last N | The higher of taking and deleting a snapshot (High): retention deletes the schedule's own snapshots |
+| A run after the schedule was edited, a VM became Prod or protected or got its tag, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
+| Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |

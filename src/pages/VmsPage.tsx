@@ -83,6 +83,7 @@ import { SnapshotActionDialog, type SnapshotAction } from "@/components/Snapshot
 import { SortableHead } from "@/components/SortableHead";
 import { StackGroupRow } from "@/components/StackGroupRow";
 import { VmDetailsPanel } from "@/components/VmDetailsPanel";
+import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 import { ResourcesDialog } from "@/components/VmSettingsDialogs";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
 import { VmSessionLinks } from "@/components/VmLinkControls";
@@ -154,6 +155,8 @@ interface Props {
   request: VmPageRequest | null;
   /** Changes when the list should be read again: a VM job finished or a setting about where VMs are found changed. */
   refreshKey: number;
+  /** VM-14, VM-27: the Schedules page, from a VM's Schedules tab. */
+  onSchedules?: (ask: ScheduleAsk) => void;
 }
 
 interface Action {
@@ -281,7 +284,16 @@ interface Column {
   ownClicks?: boolean;
 }
 
-export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActions, request, refreshKey }: Props) {
+export function VmsPage({
+  active,
+  onSubmitted,
+  onDeploy,
+  onOpenSettings,
+  onActions,
+  request,
+  refreshKey,
+  onSchedules,
+}: Props) {
   // FD-03: power actions, snapshots, protection, tags and labels are off while the read-only lock applies (the core
   // refuses them too); the page's notice says so.
   const readOnly = useReadOnlyReason();
@@ -1456,6 +1468,7 @@ export function VmsPage({ active, onSubmitted, onDeploy, onOpenSettings, onActio
                 askRename={renameAsk}
                 renameSeen={renameSeen}
                 onRenameSeen={setRenameSeen}
+                onSchedules={onSchedules}
               />
             )}
           </ResizablePanel>

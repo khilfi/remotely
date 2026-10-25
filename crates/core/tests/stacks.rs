@@ -1284,3 +1284,91 @@ async fn a_stack_mixes_virtualbox_and_workstation_steps() {
     assert!(core.stacks.instances(ctx).await.unwrap().is_empty());
     std::fs::remove_dir_all(&lab.dir).unwrap();
 }
+
+#[tokio::test]
+async fn a_schedule_on_a_stack_reaches_its_instances_vms_and_asks_again_for_one_that_joins() {
+    use remotely_core::fakes::clock::{FakeClock, FakeZone};
+    use remotely_core::schedules::{ScheduleAction, ScheduleInput, ScheduleSpec, ScheduleTarget, Timing, WallTime};
+
+    let lab = lab_with("stack-schedule", |_| {
+        FakeVmware::default().in_library(&vmx("tools01"), Some("tools01"))
+    })
+    .await;
+    let core = &lab.core;
+    let ctx = &core.ctx;
+    core.inventory.refresh(ctx).await.unwrap();
+    let clock = Arc::new(FakeClock::new(
+        time::macros::datetime!(2026-06-10 10:00 UTC),
+        FakeZone::central_europe(),
+    ));
+    core.schedules.set_clock(clock);
+    let db = template(&lab, "db").await;
+    let web = template(&lab, "web").await;
+    let id = stack(
+        &lab,
+        "web lab",
+        vec![
+            step(db, 1, Readiness::None, 600, 0),
+            step(web, 1, Readiness::None, 600, 0),
+        ],
+    )
+    .await;
+    run(
+        core,
+        core.stacks
+            .deploy(
+                ctx,
+                &StackDeployRequest {
+                    stack_id: id,
+                    instance_name: None,
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(core.stacks.stack_vms(ctx, id).await.unwrap().len(), 2);
+
+    // A nightly snapshot of the stack: its two VMs.
+    let saved = core
+        .schedules
+        .save(ScheduleInput {
+            id: None,
+            name: "lab nightly".into(),
+            spec: ScheduleSpec {
+                action: ScheduleAction::Snapshot { keep: None },
+                targets: vec![ScheduleTarget::Stack { stack_id: id }],
+                timing: Timing::Daily {
+                    at: WallTime::new(2, 0).unwrap(),
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let view = match saved.approval {
+        Some(request) => core
+            .schedules
+            .approve(
+                request.id,
+                ApprovalAnswers {
+                    confirmed: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap(),
+        None => saved.schedule,
+    };
+    assert_eq!(view.targets[0].name, "web lab");
+    assert_eq!(view.targets[0].vms, 2);
+    // A VM that joins the instance is asked about before a run touches it.
+    let instance = core.stacks.instances(ctx).await.unwrap()[0].id;
+    core.stacks.add_vm(ctx, instance, &vmx("tools01"), 1).await.unwrap();
+    assert_eq!(core.schedules.tick().await.unwrap().paused, 1);
+    let view = core.schedules.get(view.id).await.unwrap();
+    assert_eq!(
+        view.state_reason.as_deref(),
+        Some("tools01 is in the stack 'web lab' now")
+    );
+    std::fs::remove_dir_all(&lab.dir).unwrap();
+}

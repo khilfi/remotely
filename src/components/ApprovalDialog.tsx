@@ -273,6 +273,7 @@ export function ApprovalDialog({
         {/* VM-08: a stack command's instance and steps in the order they run; VM-26: this PC after a deploy. */}
         {request.stack && <StackDetailsView details={request.stack} showWarnings={false} />}
         {request.capacity && <CapacityPlanView capacity={request.capacity} />}
+        {request.standing && <StandingSummary standing={request.standing} />}
 
         <div className="grid gap-1.5" hidden={request.deploy !== null || request.stack?.action === "deploy"}>
           <div className="max-h-64 overflow-auto rounded-md border">
@@ -532,6 +533,38 @@ export function ApprovalDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** VM-14, VM-27: a schedule's approval holds for each of its runs: when they come and what each does. */
+function StandingSummary({ standing }: { standing: NonNullable<ApprovalRequest["standing"]> }) {
+  return (
+    <Alert>
+      <TimerIcon />
+      <AlertTitle>A standing approval: {standing.when}</AlertTitle>
+      <AlertDescription>
+        <p>
+          Each run of &lsquo;{standing.name}&rsquo; runs under this approval, until the schedule is edited or deleted.
+          If a VM becomes Prod or protected, a new VM gets its tag, or the approval rules change, it pauses and asks
+          again instead of running. A run missed while Remotely was closed or the PC asleep is reported, not caught up.
+        </p>
+        {standing.nextRuns.length > 0 && <p>Next runs: {standing.nextRuns.join("; ")}</p>}
+        {standing.resolves.length > 0 && <p>Targets: {standing.resolves.join("; ")}</p>}
+        {standing.snapshotName && (
+          <p>
+            Snapshots are named &lsquo;{standing.snapshotName}&rsquo;
+            {standing.keep !== null &&
+              `; each run then deletes this schedule's own older ones beyond the last ${standing.keep} (never others)`}
+            .
+          </p>
+        )}
+        {standing.countdownSeconds !== null && (
+          <p>
+            Each run waits {standing.countdownSeconds} seconds before it starts and can be cancelled in Activity then.
+          </p>
+        )}
+      </AlertDescription>
+    </Alert>
   );
 }
 

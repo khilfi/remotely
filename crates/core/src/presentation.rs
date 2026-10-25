@@ -124,11 +124,14 @@ pub enum Change {
     DashboardLayout,
     /// VM-08: stacks, and the VMs a stack instance holds.
     Stacks,
+    /// VM-14, VM-27: creating, editing, approving, pausing, resuming and deleting schedules, and the snapshot chain
+    /// limits. (While the lock is on, no scheduled run starts either: the bus refuses its commands.)
+    Schedules,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 20] = [
+    pub const ALL: [Change; 21] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -149,6 +152,7 @@ impl Change {
         Change::Alerts,
         Change::DashboardLayout,
         Change::Stacks,
+        Change::Schedules,
     ];
 
     pub fn label(self) -> &'static str {
@@ -173,6 +177,7 @@ impl Change {
             Change::Alerts => "Change alert rules or acknowledge alerts",
             Change::DashboardLayout => "Change the dashboard layout",
             Change::Stacks => "Edit stacks and their instances",
+            Change::Schedules => "Edit, approve, pause or delete schedules",
         }
     }
 }

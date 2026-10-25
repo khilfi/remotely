@@ -18,6 +18,7 @@ mod multiexec_groups;
 mod quick_connect;
 #[cfg(test)]
 mod retention_tests;
+mod schedules;
 mod sessions;
 mod ssh_keys;
 mod stacks;
@@ -53,6 +54,8 @@ pub use jobs::{JobSummary, JobTargetRecord, PurgedBodies, TargetResult};
 pub use metrics::{HistoryPruned, HistorySize};
 pub(crate) use multiexec_groups::GroupRow;
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
+pub use schedules::MAX_RUNS_KEPT;
+pub(crate) use schedules::{RunRow, ScheduleRow, SnapshotEnd, TakenSnapshot};
 pub(crate) use sessions::unsaved_spec;
 pub use stacks::MemberOrigin;
 pub(crate) use stacks::{InstanceRow, NewInstance, StackRow};

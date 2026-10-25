@@ -12,6 +12,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeftIcon,
+  CalendarClockIcon,
   CameraIcon,
   EyeIcon,
   EyeOffIcon,
@@ -445,6 +446,15 @@ export function CommandPalette({
                   }}
                 >
                   <SlidersHorizontalIcon /> Settings…
+                </CommandItem>
+                <CommandItem
+                  value="schedules snapshot power timetable nightly suspend idle"
+                  onSelect={() => {
+                    close();
+                    onOpenVm(vm.vmxPath, "schedules");
+                  }}
+                >
+                  <CalendarClockIcon /> Schedules…
                 </CommandItem>
                 <CommandItem
                   value="rename name"
