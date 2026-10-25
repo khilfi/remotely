@@ -202,6 +202,31 @@ impl VmSettings {
         vbox.screenshot(key).await
     }
 
+    /// VM-23: [`Self::screenshot`] as a `data:image/png;base64,` URL for the UI to show.
+    pub async fn screenshot_data_url(&self, key: &str) -> Result<String> {
+        use base64::Engine;
+        let png = self.screenshot(key).await?;
+        Ok(format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        ))
+    }
+
+    /// VM-23: an ISO dropped on a VM: the one `.iso` among the dropped files.
+    pub async fn attach_dropped_iso(&self, key: &str, paths: Vec<std::path::PathBuf>) -> Result<SubmitOutcome> {
+        let isos: Vec<std::path::PathBuf> = paths
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("iso")))
+            .collect();
+        match isos.as_slice() {
+            [iso] => self.attach_iso(key, iso, None).await,
+            [] => Err(CoreError::InvalidInput(
+                "Drop an ISO image (.iso) on a VM to attach it to its CD/DVD drive.".into(),
+            )),
+            _ => Err(CoreError::InvalidInput("Drop one ISO image at a time.".into())),
+        }
+    }
+
     /// VM-24: the hypervisor's own window on the VM (see the module's notes on why it is audited, not rated).
     pub async fn open_console(&self, key: &str) -> Result<ConsoleOutcome> {
         if self.store.read_only().is_locked() {
