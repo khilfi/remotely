@@ -233,6 +233,51 @@ pub trait VmwareAdapter: Send + Sync {
     async fn workstation_window_open(&self) -> bool {
         false
     }
+
+    // VM-11, VM-14, VM-16 (R4): host networks and what the waste finder reads.
+
+    /// VM-11: `vmrun -T ws` with these arguments: `listHostNetworks` and `listPortForwardings <vmnet>` (reads), and
+    /// from the job runner only `setPortForwarding` and `deletePortForwarding`, built by [`crate::host_networks`].
+    async fn vmrun_host(&self, _args: Vec<OsString>, _timeout: Duration) -> Result<String> {
+        Err(CoreError::VmrunNotFound)
+    }
+
+    /// VM-11: Workstation's NAT settings file ([`super::host_networks::VMNET_NAT_CONF`]), whole up to its cap;
+    /// `None` when there is none.
+    async fn nat_conf(&self) -> Result<Option<String>> {
+        let path = Path::new(super::host_networks::VMNET_NAT_CONF);
+        match read_capped(path, super::host_networks::MAX_NAT_CONF_BYTES).await {
+            Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
+            Err(err) if err.is_not_found() => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// VM-11: why Workstation's NAT port forwards can't be changed from this app (it isn't running as
+    /// administrator), or `None` when they can.
+    fn nat_refusal(&self) -> Option<String> {
+        super::host_networks::nat_refusal(super::host_networks::process_elevated())
+    }
+
+    /// VM-16: the folder Workstation creates new VMs in (`prefvmx.defaultVMPath` in its preferences), when set.
+    async fn default_vm_folder(&self) -> Option<PathBuf> {
+        let file = std::env::var_os("APPDATA")?;
+        let path = PathBuf::from(file).join("VMware").join("preferences.ini");
+        let bytes = read_capped(&path, MAX_VM_CONFIG_BYTES).await.ok()?;
+        preferred_vm_folder(&String::from_utf8_lossy(&bytes))
+    }
+}
+
+/// VM-16: `prefvmx.defaultVMPath = "D:\VMs"` in Workstation's `preferences.ini`.
+pub fn preferred_vm_folder(text: &str) -> Option<PathBuf> {
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        if !key.trim().eq_ignore_ascii_case("prefvmx.defaultVMPath") {
+            return None;
+        }
+        let value = value.trim().trim_matches('"').trim();
+        (!value.is_empty()).then(|| PathBuf::from(value))
+    })
 }
 
 /// VM-23, VM-16: file operations on this PC for the .vmx and disk changes.
@@ -627,6 +672,10 @@ impl VmwareAdapter for VmrunAdapter {
 
     async fn workstation_window_open(&self) -> bool {
         super::host_counters::process_running(WORKSTATION_WINDOW).await
+    }
+
+    async fn vmrun_host(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.run(args, timeout).await
     }
 }
 
@@ -1166,6 +1215,18 @@ impl VmwareAdapter for SwitchableVmware {
     }
     async fn workstation_window_open(&self) -> bool {
         self.current().workstation_window_open().await
+    }
+    async fn vmrun_host(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.current().vmrun_host(args, timeout).await
+    }
+    async fn nat_conf(&self) -> Result<Option<String>> {
+        self.current().nat_conf().await
+    }
+    fn nat_refusal(&self) -> Option<String> {
+        self.current().nat_refusal()
+    }
+    async fn default_vm_folder(&self) -> Option<PathBuf> {
+        self.current().default_vm_folder().await
     }
 }
 

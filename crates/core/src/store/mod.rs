@@ -22,6 +22,7 @@ mod sessions;
 mod ssh_keys;
 mod tags;
 mod terminal_rules;
+mod timeline;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -56,6 +57,7 @@ pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
 pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};
+pub use timeline::{vm_needle, JobTargetBrief};
 pub(crate) use vault::VaultMetaRow;
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";

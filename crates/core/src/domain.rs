@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::adapters::containers::{ContainerId, EngineKind, ImageId, VolumeName};
+use crate::adapters::hypervisor::Hypervisor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -136,6 +137,9 @@ pub enum TargetRef {
         engine: EngineKind,
         object: ContainerObject,
     },
+    /// VM-11: a hypervisor's host network whose NAT port forwards change: a Workstation vmnet (`vmnet8`) or a
+    /// VirtualBox NAT network (by its name). A change there reaches every VM on it.
+    Network { hypervisor: Hypervisor, name: String },
 }
 
 /// CT-01, CT-02: where containers run.
@@ -233,6 +237,7 @@ impl TargetRef {
             TargetRef::App => "app",
             TargetRef::Terminal { .. } => "terminal",
             TargetRef::Container { .. } => "container",
+            TargetRef::Network { .. } => "network",
         }
     }
 
@@ -247,7 +252,19 @@ impl TargetRef {
             TargetRef::Container { host, engine, object } => {
                 format!("{}/{}/{}", host.key(), engine.as_str(), object.key())
             }
+            // VM-11: `vmware:vmnet8`, `virtualbox:lab-net`.
+            TargetRef::Network { hypervisor, name } => format!("{}:{name}", hypervisor.as_str()),
         }
+    }
+
+    /// VM-11: a network target from its [`TargetRef::key`].
+    pub fn network_from_key(key: &str) -> Option<TargetRef> {
+        let (hypervisor, name) = key.split_once(':')?;
+        let hypervisor = Hypervisor::ALL.into_iter().find(|h| h.as_str() == hypervisor)?;
+        (!name.is_empty()).then(|| TargetRef::Network {
+            hypervisor,
+            name: name.to_owned(),
+        })
     }
 
     /// CT-01: a container target from its [`TargetRef::key`] (BX-04 retry).

@@ -309,6 +309,11 @@ pub enum CoreError {
     #[error("{0}")]
     VmSettingRefused(String),
 
+    /// VM-11: a port forward change that can't be made here or now, and why in words: Workstation's NAT forwards
+    /// need administrator rights, the host port is taken, the rule is gone...
+    #[error("{0}")]
+    HostNetworkRefused(String),
+
     /// CT-01, CT-02: a container CLI could not do what was asked. The message says why in words and
     /// never holds a secret, a log line or an environment value.
     #[error("{message}")]
@@ -424,6 +429,7 @@ impl CoreError {
             CoreError::VdiskManagerNotFound => "vdiskmanager_not_found",
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",
             CoreError::VmSettingRefused(_) => "vm_setting_refused",
+            CoreError::HostNetworkRefused(_) => "host_network_refused",
             CoreError::Container { problem, .. } => problem.code(),
         }
     }

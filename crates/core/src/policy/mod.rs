@@ -28,6 +28,7 @@ use crate::adapters::remote::forward::ForwardKind;
 use crate::command_bus::{Command, ContainerOp, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::host_networks::HostNetworkOp;
 use crate::presentation::Change;
 use crate::vm_settings::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
@@ -158,11 +159,15 @@ pub enum ActionKind {
     VmDelete,
     /// Add an existing VM to the list (a .vmx) or to VirtualBox (a .vbox) (VM-24).
     VmRegister,
+    /// Add a NAT port forward: a port of this PC reaches a guest, for every VM on the network to share (VM-11).
+    NatForwardAdd,
+    /// Remove a NAT port forward: connections through it stop (VM-11).
+    NatForwardRemove,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 49] = [
+    pub const ALL: [ActionKind; 51] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -188,6 +193,8 @@ impl ActionKind {
         ActionKind::VmDiskRemove,
         ActionKind::VmRegister,
         ActionKind::VmDelete,
+        ActionKind::NatForwardAdd,
+        ActionKind::NatForwardRemove,
         ActionKind::ExecReadOnly,
         ActionKind::ExecOther,
         ActionKind::ExecDangerous,
@@ -266,6 +273,8 @@ impl ActionKind {
             ActionKind::VmDiskRemove => "Remove a virtual disk (deletes its files)",
             ActionKind::VmDelete => "Delete VMs (deletes their files)",
             ActionKind::VmRegister => "Add an existing VM",
+            ActionKind::NatForwardAdd => "Add a NAT port forward",
+            ActionKind::NatForwardRemove => "Remove a NAT port forward",
         }
     }
 
@@ -847,6 +856,9 @@ impl Default for PolicyRules {
             (VmDelete, TierRule::same(Critical)),
             // Lists a VM (or registers it with VirtualBox); nothing in it changes.
             (VmRegister, TierRule::same(Low)),
+            // VM-11: a forward opens a port of this PC to a guest, or closes one, for the whole network.
+            (NatForwardAdd, TierRule::same(High)),
+            (NatForwardRemove, TierRule::same(High)),
         ]);
         Self {
             tiers,
@@ -1076,6 +1088,10 @@ impl PolicyEngine {
             Command::VmLifecycle { op, .. } => match op {
                 VmLifecycleOp::Delete => ActionKind::VmDelete,
                 VmLifecycleOp::Register { .. } => ActionKind::VmRegister,
+            },
+            Command::HostNetwork { op, .. } => match op {
+                HostNetworkOp::AddForward { .. } => ActionKind::NatForwardAdd,
+                HostNetworkOp::RemoveForward { .. } => ActionKind::NatForwardRemove,
             },
         }
     }
@@ -1348,7 +1364,9 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::TerminalLine { .. }
         | Command::FileUpload { .. }
         | Command::OpenTunnel { .. }
-        | Command::Container { .. } => false,
+        | Command::Container { .. }
+        // VM-11: a forward is the network's (or a NAT adapter's) setting; a snapshot of the guest wouldn't undo it.
+        | Command::HostNetwork { .. } => false,
     };
     on_vms && can_lose_state
 }

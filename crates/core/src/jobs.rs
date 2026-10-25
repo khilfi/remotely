@@ -1506,6 +1506,29 @@ impl JobRunner {
                     ..TargetOutcome::done()
                 })
             }
+            // VM-11: one forward on one network or VirtualBox VM. Cancel stops waiting; vmrun or VBoxManage may still
+            // finish it.
+            (Command::HostNetwork { op, .. }, network @ (TargetRef::Network { .. } | TargetRef::Vm { .. })) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let in_flight = match network {
+                    TargetRef::Network {
+                        hypervisor: Hypervisor::Vmware,
+                        ..
+                    } => CoreError::CancelledInFlight,
+                    _ => CoreError::VboxCancelledInFlight,
+                };
+                let note = tokio::select! {
+                    biased;
+                    done = crate::host_networks::apply(&self.hypervisors, std::slice::from_ref(network), op) => done?,
+                    _ = token.cancelled() => return Err(in_flight),
+                };
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
+            }
             (command, other) => Err(CoreError::WrongTargetKind {
                 action: command.summary(1),
                 target: format!("a {} target", other.kind()),
@@ -1794,8 +1817,8 @@ impl JobRunner {
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
-            // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal.
-            Command::FileUpload { .. } | Command::OpenTunnel { .. } => 1,
+            // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal. VM-11: one forward.
+            Command::FileUpload { .. } | Command::OpenTunnel { .. } | Command::HostNetwork { .. } => 1,
         };
         n.max(1)
     }
@@ -1870,6 +1893,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::VmDevice { .. } => "tools install",
         Command::VmDisk { .. } => "disk change",
         Command::VmLifecycle { .. } => "delete",
+        Command::HostNetwork { .. } => "port forward",
     }
 }
 

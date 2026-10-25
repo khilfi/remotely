@@ -21,6 +21,7 @@ use crate::domain::{now_rfc3339, ContainerHost, Context, Environment, Target, Ta
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
 use crate::forwards::PortForward;
+use crate::host_networks::{ops as net_ops, HostNetworkOp};
 use crate::impact::{ImpactPreviewer, TargetImpact};
 use crate::jobs::{JobRunner, JobSpec, TargetStatus};
 use crate::locks;
@@ -151,6 +152,10 @@ pub enum Command {
     VmDisk { targets: Vec<TargetRef>, op: VmDiskOp },
     /// VM-24: deleting VMs, and adding an existing one.
     VmLifecycle { targets: Vec<TargetRef>, op: VmLifecycleOp },
+    /// VM-11: add or remove a NAT port forward on a Workstation vmnet or a VirtualBox NAT network
+    /// ([`TargetRef::Network`]), or on a VirtualBox VM's NAT adapter ([`TargetRef::Vm`]); one target
+    /// ([`crate::host_networks`]).
+    HostNetwork { targets: Vec<TargetRef>, op: HostNetworkOp },
 }
 
 /// CT-01, CT-02: what a [`Command::Container`] does.
@@ -633,6 +638,7 @@ impl Command {
             Command::VmDevice { targets, op } => vm_ops::validate_device(targets, op),
             Command::VmDisk { targets, op } => vm_ops::validate_disk(targets, op),
             Command::VmLifecycle { targets, op } => vm_ops::validate_lifecycle(targets, op),
+            Command::HostNetwork { targets, op } => net_ops::validate(targets, op),
             _ => Ok(()),
         }
     }
@@ -658,9 +664,11 @@ impl Command {
             } => *targets = new,
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
+            // VM-11: a forward belongs to its network or VM.
             Command::AppUpdate { .. }
             | Command::TerminalLine { .. }
             | Command::OpenTunnel { .. }
+            | Command::HostNetwork { .. }
             | Command::VmLifecycle {
                 op: VmLifecycleOp::Register { .. },
                 ..
@@ -684,7 +692,8 @@ impl Command {
             | Command::VmConfig { targets, .. }
             | Command::VmDevice { targets, .. }
             | Command::VmDisk { targets, .. }
-            | Command::VmLifecycle { targets, .. } => targets,
+            | Command::VmLifecycle { targets, .. }
+            | Command::HostNetwork { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -707,6 +716,7 @@ impl Command {
             Command::VmDevice { .. } => "vmDevice",
             Command::VmDisk { .. } => "vmDisk",
             Command::VmLifecycle { .. } => "vmLifecycle",
+            Command::HostNetwork { .. } => "hostNetwork",
         }
     }
 
@@ -835,6 +845,7 @@ impl Command {
             Command::VmDevice { op, .. } => op.summary(target_count),
             Command::VmDisk { op, .. } => op.summary(target_count),
             Command::VmLifecycle { op, .. } => op.summary(target_count),
+            Command::HostNetwork { targets, op } => op.summary(targets),
         }
     }
 }
@@ -1641,6 +1652,11 @@ impl CommandBus {
             return Err(CoreError::NoTargets);
         }
         command.validate()?;
+        // VM-11: what this PC can't do at all (Workstation's NAT forwards need administrator rights) is refused
+        // before anything is asked.
+        if let Some(why) = self.impact.refusal(&command) {
+            return Err(CoreError::HostNetworkRefused(why));
+        }
         self.check_sudo_password(ctx, &command).await?;
         let targets = self.resolve_targets(ctx, &command).await?;
 
@@ -1718,6 +1734,8 @@ impl CommandBus {
             problems.extend(preview.warnings.iter().cloned());
             decision.add_warnings(problems);
         }
+        // VM-11: who can reach a forward, whose address it leads to, and the VMs on the network.
+        decision.add_warnings(self.impact.network_warnings(ctx, command).await);
         Previews {
             impact: self.add_power_warnings(ctx, command, decision).await,
             vm_change,

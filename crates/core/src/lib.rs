@@ -65,6 +65,7 @@ pub mod export;
 pub mod fakes;
 pub mod forwards;
 pub mod host_details;
+pub mod host_networks;
 pub mod impact;
 pub mod import;
 pub mod inventory;
@@ -91,7 +92,9 @@ pub mod untrusted;
 pub mod updates;
 pub mod vault;
 pub mod vm_links;
+pub mod vm_insight;
 pub mod vm_settings;
+pub mod waste;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -276,6 +279,13 @@ pub struct Core {
     /// VM-23, VM-24: VM settings the shell builds from dialogs and drops (ISOs, shared folders, an existing
     /// VM), guest OS types, screenshots and Open console. Changes go through [`Core::bus`].
     pub vm_settings: vm_settings::VmSettings,
+    /// VM-11: the hypervisors' host networks, the VMs on each and their NAT port forwards. Reads only; changes go
+    /// through [`Core::bus`].
+    pub networks: host_networks::HostNetworks,
+    /// VM-25: a VM's Log and Timeline tabs. Reads only.
+    pub insight: vm_insight::VmInsight,
+    /// VM-16, VM-14: the waste finder's report. Reads only; each row's action goes through [`Core::bus`].
+    pub waste: waste::WasteFinder,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -468,18 +478,22 @@ impl Core {
         jobs.set_containers(Arc::new(containers.clone()));
         // MO-06: a prune compacts the file only while no job runs.
         history.set_jobs(Arc::clone(&jobs));
+        // VM-11: network targets and port forward previews.
+        let networks = host_networks::HostNetworks::new(store.clone(), hypervisors.clone());
         let bus = Arc::new(CommandBus::new(
             policy,
             Arc::new(
                 StoreDirectory::new(store.clone())
                     .with_terminals(terminals.clone())
-                    .with_containers(containers.clone()),
+                    .with_containers(containers.clone())
+                    .with_host_networks(networks.clone()),
             ),
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
             CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
-            ImpactPreviewer::new(store.clone(), hypervisors.clone()).with_containers(containers.clone()),
+            ImpactPreviewer::new(store.clone(), hypervisors.clone()).with_containers(containers.clone())
+                .with_host_networks(networks.clone()),
         ));
         bus.set_bindings(bindings.clone());
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
@@ -500,8 +514,13 @@ impl Core {
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
+        let insight = vm_insight::VmInsight::new(ctx, store.clone(), hypervisors.clone());
+        let waste = waste::WasteFinder::new(ctx, store.clone(), hypervisors.clone());
         let core = Self {
             vm_settings,
+            networks,
+            insight,
+            waste,
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog: Catalog::new(store.clone()).with_hypervisors(hypervisors.clone()),
