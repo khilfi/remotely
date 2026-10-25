@@ -480,6 +480,25 @@ log.
 
 Disabled buttons say why they are disabled (QL-08), in a tooltip or under the menu item.
 
+## Installing
+
+Download `Remotely_<version>_x64-setup.exe` from the [latest release](https://github.com/khilfi/remotely/releases/latest)
+and run it. It installs for your Windows account only, so it needs no admin rights. After that, Remotely updates itself
+from the releases (see [GitHub update token](#github-update-token)).
+
+The installer isn't code-signed (Authenticode) yet, so Windows SmartScreen may show **"Windows protected your PC"**
+with an unknown publisher when you run it by hand. Before you let it run, check that the file is the one the release
+published: each release page lists the installer's SHA-256 under **Checksum**. In PowerShell, in the folder you
+downloaded it to:
+
+```powershell
+Get-FileHash .\Remotely_<version>_x64-setup.exe -Algorithm SHA256
+```
+
+If the hash matches the release page, choose **More info**, then **Run anyway**. If it doesn't match, don't run it.
+Automatic updates don't need this check: the app verifies every update's signature against its built-in public key
+before installing it (see [Update signing](#update-signing)).
+
 ## Prerequisites
 
 - Windows 10 or 11 (x64) with VMware Workstation Pro 17 or later, Oracle VirtualBox 7.0 or later, or both
@@ -571,7 +590,9 @@ list`), the Guest Additions' IP and OS name, and each running one's process.
      signs the installer with the key from the Environment (`tauri signer sign --app-version`), checks the signature
      against `plugins.updater.pubkey` and that it names this installer and version
      (`scripts/verify-update-signature.mjs`), and only then creates a **draft** release with the installer, its `.sig`
-     file and `latest.json` (`scripts/publish-release.mjs`). Before it uploads `latest.json`, it checks it the way
+     file and `latest.json` (`scripts/publish-release.mjs`). The release page's text is the tag message followed by
+     the installer's SHA-256 and how to check it (see [Installing](#installing)); `latest.json`'s notes, which the
+     update banner shows, are the tag message alone. Before it uploads `latest.json`, it checks it the way
      installed apps read it and fetches the installer back through its URL. If any check fails, the draft is deleted.
      A signature check failure means the key in the Environment doesn't pair with the public key.
 4. Smoke-test the installer from the draft, then publish it. Installed apps only see published releases; they check at
