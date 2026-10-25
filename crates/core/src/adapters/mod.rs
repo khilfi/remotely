@@ -14,3 +14,4 @@ pub mod updater;
 pub mod virtualbox;
 pub mod vm_hardware;
 pub mod vmware;
+pub mod vmx_file;

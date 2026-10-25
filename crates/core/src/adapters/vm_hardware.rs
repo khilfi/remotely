@@ -30,9 +30,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use super::virtualbox::VboxVmInfo;
 use crate::untrusted::{path_refusal, read_capped, size_words, ReadError, MAX_VM_CONFIG_BYTES};
 
-/// A VM's virtual hardware as its hypervisor's files describe it.
+/// A VM's virtual hardware as its hypervisor's files describe it. VM-23 reads all of it into the Settings tab;
+/// facts read before 0.5.0 (stored as JSON, migration 0014) lack the newer fields, which then read as empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct VmHardware {
     /// The guest OS chosen for the VM: Workstation's id (`ubuntu-64`) or VirtualBox's OS type
     /// ("Ubuntu (64-bit)").
@@ -50,6 +51,89 @@ pub struct VmHardware {
     pub hardware_version: Option<String>,
     pub disks: Vec<VirtualDisk>,
     pub nics: Vec<VirtualNic>,
+    /// VM-23: hardware virtualization passed on to the guest (VMware `vhv.enable`, VirtualBox `nested-hw-virt`).
+    pub nested_virtualization: Option<bool>,
+    /// VM-23: UEFI Secure Boot; `None` for BIOS firmware.
+    pub secure_boot: Option<bool>,
+    /// VM-23: the virtual TPM, e.g. "TPM 2.0"; `None` when the VM has none.
+    pub tpm: Option<String>,
+    /// VM-23: storage controllers (`scsi0`, `sata0`, VirtualBox's `SATA`) and their kind.
+    pub controllers: Vec<StorageController>,
+    /// VM-23: CD/DVD drives.
+    pub cdroms: Vec<VirtualCdrom>,
+    /// VM-23: USB controllers, e.g. "USB 2.0", "USB 3.x"; empty when the VM has no USB.
+    pub usb: Vec<String>,
+    /// VM-23: the sound card, e.g. "HD Audio"; `None` when the VM has none.
+    pub sound: Option<String>,
+    pub display: Option<VirtualDisplay>,
+    pub serial_ports: Vec<SerialPort>,
+    pub shared_folders: Vec<SharedFolder>,
+    /// VM-23: VirtualBox's Guest Additions version, as they report it.
+    pub tools_version: Option<String>,
+    /// VM-23: every address the guest tools report (VirtualBox's Guest Additions list each adapter's; for
+    /// Workstation the inventory's one address).
+    pub guest_ips: Vec<String>,
+}
+
+/// VM-23: a storage controller.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageController {
+    /// `scsi0`, `sata0`, `nvme0`, `ide1` (VMware) or the controller's name (VirtualBox, e.g. `SATA`).
+    pub name: String,
+    /// `pvscsi`, `lsisas1068`, `lsilogic`, `SATA (AHCI)`, `NVMe`, `IDE`; VirtualBox's `IntelAhci`, `PIIX4`...
+    pub kind: Option<String>,
+    /// VirtualBox: the ports it has now.
+    pub ports: Option<u32>,
+}
+
+/// VM-23: a CD/DVD drive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VirtualCdrom {
+    /// `sata0:1` (VMware) or `SATA-1-0` (VirtualBox).
+    pub slot: String,
+    /// The ISO image in it.
+    pub image: Option<String>,
+    /// A drive of this PC instead of an image ("auto detect", `D:`).
+    pub host_drive: Option<String>,
+    /// VMware: connected when the VM powers on.
+    pub connected: Option<bool>,
+}
+
+/// VM-23: the virtual display.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct VirtualDisplay {
+    pub video_memory_mb: Option<u32>,
+    pub accelerate_3d: Option<bool>,
+    pub monitors: Option<u32>,
+    /// VirtualBox's graphics controller (`vmsvga`, `vboxsvga`).
+    pub controller: Option<String>,
+}
+
+/// VM-23: a serial port.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SerialPort {
+    /// `serial0` (VMware) or `COM1` (VirtualBox).
+    pub slot: String,
+    /// `file`, `pipe`, `device`, `tcp`, `disconnected`...
+    pub kind: String,
+    /// The file, pipe, device or address it uses.
+    pub target: Option<String>,
+}
+
+/// VM-23: a folder of this PC shared with the guest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SharedFolder {
+    /// The name the guest sees.
+    pub name: String,
+    pub host_path: String,
+    pub writable: Option<bool>,
+    /// VMware: on; VirtualBox: mounted by itself in the guest.
+    pub enabled: Option<bool>,
 }
 
 impl VmHardware {
@@ -62,7 +146,7 @@ impl VmHardware {
 
 /// One virtual disk attached to a VM.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct VirtualDisk {
     /// Where it is attached: `scsi0:0`, `nvme0:1` (VMware) or `SATA-0-0` (VirtualBox).
     pub slot: String,
@@ -80,11 +164,17 @@ pub struct VirtualDisk {
     pub delta: bool,
     /// Why a size is missing, in words for the user.
     pub problem: Option<String>,
+    /// VM-23: the kind of controller it is on (`pvscsi`, `SATA (AHCI)`, `NVMe`, VirtualBox's `IntelAhci`).
+    pub controller: Option<String>,
+    /// VM-23: thin (grows as the guest writes) or thick (allocated in full), when its format says.
+    pub thin: Option<bool>,
+    /// VM-23: a snapshot delta's parents down to the base disk, nearest first, as their files are named.
+    pub chain: Vec<String>,
 }
 
 /// One network adapter of a VM.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct VirtualNic {
     /// `ethernet0` (VMware) or `nic1` (VirtualBox).
     pub slot: String,
@@ -96,6 +186,13 @@ pub struct VirtualNic {
     pub mac: Option<String>,
     /// VMware's `startConnected`: plugged in when the VM powers on.
     pub connected: Option<bool>,
+    /// VM-11: the network by name: VMware's vnet (`VMnet2`), VirtualBox's bridged or host-only adapter, NAT
+    /// network or internal network.
+    pub network_name: Option<String>,
+    /// VM-11: plugged in right now (VirtualBox's virtual cable). Workstation can't be asked.
+    pub connected_now: Option<bool>,
+    /// VM-11: a MAC chosen by hand (VMware `addressType = "static"`).
+    pub static_mac: bool,
 }
 
 /// Bytes of a disk header read at most. Descriptors are a few hundred bytes; a sparse VMDK's
@@ -229,6 +326,8 @@ pub struct VmxDisk {
     pub slot: String,
     /// As written in the .vmx: usually relative to its folder.
     pub file_name: String,
+    /// VM-23: the kind of controller its bus is ([`vmx_controller_kind`]).
+    pub controller: Option<String>,
 }
 
 /// What a .vmx says about the VM's hardware. Disk sizes come from [`read_disk`].
@@ -239,6 +338,8 @@ pub fn parse_vmx_hardware(text: &str) -> (VmHardware, Vec<VmxDisk>) {
         .or_else(|| get("guestos.detailed.data"))
         .map(detailed_data)
         .unwrap_or_default();
+    let on = |key: &str| get(key).and_then(truthy).unwrap_or(false);
+    let efi = get("firmware").is_some_and(|f| f.eq_ignore_ascii_case("efi"));
     let mut hardware = VmHardware {
         guest_os: get("guestos").map(str::to_owned),
         guest_os_name: detailed.get("prettyName").filter(|v| !v.is_empty()).cloned(),
@@ -246,13 +347,68 @@ pub fn parse_vmx_hardware(text: &str) -> (VmHardware, Vec<VmxDisk>) {
         vcpus: get("numvcpus").and_then(|v| v.parse().ok()).or(Some(1)),
         cores_per_socket: get("cpuid.corespersocket").and_then(|v| v.parse().ok()),
         memory_mb: get("memsize").and_then(|v| v.parse().ok()),
-        firmware: Some(match get("firmware").map(str::to_ascii_lowercase).as_deref() {
-            Some("efi") => "UEFI".to_owned(),
-            _ => "BIOS".to_owned(),
-        }),
+        firmware: Some(if efi { "UEFI".to_owned() } else { "BIOS".to_owned() }),
         hardware_version: get("virtualhw.version").map(str::to_owned),
+        nested_virtualization: Some(on("vhv.enable")),
+        secure_boot: efi.then(|| on("uefi.secureboot.enabled")),
+        tpm: on("vtpm.present").then(|| "TPM 2.0".to_owned()),
         ..VmHardware::default()
     };
+    hardware.controllers = vmx_controllers(&pairs);
+    hardware.cdroms = vmx_cdroms(&pairs);
+    hardware.usb = [
+        ("usb.present", "USB 1.1"),
+        ("ehci.present", "USB 2.0"),
+        ("usb_xhci.present", "USB 3.x"),
+    ]
+    .into_iter()
+    .filter(|(key, _)| on(key))
+    .map(|(_, name)| name.to_owned())
+    .collect();
+    hardware.sound =
+        on("sound.present").then(
+            || match get("sound.virtualdev").map(str::to_ascii_lowercase).as_deref() {
+                Some("hdaudio") => "HD Audio".to_owned(),
+                Some("es1371") => "Sound Blaster AudioPCI".to_owned(),
+                Some("sb16") => "Sound Blaster 16".to_owned(),
+                Some(other) => other.to_owned(),
+                None => "Sound card".to_owned(),
+            },
+        );
+    let video_kb: Option<u64> = get("svga.graphicsmemorykb").and_then(|v| v.parse().ok());
+    let vram_bytes: Option<u64> = get("svga.vramsize").and_then(|v| v.parse().ok());
+    hardware.display = Some(VirtualDisplay {
+        video_memory_mb: video_kb
+            .map(|kb| kb / 1024)
+            .or(vram_bytes.map(|b| b / (1024 * 1024)))
+            .and_then(|mb| u32::try_from(mb).ok()),
+        accelerate_3d: Some(on("mks.enable3d")),
+        monitors: get("svga.numdisplays").and_then(|v| v.parse().ok()),
+        controller: None,
+    });
+    hardware.serial_ports = numbered(&pairs, "serial")
+        .into_iter()
+        .filter(|n| on(&format!("serial{n}.present")))
+        .map(|n| SerialPort {
+            slot: format!("serial{n}"),
+            kind: get(&format!("serial{n}.filetype")).unwrap_or("device").to_owned(),
+            target: get(&format!("serial{n}.filename")).map(str::to_owned),
+        })
+        .collect();
+    let folders_off = on("isolation.tools.hgfs.disable");
+    hardware.shared_folders = numbered(&pairs, "sharedfolder")
+        .into_iter()
+        .filter(|n| on(&format!("sharedfolder{n}.present")))
+        .map(|n| {
+            let field = |name: &str| get(&format!("sharedfolder{n}.{name}")).map(str::to_owned);
+            SharedFolder {
+                name: field("guestname").unwrap_or_default(),
+                host_path: field("hostpath").unwrap_or_default(),
+                writable: field("writeaccess").and_then(|v| truthy(&v)),
+                enabled: Some(!folders_off && field("enabled").and_then(|v| truthy(&v)).unwrap_or(false)),
+            }
+        })
+        .collect();
 
     // Disks: `<bus><n>:<m>.fileName` on a present device that is not a CD/DVD.
     let mut disks = Vec::new();
@@ -286,6 +442,7 @@ pub fn parse_vmx_hardware(text: &str) -> (VmHardware, Vec<VmxDisk>) {
         disks.push(VmxDisk {
             slot: slot.to_owned(),
             file_name: file.to_owned(),
+            controller: vmx_controller_kind(&pairs, slot_bus(slot)),
         });
     }
     disks.sort_by_key(|d| slot_order(&d.slot));
@@ -313,10 +470,15 @@ pub fn parse_vmx_hardware(text: &str) -> (VmHardware, Vec<VmxDisk>) {
             }),
             Some(other) => Some(other.to_owned()),
         };
-        let mac = match field("addresstype").map(|t| t.to_ascii_lowercase()).as_deref() {
-            Some("static") => field("address"),
-            _ => field("generatedaddress").or_else(|| field("address")),
+        let static_mac = field("addresstype").is_some_and(|t| t.eq_ignore_ascii_case("static"));
+        let mac = if static_mac {
+            field("address")
+        } else {
+            field("generatedaddress").or_else(|| field("address"))
         };
+        let network_name = field("connectiontype")
+            .filter(|c| c.eq_ignore_ascii_case("custom"))
+            .and_then(|_| field("vnet"));
         nics.push((
             n,
             VirtualNic {
@@ -325,6 +487,9 @@ pub fn parse_vmx_hardware(text: &str) -> (VmHardware, Vec<VmxDisk>) {
                 model: field("virtualdev"),
                 mac: mac.as_deref().and_then(normal_mac),
                 connected: field("startconnected").and_then(|v| truthy(&v)),
+                network_name,
+                connected_now: None,
+                static_mac,
             },
         ));
     }
@@ -335,6 +500,123 @@ pub fn parse_vmx_hardware(text: &str) -> (VmHardware, Vec<VmxDisk>) {
 
 fn is_digits(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The numbers `n` of `<prefix><n>.` keys, in order (`serial0`, `serial1`...).
+fn numbered(pairs: &BTreeMap<String, String>, prefix: &str) -> Vec<u32> {
+    let mut found: Vec<u32> = pairs
+        .keys()
+        .filter_map(|key| key.strip_prefix(prefix)?.split_once('.')?.0.parse().ok())
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+/// The bus of a `scsi0:1`-style slot: `scsi0`.
+pub fn slot_bus(slot: &str) -> &str {
+    slot.split_once(':').map_or(slot, |(bus, _)| bus)
+}
+
+/// VM-23: what kind of controller a .vmx bus is: `scsi0.virtualDev` (Workstation's default for SCSI is LSI
+/// Logic), or the bus itself.
+pub fn vmx_controller_kind(pairs: &BTreeMap<String, String>, bus: &str) -> Option<String> {
+    let family: String = bus.chars().take_while(char::is_ascii_alphabetic).collect();
+    match family.as_str() {
+        "scsi" => Some(
+            pairs
+                .get(&format!("{bus}.virtualdev"))
+                .map(|v| v.trim().to_owned())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "lsilogic".to_owned()),
+        ),
+        "sata" => Some("SATA (AHCI)".to_owned()),
+        "nvme" => Some("NVMe".to_owned()),
+        "ide" => Some("IDE".to_owned()),
+        _ => None,
+    }
+}
+
+/// VM-23: the .vmx's storage controllers: each `<bus><n>.present = "TRUE"`, and the IDE buses its devices use
+/// (Workstation writes `ide1:0.present` without `ide1.present`).
+fn vmx_controllers(pairs: &BTreeMap<String, String>) -> Vec<StorageController> {
+    let mut buses: Vec<String> = Vec::new();
+    for (key, value) in pairs {
+        for family in ["scsi", "sata", "nvme", "ide"] {
+            let Some(rest) = key.strip_prefix(family) else {
+                continue;
+            };
+            let (n, field) = match rest.split_once(['.', ':']) {
+                Some((n, field)) if is_digits(n) => (n, field),
+                _ => continue,
+            };
+            let controller_present =
+                !rest[n.len()..].starts_with(':') && field == "present" && truthy(value) == Some(true);
+            let device_on_ide = family == "ide" && rest[n.len()..].starts_with(':');
+            if controller_present || device_on_ide {
+                let bus = format!("{family}{n}");
+                if !buses.contains(&bus) {
+                    buses.push(bus);
+                }
+            }
+        }
+    }
+    buses.sort_by_key(|bus| slot_order(bus));
+    buses
+        .into_iter()
+        .map(|bus| StorageController {
+            kind: vmx_controller_kind(pairs, &bus),
+            name: bus,
+            ports: None,
+        })
+        .collect()
+}
+
+/// VM-23: the .vmx's CD/DVD drives: devices whose `deviceType` is `cdrom-image` (an ISO), `cdrom-raw` or
+/// `atapi-cdrom` (a drive of this PC).
+fn vmx_cdroms(pairs: &BTreeMap<String, String>) -> Vec<VirtualCdrom> {
+    let mut drives: Vec<VirtualCdrom> = Vec::new();
+    for (key, value) in pairs {
+        let Some(slot) = key.strip_suffix(".devicetype") else {
+            continue;
+        };
+        let kind = value.trim().to_ascii_lowercase();
+        if !kind.contains("cdrom") {
+            continue;
+        }
+        if pairs.get(&format!("{slot}.present")).and_then(|v| truthy(v)) == Some(false) {
+            continue;
+        }
+        let file = pairs
+            .get(&format!("{slot}.filename"))
+            .map(|v| v.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        let (image, host_drive) = if kind == "cdrom-image" {
+            (file, None)
+        } else {
+            (None, Some(file.unwrap_or_else(|| "auto detect".to_owned())))
+        };
+        drives.push(VirtualCdrom {
+            slot: slot.to_owned(),
+            image,
+            host_drive,
+            connected: pairs.get(&format!("{slot}.startconnected")).and_then(|v| truthy(v)),
+        });
+    }
+    drives.sort_by_key(|d| slot_order(&d.slot));
+    drives
+}
+
+/// VM-23: thin or thick, from a disk's format.
+pub fn thin_format(format: &str) -> Option<bool> {
+    let f = format.to_ascii_lowercase();
+    if f.contains("sparse") || f.contains("streamoptimized") || f.contains("dynamic") || f.contains("qcow") {
+        Some(true)
+    } else if f.contains("flat") || f.contains("fixed") || f.contains("vmfs") || f.contains("preallocated") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// `scsi0:1` sorts by bus name, then the numbers as numbers.
@@ -369,6 +651,7 @@ async fn read_vmware_with(files: &impl VmFiles, vmx: &Path) -> crate::error::Res
         let path = resolve(folder, &disk.file_name);
         let mut read = read_disk_with(files, &path).await;
         read.slot = disk.slot;
+        read.controller = disk.controller;
         hardware.disks.push(read);
     }
     Ok(hardware)
@@ -411,16 +694,129 @@ async fn read_virtualbox_with(
                 connection: Some(n.attachment.clone()),
                 model: n.model.clone(),
                 mac: n.mac.as_deref().and_then(normal_mac),
+                // VirtualBox's cable is both: plugged in now, and at the next start.
                 connected: n.cable_connected,
+                network_name: n.network_name.clone(),
+                connected_now: n.cable_connected.filter(|_| info.power_state().is_on()),
+                static_mac: false,
             })
             .collect(),
+        nested_virtualization: info.nested_hw_virt,
+        secure_boot: info
+            .firmware
+            .as_deref()
+            .filter(|f| f.to_ascii_uppercase().starts_with("EFI"))
+            .map(|_| info.secure_boot.unwrap_or(false)),
+        tpm: None,
+        controllers: info
+            .controllers
+            .iter()
+            .map(|c| StorageController {
+                name: c.name.clone(),
+                kind: c.kind.clone(),
+                ports: c.ports,
+            })
+            .collect(),
+        cdroms: info
+            .dvds
+            .iter()
+            .map(|d| VirtualCdrom {
+                slot: d.slot.clone(),
+                image: d.image.as_ref().map(|p| p.display().to_string()),
+                host_drive: d.host_drive.clone(),
+                connected: None,
+            })
+            .collect(),
+        usb: info.usb.clone(),
+        sound: info
+            .audio
+            .as_deref()
+            .filter(|a| !a.eq_ignore_ascii_case("none"))
+            .map(|_| "Sound card".to_owned()),
+        display: Some(VirtualDisplay {
+            video_memory_mb: info.video_memory_mb,
+            accelerate_3d: info.accelerate_3d,
+            monitors: info.monitors,
+            controller: info.graphics_controller.clone(),
+        }),
+        serial_ports: info
+            .uarts
+            .iter()
+            .map(|u| {
+                let (kind, target) = match u.mode.split_once(',') {
+                    Some((kind, target)) => (kind.to_owned(), Some(target.to_owned())),
+                    None => (u.mode.clone(), None),
+                };
+                SerialPort {
+                    slot: format!("COM{}", u.slot),
+                    kind,
+                    target,
+                }
+            })
+            .collect(),
+        shared_folders: info
+            .shared_folders
+            .iter()
+            .map(|(name, path)| SharedFolder {
+                name: name.clone(),
+                host_path: path.display().to_string(),
+                writable: None,
+                enabled: None,
+            })
+            .collect(),
+        tools_version: info.additions_version.clone(),
+        guest_ips: Vec::new(),
+    };
+    let controller_of = |slot: &str| {
+        let name = slot.rsplitn(3, '-').nth(2)?;
+        info.controllers
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| c.kind.clone())
     };
     for disk in &info.disks {
         let mut read = read_disk_with(files, &disk.path).await;
         read.slot = disk.slot.clone();
+        read.controller = controller_of(&disk.slot);
         hardware.disks.push(read);
     }
     hardware
+}
+
+/// VM-23: what the `.vbox` file adds to a VirtualBox VM's hardware (TPM, shared folders' flags, the sound
+/// card), and the guest's addresses.
+pub fn add_virtualbox_extras(
+    hardware: &mut VmHardware,
+    extras: Option<&super::virtualbox::VboxSettingsExtras>,
+    guest_ips: Vec<String>,
+) {
+    hardware.guest_ips = guest_ips;
+    let Some(extras) = extras else {
+        return;
+    };
+    hardware.tpm = extras.tpm.as_deref().map(|t| match t.to_ascii_lowercase().as_str() {
+        "v2_0" => "TPM 2.0".to_owned(),
+        "v1_2" => "TPM 1.2".to_owned(),
+        "host" => "This PC's TPM".to_owned(),
+        "swtpm" => "Software TPM".to_owned(),
+        other => other.to_owned(),
+    });
+    for folder in &mut hardware.shared_folders {
+        if let Some((writable, auto_mount)) = extras.shared_folders.get(&folder.name) {
+            folder.writable = *writable;
+            folder.enabled = *auto_mount;
+        }
+    }
+    if hardware.sound.is_some() {
+        if let Some(controller) = &extras.audio_controller {
+            hardware.sound = Some(match controller.to_ascii_uppercase().as_str() {
+                "HDA" => "HD Audio".to_owned(),
+                "AC97" => "AC'97".to_owned(),
+                "SB16" => "Sound Blaster 16".to_owned(),
+                other => other.to_owned(),
+            });
+        }
+    }
 }
 
 /// A disk file named in a .vmx or descriptor: relative names are in `folder`.
@@ -691,10 +1087,12 @@ async fn read_disk_with(files: &impl VmFiles, path: &Path) -> VirtualDisk {
             disk.format = descriptor.create_type.clone();
             disk.provisioned_bytes = descriptor.capacity_bytes();
             disk.delta = descriptor.parent.is_some();
-            let (bytes, count, problem) = vmdk_chain_size(files, path, size, &descriptor, folder).await;
+            let mut chain = Vec::new();
+            let (bytes, count, problem) = vmdk_chain_size(files, path, size, &descriptor, folder, &mut chain).await;
             disk.on_disk_bytes = Some(bytes);
             disk.files = count;
             disk.problem = problem;
+            disk.chain = chain;
         }
         DiskHeader::SparseVmdk { capacity_bytes } => {
             disk.format = Some("monolithicSparse".into());
@@ -733,7 +1131,54 @@ async fn read_disk_with(files: &impl VmFiles, path: &Path) -> VirtualDisk {
             disk.problem = Some("the provisioned size is not in a header Remotely reads".into());
         }
     }
+    // A snapshot's delta is always sparse, whatever its base disk is, so it says nothing about how the disk was made.
+    disk.thin = if disk.delta {
+        None
+    } else {
+        disk.format.as_deref().and_then(thin_format)
+    };
     disk
+}
+
+/// VM-16: a disk's own files with their sizes: the file itself and, for a text descriptor, its extents in
+/// other files (not its parents, which belong to snapshots). An extent on a share or a device path is left
+/// out unopened (A3); the disk itself there is refused.
+pub async fn disk_own_files(path: &Path) -> crate::error::Result<Vec<(PathBuf, u64)>> {
+    disk_own_files_with(&LocalFiles, path).await
+}
+
+async fn disk_own_files_with(files: &impl VmFiles, path: &Path) -> crate::error::Result<Vec<(PathBuf, u64)>> {
+    if let Some(refusal) = path_refusal(path) {
+        return Err(crate::error::CoreError::VmSettingRefused(format!(
+            "the disk file {} {}, so Remotely doesn't touch it",
+            path.display(),
+            refusal.describe()
+        )));
+    }
+    let (header, size) = match read_header(files, path).await {
+        Ok(read) => read,
+        Err(HeaderError::Io(err)) => return Err(err.into()),
+        Err(HeaderError::DescriptorTooLarge) => {
+            return Err(crate::error::CoreError::VmSettingRefused(format!(
+                "the disk's descriptor is larger than {}, so Remotely didn't read it",
+                size_words(MAX_DESCRIPTOR)
+            )))
+        }
+    };
+    let mut out = vec![(path.to_path_buf(), size)];
+    if let DiskHeader::Vmdk(descriptor) = header {
+        let folder = path.parent().unwrap_or(Path::new(""));
+        for name in descriptor.extents.iter().filter_map(|(_, name)| name.as_deref()) {
+            let extent = resolve(folder, name);
+            if extent == path || path_refusal(&extent).is_some() || out.iter().any(|(p, _)| *p == extent) {
+                continue;
+            }
+            if let Ok(len) = files.len(&extent).await {
+                out.push((extent, len));
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn is_extension(path: &Path, ext: &str) -> bool {
@@ -749,6 +1194,7 @@ async fn vmdk_chain_size(
     size: u64,
     descriptor: &VmdkDescriptor,
     folder: &Path,
+    chain: &mut Vec<String>,
 ) -> (u64, u32, Option<String>) {
     let mut total = 0u64;
     let mut files = 0u32;
@@ -792,6 +1238,7 @@ async fn vmdk_chain_size(
         if seen.contains(&parent_path) {
             return (total, files, problem);
         }
+        chain.push(parent.clone());
         if let Some(refusal) = path_refusal(&parent_path) {
             problem.get_or_insert_with(|| {
                 format!(
@@ -925,6 +1372,118 @@ guestInfo.detailed.data = "architecture='X86' bitness='64' distroName='Ubuntu' d
                 ("ethernet2", Some("bridged"), None, Some("00:0c:29:00:00:02"), None),
             ]
         );
+    }
+
+    /// VM-23: what the Settings tab shows from a .vmx, in the shape Workstation 26 writes.
+    #[test]
+    fn a_vmx_gives_the_settings_tab_every_device() {
+        let vmx = r#"firmware = "efi"
+uefi.secureBoot.enabled = "TRUE"
+vhv.enable = "TRUE"
+vtpm.present = "TRUE"
+numvcpus = "2"
+scsi0.present = "TRUE"
+scsi0.virtualDev = "pvscsi"
+scsi0:0.present = "TRUE"
+scsi0:0.fileName = "web01.vmdk"
+sata0.present = "TRUE"
+sata0:1.present = "TRUE"
+sata0:1.deviceType = "cdrom-image"
+sata0:1.fileName = "C:\ISOs\ubuntu.iso"
+sata0:1.startConnected = "TRUE"
+ide1:0.present = "TRUE"
+ide1:0.deviceType = "atapi-cdrom"
+ide1:0.fileName = "auto detect"
+usb.present = "TRUE"
+ehci.present = "TRUE"
+usb_xhci.present = "TRUE"
+sound.present = "TRUE"
+sound.virtualDev = "hdaudio"
+svga.graphicsMemoryKB = "8388608"
+mks.enable3d = "TRUE"
+serial0.present = "TRUE"
+serial0.fileType = "pipe"
+serial0.fileName = "\\.\pipe\com_1"
+serial1.present = "FALSE"
+isolation.tools.hgfs.disable = "FALSE"
+sharedFolder0.present = "TRUE"
+sharedFolder0.enabled = "TRUE"
+sharedFolder0.writeAccess = "FALSE"
+sharedFolder0.hostPath = "C:\Shared\data"
+sharedFolder0.guestName = "data"
+sharedFolder1.present = "FALSE"
+ethernet0.present = "TRUE"
+ethernet0.connectionType = "custom"
+ethernet0.vnet = "VMnet3"
+ethernet0.addressType = "static"
+ethernet0.address = "00:50:56:01:02:03"
+"#;
+        let (hardware, disks) = parse_vmx_hardware(vmx);
+        assert_eq!(hardware.secure_boot, Some(true));
+        assert_eq!(hardware.nested_virtualization, Some(true));
+        assert_eq!(hardware.tpm.as_deref(), Some("TPM 2.0"));
+        assert_eq!(disks[0].controller.as_deref(), Some("pvscsi"));
+        let controllers: Vec<(&str, Option<&str>)> = hardware
+            .controllers
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind.as_deref()))
+            .collect();
+        assert_eq!(
+            controllers,
+            [
+                ("ide1", Some("IDE")),
+                ("sata0", Some("SATA (AHCI)")),
+                ("scsi0", Some("pvscsi"))
+            ]
+        );
+        assert_eq!(hardware.cdroms.len(), 2);
+        assert_eq!(hardware.cdroms[0].slot, "ide1:0");
+        assert_eq!(hardware.cdroms[0].host_drive.as_deref(), Some("auto detect"));
+        assert_eq!(hardware.cdroms[1].image.as_deref(), Some(r"C:\ISOs\ubuntu.iso"));
+        assert_eq!(hardware.usb, ["USB 1.1", "USB 2.0", "USB 3.x"]);
+        assert_eq!(hardware.sound.as_deref(), Some("HD Audio"));
+        let display = hardware.display.unwrap();
+        assert_eq!(
+            (display.video_memory_mb, display.accelerate_3d),
+            (Some(8192), Some(true))
+        );
+        assert_eq!(hardware.serial_ports.len(), 1);
+        assert_eq!(hardware.serial_ports[0].kind, "pipe");
+        assert_eq!(hardware.shared_folders.len(), 1);
+        assert_eq!(hardware.shared_folders[0].writable, Some(false));
+        assert_eq!(hardware.shared_folders[0].enabled, Some(true));
+        assert_eq!(hardware.nics[0].network_name.as_deref(), Some("VMnet3"));
+        assert!(hardware.nics[0].static_mac);
+        let bios = parse_vmx_hardware("numvcpus = \"1\"\n").0;
+        assert_eq!((bios.secure_boot, bios.tpm.as_deref()), (None, None));
+        assert_eq!(thin_format("monolithicSparse"), Some(true));
+        assert_eq!(thin_format("monolithicFlat"), Some(false));
+        assert_eq!(thin_format("VDI (fixed)"), Some(false));
+        // Facts stored before 0.5.0 read with the newer fields empty.
+        let old: VmHardware = serde_json::from_str(
+            r#"{"vcpus":2,"disks":[{"slot":"scsi0:0","path":"x","files":1,"delta":false}],"nics":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(old.vcpus, Some(2));
+        assert!(old.cdroms.is_empty() && old.disks[0].chain.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_disks_own_files_are_its_descriptor_and_extents_not_its_parents() {
+        let descriptor = "# Disk DescriptorFile\ncreateType=\"twoGbMaxExtentSparse\"\nparentFileNameHint=\"base.vmdk\"\nRW 100 SPARSE \"web01-s001.vmdk\"\nRW 100 SPARSE \"\\\\nas.example.com\\x\\web01-s002.vmdk\"\n";
+        let files = MemFiles::default()
+            .with(r"C:\VMs\web01\web01.vmdk", descriptor)
+            .with(r"C:\VMs\web01\web01-s001.vmdk", vec![0u8; 3000]);
+        let own = disk_own_files_with(&files, Path::new(r"C:\VMs\web01\web01.vmdk"))
+            .await
+            .unwrap();
+        let names: Vec<String> = own.iter().map(|(p, _)| p.display().to_string()).collect();
+        assert_eq!(names, [r"C:\VMs\web01\web01.vmdk", r"C:\VMs\web01\web01-s001.vmdk"]);
+        assert_eq!(own[1].1, 3000);
+        let share = disk_own_files_with(&files, Path::new(r"\\nas.example.com\x\web01.vmdk"))
+            .await
+            .unwrap_err();
+        assert_eq!(share.code(), "vm_setting_refused");
     }
 
     #[test]

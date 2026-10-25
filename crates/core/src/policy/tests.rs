@@ -3525,6 +3525,7 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
     ]
     .into_iter()
     .chain(every_container_command())
+    .chain(super::vm_settings_tests::every_vm_settings_command())
     .collect()
 }
 

@@ -154,6 +154,167 @@ pub trait VmwareAdapter: Send + Sync {
     async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
         super::vm_hardware::read_vmware(vmx).await
     }
+
+    // VM-23 and on: the .vmx file and the changes that go with it. Only the job runner calls the ones that
+    // change something; the file operations work without vmrun.
+
+    /// VM-23: the .vmx's bytes, whole (A9: at most [`MAX_VM_CONFIG_BYTES`], else refused).
+    async fn vmx_bytes(&self, vmx: &Path) -> Result<Vec<u8>> {
+        Ok(read_capped(vmx, MAX_VM_CONFIG_BYTES).await?)
+    }
+
+    /// VM-23: a copy of the .vmx beside it (`web01.vmx.<tag>.remotely-backup`) before Remotely changes it.
+    /// Returns the copy's path.
+    async fn backup_vmx(&self, vmx: &Path, tag: &str) -> Result<PathBuf> {
+        files::backup(vmx, tag).await
+    }
+
+    /// VM-23: writes the .vmx whole into a new file beside it, then puts that in its place, so the .vmx is never
+    /// left half written.
+    async fn write_vmx(&self, vmx: &Path, bytes: &[u8]) -> Result<()> {
+        files::replace(vmx, bytes).await
+    }
+
+    /// VM-23: the backup back in the .vmx's place, the same way.
+    async fn restore_vmx(&self, vmx: &Path, backup: &Path) -> Result<()> {
+        let bytes = read_capped(backup, MAX_VM_CONFIG_BYTES).await?;
+        files::replace(vmx, &bytes).await
+    }
+
+    /// VM-23: the backup is not needed any more: the change went well, or was undone.
+    async fn discard_backup(&self, backup: &Path) -> Result<()> {
+        match tokio::fs::remove_file(backup).await {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    /// VM-16: runs `vmware-vdiskmanager` with these arguments (create, `-x` expand, `-k` shrink, `-d`
+    /// defragment), built by [`crate::vm_settings`].
+    async fn vdiskmanager(&self, _args: Vec<OsString>, _timeout: Duration) -> Result<String> {
+        Err(CoreError::VdiskManagerNotFound)
+    }
+
+    /// VM-11, VM-15, VM-23, VM-24: `vmrun -T ws` with these arguments: `upgradevm`, `installTools`,
+    /// `connectNamedDevice`, `disconnectNamedDevice`, `writeVariable <vmx> runtimeConfig`, `deleteVM`.
+    async fn vmrun_change(&self, _args: Vec<OsString>, _timeout: Duration) -> Result<String> {
+        Err(CoreError::VmrunNotFound)
+    }
+
+    /// VM-16: deletes a removed disk's files. A path on a share or a device path is refused, never opened (A3).
+    async fn delete_files(&self, paths: &[PathBuf]) -> Result<()> {
+        files::delete(paths).await
+    }
+
+    /// VM-16: a disk's own files (its descriptor and extents) with their sizes.
+    async fn disk_files(&self, path: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        super::vm_hardware::disk_own_files(path).await
+    }
+
+    /// VM-24: the files directly in a folder, with their sizes (for the delete preview). Folders in it are left
+    /// out.
+    async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        files::list(folder).await
+    }
+
+    /// VM-16, VM-23: whether a file is there. A path on a share or a device path reads as not there, unopened.
+    async fn file_exists(&self, path: &Path) -> bool {
+        crate::untrusted::path_refusal(path).is_none() && tokio::fs::metadata(path).await.is_ok()
+    }
+
+    /// VM-24: Workstation's own window on the VM (`vmware.exe <vmx>`): a tab, without powering it on.
+    async fn open_console(&self, _vmx: &Path) -> Result<()> {
+        Err(CoreError::VmrunNotFound)
+    }
+}
+
+/// VM-23, VM-16: file operations on this PC for the .vmx and disk changes.
+pub mod files {
+    use std::path::{Path, PathBuf};
+
+    use tokio::io::AsyncWriteExt;
+
+    use crate::error::{CoreError, Result};
+    use crate::untrusted::path_refusal;
+
+    fn refuse(path: &Path, what: &str) -> Result<()> {
+        match path_refusal(path) {
+            Some(refusal) => Err(CoreError::VmSettingRefused(format!(
+                "{what} {} {}, so Remotely doesn't touch it",
+                path.display(),
+                refusal.describe()
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// `web01.vmx.<tag>.remotely-backup` beside the .vmx.
+    pub fn backup_path(vmx: &Path, tag: &str) -> PathBuf {
+        let name = vmx
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        vmx.with_file_name(format!("{name}.{tag}.remotely-backup"))
+    }
+
+    pub async fn backup(vmx: &Path, tag: &str) -> Result<PathBuf> {
+        let copy = backup_path(vmx, tag);
+        tokio::fs::copy(vmx, &copy).await?;
+        Ok(copy)
+    }
+
+    /// Writes `bytes` to a new file beside `path`, flushes it to disk, then renames it over `path`.
+    pub async fn replace(path: &Path, bytes: &[u8]) -> Result<()> {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let new = path.with_file_name(format!("{name}.remotely-new"));
+        let written = async {
+            let mut file = tokio::fs::File::create(&new).await?;
+            file.write_all(bytes).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&new, path).await
+        }
+        .await;
+        if let Err(err) = written {
+            let _ = tokio::fs::remove_file(&new).await;
+            return Err(err.into());
+        }
+        Ok(())
+    }
+
+    pub async fn delete(paths: &[PathBuf]) -> Result<()> {
+        for path in paths {
+            refuse(path, "the file")?;
+        }
+        for path in paths {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn list(folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        refuse(folder, "the folder")?;
+        let mut entries = tokio::fs::read_dir(folder).await?;
+        let mut found = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let Ok(meta) = entry.metadata().await else {
+                continue;
+            };
+            if meta.is_file() {
+                found.push((entry.path(), meta.len()));
+            }
+        }
+        found.sort();
+        Ok(found)
+    }
 }
 
 /// Builds the adapter for this machine. When vmrun cannot be found the app still starts: the library,
@@ -186,6 +347,28 @@ pub fn locate_vmrun(override_path: Option<PathBuf>) -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_file())
 }
 
+/// VM-16: vmware-vdiskmanager.exe: `REMOTELY_VDISKMANAGER`, then the folder of the vmrun.exe in use, then
+/// Workstation's install folder in the registry, then the default install folders.
+pub fn locate_vdiskmanager(vmrun: Option<&Path>) -> Option<PathBuf> {
+    locate_beside(vmrun, "vmware-vdiskmanager.exe", Some("REMOTELY_VDISKMANAGER"))
+}
+
+/// VM-24: vmware.exe (Workstation's window): the folder of the vmrun.exe in use, then the registry, then the
+/// default install folders.
+pub fn locate_vmware_exe(vmrun: Option<&Path>) -> Option<PathBuf> {
+    locate_beside(vmrun, "vmware.exe", None)
+}
+
+fn locate_beside(vmrun: Option<&Path>, file: &str, env: Option<&str>) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.extend(env.and_then(std::env::var_os).map(PathBuf::from));
+    candidates.extend(vmrun.and_then(Path::parent).map(|dir| dir.join(file)));
+    candidates.extend(registry_install_dirs().into_iter().map(|d| d.join(file)));
+    candidates.push(PathBuf::from(r"C:\Program Files (x86)\VMware\VMware Workstation").join(file));
+    candidates.push(PathBuf::from(r"C:\Program Files\VMware\VMware Workstation").join(file));
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 #[cfg(windows)]
 fn registry_install_dirs() -> Vec<PathBuf> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
@@ -215,6 +398,10 @@ pub fn default_library_path() -> Option<PathBuf> {
 
 pub struct VmrunAdapter {
     vmrun: PathBuf,
+    /// VM-16: found beside vmrun ([`locate_vdiskmanager`]).
+    vdiskmanager: Option<PathBuf>,
+    /// VM-24: Workstation's window ([`locate_vmware_exe`]).
+    vmware_exe: Option<PathBuf>,
 }
 
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -228,7 +415,56 @@ const SCAN_MAX_DIRS: usize = 20_000;
 
 impl VmrunAdapter {
     pub fn new(vmrun: PathBuf) -> Self {
-        Self { vmrun }
+        let vdiskmanager = locate_vdiskmanager(Some(&vmrun));
+        let vmware_exe = locate_vmware_exe(Some(&vmrun));
+        Self {
+            vmrun,
+            vdiskmanager,
+            vmware_exe,
+        }
+    }
+
+    /// An adapter with these tools, e.g. stand-ins in tests.
+    pub fn with_tools(vmrun: PathBuf, vdiskmanager: Option<PathBuf>, vmware_exe: Option<PathBuf>) -> Self {
+        Self {
+            vmrun,
+            vdiskmanager,
+            vmware_exe,
+        }
+    }
+
+    /// VM-16: runs vmware-vdiskmanager without a console window and returns its output. It reports failures
+    /// on stdout ("Failed to expand the disk ...") with a non-zero exit code.
+    async fn run_vdiskmanager(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        let tool = self.vdiskmanager.as_ref().ok_or(CoreError::VdiskManagerNotFound)?;
+        let label = vdisk_label(&args);
+        let mut cmd = tokio::process::Command::new(tool);
+        cmd.args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .map_err(|_| CoreError::Timeout {
+                command: format!("vmware-vdiskmanager {label}"),
+                seconds: timeout.as_secs(),
+            })??;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if output.status.success() {
+            Ok(stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(CoreError::VdiskManager {
+                command: label,
+                message: vdisk_message(&stdout, &stderr),
+            })
+        }
     }
 
     /// Runs `vmrun -T ws <args>` without a console window and returns stdout.
@@ -353,6 +589,73 @@ impl VmwareAdapter for VmrunAdapter {
 
     async fn running_since(&self, vmx: &Path) -> Result<Option<OffsetDateTime>> {
         read_log_start(vmx).await
+    }
+
+    async fn vdiskmanager(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.run_vdiskmanager(args, timeout).await
+    }
+
+    async fn vmrun_change(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.run(args, timeout).await
+    }
+
+    async fn open_console(&self, vmx: &Path) -> Result<()> {
+        let window = self.vmware_exe.as_ref().ok_or_else(|| {
+            CoreError::VmSettingRefused(
+                "vmware.exe is not next to vmrun.exe, so Remotely can't open Workstation's window".into(),
+            )
+        })?;
+        // A tab in Workstation's window; the VM is not powered on.
+        std::process::Command::new(window)
+            .arg(vmx)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(drop)
+            .map_err(CoreError::from)
+    }
+}
+
+/// How a vdiskmanager call is named in errors: `-c` is "create", `-x` "expand", `-k` "shrink", `-d`
+/// "defragment".
+fn vdisk_label(args: &[OsString]) -> String {
+    let flags: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+    for (flag, name) in [
+        ("-c", "create"),
+        ("-x", "expand"),
+        ("-k", "shrink"),
+        ("-d", "defragment"),
+    ] {
+        if flags.iter().any(|f| f == flag) {
+            return name.to_owned();
+        }
+    }
+    flags.first().cloned().unwrap_or_default()
+}
+
+/// vdiskmanager's own words from a failed call: its lines that say what failed, without the banner and
+/// the progress lines.
+pub fn vdisk_message(stdout: &str, stderr: &str) -> String {
+    let lines: Vec<&str> = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter(|l| !l.starts_with("VMware Virtual Disk Manager") && !l.contains("% done"))
+        .collect();
+    let failed: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| {
+            let lower = l.to_ascii_lowercase();
+            lower.contains("fail") || lower.contains("error") || lower.contains("cannot") || lower.contains("not ")
+        })
+        .collect();
+    if failed.is_empty() {
+        lines.join(" ")
+    } else {
+        failed.join(" ")
     }
 }
 
@@ -812,6 +1115,42 @@ impl VmwareAdapter for SwitchableVmware {
     async fn hardware(&self, vmx: &Path) -> Result<VmHardware> {
         self.current().hardware(vmx).await
     }
+    async fn vmx_bytes(&self, vmx: &Path) -> Result<Vec<u8>> {
+        self.current().vmx_bytes(vmx).await
+    }
+    async fn backup_vmx(&self, vmx: &Path, tag: &str) -> Result<PathBuf> {
+        self.current().backup_vmx(vmx, tag).await
+    }
+    async fn write_vmx(&self, vmx: &Path, bytes: &[u8]) -> Result<()> {
+        self.current().write_vmx(vmx, bytes).await
+    }
+    async fn restore_vmx(&self, vmx: &Path, backup: &Path) -> Result<()> {
+        self.current().restore_vmx(vmx, backup).await
+    }
+    async fn discard_backup(&self, backup: &Path) -> Result<()> {
+        self.current().discard_backup(backup).await
+    }
+    async fn vdiskmanager(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.current().vdiskmanager(args, timeout).await
+    }
+    async fn vmrun_change(&self, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        self.current().vmrun_change(args, timeout).await
+    }
+    async fn delete_files(&self, paths: &[PathBuf]) -> Result<()> {
+        self.current().delete_files(paths).await
+    }
+    async fn disk_files(&self, path: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        self.current().disk_files(path).await
+    }
+    async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        self.current().folder_files(folder).await
+    }
+    async fn file_exists(&self, path: &Path) -> bool {
+        self.current().file_exists(path).await
+    }
+    async fn open_console(&self, vmx: &Path) -> Result<()> {
+        self.current().open_console(vmx).await
+    }
 }
 
 /// Checks a user-chosen vmrun path before it is saved: it must be an existing file named vmrun.exe.
@@ -1168,6 +1507,121 @@ snapshot2.disk0.node = "scsi0:0"
             Some(time::macros::datetime!(2026-08-08 15:19:28.598 UTC))
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_vmx_is_backed_up_replaced_whole_and_put_back() {
+        let dir = std::env::temp_dir().join(format!("remotely-vmx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let vmx = dir.join("web01.vmx");
+        std::fs::write(&vmx, "displayName = \"web01\"\r\nmemsize = \"1024\"\r\n").unwrap();
+        let adapter = MissingWorkstation;
+        let backup = adapter.backup_vmx(&vmx, "ab12cd34").await.unwrap();
+        assert_eq!(backup, dir.join("web01.vmx.ab12cd34.remotely-backup"));
+        adapter
+            .write_vmx(&vmx, b"displayName = \"web01\"\r\nmemsize = \"2048\"\r\n")
+            .await
+            .unwrap();
+        assert!(std::fs::read_to_string(&vmx).unwrap().contains("2048"));
+        assert!(
+            !dir.join("web01.vmx.remotely-new").exists(),
+            "the new file took the .vmx's place"
+        );
+        adapter.restore_vmx(&vmx, &backup).await.unwrap();
+        assert!(std::fs::read_to_string(&vmx).unwrap().contains("1024"));
+        adapter.discard_backup(&backup).await.unwrap();
+        adapter.discard_backup(&backup).await.unwrap();
+        assert!(!backup.exists());
+        let listed = adapter.folder_files(&dir).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert!(adapter.file_exists(&vmx).await);
+        assert!(!adapter.file_exists(Path::new(r"\\nas.example.com\vms\web01.vmx")).await);
+        let refused = adapter
+            .delete_files(&[PathBuf::from(r"\\nas.example.com\vms\web01.vmdk")])
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), "vm_setting_refused");
+        adapter
+            .delete_files(&[vmx.clone(), dir.join("never-there.vmdk")])
+            .await
+            .unwrap();
+        assert!(!vmx.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// VM-16: the real adapter against a stand-in vmware-vdiskmanager (a batch file made at run time): it
+    /// writes its arguments to a file, and fails like vdiskmanager when asked to expand `bad.vmdk`.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn vdiskmanager_runs_with_its_arguments_and_reports_its_failures() {
+        let dir = std::env::temp_dir().join(format!("remotely-vdisk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("vmware-vdiskmanager.cmd");
+        let args_file = dir.join("args.txt");
+        std::fs::write(
+            &tool,
+            format!(
+                "@echo off\r\necho %*> \"{}\"\r\necho %* | findstr /c:\"bad.vmdk\" >nul && (echo VMware Virtual Disk Manager - build 1.\r\necho Failed to expand the disk 'bad.vmdk': The file is locked by another process.\r\nexit /b 1)\r\necho Disk expansion completed successfully.\r\nexit /b 0\r\n",
+                args_file.display()
+            ),
+        )
+        .unwrap();
+        let adapter = VmrunAdapter::with_tools(dir.join("vmrun.exe"), Some(tool), None);
+        let disk = dir.join("web01.vmdk");
+        let out = adapter
+            .vdiskmanager(
+                crate::vm_settings::vmware::expand_args(&disk, 61440),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        assert!(out.contains("completed successfully"));
+        let args = std::fs::read_to_string(&args_file).unwrap();
+        assert!(args.starts_with("-x 61440MB "), "{args}");
+        assert!(args.contains("web01.vmdk"), "{args}");
+        let err = adapter
+            .vdiskmanager(
+                crate::vm_settings::vmware::expand_args(&dir.join("bad.vmdk"), 61440),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "vdiskmanager_failed");
+        assert_eq!(
+            err.to_string(),
+            "vmware-vdiskmanager expand failed: Failed to expand the disk 'bad.vmdk': The file is locked by another process."
+        );
+        let missing = VmrunAdapter::with_tools(dir.join("vmrun.exe"), None, None);
+        assert_eq!(
+            missing
+                .vdiskmanager(Vec::new(), Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .code(),
+            "vdiskmanager_not_found"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn tools_beside_vmrun_are_found_in_its_folder() {
+        let dir = std::env::temp_dir().join(format!("remotely-tools-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("vmrun.exe"), b"").unwrap();
+        std::fs::write(dir.join("vmware-vdiskmanager.exe"), b"").unwrap();
+        let vmrun = dir.join("vmrun.exe");
+        if std::env::var_os("REMOTELY_VDISKMANAGER").is_none() {
+            assert_eq!(
+                locate_vdiskmanager(Some(&vmrun)),
+                Some(dir.join("vmware-vdiskmanager.exe"))
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(vdisk_label(&["-k".into(), "x.vmdk".into()]), "shrink");
+        assert_eq!(
+            vdisk_message("  Grow: 100% done.\nFailed: no space", ""),
+            "Failed: no space"
+        );
     }
 
     #[test]

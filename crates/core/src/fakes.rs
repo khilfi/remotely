@@ -33,7 +33,8 @@ use crate::adapters::remote::{
 };
 use crate::adapters::updater::{ReleaseCheck, TokenReport, UpdateInfo, UpdaterAdapter};
 use crate::adapters::virtualbox::{
-    self as vbox, VboxDisk, VboxListedVm, VboxNic, VboxVmInfo, VirtualBoxAdapter, GUEST_NET_COUNT, GUEST_OS_PRODUCT,
+    self as vbox, VboxController, VboxDisk, VboxDvd, VboxListedVm, VboxNic, VboxVmInfo, VirtualBoxAdapter,
+    GUEST_NET_COUNT, GUEST_OS_PRODUCT,
 };
 use crate::adapters::vm_hardware::VmHardware;
 use crate::adapters::vmware::{path_key, LibraryVm, SnapshotInfo, SnapshotTree, ToolsState, VmwareAdapter, VmxInfo};
@@ -81,6 +82,39 @@ pub struct FakeVmware {
     snapshot_reads: Mutex<Vec<String>>,
     /// Calls that would each start a vmrun process.
     vmrun_runs: AtomicUsize,
+    /// VM-23: each VM's .vmx text, once a test gives it or Remotely writes it. Without one, a .vmx reads as
+    /// what its [`VmxInfo`] says.
+    vmx_texts: Mutex<HashMap<String, (PathBuf, String)>>,
+    /// VM-23: backup copies beside the .vmx files, by path.
+    backups: Mutex<HashMap<String, (PathBuf, String)>>,
+    /// VM-16: virtual disks by path: (path, provisioned MB, bytes on disk).
+    disks: Mutex<HashMap<String, (PathBuf, u64, u64)>>,
+    /// VM-16, VM-24: other files on "this PC" (ISOs, folders, a VM's logs), by path: (path, size).
+    files: Mutex<HashMap<String, (PathBuf, u64)>>,
+    /// VM-23: the next .vmx write fails (a full disk), so the backup is put back.
+    failing_vmx_write: AtomicBool,
+    /// VM-16: vdiskmanager fails.
+    failing_vdisk: AtomicBool,
+}
+
+/// What the fake writes for a .vmx it was given no text for.
+fn synthesized_vmx(info: &VmxInfo) -> String {
+    let mut text = String::from(".encoding = \"UTF-8\"\nconfig.version = \"8\"\nvirtualHW.version = \"21\"\n");
+    if let Some(name) = &info.display_name {
+        text.push_str(&format!(
+            "displayName = \"{}\"\n",
+            crate::adapters::vmx_file::escape_value(name)
+        ));
+    }
+    if let Some(os) = &info.guest_os {
+        text.push_str(&format!("guestOS = \"{os}\"\n"));
+    }
+    text.push_str(&format!("numvcpus = \"{}\"\n", info.num_vcpus.unwrap_or(1)));
+    text.push_str(&format!("memsize = \"{}\"\n", info.memsize_mb.unwrap_or(1024)));
+    if info.suspended {
+        text.push_str("checkpoint.vmState = \"saved.vmss\"\n");
+    }
+    text
 }
 
 impl FakeVmware {
@@ -205,6 +239,141 @@ impl FakeVmware {
         self
     }
 
+    /// VM-23: the .vmx's text. Its keys then answer `read_vmx` and `hardware`, and Remotely's edits change it.
+    pub fn with_vmx_text(self, vmx: &str, text: &str) -> Self {
+        locks::lock(&self.vmx_texts).insert(path_key(Path::new(vmx)), (PathBuf::from(vmx), text.to_owned()));
+        self
+    }
+
+    /// VM-16: a virtual disk of `size_mb` at `path`, taking a tenth of that on disk.
+    pub fn with_disk(self, path: &str, size_mb: u64) -> Self {
+        locks::lock(&self.disks).insert(
+            path_key(Path::new(path)),
+            (PathBuf::from(path), size_mb, size_mb * 1024 * 1024 / 10),
+        );
+        self
+    }
+
+    /// VM-16, VM-24: a file (an ISO, a folder to share, a VM's log) of `size` bytes.
+    pub fn with_file(self, path: &str, size: u64) -> Self {
+        locks::lock(&self.files).insert(path_key(Path::new(path)), (PathBuf::from(path), size));
+        self
+    }
+
+    /// VM-23: from now on writing a .vmx fails (or works again).
+    pub fn set_failing_vmx_write(&self, failing: bool) {
+        self.failing_vmx_write.store(failing, Ordering::SeqCst);
+    }
+
+    /// VM-16: from now on vdiskmanager fails (or works again).
+    pub fn set_failing_vdisk(&self, failing: bool) {
+        self.failing_vdisk.store(failing, Ordering::SeqCst);
+    }
+
+    /// VM-23: the .vmx's text now (as Remotely last wrote it, or as the test gave it).
+    pub fn vmx_text(&self, vmx: &str) -> Option<String> {
+        locks::lock(&self.vmx_texts)
+            .get(&path_key(Path::new(vmx)))
+            .map(|(_, t)| t.clone())
+    }
+
+    /// VM-23: the backup copies still beside .vmx files.
+    pub fn backups(&self) -> Vec<PathBuf> {
+        locks::lock(&self.backups).values().map(|(p, _)| p.clone()).collect()
+    }
+
+    /// VM-16: a disk's provisioned size in MB, if it is there.
+    pub fn disk_size_mb(&self, path: &str) -> Option<u64> {
+        locks::lock(&self.disks)
+            .get(&path_key(Path::new(path)))
+            .map(|(_, mb, _)| *mb)
+    }
+
+    /// Whether a file (a disk, a .vmx or another file) is there.
+    pub fn has_file(&self, path: &str) -> bool {
+        let key = path_key(Path::new(path));
+        locks::lock(&self.files).contains_key(&key)
+            || locks::lock(&self.disks).contains_key(&key)
+            || locks::lock(&self.vmx_texts).contains_key(&key)
+    }
+
+    fn text_of(&self, vmx: &Path) -> Result<String> {
+        let key = path_key(vmx);
+        if self.gone.contains(&key) {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+        }
+        if let Some((_, text)) = locks::lock(&self.vmx_texts).get(&key) {
+            return Ok(text.clone());
+        }
+        let info = self.vmx.get(&key).cloned().unwrap_or_else(|| VmxInfo {
+            display_name: vmx.file_stem().map(|s| s.to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        Ok(synthesized_vmx(&info))
+    }
+
+    /// The .vmx's text with `key` set (the fake's own edits: an upgrade).
+    fn set_vmx_key(&self, vmx: &Path, key: &str, value: &str) -> Result<()> {
+        let mut file = crate::adapters::vmx_file::VmxFile::from_text(&self.text_of(vmx)?);
+        file.set(key, value)?;
+        locks::lock(&self.vmx_texts).insert(path_key(vmx), (vmx.to_path_buf(), file.to_text()));
+        Ok(())
+    }
+
+    /// VM-16: what vdiskmanager does with these arguments.
+    fn vdisk(&self, args: &[String]) -> Result<String> {
+        let failed = |command: &str, message: &str| CoreError::VdiskManager {
+            command: command.into(),
+            message: message.into(),
+        };
+        let path = args.last().cloned().unwrap_or_default();
+        let key = path_key(Path::new(&path));
+        let size_of = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|i| args.get(i + 1))
+                .and_then(|s| s.strip_suffix("MB"))
+                .and_then(|s| s.parse::<u64>().ok())
+        };
+        let mut disks = locks::lock(&self.disks);
+        match args.first().map(String::as_str) {
+            Some("-c") => {
+                if disks.contains_key(&key) {
+                    return Err(failed("create", "The file already exists"));
+                }
+                let size = size_of("-s").ok_or_else(|| failed("create", "Invalid size"))?;
+                let thick = args.iter().position(|a| a == "-t").and_then(|i| args.get(i + 1)) == Some(&"2".to_owned());
+                let on_disk = if thick { size * 1024 * 1024 } else { 65536 };
+                disks.insert(key, (PathBuf::from(&path), size, on_disk));
+                Ok("Virtual disk creation successful.".into())
+            }
+            Some("-x") => {
+                let size = size_of("-x").ok_or_else(|| failed("expand", "Invalid size"))?;
+                let disk = disks
+                    .get_mut(&key)
+                    .ok_or_else(|| failed("expand", "Failed to open the disk: The file was not found"))?;
+                if size <= disk.1 {
+                    return Err(failed("expand", "The new capacity must be larger"));
+                }
+                disk.1 = size;
+                Ok("Disk expansion completed successfully.".into())
+            }
+            Some(flag @ ("-k" | "-d")) => {
+                let disk = disks.get_mut(&key).ok_or_else(|| {
+                    failed(
+                        if flag == "-k" { "shrink" } else { "defragment" },
+                        "Failed to open the disk",
+                    )
+                })?;
+                if flag == "-k" {
+                    disk.2 /= 2;
+                }
+                Ok("done".into())
+            }
+            _ => Err(failed("?", "Unknown operation")),
+        }
+    }
+
     pub fn calls(&self) -> Vec<String> {
         locks::lock(&self.calls).clone()
     }
@@ -304,6 +473,14 @@ impl VmwareAdapter for FakeVmware {
         let key = path_key(vmx);
         if self.gone.contains(&key) {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound).into());
+        }
+        if let Some((_, text)) = locks::lock(&self.vmx_texts).get(&key) {
+            let mut info = crate::adapters::vmware::parse_vmx(text);
+            // What VMware Tools reported stays with the VM.
+            if info.guest_os_name.is_none() {
+                info.guest_os_name = self.vmx.get(&key).and_then(|i| i.guest_os_name.clone());
+            }
+            return Ok(info);
         }
         Ok(self.vmx.get(&key).cloned().unwrap_or_else(|| VmxInfo {
             display_name: vmx.file_stem().map(|s| s.to_string_lossy().into_owned()),
@@ -438,6 +615,30 @@ impl VmwareAdapter for FakeVmware {
         if let Some(hardware) = self.hardware.get(&key) {
             return Ok(hardware.clone());
         }
+        let text = locks::lock(&self.vmx_texts).get(&key).map(|(_, t)| t.clone());
+        if let Some(text) = text {
+            // VM-23: what the .vmx says, with each disk's sizes from the fake's disks.
+            let (mut hardware, disks) = crate::adapters::vm_hardware::parse_vmx_hardware(&text);
+            let folder = vmx.parent().unwrap_or(Path::new(""));
+            let known = locks::lock(&self.disks);
+            for disk in disks {
+                let path = crate::vm_settings::vmware::resolve(folder, &disk.file_name);
+                let found = known.get(&path_key(&path));
+                hardware.disks.push(crate::adapters::vm_hardware::VirtualDisk {
+                    slot: disk.slot,
+                    path: path.display().to_string(),
+                    format: found.map(|_| "monolithicSparse".to_owned()),
+                    provisioned_bytes: found.map(|(_, mb, _)| mb * 1024 * 1024),
+                    on_disk_bytes: found.map(|(_, _, bytes)| *bytes),
+                    files: u32::from(found.is_some()),
+                    problem: found.is_none().then(|| "the disk file is not there".to_owned()),
+                    controller: disk.controller,
+                    thin: found.map(|_| true),
+                    ..Default::default()
+                });
+            }
+            return Ok(hardware);
+        }
         let info = self.read_vmx(vmx).await?;
         Ok(VmHardware {
             guest_os: info.guest_os,
@@ -446,6 +647,160 @@ impl VmwareAdapter for FakeVmware {
             memory_mb: info.memsize_mb,
             ..VmHardware::default()
         })
+    }
+
+    async fn vmx_bytes(&self, vmx: &Path) -> Result<Vec<u8>> {
+        Ok(self.text_of(vmx)?.into_bytes())
+    }
+
+    async fn backup_vmx(&self, vmx: &Path, tag: &str) -> Result<PathBuf> {
+        let text = self.text_of(vmx)?;
+        let copy = crate::adapters::vmware::files::backup_path(vmx, tag);
+        self.record(format!("backup {}", vmx.display()));
+        locks::lock(&self.backups).insert(path_key(&copy), (copy.clone(), text));
+        Ok(copy)
+    }
+
+    async fn write_vmx(&self, vmx: &Path, bytes: &[u8]) -> Result<()> {
+        self.record(format!("write {}", vmx.display()));
+        if self.failing_vmx_write.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("There is not enough space on the disk.").into());
+        }
+        let text = String::from_utf8(bytes.to_vec()).map_err(|e| CoreError::InvalidInput(e.to_string()))?;
+        locks::lock(&self.vmx_texts).insert(path_key(vmx), (vmx.to_path_buf(), text));
+        Ok(())
+    }
+
+    async fn restore_vmx(&self, vmx: &Path, backup: &Path) -> Result<()> {
+        self.record(format!("restore {}", vmx.display()));
+        let text = locks::lock(&self.backups)
+            .get(&path_key(backup))
+            .map(|(_, t)| t.clone())
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
+        locks::lock(&self.vmx_texts).insert(path_key(vmx), (vmx.to_path_buf(), text));
+        Ok(())
+    }
+
+    async fn discard_backup(&self, backup: &Path) -> Result<()> {
+        locks::lock(&self.backups).remove(&path_key(backup));
+        Ok(())
+    }
+
+    async fn vdiskmanager(&self, args: Vec<std::ffi::OsString>, _timeout: Duration) -> Result<String> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        self.record(format!("vdiskmanager {}", args.join(" ")));
+        if self.failing_vdisk.load(Ordering::SeqCst) {
+            return Err(CoreError::VdiskManager {
+                command: "?".into(),
+                message: "Failed: insufficient disk space".into(),
+            });
+        }
+        self.vdisk(&args)
+    }
+
+    async fn vmrun_change(&self, args: Vec<std::ffi::OsString>, _timeout: Duration) -> Result<String> {
+        self.vmrun()?;
+        let args: Vec<String> = args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        self.record(format!("vmrun {}", args.join(" ")));
+        let vmx = PathBuf::from(args.get(1).cloned().unwrap_or_default());
+        let failed = |command: &str, message: &str| CoreError::Vmrun {
+            command: command.into(),
+            message: message.into(),
+        };
+        match args.first().map(String::as_str) {
+            Some("upgradevm") => {
+                if self.is_running(&vmx) {
+                    return Err(failed("upgradevm", "The virtual machine is powered on"));
+                }
+                self.set_vmx_key(&vmx, "virtualHW.version", "22")?;
+            }
+            Some("installTools") => {
+                if !self.is_running(&vmx) {
+                    return Err(failed("installTools", "The virtual machine is not powered on"));
+                }
+            }
+            Some("connectNamedDevice" | "disconnectNamedDevice" | "writeVariable") => {
+                if !self.is_running(&vmx) {
+                    return Err(failed(&args[0], "The virtual machine is not powered on"));
+                }
+            }
+            Some("deleteVM") => {
+                if self.is_running(&vmx) {
+                    return Err(failed("deleteVM", "The virtual machine is powered on"));
+                }
+                let key = path_key(&vmx);
+                let folder = path_key(vmx.parent().unwrap_or(Path::new("")));
+                locks::lock(&self.vmx_texts).remove(&key);
+                // Workstation deletes the VM's own files in its folder; a disk outside it stays.
+                let in_folder = |p: &Path| p.parent().is_some_and(|f| path_key(f) == folder);
+                locks::lock(&self.disks).retain(|_, (p, _, _)| !in_folder(p));
+                locks::lock(&self.files).retain(|_, (p, _)| {
+                    let name = p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_lowercase())
+                        .unwrap_or_default();
+                    !(in_folder(p) && (name.ends_with(".log") || name.ends_with(".vmsd") || name.ends_with(".nvram")))
+                });
+                locks::lock(&self.snapshots).remove(&key);
+            }
+            _ => return Err(failed("?", "Unknown command")),
+        }
+        Ok(String::new())
+    }
+
+    async fn delete_files(&self, paths: &[PathBuf]) -> Result<()> {
+        for path in paths {
+            if crate::untrusted::path_refusal(path).is_some() {
+                return Err(CoreError::VmSettingRefused(format!(
+                    "{} is not on this PC",
+                    path.display()
+                )));
+            }
+        }
+        for path in paths {
+            self.record(format!("delete {}", path.display()));
+            let key = path_key(path);
+            locks::lock(&self.disks).remove(&key);
+            locks::lock(&self.files).remove(&key);
+        }
+        Ok(())
+    }
+
+    async fn disk_files(&self, path: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        locks::lock(&self.disks)
+            .get(&path_key(path))
+            .map(|(p, _, bytes)| vec![(p.clone(), *bytes)])
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
+    }
+
+    async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        let folder = path_key(folder);
+        let here = |p: &Path| p.parent().is_some_and(|f| path_key(f) == folder);
+        let mut out: Vec<(PathBuf, u64)> = Vec::new();
+        for (path, text) in locks::lock(&self.vmx_texts).values() {
+            if here(path) {
+                out.push((path.clone(), text.len() as u64));
+            }
+        }
+        out.extend(
+            locks::lock(&self.disks)
+                .values()
+                .filter(|(p, _, _)| here(p))
+                .map(|(p, _, bytes)| (p.clone(), *bytes)),
+        );
+        out.extend(locks::lock(&self.files).values().filter(|(p, _)| here(p)).cloned());
+        out.sort();
+        Ok(out)
+    }
+
+    async fn file_exists(&self, path: &Path) -> bool {
+        crate::untrusted::path_refusal(path).is_none() && self.has_file(&path.to_string_lossy())
+    }
+
+    async fn open_console(&self, vmx: &Path) -> Result<()> {
+        self.vmrun()?;
+        self.record(format!("console {}", vmx.display()));
+        Ok(())
     }
 }
 
@@ -523,6 +878,24 @@ pub struct FakeVirtualBox {
     vboxmanage_runs: AtomicUsize,
     /// VM-01: `list vms` takes this long (a busy VirtualBox), so refreshes overlap.
     list_delay: Duration,
+    /// VM-16, VM-24: files on "this PC" (disk images, ISOs, a VM's logs), by path: (path, size).
+    files: Mutex<HashMap<String, (PathBuf, u64)>>,
+    /// VM-16: each disk image's provisioned size in MB, by path.
+    disk_sizes: Mutex<HashMap<String, u64>>,
+    /// VM-23: what each VM's .vbox file adds (TPM, shared folders' flags).
+    extras: Mutex<HashMap<String, vbox::VboxSettingsExtras>>,
+    /// VM-24: VMs whose .vbox `registervm` can add, by the file's path.
+    registerable: Mutex<HashMap<String, VboxVmInfo>>,
+    /// VM-15: VirtualBox's folder has no VBoxGuestAdditions.iso.
+    no_additions_iso: bool,
+}
+
+/// The value after `--name` in a VBoxManage call.
+fn option<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
 }
 
 /// The VBoxManage `VMState` for a power state.
@@ -578,8 +951,23 @@ impl FakeVirtualBox {
                 mac: Some("080027000001".into()),
                 model: Some("82540EM".into()),
                 cable_connected: Some(true),
+                network_name: None,
             }],
             snapshots: SnapshotTree::default(),
+            controllers: vec![VboxController {
+                name: "SATA".into(),
+                kind: Some("IntelAhci".into()),
+                ports: Some(2),
+            }],
+            dvds: vec![VboxDvd {
+                slot: "SATA-1-0".into(),
+                image: None,
+                host_drive: None,
+            }],
+            audio: Some("default".into()),
+            video_memory_mb: Some(16),
+            graphics_controller: Some("vmsvga".into()),
+            ..VboxVmInfo::default()
         };
         locks::lock(&self.vms).push(info);
         self
@@ -679,6 +1067,381 @@ impl FakeVirtualBox {
     /// The VMs whose snapshot tree was read, in order.
     pub fn snapshot_reads(&self) -> Vec<String> {
         locks::lock(&self.snapshot_reads).clone()
+    }
+
+    /// VM-16, VM-24: a file of `size` bytes on this PC (an ISO, a VM's log).
+    pub fn with_file(self, path: &str, size: u64) -> Self {
+        locks::lock(&self.files).insert(path_key(Path::new(path)), (PathBuf::from(path), size));
+        self
+    }
+
+    /// VM-16: the VM's first disk image is `size_mb` and takes a tenth of that on disk; its file is there.
+    pub fn with_disk_size(self, path: &str, size_mb: u64) -> Self {
+        locks::lock(&self.disk_sizes).insert(path_key(Path::new(path)), size_mb);
+        self.with_file(path, size_mb * 1024 * 1024 / 10)
+    }
+
+    /// VM-23: what the VM's .vbox file says that showvminfo doesn't.
+    pub fn with_extras(self, uuid: &str, extras: vbox::VboxSettingsExtras) -> Self {
+        locks::lock(&self.extras).insert(uuid.to_owned(), extras);
+        self
+    }
+
+    /// VM-24: a .vbox at `path` that `registervm` can add: a VM like [`Self::with_vm`]'s, off.
+    pub fn registerable(self, path: &str, uuid: &str, name: &str) -> Self {
+        let probe = FakeVirtualBox::new().with_vm(uuid, name, PowerState::NotRunning);
+        if let Some(mut info) = probe.find(uuid) {
+            info.config_file = Some(PathBuf::from(path));
+            locks::lock(&self.registerable).insert(path_key(Path::new(path)), info);
+        }
+        self.with_file(path, 4000)
+    }
+
+    /// VM-15: VirtualBox's folder has no Guest Additions ISO.
+    pub fn without_additions_iso(mut self) -> Self {
+        self.no_additions_iso = true;
+        self
+    }
+
+    /// The VM as `showvminfo` would describe it now.
+    pub fn info(&self, uuid: &str) -> Option<VboxVmInfo> {
+        self.find(uuid)
+    }
+
+    /// Whether a file is there.
+    pub fn has_file(&self, path: &str) -> bool {
+        locks::lock(&self.files).contains_key(&path_key(Path::new(path)))
+    }
+
+    /// VM-16: a disk image's provisioned size in MB.
+    pub fn disk_size_mb(&self, path: &str) -> Option<u64> {
+        locks::lock(&self.disk_sizes).get(&path_key(Path::new(path))).copied()
+    }
+
+    /// VM-23 and on: what VBoxManage does with these arguments, as VirtualBox 7 would.
+    fn apply_change(&self, args: &[String]) -> Result<String> {
+        let failed = |command: &str, message: &str| Self::failed(command, message);
+        let sub = args.first().map(String::as_str).unwrap_or_default();
+        let uuid_at = match sub {
+            "sharedfolder" => 2,
+            "modifymedium" | "closemedium" | "createmedium" | "registervm" => usize::MAX,
+            _ => 1,
+        };
+        let uuid = args.get(uuid_at).cloned().unwrap_or_default();
+        let vm_now = || {
+            self.find(&uuid)
+                .ok_or_else(|| failed(sub, &format!("Could not find a registered machine named '{uuid}'")))
+        };
+        let locked = |info: &VboxVmInfo| {
+            if info.power_state().is_on() {
+                Err(failed(
+                    sub,
+                    &format!(
+                        "The machine '{}' is already locked for a session (or being unlocked)",
+                        info.name
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let with_vm = |change: &mut dyn FnMut(&mut VboxVmInfo) -> Result<()>| -> Result<()> {
+            let mut vms = locks::lock(&self.vms);
+            let vm = vms
+                .iter_mut()
+                .find(|v| v.uuid == uuid)
+                .ok_or_else(|| failed(sub, "The VM is gone"))?;
+            change(vm)
+        };
+        match sub {
+            "modifyvm" => {
+                locked(&vm_now()?)?;
+                let opts = &args[2..];
+                with_vm(&mut |vm| {
+                    for pair in opts.chunks(2) {
+                        let (name, value) = (pair[0].as_str(), pair.get(1).map(String::as_str).unwrap_or_default());
+                        let nic = |prefix: &str| name.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok());
+                        match name {
+                            "--cpus" => vm.cpus = value.parse().ok(),
+                            "--memory" => vm.memory_mb = value.parse().ok(),
+                            "--nested-hw-virt" => vm.nested_hw_virt = Some(value == "on"),
+                            "--firmware" => vm.firmware = Some(value.to_ascii_uppercase()),
+                            "--name" => {
+                                vm.name = value.to_owned();
+                            }
+                            "--ostype" => vm.os_type = Some(value.to_owned()),
+                            "--tpm-type" => {}
+                            _ => {
+                                let slot = |n: u32, nics: &mut Vec<VboxNic>| -> usize {
+                                    if let Some(i) = nics.iter().position(|x| x.slot == n) {
+                                        return i;
+                                    }
+                                    nics.push(VboxNic {
+                                        slot: n,
+                                        attachment: "none".into(),
+                                        ..VboxNic::default()
+                                    });
+                                    nics.sort_by_key(|x| x.slot);
+                                    nics.iter().position(|x| x.slot == n).unwrap_or(0)
+                                };
+                                if let Some(n) = nic("--nictype") {
+                                    let i = slot(n, &mut vm.nics);
+                                    vm.nics[i].model = Some(value.to_owned());
+                                } else if let Some(n) = nic("--nic") {
+                                    let i = slot(n, &mut vm.nics);
+                                    vm.nics[i].attachment = value.to_owned();
+                                    if vm.nics[i].mac.is_none() && value != "none" {
+                                        vm.nics[i].mac = Some(format!("0800270000{n:02X}"));
+                                    }
+                                } else if let Some(n) = nic("--macaddress") {
+                                    let i = slot(n, &mut vm.nics);
+                                    vm.nics[i].mac = Some(if value == "auto" {
+                                        format!("08002712{n:04X}")
+                                    } else {
+                                        value.to_owned()
+                                    });
+                                } else if let Some(n) = nic("--cableconnected") {
+                                    let i = slot(n, &mut vm.nics);
+                                    vm.nics[i].cable_connected = Some(value == "on");
+                                } else if let Some(n) = nic("--intnet")
+                                    .or_else(|| nic("--nat-network"))
+                                    .or_else(|| nic("--bridgeadapter"))
+                                    .or_else(|| nic("--hostonlyadapter"))
+                                {
+                                    let i = slot(n, &mut vm.nics);
+                                    vm.nics[i].network_name = Some(value.to_owned());
+                                } else {
+                                    return Err(failed("modifyvm", &format!("Invalid parameter '{name}'")));
+                                }
+                            }
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            "modifynvram" => {
+                locked(&vm_now()?)?;
+                let verb = args.get(2).map(String::as_str).unwrap_or_default();
+                with_vm(&mut |vm| {
+                    match verb {
+                        "inituefivarstore" => vm.secure_boot = Some(false),
+                        "enrollmssignatures" | "enrollorclpk" => {}
+                        "secureboot" => {
+                            if vm.secure_boot.is_none() {
+                                return Err(failed(
+                                    "modifynvram secureboot",
+                                    "The UEFI variable store doesn't exist",
+                                ));
+                            }
+                            vm.secure_boot = Some(args.get(3).is_some_and(|a| a == "--enable"));
+                        }
+                        _ => return Err(failed("modifynvram", "Unknown command")),
+                    }
+                    Ok(())
+                })?;
+            }
+            "sharedfolder" => {
+                let name = option(args, "--name").unwrap_or_default().to_owned();
+                match args.get(1).map(String::as_str) {
+                    Some("add") => {
+                        let path = option(args, "--hostpath").unwrap_or_default().to_owned();
+                        with_vm(&mut |vm| {
+                            vm.shared_folders.push((name.clone(), PathBuf::from(&path)));
+                            Ok(())
+                        })?;
+                    }
+                    _ => with_vm(&mut |vm| {
+                        let before = vm.shared_folders.len();
+                        vm.shared_folders.retain(|(n, _)| *n != name);
+                        if vm.shared_folders.len() == before {
+                            return Err(failed("sharedfolder remove", "No such shared folder"));
+                        }
+                        Ok(())
+                    })?,
+                }
+            }
+            "storagectl" => {
+                locked(&vm_now()?)?;
+                let name = option(args, "--name").unwrap_or_default().to_owned();
+                let ports = option(args, "--portcount").and_then(|p| p.parse::<u32>().ok());
+                let adding = args.iter().any(|a| a == "--add");
+                with_vm(&mut |vm| {
+                    if adding {
+                        vm.controllers.push(VboxController {
+                            name: name.clone(),
+                            kind: option(args, "--controller").map(str::to_owned),
+                            ports,
+                        });
+                    } else if let Some(c) = vm.controllers.iter_mut().find(|c| c.name == name) {
+                        c.ports = ports;
+                    }
+                    Ok(())
+                })?;
+            }
+            "storageattach" => {
+                let info = vm_now()?;
+                let controller = option(args, "--storagectl").unwrap_or_default().to_owned();
+                let port = option(args, "--port").unwrap_or("0");
+                let device = option(args, "--device").unwrap_or("0");
+                let kind = option(args, "--type").unwrap_or_default().to_owned();
+                let medium = option(args, "--medium").unwrap_or_default().to_owned();
+                let slot = format!("{controller}-{port}-{device}");
+                if !info.controllers.iter().any(|c| c.name == controller) {
+                    return Err(failed(
+                        "storageattach",
+                        &format!("Could not find a controller named '{controller}'"),
+                    ));
+                }
+                // A DVD's medium changes on a running VM too; anything else needs it off.
+                if kind != "dvddrive" {
+                    locked(&info)?;
+                } else if info.power_state().is_on() && !info.dvds.iter().any(|d| d.slot == slot) {
+                    return Err(failed("storageattach", "A drive can't be added to a running VM"));
+                }
+                let additions = self.guest_additions_iso().map(|iso| path_key(&iso));
+                let files = locks::lock(&self.files);
+                let exists = |p: &str| {
+                    let key = path_key(Path::new(p));
+                    files.contains_key(&key) || additions.as_ref() == Some(&key)
+                };
+                if !matches!(medium.as_str(), "none" | "emptydrive") && !exists(&medium) {
+                    return Err(failed(
+                        "storageattach",
+                        &format!("Could not find file for the medium '{medium}'"),
+                    ));
+                }
+                drop(files);
+                with_vm(&mut |vm| {
+                    vm.disks.retain(|d| d.slot != slot);
+                    if kind == "dvddrive" {
+                        vm.dvds.retain(|d| d.slot != slot);
+                        if medium != "none" {
+                            vm.dvds.push(VboxDvd {
+                                slot: slot.clone(),
+                                image: (medium != "emptydrive").then(|| PathBuf::from(&medium)),
+                                host_drive: None,
+                            });
+                        }
+                    } else if medium != "none" {
+                        vm.disks.push(VboxDisk {
+                            slot: slot.clone(),
+                            path: PathBuf::from(&medium),
+                        });
+                    }
+                    Ok(())
+                })?;
+            }
+            "createmedium" => {
+                let file = option(args, "--filename").unwrap_or_default().to_owned();
+                let size: u64 = option(args, "--size").and_then(|s| s.parse().ok()).unwrap_or(0);
+                if self.has_file(&file) {
+                    return Err(failed("createmedium", "The file already exists"));
+                }
+                let fixed = option(args, "--variant") == Some("Fixed");
+                locks::lock(&self.files).insert(
+                    path_key(Path::new(&file)),
+                    (
+                        PathBuf::from(&file),
+                        if fixed { size * 1024 * 1024 } else { 2 * 1024 * 1024 },
+                    ),
+                );
+                locks::lock(&self.disk_sizes).insert(path_key(Path::new(&file)), size);
+            }
+            "modifymedium" => {
+                let file = args.get(2).cloned().unwrap_or_default();
+                let key = path_key(Path::new(&file));
+                let mut sizes = locks::lock(&self.disk_sizes);
+                let size = sizes
+                    .get_mut(&key)
+                    .ok_or_else(|| failed("modifymedium", &format!("Could not find file for the medium '{file}'")))?;
+                if let Some(new) = option(args, "--resize").and_then(|s| s.parse::<u64>().ok()) {
+                    if new < *size {
+                        return Err(failed("modifymedium", "Shrinking is not yet supported"));
+                    }
+                    *size = new;
+                }
+            }
+            "closemedium" => {
+                let file = args.get(2).cloned().unwrap_or_default();
+                let key = path_key(Path::new(&file));
+                let in_use = locks::lock(&self.vms)
+                    .iter()
+                    .any(|vm| vm.disks.iter().any(|d| path_key(&d.path) == key));
+                if in_use {
+                    return Err(failed("closemedium", "The medium is attached to a virtual machine"));
+                }
+                if args.iter().any(|a| a == "--delete") {
+                    locks::lock(&self.files).remove(&key);
+                    locks::lock(&self.disk_sizes).remove(&key);
+                }
+            }
+            "controlvm" => {
+                let info = vm_now()?;
+                let verb = args.get(2).cloned().unwrap_or_default();
+                let Some(n) = verb.strip_prefix("setlinkstate").and_then(|n| n.parse::<u32>().ok()) else {
+                    return Err(failed("controlvm", "Unknown command"));
+                };
+                if !info.power_state().is_on() {
+                    return Err(failed(
+                        "controlvm",
+                        &format!("Machine '{}' is not currently running", info.name),
+                    ));
+                }
+                let on = args.get(3).is_some_and(|a| a == "on");
+                with_vm(&mut |vm| {
+                    if let Some(nic) = vm.nics.iter_mut().find(|x| x.slot == n) {
+                        nic.cable_connected = Some(on);
+                    }
+                    Ok(())
+                })?;
+            }
+            "unregistervm" => {
+                let info = vm_now()?;
+                locked(&info)?;
+                locks::lock(&self.vms).retain(|v| v.uuid != uuid);
+                if args.iter().any(|a| a == "--delete") {
+                    let folder = info
+                        .config_file
+                        .as_ref()
+                        .and_then(|f| f.parent())
+                        .map(path_key)
+                        .unwrap_or_default();
+                    let disks: Vec<String> = info.disks.iter().map(|d| path_key(&d.path)).collect();
+                    locks::lock(&self.files).retain(|key, (path, _)| {
+                        let own_disk = disks.contains(key);
+                        let in_folder = path.parent().is_some_and(|f| {
+                            let f = path_key(f);
+                            f == folder || f.starts_with(&format!("{folder}\\"))
+                        });
+                        let name = path
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_lowercase())
+                            .unwrap_or_default();
+                        let own = name.ends_with(".vbox")
+                            || name.ends_with(".vbox-prev")
+                            || name.ends_with(".nvram")
+                            || name.ends_with(".log");
+                        !(own_disk || (in_folder && own))
+                    });
+                }
+            }
+            "registervm" => {
+                let file = args.get(1).cloned().unwrap_or_default();
+                let info = locks::lock(&self.registerable)
+                    .get(&path_key(Path::new(&file)))
+                    .cloned()
+                    .ok_or_else(|| failed("registervm", &format!("Could not find file '{file}'")))?;
+                if self.find(&info.uuid).is_some() {
+                    return Err(failed(
+                        "registervm",
+                        &format!("Trying to open a VM config '{file}' which has the same UUID as an existing virtual machine"),
+                    ));
+                }
+                locks::lock(&self.vms).push(info);
+            }
+            _ => return Err(failed(sub, "Unknown command")),
+        }
+        Ok(String::new())
     }
 
     pub fn power_state(&self, uuid: &str) -> PowerState {
@@ -913,6 +1676,109 @@ impl VirtualBoxAdapter for FakeVirtualBox {
             return Err(Self::failed("showvminfo", "The VM's settings could not be read"));
         }
         Ok(self.find(uuid).map(|vm| vm.snapshots).unwrap_or_default())
+    }
+
+    /// MO-13, VM-23: as VirtualBox's own reader, with each disk's size from memory (no disk file is opened).
+    async fn hardware(&self, uuid: &str) -> Result<VmHardware> {
+        let info = self.vm_info(uuid).await?;
+        let props = self.guest_properties(uuid).await.unwrap_or_default();
+        let mut stripped = info.clone();
+        stripped.disks.clear();
+        let mut hardware = crate::adapters::vm_hardware::read_virtualbox(&stripped, None, None).await;
+        {
+            let sizes = locks::lock(&self.disk_sizes);
+            let files = locks::lock(&self.files);
+            for disk in &info.disks {
+                let key = path_key(&disk.path);
+                let controller = disk
+                    .slot
+                    .rsplitn(3, '-')
+                    .nth(2)
+                    .and_then(|name| info.controllers.iter().find(|c| c.name == name))
+                    .and_then(|c| c.kind.clone());
+                hardware.disks.push(crate::adapters::vm_hardware::VirtualDisk {
+                    slot: disk.slot.clone(),
+                    path: disk.path.display().to_string(),
+                    format: Some("VDI (dynamic)".into()),
+                    provisioned_bytes: sizes.get(&key).map(|mb| mb * 1024 * 1024),
+                    on_disk_bytes: files.get(&key).map(|(_, size)| *size),
+                    files: 1,
+                    controller,
+                    thin: Some(true),
+                    ..Default::default()
+                });
+            }
+        }
+        let extras = self.settings_extras(&info).await;
+        crate::adapters::vm_hardware::add_virtualbox_extras(&mut hardware, extras.as_ref(), vbox::guest_ips(&props));
+        Ok(hardware)
+    }
+
+    async fn settings_extras(&self, info: &VboxVmInfo) -> Option<vbox::VboxSettingsExtras> {
+        locks::lock(&self.extras).get(&info.uuid).cloned()
+    }
+
+    async fn change(&self, args: Vec<String>, _timeout: Duration) -> Result<String> {
+        self.installed()?;
+        self.record(format!("change {}", args.join(" ")));
+        self.apply_change(&args)
+    }
+
+    async fn os_types(&self) -> Result<Vec<vbox::VboxOsType>> {
+        self.installed()?;
+        Ok([
+            ("Ubuntu_64", "Ubuntu (64-bit)"),
+            ("Debian_64", "Debian (64-bit)"),
+            ("Windows11_64", "Windows 11 (64-bit)"),
+        ]
+        .into_iter()
+        .map(|(id, description)| vbox::VboxOsType {
+            id: id.into(),
+            description: description.into(),
+            family: None,
+        })
+        .collect())
+    }
+
+    async fn screenshot(&self, uuid: &str) -> Result<Vec<u8>> {
+        self.installed()?;
+        self.record(format!("screenshot {uuid}"));
+        if !self.power_state(uuid).is_on() {
+            return Err(Self::failed(
+                "controlvm screenshotpng",
+                "Machine is not currently running",
+            ));
+        }
+        Ok(b"\x89PNG\r\n\x1a\nfake".to_vec())
+    }
+
+    async fn open_console(&self, uuid: &str) -> Result<()> {
+        self.installed()?;
+        self.record(format!("console {uuid}"));
+        Ok(())
+    }
+
+    fn guest_additions_iso(&self) -> Option<PathBuf> {
+        (!self.no_additions_iso && !self.not_installed)
+            .then(|| PathBuf::from(r"C:\Program Files\Oracle\VirtualBox\VBoxGuestAdditions.iso"))
+    }
+
+    async fn file_exists(&self, path: &Path) -> bool {
+        let key = path_key(path);
+        crate::untrusted::path_refusal(path).is_none()
+            && (self.has_file(&path.to_string_lossy())
+                || self.guest_additions_iso().is_some_and(|iso| path_key(&iso) == key))
+    }
+
+    async fn folder_files(&self, folder: &Path) -> Result<Vec<(PathBuf, u64)>> {
+        let folder = path_key(folder);
+        let mut out: Vec<(PathBuf, u64)> = locks::lock(&self.files)
+            .values()
+            .filter(|(p, _)| p.parent().is_some_and(|f| path_key(f) == folder))
+            .cloned()
+            .collect();
+        out.sort();
+        Ok(out)
     }
 }
 

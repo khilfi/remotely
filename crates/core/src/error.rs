@@ -294,6 +294,21 @@ pub enum CoreError {
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
 
+    /// VM-16: vmware-vdiskmanager.exe is not beside vmrun.exe (nor where `REMOTELY_VDISKMANAGER` says).
+    #[error(
+        "vmware-vdiskmanager.exe was not found next to vmrun.exe. It comes with VMware Workstation Pro: repair the install, or set REMOTELY_VDISKMANAGER to its full path"
+    )]
+    VdiskManagerNotFound,
+
+    /// VM-16: vmware-vdiskmanager answered with an error; `message` is its own text.
+    #[error("vmware-vdiskmanager {command} failed: {message}")]
+    VdiskManager { command: String, message: String },
+
+    /// VM-23, VM-24: a VM setting or lifecycle change that can't be done on this VM now, and why in words:
+    /// it is running, it has snapshots, the hypervisor has no such setting, a file is not there...
+    #[error("{0}")]
+    VmSettingRefused(String),
+
     /// CT-01, CT-02: a container CLI could not do what was asked. The message says why in words and
     /// never holds a secret, a log line or an environment value.
     #[error("{message}")]
@@ -406,6 +421,9 @@ impl CoreError {
             CoreError::Sftp(_) => "sftp",
             CoreError::ReadOnlyLock { .. } => "read_only_lock",
             CoreError::NotImplemented(_) => "not_implemented",
+            CoreError::VdiskManagerNotFound => "vdiskmanager_not_found",
+            CoreError::VdiskManager { .. } => "vdiskmanager_failed",
+            CoreError::VmSettingRefused(_) => "vm_setting_refused",
             CoreError::Container { problem, .. } => problem.code(),
         }
     }
