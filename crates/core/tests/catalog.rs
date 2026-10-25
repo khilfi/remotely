@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use common::{temp_folder, vmx, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::catalog::{
-    AfterDeploy, DiskSpec, HashProgress, Image, ImageEdit, ImageFormat, ImageInput, ImageSource, Network, ProblemCode,
+    AfterDeploy, CloneMode, DiskSpec, HashProgress, Image, ImageEdit, ImageFormat, ImageInput, ImageSource, Network, ProblemCode,
     Provisioning, SizeInput, SourceInput, TemplateInput,
 };
 use remotely_core::domain::{Environment, PowerState};
@@ -107,6 +107,9 @@ fn template(name: &str, image: &Image, size_id: &str) -> TemplateInput {
         environment: Environment::Lab,
         tags: vec!["web".into()],
         after_deploy: AfterDeploy::default(),
+        guest_user: None,
+        packages: Vec::new(),
+        clone_mode: CloneMode::Full,
     }
 }
 

@@ -34,7 +34,7 @@ pub use self::images::{
 pub use self::profiles::{profiles, Firmware, OsProfile};
 pub use self::sizes::{built_in_sizes, DiskController, DiskSpec, Provisioning, Size, SizeInput};
 pub use self::templates::{
-    AfterDeploy, DeployPlan, KeyState, LaunchTemplate, Network, PlannedVm, Problem, ProblemCode, TemplateInput,
+    AfterDeploy, CloneMode, DeployPlan, KeyState, LaunchTemplate, Network, PlannedVm, Problem, ProblemCode, TemplateInput,
 };
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::domain::Context;
@@ -971,14 +971,18 @@ fn describe_template(spec: &TemplateInput, facts: &Facts) -> String {
         .size(&spec.size_id)
         .map_or_else(|| "a deleted size".to_owned(), |s| format!("size {}", s.name));
     format!(
-        "{image}, {size}, on {}, network {}, named {}, {} by default, environment {}, tags {}; after deploy: {}",
+        "{image}, {size}, on {}, network {}, named {}, {} by default, environment {}, tags {}; after deploy: {}; \
+         guest user {}, packages {}, golden VMs: {}",
         templates::hypervisor_label(spec.hypervisor),
         spec.network.describe(),
         spec.naming_pattern,
         spec.default_count,
         spec.environment.as_str(),
         templates::tags_text(&spec.tags),
-        spec.after_deploy.describe()
+        spec.after_deploy.describe(),
+        spec.guest_user.as_deref().unwrap_or("the image's default"),
+        templates::tags_text(&spec.packages),
+        spec.clone_mode.label()
     )
 }
 

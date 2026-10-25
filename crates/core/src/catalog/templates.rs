@@ -133,6 +133,97 @@ impl AfterDeploy {
     }
 }
 
+/// VM-21 (R2): how a golden VM image is cloned.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloneMode {
+    /// A copy that stands alone (the default).
+    #[default]
+    Full,
+    /// Shares the golden VM's snapshot disk: quicker and smaller, but it needs that snapshot, and its disk can't
+    /// grow to the size's.
+    Linked,
+}
+
+impl CloneMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CloneMode::Full => "full",
+            CloneMode::Linked => "linked",
+        }
+    }
+
+    /// Unknown values read as full, the safe kind.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "linked" => CloneMode::Linked,
+            _ => CloneMode::Full,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CloneMode::Full => "full clone",
+            CloneMode::Linked => "linked clone",
+        }
+    }
+}
+
+/// VM-22: the most packages cloud-init installs for one template.
+pub const MAX_PACKAGES: usize = 50;
+pub const MAX_PACKAGE_NAME: usize = 100;
+/// VM-22: Linux user names are at most 32 characters.
+pub const MAX_GUEST_USER: usize = 32;
+
+/// VM-22: a user name cloud-init can make: a lower case letter or `_` first, then lower case letters, digits, `_`
+/// and `-`, at most [`MAX_GUEST_USER`]; never root.
+pub fn check_guest_user(user: Option<&str>) -> Result<Option<String>> {
+    let Some(user) = user.map(str::trim).filter(|u| !u.is_empty()) else {
+        return Ok(None);
+    };
+    let mut chars = user.chars();
+    let first_ok = chars.next().is_some_and(|c| c.is_ascii_lowercase() || c == '_');
+    let rest_ok = chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-'));
+    if !first_ok || !rest_ok || user.len() > MAX_GUEST_USER {
+        return invalid(format!(
+            "'{user}' can't be a Linux user name: use lower case letters, digits, _ and -, starting with a letter, at most {MAX_GUEST_USER}."
+        ));
+    }
+    if user == "root" {
+        return invalid("The guest user can't be root: cloud-init makes a user of its own, with sudo.");
+    }
+    Ok(Some(user.to_owned()))
+}
+
+/// VM-22: package names as apt and dnf take them (letters, digits and `+ . _ -`, a letter or digit first), each
+/// once, at most [`MAX_PACKAGES`].
+pub fn check_packages(packages: &[String]) -> Result<Vec<String>> {
+    let mut out: Vec<String> = Vec::new();
+    for package in packages {
+        let package = package.trim();
+        if package.is_empty() {
+            continue;
+        }
+        let ok = package.len() <= MAX_PACKAGE_NAME
+            && package.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+            && package
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '_' | '-'));
+        if !ok {
+            return invalid(format!(
+                "'{package}' isn't a package name: use letters, digits and + . _ -, at most {MAX_PACKAGE_NAME}."
+            ));
+        }
+        if !out.iter().any(|p| p == package) {
+            out.push(package.to_owned());
+        }
+    }
+    if out.len() > MAX_PACKAGES {
+        return invalid(format!("A template installs at most {MAX_PACKAGES} packages."));
+    }
+    Ok(out)
+}
+
 /// A launch template's fields, as the editor sends them and the store keeps them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,6 +248,16 @@ pub struct TemplateInput {
     pub tags: Vec<String>,
     #[serde(default)]
     pub after_deploy: AfterDeploy,
+    /// VM-22 (R2): the user cloud-init makes on first boot, with sudo and the SSH key. `None`: the image's own
+    /// default user gets the key.
+    #[serde(default)]
+    pub guest_user: Option<String>,
+    /// VM-22 (R2): packages cloud-init installs on first boot.
+    #[serde(default)]
+    pub packages: Vec<String>,
+    /// VM-21 (R2): how a golden VM image is cloned.
+    #[serde(default)]
+    pub clone_mode: CloneMode,
 }
 
 /// Why a template can't deploy now.
@@ -442,6 +543,8 @@ pub fn check_template(input: &TemplateInput) -> Result<TemplateInput> {
     if input.after_deploy.link_session && !input.after_deploy.create_session {
         return invalid("Linking a session to the VM needs the session: tick \"Create the SSH session\" too.");
     }
+    let guest_user = check_guest_user(input.guest_user.as_deref())?;
+    let packages = check_packages(&input.packages)?;
     Ok(TemplateInput {
         name,
         image_id: input.image_id,
@@ -455,6 +558,9 @@ pub fn check_template(input: &TemplateInput) -> Result<TemplateInput> {
         environment: input.environment,
         tags,
         after_deploy: input.after_deploy,
+        guest_user,
+        packages,
+        clone_mode: input.clone_mode,
     })
 }
 
@@ -631,6 +737,12 @@ pub struct DeployPlan {
     /// [`CLEAN_SNAPSHOT_NAME`] when the template takes one.
     pub clean_snapshot: Option<&'static str>,
     pub vms: Vec<PlannedVm>,
+    /// VM-22 (R2): the user cloud-init makes; `None`: the image's default user.
+    pub guest_user: Option<String>,
+    /// VM-22 (R2): packages cloud-init installs.
+    pub packages: Vec<String>,
+    /// VM-21 (R2): how a golden VM image is cloned.
+    pub clone_mode: CloneMode,
 }
 
 impl DeployPlan {
@@ -772,6 +884,9 @@ pub fn resolve(
         after_deploy: template.after_deploy,
         clean_snapshot: template.after_deploy.clean_snapshot.then_some(CLEAN_SNAPSHOT_NAME),
         vms,
+        guest_user: template.guest_user.clone(),
+        packages: template.packages.clone(),
+        clone_mode: template.clone_mode,
     })
 }
 
@@ -899,6 +1014,18 @@ pub(crate) fn template_changes(
     if before.after_deploy != after.after_deploy {
         out.push(format!("after deploy -> {}", after.after_deploy.describe()));
     }
+    if before.guest_user != after.guest_user {
+        out.push(format!(
+            "guest user -> {}",
+            after.guest_user.as_deref().unwrap_or("the image's default")
+        ));
+    }
+    if before.packages != after.packages {
+        out.push(format!("packages -> {}", tags_text(&after.packages)));
+    }
+    if before.clone_mode != after.clone_mode {
+        out.push(format!("golden VMs: {}", after.clone_mode.label()));
+    }
     out
 }
 
@@ -954,6 +1081,9 @@ mod tests {
             environment: Environment::Lab,
             tags: vec!["web".into(), "Web".into(), "frontend".into()],
             after_deploy: AfterDeploy::default(),
+            guest_user: Some("alice".into()),
+            packages: vec!["nginx".into()],
+            clone_mode: CloneMode::Full,
         }
     }
 
@@ -1047,6 +1177,39 @@ mod tests {
             ..template("web-{n}", Hypervisor::Vmware)
         };
         assert_eq!(check_template(&none).unwrap().vm_folder, None);
+    }
+
+    #[test]
+    fn first_boot_settings_are_checked() {
+        assert_eq!(check_guest_user(None).unwrap(), None);
+        assert_eq!(check_guest_user(Some("  ")).unwrap(), None);
+        assert_eq!(check_guest_user(Some(" alice ")).unwrap().as_deref(), Some("alice"));
+        assert_eq!(check_guest_user(Some("_svc-01")).unwrap().as_deref(), Some("_svc-01"));
+        for bad in ["Alice", "1bob", "bob smith", "bob;id", "b\u{202e}ob", &"a".repeat(33)] {
+            assert!(check_guest_user(Some(bad)).is_err(), "{bad}");
+        }
+        assert!(check_guest_user(Some("root")).unwrap_err().to_string().contains("can't be root"));
+
+        let packages = |list: &[&str]| check_packages(&list.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>());
+        assert_eq!(
+            packages(&[" nginx ", "", "libstdc++6", "python3.12", "nginx", "NetworkManager"]).unwrap(),
+            ["nginx", "libstdc++6", "python3.12", "NetworkManager"],
+            "trimmed, each once"
+        );
+        for bad in ["-rf", "a b", "curl|sh", "x;y", "$(id)", "\"q\"", "pkg\n- runcmd"] {
+            assert!(packages(&[bad]).is_err(), "{bad}");
+        }
+        let many: Vec<String> = (0..51).map(|i| format!("p{i}")).collect();
+        assert!(check_packages(&many).unwrap_err().to_string().contains("at most 50"));
+
+        let input = TemplateInput {
+            guest_user: Some("Bob".into()),
+            ..template("web-{n}", Hypervisor::Vmware)
+        };
+        assert!(check_template(&input).is_err());
+        assert_eq!(CloneMode::parse("linked"), CloneMode::Linked);
+        assert_eq!(CloneMode::parse("something new"), CloneMode::Full);
+        assert_eq!(serde_json::to_value(CloneMode::Linked).unwrap(), "linked");
     }
 
     #[test]
