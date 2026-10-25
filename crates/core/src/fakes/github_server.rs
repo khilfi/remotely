@@ -1,20 +1,29 @@
 //! FD-14 tests: a stand-in for the GitHub API and its release storage on 127.0.0.1, and a throwaway
 //! update-signing key made at run time. No test talks to GitHub, and no token or key is committed.
 //!
-//! The fake behaves like GitHub does for a **private** repository:
+//! The fake behaves like GitHub does for a **private** repository, or a public one after
+//! [`FakeGithub::set_public`]:
 //!
-//! * The API needs a User-Agent and `Authorization: Bearer <token>` with a token it was given
-//!   ([`FakeGithub::add_token`]). Without a token it answers 404, as for a repository that doesn't
-//!   exist; an unknown, revoked or expired token gets 401 "Bad credentials". A token that can't see
-//!   the repository gets 404, one without Contents: Read-only gets 403. Answers to a token with an
-//!   expiry carry `GitHub-Authentication-Token-Expiration`.
+//! * The API needs a User-Agent. A private repository needs `Authorization: Bearer <token>` with a
+//!   token it was given ([`FakeGithub::add_token`]); without one it answers 404, as for a repository
+//!   that doesn't exist. A public one answers calls without a token too. An unknown, revoked or
+//!   expired token gets 401 "Bad credentials". A token that can't see the repository gets 404, one
+//!   without Contents: Read-only gets 403. Answers to a token with an expiry carry
+//!   `GitHub-Authentication-Token-Expiration`.
+//! * A used-up limit gets 403 with `x-ratelimit-remaining: 0` and a reset an hour away, for calls
+//!   with a token ([`FakeGithub::set_rate_limited`]) or without one
+//!   ([`FakeGithub::set_anonymous_rate_limited`]). The secondary limit
+//!   ([`FakeGithub::set_secondary_limit`]) gets 429 with `retry-after`.
 //! * `GET /repos/{owner}/{repo}/releases/assets/{id}` with `Accept: application/octet-stream`
-//!   redirects (302) to the second server, the "storage", on another port; any other Accept gets the
+//!   redirects (302) to the "storage", another server on another port; any other Accept gets the
 //!   asset's description as JSON.
+//! * A third server stands in for github.com: `GET /{owner}/{repo}/releases/download/{tag}/{name}`
+//!   (an asset's `browser_download_url`) redirects to the storage while the repository is public,
+//!   and answers 404 while it is private.
 //! * The storage serves a file only when the request carries no `Authorization` header (S3 refuses
 //!   two kinds of authorization at once).
 //!
-//! Both servers record every request, so tests can check where the token went.
+//! Every server records every request, so tests can check where the token went.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -134,18 +143,32 @@ impl SeenRequest {
 struct State {
     owner: String,
     repo: String,
+    /// Anyone may read the repository, without a token.
+    public: bool,
     tokens: HashMap<String, Token>,
     /// The latest published release: tag, notes, files.
     release: Option<(String, String, Vec<FakeAsset>)>,
     next_asset: u64,
+    /// The limit for calls with a token is used up.
     rate_limited: bool,
+    /// The limit for calls without a token is used up.
+    anonymous_rate_limited: bool,
+    /// The secondary limit: every API call gets 429 with this `retry-after`.
+    secondary_limit: Option<u64>,
     requests: Vec<SeenRequest>,
 }
 
-/// The fake GitHub API and storage. Both stop when it is dropped.
-pub struct FakeGithub {
+/// Where the fake's three servers listen.
+#[derive(Clone)]
+struct Urls {
     api: Url,
+    web: Url,
     storage: Url,
+}
+
+/// The fake GitHub API, github.com and storage. All stop when it is dropped.
+pub struct FakeGithub {
+    urls: Urls,
     state: Arc<Mutex<State>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -167,48 +190,47 @@ impl FakeGithub {
             next_asset: 1000,
             ..Default::default()
         }));
-        let api = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap_or_else(|e| panic!("bind: {e}"));
-        let storage = TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap_or_else(|e| panic!("bind: {e}"));
+        let mut listeners = Vec::new();
+        for _ in 0..3 {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .unwrap_or_else(|e| panic!("bind: {e}"));
+            listeners.push(listener);
+        }
         let url = |l: &TcpListener| {
             let addr = l.local_addr().unwrap_or_else(|e| panic!("local_addr: {e}"));
             Url::parse(&format!("http://{addr}/")).unwrap_or_else(|e| panic!("url: {e}"))
         };
-        let (api_url, storage_url) = (url(&api), url(&storage));
-        let tasks = vec![
-            tokio::spawn(serve(
-                api,
-                "api",
-                Arc::clone(&state),
-                storage_url.clone(),
-                api_url.clone(),
-            )),
-            tokio::spawn(serve(
-                storage,
-                "storage",
-                Arc::clone(&state),
-                storage_url.clone(),
-                api_url.clone(),
-            )),
-        ];
-        Self {
-            api: api_url,
-            storage: storage_url,
-            state,
-            tasks,
-        }
+        let urls = Urls {
+            api: url(&listeners[0]),
+            web: url(&listeners[1]),
+            storage: url(&listeners[2]),
+        };
+        let tasks = listeners
+            .into_iter()
+            .zip(["api", "web", "storage"])
+            .map(|(listener, server)| tokio::spawn(serve(listener, server, Arc::clone(&state), urls.clone())))
+            .collect();
+        Self { urls, state, tasks }
     }
 
     /// The API's base URL, in place of `https://api.github.com`.
     pub fn api_url(&self) -> Url {
-        self.api.clone()
+        self.urls.api.clone()
+    }
+
+    /// The stand-in for `https://github.com`, where public download links point.
+    pub fn web_url(&self) -> Url {
+        self.urls.web.clone()
     }
 
     pub fn storage_url(&self) -> Url {
-        self.storage.clone()
+        self.urls.storage.clone()
+    }
+
+    /// Public: the API and the download links answer without a token. Private (as it starts): 404.
+    pub fn set_public(&self, public: bool) {
+        locks::lock(&self.state).public = public;
     }
 
     pub fn repo(&self) -> GithubRepo {
@@ -235,8 +257,19 @@ impl FakeGithub {
         }
     }
 
+    /// The limit for calls with a token (5,000 an hour) is used up.
     pub fn set_rate_limited(&self, limited: bool) {
         locks::lock(&self.state).rate_limited = limited;
+    }
+
+    /// The limit for calls without a token (60 an hour from one address) is used up.
+    pub fn set_anonymous_rate_limited(&self, limited: bool) {
+        locks::lock(&self.state).anonymous_rate_limited = limited;
+    }
+
+    /// The secondary limit: every API call gets 429 with `retry-after: <seconds>`, until `None`.
+    pub fn set_secondary_limit(&self, retry_after: Option<u64>) {
+        locks::lock(&self.state).secondary_limit = retry_after;
     }
 
     /// Publishes a release with these files (name, content), replacing the latest one. Returns the
@@ -285,18 +318,14 @@ impl FakeGithub {
     /// `{api}/repos/{owner}/{repo}/releases/assets/{id}`, as tauri-action writes into latest.json.
     pub fn asset_api_url(&self, id: u64) -> Url {
         let state = locks::lock(&self.state);
-        api_asset_url(&self.api, &state.owner, &state.repo, id)
+        api_asset_url(&self.urls.api, &state.owner, &state.repo, id)
     }
 
-    /// `https://github.com/{owner}/{repo}/releases/download/{tag}/{name}`, which a private repository
-    /// does not serve to tokens.
+    /// `{web}/{owner}/{repo}/releases/download/{tag}/{name}` (an asset's `browser_download_url`),
+    /// which a public repository serves to anyone and a private one does not serve to tokens.
     pub fn download_link(&self, tag: &str, name: &str) -> Url {
         let state = locks::lock(&self.state);
-        Url::parse(&format!(
-            "https://github.com/{}/{}/releases/download/{tag}/{name}",
-            state.owner, state.repo
-        ))
-        .unwrap_or_else(|e| panic!("url: {e}"))
+        download_link(&self.urls.web, &state.owner, &state.repo, tag, name)
     }
 
     pub fn requests(&self) -> Vec<SeenRequest> {
@@ -325,11 +354,21 @@ fn api_asset_url(api: &Url, owner: &str, repo: &str, id: u64) -> Url {
         .unwrap_or_else(|e| panic!("url: {e}"))
 }
 
-async fn serve(listener: TcpListener, server: &'static str, state: Arc<Mutex<State>>, storage: Url, api: Url) {
+fn download_link(web: &Url, owner: &str, repo: &str, tag: &str, name: &str) -> Url {
+    web.join(&format!("{owner}/{repo}/releases/download/{tag}/{name}"))
+        .unwrap_or_else(|e| panic!("url: {e}"))
+}
+
+/// Where the storage serves asset `id`, with a signed key in the query as S3 has.
+fn storage_location(storage: &Url, id: u64) -> String {
+    format!("{storage}assets/{id}?X-Amz-Signature=fake-signed-url")
+}
+
+async fn serve(listener: TcpListener, server: &'static str, state: Arc<Mutex<State>>, urls: Urls) {
     while let Ok((socket, _)) = listener.accept().await {
-        let (state, storage, api) = (Arc::clone(&state), storage.clone(), api.clone());
+        let (state, urls) = (Arc::clone(&state), urls.clone());
         tokio::spawn(async move {
-            let _ = handle(socket, server, &state, &storage, &api).await;
+            let _ = handle(socket, server, &state, &urls).await;
         });
     }
 }
@@ -360,15 +399,37 @@ impl Reply {
         self.headers.push((name.to_owned(), value.to_owned()));
         self
     }
+
+    fn redirect(location: String) -> Self {
+        Self {
+            status: 302,
+            headers: vec![("Location".into(), location)],
+            body: Vec::new(),
+        }
+    }
+
+    fn not_found() -> Self {
+        Self {
+            status: 404,
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    }
+
+    /// GitHub's answer once a primary limit is used up: it resets an hour from now.
+    fn rate_limited(message: &str) -> Self {
+        let reset = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() + 3600)
+            .unwrap_or_default();
+        Self::message(403, message)
+            .header("x-ratelimit-limit", "60")
+            .header("x-ratelimit-remaining", "0")
+            .header("x-ratelimit-reset", &reset.to_string())
+    }
 }
 
-async fn handle(
-    mut socket: TcpStream,
-    server: &'static str,
-    state: &Mutex<State>,
-    storage: &Url,
-    api: &Url,
-) -> std::io::Result<()> {
+async fn handle(mut socket: TcpStream, server: &'static str, state: &Mutex<State>, urls: &Urls) -> std::io::Result<()> {
     let mut head = Vec::new();
     let mut buf = [0u8; 4096];
     while !head.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -395,7 +456,8 @@ async fn handle(
         let mut state = locks::lock(state);
         state.requests.push(seen.clone());
         match server {
-            "api" => api_reply(&state, &seen, storage, api),
+            "api" => api_reply(&state, &seen, urls),
+            "web" => web_reply(&state, &seen, urls),
             _ => storage_reply(&state, &seen),
         }
     };
@@ -422,40 +484,63 @@ fn reason(status: u16) -> &'static str {
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
+        429 => "Too Many Requests",
         _ => "Not Found",
     }
 }
 
-fn api_reply(state: &State, req: &SeenRequest, storage: &Url, api: &Url) -> Reply {
+fn api_reply(state: &State, req: &SeenRequest, urls: &Urls) -> Reply {
     if !req.headers.contains_key("user-agent") {
         return Reply::message(
             403,
             "Request forbidden by administrative rules. Please make sure your request has a User-Agent header",
         );
     }
+    if let Some(retry_after) = state.secondary_limit {
+        return Reply::message(429, "You have exceeded a secondary rate limit.")
+            .header("retry-after", &retry_after.to_string());
+    }
     let token = req
         .authorization()
         .and_then(|a| a.strip_prefix("Bearer ").or_else(|| a.strip_prefix("token ")));
-    // A private repository: without a token it does not exist.
     let Some(token) = token else {
-        return Reply::message(404, "Not Found");
+        if state.anonymous_rate_limited {
+            return Reply::rate_limited("API rate limit exceeded for 203.0.113.7.");
+        }
+        // A private repository: without a token it does not exist.
+        return match state.public {
+            true => route(state, req, TokenAccess::Releases, urls),
+            false => Reply::message(404, "Not Found"),
+        };
     };
     let Some(known) = state.tokens.get(token).filter(|t| !t.revoked) else {
         return Reply::message(401, "Bad credentials");
     };
     if state.rate_limited {
-        return Reply::message(403, "API rate limit exceeded for user ID 1.")
-            .header("x-ratelimit-remaining", "0")
-            .header("x-ratelimit-reset", "1700000000");
+        return Reply::rate_limited("API rate limit exceeded for user ID 1.");
     }
-    let reply = route(state, req, known.access, storage, api);
+    let reply = route(state, req, known.access, urls);
     match &known.expires {
         Some(expires) => reply.header("github-authentication-token-expiration", expires),
         None => reply,
     }
 }
 
-fn route(state: &State, req: &SeenRequest, access: TokenAccess, storage: &Url, api: &Url) -> Reply {
+/// github.com: a public repository's download links redirect to the storage; a private one's are 404.
+fn web_reply(state: &State, req: &SeenRequest, urls: &Urls) -> Reply {
+    let Some((tag, _, assets)) = state.release.as_ref().filter(|_| state.public) else {
+        return Reply::not_found();
+    };
+    let asset = assets
+        .iter()
+        .find(|a| req.path == download_link(&urls.web, &state.owner, &state.repo, tag, &a.name).path());
+    match asset {
+        Some(asset) => Reply::redirect(storage_location(&urls.storage, asset.id)),
+        None => Reply::not_found(),
+    }
+}
+
+fn route(state: &State, req: &SeenRequest, access: TokenAccess, urls: &Urls) -> Reply {
     let repo_path = format!("/repos/{}/{}", state.owner, state.repo);
     let path = req.path.split('?').next().unwrap_or_default();
     let Some(rest) = path.strip_prefix(&repo_path) else {
@@ -467,7 +552,7 @@ fn route(state: &State, req: &SeenRequest, access: TokenAccess, storage: &Url, a
     if rest.is_empty() {
         return Reply::json(
             200,
-            json!({ "full_name": format!("{}/{}", state.owner, state.repo), "private": true }),
+            json!({ "full_name": format!("{}/{}", state.owner, state.repo), "private": !state.public }),
         );
     }
     match access {
@@ -484,10 +569,10 @@ fn route(state: &State, req: &SeenRequest, access: TokenAccess, storage: &Url, a
     };
     let describe = |a: &FakeAsset| {
         json!({
-            "url": api_asset_url(api, &state.owner, &state.repo, a.id).as_str(),
+            "url": api_asset_url(&urls.api, &state.owner, &state.repo, a.id).as_str(),
             "id": a.id,
             "name": a.name,
-            "browser_download_url": format!("https://github.com/{}/{}/releases/download/{tag}/{}", state.owner, state.repo, a.name),
+            "browser_download_url": download_link(&urls.web, &state.owner, &state.repo, tag, &a.name).as_str(),
             "size": a.bytes.len(),
             "content_type": "application/octet-stream",
             "state": "uploaded",
@@ -512,12 +597,7 @@ fn route(state: &State, req: &SeenRequest, access: TokenAccess, storage: &Url, a
         .and_then(|id| assets.iter().find(|a| a.id == id));
     match asset {
         Some(asset) if req.headers.get("accept").map(String::as_str) == Some("application/octet-stream") => {
-            let location = format!("{}assets/{}?X-Amz-Signature=fake-signed-url", storage, asset.id);
-            Reply {
-                status: 302,
-                headers: vec![("Location".into(), location)],
-                body: Vec::new(),
-            }
+            Reply::redirect(storage_location(&urls.storage, asset.id))
         }
         Some(asset) => Reply::json(200, describe(asset)),
         None => Reply::message(404, "Not Found"),
@@ -548,10 +628,6 @@ fn storage_reply(state: &State, req: &SeenRequest) -> Reply {
             headers: vec![("Content-Type".into(), "application/octet-stream".into())],
             body: asset.bytes.clone(),
         },
-        None => Reply {
-            status: 404,
-            headers: Vec::new(),
-            body: Vec::new(),
-        },
+        None => Reply::not_found(),
     }
 }

@@ -1722,8 +1722,11 @@ impl HostCounters for FakeHostCounters {
 }
 
 /// An update server that offers at most one version. Records the versions installed and the calls
-/// it got. With [`FakeUpdater::accepting`] it takes one token only and refuses any other the way
-/// GitHub refuses a revoked one; by default it takes any.
+/// it got. Its releases are public by default: it answers calls without a token, and takes any token.
+/// With [`FakeUpdater::accepting`] it takes one token only and refuses any other the way GitHub
+/// refuses a revoked one. [`FakeUpdater::set_private`] hides the releases from calls without a token
+/// (GitHub's 404 for a private repository), and [`FakeUpdater::rate_limit_anonymous`] refuses those
+/// calls the way GitHub does once its limit for them is used up.
 #[derive(Default)]
 pub struct FakeUpdater {
     offered: Option<UpdateInfo>,
@@ -1731,8 +1734,13 @@ pub struct FakeUpdater {
     expires_on: Option<String>,
     /// Revoked (or expired) on GitHub: every token is refused.
     revoked: AtomicBool,
+    /// Calls without a token see no releases.
+    private: AtomicBool,
+    /// Calls without a token are refused until this time (RFC 3339).
+    anonymous_limit: Mutex<Option<String>>,
     installed: Mutex<Vec<String>>,
     calls: AtomicUsize,
+    anonymous_calls: AtomicUsize,
     /// QL-15: the download never ends (a connection that stalls).
     stalls: bool,
 }
@@ -1768,6 +1776,16 @@ impl FakeUpdater {
         self.revoked.store(true, Ordering::SeqCst);
     }
 
+    /// The repository is private (again), or public.
+    pub fn set_private(&self, private: bool) {
+        self.private.store(private, Ordering::SeqCst);
+    }
+
+    /// Calls without a token are refused until `until` (RFC 3339), or answered again with `None`.
+    pub fn rate_limit_anonymous(&self, until: Option<&str>) {
+        *locks::lock(&self.anonymous_limit) = until.map(str::to_owned);
+    }
+
     pub fn installed(&self) -> Vec<String> {
         locks::lock(&self.installed).clone()
     }
@@ -1777,8 +1795,28 @@ impl FakeUpdater {
         self.calls.load(Ordering::SeqCst)
     }
 
-    fn authorize(&self, token: &SecretString) -> Result<()> {
+    /// Of [`Self::calls`], those made without a token.
+    pub fn anonymous_calls(&self) -> usize {
+        self.anonymous_calls.load(Ordering::SeqCst)
+    }
+
+    fn authorize(&self, token: Option<&SecretString>) -> Result<()> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let Some(token) = token else {
+            self.anonymous_calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(until) = locks::lock(&self.anonymous_limit).clone() {
+                return Err(CoreError::UpdateRateLimited {
+                    until,
+                    with_token: false,
+                });
+            }
+            return match self.private.load(Ordering::SeqCst) {
+                true => Err(CoreError::UpdateTokenNeeded {
+                    repo: "alice/remotely".into(),
+                }),
+                false => Ok(()),
+            };
+        };
         let refused = self.revoked.load(Ordering::SeqCst)
             || self.token.as_ref().is_some_and(|accepted| accepted != token.expose());
         match refused {
@@ -1790,15 +1828,16 @@ impl FakeUpdater {
 
 #[async_trait]
 impl UpdaterAdapter for FakeUpdater {
-    async fn check(&self, token: &SecretString) -> Result<ReleaseCheck> {
+    async fn check(&self, token: Option<&SecretString>) -> Result<ReleaseCheck> {
         self.authorize(token)?;
         Ok(ReleaseCheck {
             update: self.offered.clone(),
-            token_expires_on: self.expires_on.clone(),
+            // GitHub sends the expiry only with answers to a token.
+            token_expires_on: token.and(self.expires_on.clone()),
         })
     }
 
-    async fn install(&self, token: &SecretString, version: &str) -> Result<()> {
+    async fn install(&self, token: Option<&SecretString>, version: &str) -> Result<()> {
         self.authorize(token)?;
         if self.stalls {
             std::future::pending::<()>().await;
@@ -1808,7 +1847,7 @@ impl UpdaterAdapter for FakeUpdater {
     }
 
     async fn test_token(&self, token: &SecretString) -> Result<TokenReport> {
-        self.authorize(token)?;
+        self.authorize(Some(token))?;
         Ok(TokenReport {
             repository: "alice/remotely".into(),
             latest_release: self.offered.as_ref().map(|u| format!("v{}", u.version)),
