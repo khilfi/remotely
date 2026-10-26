@@ -66,9 +66,12 @@ async fn core_with(
         containers: Arc::new(remotely_core::fakes::FakeContainers::default()),
         disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
     };
-    Core::assemble(store, ctx, adapters, JobLimits::default())
+    let core = Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
-        .unwrap()
+        .unwrap();
+    // FD-02: the bus acts only on VMs the workspace lists; the fakes' VMs are listed first, as the VMs page does.
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    core
 }
 
 fn vm(name: &str) -> TargetRef {

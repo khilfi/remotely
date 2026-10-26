@@ -289,12 +289,9 @@ async fn protected_vms_are_skipped_until_they_are_unprotected() {
 #[tokio::test]
 async fn protecting_a_vm_not_in_the_inventory_fails() {
     let core = Setup::new(FakeVmware::default()).build().await;
-    let mut events = core.jobs.subscribe();
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), protect(&["nope"], true)).await.unwrap()
-    else {
-        panic!("protecting is Low");
-    };
-    assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Failed);
+    // FD-02: a VM the workspace doesn't list is refused by the bus before anything is queued.
+    let refused = core.bus.submit(&core.ctx(), protect(&["nope"], true)).await;
+    assert!(matches!(refused, Err(CoreError::NotInWorkspace(_))), "{refused:?}");
 }
 
 // ---- SS-06: environment labels on VMs -----------------------------------------------------------
@@ -535,7 +532,10 @@ const SIX: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
 
 #[tokio::test]
 async fn at_most_three_vms_power_on_at_once_by_default() {
-    let setup = Setup::new(FakeVmware::default().with_power_delay(Duration::from_millis(60)));
+    let setup = Setup::new(common::listed(
+        FakeVmware::default().with_power_delay(Duration::from_millis(60)),
+        &SIX,
+    ));
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     assert_eq!(core.power_on_limit(), 3);
@@ -547,7 +547,10 @@ async fn at_most_three_vms_power_on_at_once_by_default() {
 
 #[tokio::test]
 async fn the_power_on_limit_is_a_saved_setting() {
-    let setup = Setup::new(FakeVmware::default().with_power_delay(Duration::from_millis(40)));
+    let setup = Setup::new(common::listed(
+        FakeVmware::default().with_power_delay(Duration::from_millis(40)),
+        &SIX,
+    ));
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
 
@@ -615,6 +618,7 @@ async fn starting_vms_that_would_overcommit_host_ram_asks_for_a_confirm() {
     for (name, gb) in [("a", 16), ("b", 20), ("c", 8)] {
         fake = with_ram(fake, name, gb);
     }
+    let fake = common::listed(fake, &["b", "c"]);
     let setup = Setup::new(fake); // the fake host has 32 GB
     let vmware = Arc::clone(&setup.vmware);
     let core = setup.build().await;
@@ -654,7 +658,7 @@ async fn starting_vms_that_would_overcommit_host_ram_asks_for_a_confirm() {
 
 #[tokio::test]
 async fn a_nearly_full_vm_drive_asks_for_a_confirm() {
-    let mut setup = Setup::new(FakeVmware::default());
+    let mut setup = Setup::new(common::listed(FakeVmware::default(), &["a", "b"]));
     setup.host.free_disk_pct = 5.0;
     let core = setup.build().await;
 
@@ -671,7 +675,7 @@ async fn a_nearly_full_vm_drive_asks_for_a_confirm() {
 
 #[tokio::test]
 async fn a_capacity_check_that_cannot_run_is_a_warning_too() {
-    let mut setup = Setup::new(FakeVmware::default());
+    let mut setup = Setup::new(common::listed(FakeVmware::default(), &["a"]));
     setup.host.unavailable = true;
     let core = setup.build().await;
 
@@ -704,6 +708,7 @@ async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first(
         )
         .with_hardware(&vmx("unplugged"), hardware(vec![nic("ethernet0", "bridged", false)]))
         .with_hardware(&vmx("natted"), hardware(vec![nic("ethernet0", "nat", true)]));
+    let fake = common::listed(fake, &["clone", "unplugged", "natted"]);
     let core = Setup::new(fake).build().await;
 
     // Starting is Low, but the warning needs a confirm, and it names the VM and its adapter.
@@ -1044,7 +1049,7 @@ async fn suspend_and_restart_without_vmware_tools_fail_at_once_and_say_why() {
 #[tokio::test]
 async fn a_vm_that_is_not_running_goes_straight_to_vmrun() {
     // No Tools to wait for: vmrun answers at once (the real one with "not powered on").
-    let setup = Setup::new(FakeVmware::default());
+    let setup = Setup::new(common::listed(FakeVmware::default(), &["a"]));
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     let mut events = core.jobs.subscribe();
@@ -1073,7 +1078,10 @@ async fn wait_until(mut done: impl FnMut() -> bool) {
 
 #[tokio::test]
 async fn cancel_stops_waiting_for_a_vm_that_waits_for_an_answer_in_workstation() {
-    let setup = Setup::new(FakeVmware::default().with_question(&vmx("b")));
+    let setup = Setup::new(common::listed(
+        FakeVmware::default().with_question(&vmx("b")),
+        &["a", "b"],
+    ));
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     let mut events = core.jobs.subscribe();

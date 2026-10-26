@@ -46,9 +46,12 @@ async fn core_on(store: Store, vmware: Arc<FakeVmware>) -> Core {
         containers: Arc::new(remotely_core::fakes::FakeContainers::default()),
         disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
     };
-    Core::assemble(store, ctx, adapters, JobLimits::default())
+    let core = Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
-        .unwrap()
+        .unwrap();
+    // FD-02: the bus acts only on VMs the workspace lists; the fakes' VMs are listed first, as the VMs page does.
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    core
 }
 
 // ---- AP-01: editable tier rules -----------------------------------------------------------------
@@ -509,7 +512,8 @@ async fn the_hash_chain_can_be_checked_from_the_exported_file_alone() {
     let col = |row: &[String], name: &str| row[header.iter().position(|h| h == name).unwrap()].clone();
     let opt = |v: String| (!v.is_empty()).then_some(v);
 
-    let mut prev = remotely_core::store::GENESIS_HASH.to_owned();
+    // FD-02: the workspace's own chain, from its own start.
+    let mut prev = remotely_core::store::chain_start(&col(&rows[1], "workspace_id"), None);
     for row in &rows[1..] {
         let entry = remotely_core::store::AuditEntry {
             seq: col(row, "seq").parse().unwrap(),

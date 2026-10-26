@@ -275,7 +275,7 @@ impl MetricsSource for HostProcessSource {
             vms.iter().map(|v| (path_key(Path::new(&v.vmx_path)), v)).collect();
         // VM-18: a VirtualBox process started with the VM's name instead of its UUID.
         let vbox_by_name = virtualbox_names(&vms);
-        let samples = processes
+        let samples: Vec<MetricSample> = processes
             .into_iter()
             .filter_map(|p| {
                 let by_name = || {
@@ -318,6 +318,14 @@ impl MetricsSource for HostProcessSource {
                 })
             })
             .collect();
+        // VM-18: a VirtualBox process named by its VM rather than its UUID counts once it is matched.
+        let mut running = running;
+        for sample in &samples {
+            let key = sample.target.key();
+            if !running.iter().any(|r| r.eq_ignore_ascii_case(&key)) {
+                running.push(key);
+            }
+        }
         Ok(SourceRound {
             samples,
             statuses: Vec::new(),

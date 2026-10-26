@@ -161,7 +161,8 @@ async fn retention_deletes_snapshots_so_the_save_asks_the_high_steps_without_the
         [
             ApprovalStep::ImpactPreview,
             ApprovalStep::TypeTargetCount { expected: 2 },
-            ApprovalStep::Reason
+            ApprovalStep::Reason,
+            ApprovalStep::ChangeId { required: false }
         ]
     );
     assert!(request

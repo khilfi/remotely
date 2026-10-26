@@ -71,7 +71,9 @@ async fn audit_chain_links_and_verifies() {
         .unwrap();
     let c = store.append_audit(&ctx, entry("job_started", &targets)).await.unwrap();
 
-    assert_eq!(a.prev_hash, audit::GENESIS_HASH);
+    // FD-02: the workspace's own chain starts at a hash of its own.
+    assert_eq!(a.prev_hash, audit::chain_start(&ctx.workspace_id.to_string(), None));
+    assert_ne!(a.prev_hash, audit::GENESIS_HASH);
     assert_eq!(b.prev_hash, a.hash);
     assert_eq!(c.prev_hash, b.hash);
     assert_eq!(a.workspace_id, ctx.workspace_id.to_string());

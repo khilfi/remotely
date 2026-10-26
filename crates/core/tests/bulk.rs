@@ -1239,7 +1239,9 @@ async fn exports_hold_every_host_in_csv_json_and_html_without_secrets() {
         .unwrap();
     assert_eq!(hosts, 2);
     assert!(redacted >= 1);
-    assert!(csv.starts_with("\u{FEFF}host,group,status,exit_code,duration_ms,stdout,stderr,output_truncated,error\r\n"));
+    assert!(csv.starts_with(
+        "\u{FEFF}host,group,status,exit_code,duration_ms,stdout,stderr,output_truncated,error,change_id\r\n"
+    ));
     assert!(csv.contains("db_password=[redacted]"));
     assert!(!csv.contains("hunter2-from-config"));
 

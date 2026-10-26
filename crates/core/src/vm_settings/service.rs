@@ -175,7 +175,6 @@ impl VmSettings {
 
     /// VM-23: the guest OS types the VM's hypervisor offers.
     pub async fn guest_os_types(&self, key: &str) -> Result<Vec<GuestOsType>> {
-        self.store.require_vm_here(&self.current.get(), key).await?;
         match Hypervisor::of_key(key) {
             Hypervisor::Vmware => Ok(WORKSTATION_GUEST_OS
                 .iter()

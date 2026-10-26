@@ -72,7 +72,7 @@ pub fn is_machine_key(key: &str) -> bool {
 
 /// Reads every known setting once and sets aside the ones that can't be read. Returns their keys.
 pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
-    let mut reset = repair_workspace(store, ctx).await?;
+    let mut reset = Vec::new();
     check::<PolicyRules>(store, ctx, store::POLICY_RULES_KEY, "the approval rules", &mut reset).await?;
     check::<Option<String>>(store, ctx, store::VMRUN_PATH_KEY, "the vmrun.exe path", &mut reset).await?;
     check::<Option<String>>(store, ctx, store::OVFTOOL_PATH_KEY, "the ovftool.exe path", &mut reset).await?;
@@ -163,6 +163,7 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
     )
     .await?;
     check::<ChainLimits>(store, ctx, CHAIN_LIMITS_KEY, "the snapshot chain warnings", &mut reset).await?;
+    reset.extend(repair_workspace(store, ctx).await?);
     Ok(reset)
 }
 

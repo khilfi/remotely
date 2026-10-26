@@ -67,7 +67,7 @@ fn locked_out<T: std::fmt::Debug>(result: remotely_core::Result<T>, what: &str) 
 
 #[tokio::test]
 async fn the_bus_refuses_every_command_while_locked_and_runs_them_again_after() {
-    let fake = FakeVmware::with_running(Vec::<String>::new());
+    let fake = common::listed(FakeVmware::with_running(Vec::<String>::new()), &["a"]);
     let setup = Setup::new(fake);
     let fake = std::sync::Arc::clone(&setup.vmware);
     let core = setup.build().await;

@@ -75,8 +75,8 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
     core.inventory.refresh(&core.ctx()).await.unwrap();
     let audit_before = core.store.recent_audit(&core.ctx(), 100).await.unwrap().len();
 
-    // The command line's letter case differs from the library's; a VM the inventory has not seen
-    // still shows; a process whose command line could not be read is left out.
+    // The command line's letter case differs from the library's; FD-02: a VM the workspace doesn't list (another
+    // workspace's, or one none has) is left out, and so is a process whose command line could not be read.
     *processes.lock().unwrap() = vec![
         process(100, &vmx("web").to_uppercase(), Some(6.25)),
         process(200, &vmx("db"), None),
@@ -87,12 +87,12 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
         },
     ];
     let cost = core.metrics.collect_once().await;
-    assert_eq!(cost.vms, 3);
+    assert_eq!(cost.vms, 2);
     assert_eq!(cost.interval_secs, 5, "MO-01: every 5 seconds");
 
     let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     let names: Vec<&str> = overview.rows.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, ["db", "tmp", "web"], "'off' is not running");
+    assert_eq!(names, ["db", "web"], "'off' is not running; 'tmp' isn't listed here");
     let web = overview.rows.iter().find(|r| r.name == "web").unwrap();
     assert_eq!(web.kind, RowKind::Vm);
     assert_eq!(web.key, vmx("web"), "the inventory's spelling");
@@ -116,13 +116,11 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
         [
             (vmx("db").as_str(), None, Some(3.125)),
             (vmx("web").as_str(), Some(6.25), Some(3.125)),
-            (r"E:\Other\tmp\tmp.vmx", Some(1.0), Some(3.125)),
         ],
         "by path; a first reading has no CPU rate yet; 'off' is not running"
     );
-    let tmp = overview.rows.iter().find(|r| r.name == "tmp").unwrap();
-    assert_eq!(tmp.power_state, Some(PowerState::Running));
-    assert_eq!(tmp.host.as_ref().unwrap().cpu_pct, None, "vCPUs unknown");
+    // ...but it counts for this PC's capacity, as every VM process does.
+    assert_eq!(core.metrics.hub().running().map(|r| r.len()), Some(3));
 
     // db stopped outside the app: the next round no longer lists it, though the inventory still
     // says running. Its history stays for the drill-down.

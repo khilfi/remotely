@@ -145,9 +145,15 @@ impl Setup {
             containers: self.containers,
             disk_tools: self.disk_tools,
         };
-        Core::assemble(store, ctx, adapters, JobLimits::default())
+        let core = Core::assemble(store, ctx, adapters, JobLimits::default())
             .await
-            .unwrap()
+            .unwrap();
+        // FD-02: the bus acts only on VMs the workspace lists. The app lists them when the VMs page opens; tests start
+        // with the fakes' VMs listed (one workspace: every VM joins it).
+        if let Err(err) = core.inventory.refresh(&core.ctx()).await {
+            eprintln!("the test setup's first inventory refresh failed: {err}");
+        }
+        core
     }
 }
 
@@ -169,6 +175,13 @@ pub async fn vault_password_given(core: &Core) {
 /// `C:\VMs\<name>\<name>.vmx`.
 pub fn vmx(name: &str) -> String {
     format!(r"C:\VMs\{name}\{name}.vmx")
+}
+
+/// FD-02: VMs the fake's Workstation library lists (the bus acts only on VMs the workspace lists, and a VM that is off
+/// is listed through the library or a scanned folder).
+#[allow(dead_code)]
+pub fn listed(fake: FakeVmware, names: &[&str]) -> FakeVmware {
+    names.iter().fold(fake, |fake, name| fake.in_library(&vmx(name), None))
 }
 
 pub fn vm(name: &str) -> TargetRef {

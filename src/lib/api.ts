@@ -454,6 +454,8 @@ export type ApprovalStep =
   | { step: "safetySnapshot"; defaultOn: boolean }
   | { step: "typeTargetCount"; expected: number }
   | { step: "reason" }
+  /** AP-08: a ticket or change number, High and Critical; required when the workspace asks for one on Prod. */
+  | { step: "changeId"; required: boolean }
   | { step: "countdown"; seconds: number }
   | { step: "vaultReauth" };
 
@@ -569,6 +571,8 @@ export interface ApprovalAnswers {
   reason?: string;
   safetySnapshot?: boolean;
   vaultPassword?: string;
+  /** AP-08: at most 64 characters, one line (the core redacts it). */
+  changeId?: string;
 }
 
 export type JobStatus =
@@ -802,6 +806,8 @@ export interface JobSummary {
   bodiesRemoved: boolean;
   /** BX-04: its script or line had something that looked like a secret, now [redacted], so it can't be retried. */
   commandRedacted: boolean;
+  /** AP-08: the ticket or change number its approval was given with. */
+  changeId: string | null;
 }
 
 /** One target of a job and how it went. */
@@ -1906,6 +1912,8 @@ export interface TransferPreview {
   file: string;
   exportedAt: string;
   exportedBy: string;
+  /** FD-02: the workspace the file was exported from, when it says (files from 0.5.0 on). */
+  workspace: string | null;
   folders: number;
   newFolders: number;
   sessions: TransferItem[];
@@ -3881,3 +3889,6 @@ export const api = {
   deployHostAdapters: (bridged: boolean) => invoke<string[]>("deploy_host_adapters", { bridged }),
   deployDefaultFolder: (hypervisor: Hypervisor) => invoke<string>("deploy_default_folder", { hypervisor }),
 };
+
+/** FD-07: an import's choices, as `api.transferCommit` takes them (FD-02: also for an import into a new workspace). */
+export type TransferCommit = Parameters<typeof api.transferCommit>[0];

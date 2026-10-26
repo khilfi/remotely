@@ -163,6 +163,7 @@ import {
 } from "@/lib/job-events";
 import type { VmView } from "@/lib/vm-snapshots";
 import type { ScheduleAsk } from "@/components/VmSchedulesTab";
+import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 
 type PageId =
   | "vms"
@@ -323,6 +324,8 @@ export default function App() {
   }, []);
 
   /** VM-11, VM-16: the VM page's host networks or waste finder. */
+  // FD-02: a switch refused while jobs run offers Activity.
+  const openActivity = useCallback(() => setPage("activity"), []);
   const openVmsPanel = useCallback((panel: VmPanel) => {
     setVmRequest((prev) => ({ vmxPaths: [], view: "details", panel, n: (prev?.n ?? 0) + 1 }));
     setPage("vms");
@@ -1100,6 +1103,9 @@ export default function App() {
         <SidebarInset className="h-svh overflow-hidden">
           <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
             <SidebarTrigger className="-ml-1" />
+            <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
+            {/* FD-02: one workspace per engagement, switched here. */}
+            <WorkspaceSwitcher onOpenActivity={openActivity} />
             <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
             <h1 className="text-sm font-semibold">{current.title}</h1>
             <Button
