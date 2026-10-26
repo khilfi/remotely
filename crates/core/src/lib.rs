@@ -45,6 +45,9 @@
 //!   metrics::history (MO-06): the rounds' 1-minute averages on disk, pruned daily; alerts (MO-07): rules
 //!     run on each round, an alert list and events for the UI's notifications; dashboard (MO-16): the
 //!     dashboard's layout, per workspace
+//!   host_networks (VM-11): the hypervisors' networks, the VMs on each and their NAT port forwards ──►
+//!     adapters::host_networks; changing a forward is a command on the bus. vm_insight (VM-25): a VM's logs and
+//!     timeline; waste (VM-16, VM-14): the waste finder's report. Reads only
 //!   notifications (QL-25): the notification centre's history, in memory and redacted
 //! ```
 //!
@@ -59,6 +62,7 @@ pub mod capacity_plan;
 pub mod catalog;
 pub mod command_bus;
 pub mod containers;
+pub mod convert;
 pub mod dashboard;
 pub mod deploy;
 pub mod domain;
@@ -68,11 +72,13 @@ pub mod export;
 pub mod fakes;
 pub mod forwards;
 pub mod host_details;
+pub mod host_networks;
 pub mod impact;
 pub mod import;
 pub mod inventory;
 pub mod jobs;
 pub mod known_hosts;
+pub mod linked_clones;
 pub mod locks;
 pub mod login_guard;
 pub mod metrics;
@@ -96,8 +102,10 @@ pub mod transfer;
 pub mod untrusted;
 pub mod updates;
 pub mod vault;
+pub mod vm_insight;
 pub mod vm_links;
 pub mod vm_settings;
+pub mod waste;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -181,6 +189,8 @@ pub struct Adapters {
     pub network: Arc<dyn NetworkAdapter>,
     /// CT-01, CT-02: container engines: their CLIs over SSH and Docker Desktop's on this PC.
     pub containers: Arc<dyn ContainerEngines>,
+    /// CV-01 to CV-03, VM-17: the disk conversion tools (qemu-img when installed; the hypervisors' own).
+    pub disk_tools: Arc<dyn adapters::disk_tools::DiskTools>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -297,6 +307,13 @@ pub struct Core {
     /// VM-23, VM-24: VM settings the shell builds from dialogs and drops (ISOs, shared folders, an existing
     /// VM), guest OS types, screenshots and Open console. Changes go through [`Core::bus`].
     pub vm_settings: vm_settings::VmSettings,
+    /// VM-11: the hypervisors' host networks, the VMs on each and their NAT port forwards. Reads only; changes go
+    /// through [`Core::bus`].
+    pub networks: host_networks::HostNetworks,
+    /// VM-25: a VM's Log and Timeline tabs. Reads only.
+    pub insight: vm_insight::VmInsight,
+    /// VM-16, VM-14: the waste finder's report. Reads only; each row's action goes through [`Core::bus`].
+    pub waste: waste::WasteFinder,
     pub host_counters: Arc<dyn HostCounters>,
     updater: Arc<dyn UpdaterAdapter>,
     vmware: Arc<SwitchableVmware>,
@@ -308,6 +325,11 @@ pub struct Core {
     deployer: Arc<deploy::runner::Deployer>,
     /// VM-08: what the job runner waits on between a stack's steps; tests give it their own clock.
     stack_runner: Arc<stacks::StackRunner>,
+    /// CV-01 to CV-03, VM-17: Image tools (Inspect, Convert, Verify), a VM's Export, and the conversion tools.
+    /// Conversions and exports are commands on [`Core::bus`]; an import is a deploy ([`Core::deploy`]).
+    pub convert: convert::service::Conversions,
+    /// CV-03: what the job runner converts with; tests shorten its waits.
+    converter: Arc<convert::Converter>,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -368,6 +390,7 @@ impl Core {
             Arc::from(adapters::virtualbox::connect(config.vboxmanage_path.or(saved_vbox)));
         // SS-04: the vault in this database, unlocked by the Windows login (DPAPI) or the master password.
         let vault = LocalVault::open(store.clone(), ctx, Arc::new(Dpapi), VaultOptions::default()).await?;
+        let qemu_img = saved_qemu_img_path(&store, &ctx).await?;
         Self::assemble(
             store,
             ctx,
@@ -380,6 +403,7 @@ impl Core {
                 updater: config.updater,
                 network: Arc::new(SystemNetwork),
                 containers: Arc::new(CliEngines::new(docker.as_deref())),
+                disk_tools: Arc::new(adapters::disk_tools::LocalDiskTools::new(qemu_img)),
             },
             JobLimits::default(),
         )
@@ -496,18 +520,23 @@ impl Core {
         jobs.set_containers(Arc::new(containers.clone()));
         // MO-06: a prune compacts the file only while no job runs.
         history.set_jobs(Arc::clone(&jobs));
+        // VM-11: network targets and port forward previews.
+        let networks = host_networks::HostNetworks::new(store.clone(), hypervisors.clone(), host_details.clone());
         let bus = Arc::new(CommandBus::new(
             policy,
             Arc::new(
                 StoreDirectory::new(store.clone())
                     .with_terminals(terminals.clone())
-                    .with_containers(containers.clone()),
+                    .with_containers(containers.clone())
+                    .with_host_networks(networks.clone()),
             ),
             Arc::clone(&jobs),
             store.clone(),
             Arc::clone(&adapters.vault),
             CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
-            ImpactPreviewer::new(store.clone(), hypervisors.clone()).with_containers(containers.clone()),
+            ImpactPreviewer::new(store.clone(), hypervisors.clone())
+                .with_containers(containers.clone())
+                .with_host_networks(networks.clone()),
         ));
         bus.set_bindings(bindings.clone());
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
@@ -527,7 +556,9 @@ impl Core {
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
-        let catalog = Catalog::new(store.clone()).with_hypervisors(hypervisors.clone());
+        let catalog = Catalog::new(store.clone())
+            .with_hypervisors(hypervisors.clone())
+            .with_disk_tools(Arc::clone(&adapters.disk_tools));
         let inventory = Arc::new(Inventory::new(store.clone(), hypervisors.clone(), Arc::clone(&links)));
         // VM-21, VM-22, VM-10: the job runner makes each new VM through the deploy runner.
         let deployer = Arc::new(deploy::runner::Deployer::new(
@@ -542,13 +573,23 @@ impl Core {
             Arc::clone(&adapters.vault),
         ));
         jobs.set_deployer(deployer.clone());
+        // CV-01 to CV-03, VM-17: conversions and exports are jobs; imports convert through the deploy runner.
+        let converter = Arc::new(convert::Converter::new(
+            hypervisors.clone(),
+            Arc::clone(&adapters.disk_tools),
+            Arc::clone(&adapters.host_counters),
+        ));
+        jobs.set_converter(converter.clone());
+        deployer.set_converter(Arc::clone(&converter));
+        let convert = convert::service::Conversions::new(store.clone(), Arc::clone(&converter), Arc::clone(&bus));
         let deploy = deploy::service::Deploys::new(
             store.clone(),
             catalog.clone(),
             hypervisors.clone(),
             Arc::clone(&adapters.host_counters),
             Arc::clone(&bus),
-        );
+        )
+        .with_converter(Arc::clone(&converter));
         // VM-08: the job runner runs a stack's steps through the deploy runner and power commands, and waits between
         // them through the stack runner.
         let stack_runner = Arc::new(stacks::StackRunner::new(
@@ -567,6 +608,8 @@ impl Core {
             Arc::clone(&inventory),
         );
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
+        let insight = vm_insight::VmInsight::new(ctx, store.clone(), hypervisors.clone());
+        let waste = waste::WasteFinder::new(ctx, store.clone(), hypervisors.clone());
         // VM-14, VM-27: each run goes through the bus under its schedule's standing approval.
         let schedules = schedules::Schedules::new(schedules::ScheduleParts {
             ctx,
@@ -579,6 +622,11 @@ impl Core {
         });
         let core = Self {
             vm_settings,
+            networks,
+            insight,
+            waste,
+            convert,
+            converter,
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog,
@@ -670,6 +718,46 @@ impl Core {
     pub fn set_stack_clock(&self, clock: Arc<dyn stacks::StackClock>, tuning: stacks::StackTuning) {
         self.stack_runner.set_clock(clock);
         self.stack_runner.set_tuning(tuning);
+    }
+
+    /// CV-03: how the conversion runner retries removing what a cancelled tool still holds; tests shorten it.
+    pub fn set_convert_tuning(&self, tuning: convert::runner::ConvertTuning) {
+        self.converter.set_tuning(tuning);
+    }
+
+    /// CV-03: the qemu-img.exe in use, or `None` when it isn't installed (or not found).
+    pub fn qemu_img_path(&self) -> Option<PathBuf> {
+        self.converter.disk_tools().qemu_img()
+    }
+
+    /// CV-03: the qemu-img.exe path saved in Settings, if any.
+    pub async fn saved_qemu_img_path(&self) -> Result<Option<PathBuf>> {
+        saved_qemu_img_path(&self.store, &self.ctx).await
+    }
+
+    /// CV-03: saves the qemu-img.exe path (`None` = find it: `REMOTELY_QEMU_IMG`, then QEMU's default folder) and
+    /// looks for it again at once. The path must be an existing qemu-img.exe. Audited, since it decides which
+    /// program converts qcow2 and VHDX images.
+    pub async fn set_qemu_img_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::disk_tools::validate_qemu_img_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx, store::QEMU_IMG_PATH_KEY, &as_text)
+            .await?;
+        self.converter.disk_tools().locate_qemu_img(path);
+        let in_use = self.qemu_img_path();
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the qemu-img.exe path", &detail).await?;
+        Ok(in_use)
     }
 
     /// SS-04, AP-06: where vault passwords may go without asking; tests shorten its grace period.
@@ -1159,6 +1247,13 @@ async fn saved_vmrun_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf
 async fn saved_ovftool_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
     let saved = store
         .get_setting::<Option<String>>(ctx, store::OVFTOOL_PATH_KEY)
+        .await?;
+    Ok(saved.flatten().map(PathBuf::from))
+}
+
+async fn saved_qemu_img_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
+    let saved = store
+        .get_setting::<Option<String>>(ctx, store::QEMU_IMG_PATH_KEY)
         .await?;
     Ok(saved.flatten().map(PathBuf::from))
 }

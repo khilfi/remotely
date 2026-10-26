@@ -407,6 +407,10 @@ pub struct Settings {
     docker_path_saved: Option<String>,
     /// CT-02: the docker.exe in use; `None`: Docker Desktop was not found.
     docker_path_in_use: Option<String>,
+    /// CV-03: the qemu-img.exe path the user chose; `None`: `REMOTELY_QEMU_IMG`, then QEMU's default folder.
+    qemu_img_path_saved: Option<String>,
+    /// CV-03: the qemu-img.exe in use; `None`: not installed (qcow2 and VHDX conversions can't run).
+    qemu_img_path_in_use: Option<String>,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -431,7 +435,20 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
         guest_poll_secs: core.guest_poll_secs(),
         docker_path_saved: core.saved_docker_path().await?.map(|p| p.display().to_string()),
         docker_path_in_use: core.docker_path().map(|p| p.display().to_string()),
+        qemu_img_path_saved: core.saved_qemu_img_path().await?.map(|p| p.display().to_string()),
+        qemu_img_path_in_use: core.qemu_img_path().map(|p| p.display().to_string()),
     })
+}
+
+/// CV-03: `None` or an empty string goes back to finding qemu-img.exe (`REMOTELY_QEMU_IMG`, QEMU's default folder).
+#[tauri::command]
+pub async fn settings_set_qemu_img_path(state: State<'_, AppState>, path: Option<String>) -> IpcResult<Settings> {
+    let path = path
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    state.core.set_qemu_img_path(path).await?;
+    settings(&state.core).await
 }
 
 #[tauri::command]

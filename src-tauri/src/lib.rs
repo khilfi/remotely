@@ -6,6 +6,7 @@ mod catalog;
 mod clipboard;
 mod command_panel;
 mod containers;
+mod convert;
 mod dashboard;
 pub mod data_dirs;
 mod deploy;
@@ -22,6 +23,7 @@ mod terminal;
 mod terminal_rules;
 mod tunnels;
 pub mod updater;
+mod vm_insight;
 mod vm_settings;
 mod wake;
 
@@ -438,6 +440,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::settings_get,
         ipc::settings_set_vmrun_path,
         ipc::settings_set_ovftool_path,
+        ipc::settings_set_qemu_img_path,
         ipc::settings_set_vboxmanage_path,
         ipc::settings_set_scan_folders,
         ipc::settings_set_power_on_limit,
@@ -531,6 +534,13 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         vm_settings::vm_screenshot,
         vm_settings::vm_guest_os_types,
         vm_settings::vm_workstation_open,
+        vm_insight::vm_logs,
+        vm_insight::vm_log_read,
+        vm_insight::vm_timeline,
+        vm_insight::host_networks,
+        vm_insight::host_network_list,
+        vm_insight::waste_report,
+        vm_insight::waste_open_folder,
         dashboard::metrics_history,
         dashboard::history_info,
         dashboard::history_retention_set,
@@ -683,6 +693,19 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         stacks::stacks_add_vm,
         stacks::stacks_remove_vm,
         stacks::stacks_forget_instance,
+        convert::convert_tools,
+        convert::convert_pick,
+        convert::convert_inspect,
+        convert::convert_options,
+        convert::convert_submit,
+        convert::convert_verify,
+        convert::convert_verify_cancel,
+        convert::export_options,
+        convert::export_submit,
+        convert::import_analyze,
+        convert::import_check,
+        convert::import_submit,
+        convert::convert_open_qemu_site,
         clipboard::clipboard_read_text,
         clipboard::terminal_copy_selection,
         clipboard::terminal_output_copy,

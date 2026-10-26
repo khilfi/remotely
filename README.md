@@ -54,6 +54,11 @@ QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page
   its tree: "You are here", creation times, descriptions, old and safety snapshots marked, and Take, Revert and Delete
   with the tier each would get (Prod raises it), then the approval dialog with its impact preview and the safety
   snapshot offer.
+- **Linked clones** (0.5.0): a snapshot a linked clone was made from shows "1 linked clone" (hover for the names),
+  and its Delete is off: the clone shares the golden VM's disk as it was then, and Workstation or VirtualBox would
+  break it without a word. Delete the clones first; snapshots before or after theirs delete as usual. A delete on
+  several VMs leaves that VM out (the approval names its clones), a schedule's retention keeps such a snapshot, and
+  deleting the golden VM itself is refused the same way.
 - Snapshot trees are read for the VM you open, the selection when you open its Snapshots menu and the VMs shown when
   you select by snapshots, so a long VM list stays quick.
 - Ctrl+3 and "Snapshots" in the Ctrl+K palette open the snapshot view of the open or first selected VM; in the palette
@@ -113,6 +118,33 @@ with its size, and a VM it would refuse (running, snapshots in the way).
   nothing, so it has no tier, but it is in the audit log and off while presenting with the read-only lock. ISOs, shared
   folders and existing VMs are picked in Windows' own dialogs; a network share or a device path is refused.
 
+### VM insight, host networks and the waste finder
+
+0.5.0 (VM-25, VM-11, VM-16, VM-14). Reads, so no approval and nothing in the audit log; each action they offer goes
+through the bus and its approvals like anywhere else.
+
+- **Log tab** in a VM's details: Workstation's `vmware.log` and its older `vmware-N.log`, VirtualBox's `VBox.log` and
+  `VBox.log.N`, read only, with search. It shows a log's last 256 KB (a huge log is never read whole) and, for the
+  current log of a running VM, follows it: what was added is read every 2 seconds, only while the tab shows and the
+  window is visible.
+- **Timeline tab**: everything Remotely did to the VM, from the audit log (approvals, jobs, label changes, Open
+  console...) with each job's outcome for this VM from the job journal, newest first, 50 at a time.
+- **Networks** (the VMs page's button, or the palette): Workstation's vmnets and VirtualBox's host-only interfaces,
+  NAT networks, bridged and internal networks, the VMs on each, and their NAT port forwards: a Workstation NAT vmnet's,
+  a VirtualBox NAT network's rules and each VirtualBox VM's NAT adapter rules. Adding or removing one is **High** (it
+  reaches every VM on the network; Critical when a VM on it is labelled Prod), and the approval says who can reach it
+  and whose address it leads to. Workstation keeps its forwards in `C:\ProgramData\VMware\vmnetnat.conf`, which only
+  administrators can change, and Remotely never asks to run as administrator: change those in Workstation's Virtual
+  Network Editor, or start Remotely with Run as administrator. VirtualBox's need no administrator rights. The
+  topology map names its networks the way Workstation and VirtualBox list them, shows the ones no VM is on yet, and
+  opens Networks from a network's box; the palette's search finds the networks the map or Networks read last.
+- **Waste finder** (the VMs page's button, or the palette): running VMs idle for days (from the dashboard's history:
+  their busiest hour under 2% of this PC's CPU, and their guest's CPU and network quiet when a linked session is
+  watched), suspended VMs and what their saved state takes, long or large snapshot chains, and folders with VM files no
+  VM in the list uses. Only the scanned folders and the hypervisors' and launch templates' VM folders are searched,
+  never a whole disk; a folder on a network share is skipped and named. Each row offers Suspend, Delete VM, the VM's
+  Snapshots or Open folder.
+
 ### VM templates: sizes, images and launch templates
 
 VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does, and **Deploy**
@@ -161,7 +193,8 @@ launch template, or from **Custom** values typed in the dialog.
   "Bulk threshold for deploys") or for Prod. The job has one step per VM, two at a time, and can be cancelled. When a
   VM fails or the job is cancelled, Remotely removes what it made for that VM (never a folder that was there before);
   VMs already made stay. The audit log has the deploy's start and each VM's result.
-- **Golden VM**: a full or linked clone of the snapshot the image names. **Cloud image**: a copy of the image (the
+- **Golden VM**: a full or linked clone of the snapshot the image names. While a linked clone is there, that snapshot
+  and the golden VM can't be deleted (see Virtual machines and snapshots). **Cloud image**: a copy of the image (the
   file itself never changes) as the boot disk, grown to the size's disk; its first boot (cloud-init) sets the hostname,
   the guest user, the SSH key's public half and the packages, through the `.vmx`'s `guestinfo` keys on Workstation and
   a small `cidata` disc on VirtualBox, taken out after the first boot. A password never goes into these: they are
@@ -177,8 +210,8 @@ launch template, or from **Custom** values typed in the dialog.
 - **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
   job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
   VMs they copy: started as they are, they would use their source's name and addresses.
-- **This PC after the deploy** (VM-26): every deploy dialog (Deploy, Clone, a stack's) and its approval show RAM, CPU
-  and disk on this PC after it, next to what runs now. RAM counts what the running VMs are assigned plus the new VMs
+- **This PC after the deploy** (VM-26): every deploy dialog (Deploy, Clone, Import, a stack's) and its approval show RAM,
+  CPU and disk on this PC after it, next to what runs now. RAM counts what the running VMs are assigned plus the new VMs
   that start; over this PC's RAM, it won't fit (VM-07's rule, which still runs at every power-on). CPU counts vCPUs
   against logical CPUs: a VM with more vCPUs than this PC has won't start, and more than twice as many in all warns.
   Disk counts thin disks at their full size per drive. When the RAM won't fit, it names the running VMs to suspend to
@@ -206,6 +239,46 @@ Workstation and VirtualBox.
   instance goes. **Forget** takes the instance away and leaves its VMs as they are.
 - Stack edits are the app's own data: audited, refused while presenting read-only, and carried by **Export** with the
   launch templates (each step points at what its template became on the other laptop; instances stay on this PC).
+
+### Image tools, Import and Export
+
+CV-01 to CV-03, VM-17 (0.5.0): Remotely reads and writes other hypervisors' disk and VM formats (Hyper-V, KVM and
+QEMU, Proxmox, ESXi, Azure and other clouds). It never manages those hypervisors, and it never changes a source: every
+conversion writes new files.
+
+- **Image tools** (Ctrl+;, in the sidebar after Templates; or the palette) makes no VM. **Inspect** reads an image's header: its
+  format (VMDK, VDI, VHD, VHDX, qcow2, raw), layout (growable, preallocated, stream-optimized...), virtual size, size
+  on disk, and its parent or backing file. **Convert** turns it into VMDK (growable, preallocated, stream-optimized,
+  or ESXi's own preallocated layout), VDI, VHD or VHDX (dynamic or fixed), qcow2 (thin or preallocated) or raw. It asks
+  where the new image goes (never over a file that is there, never into a Git working tree), checks the drive's free
+  space first, and runs as a Low job with its progress in the job's notice and in Activity; cancel stops the tool and
+  removes what it made. **Verify** takes the SHA-256 of an image's files and compares two images' sizes, and with
+  qemu-img their contents.
+- **The tools**: the hypervisors' own first, which come with Workstation (`vmware-vdiskmanager`, `ovftool`) and
+  VirtualBox (`VBoxManage clonemedium`, `convertfromraw`, `export`). qcow2 and VHDX need **qemu-img**, which Remotely
+  never ships (it is GPL-licensed): install QEMU for Windows from QEMU's own download page (Image tools links to it)
+  and Remotely finds `qemu-img.exe` in its default folder, through `REMOTELY_QEMU_IMG`, or at the path in Settings
+  (Conversion tools). Without it, each output that needs it says so. qemu-img is always told the input's format, so it
+  never guesses one, and it never reads a disk with a parent: a Workstation snapshot chain is flattened with
+  vmware-vdiskmanager first, a VirtualBox one with VBoxManage, and a foreign differencing disk is refused (convert the
+  whole chain where it was made). VirtualBox adds the images it converts to its media list; Remotely takes them out
+  again.
+- **Import** (VMs page, Image tools or the palette) makes a new VM from an OVA or OVF of any vendor, a disk image (VHD
+  and VHDX from Hyper-V or Azure; qcow2, raw and `.img` from KVM, Proxmox or OpenStack; a VDI for Workstation, a VMDK
+  for VirtualBox), or a VM's own description: a libvirt domain XML (`virsh dumpxml`) or a Proxmox `.conf`, with its
+  disks in the same folder. CPU, memory and firmware come from the description when there is one (it is read as
+  untrusted input, at most 1 MB), else from a size. An import is a deploy: the same preview, approval (Medium; High for
+  Prod), job and cleanup. Each disk is copied or converted into the new VM's folder; the source stays as it was. A
+  cloud image (OpenStack, KVM) can get cloud-init's first-boot setup. qcow2 cloud images in the catalogue deploy the
+  same way once qemu-img is installed.
+- **Export** (a VM's menu on the VMs page) writes a powered-off VM as it is now, its snapshots merged: an **OVA or
+  OVF** (OVF 1.0 from Workstation's ovftool; 1.0 or 2.0 from VirtualBox), **VMDK for ESXi** (stream-optimized, or
+  preallocated for a datastore), **VHDX for Hyper-V**, a **fixed VHD for Azure** (its size rounded up to a whole
+  megabyte, as Azure requires), **qcow2 with a libvirt domain XML** for KVM, a **Proxmox** import script
+  (`qm create`, `qm importdisk`, `qm set`), or **raw** disks. It goes into a new folder `<vm>-<target>` with a
+  README.md that says how to import it there and which drivers the guest may need (VMware Tools or Guest Additions
+  out; virtio drivers in for KVM and Proxmox, and Windows needs its storage driver before it moves). A Low job; a Prod
+  VM's export asks for a confirm.
 
 ### Reachability dots
 
@@ -1246,6 +1319,9 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's public GitHub Releases, without a token or with the optional one from the vault; install is a Medium-tier job that runs alone                                                                                                         |
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; one refresh at a time, requests meanwhile share the next; filters; audited environment labels                                                                     |
 | VM settings        | `crates/core/src/vm_settings/`, `adapters/vmx_file.rs`            | VM-11, VM-12, VM-15, VM-16, VM-23, VM-24                                                                                                            | Working: the Settings tab's full read of both hypervisors; .vmx edits after a backup (unknown keys kept), vdiskmanager and VBoxManage disk changes, devices on running VMs, bulk resize, delete, rename, add an existing VM, Open console (audited), ISO drops |
+| Host networks      | `crates/core/src/host_networks/`, `adapters/host_networks.rs`     | VM-11                                                                                                                                               | Working: vmnets, VirtualBox host-only interfaces and NAT networks with the VMs on each; NAT port forwards added and removed on the bus (High); Workstation's refused without administrator rights                                                              |
+| VM insight         | `crates/core/src/vm_insight/`, `store/timeline.rs`                | VM-25                                                                                                                                               | Working: a VM's logs (capped tails, following), its timeline from the audit log and the job journal                                                                                                                                                            |
+| Waste finder       | `crates/core/src/waste/`                                          | VM-16, VM-14                                                                                                                                        | Working: idle VMs from the dashboard's history, suspended VMs, long snapshot chains, folders no VM uses                                                                                                                                                        |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                      |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                            |
 | Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                               | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                   |
@@ -1262,6 +1338,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Deploy             | `crates/core/src/deploy/`                                         | VM-10, VM-21, VM-22, AP-02                                                                                                                          | Working: deploys from a template or Custom values (golden VM clone, cloud image with cloud-init, ISO, OVA/OVF) and bulk clones, one job step per VM with cleanup after a failure or cancel; preview with disk space; Medium, High from 5 VMs                   |
 | Stacks             | `crates/core/src/stacks/`                                         | VM-08, FD-07                                                                                                                                        | Working: stacks of launch templates deployed as one job in boot order with readiness checks and delays; instances started, stopped and torn down (Critical) as one; hand-added VMs kept                                                                        |
 | Capacity planner   | `crates/core/src/capacity_plan.rs`                                | VM-26, VM-07                                                                                                                                        | Working: RAM, CPU and disk after any deploy next to now (thin disks at full size), running VMs to suspend when RAM won't fit                                                                                                                                   |
+| Conversion         | `crates/core/src/convert/`                                        | VM-17, CV-01, CV-02, CV-03                                                                                                                          | Working: Inspect, Convert and Verify on Image tools (hypervisors' tools first, qemu-img for qcow2 and VHDX when installed), imports as deploys, exports for ESXi, Hyper-V, Azure, KVM, Proxmox, OVA/OVF and raw with a README; Low jobs, Prod exports Medium   |
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                               | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                      |
 | Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                       | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec    |
 | MultiExec          | `crates/core/src/terminal/multiexec.rs`                           | SS-10, QL-07, QL-12                                                                                                                                 | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                    |

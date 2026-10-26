@@ -6,8 +6,10 @@
 //! suspended VM from one that is off), the first line of the VM's `vmware.log` for how long it has
 //! been running, and its .vmsd for the snapshot count. A VirtualBox VM (VM-18) answers all three
 //! through `showvminfo` (its state, when that state began, its snapshots) and its .vbox file (snapshot
-//! times). VM-08: a VM in a stack instance says which one and its step ([`StackMembership`]), so the dialog
-//! shows a stack's VMs as a group. Users logged in to the guest need a guest login; they are not shown yet.
+//! times). VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it would delete
+//! ([`crate::linked_clones`]). VM-08: a VM in a stack instance says which one and its step ([`StackMembership`]),
+//! so the dialog shows a stack's VMs as a group. Users logged in to the guest need a guest login; they are not shown
+//! yet.
 
 use std::path::Path;
 
@@ -20,6 +22,8 @@ use crate::adapters::hypervisor::{Hypervisor, Hypervisors, RunningVms};
 use crate::command_bus::Command;
 use crate::containers::Containers;
 use crate::domain::{Context, PowerState, Target, TargetRef};
+use crate::host_networks::HostNetworks;
+use crate::linked_clones::{Blocked, LinkedClones, SnapshotClones};
 use crate::snapshots;
 use crate::store::Store;
 use crate::vm_settings::{VmChangePreview, VmEditor};
@@ -45,6 +49,9 @@ pub struct TargetImpact {
     /// VM-08: the stack instance the VM belongs to, so the dialog shows a stack's VMs as a group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<StackMembership>,
+    /// VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it would delete, by
+    /// snapshot. Such a VM is refused ([`crate::linked_clones`]).
+    pub linked_clones: Vec<SnapshotClones>,
 }
 
 /// VM-08: a VM's place in its stack instance.
@@ -104,16 +111,28 @@ pub struct ImpactPreviewer {
     containers: Option<Containers>,
     /// VM-23, VM-24: what a VM settings or lifecycle change does to each VM.
     editor: VmEditor,
+    /// VM-11: port forwards.
+    networks: Option<HostNetworks>,
+    /// VM-04, VM-21, VM-24: the linked clones a delete would break.
+    linked_clones: LinkedClones,
 }
 
 impl ImpactPreviewer {
     pub fn new(store: Store, hypervisors: Hypervisors) -> Self {
         Self {
             editor: VmEditor::new(hypervisors.clone(), store.clone()),
+            linked_clones: LinkedClones::new(hypervisors.clone()),
             store,
             hypervisors,
             containers: None,
+            networks: None,
         }
+    }
+
+    /// VM-04, VM-21, VM-24: for a snapshot or VM delete, each VM target it must not touch because linked clones depend
+    /// on what it would delete (or that could not be checked). Empty for other commands. Reads only.
+    pub async fn linked_clones(&self, command: &Command, targets: &[Target]) -> Vec<Blocked> {
+        self.linked_clones.blocked(command, targets).await
     }
 
     /// VM-23, VM-24: for a VM settings or lifecycle command, what it changes on each VM, the files that go,
@@ -153,6 +172,25 @@ impl ImpactPreviewer {
     pub fn with_containers(mut self, containers: Containers) -> Self {
         self.containers = Some(containers);
         self
+    }
+
+    /// VM-11: port forwards are previewed by the host networks service.
+    pub fn with_host_networks(mut self, networks: HostNetworks) -> Self {
+        self.networks = Some(networks);
+        self
+    }
+
+    /// VM-11: why a command can't run on this PC at all, before anything is asked.
+    pub fn refusal(&self, command: &Command) -> Option<String> {
+        self.networks.as_ref()?.refusal(command)
+    }
+
+    /// VM-11: what a port forward's approval says (who can reach it, whose address, the VMs on the network).
+    pub async fn network_warnings(&self, ctx: &Context, command: &Command) -> Vec<String> {
+        match &self.networks {
+            Some(networks) => networks.warnings(ctx, command).await,
+            None => Vec::new(),
+        }
     }
 
     /// The preview for a command's targets: VMs here, container targets by the containers service.
@@ -307,6 +345,7 @@ impl ImpactPreviewer {
             notes,
             container: None,
             stack: None,
+            linked_clones: Vec::new(),
         }
     }
 
@@ -338,6 +377,7 @@ impl ImpactPreviewer {
             notes,
             container: None,
             stack: None,
+            linked_clones: Vec::new(),
         }
     }
 

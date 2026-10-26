@@ -215,8 +215,11 @@ impl JobTargetRecord {
                     session_id: None,
                 }),
             "container" => TargetRef::container_from_key(&self.target_key),
+            "network" => TargetRef::network_from_key(&self.target_key),
             // VM-21: a deploy's retry rebuilds its targets from the deploy, with their label.
             "new_vm" => TargetRef::new_vm_from_key(&self.target_key),
+            // CV-03: a conversion's new image.
+            "disk_image" => TargetRef::disk_image_from_key(&self.target_key),
             _ => None,
         }
     }

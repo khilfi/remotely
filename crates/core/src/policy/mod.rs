@@ -14,7 +14,11 @@
 
 mod commands;
 #[cfg(test)]
+mod convert_tests;
+#[cfg(test)]
 mod deploy_tests;
+#[cfg(test)]
+mod host_networks_tests;
 #[cfg(test)]
 mod stack_tests;
 mod standing;
@@ -33,6 +37,7 @@ use crate::adapters::remote::forward::ForwardKind;
 use crate::command_bus::{Command, ContainerOp, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::host_networks::HostNetworkOp;
 use crate::presentation::Change;
 use crate::stacks::StackOp;
 use crate::vm_settings::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
@@ -164,16 +169,24 @@ pub enum ActionKind {
     VmDelete,
     /// Add an existing VM to the list (a .vmx) or to VirtualBox (a .vbox) (VM-24).
     VmRegister,
+    /// Add a NAT port forward: a port of this PC reaches a guest, for every VM on the network to share (VM-11).
+    NatForwardAdd,
+    /// Remove a NAT port forward: connections through it stop (VM-11).
+    NatForwardRemove,
     /// VM-21, VM-10 (docs/plan-0.5.md, "Approval tiers"): make new VMs (create, clone, import). Its bulk tier
     /// applies from [`PolicyRules::deploy_bulk_threshold`] VMs.
     VmDeploy,
     /// VM-08 (docs/plan-0.5.md, "Approval tiers"): delete a stack instance's VMs and their files.
     StackTeardown,
+    /// CV-03: convert a disk image into a new one (reads the source, writes a new file only).
+    ImageConvert,
+    /// VM-17, CV-02: export a powered-off VM for another hypervisor (reads the VM, writes new files only).
+    VmExport,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 51] = [
+    pub const ALL: [ActionKind; 55] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -199,8 +212,12 @@ impl ActionKind {
         ActionKind::VmDiskRemove,
         ActionKind::VmRegister,
         ActionKind::VmDelete,
+        ActionKind::NatForwardAdd,
+        ActionKind::NatForwardRemove,
         ActionKind::VmDeploy,
         ActionKind::StackTeardown,
+        ActionKind::VmExport,
+        ActionKind::ImageConvert,
         ActionKind::ExecReadOnly,
         ActionKind::ExecOther,
         ActionKind::ExecDangerous,
@@ -279,8 +296,12 @@ impl ActionKind {
             ActionKind::VmDiskRemove => "Remove a virtual disk (deletes its files)",
             ActionKind::VmDelete => "Delete VMs (deletes their files)",
             ActionKind::VmRegister => "Add an existing VM",
+            ActionKind::NatForwardAdd => "Add a NAT port forward",
+            ActionKind::NatForwardRemove => "Remove a NAT port forward",
             ActionKind::VmDeploy => "Deploy VMs (create, clone or import)",
             ActionKind::StackTeardown => "Tear down a stack instance (deletes its VMs)",
+            ActionKind::ImageConvert => "Convert a disk image (writes a new file)",
+            ActionKind::VmExport => "Export a VM (writes new files)",
         }
     }
 
@@ -891,6 +912,9 @@ impl Default for PolicyRules {
             (VmDelete, TierRule::same(Critical)),
             // Lists a VM (or registers it with VirtualBox); nothing in it changes.
             (VmRegister, TierRule::same(Low)),
+            // VM-11: a forward opens a port of this PC to a guest, or closes one, for the whole network.
+            (NatForwardAdd, TierRule::same(High)),
+            (NatForwardRemove, TierRule::same(High)),
             // VM-21, VM-10 (docs/plan-0.5.md): 1 to 4 VMs are one confirm, 5 or more (deploy_bulk_threshold) the
             // full approval; a Prod label moves it up one, as for every action.
             (
@@ -902,6 +926,10 @@ impl Default for PolicyRules {
             ),
             // VM-08: its VMs and their files go, like deleting them.
             (StackTeardown, TierRule::same(Critical)),
+            // CV-03, VM-17, CV-02 (docs/plan-0.5.md): read the source, write new files only. A Prod VM's export is
+            // Medium (its data leaves the VM).
+            (ImageConvert, TierRule::same(Low)),
+            (VmExport, TierRule::same(Low)),
         ]);
         Self {
             tiers,
@@ -1130,7 +1158,13 @@ impl PolicyEngine {
                 VmLifecycleOp::Delete => ActionKind::VmDelete,
                 VmLifecycleOp::Register { .. } => ActionKind::VmRegister,
             },
+            Command::HostNetwork { op, .. } => match op {
+                HostNetworkOp::AddForward { .. } => ActionKind::NatForwardAdd,
+                HostNetworkOp::RemoveForward { .. } => ActionKind::NatForwardRemove,
+            },
             Command::Deploy { .. } => ActionKind::VmDeploy,
+            Command::ImageConvert { .. } => ActionKind::ImageConvert,
+            Command::VmExport { .. } => ActionKind::VmExport,
         }
     }
 
@@ -1463,8 +1497,13 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::FileUpload { .. }
         | Command::OpenTunnel { .. }
         | Command::Container { .. }
+        // VM-11: a forward is the network's (or a NAT adapter's) setting; a snapshot of the guest wouldn't undo it.
+        | Command::HostNetwork { .. }
         // VM-21: the VMs don't exist yet, and a clone's source is only read.
-        | Command::Deploy { .. } => false,
+        | Command::Deploy { .. }
+        // CV-03, VM-17: the source is only read.
+        | Command::ImageConvert { .. }
+        | Command::VmExport { .. } => false,
     };
     on_vms && can_lose_state
 }

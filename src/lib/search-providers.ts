@@ -1,8 +1,8 @@
 // QL-20: the palette's search providers, in the order their groups show on a tie. Each reads only what the app
 // already reads or keeps, once per opening of the palette: no background polling and no logins (containers come from
-// what the Containers page last read; the command library is read once a run, as it never changes). A later package
-// adds its provider to SEARCH_PROVIDERS (deploy, schedules, stacks); its items come from a pure builder in
-// search-sources.ts, tested there. Pages and the palette's own actions are searched too, from the palette's props.
+// what the Containers page last read, host networks from what the map or the networks view last read; the command
+// library is read once a run, as it never changes). A later package adds its provider to SEARCH_PROVIDERS (deploy,
+// schedules, stacks); its items come from a pure builder in search-sources.ts, tested there. Pages and the palette's own actions are searched too, from the palette's props.
 
 import {
   BoxIcon,
@@ -11,6 +11,7 @@ import {
   DiscIcon,
   LayersIcon,
   MonitorIcon,
+  NetworkIcon,
   ServerIcon,
   SettingsIcon,
   SquareChevronRightIcon,
@@ -18,9 +19,11 @@ import {
 } from "lucide-react";
 import { api, type LibraryEntry, type SessionRecord, type VmRecord } from "@/lib/api";
 import { cachedContainers } from "@/lib/container-cache";
+import { cachedHostNetworks } from "@/lib/host-networks-cache";
 import type { SearchItem } from "@/lib/search";
 import {
   containerItems,
+  hostNetworkItems,
   imageItems,
   scheduleItems,
   sessionItems,
@@ -65,6 +68,12 @@ export const SEARCH_PROVIDERS: readonly SearchProvider[] = [
     heading: "Containers",
     icon: ContainerIcon,
     load: async () => containerItems(cachedContainers()),
+  },
+  {
+    id: "hostNetworks",
+    heading: "Host networks",
+    icon: NetworkIcon,
+    load: async () => hostNetworkItems(cachedHostNetworks()),
   },
   {
     id: "templates",

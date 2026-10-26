@@ -28,6 +28,8 @@ pub enum DeployOrigin {
     Custom { name: String },
     /// VM-10: the VMs picked on the VMs page, each cloned.
     BulkClone,
+    /// CV-01: a foreign VM or disk imported from Image tools or the VMs page; `name` is the file picked.
+    Import { name: String },
 }
 
 impl DeployOrigin {
@@ -36,9 +38,21 @@ impl DeployOrigin {
             DeployOrigin::Template { name, .. } => format!("launch template '{name}'"),
             DeployOrigin::Custom { name } => format!("custom settings ('{name}')"),
             DeployOrigin::BulkClone => "a bulk clone".into(),
+            DeployOrigin::Import { name } => format!("an import of {name}"),
         }
     }
 }
+
+/// CV-01: one disk an import converts into the new VM's folder (the first boots).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportDisk {
+    pub path: String,
+    pub format: crate::convert::formats::DiskFormat,
+}
+
+/// The most disks one import brings.
+pub const MAX_IMPORT_DISKS: usize = crate::convert::import::MAX_IMPORT_DISKS;
 
 /// Where each VM's OS comes from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +75,13 @@ pub enum DeploySource {
     Appliance { path: String, format: ImageFormat },
     /// VM-10: each VM is a full clone of its own source VM ([`DeployVm::clone_of`]), as that VM is now.
     BulkClone,
+    /// CV-01: a foreign VM's disks (or one disk image), each converted (never changed) into the new VM's folder,
+    /// the first its boot disk; `description` is the libvirt XML or Proxmox `.conf` they came with.
+    Import {
+        disks: Vec<ImportDisk>,
+        #[serde(default)]
+        description: Option<String>,
+    },
 }
 
 impl DeploySource {
@@ -79,15 +100,31 @@ impl DeploySource {
             DeploySource::Iso { path } => format!("a blank VM booting {path}"),
             DeploySource::Appliance { path, format } => format!("the {} appliance {path}", format.label()),
             DeploySource::BulkClone => "a full clone of each VM as it is now".into(),
+            DeploySource::Import { disks, description } => {
+                let files: Vec<String> = disks
+                    .iter()
+                    .map(|d| format!("{} ({})", d.path, d.format.label()))
+                    .collect();
+                let mut text = format!(
+                    "the imported disk{} {}",
+                    if disks.len() == 1 { "" } else { "s" },
+                    files.join(", ")
+                );
+                if let Some(description) = description {
+                    text.push_str(&format!(", described by {description}"));
+                }
+                text
+            }
         }
     }
 
-    /// The file it reads, for the kinds that are one.
+    /// The file it reads, for the kinds that are one (an import's boot disk).
     pub fn path(&self) -> Option<&str> {
         match self {
             DeploySource::CloudImage { path, .. }
             | DeploySource::Iso { path }
             | DeploySource::Appliance { path, .. } => Some(path),
+            DeploySource::Import { disks, .. } => disks.first().map(|d| d.path.as_str()),
             DeploySource::GoldenVm { .. } | DeploySource::BulkClone => None,
         }
     }
@@ -369,6 +406,10 @@ impl DeploySpec {
             DeployOrigin::BulkClone => format!("Clone {n} {noun}"),
             DeployOrigin::Template { name, .. } => format!("Deploy {n} {noun} from '{name}'"),
             DeployOrigin::Custom { .. } => format!("Deploy {n} {noun} (custom)"),
+            DeployOrigin::Import { name } => match self.vms.as_slice() {
+                [vm] => format!("Import {} from {name}", vm.name),
+                _ => format!("Import {n} {noun} from {name}"),
+            },
         }
     }
 
@@ -436,6 +477,22 @@ impl DeploySpec {
         if let Some(path) = self.source.path() {
             if let Some(refusal) = untrusted::path_refusal(path) {
                 return invalid(format!("The image {path} {}.", refusal.describe()));
+            }
+        }
+        if let DeploySource::Import { disks, description } = &self.source {
+            if disks.is_empty() || disks.len() > MAX_IMPORT_DISKS {
+                return invalid(format!("An import brings 1 to {MAX_IMPORT_DISKS} disks."));
+            }
+            for path in disks.iter().map(|d| d.path.as_str()).chain(description.as_deref()) {
+                if !std::path::Path::new(path).is_absolute() {
+                    return invalid(format!("'{path}' isn't a full path on this PC."));
+                }
+                if let Some(refusal) = untrusted::path_refusal(path) {
+                    return invalid(format!("The disk {path} {}.", refusal.describe()));
+                }
+            }
+            if self.size.as_ref().is_some_and(|s| s.disks.len() < disks.len()) {
+                return invalid("The size has fewer disks than the import brings.");
             }
         }
         if let Some(network) = &self.network {

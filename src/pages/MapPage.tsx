@@ -6,8 +6,10 @@
 // FD-03: every word on the map is HTML (the nodes are buttons over an SVG that draws only the lines), so presentation
 // mode's DOM masking covers it as anywhere else, and a node's address line carries `data-mask`.
 //
-// Reads only while shown (P6): the VM list, the sessions and each VM's adapters (what was read before, and a read of
-// the VMs never read; Refresh reads every VM again). Tunnels come from the panes' own events.
+// Reads only while shown (P6): the VM list, the sessions, each VM's adapters (what was read before, and a read of
+// the VMs never read; Refresh reads every VM again) and R4's host networks alone (VM-11: vmrun listHostNetworks and
+// VBoxManage's two lists, no VM read again), joined to the adapters by network name; what was listed is kept for the
+// palette's search. Tunnels come from the panes' own events.
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
@@ -25,12 +27,15 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api, errorMessage, type SessionRecord, type VmRecord } from "@/lib/api";
+import { rememberHostNetworks } from "@/lib/host-networks-cache";
 import type { AppLink } from "@/lib/links";
 import { navigationApi, type VmNetworks } from "@/lib/navigation-api";
 import { openTunnels, subscribeTunnels } from "@/lib/open-tunnels";
-import { buildTopology, type TopoKind, type TopoNode, type TopoState } from "@/lib/topology";
+import { buildTopology, type HostNetwork, type TopoKind, type TopoNode, type TopoState } from "@/lib/topology";
 import { DEFAULT_LAYOUT, layoutTopology } from "@/lib/topology-layout";
 import { cn } from "@/lib/utils";
+import { topologyHostNetworks } from "@/lib/vm-insight";
+import { insightApi } from "@/lib/vm-insight-api";
 
 const ICON: Record<TopoKind, LucideIcon> = {
   pc: LaptopIcon,
@@ -66,24 +71,33 @@ export function MapPage({ active, onOpenLink }: Props) {
   const [vms, setVms] = useState<VmRecord[] | null>(null);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [networks, setNetworks] = useState<VmNetworks[]>([]);
+  const [hostNetworks, setHostNetworks] = useState<HostNetwork[]>([]);
   const [reading, setReading] = useState(false);
   const [allSessions, setAllSessions] = useState(false);
   const [offVms, setOffVms] = useState(true);
   const [lit, setLit] = useState<string | null>(null);
   const tunnels = useSyncExternalStore(subscribeTunnels, openTunnels);
 
-  const load = useCallback(
-    (fresh: boolean) =>
-      Promise.all([api.vmList(), api.sessions(), navigationApi.vmNetworks(fresh)]).then(
-        ([v, s, n]) => {
-          setVms(v);
-          setSessions(s);
-          setNetworks(n);
-        },
-        (err) => toast.error(errorMessage(err)),
-      ),
-    [],
-  );
+  const load = useCallback((fresh: boolean) => {
+    // VM-11: the host networks come on their own, as vmrun takes a moment; until then (or without them) the map names
+    // its networks as the adapters do.
+    insightApi.hostNetworkList().then(
+      (report) => {
+        const list = topologyHostNetworks(report);
+        setHostNetworks(list);
+        rememberHostNetworks(list);
+      },
+      (err) => console.warn("host networks not read", err),
+    );
+    return Promise.all([api.vmList(), api.sessions(), navigationApi.vmNetworks(fresh)]).then(
+      ([v, s, n]) => {
+        setVms(v);
+        setSessions(s);
+        setNetworks(n);
+      },
+      (err) => toast.error(errorMessage(err)),
+    );
+  }, []);
 
   useEffect(() => {
     if (active) void load(false);
@@ -95,8 +109,8 @@ export function MapPage({ active, onOpenLink }: Props) {
   }
 
   const graph = useMemo(
-    () => buildTopology({ vms: vms ?? [], networks, sessions, tunnels, allSessions, offVms }),
-    [vms, networks, sessions, tunnels, allSessions, offVms],
+    () => buildTopology({ vms: vms ?? [], networks, sessions, tunnels, hostNetworks, allSessions, offVms }),
+    [vms, networks, sessions, tunnels, hostNetworks, allSessions, offVms],
   );
   const layout = useMemo(() => layoutTopology(graph.nodes, graph.edges), [graph]);
   const near = useMemo(() => {
@@ -138,7 +152,8 @@ export function MapPage({ active, onOpenLink }: Props) {
         <Legend />
       </div>
       <p className="text-xs text-muted-foreground" role="status">
-        Networks as each VM&apos;s settings say{readAt ? `, read ${new Date(readAt).toLocaleString()}` : ""}.
+        Networks as each VM&apos;s settings say and Workstation and VirtualBox list them
+        {readAt ? `, read ${new Date(readAt).toLocaleString()}` : ""}.
         {unread > 0 &&
           ` ${unread === 1 ? "One VM" : `${unread} VMs`} could not be read now: what was read before shows.`}{" "}
         Read only: click a node to open it.

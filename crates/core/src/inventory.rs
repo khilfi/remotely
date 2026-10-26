@@ -588,6 +588,7 @@ pub struct StoreDirectory {
     store: Store,
     terminals: Option<Terminals>,
     containers: Option<crate::containers::Containers>,
+    networks: Option<crate::host_networks::HostNetworks>,
 }
 
 impl StoreDirectory {
@@ -596,6 +597,7 @@ impl StoreDirectory {
             store,
             terminals: None,
             containers: None,
+            networks: None,
         }
     }
 
@@ -608,6 +610,12 @@ impl StoreDirectory {
     /// CT-01, CT-02: container targets are what the engines list.
     pub fn with_containers(mut self, containers: crate::containers::Containers) -> Self {
         self.containers = Some(containers);
+        self
+    }
+
+    /// VM-11: network targets are the hypervisors' host networks.
+    pub fn with_host_networks(mut self, networks: crate::host_networks::HostNetworks) -> Self {
+        self.networks = Some(networks);
         self
     }
 }
@@ -664,11 +672,24 @@ impl TargetDirectory for StoreDirectory {
                 Some(containers) => containers.target(ctx, target).await,
                 None => Err(CoreError::UnknownTarget(target.key())),
             },
+            TargetRef::Network { .. } => match &self.networks {
+                Some(networks) => networks.target(ctx, target).await,
+                None => Err(CoreError::UnknownTarget(target.key())),
+            },
             // VM-21: not made yet, so nothing to look up: the name and label it will have; never protected.
             TargetRef::NewVm { name, environment, .. } => Ok(Target {
                 target: target.clone(),
                 name: name.clone(),
                 environment: *environment,
+                protected: false,
+            }),
+            // CV-03: a new file on this PC: named by its file name; no label, never protected.
+            TargetRef::DiskImage { path } => Ok(Target {
+                target: target.clone(),
+                name: std::path::Path::new(path)
+                    .file_name()
+                    .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned()),
+                environment: Environment::None,
                 protected: false,
             }),
         }

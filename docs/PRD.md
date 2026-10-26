@@ -119,6 +119,8 @@ VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-la
 | Remove a disk (deletes its files); delete a VM | Critical |
 | Add an existing VM (a `.vmx` to the list, a `.vbox` to VirtualBox) | Low |
 | Open a VM's console (the hypervisor's own window; it changes nothing) | No tier; audited |
+| Add or remove a NAT port forward: a Workstation vmnet's, a VirtualBox NAT network's, or a VirtualBox VM's NAT adapter rule (it reaches every VM on the network; a network counts as Prod when a VM on it is) | High |
+| Read a VM's logs and timeline, the host networks, the waste finder's report | No tier; not audited (reads) |
 
 Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM is a target, labelled as the deploy labels it, so a Prod label moves the tier up one; a new VM is never protected:
 
@@ -136,6 +138,15 @@ Stacks (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-08). A stack instance's V
 | Start, shut down or suspend a stack instance (boot order to start, the last step first to stop) | The power action's own tier on its VMs (start Low; shut down or suspend Medium for one VM, High for 2 or more) |
 | Tear down a stack instance (deletes the VMs its deploy made, with their files; VMs added by hand only when picked) | Critical |
 | Edit a stack, or add or take a VM out of an instance by hand (nothing in a VM changes) | No tier; audited |
+
+Conversion (0.5.0, `docs/plan-0.5.md` "Approval tiers"; CV-01 to CV-03, VM-17). The source is only read and only new files are written, so these are Low; a Prod-labelled VM moves its export up one tier, and a protected VM is skipped. An import of a foreign VM or disk is a deploy, with the deploy rows above. Inspect and Verify only read, so they are not commands:
+
+| Action | Tier |
+| --- | --- |
+| Convert a disk image into a new one (CV-03) | Low |
+| Export a powered-off VM for another hypervisor or a cloud (VM-17, CV-02) | Low |
+| Export a VM labelled Prod | Medium |
+| Import a foreign VM or disk as a new VM (CV-01) | As a deploy: Medium, High for Prod |
 
 Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 

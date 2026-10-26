@@ -3,12 +3,12 @@
 // selection's Snapshots menu opens; these helpers work on whatever has been read. QL-08: every reason says why an
 // action is off; `null` means it is available.
 
-import type { ApprovalStep, Hypervisor, SnapshotNode, Tier, VmSnapshots } from "./api.ts";
+import type { ApprovalStep, Hypervisor, LinkedClone, SnapshotNode, Tier, VmSnapshots } from "./api.ts";
 import { slashIsPath } from "./hypervisors.ts";
 
 /** Where a VM's details panel opens: its details, or its snapshot tree and actions. */
 /** The VM details panel's tabs (MO-13: System, the guest's own facts; VM-23: Settings, the VM's hardware). */
-export type VmView = "details" | "settings" | "system" | "snapshots" | "schedules";
+export type VmView = "details" | "settings" | "system" | "snapshots" | "log" | "timeline" | "schedules";
 
 /** AP-04: what a protected VM's actions say. */
 export const PROTECTED_REASON = "Protected: actions skip this VM until it is unprotected";
@@ -63,6 +63,30 @@ export function snapshotActionReason(input: {
     return "vmrun reads '/' in a name as a path, so manage this snapshot in Workstation";
   if (input.busy) return BUSY_REASON;
   return null;
+}
+
+/** `web-01, web-02 and 3 more`: at most `max` names. */
+export function cloneNames(clones: LinkedClone[], max = 5) {
+  const names = clones.slice(0, max).map((c) => c.name);
+  if (clones.length > max) return `${names.join(", ")} and ${clones.length - max} more`;
+  return names.join(", ");
+}
+
+/** VM-04, VM-21: "2 linked clones", for a snapshot's badge. */
+export function linkedClonesLabel(count: number) {
+  return count === 1 ? "1 linked clone" : `${count} linked clones`;
+}
+
+/**
+ * VM-04, VM-21: why deleting one snapshot is off: what [`snapshotActionReason`] says, or linked clones made from it,
+ * which deleting it would break (the core refuses it too).
+ */
+export function snapshotDeleteReason(input: Parameters<typeof snapshotActionReason>[0]): string | null {
+  const reason = snapshotActionReason(input);
+  if (reason) return reason;
+  const clones = input.node.linkedClones;
+  if (clones.length === 0) return null;
+  return `${linkedClonesLabel(clones.length)} ${clones.length === 1 ? "is" : "are"} made from this snapshot (${cloneNames(clones)}): deleting it would break them. Delete those clones first.`;
 }
 
 /**

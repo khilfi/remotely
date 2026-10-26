@@ -185,6 +185,7 @@ async fn core_on(store: Store) -> Core {
         updater: Arc::new(FakeUpdater::default()),
         network: Arc::new(FakeNetwork::default()),
         containers: Arc::new(FakeContainers::default()),
+        disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
     };
     Core::assemble(store, ctx, adapters, JobLimits::default())
         .await

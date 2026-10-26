@@ -601,6 +601,7 @@ impl Containers {
                 notes,
                 container: Some(container),
                 stack: None,
+                linked_clones: Vec::new(),
             });
         }
         out

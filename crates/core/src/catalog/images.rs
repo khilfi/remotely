@@ -3,7 +3,7 @@
 //! * A **golden VM** and one of its snapshots (for linked clones): by the VM's key and the snapshot's id, which stays
 //!   the same when the snapshot is renamed (Workstation's `snapshotN.uid`, VirtualBox's snapshot UUID).
 //! * A **cloud image** file that boots with cloud-init: VMDK, OVA or raw; qcow2 too (Rocky and Alma publish only
-//!   qcow2), which deploys once the conversion package (CV-03) has turned it into a VMDK or VDI.
+//!   qcow2), which each deploy converts into a VMDK or VDI with qemu-img (CV-03), when qemu-img is installed.
 //! * An **ISO** to install from.
 //! * An **OVA or OVF** appliance, imported as it is.
 //!
@@ -147,9 +147,9 @@ impl ImageFormat {
     }
 }
 
-/// Why a qcow2 image can't deploy yet.
-pub const QCOW2_NEEDS_CONVERSION: &str =
-    "qcow2 images deploy once they are converted to VMDK or VDI, which arrives with the conversion package (CV-03).";
+/// CV-03: why a qcow2 image can't deploy on this PC: each deploy converts it with qemu-img, which isn't installed.
+pub const QCOW2_NEEDS_QEMU_IMG: &str =
+    "qcow2 images deploy through qemu-img (converted into each VM's folder), which isn't installed: install QEMU for Windows (Image tools links to its download page), or convert the image to VMDK or VDI there.";
 
 /// Where an image's OS comes from, with what names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

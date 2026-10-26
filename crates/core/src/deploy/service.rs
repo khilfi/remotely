@@ -21,6 +21,9 @@ use crate::domain::{Context, Environment, PowerState};
 use crate::error::{CoreError, Result};
 use crate::store::{Store, VmRecord};
 
+mod import;
+pub use import::{ImportCloudInit, ImportRequest};
+
 /// What a deploy starts from.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -95,6 +98,8 @@ pub struct Deploys {
     bus: Arc<CommandBus>,
     /// VM-26: the capacity planner's reads.
     capacity: Arc<crate::capacity::CapacityChecker>,
+    /// CV-01: the conversion tools, for imports.
+    converter: Option<Arc<crate::convert::Converter>>,
 }
 
 impl Deploys {
@@ -117,7 +122,14 @@ impl Deploys {
             host,
             bus,
             capacity,
+            converter: None,
         }
+    }
+
+    /// CV-01: imports read their disks' formats and plans with these tools.
+    pub fn with_converter(mut self, converter: Arc<crate::convert::Converter>) -> Self {
+        self.converter = Some(converter);
+        self
     }
 
     /// VM-26: this PC after the deploy of `spec` (whose preview is `preview`), next to now. A read.
@@ -163,6 +175,38 @@ impl Deploys {
     /// VirtualBox's host-only adapters, or with `bridged` the network adapters it bridges to.
     pub async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
         self.hypervisors.virtualbox().host_adapters(bridged).await
+    }
+
+    /// VirtualBox's host-only or bridged adapter for the network: the one asked for when VirtualBox has it, else the
+    /// first; `None` for a network that needs none.
+    async fn host_adapter_for(
+        &self,
+        hypervisor: Hypervisor,
+        network: &Network,
+        asked: Option<&str>,
+    ) -> std::result::Result<Option<String>, Problem> {
+        match (hypervisor, network) {
+            (Hypervisor::VirtualBox, Network::HostOnly | Network::Bridged) => {
+                let bridged = *network == Network::Bridged;
+                let known = self.host_adapters(bridged).await.unwrap_or_default();
+                match asked {
+                    Some(asked) if known.iter().any(|k| k == asked) => Ok(Some(asked.to_owned())),
+                    Some(asked) => Err(problem(format!(
+                        "VirtualBox has no {} adapter named '{asked}'.",
+                        if bridged { "network" } else { "host-only" }
+                    ))),
+                    None => match known.into_iter().next() {
+                        Some(first) => Ok(Some(first)),
+                        None => Err(problem(if bridged {
+                            "VirtualBox lists no network adapter to bridge to."
+                        } else {
+                            "VirtualBox has no host-only network yet: add one in VirtualBox (File, Tools, Network Manager)."
+                        })),
+                    },
+                }
+            }
+            _ => Ok(None),
+        }
     }
 
     /// The spec a request makes, or why it can't make one.
@@ -226,31 +270,12 @@ impl Deploys {
             Some(folder) => with_backslashes(Path::new(folder)).display().to_string(),
             None => self.default_folder(plan.hypervisor).await?,
         };
-        let host_adapter = match (&plan.hypervisor, &plan.network) {
-            (Hypervisor::VirtualBox, Network::HostOnly | Network::Bridged) => {
-                let bridged = plan.network == Network::Bridged;
-                let known = self.host_adapters(bridged).await.unwrap_or_default();
-                match request.host_adapter.as_deref() {
-                    Some(asked) if known.iter().any(|k| k == asked) => Some(asked.to_owned()),
-                    Some(asked) => {
-                        return Ok(Err(vec![problem(format!(
-                            "VirtualBox has no {} adapter named '{asked}'.",
-                            if bridged { "network" } else { "host-only" }
-                        ))]))
-                    }
-                    None => match known.into_iter().next() {
-                        Some(first) => Some(first),
-                        None => {
-                            return Ok(Err(vec![problem(if bridged {
-                                "VirtualBox lists no network adapter to bridge to."
-                            } else {
-                                "VirtualBox has no host-only network yet: add one in VirtualBox (File, Tools, Network Manager)."
-                            })]))
-                        }
-                    },
-                }
-            }
-            _ => None,
+        let host_adapter = match self
+            .host_adapter_for(plan.hypervisor, &plan.network, request.host_adapter.as_deref())
+            .await
+        {
+            Ok(adapter) => adapter,
+            Err(problem) => return Ok(Err(vec![problem])),
         };
         let mut spec = DeploySpec::from_plan(&plan, origin, folder, host_adapter);
         if let Some(password_id) = request.guest_password_id {

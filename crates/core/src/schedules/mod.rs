@@ -14,7 +14,8 @@
 //!   up. While the read-only lock is on nothing runs (each due run is reported as skipped). Runs never overlap: a
 //!   run due while the last one still goes is skipped and reported.
 //! * VM-27 retention deletes only the snapshots its own schedule took, recorded by the hypervisor's id when they
-//!   were taken, while the id and the recognisable name still match. Chain warnings ([`chains`]) show on the VM and
+//!   were taken, while the id and the recognisable name still match, and never one a linked clone is made from (it
+//!   stays, counted again next run, VM-04, VM-21: [`crate::linked_clones`]). Chain warnings ([`chains`]) show on the VM and
 //!   in the schedule list.
 //!
 //! The scheduler ticks on the wall clock ([`Schedules::run`]); tests give a fake clock and call
@@ -49,6 +50,7 @@ use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::inventory::Inventory;
 use crate::jobs::{JobRunner, JobStatus, TargetStatus};
+use crate::linked_clones::{clone_list, LinkedClones, SnapshotClones, VboxMedia};
 use crate::locks;
 use crate::metrics::Metrics;
 use crate::policy::Tier;
@@ -1932,7 +1934,7 @@ impl Schedules {
         }
         let mut retention_failed = false;
         if let Some(keep) = keep {
-            let (deleted, kept_renamed, errors) = self.retain(row, run_id, due, keep, &taken, jobs).await;
+            let (deleted, kept_renamed, held, errors) = self.retain(row, run_id, due, keep, &taken, jobs).await;
             if deleted > 0 {
                 let what = if deleted == 1 { "snapshot" } else { "snapshots" };
                 parts.push(format!("deleted {deleted} older {what} (keeping the last {keep})"));
@@ -1941,6 +1943,13 @@ impl Schedules {
                 parts.push(format!(
                     "{} renamed since it was taken, so it is kept and no longer counted",
                     plural(kept_renamed, "snapshot")
+                ));
+            }
+            if !held.is_empty() {
+                parts.push(format!(
+                    "kept {} that linked clones are made from, until the clones are deleted: {}",
+                    plural(held.len(), "older snapshot"),
+                    held.join("; ")
                 ));
             }
             retention_failed = !errors.is_empty();
@@ -1958,7 +1967,7 @@ impl Schedules {
     }
 
     /// VM-27 retention on the VMs a run took a snapshot of. Returns how many were deleted, how many were kept for
-    /// being renamed, and what failed.
+    /// being renamed, the ones kept for linked clones (VM-04, VM-21) and what failed.
     async fn retain(
         &self,
         row: &ScheduleRow,
@@ -1967,9 +1976,12 @@ impl Schedules {
         keep: u32,
         taken: &[&VmRecord],
         jobs: &mut Vec<Uuid>,
-    ) -> (usize, usize, Vec<String>) {
+    ) -> (usize, usize, Vec<String>, Vec<String>) {
         let mut renamed = 0;
+        let mut held = Vec::new();
         let mut errors = Vec::new();
+        let linked = LinkedClones::new(self.inner.hypervisors.clone());
+        let mut media = VboxMedia::default();
         // How each excess snapshot is named to its hypervisor -> the VMs and ids.
         let mut deletes: HashMap<String, Vec<(String, String, String)>> = HashMap::new();
         for vm in taken {
@@ -1999,6 +2011,18 @@ impl Schedules {
                 }
             };
             let nodes = tree_nodes(&tree, self.clock().now());
+            // VM-04, VM-21: a snapshot linked clones are made from stays (deleting it would break them); its record stays
+            // too, so a later run deletes it once the clones are gone.
+            let clones: Vec<SnapshotClones> = match linked.of_tree(&vm.vmx_path, &tree, &mut media).await {
+                Ok(clones) => clones,
+                Err(err) => {
+                    errors.push(format!(
+                        "{}'s linked clones could not be checked, so retention left its snapshots: {err}",
+                        vm.display_name
+                    ));
+                    continue;
+                }
+            };
             for old in excess {
                 let found = tree
                     .snapshots
@@ -2023,6 +2047,15 @@ impl Schedules {
                     continue;
                 }
                 let Some(info) = found else { continue };
+                if let Some(made) = clones.iter().find(|c| c.uid == info.uid) {
+                    held.push(format!(
+                        "'{}' on {} ({})",
+                        info.name,
+                        vm.display_name,
+                        clone_list(&made.clones)
+                    ));
+                    continue;
+                }
                 // VirtualBox: its UUID. Workstation: the name when no other snapshot has it, else its path.
                 let reference = match (&info.id, tree.snapshots.iter().filter(|s| s.name == info.name).count()) {
                     (Some(id), _) => id.clone(),
@@ -2085,7 +2118,7 @@ impl Schedules {
                 locks::lock(&self.inner.chains).remove(&vm_key(&key));
             }
         }
-        (deleted, renamed, errors)
+        (deleted, renamed, held, errors)
     }
 }
 

@@ -17,6 +17,7 @@ use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::vmware::{SnapshotInfo, SnapshotTree};
 use crate::domain::{Context, Environment, PowerState};
 use crate::error::Result;
+use crate::linked_clones::{LinkedClone, LinkedClones, VboxMedia};
 use crate::store::Store;
 
 /// VM-04: snapshots older than this are flagged. Old snapshots slow the VM's disk and use space.
@@ -65,6 +66,9 @@ pub struct SnapshotNode {
     pub safety: bool,
     /// The VM's current state was taken from this snapshot ("you are here").
     pub current: bool,
+    /// VM-04, VM-21: the linked clones made from this snapshot, which deleting it would break: it is not deleted while
+    /// there are any ([`crate::linked_clones`]). Filled by [`SnapshotReader::list`].
+    pub linked_clones: Vec<LinkedClone>,
 }
 
 /// A VM and its snapshot tree.
@@ -113,6 +117,7 @@ pub fn tree_nodes(tree: &SnapshotTree, now: OffsetDateTime) -> Vec<SnapshotNode>
             old: age.is_some_and(|a| a > Duration::days(OLD_AFTER_DAYS)),
             safety: is_safety_name(&snapshot.name),
             current: tree.current_uid == Some(snapshot.uid),
+            linked_clones: Vec::new(),
         }
     };
 
@@ -185,9 +190,13 @@ impl SnapshotReader {
 
     /// The snapshots of the VMs the last inventory refresh found, or of `only` those .vmx paths. A
     /// VM whose .vmsd cannot be read is listed with the error instead of failing the whole list.
+    /// VM-04, VM-21: each snapshot's linked clones (VirtualBox's media list read once, only when a VirtualBox VM listed
+    /// has snapshots).
     pub async fn list(&self, ctx: &Context, only: Option<&[String]>) -> Result<Vec<VmSnapshots>> {
         let wanted: Option<HashSet<String>> = only.map(|paths| paths.iter().map(|p| p.to_lowercase()).collect());
         let now = OffsetDateTime::now_utc();
+        let linked = LinkedClones::new(self.hypervisors.clone());
+        let mut media = VboxMedia::default();
         let mut out = Vec::new();
         for vm in self.store.list_vms(ctx).await? {
             if wanted
@@ -197,7 +206,21 @@ impl SnapshotReader {
                 continue;
             }
             let (snapshots, error) = match self.hypervisors.snapshots(&vm.vmx_path).await {
-                Ok(tree) => (tree_nodes(&tree, now), None),
+                Ok(tree) => {
+                    let mut nodes = tree_nodes(&tree, now);
+                    match linked.of_tree(&vm.vmx_path, &tree, &mut media).await {
+                        Ok(found) => {
+                            for each in found {
+                                if let Some(node) = nodes.iter_mut().find(|n| n.uid == each.uid) {
+                                    node.linked_clones = each.clones;
+                                }
+                            }
+                        }
+                        // The delete checks again, and refuses when it can't tell.
+                        Err(err) => tracing::debug!(error = %err, "could not read a VM's linked clones"),
+                    }
+                    (nodes, None)
+                }
                 Err(err) => (Vec::new(), Some(format!("Could not read the snapshot list: {err}"))),
             };
             out.push(VmSnapshots {
@@ -233,6 +256,7 @@ mod tests {
             description: None,
             created_at: Some(at),
             id: None,
+            linked_clones: Vec::new(),
         }
     }
 

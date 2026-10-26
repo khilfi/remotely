@@ -53,6 +53,7 @@ import { approveReason } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { targetLocation } from "@/lib/hypervisors";
 import { formatSize } from "@/lib/transfers";
+import { cloneNames } from "@/lib/vm-snapshots";
 import { ContainerStateBadge, EnvBadge, StateBadge, TierBadge } from "./Badges";
 import { WhyDisabled } from "./WhyDisabled";
 
@@ -81,7 +82,9 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
   if (target.kind === "session") return target.sessionId;
   if (target.kind === "terminal") return target.terminalId;
   if (target.kind === "container") return containerTargetKey(target);
+  if (target.kind === "network") return `${target.hypervisor}:${target.name}`;
   if (target.kind === "newVm") return `new-vm/${target.hypervisor}/${target.name}`;
+  if (target.kind === "diskImage") return `disk-image/${target.path}`;
   return "app";
 }
 
@@ -322,6 +325,12 @@ export function ApprovalDialog({
                             {note}
                           </div>
                         ))}
+                        {now?.linkedClones.map((s) => (
+                          <div key={s.uid} className="text-xs text-destructive">
+                            Not deleted: {plural(s.clones.length, "linked clone")} made from its snapshot &apos;
+                            {s.snapshot}&apos; ({cloneNames(s.clones)})
+                          </div>
+                        ))}
                       </TableCell>
                       {hasContainers && (
                         <>
@@ -383,7 +392,8 @@ export function ApprovalDialog({
               <InfoIcon className="mt-px size-3.5 shrink-0" aria-hidden />
               <span>
                 Up for is how long each VM has run since it was last powered on or resumed; a VM in a stack instance
-                says which one and its step. Not shown yet: users logged in to each guest (that needs a guest login).
+                says which one and its step. Linked clones made from a VM's snapshots show under it when a delete would
+                break them. Not shown yet: users logged in to each guest (that needs a guest login).
               </span>
             </p>
           )}

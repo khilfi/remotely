@@ -127,7 +127,11 @@ crates/core/          remotely-core: all app logic
                       headers for provisioned sizes; size on disk down a snapshot chain; A3 a disk, extent or parent
                       whose resolved path is on a share or a device path is never opened, so a .vmx kept on a share
                       shows its disks as not read; A9 the .vmx up to 4 MB, a text descriptor up to 1 MB, read whole or
-                      refused; VmFiles: LocalFiles, or memory in tests), updater.rs, github.rs (FD-14
+                      refused; VmFiles: LocalFiles, or memory in tests), host_networks.rs (VM-11 the tools' network
+                      output: listHostNetworks, listPortForwardings read loosely with vmnetnat.conf's [incomingtcp] and
+                      [incomingudp] as the fallback, list hostonlyifs, list --long natnets, a VM's Forwarding(N) by
+                      the adapter keys before it; the change arguments; process_elevated; hardware_retrying: asked
+                      again while VirtualBox says another client holds the VM's lock), updater.rs, github.rs (FD-14
                       GitHub Releases API without a token or with the optional update token, public download links,
                       rate-limit backoff), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
@@ -136,7 +140,10 @@ crates/core/          remotely-core: all app logic
                       streamed through exec_output's OutputCollector (A9: capped, never buffered whole); parse.rs both
                       CLIs' JSON field by field (env values never leave it; a command and entrypoint go through
                       export::redact_secrets, parse::command_line); names.rs checked ids, volume names and
-                      image references, every word shell-quoted on hosts)
+                      image references, every word shell-quoted on hosts), disk_tools.rs (CV-01 to CV-03, VM-17 the
+                      conversion tools behind DiskTools: qemu-img found from Settings, `REMOTELY_QEMU_IMG`, then
+                      QEMU's default folder, never shipped; vdiskmanager, VBoxManage and ovftool from the hypervisor
+                      adapters' paths; each run streamed for its own progress, timed, killed on cancel)
     containers/       CT-01, CT-02 container hosts: marks.rs (sessions marked Docker or Podman, how each runs: as the
                       user or with sudo; migration 0013, audited like session edits, Change::ContainerHosts, FD-07);
                       mod.rs the Containers service: detection, reads on kept connections (closed when idle), target
@@ -208,7 +215,34 @@ crates/core/          remotely-core: all app logic
                       VM's .vmx; cloud_init.rs VM-22 meta-data and user-data (hostname, guest user with sudo, SSH
                       public key, packages; never a password) and Workstation's guestinfo keys; seed.rs the NoCloud
                       seed (ISO 9660 with Joliet, label `cidata`) and its reader for tests; ovf.rs an OVF's or OVA's
-                      disk capacities for the preview (an OVA's first tar members only)
+                      disk capacities for the preview (an OVA's first tar members only) and its descriptor (CV-01);
+                      CV-01 service/import.rs: an import is a deploy (ImportRequest, check_import, submit_import;
+                      DeploySource::Import, DeployOrigin::Import); the runner copies VMDK and raw (Workstation) or
+                      VMDK, VDI, VHD and raw (VirtualBox) itself and converts the rest (qcow2, VHDX; VHD and VDI on
+                      Workstation) through Converter::convert_into, which also makes R1's qcow2 cloud images deploy
+    convert/          CV-01 to CV-03, VM-17 conversion (other hypervisors' formats read and written, never managed).
+                      formats.rs DiskFormat and OutputKind (VMDK sparse, flat, stream-optimized, ESXi's vmfs; VDI,
+                      VHD, VHDX dynamic or fixed; qcow2; raw); inspect.rs CV-03 Inspect from each header (MO-13's
+                      readers, VHDX's region and metadata tables, qcow2's backing file and encryption, a raw disk's
+                      MBR or GPT; a parent or backing file is a problem but a Workstation delta, which vdiskmanager
+                      flattens); plan.rs which tools, pure: the hypervisors' own first (vdiskmanager for VMDK,
+                      VBoxManage for VDI, VHD and raw, VirtualBox's own differencing chains), qemu-img for qcow2 and
+                      VHDX, at most two steps through a growable VMDK or VDI, Azure's whole MB through a VDI or qcow2
+                      a tool resizes; qemu-img never reads a disk with a parent; NoPlan::NeedsQemuImg says what
+                      needs it; args.rs every command line (qemu-img always with `-f`/`-F`); spec.rs ConvertSpec
+                      (Command::ImageConvert, TargetRef::DiskImage `disk-image/<path>`, migration 0027) and
+                      ExportSpec (Command::VmExport, the VM as target), both refused from the UI and Low (a Prod
+                      VM's export Medium; policy/convert_tests.rs); runner.rs Converter, the job runner's
+                      ConvertActions: a work folder `.remotely-<job>` beside the output, files moved into place,
+                      nothing ever replaced, a free-space check first, VirtualBox's media list restored (clonemedium
+                      registers its source and target), the job's progress (JobEvent::TargetProgress), everything
+                      the job made removed on failure or cancel; an export makes `<folder>\<vm>-<target>`; targets.rs
+                      each target's README (how to import, driver changes), the libvirt domain XML and the Proxmox
+                      script (names are slugs); describe.rs OVF, libvirt XML and Proxmox .conf read as untrusted
+                      (1 MB cap, no DTD, depth and element caps); import.rs CV-01 what a picked file is and brings;
+                      verify.rs CV-03 Verify (sizes, SHA-256 of each file, qemu-img compare); service.rs
+                      Conversions (Core.convert): tools, Inspect, options and submits, Verify, QEMU's download page
+                      (checked_qemu_site)
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
                       Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
@@ -236,7 +270,7 @@ crates/core/          remotely-core: all app logic
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests), networks.rs (QL-21
                       every VM's adapters for the map from the stored hardware; only VMs never read are read, `fresh`
-                      reads all, NETWORK_READS_AT_ONCE)
+                      reads all, NETWORK_READS_AT_ONCE; VM-11's report takes its VMs' adapters from here too)
     alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
@@ -289,6 +323,27 @@ crates/core/          remotely-core: all app logic
                       Core.vm_settings: ISOs, shared folders and existing VMs from the shell's dialogs and drops (never
                       from the UI: check_from_ui), guest OS types, VirtualBox screenshots, Open console (audited
                       vm_console_opened, no tier, refused by the read-only lock)
+    host_networks/    VM-11 (Core.networks): mod.rs the report (vmnets with a NAT vmnet's forwards, VirtualBox's
+                      host-only interfaces, NAT networks and rules, each VM's NAT adapter rules, the VMs on each from
+                      QL-21's fresh adapter read, host_details::networks), networks_only (the networks alone: one vmrun
+                      and two VBoxManage lists, no VM read; the map's network nodes), network targets (Prod when a VM
+                      on it is, from the stored adapters), the approval's warnings, the submit-time refusal
+                      (Workstation's forwards need administrator rights: nat_refusal), and apply for the job runner (a
+                      forward on a host port in use is refused, never replaced); ops.rs Command::HostNetwork's
+                      HostNetworkOp (AddForward, RemoveForward of a NatForward), ForwardPlace from the one target, the
+                      checks
+    vm_insight/       VM-25 (Core.insight, reads only): logs.rs a VM's vmware.log/vmware-N.log or VBox.log/VBox.log.N,
+                      a tail of at most 2 MB (256 KB by default), following from an offset (512 KB a read, a skip to
+                      the tail beyond that, a replaced log reset), whole lines only, names only from the listing, A3
+                      folders refused unopened; mod.rs the Timeline: audit entries naming the VM, newest first, with
+                      the VM's own job rows, paged by seq
+    waste/            VM-16, VM-14 (Core.waste, reads only): rules.rs idle_verdict (busiest hour under 2% of this PC's
+                      CPU, guest under 5% and 20 KB/s when watched, history covering a third of the window and starting
+                      in its first quarter), chain depth, Workstation's snapshot and suspend files; folders.rs folder
+                      sizes and orphans (folders with VM files no known VM uses, only under the scanned folders and the
+                      hypervisors' and templates' VM folders, 4 levels and 20,000 folders a root, links, junctions and
+                      .lck left alone, A3); mod.rs the report and folder_to_open (only folders the report or a known VM
+                      names)
     terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:
                       R9 TerminalTuning::retry_delay, 10 fast tries then 12 slow ones, each spread at random;
                       Terminals::wake_reconnects on a resume or a new address, from the shell's wake.rs,
@@ -365,6 +420,14 @@ crates/core/          remotely-core: all app logic
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited; a new key type for a host
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
+    linked_clones.rs  VM-04, VM-21, VM-24 linked clones: Workstation's from the golden VM's .vmsd (SnapshotInfo's
+                      linked_clones; a clone whose .vmx is gone left out, one on a share counted unopened), VirtualBox's
+                      from `list --long hdds` (vbox_clones: other VMs on disks made from a snapshot's). A snapshot or VM
+                      delete they depend on is refused (CoreError::LinkedClones, the clones named): by the bus before
+                      it asks when every VM would be, else an approval warning and the AP-02 preview
+                      (TargetImpact.linked_clones, VM-24's problem), and by the job runner just before it deletes; a
+                      read failure refuses too. The snapshot list shows them (SnapshotNode.linked_clones); VM-27
+                      retention keeps such a snapshot (its record too, so it goes once the clones are gone)
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
                       authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
                       and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
@@ -403,7 +466,9 @@ crates/core/          remotely-core: all app logic
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
                       and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
-                      terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021); schedules.rs (VM-14,
+                      terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021); timeline.rs (VM-25 the
+                      audit entries whose targets hold `"vmxPath":<key>`, any letter case, and the VM's job rows;
+                      migration 0024 lets job_targets take 'network' and indexes it by key); schedules.rs (VM-14,
                       VM-27 schedules, their runs (200 kept), the snapshots they took, standing approvals)
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
@@ -418,13 +483,20 @@ crates/core/          remotely-core: all app logic
                       (private or public, rate limits), throwaway update-signing key
     fakes/stack_clock.rs  VM-08 FakeStackClock: a stack job's readiness waits and delays move fake time at once,
                       run `at` hooks (a port opening, a tool failing) and record each sleep
+    fakes/host_networks.rs  VM-11 the fakes' vmnets and forwards (as_admin, with_forwards_in_conf_only) and VirtualBox's
+                      host-only interfaces, NAT networks, VM NAT rules and showvminfo paths, with the tools' refusals
+    fakes/disk_tools.rs  CV-01 to CV-03 FakeDiskTools: no program runs; each tool's arguments read and small files
+                      with the right header written (VirtualBox's media list kept as VirtualBox keeps it), failing
+                      tools, delays, qemu-img only with_qemu_img; fakes/disk_images.rs small test images of every
+                      format (VMDK sparse and stream, VDI, VHD, VHDX, qcow2, raw, OVA tars, OVF text), TempFolder
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
                       QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16;
-                      schedules.rs: VM-14, VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the
-                      fakes and FakeStackClock); opt-in
-                      workstation_it.rs and virtualbox_it.rs
+                      host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
+                      VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
+                      conversion.rs: CV-01 to CV-03, VM-17); opt-in workstation_it.rs, virtualbox_it.rs and
+                      conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
@@ -450,10 +522,14 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       the command library) run on spawn_blocking, never on the window's thread; VM-23, VM-24
                       vm_settings.rs (ISO, shared folder and existing VM dialogs opened here, ISO drops taken from the
                       staged drop, Open console, screenshots, guest OS types); VM-21, VM-10 deploy.rs (the Deploy and
-                      Clone dialogs' checks and submits, host adapters, the default VM folder); VM-14, VM-27
-                      schedules.rs (the scheduler's loop, `schedules://event`, the Schedules page's and VM tab's
-                      commands); VM-08 stacks.rs (stacks, their deploy, instances' power and teardown, VMs added or
-                      taken out by hand)
+                      Clone dialogs' checks and submits, host adapters, the default VM folder); R4 vm_insight.rs (VM-25
+                      logs and the timeline, VM-11 host networks, VM-16 the waste report and Explorer at a folder the
+                      core names); VM-14, VM-27 schedules.rs (the scheduler's loop, `schedules://event`, the
+                      Schedules page's and VM tab's commands); VM-08 stacks.rs (stacks, their deploy, instances' power
+                      and teardown, VMs added or taken out by hand); CV-01 to CV-03, VM-17 convert.rs (Image tools'
+                      file dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify`
+                      progress, Export's options and folder dialog, Import's analysis, check and submit, QEMU's page
+                      after checked_qemu_site; Settings' qemu-img path in ipc.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -463,7 +539,9 @@ src/                  React + TypeScript UI
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
                       VmSettingsTab and VmSettingsDialogs for VM-23: the Settings tab and its edit dialogs (bulk
-                      resize too, VM-12);
+                      resize too, VM-12); VmLogTab (follows through usePoll) and VmTimelineTab for VM-25;
+                      HostNetworksSheet (VM-11, its add-forward dialog) and WasteFinderSheet (VM-16, VM-14), opened from
+                      the VMs page's Networks and Waste finder buttons or the palette;
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
@@ -479,8 +557,11 @@ src/                  React + TypeScript UI
                       VM: DeployProgressView, useDeployProgress), DeployPreviewView (also in the approval dialog),
                       CloneDialog; VM-08, VM-26: StacksTab (the Templates page's Stacks tab: stacks and instances),
                       StackDialog, StackDeployDialog, StackDetailsView (also in the approval dialog), StackGroupRow
-                      (an instance's header row on the VMs page), CapacityPlanView (the Deploy, Clone and stack
-                      deploy dialogs and the approval; Suspend what it suggests);
+                      (an instance's header row on the VMs page), CapacityPlanView (the Deploy, Clone, Import and stack
+                      deploy dialogs and the approval; Suspend what it suggests); CV-01 VmImportDialog (a file analysed,
+                      then a deploy with DeployPreviewView, CapacityPlanView and DeployProgressView), VM-17
+                      VmExportDialog (each target with its plan or why not), CV-03 QemuImgCard (Settings' Conversion
+                      tools; ImportDialog and ExportDialog are SS-02's and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
@@ -492,7 +573,9 @@ src/                  React + TypeScript UI
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
                       templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
-                      VM-21 and VM-10; MapPage at Ctrl+0: QL-21 HTML nodes over an SVG of lines only, so FD-03's
+                      VM-21 and VM-10, Import... and the selection's Export..., CV-01 and VM-17; ImageToolsPage
+                      at Ctrl+; after Templates: CV-03 Inspect, Convert, Verify, the tools found and
+                      QEMU's link; MapPage at Ctrl+0: QL-21 HTML nodes over an SVG of lines only, so FD-03's
                       DOM masking covers it; SchedulesPage at Ctrl+. (VM-14, VM-27; no Ctrl+digit was left), also from the palette and a
                       VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
                       take a request to show one item (Sessions `focus`, Activity `focusJob`, Settings `focus` by
@@ -530,11 +613,14 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0), catalog.ts (VM-19 to VM-21 texts, the
-                      size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and packages, a job's steps
-                      from its events and targets), stacks.ts and stacks-api.ts (VM-08, VM-26 texts, QL-08 reasons,
-                      the VMs page's grouping by instance; types and IPC wrappers), vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints),
-                      vm-settings.ts
+                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0, Image tools Ctrl+;), catalog.ts (VM-19
+                      to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
+                      packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
+                      wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
+                      rows' QL-08 reasons), stacks.ts and stacks-api.ts (VM-08, VM-26 texts, QL-08 reasons, the VMs
+                      page's grouping by instance; types and IPC wrappers), convert.ts and convert-api.ts (CV-01 to
+                      CV-03, VM-17 texts, QL-08 reasons, the Verify verdict; the conversion IPC's types and wrappers),
+                      vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
@@ -557,10 +643,13 @@ src/                  React + TypeScript UI
                       every word matches a field, name > address > tag > detail), search-sources.ts (each kind's
                       items), search-providers.ts (SEARCH_PROVIDERS: later packages add theirs), settings-index.ts
                       (Settings cards by label), container-cache.ts (what the Containers page read last; search
-                      makes no logins), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's host
-                      networks, layered layout), open-tunnels.ts (every pane's tunnels, from their events),
-                      status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs), notifications.ts and
-                      notifications-store.ts (QL-25 entries per source, JobNotes, grouping), navigation-api.ts,
+                      makes no logins), host-networks-cache.ts (VM-11 the host networks the map or the networks view
+                      read last, for search), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's
+                      host networks: vm-insight.ts topologyHostNetworks keys them alike and links them to the VM
+                      page's Networks sheet, AppLink `hostNetworks`; layered layout), open-tunnels.ts (every pane's
+                      tunnels, from their events), status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs),
+                      notifications.ts and notifications-store.ts (QL-25 entries per source, JobNotes, grouping),
+                      navigation-api.ts,
                       density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
                       shortcut), first-run.ts (QL-23); pure helpers with
                       *.test.ts
@@ -622,6 +711,21 @@ src/                  React + TypeScript UI
   a lock is there (`VmEditor::require_unlocked`; a lock left after a crash can be deleted once Workstation is closed;
   Remotely never deletes one), and warns in the approval and the edit dialogs while `vmware.exe` runs
   (`VmwareAdapter::workstation_window_open`, `WORKSTATION_OPEN_WARNING`).
+- VM-11 host networks (Workstation 26): `vmrun -T ws listHostNetworks` prints `Total host networks: N`, then a table
+  `INDEX NAME TYPE DHCP SUBNET MASK` (`8 vmnet8 nat true <subnet> 255.255.255.0`; types `hostOnly`, `nat`); vmnet0
+  (bridged) isn't listed. A .vmx adapter's `nat` is the NAT vmnet, `hostonly` vmnet1, no type bridged (vmnet0),
+  `custom` its `.vnet`. `listPortForwardings <vmnet>` prints `Total port forwardings: N` (0 here; the lines of a
+  non-empty list were not seen, so Remotely reads them loosely and falls back to `vmnetnat.conf`), and refuses a
+  host-only vmnet ("Host network type is not nat") or an unknown one ("Invalid host network"). `setPortForwarding
+  <vmnet> <tcp|udp> <host port> <guest ip> <guest port> [description]` adds or replaces the forward on that host
+  port; `deletePortForwarding <vmnet> <tcp|udp> <host port>` removes one. Forwards live in
+  `C:\ProgramData\VMware\vmnetnat.conf` (`[host] device = VMnet8`; `[incomingtcp]` / `[incomingudp]` lines
+  `<host port> = <guest ip>:<guest port>`), which SYSTEM and Administrators may change and Users only read; Windows has
+  one NAT network. So changing a forward needs administrator rights: Remotely, never elevated, refuses it with that
+  reason unless the app itself was started as administrator (`host_networks::nat_refusal`). Forwards listen on every
+  address of this PC.
+- VM-25: Workstation writes `vmware.log` in the VM's folder and keeps the older ones as `vmware-0.log` to
+  `vmware-2.log`.
 - VM-21, VM-10 deploy (`deploy::workstation`): `vmrun -T ws clone <vmx> <new vmx> full|linked [-snapshot=<path>]
   -cloneName=<name>` (a linked clone needs the golden VM's snapshot and shares its disk, so its disk can't grow). A
   cloud image is copied, never changed, by `vmware-vdiskmanager -r <image> -t 0|2 <new disk>` (0 growable, 2
@@ -633,7 +737,10 @@ src/                  React + TypeScript UI
   Workstation 26 (hand check): a full clone's disk keeps the source's name with `-cl1` (`golden-cl1.vmdk`), and a
   linked clone's is a delta whose `parentFileNameHint` is the golden VM's disk by absolute path. A full clone writes
   nothing of the golden VM's; a linked clone adds `snapshotN.cloneM = "<clone's .vmx>"` and `snapshotN.numClones` to
-  its .vmsd, yet `vmrun deleteSnapshot` deletes that snapshot without a word (the linked clone breaks). Both clone a
+  its .vmsd, yet `vmrun deleteSnapshot` of that snapshot and `vmrun deleteVM` of the golden VM break the clone without a
+  word (it no longer powers on), while deleting the snapshot's parent or a later one is safe; `deleteVM` of a clone
+  lowers `numClones` but may leave its last `cloneM` line, so only the first `numClones` count (`linked_clones`
+  refuses both deletes, naming the clones). Both clone a
   running golden VM from its snapshot, and the golden VM runs on; a VM started with `vmrun start ... nogui` has
   `<disk>.vmdk.lck` folders (and a `.vmem.lck`) but no `.vmx.lck`; and vmrun ignores a `.vmx.lck` (an open tab's): it
   clones beside one and writes the linked clone's record anyway, so only Remotely's own check stops it; ovftool writes .vmx
@@ -712,8 +819,13 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   gives `Default machine folder:`; `list hostonlyifs` and `list bridgedifs` the adapters a network can use. A cancelled
   `clonevm` may hold the VM for a moment, so cleanup tries `unregistervm --delete` again a few times. VirtualBox 7.2
   (hand check): `unregistervm --delete` deletes a VM's disks but leaves its DVD images in the media list, so cleanup
-  closes the seed with `closemedium dvd`; it refuses to delete a golden VM while a linked clone uses its snapshot;
-  `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing `IsInstallSupported="off"`, and
+  closes the seed with `closemedium dvd`; a linked clone's differencing disk sits under the snapshot's disk in the golden
+  VM's media registry (`list --long hdds`: each disk's `Parent UUID`, and in `In use by VMs` the VMs and `[snapshots]`
+  using it): `snapshot delete` of that snapshot fails ("more than one child hard disk") while the golden VM's own disk
+  is a child too, but once the golden VM restored an older snapshot it merges the clone's disk away (the clone no longer
+  starts), and `unregistervm --delete` of the golden VM unregisters it and deletes its current disk before it fails
+  ("Cannot close medium ... because it has 1 child media"); deleting the snapshot's parent is safe (`linked_clones`
+  refuses the other two up front); `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing `IsInstallSupported="off"`, and
   Remotely takes any failure as "can't install it by itself"; `import` takes an OVA that ovftool made, and a truncated
   one fails with VERR_EOF. Windows' own `tar.exe` (libarchive) lists a seed's Joliet names, a check that doesn't use
   Remotely's reader.
@@ -746,6 +858,54 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   registry. `registervm <file.vbox>` refuses a VM whose UUID is registered already.
   `controlvm <uuid> screenshotpng <file>` (running), `VirtualBoxVM.exe --startvm <uuid> --separate` (a window on a
   running VM), `VBoxGuestAdditions.iso` beside VBoxManage.
+- VM-11 (checked on 7.2.22): `list hostonlyifs` prints blocks of `Key: value` (`Name`, `GUID`, `DHCP`
+  Enabled/Disabled, `IPAddress`, `NetworkMask`, `Status` Up/Down, `VBoxNetworkName`), the `Name` being what
+  `--hostonlyadapterN` takes; `list hostonlynets` is macOS only ("Unknown subcommand" on Windows). `list natnets` leaves
+  the rules out: `list --long natnets` prints `Name:` (6.1: `NetworkName:`), `Enabled`, `Network` (CIDR), `Gateway`,
+  `DHCP Server`, `IPv6`, then `Port-forwarding (ipv4)` and indented rules `name:proto:[host ip]:host port:[guest
+  ip]:guest port` (`[]` for any), then `loopback mappings (ipv4)`. `natnetwork modify --netname <n> --port-forward-4
+  <rule>` adds one, `... --port-forward-4 delete <name>` removes one; a taken name ("A NAT rule of this name already
+  exists") or a missing one ("Failed to delete pf") is an error. A rule name may hold spaces. A VM's NAT rules are
+  `Forwarding(N)="name,proto,host ip,host port,guest ip,guest port"` in `showvminfo --machinereadable`, right after
+  their adapter's `natnetN`, `macaddressN`, `cableconnectedN`, `nicN`, `nictypeN` and `nicspeedN` keys (the key doesn't
+  name the adapter; N restarts at 0 per adapter). `modifyvm <uuid> --natpfN <rule>` while off, `controlvm <uuid>
+  natpfN <rule>` while running (kept after power-off; on a VM that is off: "is not currently running"), `delete
+  <name>` to remove; none needs administrator rights.
+- VM-25, VM-16: `showvminfo --machinereadable` also gives `LogFldr` (`Logs` beside the .vbox: `VBox.log`, kept as
+  `VBox.log.1` to `.3`, and `VBoxHardening.log`), `SnapFldr`, and for a saved VM `VMStateFile` (the `.sav` in the
+  snapshot folder), which, unlike `CfgFile`, is printed without escaping its backslashes. `list systemproperties` has
+  `Default machine folder:`.
+- Two `showvminfo` calls on the same VM at the same moment: the second fails ("The machine '<name>' already has a lock
+  request pending", or "The session is not locked", "The object is not ready" around a state change). R4's reads ask
+  again up to three times (`host_networks::showvminfo_pairs`, `vbox_busy`), and the waste finder reads each VM once
+  per report, in sequence.
+
+## Conversion tools facts
+
+CV-01 to CV-03, VM-17, from 0.5.0 (`docs/plan-0.5.md`, R5). Checked by hand with Workstation 26's vdiskmanager and
+ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
+
+- vmware-vdiskmanager `-r <src> -t <n> <dst>` reads any VMDK, a snapshot delta with its whole chain (it flattens it),
+  and a raw disk through a flat-extent descriptor. `-t 0` growable, `-t 2` preallocated (`<name>.vmdk` with
+  createType `monolithicFlat` and a `<name>-flat.vmdk` extent holding the raw bytes), `-t 4` ESXi's preallocated
+  layout (createType `vmfs`, the same two files), `-t 5` stream-optimized (a `KDMV` file). It prints
+  `\r  Convert: NN% done.` and refuses a target that is there. It reads no VHD, VDI, VHDX or qcow2.
+- `ovftool <vmx> <file.ova|.ovf>` exports the VM as it is now; it has no OVF 2.0 option (OVF 1.0 only), and
+  `--shaAlgorithm=SHA256` (the default) writes the manifest. `--noImageFiles` leaves an attached ISO out.
+- `VBoxManage clonemedium disk <src> <dst> --format VDI|VMDK|VHD|RAW [--variant Standard|Fixed|Stream]` registers
+  **both** the source and the target in VirtualBox's media list (`list hdds`); `closemedium disk <file>` takes one
+  out (the file stays). `convertfromraw` registers nothing. A VirtualBox VM's current disk (its snapshot's
+  differencing image) is cloned whole, its chain merged. Progress is `0%...10%...` on stderr. Its VHDX backend
+  (`list hddbackends`: capabilities 0x0240, no create) is read-only and refused qemu-img's own VHDX ("BAT region not
+  marked as required"), so VHDX goes through qemu-img; its QCOW backend isn't used either. `VBoxManage export
+  <uuid> --output <file> --ovf10|--ovf20 --manifest` writes an appliance of the VM as it is now.
+- qemu-img (QEMU for Windows, `C:\Program Files\qemu\qemu-img.exe` by default; GPL, never shipped): `convert -p -f <in>
+  -O <out> [-o ...]` prints `    (NN.NN/100%)\r`; `-O vpc -o subformat=fixed,force_size=on` keeps a VHD's exact size
+  (without force_size it rounds to a CHS geometry), `-O vhdx -o subformat=dynamic|fixed`, `-O vdi -o static=on`,
+  `-O qcow2 -o preallocation=metadata` (on Windows its file driver refuses `full` and `falloc`, and `metadata` makes the file its full size), `-O vmdk -o subformat=monolithicSparse|monolithicFlat|streamOptimized` (no
+  `vmfs`). A failure prints `C:\...\qemu-img.exe: <message>` and exits 1. `compare -f A -F B a b` exits 0 ("Images
+  are identical."), 1 when they differ ("Content mismatch at offset N!"), 2 on an error. Remotely always passes `-f`
+  (and `-F`), so it never probes, and never gives it a disk with a parent or a backing file.
 
 ## Development safety
 
@@ -756,6 +916,9 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   VBoxManage calls (`change ...` in `calls`, `info`, `disk_size_mb`, `registerable`). Adapter tests run the real
   `VmrunAdapter` against a stand-in `vmware-vdiskmanager.cmd` written at run time in the system temp folder
   (`tests/vm_settings.rs`, `adapters/vmware.rs`).
+- Host networks (VM-11): never add or remove a forward or a network on this PC in a test. `FakeVmware` and
+  `FakeVirtualBox` hold vmnets, NAT networks and rules in memory (`fakes/host_networks.rs`); the waste finder's and
+  the Log tab's tests use folders and log files made at run time in the system temp folder.
 - Never let a `\\server\share`, `//server/share`, `\\?\` or `\\.\` path reach the real file system in a test, not
   even a made-up one (Windows would send the sign-in to it). Tests of refused paths (A3) go through in-memory fakes
   that fail when asked for one (`import::openssh::IncludeFiles`, `adapters::vm_hardware::VmFiles`) or an injected
@@ -787,6 +950,12 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
 - Stacks (VM-08): `tests/stacks.rs` deploys, starts, stops and tears down stacks on the same fakes, with
   `Core::set_stack_clock(FakeStackClock)` so readiness waits and delays never sleep (`at` hooks open a `FakeNetwork`
   port or make a fake fail at a given fake time).
+- Conversion (CV-01 to CV-03, VM-17): never convert, export or import a real VM's disks or a downloaded image in a
+  test. `tests/conversion.rs` runs through the bus with `fakes::FakeDiskTools` (it runs no program and writes small
+  files with each format's header) on images from `fakes::disk_images` made at run time in the system temp folder;
+  never an image on a network share. The opt-in `conversion_it.rs` runs the real tools on 64 MB images in the temp
+  folder and exports an `it-` Workstation VM made of files there, never registered; it checks VirtualBox's media
+  list is as it was.
 - Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use
   `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).
@@ -820,6 +989,7 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   (from the second server on, docker needs sudo); mark a session as a container host on the Containers page.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Opt-in test against real VirtualBox (reads only: `list vms`, then for `it-` VMs only `showvminfo`, snapshots, guest properties and their processes): `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`
+- Opt-in test against the real conversion tools (vdiskmanager, VBoxManage, qemu-img when installed, ovftool; temp images and an `it-` VM's files only): `REMOTELY_IT=1 cargo test -p remotely-core --test conversion_it -- --nocapture`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM; and the release scripts' tests, `scripts/*.test.mjs`, against a fake GitHub on 127.0.0.1)
 - Dependency scan, as CI runs it: `cargo deny --locked check advisories bans sources` (cargo-deny is not a project dependency), `npm audit --omit=dev`

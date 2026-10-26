@@ -6,7 +6,10 @@
 
 pub mod clock;
 pub mod containers;
+pub mod disk_images;
+pub mod disk_tools;
 pub mod github_server;
+pub mod host_networks;
 pub mod ssh_server;
 pub mod stack_clock;
 
@@ -101,11 +104,15 @@ pub struct FakeVmware {
     failing_vdisk: AtomicBool,
     /// VM-23: Workstation's window (`vmware.exe`) runs.
     workstation_open: AtomicBool,
+    /// VM-11, VM-16: vmnets, NAT forwards and the default VM folder.
+    networks: host_networks::VmwareNetworks,
     /// VM-21: operations that fail (`clone`, `ovftool`, `convert`), after leaving what they made, as a real
     /// tool stopped halfway does.
     failing: Mutex<HashSet<String>>,
     /// VM-21: no ovftool.exe on this PC.
     no_ovftool: bool,
+    /// CV-03: no vmware-vdiskmanager.exe for conversions.
+    no_vdiskmanager: bool,
     /// VM-21: a clone takes this long once its files are there (so a test can cancel it halfway).
     clone_delay: Duration,
 }
@@ -240,6 +247,48 @@ impl FakeVmware {
         self
     }
 
+    /// VM-04, VM-21: `clone` is a linked clone of `golden`'s snapshot `snapshot` (a name or vmrun's path form), as
+    /// Workstation records one in the golden VM's .vmsd. The clone's .vmx is a file here, so it counts as there.
+    pub fn with_linked_clone(self, golden: &str, snapshot: &str, clone: &str) -> Self {
+        self.add_linked_clone(Path::new(golden), snapshot, Path::new(clone));
+        if !self.has_file(clone) {
+            locks::lock(&self.files).insert(path_key(Path::new(clone)), (PathBuf::from(clone), 2048));
+        }
+        self
+    }
+
+    /// VM-04, VM-21: Workstation records `clone` as a linked clone of `golden`'s snapshot now (a clone made after an
+    /// approval was asked).
+    pub fn add_linked_clone(&self, golden: &Path, snapshot: &str, clone: &Path) {
+        let mut trees = locks::lock(&self.snapshots);
+        let Some(tree) = trees.get_mut(&path_key(golden)) else {
+            return;
+        };
+        let nodes = crate::snapshots::tree_nodes(tree, OffsetDateTime::now_utc());
+        let uid = nodes
+            .iter()
+            .find(|n| n.path == snapshot)
+            .or_else(|| nodes.iter().find(|n| n.name == snapshot))
+            .map(|n| n.uid);
+        if let Some(info) = tree.snapshots.iter_mut().find(|s| Some(s.uid) == uid) {
+            info.linked_clones.push(clone.display().to_string());
+        }
+    }
+
+    /// VM-04, VM-21: the linked clones `golden`'s .vmsd records, by snapshot name.
+    pub fn linked_clones(&self, golden: &str) -> Vec<(String, Vec<String>)> {
+        locks::lock(&self.snapshots)
+            .get(&path_key(Path::new(golden)))
+            .map(|tree| {
+                tree.snapshots
+                    .iter()
+                    .filter(|s| !s.linked_clones.is_empty())
+                    .map(|s| (s.name.clone(), s.linked_clones.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// AP-02: the VM's process started at `at` (what the first line of its vmware.log says).
     pub fn with_started_at(mut self, vmx: &str, at: OffsetDateTime) -> Self {
         self.started_at.insert(path_key(Path::new(vmx)), at);
@@ -324,6 +373,13 @@ impl FakeVmware {
     /// VM-21: Workstation without its OVFTool folder.
     pub fn without_ovftool(mut self) -> Self {
         self.no_ovftool = true;
+        self
+    }
+
+    /// CV-03: Workstation without its conversion tools (no vmware-vdiskmanager.exe, no ovftool.exe).
+    pub fn without_disk_tools(mut self) -> Self {
+        self.no_ovftool = true;
+        self.no_vdiskmanager = true;
         self
     }
 
@@ -909,6 +965,10 @@ impl VmwareAdapter for FakeVmware {
                     return Err(failed("clone", "The destination file already exists"));
                 }
                 self.clone_vm(&vmx, &target, &name)?;
+                if let (true, Some(path)) = (linked, snapshot) {
+                    // VM-04, VM-21: Workstation records a linked clone in the golden VM's .vmsd.
+                    self.add_linked_clone(&vmx, path, &target);
+                }
                 if !self.clone_delay.is_zero() {
                     tokio::time::sleep(self.clone_delay).await;
                 }
@@ -933,7 +993,12 @@ impl VmwareAdapter for FakeVmware {
                         .unwrap_or_default();
                     !(in_folder(p) && (name.ends_with(".log") || name.ends_with(".vmsd") || name.ends_with(".nvram")))
                 });
-                locks::lock(&self.snapshots).remove(&key);
+                let mut trees = locks::lock(&self.snapshots);
+                trees.remove(&key);
+                // Workstation 26 takes a deleted linked clone off its golden VM's .vmsd (numClones).
+                for snapshot in trees.values_mut().flat_map(|t| t.snapshots.iter_mut()) {
+                    snapshot.linked_clones.retain(|c| path_key(Path::new(c)) != key);
+                }
             }
             _ => return Err(failed("?", "Unknown command")),
         }
@@ -1040,8 +1105,25 @@ impl VmwareAdapter for FakeVmware {
         (!self.no_ovftool).then(|| PathBuf::from(r"C:\Program Files\VMware\VMware Workstation\OVFTool\ovftool.exe"))
     }
 
+    fn vdiskmanager_path(&self) -> Option<PathBuf> {
+        (!self.no_vdiskmanager)
+            .then(|| PathBuf::from(r"C:\Program Files\VMware\VMware Workstation\vmware-vdiskmanager.exe"))
+    }
+
     async fn workstation_window_open(&self) -> bool {
         self.workstation_open.load(Ordering::SeqCst)
+    }
+
+    async fn vmrun_host(&self, args: Vec<std::ffi::OsString>, _timeout: Duration) -> Result<String> {
+        self.vmrun_host_call(args)
+    }
+
+    async fn nat_conf(&self) -> Result<Option<String>> {
+        Ok(self.networks.nat_conf())
+    }
+
+    fn nat_refusal(&self) -> Option<String> {
+        crate::adapters::host_networks::nat_refusal(self.networks.admin())
     }
 }
 
@@ -1064,6 +1146,7 @@ fn take_snapshot(tree: &mut SnapshotTree, name: &str, at: OffsetDateTime) {
         description: None,
         created_at: Some(at),
         id: None,
+        linked_clones: Vec::new(),
     });
     tree.current_uid = Some(uid);
 }
@@ -1093,6 +1176,7 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
 }
 
 pub use containers::FakeContainers;
+pub use disk_tools::FakeDiskTools;
 
 /// VM-18: VirtualBox in memory. VMs are registered with a UUID, a name and a state; power calls
 /// change the state and snapshot calls the tree the way VBoxManage would, through the same checks as
@@ -1134,12 +1218,17 @@ pub struct FakeVirtualBox {
     registerable: Mutex<HashMap<String, VboxVmInfo>>,
     /// VM-15: VirtualBox's folder has no VBoxGuestAdditions.iso.
     no_additions_iso: bool,
+    /// VM-11, VM-16, VM-25: host networks, NAT rules, the default machine folder.
+    networks: host_networks::VboxNetworks,
     /// VM-21: operations that fail (`clonevm`, `import`, `clonemedium`, `createvm`), after leaving what they made.
     failing: Mutex<HashSet<String>>,
     /// VM-21: guest IPs by VM name, for VMs a deploy makes (their UUID is the deploy's to choose).
     ips_by_name: HashMap<String, String>,
     /// VM-21: what unattended installs were asked: (VM uuid, user). The password is read and dropped.
     unattended: Mutex<Vec<(String, String)>>,
+    /// VM-04, VM-21: linked clones: (golden VM, its snapshot's UUID, the clone), as `clonevm --options=Link` leaves
+    /// them; `media` reads them as VirtualBox's media list would show them.
+    links: Mutex<Vec<(String, String, String)>>,
 }
 
 /// The value after `--name` in a VBoxManage call.
@@ -1317,6 +1406,33 @@ impl FakeVirtualBox {
             take_vbox_snapshot(&mut vm.snapshots, name, at);
         }
         self
+    }
+
+    /// VM-04, VM-21: `clone` (a VM given with [`Self::with_vm`]) is a linked clone of `golden`'s snapshot `snapshot`
+    /// (by name), as `clonevm --snapshot <snapshot> --options=Link` makes one.
+    pub fn with_linked_clone(self, golden: &str, snapshot: &str, clone: &str) -> Self {
+        self.add_linked_clone(golden, snapshot, clone);
+        self
+    }
+
+    /// VM-04, VM-21: `clone` becomes a linked clone of `golden`'s snapshot now.
+    pub fn add_linked_clone(&self, golden: &str, snapshot: &str, clone: &str) {
+        let key = |id: &str| crate::adapters::hypervisor::virtualbox_key(id).unwrap_or_else(|| id.to_owned());
+        let id = self
+            .find(&key(golden))
+            .and_then(|vm| vbox::find_snapshot(&vm.snapshots, snapshot).and_then(|s| s.id.clone()));
+        if let Some(id) = id {
+            locks::lock(&self.links).push((key(golden), id, key(clone)));
+        }
+    }
+
+    /// VM-04, VM-21: the linked clones VirtualBox's media list shows under `golden`'s snapshots: (snapshot UUID, clone).
+    pub fn linked_clones(&self, golden: &str) -> Vec<(String, String)> {
+        locks::lock(&self.links)
+            .iter()
+            .filter(|(g, _, _)| g == golden)
+            .map(|(_, snapshot, clone)| (snapshot.clone(), clone.clone()))
+            .collect()
     }
 
     pub fn calls(&self) -> Vec<String> {
@@ -1517,7 +1633,11 @@ impl FakeVirtualBox {
                     })
                     .collect();
                 info.dvds.clear();
+                let clone = info.uuid.clone();
                 locks::lock(&self.vms).push(info);
+                if let (true, Some(snapshot)) = (linked, snapshot) {
+                    self.add_linked_clone(&from.uuid, snapshot, &clone);
+                }
                 if self.fails("clonevm") {
                     return Some(Err(failed("clonevm", "Clone VM failed: not enough free space")));
                 }
@@ -1923,6 +2043,8 @@ impl FakeVirtualBox {
                 let info = vm_now()?;
                 locked(&info)?;
                 locks::lock(&self.vms).retain(|v| v.uuid != uuid);
+                // A linked clone's disk goes with it; the golden VM's snapshot has one clone less.
+                locks::lock(&self.links).retain(|(_, _, clone)| *clone != uuid);
                 if args.iter().any(|a| a == "--delete") {
                     let folder = info
                         .config_file
@@ -2254,6 +2376,38 @@ impl VirtualBoxAdapter for FakeVirtualBox {
         Ok((supported, supported.then(|| "Ubuntu24_LTS_64".to_owned())))
     }
 
+    /// VM-04, VM-21: the media list as VirtualBox shows it for the linked clones: each snapshot with clones holds a
+    /// disk, the golden VM's current disk and each clone's disk are made from it.
+    async fn media(&self) -> Result<Vec<vbox::VboxMedium>> {
+        self.installed()?;
+        if self.fails("media") {
+            return Err(Self::failed("list hdds", "The object functionality is limited"));
+        }
+        let disk = |uuid: String, parent: Option<String>, used_by: Vec<String>| vbox::VboxMedium {
+            location: format!(r"C:\Users\alice\VirtualBox VMs\{uuid}.vdi"),
+            uuid,
+            parent,
+            used_by,
+        };
+        let mut media = Vec::new();
+        let links = locks::lock(&self.links).clone();
+        let mut held: Vec<(String, String)> = Vec::new();
+        for (golden, snapshot, clone) in links {
+            let image = format!("disk-{snapshot}");
+            if !held.contains(&(golden.clone(), snapshot.clone())) {
+                held.push((golden.clone(), snapshot.clone()));
+                media.push(disk(image.clone(), None, vec![golden.clone(), snapshot.clone()]));
+                media.push(disk(
+                    format!("own-{snapshot}"),
+                    Some(image.clone()),
+                    vec![golden.clone()],
+                ));
+            }
+            media.push(disk(format!("clone-{clone}-{snapshot}"), Some(image), vec![clone]));
+        }
+        Ok(media)
+    }
+
     async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
         self.installed()?;
         Ok(if bridged {
@@ -2370,6 +2524,10 @@ impl VirtualBoxAdapter for FakeVirtualBox {
         out.sort();
         Ok(out)
     }
+
+    async fn vboxmanage_host(&self, args: Vec<String>, _timeout: Duration) -> Result<String> {
+        self.vboxmanage_host_call(args)
+    }
 }
 
 /// Adds a snapshot from the current one, with a new UUID, and makes it current.
@@ -2382,6 +2540,7 @@ fn take_vbox_snapshot(tree: &mut SnapshotTree, name: &str, at: OffsetDateTime) {
         description: None,
         created_at: Some(at),
         id: Some(Uuid::new_v4().hyphenated().to_string()),
+        linked_clones: Vec::new(),
     });
     tree.current_uid = Some(uid);
 }

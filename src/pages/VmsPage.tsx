@@ -37,9 +37,13 @@ import {
   InfoIcon,
   ListChecksIcon,
   MonitorOffIcon,
+  NetworkIcon,
   PlayIcon,
+  RecycleIcon,
   RefreshCwIcon,
   RocketIcon,
+  ImportIcon,
+  PackageIcon,
   ShieldIcon,
   ShieldOffIcon,
   TagIcon,
@@ -77,6 +81,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { EnvBadge, HypervisorLabel, StateBadge, ToolsLabel } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
+import { HostNetworksSheet } from "@/components/HostNetworksSheet";
+import { WasteFinderSheet } from "@/components/WasteFinderSheet";
 import { MetricCell } from "@/components/MetricBits";
 import { NameDialog } from "@/components/NameDialog";
 import { SnapshotActionDialog, type SnapshotAction } from "@/components/SnapshotActionDialog";
@@ -132,6 +138,9 @@ import {
 } from "@/lib/vm-snapshots";
 import { bulkResizeReason, resizeTargets } from "@/lib/vm-settings";
 
+/** VM-11, VM-16: the side sheets the page opens. */
+export type VmPanel = "networks" | "waste";
+
 /** QL-14: a VM to show from elsewhere (the palette, a shortcut, an old Snapshots link). `n` counts the requests. */
 export interface VmPageRequest {
   /** The VMs to show; none: the snapshot view of the open or first selected VM. */
@@ -140,6 +149,8 @@ export interface VmPageRequest {
   n: number;
   /** VM-24: open the Settings tab's rename dialog too (the palette's Rename). */
   rename?: boolean;
+  /** VM-11, VM-16: open the host networks or the waste finder instead of a VM. */
+  panel?: VmPanel;
 }
 
 interface Props {
@@ -149,6 +160,10 @@ interface Props {
   onSubmitted: (outcome: SubmitOutcome, onJob?: (jobId: string) => void) => void;
   /** VM-21: opens the Deploy dialog. */
   onDeploy: () => void;
+  /** CV-01: opens the Import dialog. */
+  onImport?: () => void;
+  /** VM-17, CV-02: opens the Export dialog on a VM. */
+  onExport?: (vmxPath: string) => void;
   onOpenSettings: () => void;
   /** FD-01: the command palette on one VM's actions. */
   onActions: (vmxPath: string) => void;
@@ -288,6 +303,8 @@ export function VmsPage({
   active,
   onSubmitted,
   onDeploy,
+  onImport,
+  onExport,
   onOpenSettings,
   onActions,
   request,
@@ -327,6 +344,8 @@ export function VmsPage({
   // QL-14: the VM whose details are open, and the tab they open on (kept when another VM opens).
   const [detail, setDetail] = useState<string | null>(null);
   const [view, setView] = useState<VmView>("details");
+  // VM-11, VM-16: the host networks or the waste finder sheet.
+  const [panel, setPanel] = useState<VmPanel | null>(null);
   // VM-04: snapshot trees read so far, by .vmx path. A refresh, a finished job or a setting change starts afresh.
   const [trees, setTrees] = useState<{ key: string; map: Map<string, VmSnapshots> }>({ key, map: new Map() });
   if (trees.key !== key) setTrees({ key, map: new Map() });
@@ -532,7 +551,10 @@ export function VmsPage({
   const [renameAsk, setRenameAsk] = useState(0);
   const [renameSeen, setRenameSeen] = useState(0);
   const listReady = !loading && listedFor === filter;
-  if (request && request.n !== handledRequest && listReady) {
+  if (request && request.n !== handledRequest && request.panel) {
+    setHandledRequest(request.n);
+    setPanel(request.panel);
+  } else if (request && request.n !== handledRequest && listReady) {
     const wanted = new Set(request.vmxPaths.map(keyOf));
     const found = listed.filter((v) => wanted.has(keyOf(v.vmxPath)));
     if (found.length < wanted.size && !isEmptyFilter(filter)) {
@@ -953,6 +975,32 @@ export function VmsPage({
             Deploy
           </Button>
         </WhyDisabled>
+        {/* CV-01: a foreign VM or disk (OVA, VHD/VHDX, qcow2, raw, libvirt, Proxmox) as a new VM. */}
+        {onImport && (
+          <WhyDisabled reason={readOnly}>
+            <Button variant="outline" disabled={readOnly !== null} onClick={() => onImport()}>
+              <ImportIcon data-icon="inline-start" />
+              Import…
+            </Button>
+          </WhyDisabled>
+        )}
+        {/* VM-11, VM-16: reads; their actions go through the bus. */}
+        <Button
+          variant="outline"
+          title="Workstation's and VirtualBox's networks and NAT port forwards"
+          onClick={() => setPanel("networks")}
+        >
+          <NetworkIcon data-icon="inline-start" />
+          Networks
+        </Button>
+        <Button
+          variant="outline"
+          title="Idle and suspended VMs, long snapshot chains, VM files no VM uses"
+          onClick={() => setPanel("waste")}
+        >
+          <RecycleIcon data-icon="inline-start" />
+          Waste finder
+        </Button>
         <VmFilterBar
           filter={filter}
           onChange={setFilter}
@@ -1211,6 +1259,19 @@ export function VmsPage({
               Clone…
               <DropdownMenuShortcut>{selectedVms.length || ""}</DropdownMenuShortcut>
             </DropdownMenuItem>
+            {/* VM-17, CV-02: one VM exported for another hypervisor or a cloud. */}
+            {onExport && (
+              <DropdownMenuItem
+                disabled={selectedVms.length !== 1}
+                onSelect={() => selectedVms[0] && onExport(selectedVms[0].vmxPath)}
+              >
+                <PackageIcon />
+                <div>
+                  Export…
+                  <ReasonLine reason={selectedVms.length !== 1 ? "Select one VM to export" : null} />
+                </div>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuLabel>Tags</DropdownMenuLabel>
             <DropdownMenuItem onSelect={() => setDialog({ kind: "addTag" })}>
@@ -1483,6 +1544,23 @@ export function VmsPage({
       )}
 
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+      <HostNetworksSheet
+        open={panel === "networks"}
+        onClose={() => setPanel(null)}
+        readOnly={readOnly}
+        onSubmitted={onSubmitted}
+      />
+      <WasteFinderSheet
+        open={panel === "waste"}
+        onClose={() => setPanel(null)}
+        readOnly={readOnly}
+        onSubmitted={onSubmitted}
+        onOpenVm={(vmxPath, wanted) => {
+          setPanel(null);
+          setView(wanted);
+          setDetail(vmxPath);
+        }}
+      />
 
       {snapshotDialog && limits && (
         <SnapshotActionDialog

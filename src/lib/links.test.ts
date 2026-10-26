@@ -20,6 +20,7 @@ const EVERY: AppLink[] = [
   { kind: "vault" },
   { kind: "map" },
   { kind: "schedule", scheduleId: "s-1" },
+  { kind: "hostNetworks" },
 ];
 
 test("every kind of link is one, and has words for its button", () => {

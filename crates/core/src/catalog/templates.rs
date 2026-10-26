@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use time::Date;
 use uuid::Uuid;
 
-use super::images::{folder_problem, Image, ImageFormat, QCOW2_NEEDS_CONVERSION};
+use super::images::{folder_problem, Image};
 use super::profiles::{profile, Firmware, OsProfile};
 use super::sizes::{DiskController, Provisioning, Size};
 use crate::adapters::hypervisor::Hypervisor;
@@ -518,28 +518,8 @@ pub fn check_template(input: &TemplateInput) -> Result<TemplateInput> {
             Some(folder.to_owned())
         }
     };
-    let network = match &input.network {
-        Network::Vmnet { number } if *number > MAX_VMNET => {
-            return invalid(format!("Workstation's custom networks are vmnet0 to vmnet{MAX_VMNET}."))
-        }
-        Network::NatNetwork { name } => Network::NatNetwork {
-            name: network_name(name)?,
-        },
-        Network::Internal { name } => Network::Internal {
-            name: network_name(name)?,
-        },
-        other => other.clone(),
-    };
-    let mut tags: Vec<String> = Vec::new();
-    for tag in &input.tags {
-        let tag = clean_name("tag", tag, MAX_TAG_LEN)?;
-        if !tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
-            tags.push(tag);
-        }
-    }
-    if tags.len() > MAX_TEMPLATE_TAGS {
-        return invalid(format!("A template can give its VMs at most {MAX_TEMPLATE_TAGS} tags."));
-    }
+    let network = check_network(&input.network)?;
+    let tags = check_tags(&input.tags)?;
     if input.after_deploy.link_session && !input.after_deploy.create_session {
         return invalid("Linking a session to the VM needs the session: tick \"Create the SSH session\" too.");
     }
@@ -564,6 +544,37 @@ pub fn check_template(input: &TemplateInput) -> Result<TemplateInput> {
     })
 }
 
+/// A template's (or an import's, CV-01) network: a vmnet Workstation has, a NAT or internal network's name checked.
+pub fn check_network(network: &Network) -> Result<Network> {
+    Ok(match network {
+        Network::Vmnet { number } if *number > MAX_VMNET => {
+            return invalid(format!("Workstation's custom networks are vmnet0 to vmnet{MAX_VMNET}."))
+        }
+        Network::NatNetwork { name } => Network::NatNetwork {
+            name: network_name(name)?,
+        },
+        Network::Internal { name } => Network::Internal {
+            name: network_name(name)?,
+        },
+        other => other.clone(),
+    })
+}
+
+/// A template's (or an import's, CV-01) tags: each a clean name, once, at most [`MAX_TEMPLATE_TAGS`].
+pub fn check_tags(input: &[String]) -> Result<Vec<String>> {
+    let mut tags: Vec<String> = Vec::new();
+    for tag in input {
+        let tag = clean_name("tag", tag, MAX_TAG_LEN)?;
+        if !tags.iter().any(|t| t.eq_ignore_ascii_case(&tag)) {
+            tags.push(tag);
+        }
+    }
+    if tags.len() > MAX_TEMPLATE_TAGS {
+        return invalid(format!("A template can give its VMs at most {MAX_TEMPLATE_TAGS} tags."));
+    }
+    Ok(tags)
+}
+
 /// Why `template` can't deploy with what it names now, in the order a user fixes them; empty when it can.
 pub fn problems(template: &TemplateInput, refs: &Refs) -> Vec<Problem> {
     use ProblemCode as C;
@@ -578,12 +589,7 @@ pub fn problems(template: &TemplateInput, refs: &Refs) -> Vec<Problem> {
                     format!("Image '{}': {problem}", image.name),
                 ));
             }
-            if image.source.format() == Some(ImageFormat::Qcow2) {
-                out.push(Problem::new(
-                    C::NeedsConversion,
-                    format!("Image '{}': {QCOW2_NEEDS_CONVERSION}", image.name),
-                ));
-            }
+            // CV-03: a qcow2 deploys through qemu-img; the catalogue puts its absence in the image's problem.
             if !image.hypervisors.contains(&hv) {
                 let on: Vec<&str> = image.hypervisors.iter().map(|h| hypervisor_label(*h)).collect();
                 out.push(Problem::new(
@@ -1041,7 +1047,7 @@ pub(crate) fn tags_text(tags: &[String]) -> String {
 mod tests {
     use time::macros::date;
 
-    use super::super::images::ImageSource;
+    use super::super::images::{ImageFormat, ImageSource};
     use super::super::sizes::{built_in, DiskSpec};
     use super::*;
 
@@ -1262,10 +1268,8 @@ mod tests {
             path: r"C:\Images\rocky.qcow2".into(),
             format: ImageFormat::Qcow2,
         };
-        assert_eq!(
-            codes(&problems(&t, &refs(Some(&qcow2), Some(&size)))),
-            [ProblemCode::NeedsConversion]
-        );
+        // CV-03: a qcow2 deploys (converted with qemu-img); without qemu-img the catalogue sets the image's problem.
+        assert!(problems(&t, &refs(Some(&qcow2), Some(&size))).is_empty());
         let newer = image(&Hypervisor::ALL, "beos");
         assert_eq!(
             codes(&problems(&t, &refs(Some(&newer), Some(&size)))),
