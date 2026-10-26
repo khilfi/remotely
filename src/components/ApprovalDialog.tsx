@@ -80,6 +80,7 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
   if (target.kind === "session") return target.sessionId;
   if (target.kind === "terminal") return target.terminalId;
   if (target.kind === "container") return containerTargetKey(target);
+  if (target.kind === "network") return `${target.hypervisor}:${target.name}`;
   if (target.kind === "newVm") return `new-vm/${target.hypervisor}/${target.name}`;
   return "app";
 }

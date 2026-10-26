@@ -149,6 +149,24 @@ test("R4's host networks name a network by the same key, and add those no VM is 
   assert.ok(graph.nodes.some((n) => n.id === "net:vmware:vmnet5"));
 });
 
+test("a host network the hypervisor listed links to the host networks view; one only an adapter names doesn't", () => {
+  const vms = [vm("web"), vm("db")];
+  const graph = buildTopology(
+    input({
+      vms,
+      networks: [
+        { vmxPath: vms[0].vmxPath, hypervisor: "vmware", nics: [nic("nat")] },
+        { vmxPath: vms[1].vmxPath, hypervisor: "vmware", nics: [nic("bridged")] },
+      ],
+      hostNetworks: [{ key: "vmware:vmnet8", label: "NAT (VMnet8)", link: { kind: "hostNetworks" } }],
+    }),
+  );
+  const nat = graph.nodes.find((n) => n.id === "net:vmware:vmnet8");
+  assert.deepEqual(nat?.link, { kind: "hostNetworks" });
+  assert.ok(graph.edges.some((e) => e.from === "net:vmware:vmnet8" && e.to === "vm:" + vms[0].id));
+  assert.equal(graph.nodes.find((n) => n.id === "net:vmware:vmnet0")?.link, undefined);
+});
+
 test("only sessions on the way to something show, unless every session is asked for", () => {
   const vms = [vm("web")];
   const sessions = [

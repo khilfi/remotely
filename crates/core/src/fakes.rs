@@ -7,6 +7,7 @@
 pub mod clock;
 pub mod containers;
 pub mod github_server;
+pub mod host_networks;
 pub mod ssh_server;
 
 use std::collections::{HashMap, HashSet};
@@ -100,6 +101,8 @@ pub struct FakeVmware {
     failing_vdisk: AtomicBool,
     /// VM-23: Workstation's window (`vmware.exe`) runs.
     workstation_open: AtomicBool,
+    /// VM-11, VM-16: vmnets, NAT forwards and the default VM folder.
+    networks: host_networks::VmwareNetworks,
     /// VM-21: operations that fail (`clone`, `ovftool`, `convert`), after leaving what they made, as a real
     /// tool stopped halfway does.
     failing: Mutex<HashSet<String>>,
@@ -1093,6 +1096,18 @@ impl VmwareAdapter for FakeVmware {
     async fn workstation_window_open(&self) -> bool {
         self.workstation_open.load(Ordering::SeqCst)
     }
+
+    async fn vmrun_host(&self, args: Vec<std::ffi::OsString>, _timeout: Duration) -> Result<String> {
+        self.vmrun_host_call(args)
+    }
+
+    async fn nat_conf(&self) -> Result<Option<String>> {
+        Ok(self.networks.nat_conf())
+    }
+
+    fn nat_refusal(&self) -> Option<String> {
+        crate::adapters::host_networks::nat_refusal(self.networks.admin())
+    }
 }
 
 /// Counts a power call as finished when it returns or is dropped.
@@ -1185,6 +1200,8 @@ pub struct FakeVirtualBox {
     registerable: Mutex<HashMap<String, VboxVmInfo>>,
     /// VM-15: VirtualBox's folder has no VBoxGuestAdditions.iso.
     no_additions_iso: bool,
+    /// VM-11, VM-16, VM-25: host networks, NAT rules, the default machine folder.
+    networks: host_networks::VboxNetworks,
     /// VM-21: operations that fail (`clonevm`, `import`, `clonemedium`, `createvm`), after leaving what they made.
     failing: Mutex<HashSet<String>>,
     /// VM-21: guest IPs by VM name, for VMs a deploy makes (their UUID is the deploy's to choose).
@@ -2488,6 +2505,10 @@ impl VirtualBoxAdapter for FakeVirtualBox {
             .collect();
         out.sort();
         Ok(out)
+    }
+
+    async fn vboxmanage_host(&self, args: Vec<String>, _timeout: Duration) -> Result<String> {
+        self.vboxmanage_host_call(args)
     }
 }
 

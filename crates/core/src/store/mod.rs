@@ -25,6 +25,7 @@ mod tags;
 mod terminal_rules;
 #[cfg(test)]
 mod tests;
+mod timeline;
 #[cfg(test)]
 mod upgrade_tests;
 mod vault;
@@ -37,6 +38,7 @@ use std::time::Duration;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous};
+use sqlx::{ConnectOptions, Connection};
 use uuid::Uuid;
 
 use crate::domain::{now_rfc3339, Context, UserId, WorkspaceId};
@@ -59,6 +61,7 @@ pub(crate) use sessions::unsaved_spec;
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
 pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};
+pub use timeline::{vm_needle, JobTargetBrief};
 pub(crate) use vault::VaultMetaRow;
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";
@@ -79,6 +82,8 @@ pub const SHUTDOWN_WAIT_KEY: &str = "vmware.shutdownWaitSecs";
 /// BX-02: how many hosts a bulk run reaches at once.
 pub const REMOTE_LIMIT_KEY: &str = "jobs.remoteLimit";
 pub const DEFAULT_WORKSPACE: &str = "Default";
+/// How long a statement waits for another connection's lock on the database file.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct Store {
@@ -91,15 +96,17 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens (or creates) the database file and applies migrations.
+    /// Opens (or creates) the database file and applies migrations. QL-15: when it fails, nothing holds the file
+    /// open any more, so the shell can set it aside at once.
     pub async fn open(path: &Path) -> Result<Self> {
+        Self::check_file(path).await?;
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
             .foreign_keys(true)
-            .busy_timeout(Duration::from_secs(5))
+            .busy_timeout(BUSY_TIMEOUT)
             // SS-04, BX-02: a deleted or rewritten row (an old wrapped key or ciphertext, job outputs and scripts the
             // retention purge removes) is overwritten on disk, not left in a free page for a copy of the file to give
             // back.
@@ -109,6 +116,28 @@ impl Store {
             .connect_with(options)
             .await?;
         Self::from_pool(pool).await
+    }
+
+    /// QL-15: reads the file as a database on a connection of its own, and closes that connection before
+    /// answering, whatever the answer. A damaged file must fail here, not in the pool: when a pool connection
+    /// fails its first statement, sqlx drops it without waiting, and the file is closed later by sqlx's worker
+    /// thread. The error then came back while the file was still open, and Windows refused to rename it.
+    async fn check_file(path: &Path) -> Result<()> {
+        // The only statement sqlx runs on connecting with these options, `PRAGMA foreign_keys = ON`, doesn't read
+        // the file. A file that can't be opened at all fails inside sqlx's worker thread, after it closed the file.
+        let mut conn = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .busy_timeout(BUSY_TIMEOUT)
+            .connect()
+            .await?;
+        // The first statement a pool connection runs that reads the file: its header and schema.
+        let checked = sqlx::raw_sql("PRAGMA journal_mode = WAL").execute(&mut conn).await;
+        // Returns once sqlx's worker thread has closed the file.
+        let closed = conn.close().await;
+        checked?;
+        closed?;
+        Ok(())
     }
 
     /// A private in-memory database, for tests. One connection, so every query sees the same data.

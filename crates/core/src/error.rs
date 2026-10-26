@@ -314,6 +314,11 @@ pub enum CoreError {
     #[error("{0}")]
     VmSettingRefused(String),
 
+    /// VM-11: a port forward change that can't be made here or now, and why in words: Workstation's NAT forwards
+    /// need administrator rights, the host port is taken, the rule is gone...
+    #[error("{0}")]
+    HostNetworkRefused(String),
+
     /// VM-04, VM-21, VM-24: deleting a snapshot or a VM would break the linked clones made from it (they share its
     /// disk as it was at the snapshot); the message names the VM, what would go and the clones.
     #[error("{0}")]
@@ -449,6 +454,7 @@ impl CoreError {
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",
             CoreError::VmSettingRefused(_) => "vm_setting_refused",
             CoreError::LinkedClones(_) => "linked_clones",
+            CoreError::HostNetworkRefused(_) => "host_network_refused",
             CoreError::OvftoolNotFound => "ovftool_not_found",
             CoreError::Ovftool { .. } => "ovftool_failed",
             CoreError::DeployFailed { .. } => "deploy_failed",
