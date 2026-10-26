@@ -107,6 +107,8 @@ export interface RefreshReport {
   warnings: InventoryWarning[];
   /** QL-01: sessions linked to VMs (or unlinked) by IP address after this refresh. */
   links: AutoLinkReport;
+  /** FD-02: VMs on this PC that no workspace has yet (the Unassigned view). */
+  unassigned: import("./workspaces-api").UnassignedVm[];
 }
 
 /** QL-01: how a session's VM link was made. auto: by IP address, not confirmed; manual: the user's choice. */

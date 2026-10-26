@@ -623,8 +623,7 @@ export function learnAddress(masker: Masker, address: string) {
 export function fitWidth(standIn: string, kind: MaskKind, width: number): string {
   if (width <= 0) return "";
   const n = /-(\d+)$/.exec(standIn)?.[1] ?? "";
-  const short =
-    kind === "host" ? "h" : kind === "user" ? "u" : kind === "mac" ? "m" : kind === "workspace" ? "w" : "i";
+  const short = kind === "host" ? "h" : kind === "user" ? "u" : kind === "mac" ? "m" : kind === "workspace" ? "w" : "i";
   for (const candidate of [standIn, `${short}-${n}`, `${short}${n}`]) {
     if (candidate.length <= width) return candidate + PAD.repeat(width - candidate.length);
   }

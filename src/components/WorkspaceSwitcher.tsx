@@ -8,7 +8,15 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ArchiveIcon, ArchiveRestoreIcon, CheckIcon, ChevronsUpDownIcon, PencilIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ArchiveRestoreIcon,
+  CheckIcon,
+  ChevronsUpDownIcon,
+  PencilIcon,
+  PlusIcon,
+  SettingsIcon,
+} from "lucide-react";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { Button } from "@/components/ui/button";
@@ -49,7 +57,9 @@ import {
 
 /** The coloured dot before a workspace's name. */
 export function WorkspaceDot({ color, className }: { color: string; className?: string }) {
-  return <span aria-hidden className={cn("inline-block size-2.5 shrink-0 rounded-full", colorClass(color), className)} />;
+  return (
+    <span aria-hidden className={cn("inline-block size-2.5 shrink-0 rounded-full", colorClass(color), className)} />
+  );
 }
 
 /** The switch itself: the core closes what the old workspace had open, then the window loads the new one. */
@@ -79,8 +89,17 @@ export function WorkspaceSwitcher({ onOpenActivity }: Props) {
   }, []);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    let live = true;
+    workspacesApi.list().then(
+      (list) => {
+        if (live) setAll(list);
+      },
+      (err) => toast.error(`Could not read the workspaces: ${errorMessage(err)}`),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
 
   const shown = all.find((w) => w.current);
   const list = switchable(all);
@@ -426,7 +445,13 @@ function ManageWorkspacesDialog({
       )}
       {!w.archived && (
         <WhyDisabled reason={readOnly}>
-          <Button size="sm" variant="ghost" aria-label="Rename or recolour" disabled={!!readOnly} onClick={() => onEdit(w)}>
+          <Button
+            size="sm"
+            variant="ghost"
+            aria-label="Rename or recolour"
+            disabled={!!readOnly}
+            onClick={() => onEdit(w)}
+          >
             <PencilIcon />
           </Button>
         </WhyDisabled>

@@ -48,8 +48,8 @@ export function nameProblem(name: string, others: readonly Named[], exceptId?: s
   const trimmed = name.trim();
   if (trimmed === "") return "Give the workspace a name.";
   if ([...trimmed].length > MAX_WORKSPACE_NAME) return `At most ${MAX_WORKSPACE_NAME} characters.`;
-  // eslint-disable-next-line no-control-regex
-  if (/[\u0000-\u001f\u007f​-‏‪-‮⁠-⁤﻿]/.test(trimmed)) {
+  // Control and format characters (the core refuses them too).
+  if (/[\p{Cc}\p{Cf}]/u.test(trimmed)) {
     return "One line of plain text.";
   }
   const lower = trimmed.toLowerCase();

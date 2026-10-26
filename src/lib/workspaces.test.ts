@@ -23,7 +23,7 @@ test("FD-02: a workspace name is one trimmed line, unique among the user's (lett
   assert.match(nameProblem("acme", others) ?? "", /Another workspace/);
   assert.match(nameProblem("OLD CLIENT", others) ?? "", /archived ones count/);
   assert.equal(nameProblem("Acme", others, "1"), null, "renaming to its own name");
-  assert.equal(nameProblem("Acme‮Corp", others), "One line of plain text.");
+  assert.equal(nameProblem("Acme\u202eCorp", others), "One line of plain text.");
   assert.equal(nameProblem("Globex", others), null);
 });
 

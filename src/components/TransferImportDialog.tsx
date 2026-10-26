@@ -48,6 +48,10 @@ import {
 import { formatWhen, plural } from "@/lib/format";
 import { withVaultPassword } from "@/lib/reauth-prompt";
 import { cn } from "@/lib/utils";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { switchWorkspace } from "@/components/WorkspaceSwitcher";
+import { MAX_WORKSPACE_NAME } from "@/lib/workspaces";
+import { workspacesApi } from "@/lib/workspaces-api";
 
 interface Props {
   vault: VaultInfo | null;
@@ -170,6 +174,9 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
   const [keepStartup, setKeepStartup] = useState<Set<number>>(new Set());
   const [keepForwards, setKeepForwards] = useState<Set<number>>(new Set());
   const [report, setReport] = useState<TransferReport | null>(null);
+  // FD-02: into the shown workspace, or a new one (named after the file's workspace by default).
+  const [into, setInto] = useState<"here" | "new">("here");
+  const [newName, setNewName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const unlocked = vault?.status === "unlocked";
@@ -200,6 +207,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
       setPassphrase("");
       setPreview(opened);
       setChoices(defaults(opened));
+      setNewName(opened.workspace ?? "");
       setKeepStartup(new Set());
       setKeepForwards(new Set());
     } catch (err) {
@@ -245,6 +253,17 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),
       };
+      if (into === "new") {
+        // FD-02: a new workspace, made and filled; the shown one doesn't change.
+        const made = await withVaultPassword((vaultPassword) =>
+          workspacesApi.importIntoNew({ name: newName.trim() }, { ...request, vaultPassword }),
+        );
+        setReport(made.report);
+        toast.success("Imported into a new workspace", {
+          action: { label: "Open it", onClick: () => void switchWorkspace(made.workspace.id) },
+        });
+        return;
+      }
       // SS-04, AP-06: sessions that would use passwords already in this vault ask for the vault password once.
       const done = await withVaultPassword((vaultPassword) => api.transferCommit({ ...request, vaultPassword }));
       setReport(done);
@@ -400,6 +419,33 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
                 : ""}
               .
             </p>
+            <div className="grid gap-2 rounded-lg border p-3">
+              <p className="text-sm font-medium">Import into</p>
+              <RadioGroup value={into} onValueChange={(v) => setInto(v === "new" ? "new" : "here")}>
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="here" />
+                  This workspace, as compared below
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <RadioGroupItem value="new" />A new workspace:
+                  <Input
+                    className="h-8 w-64"
+                    data-mask="workspace"
+                    aria-label="The new workspace's name"
+                    maxLength={MAX_WORKSPACE_NAME}
+                    value={newName}
+                    placeholder="Customer or engagement"
+                    onFocus={() => setInto("new")}
+                    onChange={(e) => setNewName(e.currentTarget.value)}
+                  />
+                </label>
+              </RadioGroup>
+              {into === "new" && (
+                <p className="text-xs text-muted-foreground">
+                  The new workspace starts empty, so nothing is replaced there: what you import is added.
+                </p>
+              )}
+            </div>
             {preview.warnings.map((w) => (
               <Alert key={w}>
                 <AlertTriangleIcon />
@@ -531,7 +577,9 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
                 <Button
                   type="button"
                   onClick={() => void commit()}
-                  disabled={busy || changes === 0 || (secretsChosen && !unlocked)}
+                  disabled={
+                    busy || changes === 0 || (secretsChosen && !unlocked) || (into === "new" && newName.trim() === "")
+                  }
                 >
                   {busy ? "Importing…" : "Import"}
                 </Button>

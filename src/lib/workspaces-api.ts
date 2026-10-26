@@ -5,7 +5,14 @@
 // Workspace names may be customer names: every answer that holds one teaches the FD-03 masker (`learnWorkspace`), so
 // presentation mode masks them wherever they show.
 
-import { invoke, type Hypervisor, type PowerState, type TransferCommit, type TransferReport, type VmRecord } from "@/lib/api";
+import {
+  invoke,
+  type Hypervisor,
+  type PowerState,
+  type TransferCommit,
+  type TransferReport,
+  type VmRecord,
+} from "@/lib/api";
 import { masker } from "@/lib/presentation";
 import type { WorkspaceColor } from "@/lib/workspaces";
 
@@ -65,8 +72,7 @@ export const workspacesApi = {
   current: () => invoke<Workspace>("workspace_current").then(learnt),
   create: (input: WorkspaceInput) => invoke<Workspace>("workspace_create", { input }).then(learnt),
   rename: (id: string, name: string) => invoke<Workspace>("workspace_rename", { id, name }).then(learnt),
-  setColor: (id: string, color: WorkspaceColor) =>
-    invoke<Workspace>("workspace_set_color", { id, color }).then(learnt),
+  setColor: (id: string, color: WorkspaceColor) => invoke<Workspace>("workspace_set_color", { id, color }).then(learnt),
   archive: (id: string) => invoke<Workspace>("workspace_archive", { id }).then(learnt),
   restore: (id: string) => invoke<Workspace>("workspace_restore", { id }).then(learnt),
   switchPreview: (id: string) =>

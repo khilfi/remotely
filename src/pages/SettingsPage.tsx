@@ -23,6 +23,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DashboardHistoryCard } from "@/components/DashboardHistoryCard";
 import { DataRetentionCard } from "@/components/DataRetentionCard";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
+import { ChangeIdCard } from "@/components/ChangeIdCard";
 import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
 import { PresentationCard } from "@/components/Presentation";
 import { TerminalRulesCard } from "@/components/TerminalRulesCard";
@@ -290,7 +291,11 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
           <TerminalRulesCard />
         </Section>
       </TabsContent>
-      <TabsContent value="rules">
+      <TabsContent value="rules" className="flex flex-col gap-6">
+        {/* AP-08: this workspace's change ID rule (FD-02). */}
+        <Section id="change-ids" lit={lit}>
+          <ChangeIdCard />
+        </Section>
         <Section id="rules" lit={lit}>
           <PolicyRulesEditor />
         </Section>
