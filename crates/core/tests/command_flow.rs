@@ -66,9 +66,12 @@ async fn core_with(
         containers: Arc::new(remotely_core::fakes::FakeContainers::default()),
         disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
     };
-    Core::assemble(store, ctx, adapters, JobLimits::default())
+    let core = Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
-        .unwrap()
+        .unwrap();
+    // FD-02: the bus acts only on VMs the workspace lists; the fakes' VMs are listed first, as the VMs page does.
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    core
 }
 
 fn vm(name: &str) -> TargetRef {
@@ -95,7 +98,7 @@ async fn wait_finished(rx: &mut tokio::sync::broadcast::Receiver<JobEvent>, job:
 async fn inventory_refresh_lists_running_vms() {
     let fake = fake_vmware();
     let core = core(fake, None).await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     let names: Vec<_> = report.vms.iter().map(|v| v.display_name.as_str()).collect();
     assert_eq!(names, ["a", "b"]);
     assert!(report.warnings.is_empty());
@@ -111,7 +114,7 @@ async fn low_tier_runs_without_approval_and_is_audited() {
         targets: vec![vm("a"), vm("b")],
         op: PowerOp::Start { gui: false },
     };
-    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx, cmd).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
         panic!("starting VMs should not need approval");
     };
     assert_eq!(tier, Tier::Low);
@@ -127,12 +130,12 @@ async fn low_tier_runs_without_approval_and_is_audited() {
         ]
     );
 
-    let audit = core.store.recent_audit(&core.ctx, 10).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 10).await.unwrap();
     let events: Vec<_> = audit.iter().rev().map(|e| e.event.as_str()).collect();
     assert_eq!(events, ["job_started", "job_finished"]);
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 
-    let jobs = core.store.recent_jobs(&core.ctx, 5).await.unwrap();
+    let jobs = core.store.recent_jobs(&core.ctx(), 5).await.unwrap();
     assert_eq!(jobs[0].status, "succeeded");
     assert_eq!(jobs[0].targets_succeeded, 2);
 }
@@ -152,7 +155,7 @@ async fn high_tier_waits_for_correct_answers_then_runs_with_safety_snapshot() {
         targets: vec![vm("a"), vm("b")],
         op: PowerOp::Suspend,
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, cmd).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
         panic!("suspending 2 VMs is High");
     };
     assert_eq!(request.tier, Tier::High);
@@ -200,7 +203,7 @@ async fn high_tier_waits_for_correct_answers_then_runs_with_safety_snapshot() {
         ]
     );
 
-    let audit = core.store.recent_audit(&core.ctx, 10).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 10).await.unwrap();
     let events: Vec<_> = audit.iter().rev().map(|e| e.event.as_str()).collect();
     assert_eq!(
         events,
@@ -225,7 +228,7 @@ async fn cancelling_during_the_countdown_touches_no_target() {
         targets: vec![vm("a")],
         op: SnapshotOp::Revert { name: "base".into() },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, cmd).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
         panic!("revert is High");
     };
     let job_id = core
@@ -255,7 +258,7 @@ async fn critical_is_refused_until_the_vault_is_set_up() {
         targets: vec![vm("a")],
         op: PowerOp::Stop { mode: StopMode::Hard },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, cmd).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
         panic!("hard power-off is Critical");
     };
     assert_eq!(request.tier, Tier::Critical);
@@ -282,7 +285,7 @@ async fn commands_without_targets_are_rejected() {
         op: PowerOp::Pause,
     };
     assert!(matches!(
-        core.bus.submit(&core.ctx, cmd).await,
+        core.bus.submit(&core.ctx(), cmd).await,
         Err(CoreError::NoTargets)
     ));
 }
@@ -308,7 +311,7 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
         targets: vec![vm("a")],
         op: PowerOp::Stop { mode: StopMode::Hard },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, cmd).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
         panic!("hard power-off is Critical");
     };
     let answers = |password: &str| ApprovalAnswers {
@@ -317,6 +320,7 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
         reason: Some("hung VM".into()),
         safety_snapshot: Some(false),
         vault_password: Some(SecretString::new(password)),
+        change_id: None,
     };
 
     // AP-06: a wrong password is refused, nothing runs, and the audit log shows the attempt.
@@ -325,7 +329,7 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
         Err(CoreError::WrongVaultPassword)
     ));
     assert!(fake.calls().is_empty());
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "approval_rejected");
     assert_eq!(audit[0].detail.as_deref(), Some("wrong vault password"));
 
@@ -334,7 +338,7 @@ async fn critical_runs_after_the_vault_password_is_given_again() {
     assert_eq!(fake.calls(), [r"power Stop { mode: Hard } C:\VMs\a\a.vmx"]);
 
     // The password is never written to the audit log.
-    let audit = core.store.recent_audit(&core.ctx, 10).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 10).await.unwrap();
     assert!(audit.iter().all(|e| !format!("{e:?}").contains("correct horse")));
     assert!(audit.iter().any(|e| e
         .approval_json
@@ -363,7 +367,7 @@ async fn an_update_installs_only_once_no_other_job_is_open() {
         targets: vec![vm("a")],
         op: SnapshotOp::Revert { name: "base".into() },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, revert).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), revert).await.unwrap() else {
         panic!("revert is High");
     };
     let busy_job = core
@@ -384,7 +388,7 @@ async fn an_update_installs_only_once_no_other_job_is_open() {
     let update = Command::AppUpdate {
         version: offered.version.clone(),
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, update).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), update).await.unwrap() else {
         panic!("installing an update is Medium");
     };
     assert_eq!(request.tier, Tier::Medium);
@@ -422,9 +426,9 @@ async fn the_vmrun_path_must_be_a_real_vmrun_exe() {
 
     // Clearing it ("find automatically") is saved and audited.
     core.set_vmrun_path(None).await.unwrap();
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "setting_changed");
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -448,7 +452,7 @@ async fn update_checks_can_be_turned_off_for_air_gapped_sites() {
     assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::Off);
     assert_eq!(updater.calls(), calls, "no network call with checks off");
 
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "setting_changed");
     assert_eq!(audit[0].detail.as_deref(), Some("off"));
 }

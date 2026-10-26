@@ -100,7 +100,7 @@ async fn the_sudo_password_never_leaks() {
     let login_id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "login",
             SecretString::new(login.as_str()),
@@ -111,7 +111,7 @@ async fn the_sudo_password_never_leaks() {
     let sudo_id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "sudo",
             SecretString::new(sudo.as_str()),
@@ -141,7 +141,7 @@ async fn the_sudo_password_never_leaks() {
             key_type: "ssh-ed25519".into(),
             fingerprint: server.host_key_fingerprint(),
         };
-        core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+        core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
         let input = SessionInput {
             name: name.into(),
             folder_id: None,
@@ -161,7 +161,7 @@ async fn the_sudo_password_never_leaks() {
             tags: vec![],
             vm_id: None,
         };
-        ids.push(core.sessions.create(&core.ctx, input).await.unwrap().id);
+        ids.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
         servers.push(server);
     }
 
@@ -178,7 +178,7 @@ async fn the_sudo_password_never_leaks() {
     };
     // Read-only commands, so Low; but SS-04, AP-06: the chosen sudo password goes to these hosts for the first
     // time, so the run asks for a confirm and the vault password. The secret never reaches the approval.
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), command).await.unwrap() else {
         panic!("a sudo password new to these hosts asks for the vault password");
     };
     assert!(
@@ -217,7 +217,7 @@ async fn the_sudo_password_never_leaks() {
 
     // What each host did.
     let opts = GroupOptions::default();
-    let results = core.bulk.results(&core.ctx, job, opts).await.unwrap();
+    let results = core.bulk.results(&core.ctx(), job, opts).await.unwrap();
     let output = |name: &str| {
         let host = results.hosts.iter().find(|h| h.name == name).unwrap();
         (host.clone(), host.target_key.clone())
@@ -226,7 +226,7 @@ async fn the_sudo_password_never_leaks() {
     for name in ["right", "echoes", "nopasswd"] {
         let (host, key) = output(name);
         assert_eq!(host.status, "succeeded", "{name}: {:?}", host.error);
-        let out = core.bulk.host_output(&core.ctx, job, &key).await.unwrap();
+        let out = core.bulk.host_output(&core.ctx(), job, &key).await.unwrap();
         let expected = if name == "echoes" {
             "[redacted]\nroot\ndone\n"
         } else {
@@ -241,13 +241,13 @@ async fn the_sudo_password_never_leaks() {
 
     // Everywhere the password could have gone.
     for format in [ExportFormat::Csv, ExportFormat::Json, ExportFormat::Html] {
-        everything.push(core.bulk.render(&core.ctx, job, format, opts).await.unwrap().0);
+        everything.push(core.bulk.render(&core.ctx(), job, format, opts).await.unwrap().0);
     }
     for group in &results.groups {
         for other in &results.groups {
             let diff = core
                 .bulk
-                .diff(&core.ctx, job, &group.sample, &other.sample, opts)
+                .diff(&core.ctx(), job, &group.sample, &other.sample, opts)
                 .await
                 .unwrap();
             everything.push(serde_json::to_string(&diff).unwrap());
@@ -255,7 +255,7 @@ async fn the_sudo_password_never_leaks() {
     }
     everything.extend(seen);
     everything.push(database_text(&core).await);
-    for entry in core.store.recent_audit(&core.ctx, 500).await.unwrap() {
+    for entry in core.store.recent_audit(&core.ctx(), 500).await.unwrap() {
         everything.push(serde_json::to_string(&entry).unwrap());
     }
     for server in &servers {

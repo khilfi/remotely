@@ -88,7 +88,7 @@ async fn host(core: &Core, echo: u16, environment: Environment) -> (TestSshServe
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
     let name = match environment {
         Environment::Prod => "prod01",
         _ => "app01",
@@ -96,7 +96,7 @@ async fn host(core: &Core, echo: u16, environment: Environment) -> (TestSshServe
     let secret = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             &format!("alice on {name}"),
             SecretString::new(&password),
@@ -107,7 +107,7 @@ async fn host(core: &Core, echo: u16, environment: Environment) -> (TestSshServe
     let session = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: name.into(),
                 folder_id: None,
@@ -152,7 +152,7 @@ fn forward(kind: ForwardKind, dest_host: &str, dest_port: u16, auto_start: bool)
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 300).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 300).await.unwrap()
 }
 
 struct Pane {
@@ -166,7 +166,7 @@ impl Pane {
     async fn open(core: &Core, session: Uuid) -> Self {
         let handle = core
             .terminals
-            .open(&core.ctx, session, PtySize { cols: 80, rows: 24 })
+            .open(&core.ctx(), session, PtySize { cols: 80, rows: 24 })
             .await
             .unwrap();
         // The output is drained so the pane never waits on it.
@@ -287,7 +287,7 @@ async fn local_and_socks_forwards_carry_bytes_and_are_audited_when_they_open_and
     let saved = core
         .forwards
         .save(
-            &core.ctx,
+            &core.ctx(),
             session,
             &[
                 forward(ForwardKind::Local, "echo.test", 7, false),
@@ -309,11 +309,11 @@ async fn local_and_socks_forwards_carry_bytes_and_are_audited_when_they_open_and
     let mut pane = Pane::open(&core, session).await;
     pane.connected().await;
     // Started by hand: nothing opened with the terminal.
-    let listed = core.terminals.tunnels(&core.ctx, pane.id).await.unwrap();
+    let listed = core.terminals.tunnels(&core.ctx(), pane.id).await.unwrap();
     assert!(listed.iter().all(|t| t.state == TunnelState::Stopped), "{listed:?}");
 
     // A tunnel only this PC can use, to a Lab host: Low, so it opens at once.
-    let started = core.terminals.start_tunnel(&core.ctx, pane.id, local).await.unwrap();
+    let started = core.terminals.start_tunnel(&core.ctx(), pane.id, local).await.unwrap();
     let TunnelStart::Opening { job_id } = started else {
         panic!("{started:?}")
     };
@@ -324,17 +324,17 @@ async fn local_and_socks_forwards_carry_bytes_and_are_audited_when_they_open_and
         "hello through the tunnel"
     );
     assert!(server.log().contains(&"direct-tcpip echo.test:7".to_owned()));
-    let info = core.terminals.tunnels(&core.ctx, pane.id).await.unwrap();
+    let info = core.terminals.tunnels(&core.ctx(), pane.id).await.unwrap();
     assert_eq!(info[0].connections, 1);
 
     // SOCKS: the client names where it goes, and the host reaches it.
-    core.terminals.start_tunnel(&core.ctx, pane.id, socks).await.unwrap();
+    core.terminals.start_tunnel(&core.ctx(), pane.id, socks).await.unwrap();
     let proxy = port_of(&pane.listening(socks).await);
     assert_eq!(socks_ping(proxy, "echo.test", 9, "via socks").await, "via socks");
     assert!(server.log().contains(&"direct-tcpip echo.test:9".to_owned()));
 
     // Stopping closes the listener and is audited with how much it carried, never what.
-    core.terminals.stop_tunnel(&core.ctx, pane.id, local).await.unwrap();
+    core.terminals.stop_tunnel(&core.ctx(), pane.id, local).await.unwrap();
     pane.expect_tunnel(local, |s| *s == TunnelState::Stopped).await;
     assert!(
         TcpStream::connect(("127.0.0.1", port_of(&at))).await.is_err(),
@@ -389,7 +389,7 @@ async fn local_and_socks_forwards_carry_bytes_and_are_audited_when_they_open_and
     assert_eq!(closed.len(), 1);
     assert!(closed[0].detail.as_deref().unwrap().starts_with("the terminal closed"));
     assert!(TcpStream::connect(("127.0.0.1", proxy)).await.is_err());
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -400,7 +400,7 @@ async fn a_remote_forward_asks_first_and_brings_the_hosts_connections_back_here(
     let saved = core
         .forwards
         .save(
-            &core.ctx,
+            &core.ctx(),
             session,
             &[forward(ForwardKind::Remote, "127.0.0.1", echo, false)],
         )
@@ -410,7 +410,7 @@ async fn a_remote_forward_asks_first_and_brings_the_hosts_connections_back_here(
     let mut pane = Pane::open(&core, session).await;
     pane.connected().await;
     // The host listens and its connections reach into this PC's network: Medium, one confirm.
-    let started = core.terminals.start_tunnel(&core.ctx, pane.id, id).await.unwrap();
+    let started = core.terminals.start_tunnel(&core.ctx(), pane.id, id).await.unwrap();
     let TunnelStart::NeedsApproval { request } = started else {
         panic!("{started:?}")
     };
@@ -426,7 +426,7 @@ async fn a_remote_forward_asks_first_and_brings_the_hosts_connections_back_here(
     assert!(server.forwarded_ports().is_empty(), "nothing before the approval");
 
     core.terminals
-        .approve_tunnel(&core.ctx, pane.id, id, confirmed())
+        .approve_tunnel(&core.ctx(), pane.id, id, confirmed())
         .await
         .unwrap();
     let at = pane.listening(id).await;
@@ -436,7 +436,7 @@ async fn a_remote_forward_asks_first_and_brings_the_hosts_connections_back_here(
     // A program on the host connects to its port; this PC carries it on to the echo service.
     assert_eq!(ping(port, "from the host side").await, "from the host side");
 
-    core.terminals.stop_tunnel(&core.ctx, pane.id, id).await.unwrap();
+    core.terminals.stop_tunnel(&core.ctx(), pane.id, id).await.unwrap();
     timeout(WAIT, async {
         while !server.forwarded_ports().is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -462,7 +462,7 @@ async fn prod_and_shared_tunnels_ask_first_and_a_declined_one_stays_closed() {
     let saved = core
         .forwards
         .save(
-            &core.ctx,
+            &core.ctx(),
             prod,
             &[
                 forward(ForwardKind::Local, "echo.test", 7, false),
@@ -479,7 +479,7 @@ async fn prod_and_shared_tunnels_ask_first_and_a_declined_one_stays_closed() {
         let core = &core;
         let pane_id = pane.id;
         async move {
-            match core.terminals.start_tunnel(&core.ctx, pane_id, id).await.unwrap() {
+            match core.terminals.start_tunnel(&core.ctx(), pane_id, id).await.unwrap() {
                 TunnelStart::NeedsApproval { request } => request,
                 other => panic!("{other:?}"),
             }
@@ -517,11 +517,11 @@ async fn prod_and_shared_tunnels_ask_first_and_a_declined_one_stays_closed() {
     // Declining leaves each closed: nothing listens, nothing is audited as opened.
     for forward in &saved {
         core.terminals
-            .decline_tunnel(&core.ctx, pane.id, forward.id)
+            .decline_tunnel(&core.ctx(), pane.id, forward.id)
             .await
             .unwrap();
     }
-    let listed = core.terminals.tunnels(&core.ctx, pane.id).await.unwrap();
+    let listed = core.terminals.tunnels(&core.ctx(), pane.id).await.unwrap();
     assert!(listed.iter().all(|t| t.state == TunnelState::Stopped), "{listed:?}");
     let entries = audit(&core).await;
     assert_eq!(entries.iter().filter(|e| e.event == "approval_cancelled").count(), 3);
@@ -536,7 +536,7 @@ async fn forwards_start_with_the_terminal_and_open_again_after_a_reconnect() {
     let (lab_server, lab) = host(&core, echo, Environment::Lab).await;
     let saved = core
         .forwards
-        .save(&core.ctx, lab, &[forward(ForwardKind::Local, "echo.test", 7, true)])
+        .save(&core.ctx(), lab, &[forward(ForwardKind::Local, "echo.test", 7, true)])
         .await
         .unwrap();
     let id = saved[0].id;
@@ -582,7 +582,7 @@ async fn forwards_start_with_the_terminal_and_open_again_after_a_reconnect() {
     let (_prod_server, prod) = host(&core, echo, Environment::Prod).await;
     let saved = core
         .forwards
-        .save(&core.ctx, prod, &[forward(ForwardKind::Local, "echo.test", 7, true)])
+        .save(&core.ctx(), prod, &[forward(ForwardKind::Local, "echo.test", 7, true)])
         .await
         .unwrap();
     let id = saved[0].id;
@@ -593,12 +593,12 @@ async fn forwards_start_with_the_terminal_and_open_again_after_a_reconnect() {
     assert_eq!(request.tier, Tier::Medium);
     let wrong = core
         .terminals
-        .approve_tunnel(&core.ctx, pane.id, id, ApprovalAnswers::default())
+        .approve_tunnel(&core.ctx(), pane.id, id, ApprovalAnswers::default())
         .await;
     assert!(wrong.is_err(), "not confirmed");
     assert!(core.terminals.tunnel_request(pane.id, id).is_some(), "still asking");
     core.terminals
-        .approve_tunnel(&core.ctx, pane.id, id, confirmed())
+        .approve_tunnel(&core.ctx(), pane.id, id, confirmed())
         .await
         .unwrap();
     let at = pane.listening(id).await;
@@ -615,11 +615,11 @@ async fn tunnels_need_a_connected_terminal_and_refuse_a_taken_port() {
     let taken = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let mut clash = forward(ForwardKind::Local, "echo.test", 7, false);
     clash.bind_port = taken.local_addr().unwrap().port();
-    let saved = core.forwards.save(&core.ctx, session, &[clash]).await.unwrap();
+    let saved = core.forwards.save(&core.ctx(), session, &[clash]).await.unwrap();
     let id = saved[0].id;
     let mut pane = Pane::open(&core, session).await;
     pane.connected().await;
-    core.terminals.start_tunnel(&core.ctx, pane.id, id).await.unwrap();
+    core.terminals.start_tunnel(&core.ctx(), pane.id, id).await.unwrap();
     let failed = pane
         .expect_tunnel(id, |s| matches!(s, TunnelState::Failed { .. }))
         .await;
@@ -628,7 +628,7 @@ async fn tunnels_need_a_connected_terminal_and_refuse_a_taken_port() {
     };
     assert!(message.contains("is in use by another program on this PC"), "{message}");
     // Started twice while asking or open is refused; a failed one can be started again.
-    assert!(core.terminals.start_tunnel(&core.ctx, pane.id, id).await.is_ok());
+    assert!(core.terminals.start_tunnel(&core.ctx(), pane.id, id).await.is_ok());
     pane.expect_tunnel(id, |s| matches!(s, TunnelState::Failed { .. }))
         .await;
     drop(taken);

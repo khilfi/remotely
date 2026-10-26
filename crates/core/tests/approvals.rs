@@ -46,9 +46,12 @@ async fn core_on(store: Store, vmware: Arc<FakeVmware>) -> Core {
         containers: Arc::new(remotely_core::fakes::FakeContainers::default()),
         disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
     };
-    Core::assemble(store, ctx, adapters, JobLimits::default())
+    let core = Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
-        .unwrap()
+        .unwrap();
+    // FD-02: the bus acts only on VMs the workspace lists; the fakes' VMs are listed first, as the VMs page does.
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    core
 }
 
 // ---- AP-01: editable tier rules -----------------------------------------------------------------
@@ -60,7 +63,8 @@ async fn edited_rules_are_saved_applied_at_once_audited_and_kept_after_a_restart
     let core = setup.build().await;
 
     let pause_two = pause(&["web01", "db01"]);
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, pause_two.clone()).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), pause_two.clone()).await.unwrap()
+    else {
         panic!("pausing is Medium by default");
     };
     assert_eq!(request.tier, Tier::Medium);
@@ -75,7 +79,7 @@ async fn edited_rules_are_saved_applied_at_once_audited_and_kept_after_a_restart
         },
     );
     rules.countdown_seconds = 5;
-    let changes = core.bus.set_rules(&core.ctx, rules.clone()).await.unwrap();
+    let changes = core.bus.set_rules(&core.ctx(), rules.clone()).await.unwrap();
     assert_eq!(
         changes,
         [
@@ -85,7 +89,7 @@ async fn edited_rules_are_saved_applied_at_once_audited_and_kept_after_a_restart
     );
 
     // Applies to the next command.
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, pause_two).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), pause_two).await.unwrap() else {
         panic!("now High");
     };
     assert_eq!(request.tier, Tier::High);
@@ -93,7 +97,7 @@ async fn edited_rules_are_saved_applied_at_once_audited_and_kept_after_a_restart
 
     let changed = core
         .store
-        .recent_audit(&core.ctx, 10)
+        .recent_audit(&core.ctx(), 10)
         .await
         .unwrap()
         .into_iter()
@@ -101,7 +105,7 @@ async fn edited_rules_are_saved_applied_at_once_audited_and_kept_after_a_restart
         .unwrap();
     assert_eq!(changed.action, "Changed the approval rules");
     assert_eq!(changed.detail.as_deref(), Some(changes.join("; ").as_str()));
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 
     // Saved: a restart reads them back.
     let again = core_on(core.store.clone(), fake).await;
@@ -120,7 +124,7 @@ async fn invalid_rules_are_rejected_with_the_reason_and_nothing_changes() {
             bulk: Tier::Low,
         },
     );
-    let err = core.bus.set_rules(&core.ctx, rules).await.unwrap_err();
+    let err = core.bus.set_rules(&core.ctx(), rules).await.unwrap_err();
     assert!(matches!(err, CoreError::InvalidRule { .. }));
     assert_eq!(err.code(), "invalid_rule");
     assert_eq!(
@@ -128,7 +132,7 @@ async fn invalid_rules_are_rejected_with_the_reason_and_nothing_changes() {
         "invalid policy rule 'Revert to a snapshot': the tier for 2 or more targets (low) can't be lower than for one target (high)"
     );
     assert_eq!(core.bus.rules(), before);
-    assert!(core.store.recent_audit(&core.ctx, 5).await.unwrap().is_empty());
+    assert!(core.store.recent_audit(&core.ctx(), 5).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -137,8 +141,8 @@ async fn saving_the_same_rules_again_changes_and_logs_nothing() {
     // Spaces typed around a name are not a change.
     let mut rules = core.bus.rules();
     rules.read_only_commands[0] = format!("  {}  ", rules.read_only_commands[0]);
-    assert!(core.bus.set_rules(&core.ctx, rules).await.unwrap().is_empty());
-    assert!(core.store.recent_audit(&core.ctx, 5).await.unwrap().is_empty());
+    assert!(core.bus.set_rules(&core.ctx(), rules).await.unwrap().is_empty());
+    assert!(core.store.recent_audit(&core.ctx(), 5).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -153,7 +157,7 @@ async fn saved_rules_that_no_longer_pass_the_checks_fall_back_to_the_defaults_an
 
     let core = core_on(store, Arc::new(two_running())).await;
     assert_eq!(core.bus.rules(), PolicyRules::default());
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].action, "Reset the approval rules to the defaults");
     assert!(audit[0].detail.as_deref().unwrap().contains("Countdown"));
 }
@@ -178,13 +182,13 @@ async fn the_approval_shows_each_vms_state_uptime_and_snapshot_count() {
         .with_snapshot(&vmx("web01"), "base", now - Duration::days(40))
         .with_snapshot(&vmx("web01"), "patched", now - Duration::days(1));
     let core = Setup::new(fake).build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
     let stop = Command::VmPower {
         targets: vec![vm("web01"), vm("db01")],
         op: PowerOp::Stop { mode: StopMode::Soft },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, stop).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), stop).await.unwrap() else {
         panic!("High");
     };
     let [web, db] = &request.impact[..] else {
@@ -206,7 +210,8 @@ async fn the_approval_shows_each_vms_state_uptime_and_snapshot_count() {
 #[tokio::test]
 async fn a_medium_confirm_shows_the_impact_too() {
     let core = Setup::new(two_running()).build().await;
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, pause(&["web01"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), pause(&["web01"])).await.unwrap()
+    else {
         panic!("Medium");
     };
     assert_eq!(request.impact.len(), 1);
@@ -221,7 +226,8 @@ async fn a_medium_confirm_shows_the_impact_too() {
 #[tokio::test]
 async fn without_vmrun_the_preview_uses_the_last_known_state_and_says_so() {
     let core = Setup::new(two_running().without_vmrun()).build().await;
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, pause(&["web01"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), pause(&["web01"])).await.unwrap()
+    else {
         panic!("Medium");
     };
     let impact = &request.impact[0];
@@ -252,7 +258,7 @@ async fn type_to_confirm_and_a_reason_are_required_and_a_wrong_answer_can_be_cor
     let setup = countdown_setup(0);
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend_two()).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend_two()).await.unwrap() else {
         panic!("High");
     };
     let answer = |count: Option<usize>, reason: Option<&str>| ApprovalAnswers {
@@ -288,7 +294,7 @@ async fn type_to_confirm_and_a_reason_are_required_and_a_wrong_answer_can_be_cor
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
     let granted = core
         .store
-        .recent_audit(&core.ctx, 10)
+        .recent_audit(&core.ctx(), 10)
         .await
         .unwrap()
         .into_iter()
@@ -305,7 +311,7 @@ async fn the_countdown_is_visible_and_cancelling_it_touches_no_vm() {
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     let mut events = core.jobs.subscribe();
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend_two()).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend_two()).await.unwrap() else {
         panic!("High");
     };
     assert!(request
@@ -336,7 +342,7 @@ async fn the_countdown_is_visible_and_cancelling_it_touches_no_vm() {
     let until = OffsetDateTime::parse(&until, &time::format_description::well_known::Rfc3339).unwrap();
     let wait = until - approved_at;
     assert!(wait > Duration::seconds(9) && wait < Duration::seconds(11), "{wait}");
-    let listed = &core.store.recent_jobs(&core.ctx, 1).await.unwrap()[0];
+    let listed = &core.store.recent_jobs(&core.ctx(), 1).await.unwrap()[0];
     assert_eq!(listed.status, "countdown");
     assert!(listed.countdown_until.is_some());
 
@@ -344,11 +350,11 @@ async fn the_countdown_is_visible_and_cancelling_it_touches_no_vm() {
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Cancelled);
     assert!(fake.calls().is_empty(), "no safety snapshot, no suspend");
     assert!(!core.jobs.cancel(job), "a closed job cannot be cancelled again");
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "job_cancelled");
     assert!(core
         .store
-        .job_targets(&core.ctx, job)
+        .job_targets(&core.ctx(), job)
         .await
         .unwrap()
         .iter()
@@ -361,7 +367,7 @@ async fn the_job_runs_once_the_countdown_ends() {
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     let mut events = core.jobs.subscribe();
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend_two()).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend_two()).await.unwrap() else {
         panic!("High");
     };
     let started = std::time::Instant::now();
@@ -397,7 +403,7 @@ async fn the_audit_log_exports_to_csv_without_secrets_and_the_export_is_logged()
         targets: vec![vm("web01")],
         op: PowerOp::Stop { mode: StopMode::Hard },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, off).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), off).await.unwrap() else {
         panic!("Critical");
     };
     let job = core
@@ -410,6 +416,7 @@ async fn the_audit_log_exports_to_csv_without_secrets_and_the_export_is_logged()
                 reason: Some("hung guest, password=hunter2".into()),
                 safety_snapshot: Some(true),
                 vault_password: Some(SecretString::new(VAULT_PASSWORD)),
+                change_id: None,
             },
         )
         .await
@@ -421,12 +428,12 @@ async fn the_audit_log_exports_to_csv_without_secrets_and_the_export_is_logged()
             name: "x, \"quoted\"".into(),
         },
     };
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, take).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), take).await.unwrap() else {
         panic!("Low");
     };
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Succeeded);
 
-    let entries = core.store.audit_for_export(&core.ctx).await.unwrap().len();
+    let entries = core.store.audit_for_export(&core.ctx()).await.unwrap().len();
     let dir = common::temp_folder("export");
     let path = dir.join("audit.csv");
     let report = core.export_audit_csv(&path).await.unwrap();
@@ -445,13 +452,13 @@ async fn the_audit_log_exports_to_csv_without_secrets_and_the_export_is_logged()
     );
     assert!(csv.contains("\"Take snapshot 'x, \"\"quoted\"\"' on 1 VM\""), "{csv}");
 
-    let last = &core.store.recent_audit(&core.ctx, 1).await.unwrap()[0];
+    let last = &core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0];
     assert_eq!(last.event, "audit_exported");
     assert_eq!(
         last.detail.as_deref(),
         Some(format!("{entries} entries to audit.csv").as_str())
     );
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -485,7 +492,7 @@ async fn the_hash_chain_can_be_checked_from_the_exported_file_alone() {
     let setup = countdown_setup(0);
     let core = setup.build().await;
     let mut events = core.jobs.subscribe();
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend_two()).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend_two()).await.unwrap() else {
         panic!("High");
     };
     let answers = ApprovalAnswers {
@@ -505,7 +512,8 @@ async fn the_hash_chain_can_be_checked_from_the_exported_file_alone() {
     let col = |row: &[String], name: &str| row[header.iter().position(|h| h == name).unwrap()].clone();
     let opt = |v: String| (!v.is_empty()).then_some(v);
 
-    let mut prev = remotely_core::store::GENESIS_HASH.to_owned();
+    // FD-02: the workspace's own chain, from its own start.
+    let mut prev = remotely_core::store::chain_start(&col(&rows[1], "workspace_id"), None);
     for row in &rows[1..] {
         let entry = remotely_core::store::AuditEntry {
             seq: col(row, "seq").parse().unwrap(),

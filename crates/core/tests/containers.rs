@@ -58,7 +58,7 @@ fn input(name: &str, env: Environment, auth: SessionAuth) -> SessionInput {
 
 async fn session(core: &Core, name: &str, env: Environment) -> Uuid {
     core.sessions
-        .create(&core.ctx, input(name, env, SessionAuth::Agent))
+        .create(&core.ctx(), input(name, env, SessionAuth::Agent))
         .await
         .unwrap()
         .id
@@ -67,7 +67,7 @@ async fn session(core: &Core, name: &str, env: Environment) -> Uuid {
 async fn mark(core: &Core, id: Uuid, engine: EngineKind, sudo: SudoMode) {
     core.containers
         .marks()
-        .set(&core.ctx, id, &[MarkInput { engine, sudo }])
+        .set(&core.ctx(), id, &[MarkInput { engine, sudo }])
         .await
         .unwrap();
 }
@@ -130,7 +130,7 @@ fn answers(request: &ApprovalRequest) -> ApprovalAnswers {
 /// Submits, approving whatever it asks, and waits for the job.
 async fn run(core: &Core, command: Command) -> (Uuid, JobStatus) {
     let mut events = core.jobs.subscribe();
-    let job = match core.bus.submit(&core.ctx, command).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, answers(&request)).await.unwrap(),
     };
@@ -138,7 +138,7 @@ async fn run(core: &Core, command: Command) -> (Uuid, JobStatus) {
 }
 
 async fn needs_approval(core: &Core, command: Command) -> ApprovalRequest {
-    match core.bus.submit(&core.ctx, command).await.unwrap() {
+    match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::NeedsApproval { request } => request,
         SubmitOutcome::Queued { summary, .. } => panic!("{summary} ran without asking"),
     }
@@ -149,7 +149,7 @@ async fn needs_approval(core: &Core, command: Command) -> ApprovalRequest {
 #[tokio::test]
 async fn marking_a_session_as_a_container_host_is_checked_and_audited_like_a_session_edit() {
     let core = core_with(FakeContainers::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web = session(&core, "web01", Environment::Lab).await;
     let marks = core.containers.marks();
     assert!(
@@ -292,7 +292,7 @@ async fn marking_a_session_as_a_container_host_is_checked_and_audited_like_a_ses
 #[tokio::test]
 async fn reads_list_containers_images_volumes_networks_details_and_logs() {
     let (core, fake, web) = docker_host("web01", Environment::Lab).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let list = core.containers.containers(ctx, host(web), DOCKER).await.unwrap();
     let names: Vec<&str> = list.containers.iter().map(|c| c.name.as_str()).collect();
     assert_eq!(
@@ -355,14 +355,14 @@ async fn an_engine_a_host_is_not_marked_with_cant_be_read() {
     let (core, _fake, web) = docker_host("web01", Environment::Lab).await;
     let err = core
         .containers
-        .containers(&core.ctx, host(web), PODMAN)
+        .containers(&core.ctx(), host(web), PODMAN)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not marked as a Podman host"), "{err}");
     let unmarked = session(&core, "db01", Environment::Lab).await;
     let err = core
         .containers
-        .containers(&core.ctx, host(unmarked), DOCKER)
+        .containers(&core.ctx(), host(unmarked), DOCKER)
         .await
         .unwrap_err();
     assert!(
@@ -385,7 +385,7 @@ async fn starting_a_container_is_low_and_audited_with_host_engine_name_and_id() 
     );
     assert_eq!(fake.changes(), [format!("web01/docker: start {worker}")]);
 
-    let audit = core.store.recent_audit(&core.ctx, 10).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 10).await.unwrap();
     let started = audit.iter().find(|e| e.event == "job_started").unwrap();
     assert_eq!(started.action, "Start 1 container");
     assert_eq!(started.tier.as_deref(), Some("low"));
@@ -467,7 +467,7 @@ async fn a_prod_host_raises_the_tier_and_a_protected_host_is_skipped() {
         .with_host("prod01", DOCKER, Fixture::sample())
         .with_host("web", DOCKER, Fixture::sample());
     let core = core_with(fake.clone()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let prod = session(&core, "prod01", Environment::Prod).await;
     mark(&core, prod, DOCKER, SudoMode::Off).await;
     let worker = id_of(&fake, "prod01", "shop-worker-1");
@@ -542,7 +542,7 @@ async fn a_session_reaching_a_virtualbox_vm_takes_its_protection_and_prod_label(
         .with_containers(Arc::new(fake.clone()))
         .build()
         .await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let vm_id = core.store.find_vm(ctx, UUID).await.unwrap().unwrap().id;
     let linked = core
@@ -588,7 +588,7 @@ async fn a_session_reaching_a_virtualbox_vm_takes_its_protection_and_prod_label(
 #[tokio::test]
 async fn removing_a_volume_is_critical_and_names_the_containers_using_it() {
     let (core, fake, web) = docker_host("web01", Environment::Lab).await;
-    core.containers.volumes(&core.ctx, host(web), DOCKER).await.unwrap();
+    core.containers.volumes(&core.ctx(), host(web), DOCKER).await.unwrap();
     let pgdata = TargetRef::Container {
         host: host(web),
         engine: DOCKER,
@@ -614,7 +614,7 @@ async fn removing_a_volume_is_critical_and_names_the_containers_using_it() {
     let job = core.bus.approve(request.id, answers(&request)).await.unwrap();
     // In use: the engine refuses, and the job says so.
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Failed);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert!(
         targets[0].error.as_deref().unwrap().contains("volume is in use"),
         "{:?}",
@@ -662,11 +662,11 @@ async fn prunes_preview_what_they_remove_and_say_what_they_freed() {
     let job = core.bus.approve(request.id, answers(&request)).await.unwrap();
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
     assert!(fake.fixture("web01", DOCKER).container("old-job").is_none());
-    let finished = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let finished = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     let detail = finished[0].detail.as_deref().unwrap();
     assert!(detail.contains("Docker on web01: reclaimed 20MB"), "{detail}");
     // The CLI's output stays with the job.
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert!(targets[0]
         .output
         .as_deref()
@@ -727,7 +727,7 @@ async fn only_what_the_engine_lists_can_be_a_target() {
     let ghost = "0123456789ab0123456789ab0123456789ab0123456789ab0123456789abcdef";
     let err = core
         .bus
-        .submit(&core.ctx, op(vec![container(web, ghost)], ContainerOp::Start))
+        .submit(&core.ctx(), op(vec![container(web, ghost)], ContainerOp::Start))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "unknown_target");
@@ -740,7 +740,7 @@ async fn only_what_the_engine_lists_can_be_a_target() {
     };
     let err = core
         .bus
-        .submit(&core.ctx, op(vec![image], ContainerOp::RemoveImage))
+        .submit(&core.ctx(), op(vec![image], ContainerOp::RemoveImage))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "unknown_target");
@@ -748,7 +748,10 @@ async fn only_what_the_engine_lists_can_be_a_target() {
     let worker = id_of(&fake, "web01", "shop-worker-1");
     let err = core
         .bus
-        .submit(&core.ctx, op(vec![container(web, &worker)], ContainerOp::RemoveVolume))
+        .submit(
+            &core.ctx(),
+            op(vec![container(web, &worker)], ContainerOp::RemoveVolume),
+        )
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
@@ -778,7 +781,7 @@ async fn pulling_an_image_is_low_and_takes_only_a_reference_that_passes_the_gram
         let err = core
             .bus
             .submit(
-                &core.ctx,
+                &core.ctx(),
                 op(
                     vec![engine_of(web, DOCKER)],
                     ContainerOp::Pull { reference: bad.into() },
@@ -794,7 +797,7 @@ async fn pulling_an_image_is_low_and_takes_only_a_reference_that_passes_the_gram
 #[tokio::test]
 async fn the_read_only_lock_refuses_container_changes_and_mark_edits_but_reads_go_on() {
     let (core, fake, web) = docker_host("web01", Environment::Lab).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.presentation
         .set(remotely_core::presentation::Presentation {
             enabled: true,
@@ -831,7 +834,7 @@ async fn a_host_outside_the_docker_group_runs_docker_with_sudo_and_its_password_
         .needing_sudo("web01", DOCKER)
         .with_sudo_password("login-pw-example");
     let core = core_with(fake.clone()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let login = core
         .vault
         .add(
@@ -924,7 +927,7 @@ async fn failed_container_targets_can_be_retried_and_rated_again() {
     )
     .await;
     assert_eq!(status, JobStatus::Failed);
-    let request = match core.bus.retry_failed(&core.ctx, job, false).await.unwrap() {
+    let request = match core.bus.retry_failed(&core.ctx(), job, false).await.unwrap() {
         SubmitOutcome::NeedsApproval { request } => request,
         SubmitOutcome::Queued { .. } => panic!("pausing 2 asks"),
     };
@@ -940,7 +943,7 @@ async fn docker_desktop_on_this_pc_is_a_host_with_the_same_rules() {
     let path = std::env::temp_dir().join("remotely-test-not-real").join("docker.exe");
     let fake = FakeContainers::default().with_this_pc(&path, Fixture::sample());
     let core = core_with(fake.clone()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let hosts = core.containers.hosts(ctx).await.unwrap();
     assert_eq!(hosts.len(), 1);
     assert_eq!(hosts[0].host, ContainerHost::ThisPc);
@@ -977,10 +980,10 @@ async fn docker_desktop_on_this_pc_is_a_host_with_the_same_rules() {
 #[tokio::test]
 async fn without_docker_desktop_this_pc_is_no_host() {
     let core = core_with(FakeContainers::default()).await;
-    assert!(core.containers.hosts(&core.ctx).await.unwrap().is_empty());
+    assert!(core.containers.hosts(&core.ctx()).await.unwrap().is_empty());
     let err = core
         .containers
-        .containers(&core.ctx, ContainerHost::ThisPc, DOCKER)
+        .containers(&core.ctx(), ContainerHost::ThisPc, DOCKER)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "container_cli_missing");
@@ -1006,7 +1009,7 @@ async fn laptop() -> Core {
 #[tokio::test]
 async fn an_export_carries_container_marks_to_another_laptop() {
     let core = laptop().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web = session(&core, "web01", Environment::Lab).await;
     let sudo = core
         .vault
@@ -1059,7 +1062,7 @@ async fn an_export_carries_container_marks_to_another_laptop() {
     let preview = other
         .transfer
         .open(
-            &other.ctx,
+            &other.ctx(),
             &file,
             SecretString::new("export passphrase example"),
             &other.vault,
@@ -1069,7 +1072,7 @@ async fn an_export_carries_container_marks_to_another_laptop() {
     let done = other
         .transfer
         .commit(
-            &other.ctx,
+            &other.ctx(),
             remotely_core::transfer::TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -1091,20 +1094,20 @@ async fn an_export_carries_container_marks_to_another_laptop() {
         .await
         .unwrap();
     assert_eq!(done.container_hosts, 1);
-    let marks = other.containers.marks().list(&other.ctx, None).await.unwrap();
+    let marks = other.containers.marks().list(&other.ctx(), None).await.unwrap();
     assert_eq!(marks.len(), 2);
     let docker = marks.iter().find(|m| m.engine == DOCKER).unwrap();
     let SudoMode::Password { password_id: Some(id) } = docker.sudo else {
         panic!("sudo with a chosen password: {:?}", docker.sudo);
     };
     assert_ne!(id, sudo, "the secret has this laptop's id");
-    let labels = other.vault.list(&other.ctx).await.unwrap();
+    let labels = other.vault.list(&other.ctx()).await.unwrap();
     assert!(labels.iter().any(|s| s.id == id && s.label == "web01 sudo"));
     assert_eq!(
         marks.iter().find(|m| m.engine == PODMAN).unwrap().sudo,
         SudoMode::NoPassword
     );
-    let audit = other.store.recent_audit(&other.ctx, 20).await.unwrap();
+    let audit = other.store.recent_audit(&other.ctx(), 20).await.unwrap();
     assert!(audit
         .iter()
         .any(|e| e.action == "Imported the container engines of 'web01'"));
@@ -1117,7 +1120,11 @@ async fn containers_with_hostile_names_are_shown_and_acted_on_by_id_only() {
     let core = core_with(fake.clone()).await;
     let web = session(&core, "web01", Environment::Lab).await;
     mark(&core, web, DOCKER, SudoMode::Off).await;
-    let list = core.containers.containers(&core.ctx, host(web), DOCKER).await.unwrap();
+    let list = core
+        .containers
+        .containers(&core.ctx(), host(web), DOCKER)
+        .await
+        .unwrap();
     let evil = list.containers.iter().find(|c| c.name.contains("touch")).unwrap();
     let request = needs_approval(&core, op(vec![container(web, evil.id.as_str())], ContainerOp::Stop)).await;
     assert_eq!(request.targets[0].name, format!("{} on web01 (Docker)", evil.name));

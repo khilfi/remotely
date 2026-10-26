@@ -107,6 +107,19 @@ test("Approve names the first answer still missing", () => {
   );
 });
 
+test("AP-08: a change ID is optional, unless the workspace requires one for Prod; at most 64 characters", () => {
+  const base = { typedCount: "", reason: "", password: "", busy: false };
+  const optional = [{ step: "changeId" as const, required: false }];
+  const required = [{ step: "changeId" as const, required: true }];
+  assert.equal(approveReason({ ...base, steps: optional }), null);
+  assert.equal(
+    approveReason({ ...base, steps: optional, changeId: "x".repeat(65) }),
+    "A change ID is at most 64 characters",
+  );
+  assert.match(approveReason({ ...base, steps: required, changeId: "  " }) ?? "", /needs a change ID/);
+  assert.equal(approveReason({ ...base, steps: required, changeId: "CHG0012345" }), null);
+});
+
 test("comparing groups and connection actions say why they wait", () => {
   assert.equal(diffReason(1), "Only one group so far: every host that finished gave the same answer");
   assert.equal(diffReason(2), null);

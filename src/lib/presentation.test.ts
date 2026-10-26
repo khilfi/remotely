@@ -260,3 +260,26 @@ test("command variables named like a host or user hold one", () => {
   }
   for (const name of ["zip", "service", "script", "count", "pipeline", "path"]) assert.ok(!namesAHost(name), name);
 });
+
+test("FD-02: a workspace's name is masked in its field and, once learnt, as a phrase in any text", () => {
+  const m = new Masker();
+  assert.equal(m.field("workspace", "Acme Corp"), "workspace-1", "its own field, spaces and all");
+  assert.ok(m.learnWorkspace("Acme Corp"));
+  assert.ok(!m.learnWorkspace("acme corp"), "once, whatever the letter case");
+  assert.equal(m.text("Created this workspace, 'Acme Corp'"), "Created this workspace, 'workspace-1'");
+  assert.equal(m.text("ACME  corp's lab"), "workspace-1's lab", "any letter case and run of spaces");
+  assert.equal(m.text("Acme Corporation"), "Acme Corporation", "a whole phrase only");
+});
+
+test("FD-02: short names and plain words are masked only in their own field", () => {
+  const m = new Masker();
+  for (const name of ["Default", "Lab", "QA"]) assert.ok(!m.learnWorkspace(name), name);
+  assert.equal(m.text("Default layout for the lab"), "Default layout for the lab");
+  assert.equal(m.field("workspace", "Default"), "workspace-1");
+});
+
+test("FD-02: an FD-07 preview's workspace field is learnt like a host field", () => {
+  const m = new Masker();
+  learnFields(m, { file: "export.remotely", workspace: "Globex Retail" });
+  assert.equal(m.text("from Globex Retail"), "from workspace-1");
+});

@@ -46,9 +46,10 @@ Everything committed here is public, and git history is forever.
 2. **Policy engine decides the tier** (Low, Medium, High, Critical; a Prod-labelled target moves an action up one tier) and the approval steps. Nothing runs at High or Critical without the approval answer from the UI. See the tier table in `docs/PRD.md`.
 3. **Reads skip approval.** Inventory and metrics reads go adapters -> metrics collector -> store -> UI.
 4. **Audit everything that changes state.** Append-only audit log, written when an action starts and when it ends, each entry hash-chained to the previous one.
-5. **Every record carries `workspace_id` and `user_id`** from day one, even though the MVP has one workspace and one user.
+5. **Every record carries `workspace_id` and `user_id`** from day one. Still one user; from 0.5.0 (FD-02) there are several workspaces, and rule 8 says what that asks of every feature.
 6. **One adapter per outside system** (VMware, remote/SSH, host counters), each behind a Rust trait so tests can use a fake.
 7. **Secrets live only in the vault.** Never put passwords, keys or passphrases in logs, audit entries, job output, exports, error messages or the UI state. The vault hands secrets to adapters only. A vault password goes to a host without the vault password being asked again only where it already goes (`vault::bindings`): anything that sends one somewhere new checks `SecretBindings::may_go` and asks with `SecretBindings::confirm` (`reauth_required`).
+8. **Workspaces (FD-02).** What the user makes belongs to the shown workspace: read it with `core.ctx()` per call (never a context kept from start-up) and store it with that `workspace_id`; a service that keeps state takes `workspaces::Current` and lets go of the old workspace's when it changes. A VM is reached only after `Store::require_vm_here` or the bus's target resolution (`NotInWorkspace`); a VM a feature makes is `assign_vm`ed to the job's workspace, one it deletes `release_vm`d. A new setting is per workspace unless it describes this PC: then it goes in `settings::MACHINE_KEYS` (kept in the home workspace), else `WORKSPACE_KEYS` if `repair` must check it. An event stream the window shows is filtered to the shown workspace in the shell (jobs by `JobRunner::workspace_of`, schedules by `subscribe_scoped`). Work that goes on in hidden workspaces (schedule runs) uses that workspace's own ctx and audits there. An FD-07 export holds one workspace. A new per-workspace store gets a case in `tests/workspaces.rs`.
 
 ## Layout
 
@@ -76,9 +77,16 @@ crates/core/          remotely-core: all app logic
                       templates, targets with their labels then, the answers; migration 0025), submit_standing checks
                       each scheduled command (read-only lock; edited, new, Prod or protected targets, rules changed:
                       StandingChanged, nothing runs; another command or a revoked grant refused, approval_refused),
-                      audits approval_used; ApprovalRecord.standing names the schedule and run in the job's entries
+                      audits approval_used; ApprovalRecord.standing names the schedule and run in the job's entries;
+                      command_bus/change_id.rs AP-08 ChangeIdRules (`approvals.changeIds`, per workspace: required for
+                      Prod) and clean_change_id (one line, 64 characters, export::redact_secrets); ApprovalStep::ChangeId
+                      on High and Critical, made required by apply_change_id_rule (submit, preview, ask_again,
+                      ask_standing); kept in ApprovalRecord.change_id, jobs.change_id (migration 0029), the audit CSV's
+                      change_id and the Compare and MultiExec exports; a standing grant without one asks again once the
+                      rule requires it; FD-02 resolve_targets refuses another workspace's VM, a Register of one too
     settings.rs       QL-15 settings this version can't read are set aside (`<key>.unreadable`), audited, and get
-                      their defaults at start, instead of stopping the app
+                      their defaults at start, instead of stopping the app; FD-02 MACHINE_KEYS, this PC's settings,
+                      which the store keeps in the home workspace whichever is shown, and WORKSPACE_KEYS
     policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit;
                       AP-01 RUNS_ANYTHING: shells, interpreters and command runners can't be read-only entries
                       SS-07 a loopback SOCKS tunnel is at least Medium while other users are signed in to this PC
@@ -88,6 +96,13 @@ crates/core/          remotely-core: all app logic
                       default that rate given actions)
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
+    workspaces.rs     FD-02 (migration 0029): Workspaces (create, rename, colour, archive, restore; audited in the
+                      workspace, Change::Workspaces), Current (the shown workspace, a watch every service reads),
+                      Core::switch_preview and switch_workspace (refused while a job started from the UI in the shown
+                      workspace is open, WorkspaceBusy; closes MultiExec, terminals with their tunnels, approvals, kept
+                      connections, the metrics hub and an opened FD-07 file; history minutes written to the old one;
+                      audited workspace_left and workspace_opened; `workspaces.current` saved), and FD-07's
+                      import_into_new_workspace. One vault key for all workspaces (each item's AAD names its workspace)
     jobs.rs           QL-15: a failing journal or audit write is logged and the job goes on to its real result
                       (job_finished always tried); the update install races the job's cancel token; BX-02 when_idle:
                       compaction holds new jobs back and runs only while none is open. H9 `Rollout` of
@@ -95,7 +110,9 @@ crates/core/          remotely-core: all app logic
                       CANARY_WAIT 15 min, audited canary_go_on) and stop_after_failures (no new hosts; running ones
                       finish; skipped); TargetStatus::Unknown for CommandTimedOut and in-flight cancels (retry_failed
                       leaves them out unless include_unknown, and refuses redacted or purged runs); each remote target
-                      journals peer_ip and the accepted host_key (BulkVerifier; migration 0018), listed at job_finished
+                      journals peer_ip and the accepted host_key (BulkVerifier; migration 0018), listed at job_finished;
+                      FD-02 JobOwner: each open job's workspace and whether a schedule started it (workspace_of,
+                      open_user_jobs, cancel_in; go_on only from the job's workspace)
     retention.rs      BX-02 how long the job journal keeps outputs and command text (Settings: 30 days, 90 by default,
                       1 year, forever; `jobs.retention`): the purge at start and daily (JournalRetention::run, wall
                       clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
@@ -159,7 +176,10 @@ crates/core/          remotely-core: all app logic
                       GitHub update token in the vault
     inventory.rs      VM-01 Workstation's and (VM-18) VirtualBox's VMs; a VirtualBox VM is kept when VirtualBox can't
                       be asked; P2 refreshes single-flight and coalesced (RefreshGate: requests while one runs share
-                      the next run)
+                      the next run); FD-02 discovery is for this PC, and each VM belongs to one workspace
+                      (vm_assignments): the found VMs no workspace has are `unassigned()` (in memory, joining the only
+                      active workspace by themselves), claim and release (audited vm_assigned and vm_released; never a
+                      protected or Prod VM out, never with one workspace); StoreDirectory refuses another's VM
     capacity.rs       VM-07 capacity check before power-on; VM-02 `bridged`: starting 2+ VMs warns about bridged
                       adapters plugged in at power-on (one confirm)
     capacity_plan.rs  VM-26 the deploy capacity planner: RAM, CPU and disk per drive after a deploy next to now
@@ -261,7 +281,11 @@ crates/core/          remotely-core: all app logic
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
                       GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
                       POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
-                      minute (DF_EVERY), and their parsers); HostProcessSource reads no inventory with no VM process
+                      minute (DF_EVERY), and their parsers); HostProcessSource reads no inventory with no VM process;
+                      FD-02 the samples are the shown workspace's VMs, and other workspaces' running VMs go only to
+                      their own workspace's history (SourceRound::elsewhere, one Rollup per workspace) so VM-14's idle
+                      check works in a hidden workspace; guest polling, the hub and MO-07 alerts follow the shown
+                      workspace only; a round during a switch is dropped
     host_details/     MO-13, MO-14 (reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
                       (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
                       channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the
@@ -471,7 +495,11 @@ crates/core/          remotely-core: all app logic
                       terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021); timeline.rs (VM-25 the
                       audit entries whose targets hold `"vmxPath":<key>`, any letter case, and the VM's job rows;
                       migration 0024 lets job_targets take 'network' and indexes it by key); schedules.rs (VM-14,
-                      VM-27 schedules, their runs (200 kept), the snapshots they took, standing approvals)
+                      VM-27 schedules, their runs (200 kept), the snapshots they took, standing approvals);
+                      workspaces.rs (FD-02 rows, the home workspace, vm_assignments: require_vm_here, assign_vm,
+                      release_vm); audit.rs one hash chain per workspace from chain_start, entries up to
+                      `audit_legacy_until` checked against the old single chain; workspace_upgrade_tests.rs a database
+                      at migration 0028 with a row in every table, opened by 0029
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -497,7 +525,8 @@ crates/core/          remotely-core: all app logic
                       QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16;
                       host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
                       VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
-                      conversion.rs: CV-01 to CV-03, VM-17); opt-in workstation_it.rs, virtualbox_it.rs and
+                      conversion.rs: CV-01 to CV-03, VM-17; workspaces.rs: FD-02 isolation of every service and
+                      switching; change_ids.rs: AP-08); opt-in workstation_it.rs, virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
@@ -531,7 +560,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       and teardown, VMs added or taken out by hand); CV-01 to CV-03, VM-17 convert.rs (Image tools'
                       file dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify`
                       progress, Export's options and folder dialog, Import's analysis, check and submit, QEMU's page
-                      after checked_qemu_site; Settings' qemu-img path in ipc.rs)
+                      after checked_qemu_site; Settings' qemu-img path in ipc.rs); FD-02, AP-08 workspaces.rs (the
+                      switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); lib.rs
+                      and schedules.rs pass job and schedule events to the window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -570,7 +601,9 @@ src/                  React + TypeScript UI
                       NotificationSources (QL-25: jobs and MO-07 alerts kept whatever page shows), ShortcutSheet
                       (QL-24, Ctrl+/), FirstRunWizard (QL-23: the Vault page's SetupCard, the import dialog); VM-14,
                       VM-27 ScheduleDialog (the core's preview of next runs and warnings), ScheduleRunsSheet,
-                      VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary)
+                      VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-02
+                      WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
+                      after a switch), UnassignedVmsSheet; AP-08 ChangeIdCard and the approval dialog's Change ID)
   pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
@@ -636,7 +669,9 @@ src/                  React + TypeScript UI
                       VM-27 wrappers and types; the editor's form, checks and wording), retention.ts (BX-02 the retention choices
                       and a purge's summary for Settings' DataRetentionCard),
                       presentation.ts (FD-03 masking: stand-ins, patterns, known values, TerminalMasker; MO-13 MAC
-                      addresses as `mac-N`), rollout.ts (H9 canary, stop after failures, retry choices),
+                      addresses as `mac-N`; FD-02 workspace names, `data-mask="workspace"`, learnWorkspace),
+                      workspaces.ts and workspaces-api.ts (FD-02 checks and texts; wrappers that teach the masker every
+                      workspace name), rollout.ts (H9 canary, stop after failures, retry choices),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
@@ -1011,7 +1046,8 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
 - Every policy-engine rule has a unit test.
 - FD-03 presentation mode masks what is on screen at the DOM (`src/lib/presentation-dom.ts`), so new UI needs nothing
   for text. An element or input that holds exactly one host, IP, user or `user@host:port` gets
-  `data-mask="host|ip|user|address"` (inputs then show dots while presenting). Text shown outside the window (Windows
+  `data-mask="host|ip|user|address"` (inputs then show dots while presenting), and a workspace name
+  `data-mask="workspace"`. Text shown outside the window (Windows
   notifications) goes through `maskedOutside`. A new IPC field holding a host, IP or user should use one of the names
   `learnFields` knows (`host`, `hostname`, `ip`, `username`, ...). A new state-changing core method that skips the bus
   starts with `store.read_only().check(Change::…)`.

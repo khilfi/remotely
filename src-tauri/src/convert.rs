@@ -47,7 +47,7 @@ pub enum PickFor {
 #[tauri::command]
 pub async fn convert_tools(state: State<'_, AppState>) -> IpcResult<ToolsReport> {
     let core = &state.core;
-    Ok(core.convert.tools(&core.ctx).await?)
+    Ok(core.convert.tools(&core.ctx()).await?)
 }
 
 /// Asks for a file (Downloads by default). `None` when the dialog was closed.
@@ -133,7 +133,7 @@ pub async fn convert_submit(
     let core = &state.core;
     Ok(Some(
         core.convert
-            .submit_convert(&core.ctx, &source, &output, kind, whole_megabytes)
+            .submit_convert(&core.ctx(), &source, &output, kind, whole_megabytes)
             .await?,
     ))
 }
@@ -184,7 +184,7 @@ pub fn convert_verify_cancel(state: State<'_, AppState>, request: Uuid) -> bool 
 #[tauri::command]
 pub async fn export_options(state: State<'_, AppState>, vm_key: String) -> IpcResult<ExportOptions> {
     let core = &state.core;
-    Ok(core.convert.export_options(&core.ctx, &vm_key).await?)
+    Ok(core.convert.export_options(&core.ctx(), &vm_key).await?)
 }
 
 /// VM-17, CV-02: asks for the folder the export goes in (Documents by default), then submits it to the bus (Low; a
@@ -214,7 +214,9 @@ pub async fn export_submit(
     let folder = into_path(chosen)?;
     let core = &state.core;
     Ok(Some(
-        core.convert.submit_export(&core.ctx, &vm_key, target, &folder).await?,
+        core.convert
+            .submit_export(&core.ctx(), &vm_key, target, &folder)
+            .await?,
     ))
 }
 
@@ -228,14 +230,14 @@ pub async fn import_analyze(state: State<'_, AppState>, path: String) -> IpcResu
 #[tauri::command]
 pub async fn import_check(state: State<'_, AppState>, request: ImportRequest) -> IpcResult<DeployCheck> {
     let core = &state.core;
-    Ok(core.deploy.check_import(&core.ctx, &request).await?)
+    Ok(core.deploy.check_import(&core.ctx(), &request).await?)
 }
 
 /// CV-01: submits the import as a deploy: approval, then one job.
 #[tauri::command]
 pub async fn import_submit(state: State<'_, AppState>, request: ImportRequest) -> IpcResult<SubmitOutcome> {
     let core = &state.core;
-    Ok(core.deploy.submit_import(&core.ctx, &request).await?)
+    Ok(core.deploy.submit_import(&core.ctx(), &request).await?)
 }
 
 /// Opens QEMU's download page in the default browser. Any other address is refused before Windows sees it.

@@ -19,12 +19,17 @@
 //
 // The terminal needs the masked text to take exactly as many cells as the real text (`TerminalMasker`), so its
 // stand-ins keep the value's width: `ip-5······` for 192.0.2.10, `u2···` for alice.
+//
+// FD-02: workspace names may be customer names, so they are masked too (`workspace-1`): in elements marked
+// `data-mask="workspace"` whatever they look like, and as a phrase anywhere else once the UI learnt them
+// (`learnWorkspace`, from the workspace list; names may hold spaces). A name of fewer than three letters or a plain
+// word like "Default" or "Lab" is masked only in its own field.
 
-export type MaskKind = "host" | "ip" | "user" | "mac";
+export type MaskKind = "host" | "ip" | "user" | "mac" | "workspace";
 
 /** A value the masker learnt, masked from now on wherever it appears as a whole word. */
 export interface Learned {
-  kind: "host" | "user";
+  kind: "host" | "user" | "workspace";
   value: string;
 }
 
@@ -108,7 +113,7 @@ const PROFILE_RE =
   /(?:\b[A-Za-z]:|(?<![\w.]))[\\/]+(?:Users|Documents and Settings)[\\/]+([^\\/:*?"<>|\r\n\t]{1,64}?(?=[\\/])|[^\s\\/:*?"<>|,;)'`]{1,64})/gi;
 /** /home/<name> on a Linux host. */
 const HOME_RE = /(?<![\w.~-])\/home\/([A-Za-z0-9_][A-Za-z0-9._-]{0,63})(?![\w-])/g;
-const STAND_IN_RE = /^(?:host|ip|user|mac)-\d+$/;
+const STAND_IN_RE = /^(?:host|ip|user|mac|workspace)-\d+$/;
 /** MO-13: six hex pairs split by colons or by hyphens (not mixed). */
 const MAC_RE = /(?<![\w:.-])[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}(?![\w:.-])/g;
 
@@ -216,10 +221,14 @@ type Candidate = { start: number; end: number; parts: Part[] };
 export class Masker {
   private readonly standIns = new Map<string, string>();
   private readonly issued = new Set<string>();
-  private readonly counts: Record<MaskKind, number> = { host: 0, ip: 0, user: 0, mac: 0 };
+  private readonly counts: Record<MaskKind, number> = { host: 0, ip: 0, user: 0, mac: 0, workspace: 0 };
   /** Known values masked as bare words, by kind. */
-  private readonly known: Record<"host" | "user", Set<string>> = { host: new Set(), user: new Set() };
-  private matchers: { re: RegExp; kind: "host" | "user" }[] | null = null;
+  private readonly known: Record<"host" | "user" | "workspace", Set<string>> = {
+    host: new Set(),
+    user: new Set(),
+    workspace: new Set(),
+  };
+  private matchers: { re: RegExp; kind: "host" | "user" | "workspace" }[] | null = null;
   private readonly listeners = new Set<(learned: Learned) => void>();
 
   /** Called with each new known value, so text already on screen that holds it can be masked again. */
@@ -252,6 +261,7 @@ export class Masker {
    * rest are masked from now on wherever they appear as a whole word. Returns whether it was new.
    */
   learn(kind: MaskKind, raw: string | null | undefined): boolean {
+    if (kind === "workspace") return this.learnWorkspace(raw);
     // MAC addresses need no learning either: the pattern finds them all.
     if (kind === "mac") return false;
     const value = raw?.trim().replace(/\.$/, "");
@@ -271,12 +281,35 @@ export class Masker {
   }
 
   /**
+   * FD-02: a workspace's name, masked from now on wherever it appears as a phrase (any letter case). Short names and
+   * plain words are left to their own fields. Returns whether it was new.
+   */
+  learnWorkspace(raw: string | null | undefined): boolean {
+    const value = raw?.trim().replace(/\s+/g, " ");
+    if (!value || value.length < 3 || value.length > 120 || this.issued.has(value)) return false;
+    if (STAND_IN_RE.test(value) || GENERIC.has(value.toLowerCase())) return false;
+    const key = value.toLowerCase();
+    if (this.known.workspace.has(key)) return false;
+    this.known.workspace.add(key);
+    this.matchers = null;
+    const learned: Learned = { kind: "workspace", value };
+    this.listeners.forEach((l) => l(learned));
+    return true;
+  }
+
+  /**
    * A whole value of one kind, whatever it looks like: a user name, or a host or IP field, which may come as
    * `user@host:port`, `host:port` or `[2001:db8::1]:22`. Text with spaces is masked like free text.
    */
   field(kind: MaskKind | "address", value: string): string {
     const trimmed = value.trim();
     if (trimmed === "" || this.issued.has(trimmed)) return value;
+    // FD-02: a workspace's name is one value, spaces and all.
+    if (kind === "workspace") {
+      const lead = value.slice(0, value.indexOf(trimmed));
+      const trail = value.slice(lead.length + trimmed.length);
+      return `${lead}${this.standIn("workspace", trimmed)}${trail}`;
+    }
     if (/\s/.test(trimmed)) return this.text(value);
     const lead = value.slice(0, value.indexOf(trimmed));
     const trail = value.slice(lead.length + trimmed.length);
@@ -480,10 +513,15 @@ export class Masker {
     const hosts = [...this.known.host];
     const distinctive = hosts.filter((h) => /[\d._-]/.test(h));
     const plain = hosts.filter((h) => !/[\d._-]/.test(h));
-    const out: { re: RegExp; kind: "host" | "user" }[] = [];
+    const out: { re: RegExp; kind: "host" | "user" | "workspace" }[] = [];
     const hostAny = build(distinctive, "gi");
     const hostExact = build(plain, "g");
     const users = build([...this.known.user], "g");
+    // FD-02: workspace names in any letter case, the spaces in them matching any run of spaces.
+    const workspaces = build([...this.known.workspace], "gi");
+    if (workspaces) {
+      out.push({ re: new RegExp(workspaces.source.replace(/ /g, "\\s+"), "gi"), kind: "workspace" });
+    }
     if (hostAny) out.push({ re: hostAny, kind: "host" });
     if (hostExact) out.push({ re: hostExact, kind: "host" });
     if (users) out.push({ re: users, kind: "user" });
@@ -501,6 +539,7 @@ function normalize(kind: MaskKind, value: string): string {
   if (kind === "user") return value;
   if (kind === "ip") return ipKey(value.replace(/^\[|\]$/g, ""));
   if (kind === "mac") return value.toLowerCase().replace(/-/g, ":");
+  if (kind === "workspace") return value.toLowerCase().replace(/\s+/g, " ");
   return value.toLowerCase().replace(/\.$/, "");
 }
 
@@ -538,6 +577,8 @@ const FIELD_KINDS: Record<string, MaskKind | "address"> = {
   username: "user",
   user: "user",
   address: "address",
+  // FD-02: the workspace an FD-07 file was exported from.
+  workspace: "workspace",
 };
 
 /**
@@ -582,7 +623,7 @@ export function learnAddress(masker: Masker, address: string) {
 export function fitWidth(standIn: string, kind: MaskKind, width: number): string {
   if (width <= 0) return "";
   const n = /-(\d+)$/.exec(standIn)?.[1] ?? "";
-  const short = kind === "host" ? "h" : kind === "user" ? "u" : kind === "mac" ? "m" : "i";
+  const short = kind === "host" ? "h" : kind === "user" ? "u" : kind === "mac" ? "m" : kind === "workspace" ? "w" : "i";
   for (const candidate of [standIn, `${short}-${n}`, `${short}${n}`]) {
     if (candidate.length <= width) return candidate + PAD.repeat(width - candidate.length);
   }

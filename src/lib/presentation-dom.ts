@@ -177,7 +177,14 @@ function visit(el: Element) {
 /** The kind of value an element marked `data-mask` holds. */
 function fieldKind(el: Element): MaskKind | "address" | null {
   const kind = el.closest("[data-mask]")?.getAttribute("data-mask");
-  return kind === "host" || kind === "ip" || kind === "user" || kind === "mac" || kind === "address" ? kind : null;
+  return kind === "host" ||
+    kind === "ip" ||
+    kind === "user" ||
+    kind === "mac" ||
+    kind === "workspace" ||
+    kind === "address"
+    ? kind
+    : null;
 }
 
 function maskChildren(el: Element) {

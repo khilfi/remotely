@@ -15,14 +15,14 @@ type IpcResult<T> = Result<T, IpcError>;
 #[tauri::command]
 pub async fn multiexec_groups_list(state: State<'_, AppState>) -> IpcResult<Vec<MultiExecGroup>> {
     let core = &state.core;
-    Ok(core.groups.list(&core.ctx).await?)
+    Ok(core.groups.list(&core.ctx()).await?)
 }
 
 /// Saves a new group of saved sessions. Audited.
 #[tauri::command]
 pub async fn multiexec_group_create(state: State<'_, AppState>, input: GroupInput) -> IpcResult<MultiExecGroup> {
     let core = &state.core;
-    Ok(core.groups.create(&core.ctx, input).await?)
+    Ok(core.groups.create(&core.ctx(), input).await?)
 }
 
 /// Renames a group and sets its sessions. Audited.
@@ -33,12 +33,12 @@ pub async fn multiexec_group_update(
     input: GroupInput,
 ) -> IpcResult<MultiExecGroup> {
     let core = &state.core;
-    Ok(core.groups.update(&core.ctx, id, input).await?)
+    Ok(core.groups.update(&core.ctx(), id, input).await?)
 }
 
 /// The sessions stay. Audited.
 #[tauri::command]
 pub async fn multiexec_group_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.groups.delete(&core.ctx, id).await?)
+    Ok(core.groups.delete(&core.ctx(), id).await?)
 }

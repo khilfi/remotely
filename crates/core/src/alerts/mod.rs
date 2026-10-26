@@ -195,7 +195,8 @@ struct Directory {
 /// MO-07: the rules, the alert list and their evaluation (`Core.alerts`).
 pub struct Alerts {
     store: Store,
-    ctx: Context,
+    /// FD-02: the workspace shown, whose rules run on the rounds ([`Alerts::switch_to`]).
+    ctx: RwLock<Context>,
     rules: RwLock<Vec<AlertRule>>,
     eval: tokio::sync::Mutex<Evaluator>,
     directory: tokio::sync::Mutex<Option<Directory>>,
@@ -219,13 +220,37 @@ impl Alerts {
         let (tx, _) = broadcast::channel(64);
         Ok(Self {
             store,
-            ctx,
+            ctx: RwLock::new(ctx),
             rules: RwLock::new(rules),
             eval: tokio::sync::Mutex::new(Evaluator::default()),
             directory: tokio::sync::Mutex::new(None),
             tx,
             failing: Mutex::new(false),
         })
+    }
+
+    fn ctx(&self) -> Context {
+        *locks::read(&self.ctx)
+    }
+
+    /// FD-02: another workspace is shown. The old one's alerts still firing close as gone (its targets left the
+    /// dashboard), and the new one's rules run from the next round, after its own leftover alerts are closed as at
+    /// start. A hidden workspace raises no alerts.
+    pub async fn switch_to(&self, ctx: Context) -> Result<()> {
+        let mut eval = self.eval.lock().await;
+        let old = self.ctx();
+        let at = eval::rfc3339(now_ms());
+        if old != ctx {
+            self.store.close_open_alerts(&old, Resolution::Gone, &at).await?;
+        }
+        self.store.ensure_builtin_rules(&ctx, &rules::BUILTINS).await?;
+        self.store.close_open_alerts(&ctx, Resolution::Restarted, &at).await?;
+        let rules = self.store.alert_rules(&ctx).await?;
+        *locks::write(&self.ctx) = ctx;
+        *locks::write(&self.rules) = rules;
+        *eval = Evaluator::default();
+        *self.directory.lock().await = None;
+        Ok(())
     }
 
     /// Alerts firing, resolving and acknowledged, as they happen.
@@ -243,7 +268,7 @@ impl Alerts {
         self.store.read_only().check(Change::Alerts)?;
         let input = rules::checked(input)?;
         self.check_scope(&input.scope).await?;
-        let rule = self.store.insert_alert_rule(&self.ctx, None, &input).await?;
+        let rule = self.store.insert_alert_rule(&self.ctx(), None, &input).await?;
         self.audit("Added an alert rule", &rules::describe(&input)).await?;
         self.reload().await?;
         Ok(rule)
@@ -266,7 +291,7 @@ impl Alerts {
         self.check_scope(&input.scope).await?;
         let rule = self
             .store
-            .update_alert_rule(&self.ctx, id, &input)
+            .update_alert_rule(&self.ctx(), id, &input)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(id.to_string()))?;
         let detail = format!("{} -> {}", rules::describe(&old.input()), rules::describe(&input));
@@ -285,7 +310,7 @@ impl Alerts {
                 "A built-in rule can't be deleted. Turn it off instead.".into(),
             ));
         }
-        self.store.delete_alert_rule(&self.ctx, id).await?;
+        self.store.delete_alert_rule(&self.ctx(), id).await?;
         self.audit("Deleted an alert rule", &rules::describe(&old.input()))
             .await?;
         self.rule_changed(id).await
@@ -303,7 +328,7 @@ impl Alerts {
         let input = builtin.input();
         let rule = self
             .store
-            .update_alert_rule(&self.ctx, id, &input)
+            .update_alert_rule(&self.ctx(), id, &input)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(id.to_string()))?;
         let detail = format!(
@@ -319,8 +344,8 @@ impl Alerts {
     /// The alert list: firing alerts, or the history too, newest first, with the counts for the badge.
     pub async fn list(&self, query: AlertQuery) -> Result<AlertList> {
         let limit = query.limit.unwrap_or(200).clamp(1, MAX_LIST);
-        let alerts = self.store.list_alerts(&self.ctx, query.open_only, limit).await?;
-        let (open, unacknowledged) = self.store.alert_counts(&self.ctx).await?;
+        let alerts = self.store.list_alerts(&self.ctx(), query.open_only, limit).await?;
+        let (open, unacknowledged) = self.store.alert_counts(&self.ctx()).await?;
         Ok(AlertList {
             alerts,
             open,
@@ -333,7 +358,7 @@ impl Alerts {
     pub async fn acknowledge(&self, ids: &[Uuid]) -> Result<Vec<Uuid>> {
         self.store.read_only().check(Change::Alerts)?;
         let at = eval::rfc3339(now_ms());
-        let acknowledged = self.store.acknowledge_alerts(&self.ctx, ids, &at).await?;
+        let acknowledged = self.store.acknowledge_alerts(&self.ctx(), ids, &at).await?;
         if acknowledged.is_empty() {
             return Ok(Vec::new());
         }
@@ -353,7 +378,7 @@ impl Alerts {
         );
         self.store
             .append_audit(
-                &self.ctx,
+                &self.ctx(),
                 NewAuditEntry {
                     event: "alert_acknowledged",
                     action: "Acknowledged alerts",
@@ -384,9 +409,9 @@ impl Alerts {
             let mut directory = self.directory.lock().await;
             if directory.as_ref().is_none_or(|d| d.read_at.elapsed() >= DIRECTORY_TTL) {
                 *directory = Some(Directory {
-                    vms: self.store.list_vms(&self.ctx).await?,
-                    sessions: self.store.list_sessions(&self.ctx).await?,
-                    by_vm: self.store.sessions_by_vm(&self.ctx).await?,
+                    vms: self.store.list_vms(&self.ctx()).await?,
+                    sessions: self.store.list_sessions(&self.ctx()).await?,
+                    by_vm: self.store.sessions_by_vm(&self.ctx()).await?,
                     read_at: Instant::now(),
                 });
             }
@@ -400,7 +425,11 @@ impl Alerts {
             let now = time::OffsetDateTime::from_unix_timestamp(round.t_ms.div_euclid(1000))
                 .unwrap_or(time::OffsetDateTime::UNIX_EPOCH);
             for key in eval.stopped_vms(&snapshot) {
-                if self.store.vm_job_since(&self.ctx, &key, now - REMOTELY_WINDOW).await? {
+                if self
+                    .store
+                    .vm_job_since(&self.ctx(), &key, now - REMOTELY_WINDOW)
+                    .await?
+                {
                     by_remotely.insert(key);
                 }
             }
@@ -413,7 +442,7 @@ impl Alerts {
         for transition in transitions {
             match transition {
                 Transition::Fired { alert, notify } => {
-                    self.store.insert_alert(&self.ctx, &alert).await?;
+                    self.store.insert_alert(&self.ctx(), &alert).await?;
                     tracing::info!(rule = %alert.rule_id, metric = alert.metric.as_str(), notify, "an alert fired");
                     let _ = self.tx.send(AlertEvent::Fired { alert: *alert, notify });
                 }
@@ -425,7 +454,7 @@ impl Alerts {
                 } => {
                     let resolved = self
                         .store
-                        .resolve_alert(&self.ctx, alert_id, resolution, peak, &eval::rfc3339(at_ms))
+                        .resolve_alert(&self.ctx(), alert_id, resolution, peak, &eval::rfc3339(at_ms))
                         .await?;
                     if let Some(alert) = resolved {
                         let _ = self.tx.send(AlertEvent::Resolved { alert });
@@ -438,7 +467,7 @@ impl Alerts {
 
     async fn rule(&self, id: Uuid) -> Result<AlertRule> {
         self.store
-            .alert_rule(&self.ctx, id)
+            .alert_rule(&self.ctx(), id)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(id.to_string()))
     }
@@ -446,7 +475,7 @@ impl Alerts {
     /// A watched host rule needs a saved session.
     async fn check_scope(&self, scope: &AlertScope) -> Result<()> {
         if let AlertScope::Host { session_id } = scope {
-            if self.store.get_session(&self.ctx, *session_id).await?.is_none() {
+            if self.store.get_session(&self.ctx(), *session_id).await?.is_none() {
                 return Err(CoreError::InvalidInput("Choose a saved session for the rule.".into()));
             }
         }
@@ -471,7 +500,7 @@ impl Alerts {
     }
 
     async fn reload(&self) -> Result<()> {
-        let rules = self.store.alert_rules(&self.ctx).await?;
+        let rules = self.store.alert_rules(&self.ctx()).await?;
         *locks::write(&self.rules) = rules;
         Ok(())
     }
@@ -479,7 +508,7 @@ impl Alerts {
     async fn audit(&self, action: &str, detail: &str) -> Result<()> {
         self.store
             .append_audit(
-                &self.ctx,
+                &self.ctx(),
                 NewAuditEntry {
                     event: "alert_rule_changed",
                     action,

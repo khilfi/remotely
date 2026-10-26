@@ -49,7 +49,7 @@ import {
 import { containerTargetKey, formatBytes } from "@/lib/containers";
 import { rolloutText } from "@/lib/rollout";
 import { isLoopback } from "@/lib/tunnels";
-import { approveReason } from "@/lib/disabled-reasons";
+import { approveReason, MAX_CHANGE_ID } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { targetLocation } from "@/lib/hypervisors";
 import { formatSize } from "@/lib/transfers";
@@ -152,6 +152,8 @@ export function ApprovalDialog({
   const snapshot = find(steps, "safetySnapshot");
   const typeCount = find(steps, "typeTargetCount");
   const needsReason = Boolean(find(steps, "reason"));
+  // AP-08: optional, unless this workspace requires one for Prod targets.
+  const changeIdStep = find(steps, "changeId");
   const countdownStep = find(steps, "countdown");
   const reauth = Boolean(find(steps, "vaultReauth"));
   const risky = tier === "high" || tier === "critical";
@@ -163,6 +165,7 @@ export function ApprovalDialog({
   const [safetySnapshot, setSafetySnapshot] = useState(snapshot?.defaultOn ?? false);
   const [typed, setTyped] = useState("");
   const [reason, setReason] = useState("");
+  const [changeId, setChangeId] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [noVault, setNoVault] = useState(false);
@@ -175,10 +178,12 @@ export function ApprovalDialog({
   const ready =
     (!typeCount || Number(typed) === typeCount.expected) &&
     (!needsReason || reason.trim() !== "") &&
+    (!changeIdStep?.required || changeId.trim() !== "") &&
+    [...changeId.trim()].length <= MAX_CHANGE_ID &&
     (!reauth || password !== "");
   const notReady = expired
     ? "This approval expired: start the action again"
-    : approveReason({ steps, typedCount: typed, reason, password, busy });
+    : approveReason({ steps, typedCount: typed, reason, password, busy, changeId });
   // FD-01: the first answer to type gets the focus, and Enter in any of them approves once all are
   // right (the same as pressing Approve).
   const firstField = typeCount ? "count" : needsReason ? "reason" : reauth ? "password" : null;
@@ -200,6 +205,7 @@ export function ApprovalDialog({
         reason: needsReason ? reason : undefined,
         safetySnapshot: snapshot ? safetySnapshot : undefined,
         vaultPassword: reauth ? password : undefined,
+        changeId: changeIdStep && changeId.trim() !== "" ? changeId.trim() : undefined,
       };
       const jobId = approveWith ? await approveWith(answers) : await api.approve(request.id, answers);
       setPassword("");
@@ -219,6 +225,7 @@ export function ApprovalDialog({
         setRequest(again);
         setTyped("");
         setReason("");
+        setChangeId("");
         setSafetySnapshot(find(again.steps, "safetySnapshot")?.defaultOn ?? false);
       }
       setExpired(errorCode(err) === "approval_expired");
@@ -465,6 +472,29 @@ export function ApprovalDialog({
                 onKeyDown={enterApproves}
                 autoFocus={firstField === "reason"}
               />
+            </div>
+          )}
+
+          {changeIdStep && (
+            <div className="grid gap-2">
+              <Label htmlFor="approval-change-id">
+                Change ID or ticket{changeIdStep.required ? "" : " (optional)"}
+              </Label>
+              <Input
+                id="approval-change-id"
+                className="w-64"
+                autoComplete="off"
+                maxLength={MAX_CHANGE_ID}
+                placeholder="CHG0012345"
+                value={changeId}
+                onChange={(e) => setChangeId(e.currentTarget.value)}
+                onKeyDown={enterApproves}
+              />
+              <p className="text-xs text-muted-foreground">
+                {changeIdStep.required
+                  ? "This workspace needs one for High and Critical actions on Prod targets (Settings, Approvals)."
+                  : "Kept with the approval: in the job, the audit log and the exports."}
+              </p>
             </div>
           )}
 

@@ -16,6 +16,7 @@ use remotely_core::presentation::{Presentation, PresentationMode, PRESENTATION_K
 use remotely_core::sessions::{SessionAuth, SessionFilter, SessionInput};
 use remotely_core::snippets::FavouriteInput;
 use remotely_core::vault::{SecretKind, SecretString, UnlockMethod};
+use remotely_core::workspaces::Current;
 use remotely_core::{Core, CoreError};
 
 const LOCKED: Presentation = Presentation {
@@ -66,7 +67,7 @@ fn locked_out<T: std::fmt::Debug>(result: remotely_core::Result<T>, what: &str) 
 
 #[tokio::test]
 async fn the_bus_refuses_every_command_while_locked_and_runs_them_again_after() {
-    let fake = FakeVmware::with_running(Vec::<String>::new());
+    let fake = common::listed(FakeVmware::with_running(Vec::<String>::new()), &["a"]);
     let setup = Setup::new(fake);
     let fake = std::sync::Arc::clone(&setup.vmware);
     let core = setup.build().await;
@@ -79,8 +80,8 @@ async fn the_bus_refuses_every_command_while_locked_and_runs_them_again_after() 
     core.presentation.set(LOCKED).await.unwrap();
     assert!(core.store.read_only().is_locked());
     // Low tier, which runs without a dialog: refused too, and nothing reached the VM or the audit log.
-    let before = core.store.recent_audit(&core.ctx, 50).await.unwrap().len();
-    locked_out(core.bus.submit(&core.ctx, start()).await, "Start VMs");
+    let before = core.store.recent_audit(&core.ctx(), 50).await.unwrap().len();
+    locked_out(core.bus.submit(&core.ctx(), start()).await, "Start VMs");
     let exec = Command::RemoteExec {
         targets: vec![TargetRef::Session {
             session_id: uuid::Uuid::new_v4(),
@@ -92,11 +93,11 @@ async fn the_bus_refuses_every_command_while_locked_and_runs_them_again_after() 
         timeout_secs: None,
         rollout: Default::default(),
     };
-    locked_out(core.bus.submit(&core.ctx, exec).await, "Run a read-only command");
+    locked_out(core.bus.submit(&core.ctx(), exec).await, "Run a read-only command");
     locked_out(
         core.bus
             .submit(
-                &core.ctx,
+                &core.ctx(),
                 Command::AppUpdate {
                     version: "9.9.9".into(),
                 },
@@ -106,12 +107,12 @@ async fn the_bus_refuses_every_command_while_locked_and_runs_them_again_after() 
     );
     assert!(fake.calls().is_empty());
     assert!(running(&fake).is_empty());
-    assert_eq!(core.store.recent_audit(&core.ctx, 50).await.unwrap().len(), before);
+    assert_eq!(core.store.recent_audit(&core.ctx(), 50).await.unwrap().len(), before);
 
     // Presenting without the lock: commands go as usual.
     core.presentation.set(PRESENTING).await.unwrap();
     assert!(!core.store.read_only().is_locked());
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, start()).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), start()).await.unwrap() else {
         panic!("starting a VM needs no approval");
     };
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Succeeded);
@@ -125,7 +126,7 @@ async fn an_approval_asked_before_the_lock_waits_until_the_lock_is_off() {
         targets: vec![vm("a")],
         op: PowerOp::Suspend,
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend).await.unwrap() else {
         panic!("suspending is Medium");
     };
     core.presentation.set(LOCKED).await.unwrap();
@@ -142,7 +143,7 @@ async fn an_approval_asked_before_the_lock_waits_until_the_lock_is_off() {
 #[tokio::test]
 async fn the_lock_refuses_edits_of_the_apps_data_and_changes_nothing() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let kept = core
         .sessions
         .create(ctx, session("web01", "web01.example.com"))
@@ -238,7 +239,7 @@ async fn the_lock_refuses_edits_of_the_apps_data_and_changes_nothing() {
 #[tokio::test]
 async fn presentation_is_saved_audited_and_read_back_failing_closed() {
     let core = core().await;
-    let ctx = core.ctx;
+    let ctx = core.ctx();
     assert_eq!(core.presentation.get(), Presentation::default());
     core.presentation.set(PRESENTING).await.unwrap();
     core.presentation.set(LOCKED).await.unwrap();
@@ -253,7 +254,7 @@ async fn presentation_is_saved_audited_and_read_back_failing_closed() {
     assert!(audit.iter().all(|e| e.event == "setting_changed"));
 
     // The app starts as it closed: presenting, locked.
-    let restarted = PresentationMode::load(core.store.clone(), ctx).await;
+    let restarted = PresentationMode::load(core.store.clone(), Current::new(ctx)).await;
     assert_eq!(restarted.get(), LOCKED);
     assert!(core.store.read_only().is_locked());
 
@@ -262,7 +263,7 @@ async fn presentation_is_saved_audited_and_read_back_failing_closed() {
         .put_setting(&ctx, PRESENTATION_KEY, &"presenting, maybe")
         .await
         .unwrap();
-    let unreadable = PresentationMode::load(core.store.clone(), ctx).await;
+    let unreadable = PresentationMode::load(core.store.clone(), Current::new(ctx)).await;
     assert_eq!(unreadable.get(), Presentation::FAIL_CLOSED);
 
     core.presentation.set(Presentation::default()).await.unwrap();
@@ -270,5 +271,5 @@ async fn presentation_is_saved_audited_and_read_back_failing_closed() {
     let actions: Vec<_> = audit.iter().rev().map(|e| e.action.as_str()).collect();
     assert_eq!(actions, ["Stopped presenting", "Turned the read-only lock off"]);
     assert!(!core.store.read_only().is_locked());
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }

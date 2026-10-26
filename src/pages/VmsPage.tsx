@@ -137,6 +137,9 @@ import {
   type VmView,
 } from "@/lib/vm-snapshots";
 import { bulkResizeReason, resizeTargets } from "@/lib/vm-settings";
+import { UnassignedVmsSheet } from "@/components/UnassignedVmsSheet";
+import { noVmsHere, releaseReason } from "@/lib/workspaces";
+import { workspacesApi, type UnassignedVm } from "@/lib/workspaces-api";
 
 /** VM-11, VM-16: the side sheets the page opens. */
 export type VmPanel = "networks" | "waste";
@@ -335,6 +338,10 @@ export function VmsPage({
   const [submitting, setSubmitting] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [refreshes, setRefreshes] = useState(0);
+  // FD-02: VMs on this PC no workspace has (the last refresh's), and how many workspaces are active.
+  const [unassigned, setUnassigned] = useState<UnassignedVm[]>([]);
+  const [unassignedOpen, setUnassignedOpen] = useState(false);
+  const [activeWorkspaces, setActiveWorkspaces] = useState(1);
   const [loadedKey, setLoadedKey] = useState<string | null>(null);
   // Bumped after a refresh or a change to tags, so the list is read again from the store.
   const [listVersion, setListVersion] = useState(0);
@@ -388,6 +395,11 @@ export function VmsPage({
         const news = linkNews(report.links);
         if (news) toast.info(news, { id: "vm-links" });
         setWarnings(report.warnings);
+        setUnassigned(report.unassigned);
+        workspacesApi.list().then(
+          (all) => setActiveWorkspaces(all.filter((w) => !w.archived).length),
+          () => {},
+        );
         setTotal({
           vms: report.vms.length,
           running: report.vms.filter((v) => ON.includes(v.powerState)).length,
@@ -805,6 +817,20 @@ export function VmsPage({
   const shutDown = power(SHUT_DOWN);
   const suspend = power(SUSPEND);
   const powerOff = power(POWER_OFF);
+  // FD-02: taking VMs out of this workspace, into Unassigned.
+  const releaseOff = readOnly ?? releaseReason(selectedVms, activeWorkspaces);
+  const noVms = noVmsHere(activeWorkspaces, unassigned.length);
+  async function release() {
+    try {
+      const keys = selectedVms.map((v) => v.vmxPath);
+      await workspacesApi.releaseVms(keys);
+      toast.success(keys.length === 1 ? "The VM is in Unassigned now" : `${keys.length} VMs are in Unassigned now`);
+      setSelected(new Set());
+      setRefreshes((n) => n + 1);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
   const toProtect = selectedVms.filter((v) => !v.protected);
   const toUnprotect = selectedVms.filter((v) => v.protected);
   // VM-12, VM-15, VM-24: what the selection's settings and lifecycle actions go to.
@@ -983,6 +1009,13 @@ export function VmsPage({
               Import…
             </Button>
           </WhyDisabled>
+        )}
+        {/* FD-02: VMs no workspace has yet; adding them is this page's own action. */}
+        {unassigned.length > 0 && (
+          <Button variant="outline" onClick={() => setUnassignedOpen(true)}>
+            Unassigned
+            <span className="text-muted-foreground">{unassigned.length}</span>
+          </Button>
         )}
         {/* VM-11, VM-16: reads; their actions go through the bus. */}
         <Button
@@ -1309,6 +1342,13 @@ export function VmsPage({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
             <DropdownMenuSeparator />
+            <DropdownMenuItem disabled={releaseOff !== null} onSelect={() => void release()}>
+              <div className="grid">
+                Take out of this workspace
+                <ReasonLine reason={releaseOff} />
+              </div>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
             <DropdownMenuLabel>Do not touch (AP-04)</DropdownMenuLabel>
             <DropdownMenuItem
               disabled={toProtect.length === 0}
@@ -1381,14 +1421,19 @@ export function VmsPage({
             <EmptyMedia variant="icon">
               <MonitorOffIcon />
             </EmptyMedia>
-            <EmptyTitle>No VMs found</EmptyTitle>
+            <EmptyTitle>{noVms?.title ?? "No VMs found"}</EmptyTitle>
             <EmptyDescription>
-              Remotely lists the VMs in VMware Workstation&apos;s library and in folders you choose, and the VMs
-              registered in Oracle VirtualBox. Open a VM in Workstation once, add the folder that holds your VMs, or
-              register the VM in VirtualBox.
+              {noVms?.description ?? (
+                <>
+                  Remotely lists the VMs in VMware Workstation&apos;s library and in folders you choose, and the VMs
+                  registered in Oracle VirtualBox. Open a VM in Workstation once, add the folder that holds your VMs, or
+                  register the VM in VirtualBox.
+                </>
+              )}
             </EmptyDescription>
           </EmptyHeader>
-          <EmptyContent>
+          <EmptyContent className="flex-row justify-center">
+            {unassigned.length > 0 && <Button onClick={() => setUnassignedOpen(true)}>Unassigned VMs</Button>}
             <Button variant="outline" onClick={onOpenSettings}>
               <FolderPlusIcon data-icon="inline-start" />
               Add a VM folder
@@ -1544,6 +1589,13 @@ export function VmsPage({
       )}
 
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+      <UnassignedVmsSheet
+        open={unassignedOpen}
+        vms={unassigned}
+        readOnly={readOnly}
+        onOpenChange={setUnassignedOpen}
+        onAdded={() => setRefreshes((n) => n + 1)}
+      />
       <HostNetworksSheet
         open={panel === "networks"}
         onClose={() => setPanel(null)}

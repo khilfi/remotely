@@ -85,7 +85,7 @@ fn answers(request: &ApprovalRequest) -> ApprovalAnswers {
 /// Submits, approving whatever it needs, and waits for the end.
 async fn run(core: &Core, command: Command) -> Uuid {
     let mut events = core.jobs.subscribe();
-    let job = match core.bus.submit(&core.ctx, command).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, answers(&request)).await.unwrap(),
     };
@@ -104,7 +104,7 @@ async fn core_with_hosts() -> (Core, Vec<Uuid>) {
         .await;
     let mut ids = Vec::new();
     for name in ["web01", "web02"] {
-        ids.push(core.sessions.create(&core.ctx, session(name)).await.unwrap().id);
+        ids.push(core.sessions.create(&core.ctx(), session(name)).await.unwrap().id);
     }
     (core, ids)
 }
@@ -140,19 +140,19 @@ async fn a_run_keeps_no_secret_and_loses_its_outputs_after_the_retention_period(
     backdate(&core, old, 100).await;
 
     // Stored without the secret, and marked: it can't be retried as it ran.
-    let (summary, command) = core.store.job_detail(&core.ctx, old).await.unwrap().unwrap();
+    let (summary, command) = core.store.job_detail(&core.ctx(), old).await.unwrap().unwrap();
     assert!(summary.command_redacted);
     let Command::RemoteExec { script, .. } = &command else {
         panic!("{command:?}")
     };
     assert_eq!(script, "df -h --password=[redacted]");
-    let all_audit = core.store.audit_for_export(&core.ctx).await.unwrap();
+    let all_audit = core.store.audit_for_export(&core.ctx()).await.unwrap();
     assert!(all_audit.iter().all(|e| !format!("{e:?}").contains("hunter2")));
     // Refused whether or not the retry takes hosts whose outcome is unknown (H9).
     for include_unknown in [false, true] {
         let err = core
             .bus
-            .retry_failed(&core.ctx, old, include_unknown)
+            .retry_failed(&core.ctx(), old, include_unknown)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("looked like a secret"), "{err}");
@@ -169,23 +169,23 @@ async fn a_run_keeps_no_secret_and_loses_its_outputs_after_the_retention_period(
     assert!(!report.by_hand);
 
     // Activity still lists both, with their results.
-    let jobs = core.store.recent_jobs(&core.ctx, 10).await.unwrap();
+    let jobs = core.store.recent_jobs(&core.ctx(), 10).await.unwrap();
     assert_eq!(jobs.len(), 2);
     let old_row = jobs.iter().find(|j| j.id == old.to_string()).unwrap();
     assert!(old_row.bodies_removed);
     assert_eq!(old_row.status, "partially_failed");
     assert_eq!((old_row.targets_succeeded, old_row.targets_failed), (1, 1));
     assert!(!jobs.iter().find(|j| j.id == new.to_string()).unwrap().bodies_removed);
-    for t in core.store.job_targets(&core.ctx, old).await.unwrap() {
+    for t in core.store.job_targets(&core.ctx(), old).await.unwrap() {
         assert_eq!((t.output, t.stderr), (None, None));
     }
-    assert!(core.store.job_targets(&core.ctx, new).await.unwrap()[0]
+    assert!(core.store.job_targets(&core.ctx(), new).await.unwrap()[0]
         .output
         .is_some());
     // Compare still groups the old run (by its hashes) and says it is gone.
     let results = core
         .bulk
-        .results(&core.ctx, old, GroupOptions::default())
+        .results(&core.ctx(), old, GroupOptions::default())
         .await
         .unwrap();
     assert!(results.job.bodies_removed);
@@ -195,29 +195,29 @@ async fn a_run_keeps_no_secret_and_loses_its_outputs_after_the_retention_period(
     for include_unknown in [false, true] {
         let err = core
             .bus
-            .retry_failed(&core.ctx, old, include_unknown)
+            .retry_failed(&core.ctx(), old, include_unknown)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("retention period"), "{err}");
     }
 
     // Audited with what went; the chain still verifies.
-    let last = &core.store.recent_audit(&core.ctx, 1).await.unwrap()[0];
+    let last = &core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0];
     assert_eq!(last.event, "journal_purged");
     assert_eq!(last.action, "Removed old job outputs and command text");
     let detail = last.detail.as_deref().unwrap();
     assert!(detail.starts_with("older than 90 days"), "{detail}");
     assert!(detail.contains("removed 2 outputs and 1 script or line"), "{detail}");
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 
     // A scheduled purge with nothing to do writes no audit entry; Purge now always does.
-    let before = core.store.recent_audit(&core.ctx, 100).await.unwrap().len();
+    let before = core.store.recent_audit(&core.ctx(), 100).await.unwrap().len();
     let quiet = core.retention.purge_scheduled().await.unwrap();
     assert!(!quiet.removed.removed_any());
-    assert_eq!(core.store.recent_audit(&core.ctx, 100).await.unwrap().len(), before);
+    assert_eq!(core.store.recent_audit(&core.ctx(), 100).await.unwrap().len(), before);
     let by_hand = core.retention.purge_now().await.unwrap();
     assert!(by_hand.by_hand);
-    let last = &core.store.recent_audit(&core.ctx, 1).await.unwrap()[0];
+    let last = &core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0];
     assert_eq!(
         (last.event.as_str(), last.action.as_str()),
         ("journal_purged", "Purged old job outputs and command text")
@@ -240,14 +240,14 @@ async fn the_setting_is_audited_and_locked_while_presenting_but_the_schedule_is_
     let info = core.retention.set_retention(Retention::Days30).await.unwrap();
     assert_eq!(info.retention, Retention::Days30);
     assert_eq!(core.retention.retention().await.unwrap(), Retention::Days30);
-    let last = &core.store.recent_audit(&core.ctx, 1).await.unwrap()[0];
+    let last = &core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0];
     assert_eq!(last.event, "setting_changed");
     assert_eq!(last.action, "Set how long job outputs and command text are kept");
     assert!(last.detail.as_deref().unwrap().starts_with("90 days -> 30 days"));
     // The same again changes and logs nothing.
-    let before = core.store.recent_audit(&core.ctx, 100).await.unwrap().len();
+    let before = core.store.recent_audit(&core.ctx(), 100).await.unwrap().len();
     core.retention.set_retention(Retention::Days30).await.unwrap();
-    assert_eq!(core.store.recent_audit(&core.ctx, 100).await.unwrap().len(), before);
+    assert_eq!(core.store.recent_audit(&core.ctx(), 100).await.unwrap().len(), before);
 
     core.presentation.set(LOCKED).await.unwrap();
     locked_out(core.retention.set_retention(Retention::Forever).await);
@@ -257,7 +257,7 @@ async fn the_setting_is_audited_and_locked_while_presenting_but_the_schedule_is_
     let report = core.retention.purge_scheduled().await.unwrap();
     assert_eq!((report.removed.jobs, report.removed.outputs), (1, 2));
     assert_eq!(
-        core.store.recent_audit(&core.ctx, 1).await.unwrap()[0].event,
+        core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0].event,
         "journal_purged"
     );
 
@@ -266,7 +266,7 @@ async fn the_setting_is_audited_and_locked_while_presenting_but_the_schedule_is_
     assert_eq!(info.retention, Retention::Forever);
     let report = core.retention.purge_now().await.unwrap();
     assert_eq!(report.before, None);
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -276,9 +276,10 @@ async fn compacting_waits_until_no_job_runs() {
         .with_remote(Arc::new(remote))
         .build()
         .await;
-    let slow = core.sessions.create(&core.ctx, session("slow01")).await.unwrap().id;
+    let slow = core.sessions.create(&core.ctx(), session("slow01")).await.unwrap().id;
     let mut events = core.jobs.subscribe();
-    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx, exec("uptime", &[slow])).await.unwrap()
+    let SubmitOutcome::Queued { job_id, tier, .. } =
+        core.bus.submit(&core.ctx(), exec("uptime", &[slow])).await.unwrap()
     else {
         panic!("read-only on one host is Low");
     };
@@ -304,7 +305,7 @@ async fn no_save_path_writes_into_a_git_working_tree() {
     in_repository(
         core.bulk
             .export(
-                &core.ctx,
+                &core.ctx(),
                 job,
                 ExportFormat::Csv,
                 GroupOptions::default(),
@@ -320,11 +321,12 @@ async fn no_save_path_writes_into_a_git_working_tree() {
         recorded_at: "2026-10-25T08:00:00Z".into(),
         job_id: None,
         targets: vec![],
+        change_id: None,
     }];
     in_repository(
         core.bulk
             .export_recorded(
-                &core.ctx,
+                &core.ctx(),
                 &recorded,
                 ExportFormat::Json,
                 GroupOptions::default(),
@@ -343,26 +345,26 @@ async fn no_save_path_writes_into_a_git_working_tree() {
     };
     in_repository(
         core.terminals
-            .save_output(&core.ctx, text(), SaveLayout::OneFile, &inside.join("out.txt"))
+            .save_output(&core.ctx(), text(), SaveLayout::OneFile, &inside.join("out.txt"))
             .await
             .unwrap_err(),
     );
     in_repository(
         core.terminals
-            .save_output(&core.ctx, text(), SaveLayout::FilePerTerminal, &inside)
+            .save_output(&core.ctx(), text(), SaveLayout::FilePerTerminal, &inside)
             .await
             .unwrap_err(),
     );
     in_repository(
         core.terminals
-            .start_log(&core.ctx, Uuid::new_v4(), &inside.join("web01.log"))
+            .start_log(&core.ctx(), Uuid::new_v4(), &inside.join("web01.log"))
             .await
             .unwrap_err(),
     );
     // SS-08: downloads.
     in_repository(
         core.terminals
-            .download(&core.ctx, Uuid::new_v4(), &["/etc/hosts".into()], &inside)
+            .download(&core.ctx(), Uuid::new_v4(), &["/etc/hosts".into()], &inside)
             .await
             .unwrap_err(),
     );
@@ -383,7 +385,7 @@ async fn no_save_path_writes_into_a_git_working_tree() {
     );
     core.bulk
         .export(
-            &core.ctx,
+            &core.ctx(),
             job,
             ExportFormat::Csv,
             GroupOptions::default(),
@@ -392,7 +394,7 @@ async fn no_save_path_writes_into_a_git_working_tree() {
         .await
         .unwrap();
     core.terminals
-        .save_output(&core.ctx, text(), SaveLayout::OneFile, &outside.join("out.txt"))
+        .save_output(&core.ctx(), text(), SaveLayout::OneFile, &outside.join("out.txt"))
         .await
         .unwrap();
     std::fs::remove_dir_all(&repo).unwrap();

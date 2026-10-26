@@ -72,7 +72,7 @@ async fn core_with(names: &[&str]) -> (Core, Arc<std::sync::Mutex<Vec<VmProcess>
     let processes = Arc::clone(&setup.host.processes);
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     (core, processes, fake)
 }
 
@@ -154,7 +154,7 @@ async fn built_in_rules_are_there_once_and_the_quiet_ones_start_off() {
     assert_eq!(updated.name, cpu.name, "a built-in rule keeps its name");
     let reset = core.alerts.reset_rule(cpu.id).await.unwrap();
     assert_eq!((reset.enabled, reset.threshold), (false, Some(90.0)));
-    let audit = core.store.recent_audit(&core.ctx, 2).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 2).await.unwrap();
     assert_eq!(audit[0].event, "alert_rule_changed");
     assert_eq!(audit[0].action, "Reset an alert rule");
     assert_eq!(audit[1].action, "Changed an alert rule");
@@ -197,9 +197,9 @@ async fn a_vm_above_its_cpu_threshold_fires_one_notification_and_resolves() {
     assert_eq!((list.open, list.unacknowledged), (1, 1));
     assert_eq!(list.alerts[0].id, alert.id);
     // Reads only: no job, no audit entry for the alert itself.
-    assert!(core.store.recent_jobs(&core.ctx, 10).await.unwrap().is_empty());
+    assert!(core.store.recent_jobs(&core.ctx(), 10).await.unwrap().is_empty());
     assert_eq!(
-        core.store.recent_audit(&core.ctx, 1).await.unwrap()[0].action,
+        core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0].action,
         "Added an alert rule"
     );
 
@@ -247,7 +247,7 @@ async fn a_vm_stopped_outside_the_app_alerts_and_one_stopped_by_a_remotely_job_d
         targets: vec![vm("db")],
         op: PowerOp::Suspend,
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend).await.unwrap() else {
         panic!("suspending a VM is Medium");
     };
     let job = core.bus.approve(request.id, confirm()).await.unwrap();
@@ -329,7 +329,7 @@ async fn acknowledging_is_audited_and_the_read_only_lock_refuses_it_and_rule_edi
     let list = core.alerts.list(AlertQuery::default()).await.unwrap();
     assert_eq!((list.open, list.unacknowledged), (1, 0));
     assert!(list.alerts[0].acknowledged_at.is_some());
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "alert_acknowledged");
     assert_eq!(audit[0].detail.as_deref(), Some("1 alert: CPU test on web"));
     assert!(core.alerts.acknowledge(&[]).await.unwrap().is_empty(), "nothing left");
@@ -361,7 +361,7 @@ async fn editing_or_deleting_a_rule_resolves_its_alerts_and_a_restart_closes_the
     let core = Core::assemble(store.clone(), ctx, adapters(&setup), Default::default())
         .await
         .unwrap();
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     only_my_rules(&core).await;
     let cpu = core
         .alerts
@@ -414,7 +414,7 @@ async fn a_tag_scope_covers_tagged_vms_and_a_vm_scope_one_vm() {
     let (core, processes, _) = core_with(&["web", "db", "ci"]).await;
     only_my_rules(&core).await;
     core.store
-        .tag_vms(&core.ctx, &[vmx("web"), vmx("ci")], "Builds")
+        .tag_vms(&core.ctx(), &[vmx("web"), vmx("ci")], "Builds")
         .await
         .unwrap();
     core.alerts
@@ -475,7 +475,7 @@ async fn a_watched_host_that_cant_be_reached_fires_after_its_duration() {
     let password_id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "db01 login",
             SecretString::new(format!("pw-{}", Uuid::new_v4().simple())),
@@ -486,7 +486,7 @@ async fn a_watched_host_that_cant_be_reached_fires_after_its_duration() {
     let id = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: "db01".into(),
                 folder_id: None,
@@ -510,7 +510,7 @@ async fn a_watched_host_that_cant_be_reached_fires_after_its_duration() {
         .await
         .unwrap()
         .id;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
     // The built-in rule waits 5 minutes; this one, for this host only, 10 seconds.
     only_my_rules(&core).await;
     core.alerts

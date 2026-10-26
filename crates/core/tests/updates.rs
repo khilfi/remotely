@@ -398,7 +398,7 @@ async fn core_with(updater: Arc<FakeUpdater>) -> Core {
 
 async fn token_count(core: &Core) -> usize {
     core.vault
-        .list(&core.ctx)
+        .list(&core.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -409,7 +409,7 @@ async fn token_count(core: &Core) -> usize {
 async fn unlock(core: &Core) {
     core.vault
         .unlock(
-            &core.ctx,
+            &core.ctx(),
             UnlockMethod::MasterPassword(SecretString::new(VAULT_PASSWORD)),
         )
         .await
@@ -421,7 +421,7 @@ async fn install(core: &Core, version: &str) -> Uuid {
     let command = Command::AppUpdate {
         version: version.into(),
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), command).await.unwrap() else {
         panic!("installing is Medium");
     };
     let answers = ApprovalAnswers {
@@ -539,11 +539,11 @@ async fn a_good_token_is_stored_in_the_vault_and_finds_the_update() {
     assert_eq!(report.latest_release.as_deref(), Some("v0.3.0"));
 
     // It is a vault secret like the others: listed by label and kind, never by value.
-    let listed = core.vault.list(&core.ctx).await.unwrap();
+    let listed = core.vault.list(&core.ctx()).await.unwrap();
     let item = listed.iter().find(|m| m.label == UPDATE_TOKEN_LABEL).unwrap();
     assert_eq!(item.kind, SecretKind::Password);
     assert_eq!(
-        core.vault.vault().get(&core.ctx, item.id).await.unwrap().expose(),
+        core.vault.vault().get(&core.ctx(), item.id).await.unwrap().expose(),
         token
     );
 }
@@ -582,7 +582,7 @@ async fn cancelling_a_stalled_update_ends_the_job_and_installs_nothing() {
     assert!(core.jobs.cancel(job));
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Cancelled);
     assert!(updater.installed().is_empty());
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert_eq!(targets[0].status, "cancelled");
 }
 
@@ -630,7 +630,7 @@ async fn a_locked_vault_checks_without_the_token_and_keeps_its_expiry() {
     core.set_update_token(secret(&token)).await.unwrap();
     core.check_for_update().await.unwrap();
 
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
     assert_eq!(core.vault.info().status, VaultStatus::Locked);
     assert!(matches!(
         core.check_for_update().await.unwrap(),
@@ -660,7 +660,7 @@ async fn a_private_again_repository_with_the_token_locked_away_asks_to_unlock() 
     let core = core_with(Arc::clone(&updater)).await;
     core.set_update_token(secret(&token)).await.unwrap();
 
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
     assert_eq!(core.check_for_update().await.unwrap(), UpdateCheck::VaultLocked);
     assert_eq!(
         serde_json::to_string(&UpdateCheck::VaultLocked).unwrap(),
@@ -670,7 +670,7 @@ async fn a_private_again_repository_with_the_token_locked_away_asks_to_unlock() 
     let mut events = core.jobs.subscribe();
     let job = install(&core, "0.3.0").await;
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Failed);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert_eq!(targets[0].error_code.as_deref(), Some("vault_locked"));
 
     // Unlocked, the token reads the releases.
@@ -716,7 +716,7 @@ async fn replacing_keeps_one_vault_secret_and_removing_deletes_it() {
     ));
     assert_eq!(updater.anonymous_calls(), 1);
 
-    let audit = core.store.recent_audit(&core.ctx, 10).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 10).await.unwrap();
     let actions: Vec<&str> = audit.iter().map(|e| e.action.as_str()).collect();
     assert!(
         actions.contains(&"Saved the GitHub update token in the vault"),
@@ -731,7 +731,7 @@ async fn replacing_keeps_one_vault_secret_and_removing_deletes_it() {
         "{actions:?}"
     );
     assert!(audit.iter().filter(|e| e.event == "vault_changed").count() >= 3);
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -741,14 +741,14 @@ async fn a_token_deleted_on_the_vault_page_counts_as_none() {
     core.set_update_token(secret(&new_token())).await.unwrap();
     let id = core
         .vault
-        .list(&core.ctx)
+        .list(&core.ctx())
         .await
         .unwrap()
         .into_iter()
         .find(|m| m.label == UPDATE_TOKEN_LABEL)
         .unwrap()
         .id;
-    core.vault.delete(&core.ctx, id).await.unwrap();
+    core.vault.delete(&core.ctx(), id).await.unwrap();
     assert!(!core.update_token_info().await.unwrap().stored);
     assert!(matches!(
         core.check_for_update().await.unwrap(),
@@ -787,7 +787,7 @@ async fn installing_needs_no_token_and_uses_one_when_there_is_one() {
     updater.set_private(true);
     let job = install(&core, "0.3.0").await;
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Failed);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert_eq!(targets[0].error_code.as_deref(), Some("update_token_needed"));
 
     // With the token it installs.
@@ -867,7 +867,7 @@ async fn the_token_never_leaks() {
         "the HTTP client's own trace lines are captured too"
     );
     assert!(logs.contains("GitHub's API limit is used up"), "the backoff is logged");
-    let audit = core.store.recent_audit(&core.ctx, 100).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 100).await.unwrap();
     let audit = format!("{audit:?}");
     let database = database_text(&core).await;
     for t in [&token, &wrong] {

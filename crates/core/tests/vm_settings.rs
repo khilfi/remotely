@@ -61,7 +61,7 @@ fn workstation() -> FakeVmware {
 
 async fn built(setup: Setup) -> Core {
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     core
 }
 
@@ -81,6 +81,7 @@ async fn approve(core: &Core, request: &ApprovalRequest) -> Uuid {
         reason: Some("R3 test".into()),
         safety_snapshot: None,
         vault_password: vault.then(|| SecretString::new(VAULT_PASSWORD)),
+        change_id: None,
     };
     core.bus.approve(request.id, answers).await.unwrap()
 }
@@ -88,7 +89,7 @@ async fn approve(core: &Core, request: &ApprovalRequest) -> Uuid {
 /// Submits, approves when asked, and waits for the job's end.
 async fn run(core: &Core, command: Command) -> (Uuid, JobStatus) {
     let mut rx = core.jobs.subscribe();
-    let job = match core.bus.submit(&core.ctx, command).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => approve(core, &request).await,
     };
@@ -97,7 +98,7 @@ async fn run(core: &Core, command: Command) -> (Uuid, JobStatus) {
 
 async fn last_finished(core: &Core) -> String {
     core.store
-        .recent_audit(&core.ctx, 20)
+        .recent_audit(&core.ctx(), 20)
         .await
         .unwrap()
         .into_iter()
@@ -126,7 +127,7 @@ async fn a_resize_edits_the_vmx_keeps_the_rest_and_drops_its_backup() {
         targets: vec![vm("web")],
         edit: resize(4, 8192),
     };
-    let request = asked(core.bus.submit(&core.ctx, command.clone()).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command.clone()).await.unwrap());
     assert_eq!(request.tier, Tier::Medium);
     let preview = request.vm_change.as_ref().expect("a VM change preview");
     assert_eq!(preview.targets[0].changes, ["vCPUs: 2 → 4", "Memory: 4 GB → 8 GB"]);
@@ -151,7 +152,7 @@ async fn a_resize_edits_the_vmx_keeps_the_rest_and_drops_its_backup() {
         .await
         .contains("'web': vCPUs: 2 → 4; Memory: 4 GB → 8 GB"));
     // The inventory reads it back.
-    let refreshed = core.inventory.refresh(&core.ctx).await.unwrap();
+    let refreshed = core.inventory.refresh(&core.ctx()).await.unwrap();
     let web = refreshed.vms.iter().find(|v| v.display_name == "web").unwrap();
     assert_eq!((web.num_vcpus, web.memsize_mb), (Some(4), Some(8192)));
 }
@@ -166,7 +167,7 @@ async fn a_bulk_resize_is_one_approval_and_a_running_vm_is_refused_with_the_reas
     let core = built(setup).await;
     core.bus
         .submit(
-            &core.ctx,
+            &core.ctx(),
             Command::VmPower {
                 targets: vec![vm("live")],
                 op: remotely_core::command_bus::PowerOp::Start { gui: false },
@@ -180,7 +181,7 @@ async fn a_bulk_resize_is_one_approval_and_a_running_vm_is_refused_with_the_reas
         targets: vec![vm("web"), vm("app"), vm("live")],
         edit: resize(2, 2048),
     };
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     assert_eq!(request.tier, Tier::Medium, "VM-12: one confirm for all of them");
     assert_eq!(request.steps, [ApprovalStep::Confirm]);
     assert!(
@@ -194,7 +195,7 @@ async fn a_bulk_resize_is_one_approval_and_a_running_vm_is_refused_with_the_reas
     let mut rx = core.jobs.subscribe();
     let job = approve(&core, &request).await;
     assert_eq!(wait_finished(&mut rx, job).await, JobStatus::PartiallyFailed);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let live = targets.iter().find(|t| t.target_key == vmx("live")).unwrap();
     assert_eq!(live.error_code.as_deref(), Some("vm_setting_refused"));
     assert!(vmware.vmx_text(&vmx("app")).unwrap().contains("memsize = \"2048\""));
@@ -237,7 +238,7 @@ async fn workstations_lock_on_a_vm_or_its_disk_refuses_changes_to_their_files() 
     let request = asked(
         core.bus
             .submit(
-                &core.ctx,
+                &core.ctx(),
                 Command::VmConfig {
                     targets: vec![vm("web")],
                     edit: resize(4, 8192),
@@ -287,7 +288,7 @@ async fn workstations_lock_on_a_vm_or_its_disk_refuses_changes_to_their_files() 
             op: VmLifecycleOp::Delete,
         },
     ] {
-        let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+        let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
         let problem = request.vm_change.as_ref().unwrap().targets[0]
             .problem
             .clone()
@@ -312,14 +313,14 @@ async fn workstations_window_open_warns_before_a_vmx_change() {
         targets: vec![vm("web")],
         edit: resize(4, 8192),
     };
-    let request = asked(core.bus.submit(&core.ctx, command.clone()).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command.clone()).await.unwrap());
     assert!(request.vm_change.as_ref().unwrap().warnings.is_empty());
     assert!(!request.warnings.iter().any(|w| w == WORKSTATION_OPEN_WARNING));
     core.bus.cancel_approval(request.id).await.unwrap();
 
     fake.set_workstation_open(true);
     assert!(core.vm_settings.workstation_window_open().await);
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     let preview = request.vm_change.as_ref().unwrap();
     assert_eq!(preview.warnings, [WORKSTATION_OPEN_WARNING]);
     assert_eq!(preview.targets[0].problem, None, "not a refusal");
@@ -379,7 +380,7 @@ async fn adapters_firmware_and_shared_folders_on_workstation() {
     ] {
         assert!(text.contains(line), "{line} in {text}");
     }
-    let specs = core.host_details.vm_specs(&core.ctx, &vmx("web")).await.unwrap();
+    let specs = core.host_details.vm_specs(&core.ctx(), &vmx("web")).await.unwrap();
     let hardware = specs.hardware;
     assert_eq!(hardware.nics.len(), 2);
     assert_eq!(hardware.secure_boot, Some(true));
@@ -400,7 +401,7 @@ async fn a_hardware_upgrade_is_high_and_runs_upgradevm() {
         targets: vec![vm("web")],
         edit: VmConfigEdit::UpgradeHardware,
     };
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     assert_eq!(request.tier, Tier::High);
     assert!(request.vm_change.as_ref().unwrap().targets[0].changes[0].starts_with("Hardware version: 21 →"));
     let mut rx = core.jobs.subscribe();
@@ -419,14 +420,14 @@ async fn a_prod_vms_settings_change_is_high_and_takes_a_safety_snapshot_first() 
     let fake = Arc::clone(&setup.vmware);
     let core = built(setup).await;
     core.inventory
-        .set_environment(&core.ctx, &[vmx("web")], Environment::Prod)
+        .set_environment(&core.ctx(), &[vmx("web")], Environment::Prod)
         .await
         .unwrap();
     let command = Command::VmConfig {
         targets: vec![vm("web")],
         edit: resize(4, 4096),
     };
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     assert_eq!(request.tier, Tier::High);
     assert!(request
         .steps
@@ -478,7 +479,7 @@ async fn disks_are_added_expanded_and_compacted_with_vdiskmanager() {
             size_mb: 60 * 1024,
         },
     };
-    let request = asked(core.bus.submit(&core.ctx, expand).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), expand).await.unwrap());
     assert_eq!(request.tier, Tier::High);
     assert_eq!(
         request.vm_change.as_ref().unwrap().targets[0].changes[0],
@@ -496,7 +497,7 @@ async fn disks_are_added_expanded_and_compacted_with_vdiskmanager() {
             size_mb: 10 * 1024,
         },
     };
-    let request = asked(core.bus.submit(&core.ctx, shrink).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), shrink).await.unwrap());
     assert!(request.vm_change.as_ref().unwrap().targets[0]
         .problem
         .as_deref()
@@ -529,7 +530,7 @@ async fn a_vm_with_snapshots_cant_have_a_disk_expanded() {
             size_mb: 60 * 1024,
         },
     };
-    let request = asked(core.bus.submit(&core.ctx, command.clone()).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command.clone()).await.unwrap());
     let problem = request.vm_change.as_ref().unwrap().targets[0].problem.clone().unwrap();
     assert_eq!(
         problem,
@@ -559,7 +560,7 @@ async fn removing_a_disk_is_critical_lists_its_files_and_deletes_them() {
         targets: vec![vm("web")],
         op: VmDiskOp::Remove { slot: "scsi0:1".into() },
     };
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     assert_eq!(request.tier, Tier::Critical);
     assert!(request.steps.contains(&ApprovalStep::VaultReauth));
     let target = &request.vm_change.as_ref().unwrap().targets[0];
@@ -577,7 +578,7 @@ async fn removing_a_disk_is_critical_lists_its_files_and_deletes_them() {
         targets: vec![vm("web")],
         op: VmDiskOp::Remove { slot: "scsi0:2".into() },
     };
-    let request = asked(core.bus.submit(&core.ctx, outside).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), outside).await.unwrap());
     assert!(request.vm_change.as_ref().unwrap().targets[0]
         .problem
         .as_deref()
@@ -698,7 +699,7 @@ async fn deleting_a_vm_is_critical_lists_every_file_and_drops_it_from_the_list()
         targets: vec![vm("web")],
         op: VmLifecycleOp::Delete,
     };
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     assert_eq!(request.tier, Tier::Critical);
     let target = &request.vm_change.as_ref().unwrap().targets[0];
     let mut going: Vec<&str> = target.deletes.iter().map(|f| f.path.as_str()).collect();
@@ -722,7 +723,7 @@ async fn deleting_a_vm_is_critical_lists_every_file_and_drops_it_from_the_list()
 async fn an_existing_vmx_is_added_to_the_list_and_listed_on_refresh() {
     let fake = FakeVmware::default().with_vmx_text(r"D:\Lab\old\old.vmx", &WEB_VMX.replace("\"web", "\"old"));
     let core = built(Setup::new(fake)).await;
-    assert!(core.inventory.refresh(&core.ctx).await.unwrap().vms.is_empty());
+    assert!(core.inventory.refresh(&core.ctx()).await.unwrap().vms.is_empty());
     let outcome = core
         .vm_settings
         .add_existing(std::path::Path::new(r"D:\Lab\old\old.vmx"))
@@ -734,7 +735,7 @@ async fn an_existing_vmx_is_added_to_the_list_and_listed_on_refresh() {
     assert_eq!(tier, Tier::Low);
     let mut rx = core.jobs.subscribe();
     assert_eq!(wait_finished(&mut rx, job_id).await, JobStatus::Succeeded);
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(
         report.vms.iter().map(|v| v.display_name.as_str()).collect::<Vec<_>>(),
         ["old"]
@@ -759,7 +760,7 @@ async fn opening_a_console_is_audited_without_a_tier_and_refused_while_presentin
         ConsoleOutcome::Opened
     ));
     assert!(vmware.calls().iter().any(|c| c == &format!("console {}", vmx("web"))));
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "vm_console_opened");
     assert_eq!(audit[0].tier, None);
     assert!(audit[0].targets_json.contains("web"));
@@ -884,7 +885,7 @@ async fn virtualbox_settings_go_through_modifyvm_and_its_disks_through_modifymed
             slot: "SATA-0-0".into(),
         },
     };
-    let err = core.bus.submit(&core.ctx, defrag).await.unwrap_err();
+    let err = core.bus.submit(&core.ctx(), defrag).await.unwrap_err();
     assert_eq!(err.code(), "invalid_input", "VirtualBox has no defragment");
 }
 
@@ -963,7 +964,7 @@ async fn deleting_a_virtualbox_vm_lists_its_files_and_unregisters_it() {
         targets: vec![vbox_vm(DB)],
         op: VmLifecycleOp::Delete,
     };
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     assert_eq!(request.tier, Tier::Critical);
     let going: Vec<&str> = request.vm_change.as_ref().unwrap().targets[0]
         .deletes
@@ -1017,7 +1018,7 @@ async fn deleting_a_virtualbox_vm_with_a_snapshot_lists_the_base_disks_it_keeps(
         targets: vec![vbox_vm(DB)],
         op: VmLifecycleOp::Delete,
     };
-    let request = asked(core.bus.submit(&core.ctx, command).await.unwrap());
+    let request = asked(core.bus.submit(&core.ctx(), command).await.unwrap());
     let target = &request.vm_change.as_ref().unwrap().targets[0];
     let going: Vec<(&str, Option<u64>)> = target.deletes.iter().map(|f| (f.path.as_str(), f.bytes)).collect();
     let base = format!(r"{folder}\db.vdi");
@@ -1068,7 +1069,7 @@ async fn an_existing_vbox_is_registered_by_the_uuid_in_it() {
     assert_eq!(vbox.info(DB).unwrap().name, "lab");
     assert!(core
         .inventory
-        .refresh(&core.ctx)
+        .refresh(&core.ctx())
         .await
         .unwrap()
         .vms
@@ -1087,7 +1088,7 @@ async fn the_settings_tab_reads_everything_virtualbox_shows() {
         },
     );
     let core = built(Setup::new(FakeVmware::default()).with_virtualbox(fake)).await;
-    let hardware = core.host_details.vm_specs(&core.ctx, DB).await.unwrap().hardware;
+    let hardware = core.host_details.vm_specs(&core.ctx(), DB).await.unwrap().hardware;
     assert_eq!(hardware.tpm.as_deref(), Some("TPM 2.0"));
     assert_eq!(hardware.controllers[0].name, "SATA");
     assert_eq!(hardware.cdroms[0].slot, "SATA-1-0");

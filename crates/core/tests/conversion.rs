@@ -54,7 +54,7 @@ async fn wait(core: &Core, job: Uuid) -> JobStatus {
 
 async fn outputs(core: &Core, job: Uuid) -> Vec<(String, Option<String>, Option<String>)> {
     core.store
-        .job_targets(&core.ctx, job)
+        .job_targets(&core.ctx(), job)
         .await
         .unwrap()
         .into_iter()
@@ -111,7 +111,7 @@ async fn a_qcow2_converts_to_a_vmdk_as_a_low_job_with_progress_and_the_source_un
     let output = dir.join("rocky.vmdk");
     let job = queued(
         core.convert
-            .submit_convert(&core.ctx, &source, &output, OutputKind::VmdkSparse, false)
+            .submit_convert(&core.ctx(), &source, &output, OutputKind::VmdkSparse, false)
             .await
             .unwrap(),
     );
@@ -152,7 +152,7 @@ async fn a_qcow2_converts_to_a_vmdk_as_a_low_job_with_progress_and_the_source_un
     assert!(!progress.is_empty());
     assert!(progress.iter().any(|(p, _)| *p >= 50.0), "{progress:?}");
     // The audit log names the job's start and end with what it made.
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     assert!(
         audit
             .iter()
@@ -163,7 +163,7 @@ async fn a_qcow2_converts_to_a_vmdk_as_a_low_job_with_progress_and_the_source_un
     // A second conversion to the same name is refused: nothing is ever replaced.
     let err = core
         .convert
-        .submit_convert(&core.ctx, &source, &output, OutputKind::VmdkSparse, false)
+        .submit_convert(&core.ctx(), &source, &output, OutputKind::VmdkSparse, false)
         .await
         .unwrap_err()
         .to_string();
@@ -177,7 +177,7 @@ async fn without_qemu_img_qcow2_and_vhdx_say_they_need_it() {
     let source = dir.join("rocky.qcow2");
     std::fs::write(&source, img::qcow2(64 * MB, None)).unwrap();
     let (core, _) = core_with(FakeDiskTools::new()).await;
-    let tools = core.convert.tools(&core.ctx).await.unwrap();
+    let tools = core.convert.tools(&core.ctx()).await.unwrap();
     assert!(tools.paths.qemu_img.is_none());
     assert_eq!(tools.download_page, "https://www.qemu.org/download/#windows");
     let options = core.convert.options(&source).await.unwrap();
@@ -185,7 +185,7 @@ async fn without_qemu_img_qcow2_and_vhdx_say_they_need_it() {
     let err = core
         .convert
         .submit_convert(
-            &core.ctx,
+            &core.ctx(),
             &source,
             &dir.join("rocky.vdi"),
             OutputKind::VdiDynamic,
@@ -226,7 +226,7 @@ async fn virtualbox_forgets_the_media_a_conversion_registered() {
     let output = dir.join("dc01.vdi");
     let job = queued(
         core.convert
-            .submit_convert(&core.ctx, &source, &output, OutputKind::VdiFixed, false)
+            .submit_convert(&core.ctx(), &source, &output, OutputKind::VdiFixed, false)
             .await
             .unwrap(),
     );
@@ -264,7 +264,7 @@ async fn a_failed_or_cancelled_conversion_leaves_nothing_and_space_is_checked_fi
     tools.set_failing(Tool::QemuImg, true);
     let job = queued(
         core.convert
-            .submit_convert(&core.ctx, &source, &dir.join("disk.qcow2"), OutputKind::Qcow2, false)
+            .submit_convert(&core.ctx(), &source, &dir.join("disk.qcow2"), OutputKind::Qcow2, false)
             .await
             .unwrap(),
     );
@@ -277,7 +277,7 @@ async fn a_failed_or_cancelled_conversion_leaves_nothing_and_space_is_checked_fi
     tools.set_delay(Duration::from_secs(20));
     let job = queued(
         core.convert
-            .submit_convert(&core.ctx, &source, &dir.join("disk.qcow2"), OutputKind::Qcow2, false)
+            .submit_convert(&core.ctx(), &source, &dir.join("disk.qcow2"), OutputKind::Qcow2, false)
             .await
             .unwrap(),
     );
@@ -293,7 +293,7 @@ async fn a_failed_or_cancelled_conversion_leaves_nothing_and_space_is_checked_fi
     let full = setup.build().await;
     let err = full
         .convert
-        .submit_convert(&full.ctx, &source, &dir.join("disk.vhd"), OutputKind::VhdFixed, false)
+        .submit_convert(&full.ctx(), &source, &dir.join("disk.vhd"), OutputKind::VhdFixed, false)
         .await
         .unwrap_err()
         .to_string();
@@ -345,7 +345,7 @@ async fn export_core(fake: FakeVmware, tools: FakeDiskTools) -> (Core, Arc<FakeD
     setup.disk_tools = Arc::new(tools);
     let tools = Arc::clone(&setup.disk_tools);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     (core, tools)
 }
 
@@ -357,7 +357,7 @@ async fn a_vm_exports_for_kvm_with_its_xml_and_readme() {
     let out = dir.join("out");
     std::fs::create_dir_all(&out).unwrap();
 
-    let options = core.convert.export_options(&core.ctx, &vmx).await.unwrap();
+    let options = core.convert.export_options(&core.ctx(), &vmx).await.unwrap();
     assert_eq!(options.refusal, None);
     let kvm = options.targets.iter().find(|t| t.target == ExportTarget::Kvm).unwrap();
     assert!(kvm.reason.is_none(), "{:?}", kvm.reason);
@@ -378,7 +378,7 @@ async fn a_vm_exports_for_kvm_with_its_xml_and_readme() {
 
     let job = queued(
         core.convert
-            .submit_export(&core.ctx, &vmx, ExportTarget::Kvm, &out)
+            .submit_export(&core.ctx(), &vmx, ExportTarget::Kvm, &out)
             .await
             .unwrap(),
     );
@@ -409,7 +409,7 @@ async fn a_vm_exports_for_kvm_with_its_xml_and_readme() {
     // Again into the same folder: refused, the first export stays.
     let err = core
         .convert
-        .submit_export(&core.ctx, &vmx, ExportTarget::Kvm, &out)
+        .submit_export(&core.ctx(), &vmx, ExportTarget::Kvm, &out)
         .await
         .unwrap_err()
         .to_string();
@@ -426,7 +426,7 @@ async fn proxmox_takes_a_vmdk_without_qemu_img_and_an_ova_comes_from_ovftool() {
     std::fs::create_dir_all(&out).unwrap();
     let job = queued(
         core.convert
-            .submit_export(&core.ctx, &vmx, ExportTarget::Proxmox, &out)
+            .submit_export(&core.ctx(), &vmx, ExportTarget::Proxmox, &out)
             .await
             .unwrap(),
     );
@@ -445,7 +445,7 @@ async fn proxmox_takes_a_vmdk_without_qemu_img_and_an_ova_comes_from_ovftool() {
     );
     assert!(!script.contains('\r'), "the script runs on Linux");
     // KVM needs qemu-img: the option says so.
-    let options = core.convert.export_options(&core.ctx, &vmx).await.unwrap();
+    let options = core.convert.export_options(&core.ctx(), &vmx).await.unwrap();
     let kvm = options.targets.iter().find(|t| t.target == ExportTarget::Kvm).unwrap();
     assert!(kvm.needs_qemu_img, "{:?}", kvm.reason);
 
@@ -453,7 +453,7 @@ async fn proxmox_takes_a_vmdk_without_qemu_img_and_an_ova_comes_from_ovftool() {
         ova: true,
         version: OvfVersion::V1,
     };
-    let job = queued(core.convert.submit_export(&core.ctx, &vmx, ova, &out).await.unwrap());
+    let job = queued(core.convert.submit_export(&core.ctx(), &vmx, ova, &out).await.unwrap());
     assert_eq!(
         wait(&core, job).await,
         JobStatus::Succeeded,
@@ -479,7 +479,7 @@ async fn an_export_through_virtualbox_leaves_its_media_list_as_it_was() {
     std::fs::create_dir_all(&out).unwrap();
     let job = queued(
         core.convert
-            .submit_export(&core.ctx, &vmx, ExportTarget::Azure, &out)
+            .submit_export(&core.ctx(), &vmx, ExportTarget::Azure, &out)
             .await
             .unwrap(),
     );
@@ -502,7 +502,7 @@ async fn an_export_through_virtualbox_leaves_its_media_list_as_it_was() {
     for thick in [false, true] {
         let job = queued(
             core.convert
-                .submit_export(&core.ctx, &vmx, ExportTarget::Esxi { thick }, &out)
+                .submit_export(&core.ctx(), &vmx, ExportTarget::Esxi { thick }, &out)
                 .await
                 .unwrap(),
         );
@@ -522,11 +522,11 @@ async fn a_running_vm_isnt_exported_and_a_prod_vms_export_asks() {
     let dir = temp_folder("export-refused");
     let (fake, vmx) = workstation_vm(&dir, true);
     let (core, _) = export_core(fake, FakeDiskTools::new().with_qemu_img()).await;
-    let options = core.convert.export_options(&core.ctx, &vmx).await.unwrap();
+    let options = core.convert.export_options(&core.ctx(), &vmx).await.unwrap();
     assert!(options.refusal.unwrap().contains("running"));
     let err = core
         .convert
-        .submit_export(&core.ctx, &vmx, ExportTarget::Raw, &dir)
+        .submit_export(&core.ctx(), &vmx, ExportTarget::Raw, &dir)
         .await
         .unwrap_err()
         .to_string();
@@ -536,12 +536,12 @@ async fn a_running_vm_isnt_exported_and_a_prod_vms_export_asks() {
     let (fake, vmx) = workstation_vm(&dir2, false);
     let (core, _) = export_core(fake, FakeDiskTools::new().with_qemu_img()).await;
     core.inventory
-        .set_environment(&core.ctx, std::slice::from_ref(&vmx), Environment::Prod)
+        .set_environment(&core.ctx(), std::slice::from_ref(&vmx), Environment::Prod)
         .await
         .unwrap();
     let outcome = core
         .convert
-        .submit_export(&core.ctx, &vmx, ExportTarget::Azure, &dir2)
+        .submit_export(&core.ctx(), &vmx, ExportTarget::Azure, &dir2)
         .await
         .unwrap();
     let SubmitOutcome::NeedsApproval { request } = outcome else {
@@ -564,6 +564,7 @@ async fn approve(core: &Core, request: &ApprovalRequest) -> JobStatus {
             .steps
             .contains(&ApprovalStep::VaultReauth)
             .then(|| SecretString::new(VAULT_PASSWORD)),
+        change_id: None,
     };
     let job = core.bus.approve(request.id, answers).await.unwrap();
     wait(core, job).await
@@ -620,7 +621,7 @@ async fn a_libvirt_vm_imports_into_workstation_as_a_deploy() {
     assert_eq!(analysis.described.memory_mb, Some(3072));
 
     let request = import_request(&source, Hypervisor::Vmware, &lab);
-    let check = core.deploy.check_import(&core.ctx, &request).await.unwrap();
+    let check = core.deploy.check_import(&core.ctx(), &request).await.unwrap();
     assert!(check.problems.is_empty(), "{:?}", check.problems);
     let preview = check.preview.unwrap();
     let size = preview.size.as_ref().unwrap();
@@ -648,7 +649,7 @@ async fn a_libvirt_vm_imports_into_workstation_as_a_deploy() {
     );
 
     let SubmitOutcome::NeedsApproval { request: approval } =
-        core.deploy.submit_import(&core.ctx, &request).await.unwrap()
+        core.deploy.submit_import(&core.ctx(), &request).await.unwrap()
     else {
         panic!("an import is a deploy, Medium");
     };
@@ -681,15 +682,15 @@ async fn an_import_without_its_tools_is_refused_and_a_disk_imports_into_virtualb
     let lab = dir.join("lab");
     let mut request = import_request(&source, Hypervisor::VirtualBox, &lab);
     request.profile_id = "windows-server".into();
-    let check = core.deploy.check_import(&core.ctx, &request).await.unwrap();
+    let check = core.deploy.check_import(&core.ctx(), &request).await.unwrap();
     assert!(check.problems[0].message.contains("qemu-img"), "{:?}", check.problems);
-    assert!(core.deploy.submit_import(&core.ctx, &request).await.is_err());
+    assert!(core.deploy.submit_import(&core.ctx(), &request).await.is_err());
 
     // A VHD from Hyper-V: VirtualBox copies it itself.
     let vhd = dir.join("dc01.vhd");
     std::fs::write(&vhd, img::vhd_fixed(2 * MB)).unwrap();
     let request = import_request(&vhd, Hypervisor::VirtualBox, &lab);
-    let check = core.deploy.check_import(&core.ctx, &request).await.unwrap();
+    let check = core.deploy.check_import(&core.ctx(), &request).await.unwrap();
     assert!(check.problems.is_empty(), "{:?}", check.problems);
     assert!(check
         .preview
@@ -716,7 +717,7 @@ async fn a_qcow2_cloud_image_deploys_once_qemu_img_is_installed() {
         let image = core
             .catalog
             .add_image(
-                &core.ctx,
+                &core.ctx(),
                 Uuid::new_v4(),
                 ImageInput {
                     name: "Rocky".into(),
@@ -731,7 +732,7 @@ async fn a_qcow2_cloud_image_deploys_once_qemu_img_is_installed() {
             )
             .await
             .unwrap();
-        let listed = core.catalog.images(&core.ctx).await.unwrap();
+        let listed = core.catalog.images(&core.ctx()).await.unwrap();
         let found = listed.iter().find(|i| i.id == image.id).unwrap();
         assert_eq!(found.problem.is_none(), deployable, "{:?}", found.problem);
         if !deployable {

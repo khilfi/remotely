@@ -197,6 +197,8 @@ impl CommandBus {
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
         }
+        // AP-08: a schedule's High or Critical approval takes a change ID like any, and each run carries it.
+        self.apply_change_id_rule(ctx, &mut decision).await?;
         decision.add_warnings(draft.warnings.clone());
         if decision.steps.is_empty() {
             // Low: nothing to ask, as when it runs now; the approval is still recorded and audited.
@@ -209,6 +211,7 @@ impl CommandBus {
                 vault_reauth: false,
                 approved_at: now_rfc3339(),
                 standing: None,
+                change_id: None,
             };
             let grant = self.grant(ctx, &draft, &decision, record).await?;
             return Ok(StandingAsk::Granted(Box::new(grant)));
@@ -389,7 +392,25 @@ impl CommandBus {
     ) -> Result<Vec<String>> {
         let grant = self.covering_grant(ctx, approval_id, command).await?;
         let targets = self.resolve_targets(ctx, command).await?;
-        Ok(self.changes_since(&grant, content_hash, command, &targets).1)
+        let mut changes = self.changes_since(&grant, content_hash, command, &targets).1;
+        changes.extend(self.change_id_now_needed(ctx, &grant, &targets).await?);
+        Ok(changes)
+    }
+
+    /// AP-08: the workspace requires a change ID for Prod targets since the schedule was approved without one.
+    async fn change_id_now_needed(
+        &self,
+        ctx: &Context,
+        grant: &StandingGrant,
+        targets: &[Target],
+    ) -> Result<Option<String>> {
+        if grant.tier < Tier::High || grant.record.change_id.is_some() {
+            return Ok(None);
+        }
+        let rules = super::ChangeIdRules::load(&self.store, ctx).await?;
+        Ok(rules
+            .requires(targets)
+            .then(|| "this workspace needs a change ID for Prod targets now".to_owned()))
     }
 
     async fn covering_grant(&self, ctx: &Context, approval_id: Uuid, command: &Command) -> Result<StandingGrant> {
@@ -495,7 +516,8 @@ impl CommandBus {
             }
         };
         let targets = self.resolve_targets(ctx, &command).await?;
-        let (decision, changes) = self.changes_since(&grant, &content_hash, &command, &targets);
+        let (decision, mut changes) = self.changes_since(&grant, &content_hash, &command, &targets);
+        changes.extend(self.change_id_now_needed(ctx, &grant, &targets).await?);
         if !changes.is_empty() {
             return Err(CoreError::StandingChanged {
                 changes: changes.join("; "),

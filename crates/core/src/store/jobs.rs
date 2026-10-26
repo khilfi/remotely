@@ -124,6 +124,8 @@ pub struct JobSummary {
     /// BX-04: the stored script or line had something that looked like a secret, now `[redacted]`, so it
     /// can't run again as it was.
     pub command_redacted: bool,
+    /// AP-08: the ticket or change number its approval was given with.
+    pub change_id: Option<String>,
 }
 
 impl JobSummary {
@@ -238,7 +240,7 @@ macro_rules! target_columns {
 macro_rules! job_columns {
     () => {
         "j.id, j.summary, j.action, j.tier, j.status, j.created_at, j.started_at, j.finished_at, j.countdown_until,
-         j.retry_of, j.bodies_removed_at, j.command_redacted"
+         j.retry_of, j.bodies_removed_at, j.command_redacted, j.change_id"
     };
 }
 
@@ -289,6 +291,7 @@ fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<JobSummary> {
         retry_of: r.try_get("retry_of")?,
         bodies_removed: removed.is_some(),
         command_redacted: redacted == Some(1),
+        change_id: r.try_get("change_id")?,
     })
 }
 
@@ -363,8 +366,8 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO jobs (id, workspace_id, user_id, summary, action, tier, command_json, approval_json, status,
-                               created_at, countdown_until, retry_of, command_type, command_redacted)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                               created_at, countdown_until, retry_of, command_type, command_redacted, change_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(&ws)
@@ -380,6 +383,7 @@ impl Store {
         .bind(job.retry_of.map(|r| r.to_string()))
         .bind(kept.type_name())
         .bind(redacted)
+        .bind(job.approval.and_then(|a| a.change_id.as_deref()))
         .execute(&mut *tx)
         .await?;
         for t in job.targets {

@@ -155,7 +155,7 @@ impl Fleet {
         let login = core
             .vault
             .add(
-                &core.ctx,
+                &core.ctx(),
                 SecretKind::Password,
                 "lab login",
                 SecretString::new(password.as_str()),
@@ -180,11 +180,11 @@ impl Fleet {
                 key_type: "ssh-ed25519".into(),
                 fingerprint: s.host_key_fingerprint(),
             };
-            core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+            core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
             let session = core
                 .sessions
                 .create(
-                    &core.ctx,
+                    &core.ctx(),
                     SessionInput {
                         name: format!("web{:02}", i + 1),
                         folder_id: None,
@@ -208,7 +208,7 @@ impl Fleet {
                 .await
                 .unwrap()
                 .id;
-            let handle = core.terminals.open(&core.ctx, session, SIZE).await.unwrap();
+            let handle = core.terminals.open(&core.ctx(), session, SIZE).await.unwrap();
             let mut pane = Pane {
                 id: handle.id,
                 output: handle.output,
@@ -271,7 +271,7 @@ impl Fleet {
     }
 
     async fn audit(&self) -> Vec<AuditEntry> {
-        self.core.store.recent_audit(&self.core.ctx, 500).await.unwrap()
+        self.core.store.recent_audit(&self.core.ctx(), 500).await.unwrap()
     }
 }
 
@@ -358,12 +358,12 @@ async fn keys_go_to_the_picked_terminals_only_and_a_read_only_line_runs_at_once(
     assert_eq!(fleet.ran(0), ["echo hello"]);
 
     // Enter on an empty line runs nothing, so nothing is rated or audited.
-    let jobs = fleet.core.store.recent_jobs(&fleet.core.ctx, 50).await.unwrap().len();
+    let jobs = fleet.core.store.recent_jobs(&fleet.core.ctx(), 50).await.unwrap().len();
     let outcome = fleet.type_in(0, "\r").await;
     assert!(matches!(outcome, InputOutcome::Typed { .. }), "{outcome:?}");
     fleet.panes[1].expect("\r\n$ ").await;
     assert_eq!(
-        fleet.core.store.recent_jobs(&fleet.core.ctx, 50).await.unwrap().len(),
+        fleet.core.store.recent_jobs(&fleet.core.ctx(), 50).await.unwrap().len(),
         jobs
     );
 
@@ -638,7 +638,7 @@ async fn keys_that_open_the_line_in_an_editor_are_refused_and_never_reach_the_ho
     assert!(fleet
         .core
         .store
-        .recent_jobs(&fleet.core.ctx, 50)
+        .recent_jobs(&fleet.core.ctx(), 50)
         .await
         .unwrap()
         .is_empty());
@@ -678,7 +678,7 @@ async fn a_pager_is_not_read_only_in_multiexec_but_is_in_compare() {
         timeout_secs: None,
         rollout: Default::default(),
     };
-    let preview = fleet.core.bus.preview(&fleet.core.ctx, &compare).await.unwrap();
+    let preview = fleet.core.bus.preview(&fleet.core.ctx(), &compare).await.unwrap();
     assert_eq!(preview.action, ActionKind::ExecReadOnly);
 }
 
@@ -704,7 +704,12 @@ async fn the_bus_refuses_a_line_whose_keys_are_not_what_was_rated() {
         "\x0frm -rf /tmp/x\r",
         "\x1b\r\r",
     ] {
-        let err = fleet.core.bus.submit(&fleet.core.ctx, crafted(keys)).await.unwrap_err();
+        let err = fleet
+            .core
+            .bus
+            .submit(&fleet.core.ctx(), crafted(keys))
+            .await
+            .unwrap_err();
         assert!(matches!(err, CoreError::InvalidInput(_)), "{keys:?}: {err:?}");
     }
     // Nor can the UI send one: only MultiExec builds them, from what it held and rated.
@@ -729,7 +734,7 @@ async fn the_bus_refuses_a_line_whose_keys_are_not_what_was_rated() {
     assert!(fleet
         .core
         .store
-        .recent_jobs(&fleet.core.ctx, 50)
+        .recent_jobs(&fleet.core.ctx(), 50)
         .await
         .unwrap()
         .is_empty());
@@ -795,7 +800,7 @@ async fn a_password_typed_at_a_prompt_goes_only_to_terminals_at_one_and_is_never
         assert!(!fleet.panes[i].text().contains(&sudo));
     }
     assert_eq!(fleet.ran(2), ["sudo whoami"]);
-    let jobs = fleet.core.store.recent_jobs(&fleet.core.ctx, 50).await.unwrap();
+    let jobs = fleet.core.store.recent_jobs(&fleet.core.ctx(), 50).await.unwrap();
     assert_eq!(jobs.len(), 1, "only `sudo whoami` was a job: {jobs:?}");
     for entry in fleet.audit().await {
         assert!(!format!("{entry:?}").contains(&sudo), "{entry:?}");
@@ -831,7 +836,7 @@ async fn keys_for_a_full_screen_program_pass_straight_through_unrated() {
     );
     assert!(status.targets[2].receives && status.targets[2].note.is_none());
 
-    let jobs = fleet.core.store.recent_jobs(&fleet.core.ctx, 50).await.unwrap().len();
+    let jobs = fleet.core.store.recent_jobs(&fleet.core.ctx(), 50).await.unwrap().len();
     let InputOutcome::Typed {
         mode,
         reached,
@@ -857,7 +862,7 @@ async fn keys_for_a_full_screen_program_pass_straight_through_unrated() {
     fleet.panes[2].settle().await;
     assert!(fleet.ran(2).is_empty(), "{:?}", fleet.log(2));
     assert_eq!(
-        fleet.core.store.recent_jobs(&fleet.core.ctx, 50).await.unwrap().len(),
+        fleet.core.store.recent_jobs(&fleet.core.ctx(), 50).await.unwrap().len(),
         jobs
     );
     assert!(!fleet.audit().await.iter().any(|e| e.action.contains("rm -rf")));
@@ -917,9 +922,9 @@ async fn each_line_sent_is_audited_with_the_command_the_sessions_and_the_tier_ne
             "{entry:?}"
         );
     }
-    assert!(fleet.core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(fleet.core.store.verify_audit_chain(&fleet.core.ctx()).await.unwrap().ok);
     // Lines typed into terminals are not Compare runs.
-    assert!(fleet.core.bulk.recent(&fleet.core.ctx, 20).await.unwrap().is_empty());
+    assert!(fleet.core.bulk.recent(&fleet.core.ctx(), 20).await.unwrap().is_empty());
 }
 
 // ---- QL-12: recording into Compare ----------------------------------------------------------------
@@ -1280,7 +1285,7 @@ async fn a_vault_password_typed_while_a_line_records_is_scrubbed() {
     let secret = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "lab sudo",
             SecretString::new(sudo.as_str()),
@@ -1299,7 +1304,7 @@ async fn a_vault_password_typed_while_a_line_records_is_scrubbed() {
         fleet
             .core
             .terminals
-            .type_secret(&fleet.core.ctx, fleet.id(i), secret, false, None)
+            .type_secret(&fleet.core.ctx(), fleet.id(i), secret, false, None)
             .await
             .unwrap();
     }
@@ -1396,7 +1401,7 @@ async fn recorded_lines_export_with_groups_and_diffs_and_the_audit_keeps_what_an
         ));
         let done = core
             .bulk
-            .export_recorded(&core.ctx, &runs, format, GroupOptions::default(), &path)
+            .export_recorded(&core.ctx(), &runs, format, GroupOptions::default(), &path)
             .await
             .unwrap();
         assert_eq!((done.lines, done.outputs, done.redacted), (2, 6, 0));
@@ -1446,7 +1451,7 @@ async fn recorded_lines_export_with_groups_and_diffs_and_the_audit_keeps_what_an
         let text = format!("{entry:?}");
         assert!(!text.contains("22.04") && !text.contains("VERSION_ID"), "{entry:?}");
     }
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 // ---- QL-07: one notification per MultiExec line -------------------------------------------------
@@ -1614,7 +1619,7 @@ async fn a_hooked_shell_records_without_its_reports_and_still_notices_a_switched
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_saved_group_picks_its_terminals_and_a_line_reaches_each_of_them() {
     let mut fleet = Fleet::new(4).await;
-    let ctx = fleet.core.ctx;
+    let ctx = fleet.core.ctx();
     // Three of the four sessions, in an order of their own.
     let members = vec![fleet.sessions[2], fleet.sessions[0], fleet.sessions[1]];
     let group = fleet

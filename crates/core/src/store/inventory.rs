@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::Store;
 use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::vmware::{path_key, VmxInfo};
-use crate::domain::{now_rfc3339, Context, Environment, PowerState};
+use crate::domain::{now_rfc3339, Context, Environment, PowerState, UserId, WorkspaceId};
 use crate::error::{CoreError, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,86 +82,79 @@ macro_rules! vm_columns {
 }
 
 impl Store {
-    /// Saves what a refresh found. VMs it did not find are marked missing and drop out of
-    /// [`Store::list_vms`]; their rows stay so tags, labels and protection survive. A VM the app
-    /// paused stays paused while vmrun still lists it as running, with its last Tools state and IP
-    /// (a paused guest cannot answer).
+    /// Saves what a refresh found into the context's workspace, adding every VM no workspace has to it first (store
+    /// tests and single-workspace callers). See [`Store::record_discovery`].
     pub async fn record_inventory(&self, ctx: &Context, found: &[DiscoveredVm]) -> Result<()> {
-        self.record_inventory_for(ctx, found, &Hypervisor::ALL).await
+        self.record_discovery(ctx.user_id, found, &Hypervisor::ALL, Some(ctx))
+            .await
+            .map(drop)
     }
 
-    /// VM-18: the same, where the refresh read only the hypervisors in `read` in full. VMs of the
-    /// others are left as they were (VirtualBox could not be asked this time), not marked missing. A
-    /// VirtualBox VM reports its own pause, so only a VMware VM stays paused while it is listed as
-    /// running; either keeps its last Tools state and IP while paused.
-    pub async fn record_inventory_for(&self, ctx: &Context, found: &[DiscoveredVm], read: &[Hypervisor]) -> Result<()> {
-        let ws = ctx.workspace_id.to_string();
-        let user = ctx.user_id.to_string();
+    /// FD-02, VM-01: saves what a refresh found on this PC. Each VM goes to the workspace it belongs to
+    /// (`vm_assignments`); with `auto` (the user's only active workspace), a VM no workspace has joins that one
+    /// first. VMs of the user's workspaces it did not find are marked missing and drop out of [`Store::list_vms`];
+    /// their rows stay so tags, labels and protection survive. Returns the VMs found that no workspace has.
+    ///
+    /// VM-18: only the hypervisors in `read` were read in full; VMs of the others are left as they were (VirtualBox
+    /// could not be asked this time), not marked missing. A VM the app paused stays paused while vmrun still lists it
+    /// as running, with its last Tools state and IP (a paused guest cannot answer); a VirtualBox VM reports its own
+    /// pause, so only a VMware VM stays paused that way.
+    pub(crate) async fn record_discovery(
+        &self,
+        user: UserId,
+        found: &[DiscoveredVm],
+        read: &[Hypervisor],
+        auto: Option<&Context>,
+    ) -> Result<Vec<DiscoveredVm>> {
+        let owners = self.vm_assignments().await?;
         let now = now_rfc3339();
+        let mut unassigned = Vec::new();
         let mut tx = self.pool.begin().await?;
 
         for hypervisor in read {
             sqlx::query(
-                "UPDATE vms SET missing = 1, updated_at = ? WHERE workspace_id = ? AND missing = 0 AND hypervisor = ?",
+                "UPDATE vms SET missing = 1, updated_at = ?
+                 WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?) AND missing = 0 AND hypervisor = ?",
             )
             .bind(&now)
-            .bind(&ws)
+            .bind(user.to_string())
             .bind(hypervisor.as_str())
             .execute(&mut *tx)
             .await?;
         }
 
         for vm in found {
-            sqlx::query(
-                "INSERT INTO vms (id, workspace_id, user_id, vmx_path, hypervisor, config_path, display_name,
-                                  guest_os, guest_os_name, num_vcpus, memsize_mb, power_state, ip_address,
-                                  tools_state, missing, last_seen_at, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-                 ON CONFLICT(workspace_id, vmx_path) DO UPDATE SET
-                     hypervisor    = excluded.hypervisor,
-                     config_path   = excluded.config_path,
-                     display_name  = excluded.display_name,
-                     guest_os      = excluded.guest_os,
-                     guest_os_name = COALESCE(excluded.guest_os_name, vms.guest_os_name),
-                     num_vcpus     = excluded.num_vcpus,
-                     memsize_mb    = excluded.memsize_mb,
-                     power_state   = CASE WHEN excluded.power_state = 'running' AND vms.power_state = 'paused'
-                                               AND excluded.hypervisor = 'vmware'
-                                          THEN 'paused' ELSE excluded.power_state END,
-                     ip_address    = CASE WHEN (excluded.power_state = 'running' AND vms.power_state = 'paused'
-                                                AND excluded.hypervisor = 'vmware')
-                                               OR excluded.power_state = 'paused'
-                                          THEN vms.ip_address ELSE excluded.ip_address END,
-                     tools_state   = CASE WHEN (excluded.power_state = 'running' AND vms.power_state = 'paused'
-                                                AND excluded.hypervisor = 'vmware')
-                                               OR excluded.power_state = 'paused'
-                                          THEN vms.tools_state ELSE excluded.tools_state END,
-                     missing       = 0,
-                     last_seen_at  = excluded.last_seen_at,
-                     updated_at    = excluded.updated_at",
-            )
-            .bind(Uuid::new_v4().to_string())
-            .bind(&ws)
-            .bind(&user)
-            .bind(&vm.vmx_path)
-            .bind(vm.hypervisor.as_str())
-            .bind(&vm.config_path)
-            .bind(&vm.display_name)
-            .bind(&vm.info.guest_os)
-            .bind(&vm.info.guest_os_name)
-            .bind(vm.info.num_vcpus.map(i64::from))
-            .bind(vm.info.memsize_mb.map(i64::from))
-            .bind(vm.power_state.as_str())
-            .bind(&vm.ip_address)
-            .bind(&vm.tools_state)
-            .bind(&now)
-            .bind(&now)
-            .bind(&now)
-            .execute(&mut *tx)
-            .await?;
+            let owner = match owners.get(&vm.vmx_path.to_lowercase()) {
+                Some((workspace, owner)) if *owner == user => Context {
+                    workspace_id: *workspace,
+                    user_id: user,
+                },
+                // Another Windows account's VM (a database two accounts used): not this user's to list.
+                Some(_) => continue,
+                None => match auto {
+                    Some(ctx) => {
+                        sqlx::query(
+                            "INSERT INTO vm_assignments (vm_key, workspace_id, user_id, assigned_at) VALUES (?, ?, ?, ?)
+                             ON CONFLICT(vm_key) DO NOTHING",
+                        )
+                        .bind(&vm.vmx_path)
+                        .bind(ctx.workspace_id.to_string())
+                        .bind(user.to_string())
+                        .bind(&now)
+                        .execute(&mut *tx)
+                        .await?;
+                        *ctx
+                    }
+                    None => {
+                        unassigned.push(vm.clone());
+                        continue;
+                    }
+                },
+            };
+            upsert_vm(&mut tx, &owner, vm, &now).await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(unassigned)
     }
 
     /// Every VM the last refresh found, by name.
@@ -175,6 +168,41 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_vm).collect()
+    }
+
+    /// FD-02: every VM listed in any of the user's workspaces. For what belongs to this PC rather than to an
+    /// engagement (the RAM the running VMs hold, which folders hold a VM, whether a host network has a Prod VM on
+    /// it): never shown as a list, and never named to a workspace that doesn't have the VM.
+    pub(crate) async fn list_vms_all_workspaces(&self, user: UserId) -> Result<Vec<VmRecord>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            vm_columns!(),
+            " FROM vms WHERE missing = 0 AND workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)
+              ORDER BY display_name COLLATE NOCASE, vmx_path"
+        ))
+        .bind(user.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(row_to_vm).collect()
+    }
+
+    /// FD-02: every VM a workspace of the user lists, with that workspace (a VM is listed in at most one: the one it
+    /// belongs to). For the collector, which records each running VM's host side in its own workspace's history.
+    pub(crate) async fn listed_vms_by_workspace(&self, user: UserId) -> Result<Vec<(WorkspaceId, VmRecord)>> {
+        let rows = sqlx::query(concat!(
+            "SELECT workspace_id AS owner, ",
+            vm_columns!(),
+            " FROM vms WHERE missing = 0 AND workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)"
+        ))
+        .bind(user.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let owner: String = row.try_get("owner")?;
+                Ok((WorkspaceId(super::parse_uuid(&owner)?), row_to_vm(row)?))
+            })
+            .collect()
     }
 
     /// A VM by its id, including one the last refresh did not find (BX-01: a session's VM).
@@ -207,11 +235,15 @@ impl Store {
     }
 
     /// Saved power state per VM, keyed by [`path_key`].
+    /// FD-02: of every VM the user's workspaces list (the PC's, for a refresh), by key.
     pub async fn vm_power_states(&self, ctx: &Context) -> Result<HashMap<String, PowerState>> {
-        let rows = sqlx::query("SELECT vmx_path, power_state FROM vms WHERE workspace_id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT vmx_path, power_state FROM vms
+             WHERE missing = 0 AND workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)",
+        )
+        .bind(ctx.user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
         rows.iter()
             .map(|r| {
                 let path: String = r.try_get("vmx_path")?;
@@ -286,6 +318,63 @@ impl Store {
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// One found VM into its workspace's row (made, or brought back from missing).
+async fn upsert_vm(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ctx: &Context,
+    vm: &DiscoveredVm,
+    now: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO vms (id, workspace_id, user_id, vmx_path, hypervisor, config_path, display_name,
+                          guest_os, guest_os_name, num_vcpus, memsize_mb, power_state, ip_address,
+                          tools_state, missing, last_seen_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+         ON CONFLICT(workspace_id, vmx_path) DO UPDATE SET
+             hypervisor    = excluded.hypervisor,
+             config_path   = excluded.config_path,
+             display_name  = excluded.display_name,
+             guest_os      = excluded.guest_os,
+             guest_os_name = COALESCE(excluded.guest_os_name, vms.guest_os_name),
+             num_vcpus     = excluded.num_vcpus,
+             memsize_mb    = excluded.memsize_mb,
+             power_state   = CASE WHEN excluded.power_state = 'running' AND vms.power_state = 'paused'
+                                       AND excluded.hypervisor = 'vmware'
+                                  THEN 'paused' ELSE excluded.power_state END,
+             ip_address    = CASE WHEN (excluded.power_state = 'running' AND vms.power_state = 'paused'
+                                        AND excluded.hypervisor = 'vmware')
+                                       OR excluded.power_state = 'paused'
+                                  THEN vms.ip_address ELSE excluded.ip_address END,
+             tools_state   = CASE WHEN (excluded.power_state = 'running' AND vms.power_state = 'paused'
+                                        AND excluded.hypervisor = 'vmware')
+                                       OR excluded.power_state = 'paused'
+                                  THEN vms.tools_state ELSE excluded.tools_state END,
+             missing       = 0,
+             last_seen_at  = excluded.last_seen_at,
+             updated_at    = excluded.updated_at",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(ctx.workspace_id.to_string())
+    .bind(ctx.user_id.to_string())
+    .bind(&vm.vmx_path)
+    .bind(vm.hypervisor.as_str())
+    .bind(&vm.config_path)
+    .bind(&vm.display_name)
+    .bind(&vm.info.guest_os)
+    .bind(&vm.info.guest_os_name)
+    .bind(vm.info.num_vcpus.map(i64::from))
+    .bind(vm.info.memsize_mb.map(i64::from))
+    .bind(vm.power_state.as_str())
+    .bind(&vm.ip_address)
+    .bind(&vm.tools_state)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
 }
 
 fn row_to_vm(row: &sqlx::sqlite::SqliteRow) -> Result<VmRecord> {

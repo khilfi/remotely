@@ -7,7 +7,7 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::Store;
-use crate::domain::{now_rfc3339, Context};
+use crate::domain::{now_rfc3339, Context, WorkspaceId};
 use crate::error::{CoreError, Result};
 use crate::sessions::Folders;
 use crate::vault::bindings::SecretPlaces;
@@ -123,13 +123,16 @@ impl Store {
         kdf_params: &KdfParams,
         wrapped_key: &[u8],
         dpapi_key: Option<&[u8]>,
-        items: &[(SecretId, [u8; 12], Vec<u8>)],
+        items: &[(WorkspaceId, SecretId, [u8; 12], Vec<u8>)],
     ) -> Result<()> {
         let mut tx = self.pool.begin().await?;
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM vault_items WHERE workspace_id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .fetch_one(&mut *tx)
-            .await?;
+        // FD-02: one key for every workspace of the user, so every workspace's items are sealed again.
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM vault_items WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)",
+        )
+        .bind(ctx.user_id.to_string())
+        .fetch_one(&mut *tx)
+        .await?;
         if usize::try_from(count).ok() != Some(items.len()) {
             return Err(CoreError::Vault(
                 "the vault changed while its key was being replaced; nothing was changed, try again".into(),
@@ -151,13 +154,13 @@ impl Store {
         .bind(ctx.workspace_id.to_string())
         .execute(&mut *tx)
         .await?;
-        for (id, nonce, ciphertext) in items {
+        for (workspace, id, nonce, ciphertext) in items {
             // `updated_at` stays: the secret's value did not change, only the key it is sealed with.
             let done =
                 sqlx::query("UPDATE vault_items SET nonce = ?, ciphertext = ? WHERE workspace_id = ? AND id = ?")
                     .bind(&nonce[..])
                     .bind(ciphertext)
-                    .bind(ctx.workspace_id.to_string())
+                    .bind(workspace.to_string())
                     .bind(id.0.to_string())
                     .execute(&mut *tx)
                     .await?;
@@ -171,16 +174,21 @@ impl Store {
         Ok(())
     }
 
-    /// Every item's ciphertext, for a new data key.
-    pub(crate) async fn vault_ciphers(&self, ctx: &Context) -> Result<Vec<(SecretId, VaultCipher)>> {
-        let rows = sqlx::query("SELECT id, kind, label, nonce, ciphertext FROM vault_items WHERE workspace_id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+    /// Every item's ciphertext in every workspace of the user (FD-02: they share the key), for a new data key.
+    pub(crate) async fn vault_ciphers(&self, ctx: &Context) -> Result<Vec<(WorkspaceId, SecretId, VaultCipher)>> {
+        let rows = sqlx::query(
+            "SELECT workspace_id, id, kind, label, nonce, ciphertext FROM vault_items
+             WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)",
+        )
+        .bind(ctx.user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
         rows.iter()
             .map(|r| {
                 let id: String = r.try_get("id")?;
+                let workspace: String = r.try_get("workspace_id")?;
                 Ok((
+                    WorkspaceId(super::parse_uuid(&workspace)?),
                     SecretId(super::parse_uuid(&id)?),
                     VaultCipher {
                         kind: kind_of(r)?,

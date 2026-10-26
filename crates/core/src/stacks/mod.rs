@@ -794,6 +794,7 @@ impl Stacks {
     /// teardown keeps it unless it is picked on purpose. Audited; no tier (nothing in the VM changes).
     pub async fn add_vm(&self, ctx: &Context, id: Uuid, vm_key: &str, step: u32) -> Result<StackInstance> {
         self.store.read_only().check(Change::Stacks)?;
+        self.store.require_vm_here(ctx, vm_key).await?;
         let instance = self.instance(ctx, id).await?;
         let vm = self
             .store

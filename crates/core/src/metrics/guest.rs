@@ -39,6 +39,7 @@ use crate::login_guard::{self, LoginGuard, ParkReason, ParkScope, Parked};
 use crate::sessions;
 use crate::store::Store;
 use crate::vault::{Vault, VaultStatus};
+use crate::workspaces::Current;
 
 /// Settings key: the sessions watched for guest metrics (a list of session ids).
 pub const WATCHED_KEY: &str = "metrics.guestSessions";
@@ -131,7 +132,8 @@ struct StatusEntry {
 /// What the polls share.
 struct Shared {
     store: Store,
-    ctx: Context,
+    /// FD-02: the workspace shown, whose watched hosts are polled.
+    current: Current,
     remote: Arc<dyn RemoteAdapter>,
     vault: Arc<dyn Vault>,
     known_hosts: Arc<KnownHosts>,
@@ -145,6 +147,12 @@ struct Shared {
     specs: OnceLock<SpecsCollector>,
     /// P8: the time between two polls of a host ([`POLL_KEY`]).
     interval: RwLock<Duration>,
+}
+
+impl Shared {
+    fn ctx(&self) -> Context {
+        self.current.get()
+    }
 }
 
 pub struct GuestSource {
@@ -270,7 +278,7 @@ fn needs_vault(auth: &AuthMethod) -> bool {
 impl GuestSource {
     pub fn new(
         store: Store,
-        ctx: Context,
+        current: Current,
         remote: Arc<dyn RemoteAdapter>,
         vault: Arc<dyn Vault>,
         known_hosts: Arc<KnownHosts>,
@@ -279,7 +287,7 @@ impl GuestSource {
         Self {
             shared: Arc::new(Shared {
                 store,
-                ctx,
+                current,
                 remote,
                 vault,
                 known_hosts,
@@ -351,7 +359,7 @@ impl GuestSource {
         Ok(self
             .shared
             .store
-            .get_setting::<Vec<Uuid>>(&self.shared.ctx, WATCHED_KEY)
+            .get_setting::<Vec<Uuid>>(&self.shared.ctx(), WATCHED_KEY)
             .await?
             .unwrap_or_default())
     }
@@ -382,6 +390,13 @@ impl GuestSource {
             host.disconnect().await;
             host.spec_key.clear();
         }
+    }
+
+    /// FD-02: another workspace is shown: every kept connection closes and the hosts' states are forgotten, so
+    /// nothing of the old workspace's hosts is polled or shown. The new workspace's watched hosts connect next round.
+    pub async fn leave_workspace(&self) {
+        self.close_all().await;
+        self.forget_unwatched(&[]).await;
     }
 
     /// Drops what is kept for hosts no longer watched and closes their connections.
@@ -473,6 +488,8 @@ impl MetricsSource for GuestSource {
         Ok(SourceRound {
             samples,
             statuses: watched.iter().filter_map(|id| statuses.get(id).cloned()).collect(),
+            running: None,
+            elsewhere: Vec::new(),
         })
     }
 }
@@ -522,7 +539,7 @@ async fn read_once(
     id: Uuid,
     host: &mut Host,
 ) -> std::result::Result<MetricSample, Failure> {
-    let ctx = shared.ctx;
+    let ctx = shared.ctx();
     let spec = match shared.store.session_spec(&ctx, id).await {
         Ok(Some(spec)) => spec,
         Ok(None) => return Err(Failure::new(GuestState::Error, "the session was deleted")),
@@ -628,7 +645,7 @@ async fn read_specs_when_old(shared: &Shared, id: Uuid, host: &mut Host) {
     };
     if let Err(err) = collector
         .collect_if_older(
-            &shared.ctx,
+            &shared.ctx(),
             id,
             conn.as_ref(),
             tuning.dashboard_max_age,
@@ -694,10 +711,10 @@ async fn connect(
         ),
         other => Failure::from_error(&other),
     };
-    let credentials = sessions::credentials(shared.vault.as_ref(), &shared.ctx, spec, None)
+    let credentials = sessions::credentials(shared.vault.as_ref(), &shared.ctx(), spec, None)
         .await
         .map_err(missing)?;
-    let jump_credentials = sessions::jump_credentials(shared.vault.as_ref(), &shared.ctx, spec, &HashMap::new())
+    let jump_credentials = sessions::jump_credentials(shared.vault.as_ref(), &shared.ctx(), spec, &HashMap::new())
         .await
         .map_err(missing)?;
     if let Err(wait) = shared.guard.admit(spec.id, &login_guard::login_hosts(spec)) {
@@ -717,7 +734,7 @@ async fn connect(
     };
     let verifier = Arc::new(GuestVerifier {
         known_hosts: Arc::clone(&shared.known_hosts),
-        ctx: shared.ctx,
+        ctx: shared.ctx(),
         target: Target {
             target: TargetRef::Session { session_id: spec.id },
             name: spec.name.clone(),

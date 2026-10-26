@@ -668,6 +668,9 @@ enum Source {
 }
 
 struct Control {
+    /// FD-02: the workspace the terminal was opened in. Switching workspaces closes it; until then nothing of
+    /// another workspace may use it.
+    workspace: crate::domain::WorkspaceId,
     input: mpsc::Sender<TerminalInput>,
     cancel: CancellationToken,
     source: Source,
@@ -1178,6 +1181,7 @@ impl Terminals {
         let (events_tx, events_rx) = mpsc::channel(64);
         let id = Uuid::new_v4();
         let control = Arc::new(Control {
+            workspace: ctx.workspace_id,
             input: input_tx,
             cancel: CancellationToken::new(),
             source: pane.source,
@@ -1326,6 +1330,9 @@ impl Terminals {
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id} has closed")))?;
+        if control.workspace != ctx.workspace_id {
+            return Err(CoreError::NotInWorkspace(format!("Terminal {id}")));
+        }
         let session_id = control.session_id();
         let found = match session_id {
             Some(session) => self.inner.store.find_session_target(ctx, session).await?,

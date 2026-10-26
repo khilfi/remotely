@@ -99,7 +99,7 @@ impl Chain {
             let password = SecretString::new(password);
             async move {
                 core.vault
-                    .add(&core.ctx, SecretKind::Password, &label, password)
+                    .add(&core.ctx(), SecretKind::Password, &label, password)
                     .await
                     .unwrap()
                     .id
@@ -128,7 +128,7 @@ impl Chain {
         };
         let create = |mut input: SessionInput, password: Option<remotely_core::vault::SecretId>| {
             input.auth = SessionAuth::Password { password_id: password };
-            async move { core.sessions.create(&core.ctx, input).await.unwrap().id }
+            async move { core.sessions.create(&core.ctx(), input).await.unwrap().id }
         };
         let bastion_id = create(input("bastion", "127.0.0.1", bastion.port(), "bob", None), bastion_auth).await;
         let inner_password = saved("inner carol", &passwords[1]).await;
@@ -167,13 +167,13 @@ impl Chain {
                 key_type: "ssh-ed25519".into(),
                 fingerprint: server.host_key_fingerprint(),
             };
-            core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+            core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
         }
     }
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 200).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 200).await.unwrap()
 }
 
 struct Pane {
@@ -189,7 +189,7 @@ impl Pane {
         let handle: TerminalHandle = core
             .terminals
             .open(
-                &core.ctx,
+                &core.ctx(),
                 session,
                 remotely_core::adapters::remote::PtySize { cols: 80, rows: 24 },
             )
@@ -381,7 +381,7 @@ async fn a_changed_key_at_the_second_hop_blocks_the_connection_and_names_it() {
     );
 
     // Trusting the new key (an explicit, audited step) lets it through.
-    core.terminals.replace_host_key(&core.ctx, pane.id).await.unwrap();
+    core.terminals.replace_host_key(&core.ctx(), pane.id).await.unwrap();
     pane.connected().await;
     pane.expect_output("Welcome, alice").await;
     core.terminals.close(pane.id).await;
@@ -404,24 +404,24 @@ async fn commands_and_compare_runs_go_through_the_chain() {
         timeout_secs: Some(30),
         rollout: Default::default(),
     };
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, run(false)).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), run(false)).await.unwrap() else {
         panic!("a read-only command on a Lab host runs at once");
     };
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Succeeded);
-    let targets = core.store.job_targets(&core.ctx, job_id).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job_id).await.unwrap();
     assert_eq!(targets[0].output.as_deref(), Some("db01\nalice\n"));
     assert!(chain.inner.log().contains(&"direct-tcpip db01.test:22".to_owned()));
     assert!(chain.db.log().contains(&"exec hostname; whoami".to_owned()));
 
     // A run can't ask about a key; an unknown one at a hop fails and says which.
-    let known = core.known_hosts.list(&core.ctx).await.unwrap();
+    let known = core.known_hosts.list(&core.ctx()).await.unwrap();
     let inner_key = known.iter().find(|k| k.host == "inner.test").unwrap();
-    core.known_hosts.remove(&core.ctx, inner_key.id).await.unwrap();
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, run(false)).await.unwrap() else {
+    core.known_hosts.remove(&core.ctx(), inner_key.id).await.unwrap();
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), run(false)).await.unwrap() else {
         panic!("queued");
     };
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Failed);
-    let targets = core.store.job_targets(&core.ctx, job_id).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job_id).await.unwrap();
     let error = targets[0].error.clone().unwrap();
     assert!(error.contains("the jump host 'inner' (inner.test:22)"), "{error}");
     assert_eq!(targets[0].error_code.as_deref(), Some("host_key_unknown"));
@@ -439,7 +439,7 @@ async fn files_ride_the_terminals_connection_through_the_chain() {
     assert!(names.contains(&"report.txt"), "{names:?}");
     let dest = temp_folder("jump-download");
     core.terminals
-        .download(&core.ctx, pane.id, &["/home/alice/report.txt".to_owned()], &dest)
+        .download(&core.ctx(), pane.id, &["/home/alice/report.txt".to_owned()], &dest)
         .await
         .unwrap();
     let saved = timeout(WAIT, async {
@@ -487,15 +487,15 @@ async fn guest_metrics_are_read_through_the_chain() {
         parallel: 4,
         agent: no_agent(),
     });
-    core.metrics.set_watched(&core.ctx, chain.db_id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), chain.db_id, true).await.unwrap();
     core.metrics.collect_once().await;
     let status = core.metrics.guest().statuses()[&chain.db_id].clone();
     assert_eq!(status.state, GuestState::Ok, "{status:?}");
     assert!(chain.inner.log().contains(&"direct-tcpip db01.test:22".to_owned()));
 
     // A jump host whose password is not saved can't be logged in to by the dashboard: it says so.
-    core.metrics.set_watched(&core.ctx, chain.db_id, false).await.unwrap();
-    let bastion = core.sessions.get(&core.ctx, chain.bastion_id).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), chain.db_id, false).await.unwrap();
+    let bastion = core.sessions.get(&core.ctx(), chain.bastion_id).await.unwrap();
     let input = SessionInput {
         name: bastion.name.clone(),
         folder_id: None,
@@ -513,8 +513,14 @@ async fn guest_metrics_are_read_through_the_chain() {
         tags: vec![],
         vm_id: None,
     };
-    core.sessions.update(&core.ctx, chain.bastion_id, input).await.unwrap();
-    core.metrics.set_watched(&core.ctx, chain.inner_id, true).await.unwrap();
+    core.sessions
+        .update(&core.ctx(), chain.bastion_id, input)
+        .await
+        .unwrap();
+    core.metrics
+        .set_watched(&core.ctx(), chain.inner_id, true)
+        .await
+        .unwrap();
     core.metrics.collect_once().await;
     let status = core.metrics.guest().statuses()[&chain.inner_id].clone();
     assert_eq!(status.state, GuestState::LoginFailed);
@@ -549,7 +555,7 @@ async fn a_tunnel_on_a_two_hop_session_starts_from_the_far_host() {
     let saved = core
         .forwards
         .save(
-            &core.ctx,
+            &core.ctx(),
             chain.db_id,
             &[ForwardInput {
                 id: None,

@@ -62,7 +62,7 @@ async fn session(core: &Core, name: &str, port: u16, environment: &str, password
     let password_id = match password {
         Some(password) => Some(
             core.vault
-                .add(&core.ctx, SecretKind::Password, name, SecretString::new(password))
+                .add(&core.ctx(), SecretKind::Password, name, SecretString::new(password))
                 .await
                 .unwrap()
                 .id,
@@ -78,11 +78,11 @@ async fn session(core: &Core, name: &str, port: u16, environment: &str, password
         "environment": environment,
     }))
     .unwrap();
-    core.sessions.create(&core.ctx, input).await.unwrap().id
+    core.sessions.create(&core.ctx(), input).await.unwrap().id
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 300).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 300).await.unwrap()
 }
 
 async fn rule_entries(core: &Core) -> Vec<AuditEntry> {
@@ -95,7 +95,7 @@ async fn rule_entries(core: &Core) -> Vec<AuditEntry> {
 
 async fn names(core: &Core) -> Vec<String> {
     core.terminal_rules
-        .list(&core.ctx)
+        .list(&core.ctx())
         .await
         .unwrap()
         .iter()
@@ -116,7 +116,7 @@ async fn rules_are_listed_built_ins_first_and_edits_are_audited_without_the_patt
     let web = session(&core, "web01", 22, "prod", None).await;
 
     // Five built-ins, highlights on, alerts off.
-    let fresh = core.terminal_rules.list(&core.ctx).await.unwrap();
+    let fresh = core.terminal_rules.list(&core.ctx()).await.unwrap();
     assert_eq!(
         fresh.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
         [
@@ -132,7 +132,7 @@ async fn rules_are_listed_built_ins_first_and_edits_are_audited_without_the_patt
     let oom = core
         .terminal_rules
         .create(
-            &core.ctx,
+            &core.ctx(),
             rule("OOM killer", r"Out of memory: Killed process \d+", RuleScope::Global),
         )
         .await
@@ -146,11 +146,11 @@ async fn rules_are_listed_built_ins_first_and_edits_are_audited_without_the_patt
         },
     );
     prod.style = RuleStyle::Fill;
-    let prod = core.terminal_rules.create(&core.ctx, prod).await.unwrap();
+    let prod = core.terminal_rules.create(&core.ctx(), prod).await.unwrap();
     let only_web = core
         .terminal_rules
         .create(
-            &core.ctx,
+            &core.ctx(),
             rule(
                 "web01 deploys",
                 "deploy finished",
@@ -169,36 +169,36 @@ async fn rules_are_listed_built_ins_first_and_edits_are_audited_without_the_patt
     change.alert = true;
     change.color = None;
     let oom_id: Uuid = oom.id.parse().unwrap();
-    let changed = core.terminal_rules.update(&core.ctx, oom_id, change).await.unwrap();
+    let changed = core.terminal_rules.update(&core.ctx(), oom_id, change).await.unwrap();
     assert!(changed.alert && changed.color.is_none());
     // Reordered, then one deleted.
     let ids: Vec<Uuid> = [&only_web, &prod, &changed]
         .iter()
         .map(|r| r.id.parse().unwrap())
         .collect();
-    core.terminal_rules.reorder(&core.ctx, &ids).await.unwrap();
+    core.terminal_rules.reorder(&core.ctx(), &ids).await.unwrap();
     assert_eq!(
         names(&core).await[5..],
         ["web01 deploys", "Prod 5xx", "OOM"].map(String::from)
     );
     core.terminal_rules
-        .delete(&core.ctx, prod.id.parse().unwrap())
+        .delete(&core.ctx(), prod.id.parse().unwrap())
         .await
         .unwrap();
     // A built-in turned off, another's alert on.
     let error = core
         .terminal_rules
-        .set_builtin(&core.ctx, "error", false, false)
+        .set_builtin(&core.ctx(), "error", false, false)
         .await
         .unwrap();
     assert!(!error.enabled);
     let fatal = core
         .terminal_rules
-        .set_builtin(&core.ctx, "fatal", true, true)
+        .set_builtin(&core.ctx(), "fatal", true, true)
         .await
         .unwrap();
     assert!(fatal.enabled && fatal.alert);
-    let listed = core.terminal_rules.list(&core.ctx).await.unwrap();
+    let listed = core.terminal_rules.list(&core.ctx()).await.unwrap();
     assert!(!listed[0].enabled && listed[1].alert);
     assert_eq!(listed.len(), 7);
 
@@ -258,18 +258,18 @@ async fn rules_are_listed_built_ins_first_and_edits_are_audited_without_the_patt
         assert!(!text.contains("HTTP/1"), "{text}");
         assert!(!text.contains("deploy finished"), "{text}");
     }
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 
     // Nothing changed: nothing audited.
     let before = rule_entries(&core).await.len();
     core.terminal_rules
-        .set_builtin(&core.ctx, "fatal", true, true)
+        .set_builtin(&core.ctx(), "fatal", true, true)
         .await
         .unwrap();
     let mut same = rule("OOM", r"Out of memory: Killed process \d+", RuleScope::Global);
     same.alert = true;
     same.color = None;
-    core.terminal_rules.update(&core.ctx, oom_id, same).await.unwrap();
+    core.terminal_rules.update(&core.ctx(), oom_id, same).await.unwrap();
     assert_eq!(rule_entries(&core).await.len(), before);
 }
 
@@ -278,32 +278,32 @@ async fn bad_rules_are_refused_with_a_reason() {
     let core = core().await;
     let rules = &core.terminal_rules;
     invalid(
-        rules.create(&core.ctx, rule("  ", "x", RuleScope::Global)).await,
+        rules.create(&core.ctx(), rule("  ", "x", RuleScope::Global)).await,
         "name",
     );
     invalid(
-        rules.create(&core.ctx, rule("error", "x", RuleScope::Global)).await,
+        rules.create(&core.ctx(), rule("error", "x", RuleScope::Global)).await,
         "built-in",
     );
     invalid(
-        rules.create(&core.ctx, rule("A", "(?i)x", RuleScope::Global)).await,
+        rules.create(&core.ctx(), rule("A", "(?i)x", RuleScope::Global)).await,
         "Match case",
     );
     invalid(
-        rules.create(&core.ctx, rule("A", "(a+)+", RuleScope::Global)).await,
+        rules.create(&core.ctx(), rule("A", "(a+)+", RuleScope::Global)).await,
         "very slow",
     );
     invalid(
-        rules.create(&core.ctx, rule("A", "x*", RuleScope::Global)).await,
+        rules.create(&core.ctx(), rule("A", "x*", RuleScope::Global)).await,
         "empty text",
     );
     let mut nothing = rule("A", "x", RuleScope::Global);
     nothing.color = None;
-    invalid(rules.create(&core.ctx, nothing).await, "does nothing");
+    invalid(rules.create(&core.ctx(), nothing).await, "does nothing");
     invalid(
         rules
             .create(
-                &core.ctx,
+                &core.ctx(),
                 rule(
                     "A",
                     "x",
@@ -318,7 +318,7 @@ async fn bad_rules_are_refused_with_a_reason() {
     invalid(
         rules
             .create(
-                &core.ctx,
+                &core.ctx(),
                 rule(
                     "A",
                     "x",
@@ -331,11 +331,11 @@ async fn bad_rules_are_refused_with_a_reason() {
         "no longer exists",
     );
     rules
-        .create(&core.ctx, rule("A", "x", RuleScope::Global))
+        .create(&core.ctx(), rule("A", "x", RuleScope::Global))
         .await
         .unwrap();
     invalid(
-        rules.create(&core.ctx, rule("a", "y", RuleScope::Global)).await,
+        rules.create(&core.ctx(), rule("a", "y", RuleScope::Global)).await,
         "already",
     );
     // The live check says the same, and changes nothing.
@@ -345,25 +345,27 @@ async fn bad_rules_are_refused_with_a_reason() {
     // At most MAX_RULES.
     for i in 1..MAX_RULES {
         rules
-            .create(&core.ctx, rule(&format!("rule {i}"), "x", RuleScope::Global))
+            .create(&core.ctx(), rule(&format!("rule {i}"), "x", RuleScope::Global))
             .await
             .unwrap();
     }
     invalid(
-        rules.create(&core.ctx, rule("one more", "x", RuleScope::Global)).await,
+        rules
+            .create(&core.ctx(), rule("one more", "x", RuleScope::Global))
+            .await,
         "Delete some",
     );
     // A reorder that doesn't name every rule is refused.
-    let some: Vec<Uuid> = rules.list(&core.ctx).await.unwrap()[5..7]
+    let some: Vec<Uuid> = rules.list(&core.ctx()).await.unwrap()[5..7]
         .iter()
         .map(|r| r.id.parse().unwrap())
         .collect();
     assert!(matches!(
-        rules.reorder(&core.ctx, &some).await,
+        rules.reorder(&core.ctx(), &some).await,
         Err(CoreError::InvalidInput(_))
     ));
     assert!(matches!(
-        rules.set_builtin(&core.ctx, "nope", true, true).await,
+        rules.set_builtin(&core.ctx(), "nope", true, true).await,
         Err(CoreError::UnknownTarget(_))
     ));
 }
@@ -373,7 +375,7 @@ async fn the_read_only_lock_refuses_every_rule_edit() {
     let core = core().await;
     let kept = core
         .terminal_rules
-        .create(&core.ctx, rule("Kept", "x", RuleScope::Global))
+        .create(&core.ctx(), rule("Kept", "x", RuleScope::Global))
         .await
         .unwrap();
     let id: Uuid = kept.id.parse().unwrap();
@@ -394,19 +396,19 @@ async fn the_read_only_lock_refuses_every_rule_edit() {
     let rules = &core.terminal_rules;
     refused(
         rules
-            .create(&core.ctx, rule("New", "y", RuleScope::Global))
+            .create(&core.ctx(), rule("New", "y", RuleScope::Global))
             .await
             .map(drop),
     );
     refused(
         rules
-            .update(&core.ctx, id, rule("Renamed", "x", RuleScope::Global))
+            .update(&core.ctx(), id, rule("Renamed", "x", RuleScope::Global))
             .await
             .map(drop),
     );
-    refused(rules.delete(&core.ctx, id).await);
-    refused(rules.reorder(&core.ctx, &[id]).await.map(drop));
-    refused(rules.set_builtin(&core.ctx, "error", false, true).await.map(drop));
+    refused(rules.delete(&core.ctx(), id).await);
+    refused(rules.reorder(&core.ctx(), &[id]).await.map(drop));
+    refused(rules.set_builtin(&core.ctx(), "error", false, true).await.map(drop));
     // Reads and the live check still work; nothing was written or audited.
     assert!(rules.validate("x", false).valid);
     assert_eq!(names(&core).await.len(), 6);
@@ -499,7 +501,7 @@ async fn trust(core: &Core, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 #[tokio::test]
@@ -515,7 +517,7 @@ async fn matching_lines_alert_once_per_burst_then_cool_down() {
     let lab = session(&core, "lab box", server.port(), "lab", Some(&password)).await;
     let mut pane = Pane::new(
         core.terminals
-            .open(&core.ctx, lab, PtySize { cols: 80, rows: 24 })
+            .open(&core.ctx(), lab, PtySize { cols: 80, rows: 24 })
             .await
             .unwrap(),
     );
@@ -526,7 +528,7 @@ async fn matching_lines_alert_once_per_burst_then_cool_down() {
     // command line doesn't count either way), one for Prod only, and the built-in Fatal with its alert on.
     let mut alerting = rule("Errors", r"^ERROR\b", RuleScope::Global);
     alerting.alert = true;
-    core.terminal_rules.create(&core.ctx, alerting).await.unwrap();
+    core.terminal_rules.create(&core.ctx(), alerting).await.unwrap();
     let mut prod_only = rule(
         "Prod errors",
         "ERROR",
@@ -535,9 +537,9 @@ async fn matching_lines_alert_once_per_burst_then_cool_down() {
         },
     );
     prod_only.alert = true;
-    core.terminal_rules.create(&core.ctx, prod_only).await.unwrap();
+    core.terminal_rules.create(&core.ctx(), prod_only).await.unwrap();
     core.terminal_rules
-        .set_builtin(&core.ctx, "fatal", true, true)
+        .set_builtin(&core.ctx(), "fatal", true, true)
         .await
         .unwrap();
 
@@ -582,7 +584,7 @@ async fn matching_lines_alert_once_per_burst_then_cool_down() {
 
     // Turned off: nothing more.
     core.terminal_rules
-        .set_builtin(&core.ctx, "fatal", true, false)
+        .set_builtin(&core.ctx(), "fatal", true, false)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(2600)).await;
@@ -609,11 +611,11 @@ async fn a_sample_never_shows_the_login_password() {
     });
     let mut alerting = rule("Errors", "error", RuleScope::Global);
     alerting.alert = true;
-    core.terminal_rules.create(&core.ctx, alerting).await.unwrap();
+    core.terminal_rules.create(&core.ctx(), alerting).await.unwrap();
     let lab = session(&core, "lab box", server.port(), "lab", Some(&password)).await;
     let mut pane = Pane::new(
         core.terminals
-            .open(&core.ctx, lab, PtySize { cols: 80, rows: 24 })
+            .open(&core.ctx(), lab, PtySize { cols: 80, rows: 24 })
             .await
             .unwrap(),
     );

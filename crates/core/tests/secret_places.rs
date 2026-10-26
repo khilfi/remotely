@@ -41,7 +41,12 @@ async fn core() -> Core {
 async fn existing(core: &Core, label: &str) -> SecretId {
     core.vault
         .vault()
-        .put(&core.ctx, SecretKind::Password, label, pw(&format!("{label}-value-1")))
+        .put(
+            &core.ctx(),
+            SecretKind::Password,
+            label,
+            pw(&format!("{label}-value-1")),
+        )
         .await
         .unwrap()
 }
@@ -76,19 +81,19 @@ fn reauth_required(result: &Result<impl std::fmt::Debug, CoreError>) -> bool {
 
 async fn saved(core: &Core, input: SessionInput) -> SessionRecord {
     core.sessions
-        .create_with(&core.ctx, input, Some(&pw(VAULT_PASSWORD)))
+        .create_with(&core.ctx(), input, Some(&pw(VAULT_PASSWORD)))
         .await
         .unwrap()
 }
 
 async fn audit_events(core: &Core) -> Vec<remotely_core::store::AuditEntry> {
-    core.store.recent_audit(&core.ctx, 200).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 200).await.unwrap()
 }
 
 #[tokio::test]
 async fn a_password_sent_to_a_new_host_needs_the_vault_password_and_each_answer_is_audited() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let root = existing(&core, "customer root").await;
 
     let err = core
@@ -145,7 +150,7 @@ async fn a_password_sent_to_a_new_host_needs_the_vault_password_and_each_answer_
 #[tokio::test]
 async fn a_new_secret_goes_to_its_first_session_without_asking() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     // The session editor's "new password": added on the spot, then picked for the session being saved.
     let fresh = core
         .vault
@@ -168,7 +173,7 @@ async fn a_new_secret_goes_to_its_first_session_without_asking() {
 #[tokio::test]
 async fn moving_a_session_that_sends_a_vault_password_asks_first() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let root = existing(&core, "web root").await;
     let web = saved(&core, with_password("web01", "web01.example.com", root)).await;
 
@@ -213,7 +218,7 @@ async fn moving_a_session_that_sends_a_vault_password_asks_first() {
 #[tokio::test]
 async fn keys_and_their_passphrases_never_leave_this_pc_so_they_never_ask() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let key = core
         .vault
         .vault()
@@ -264,7 +269,7 @@ fn quick(host: &str, id: SecretId, vault_password: Option<&str>) -> QuickConnect
 #[tokio::test]
 async fn a_quick_connection_with_a_vault_password_for_a_new_host_asks_first() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let root = existing(&core, "customer root").await;
 
     let err = core
@@ -307,7 +312,7 @@ async fn a_quick_connection_with_a_vault_password_for_a_new_host_asks_first() {
 #[tokio::test]
 async fn a_container_hosts_sudo_password_for_a_new_host_asks_first() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let login = existing(&core, "web login").await;
     let sudo = existing(&core, "customer root").await;
     let web = saved(&core, with_password("web01", "web01.example.com", login)).await;
@@ -360,7 +365,7 @@ fn compare(targets: &[SessionRecord], sudo_password: SecretId) -> Command {
 #[tokio::test]
 async fn a_compare_run_whose_sudo_password_is_new_to_its_hosts_asks_for_the_vault_password() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let sudo = existing(&core, "customer root").await;
     let mut hosts = Vec::new();
     for name in ["web01", "web02"] {
@@ -427,7 +432,7 @@ async fn a_compare_run_whose_sudo_password_is_new_to_its_hosts_asks_for_the_vaul
 #[tokio::test]
 async fn loosening_the_approval_rules_needs_the_vault_password_and_tightening_does_not() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let mut tighter: PolicyRules = core.bus.rules();
     tighter.countdown_seconds = 20;
     tighter.prod_bump = true;
@@ -472,7 +477,7 @@ async fn loosening_the_approval_rules_needs_the_vault_password_and_tightening_do
 async fn one_right_answer_covers_the_next_five_minutes_until_the_vault_locks() {
     assert_eq!(REAUTH_GRACE, Duration::from_secs(5 * 60));
     let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let shared = existing(&core, "customer root").await;
 
     // Setting up several sessions that share a password asks once.

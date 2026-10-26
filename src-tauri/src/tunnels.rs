@@ -21,14 +21,14 @@ type IpcResult<T> = Result<T, IpcError>;
 #[tauri::command]
 pub async fn forwards_list(state: State<'_, AppState>, session_id: Uuid) -> IpcResult<Vec<PortForward>> {
     let core = &state.core;
-    Ok(core.forwards.list(&core.ctx, session_id).await?)
+    Ok(core.forwards.list(&core.ctx(), session_id).await?)
 }
 
 /// Every session's saved forwards, by session (the Sessions page's list and the tree).
 #[tauri::command]
 pub async fn forwards_all(state: State<'_, AppState>) -> IpcResult<HashMap<Uuid, Vec<PortForward>>> {
     let core = &state.core;
-    Ok(core.forwards.all(&core.ctx).await?)
+    Ok(core.forwards.all(&core.ctx()).await?)
 }
 
 /// Replaces a session's forwards with the dialog's list. Audited with what changed.
@@ -39,14 +39,14 @@ pub async fn forwards_save(
     forwards: Vec<ForwardInput>,
 ) -> IpcResult<Vec<PortForward>> {
     let core = &state.core;
-    Ok(core.forwards.save(&core.ctx, session_id, &forwards).await?)
+    Ok(core.forwards.save(&core.ctx(), session_id, &forwards).await?)
 }
 
 /// A terminal's tunnels: the session's forwards and each one's state.
 #[tauri::command]
 pub async fn terminal_tunnels(state: State<'_, AppState>, terminal_id: Uuid) -> IpcResult<Vec<TunnelInfo>> {
     let core = &state.core;
-    Ok(core.terminals.tunnels(&core.ctx, terminal_id).await?)
+    Ok(core.terminals.tunnels(&core.ctx(), terminal_id).await?)
 }
 
 /// Opens a saved forward on the terminal's connection, through the command bus: opening at once, or
@@ -58,7 +58,10 @@ pub async fn terminal_tunnel_start(
     forward_id: Uuid,
 ) -> IpcResult<TunnelStart> {
     let core = &state.core;
-    Ok(core.terminals.start_tunnel(&core.ctx, terminal_id, forward_id).await?)
+    Ok(core
+        .terminals
+        .start_tunnel(&core.ctx(), terminal_id, forward_id)
+        .await?)
 }
 
 /// The approval a tunnel waits for (one that started with the terminal asks this way).
@@ -81,7 +84,7 @@ pub async fn terminal_tunnel_approve(
     let core = &state.core;
     Ok(core
         .terminals
-        .approve_tunnel(&core.ctx, terminal_id, forward_id, answers)
+        .approve_tunnel(&core.ctx(), terminal_id, forward_id, answers)
         .await?)
 }
 
@@ -90,7 +93,7 @@ pub async fn terminal_tunnel_decline(state: State<'_, AppState>, terminal_id: Uu
     let core = &state.core;
     Ok(core
         .terminals
-        .decline_tunnel(&core.ctx, terminal_id, forward_id)
+        .decline_tunnel(&core.ctx(), terminal_id, forward_id)
         .await?)
 }
 
@@ -98,5 +101,5 @@ pub async fn terminal_tunnel_decline(state: State<'_, AppState>, terminal_id: Uu
 #[tauri::command]
 pub async fn terminal_tunnel_stop(state: State<'_, AppState>, terminal_id: Uuid, forward_id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.terminals.stop_tunnel(&core.ctx, terminal_id, forward_id).await?)
+    Ok(core.terminals.stop_tunnel(&core.ctx(), terminal_id, forward_id).await?)
 }

@@ -51,7 +51,7 @@ async fn core() -> Core {
 async fn generate(core: &Core, label: &str, key_type: KeyType) -> SshKey {
     core.keys
         .generate(
-            &core.ctx,
+            &core.ctx(),
             GenerateKey {
                 label: label.into(),
                 key_type,
@@ -90,11 +90,11 @@ async fn host(core: &Core, server: &TestSshServer, name: &str, password: &str, e
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
     let pw = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             &format!("{name} login"),
             SecretString::new(password),
@@ -104,7 +104,7 @@ async fn host(core: &Core, server: &TestSshServer, name: &str, password: &str, e
         .id;
     let auth = SessionAuth::Password { password_id: Some(pw) };
     core.sessions
-        .create(&core.ctx, input(name, server.port(), auth, environment))
+        .create(&core.ctx(), input(name, server.port(), auth, environment))
         .await
         .unwrap()
         .id
@@ -145,7 +145,7 @@ fn remove(public_key: &str, sessions: &[Uuid]) -> Command {
 
 /// Submits and approves. Returns the job id and the tier it was given.
 async fn run(core: &Core, command: Command) -> (Uuid, Tier) {
-    match core.bus.submit(&core.ctx, command).await.unwrap() {
+    match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, tier, .. } => (job_id, tier),
         SubmitOutcome::NeedsApproval { request } => {
             let mut answers = ApprovalAnswers {
@@ -182,14 +182,14 @@ async fn finished(rx: &mut Receiver<JobEvent>, job: Uuid) -> JobStatus {
 
 async fn stdout(core: &Core, job: Uuid, session: Uuid) -> String {
     core.bulk
-        .host_output(&core.ctx, job, &session.to_string())
+        .host_output(&core.ctx(), job, &session.to_string())
         .await
         .unwrap()
         .stdout
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 500).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 500).await.unwrap()
 }
 
 // ---- Generating keys -------------------------------------------------------------------------------
@@ -205,10 +205,10 @@ async fn an_ed25519_key_is_generated_into_the_vault_with_its_public_half() {
     assert!(public.line.starts_with("ssh-ed25519 AAAA"));
 
     // The private half is an ordinary private key in the vault, and it matches the public half.
-    let meta = core.vault.list(&core.ctx).await.unwrap();
+    let meta = core.vault.list(&core.ctx()).await.unwrap();
     let item = meta.iter().find(|m| m.id == key.id).unwrap();
     assert_eq!(item.kind, SecretKind::PrivateKey);
-    let private = core.vault.vault().get(&core.ctx, key.id).await.unwrap();
+    let private = core.vault.vault().get(&core.ctx(), key.id).await.unwrap();
     let decoded = russh::keys::decode_secret_key(private.expose(), None).unwrap();
     assert_eq!(
         decoded
@@ -219,8 +219,8 @@ async fn an_ed25519_key_is_generated_into_the_vault_with_its_public_half() {
     );
 
     // Locked, the public half is still shown.
-    core.vault.lock(&core.ctx).await.unwrap();
-    let listed = core.keys.list(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
+    let listed = core.keys.list(&core.ctx()).await.unwrap();
     assert_eq!(listed, vec![key.clone()]);
 
     // Audited with the type and fingerprint, never the private key.
@@ -245,7 +245,7 @@ async fn an_rsa_4096_key_can_be_chosen() {
     let key = core
         .keys
         .generate(
-            &core.ctx,
+            &core.ctx(),
             GenerateKey {
                 label: "old hosts".into(),
                 key_type: KeyType::Rsa,
@@ -267,7 +267,7 @@ async fn generating_needs_an_unlocked_vault_and_a_free_label() {
     let taken = core
         .keys
         .generate(
-            &core.ctx,
+            &core.ctx(),
             GenerateKey {
                 label: "LAPTOP KEY".into(),
                 key_type: KeyType::Ed25519,
@@ -280,7 +280,7 @@ async fn generating_needs_an_unlocked_vault_and_a_free_label() {
     let bad_comment = core
         .keys
         .generate(
-            &core.ctx,
+            &core.ctx(),
             GenerateKey {
                 label: "other".into(),
                 key_type: KeyType::Ed25519,
@@ -290,11 +290,11 @@ async fn generating_needs_an_unlocked_vault_and_a_free_label() {
         .await
         .unwrap_err();
     assert_eq!(bad_comment.code(), "invalid_input");
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
     let locked = core
         .keys
         .generate(
-            &core.ctx,
+            &core.ctx(),
             GenerateKey {
                 label: "other".into(),
                 key_type: KeyType::Ed25519,
@@ -304,7 +304,7 @@ async fn generating_needs_an_unlocked_vault_and_a_free_label() {
         .await
         .unwrap_err();
     assert_eq!(locked.code(), "vault_locked");
-    assert_eq!(core.keys.list(&core.ctx).await.unwrap().len(), 1);
+    assert_eq!(core.keys.list(&core.ctx()).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -314,7 +314,7 @@ async fn the_public_half_of_a_pasted_key_is_read_once_and_dropped_when_the_key_i
     let id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::PrivateKey,
             "pasted",
             ssh_server::private_key_text(&first, None),
@@ -322,25 +322,25 @@ async fn the_public_half_of_a_pasted_key_is_read_once_and_dropped_when_the_key_i
         .await
         .unwrap()
         .id;
-    let listed = core.keys.get(&core.ctx, id).await.unwrap();
+    let listed = core.keys.get(&core.ctx(), id).await.unwrap();
     assert!(!listed.generated);
     assert_eq!(listed.public, None, "not read yet");
 
-    let read = core.keys.read_public_key(&core.ctx, id).await.unwrap();
+    let read = core.keys.read_public_key(&core.ctx(), id).await.unwrap();
     assert_eq!(read.public.unwrap().fingerprint, ssh_server::fingerprint(&first));
 
     let second = ssh_server::generate_key();
     core.vault
-        .replace(&core.ctx, id, ssh_server::private_key_text(&second, None))
+        .replace(&core.ctx(), id, ssh_server::private_key_text(&second, None))
         .await
         .unwrap();
-    assert_eq!(core.keys.get(&core.ctx, id).await.unwrap().public, None);
-    let again = core.keys.read_public_key(&core.ctx, id).await.unwrap();
+    assert_eq!(core.keys.get(&core.ctx(), id).await.unwrap().public, None);
+    let again = core.keys.read_public_key(&core.ctx(), id).await.unwrap();
     assert_eq!(again.public.unwrap().fingerprint, ssh_server::fingerprint(&second));
 
     // Deleting the vault item deletes its public half with it.
-    core.vault.delete(&core.ctx, id).await.unwrap();
-    assert!(core.keys.list(&core.ctx).await.unwrap().is_empty());
+    core.vault.delete(&core.ctx(), id).await.unwrap();
+    assert!(core.keys.list(&core.ctx()).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -350,7 +350,7 @@ async fn a_key_with_a_passphrase_is_read_with_the_passphrase_a_session_saves() {
     let id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::PrivateKey,
             "locked key",
             ssh_server::private_key_text(&key, Some("open sesame")),
@@ -358,14 +358,14 @@ async fn a_key_with_a_passphrase_is_read_with_the_passphrase_a_session_saves() {
         .await
         .unwrap()
         .id;
-    let err = core.keys.read_public_key(&core.ctx, id).await.unwrap_err();
+    let err = core.keys.read_public_key(&core.ctx(), id).await.unwrap_err();
     assert!(err.to_string().contains("has a passphrase"), "{err}");
     assert!(!err.to_string().contains("open sesame"));
 
     let passphrase = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Passphrase,
             "locked key passphrase",
             SecretString::new("open sesame"),
@@ -378,10 +378,10 @@ async fn a_key_with_a_passphrase_is_read_with_the_passphrase_a_session_saves() {
         passphrase_id: Some(passphrase),
     };
     core.sessions
-        .create(&core.ctx, input("web01", 22, auth, Environment::Lab))
+        .create(&core.ctx(), input("web01", 22, auth, Environment::Lab))
         .await
         .unwrap();
-    let read = core.keys.read_public_key(&core.ctx, id).await.unwrap();
+    let read = core.keys.read_public_key(&core.ctx(), id).await.unwrap();
     assert_eq!(read.public.unwrap().fingerprint, ssh_server::fingerprint(&key));
 }
 
@@ -396,15 +396,19 @@ async fn attaching_a_key_makes_sessions_log_in_with_it_and_is_audited_per_sessio
         let auth = SessionAuth::Password { password_id: None };
         let s = core
             .sessions
-            .create(&core.ctx, input(name, 22, auth, Environment::Lab))
+            .create(&core.ctx(), input(name, 22, auth, Environment::Lab))
             .await
             .unwrap();
         ids.push(s.id);
     }
-    let changed = core.keys.attach(&core.ctx, key.id, &ids, &core.sessions).await.unwrap();
+    let changed = core
+        .keys
+        .attach(&core.ctx(), key.id, &ids, &core.sessions)
+        .await
+        .unwrap();
     assert_eq!(changed.len(), 2);
     for id in &ids {
-        let s = core.sessions.get(&core.ctx, *id).await.unwrap();
+        let s = core.sessions.get(&core.ctx(), *id).await.unwrap();
         assert_eq!(
             s.auth,
             SessionAuth::Key {
@@ -413,7 +417,7 @@ async fn attaching_a_key_makes_sessions_log_in_with_it_and_is_audited_per_sessio
             }
         );
     }
-    assert_eq!(core.keys.get(&core.ctx, key.id).await.unwrap().used_by, 2);
+    assert_eq!(core.keys.get(&core.ctx(), key.id).await.unwrap().used_by, 2);
     let entries = audit(&core).await;
     assert_eq!(
         entries
@@ -425,14 +429,14 @@ async fn attaching_a_key_makes_sessions_log_in_with_it_and_is_audited_per_sessio
     // Attaching again changes nothing.
     assert!(core
         .keys
-        .attach(&core.ctx, key.id, &ids, &core.sessions)
+        .attach(&core.ctx(), key.id, &ids, &core.sessions)
         .await
         .unwrap()
         .is_empty());
     let not_a_key = SecretId(Uuid::new_v4());
     assert!(core
         .keys
-        .attach(&core.ctx, not_a_key, &ids, &core.sessions)
+        .attach(&core.ctx(), not_a_key, &ids, &core.sessions)
         .await
         .is_err());
 }
@@ -450,7 +454,7 @@ async fn a_pushed_key_lands_once_with_the_right_permissions_and_then_logs_in() {
     let mut events = core.jobs.subscribe();
 
     // Through the bus: classified as a key push, Medium, with one confirm.
-    let preview = core.bus.preview(&core.ctx, &push(&line, &[session])).await.unwrap();
+    let preview = core.bus.preview(&core.ctx(), &push(&line, &[session])).await.unwrap();
     assert_eq!(preview.action, ActionKind::SshKeyPush);
     assert_eq!(preview.tier, Tier::Medium);
     let (job, tier) = run(&core, push(&line, &[session])).await;
@@ -480,7 +484,7 @@ async fn a_pushed_key_lands_once_with_the_right_permissions_and_then_logs_in() {
     // The job shows like a bulk run's, with the script each host ran.
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert!(results.run.unwrap().script.contains("authorized_keys"));
@@ -500,7 +504,7 @@ async fn a_pushed_key_lands_once_with_the_right_permissions_and_then_logs_in() {
 
     // The server now takes the key: the session logs in with it, without its password.
     core.keys
-        .attach(&core.ctx, key.id, &[session], &core.sessions)
+        .attach(&core.ctx(), key.id, &[session], &core.sessions)
         .await
         .unwrap();
     let (check, _) = run(
@@ -579,7 +583,7 @@ async fn pushing_to_many_hosts_reports_each_and_a_prod_host_raises_the_tier() {
     let key = generate(&core, "laptop key", KeyType::Ed25519).await;
     let line = key.public.unwrap().line;
 
-    let outcome = core.bus.submit(&core.ctx, push(&line, &[lab, prod])).await.unwrap();
+    let outcome = core.bus.submit(&core.ctx(), push(&line, &[lab, prod])).await.unwrap();
     let SubmitOutcome::NeedsApproval { request } = outcome else {
         panic!("a Prod host needs approval");
     };
@@ -621,7 +625,7 @@ async fn a_host_that_refuses_the_write_fails_with_its_message() {
     assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
     let out = core
         .bulk
-        .host_output(&core.ctx, job, &session.to_string())
+        .host_output(&core.ctx(), job, &session.to_string())
         .await
         .unwrap();
     assert_eq!(out.exit_code, Some(1));
@@ -633,7 +637,7 @@ async fn a_push_with_something_that_is_not_a_public_key_is_refused_before_anythi
     let core = core().await;
     let session = core
         .sessions
-        .create(&core.ctx, input("web01", 22, SessionAuth::Agent, Environment::Lab))
+        .create(&core.ctx(), input("web01", 22, SessionAuth::Agent, Environment::Lab))
         .await
         .unwrap()
         .id;
@@ -643,7 +647,7 @@ async fn a_push_with_something_that_is_not_a_public_key_is_refused_before_anythi
         format!("-----BEGIN {private_kind}-----"),
         String::new(),
     ] {
-        let err = core.bus.submit(&core.ctx, push(&bad, &[session])).await.unwrap_err();
+        let err = core.bus.submit(&core.ctx(), push(&bad, &[session])).await.unwrap_err();
         assert_eq!(err.code(), "invalid_input", "{bad}");
     }
     assert!(core.jobs.open_jobs() == 0);
@@ -697,7 +701,7 @@ async fn a_key_can_be_pushed_with_an_expiry_and_the_networks_it_may_log_in_from(
     // Pushed again with options, a key already there is not changed, and the host says why.
     let (again, _) = run(&core, push_with(&line, &[session], options)).await;
     assert_eq!(finished(&mut events, again).await, JobStatus::Failed);
-    let targets = core.store.job_targets(&core.ctx, again).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), again).await.unwrap();
     assert_eq!(targets[0].exit_code, Some(3));
     assert!(
         targets[0]
@@ -748,12 +752,12 @@ async fn options_that_could_break_out_of_the_line_or_make_no_sense_are_refused()
     ] {
         let err = core
             .bus
-            .submit(&core.ctx, push_with(&line, &[session], options.clone()))
+            .submit(&core.ctx(), push_with(&line, &[session], options.clone()))
             .await
             .unwrap_err();
         assert_eq!(err.code(), "invalid_input", "{options:?}");
     }
-    assert!(core.store.recent_jobs(&core.ctx, 5).await.unwrap().is_empty());
+    assert!(core.store.recent_jobs(&core.ctx(), 5).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -781,7 +785,7 @@ async fn a_key_is_removed_from_hosts_keeping_the_other_keys_and_audited() {
 
     let preview = core
         .bus
-        .preview(&core.ctx, &remove(&public.line, &sessions))
+        .preview(&core.ctx(), &remove(&public.line, &sessions))
         .await
         .unwrap();
     assert_eq!((preview.action, preview.tier), (ActionKind::SshKeyRemove, Tier::Medium));

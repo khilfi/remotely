@@ -16,7 +16,7 @@ type IpcResult<T> = Result<T, IpcError>;
 #[tauri::command]
 pub async fn terminal_rules_list(state: State<'_, AppState>) -> IpcResult<Vec<TerminalRule>> {
     let core = &state.core;
-    Ok(core.terminal_rules.list(&core.ctx).await?)
+    Ok(core.terminal_rules.list(&core.ctx()).await?)
 }
 
 /// The editor's live check of a pattern. Changes nothing.
@@ -29,7 +29,7 @@ pub fn terminal_rule_validate(state: State<'_, AppState>, pattern: String, case_
 #[tauri::command]
 pub async fn terminal_rule_add(state: State<'_, AppState>, input: TerminalRuleInput) -> IpcResult<TerminalRule> {
     let core = &state.core;
-    Ok(core.terminal_rules.create(&core.ctx, input).await?)
+    Ok(core.terminal_rules.create(&core.ctx(), input).await?)
 }
 
 /// Audited with what changed.
@@ -40,21 +40,21 @@ pub async fn terminal_rule_update(
     input: TerminalRuleInput,
 ) -> IpcResult<TerminalRule> {
     let core = &state.core;
-    Ok(core.terminal_rules.update(&core.ctx, id, input).await?)
+    Ok(core.terminal_rules.update(&core.ctx(), id, input).await?)
 }
 
 /// Audited.
 #[tauri::command]
 pub async fn terminal_rule_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.terminal_rules.delete(&core.ctx, id).await?)
+    Ok(core.terminal_rules.delete(&core.ctx(), id).await?)
 }
 
 /// The user's rules in a new order (all of them). Audited.
 #[tauri::command]
 pub async fn terminal_rules_reorder(state: State<'_, AppState>, ids: Vec<Uuid>) -> IpcResult<Vec<TerminalRule>> {
     let core = &state.core;
-    Ok(core.terminal_rules.reorder(&core.ctx, &ids).await?)
+    Ok(core.terminal_rules.reorder(&core.ctx(), &ids).await?)
 }
 
 /// Turns a built-in rule, or its alert, on or off. Audited.
@@ -66,5 +66,8 @@ pub async fn terminal_rule_set_builtin(
     alert: bool,
 ) -> IpcResult<TerminalRule> {
     let core = &state.core;
-    Ok(core.terminal_rules.set_builtin(&core.ctx, &key, enabled, alert).await?)
+    Ok(core
+        .terminal_rules
+        .set_builtin(&core.ctx(), &key, enabled, alert)
+        .await?)
 }

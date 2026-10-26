@@ -111,7 +111,7 @@ async fn a_password_typed_with_multiexec_is_never_logged_or_kept() {
     let login_id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "login",
             SecretString::new(login.as_str()),
@@ -132,11 +132,11 @@ async fn a_password_typed_with_multiexec_is_never_logged_or_kept() {
             key_type: "ssh-ed25519".into(),
             fingerprint: server.host_key_fingerprint(),
         };
-        core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+        core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
         let session = core
             .sessions
             .create(
-                &core.ctx,
+                &core.ctx(),
                 SessionInput {
                     name: name.into(),
                     folder_id: None,
@@ -162,7 +162,7 @@ async fn a_password_typed_with_multiexec_is_never_logged_or_kept() {
             .id;
         let mut handle = core
             .terminals
-            .open(&core.ctx, session, PtySize { cols: 80, rows: 24 })
+            .open(&core.ctx(), session, PtySize { cols: 80, rows: 24 })
             .await
             .unwrap();
         timeout(WAIT, async {

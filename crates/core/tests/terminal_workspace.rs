@@ -82,12 +82,12 @@ async fn trust_server(core: &Core, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 async fn secret(core: &Core, label: &str, value: &str) -> SecretId {
     core.vault
-        .add(&core.ctx, SecretKind::Password, label, SecretString::new(value))
+        .add(&core.ctx(), SecretKind::Password, label, SecretString::new(value))
         .await
         .unwrap()
         .id
@@ -114,7 +114,7 @@ fn session_input(name: &str, host: &str, port: u16, auth: SessionAuth) -> Sessio
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 300).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 300).await.unwrap()
 }
 
 /// Nothing secret in the audit log, ever.
@@ -125,7 +125,7 @@ async fn assert_audit_clean(core: &Core, secrets: &[&str]) {
             assert!(!text.contains(secret), "{text}");
         }
     }
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 /// A pane under test: what it printed so far, and its events.
@@ -249,7 +249,7 @@ async fn a_quick_connection_that_is_not_saved_keeps_only_a_history_entry() {
 
     let opened = core
         .terminals
-        .quick_connect(&core.ctx, quick(&server, Some(&password), None), SIZE)
+        .quick_connect(&core.ctx(), quick(&server, Some(&password), None), SIZE)
         .await
         .unwrap();
     assert!(opened.session.is_none());
@@ -263,18 +263,18 @@ async fn a_quick_connection_that_is_not_saved_keeps_only_a_history_entry() {
     assert!(!pane.text().contains(&password));
 
     // A split opens a second pane like it, without asking for the password again.
-    let mut second = Pane::new(core.terminals.open_like(&core.ctx, pane.id, SIZE).await.unwrap());
+    let mut second = Pane::new(core.terminals.open_like(&core.ctx(), pane.id, SIZE).await.unwrap());
     second.connected().await;
     assert_eq!(server.log().iter().filter(|l| *l == "password alice ok").count(), 2);
 
     // Nothing was saved as a session; the history has where it went and how, never the password.
     assert!(core
         .sessions
-        .list(&core.ctx, &SessionFilter::default())
+        .list(&core.ctx(), &SessionFilter::default())
         .await
         .unwrap()
         .is_empty());
-    let history = core.terminals.quick_connect_history(&core.ctx).await.unwrap();
+    let history = core.terminals.quick_connect_history(&core.ctx()).await.unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].host, "127.0.0.1");
     assert_eq!(history[0].port, server.port());
@@ -309,15 +309,18 @@ async fn a_quick_connection_that_is_not_saved_keeps_only_a_history_entry() {
     // The same target again moves to the top instead of adding a row; forgetting is audited.
     let again = core
         .terminals
-        .quick_connect(&core.ctx, quick(&server, Some(&password), None), SIZE)
+        .quick_connect(&core.ctx(), quick(&server, Some(&password), None), SIZE)
         .await
         .unwrap();
     core.terminals.close(again.handle.id).await;
-    assert_eq!(core.terminals.quick_connect_history(&core.ctx).await.unwrap().len(), 1);
-    core.terminals.forget_quick_connects(&core.ctx, None).await.unwrap();
+    assert_eq!(
+        core.terminals.quick_connect_history(&core.ctx()).await.unwrap().len(),
+        1
+    );
+    core.terminals.forget_quick_connects(&core.ctx(), None).await.unwrap();
     assert!(core
         .terminals
-        .quick_connect_history(&core.ctx)
+        .quick_connect_history(&core.ctx())
         .await
         .unwrap()
         .is_empty());
@@ -335,7 +338,7 @@ async fn a_wrong_typed_password_is_forgotten_so_the_next_try_asks_in_the_termina
     trust_server(&core, &server).await;
     let opened = core
         .terminals
-        .quick_connect(&core.ctx, quick(&server, Some("not-it"), None), SIZE)
+        .quick_connect(&core.ctx(), quick(&server, Some("not-it"), None), SIZE)
         .await
         .unwrap();
     let mut pane = Pane::new(opened.handle);
@@ -362,7 +365,7 @@ async fn a_quick_connection_saved_as_a_session_goes_to_its_folder_and_recent_ses
     trust_server(&core, &server).await;
     let folder = core
         .sessions
-        .create_folder(&core.ctx, "Customer A", None)
+        .create_folder(&core.ctx(), "Customer A", None)
         .await
         .unwrap();
 
@@ -374,7 +377,7 @@ async fn a_quick_connection_saved_as_a_session_goes_to_its_folder_and_recent_ses
     };
     let opened = core
         .terminals
-        .quick_connect(&core.ctx, quick(&server, Some(&password), Some(save)), SIZE)
+        .quick_connect(&core.ctx(), quick(&server, Some(&password), Some(save)), SIZE)
         .await
         .unwrap();
     let session = opened.session.clone().unwrap();
@@ -386,18 +389,18 @@ async fn a_quick_connection_saved_as_a_session_goes_to_its_folder_and_recent_ses
     assert_eq!(session.username.as_deref(), Some("alice"));
     // The typed password was used, never saved: the session asks for it next time.
     assert_eq!(session.auth, SessionAuth::Password { password_id: None });
-    assert!(core.vault.list(&core.ctx).await.unwrap().is_empty());
+    assert!(core.vault.list(&core.ctx()).await.unwrap().is_empty());
 
     let mut pane = Pane::new(opened.handle);
     pane.connected().await;
-    let recent = core.sessions.recent(&core.ctx, 10).await.unwrap();
+    let recent = core.sessions.recent(&core.ctx(), 10).await.unwrap();
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].id, session.id);
     assert!(recent[0].last_opened_at.is_some());
     // Saved connections are in Recent sessions, not the quick-connect history.
     assert!(core
         .terminals
-        .quick_connect_history(&core.ctx)
+        .quick_connect_history(&core.ctx())
         .await
         .unwrap()
         .is_empty());
@@ -467,14 +470,14 @@ async fn quick_connect_checks_what_was_typed_before_opening_anything() {
     ];
     for request in bad {
         assert!(
-            core.terminals.quick_connect(&core.ctx, request, SIZE).await.is_err(),
+            core.terminals.quick_connect(&core.ctx(), request, SIZE).await.is_err(),
             "accepted"
         );
     }
     assert_eq!(core.terminals.open_count(), 0);
     assert!(core
         .terminals
-        .quick_connect_history(&core.ctx)
+        .quick_connect_history(&core.ctx())
         .await
         .unwrap()
         .is_empty());
@@ -497,7 +500,7 @@ async fn the_address_reached_and_the_servers_own_name_replace_dns_and_stay_on_th
     let session = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input(
                 "lab box",
                 "127.0.0.1",
@@ -508,7 +511,7 @@ async fn the_address_reached_and_the_servers_own_name_replace_dns_and_stay_on_th
         .await
         .unwrap();
 
-    let mut pane = Pane::new(core.terminals.open(&core.ctx, session.id, SIZE).await.unwrap());
+    let mut pane = Pane::new(core.terminals.open(&core.ctx(), session.id, SIZE).await.unwrap());
     let dns = pane.facts(|f| f.hostname.is_some()).await;
     if dns.hostname_from == Some(FactSource::Dns) {
         assert_eq!(dns.hostname.as_deref(), Some("lab-box.test"));
@@ -526,7 +529,7 @@ async fn the_address_reached_and_the_servers_own_name_replace_dns_and_stay_on_th
     assert_eq!(server.connections(), 1);
     assert!(log.contains(&"exec hostname".to_owned()), "{log:?}");
 
-    let saved = core.sessions.get(&core.ctx, session.id).await.unwrap();
+    let saved = core.sessions.get(&core.ctx(), session.id).await.unwrap();
     assert_eq!(saved.last_ip.as_deref(), Some("127.0.0.1"));
     assert_eq!(saved.last_hostname.as_deref(), Some("web01"));
     assert!(saved.last_seen_at.is_some());
@@ -550,7 +553,7 @@ async fn when_the_server_does_not_say_its_name_dns_fills_in() {
     let session = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input(
                 "switch",
                 "127.0.0.1",
@@ -560,7 +563,7 @@ async fn when_the_server_does_not_say_its_name_dns_fills_in() {
         )
         .await
         .unwrap();
-    let mut pane = Pane::new(core.terminals.open(&core.ctx, session.id, SIZE).await.unwrap());
+    let mut pane = Pane::new(core.terminals.open(&core.ctx(), session.id, SIZE).await.unwrap());
     // The address reached comes before the connected status, so watch the facts alone.
     let facts = pane
         .facts(|f| f.ip_from == Some(FactSource::Host) && f.hostname.is_some())
@@ -569,13 +572,13 @@ async fn when_the_server_does_not_say_its_name_dns_fills_in() {
     assert_eq!(facts.hostname_from, Some(FactSource::Dns));
     // Wait for the `hostname` answer to be handled, then check what was kept.
     for _ in 0..100 {
-        let saved = core.sessions.get(&core.ctx, session.id).await.unwrap();
+        let saved = core.sessions.get(&core.ctx(), session.id).await.unwrap();
         if saved.last_hostname.is_some() && saved.last_ip.is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    let saved = core.sessions.get(&core.ctx, session.id).await.unwrap();
+    let saved = core.sessions.get(&core.ctx(), session.id).await.unwrap();
     assert_eq!(saved.last_hostname.as_deref(), Some("switch01.test"));
     assert_eq!(saved.last_ip.as_deref(), Some("127.0.0.1"));
     core.terminals.close(pane.id).await;
@@ -595,22 +598,22 @@ async fn before_connecting_dns_gives_a_name_its_address_and_an_address_its_name(
         .await;
     let by_name = core
         .sessions
-        .create(&core.ctx, session_input("web", "web01.test", 22, SessionAuth::Agent))
+        .create(&core.ctx(), session_input("web", "web01.test", 22, SessionAuth::Agent))
         .await
         .unwrap();
     let by_ip = core
         .sessions
-        .create(&core.ctx, session_input("db", "198.51.100.7", 22, SessionAuth::Agent))
+        .create(&core.ctx(), session_input("db", "198.51.100.7", 22, SessionAuth::Agent))
         .await
         .unwrap();
 
-    let mut web = Pane::new(core.terminals.open(&core.ctx, by_name.id, SIZE).await.unwrap());
+    let mut web = Pane::new(core.terminals.open(&core.ctx(), by_name.id, SIZE).await.unwrap());
     let facts = web.facts(|f| f.ip.is_some()).await;
     assert_eq!(facts.hostname.as_deref(), Some("web01.test"));
     assert_eq!(facts.ip.as_deref(), Some("192.0.2.10"));
     assert_eq!(facts.ip_from, Some(FactSource::Dns));
 
-    let mut db = Pane::new(core.terminals.open(&core.ctx, by_ip.id, SIZE).await.unwrap());
+    let mut db = Pane::new(core.terminals.open(&core.ctx(), by_ip.id, SIZE).await.unwrap());
     let facts = db.facts(|f| f.hostname.is_some()).await;
     assert_eq!(facts.hostname.as_deref(), Some("db01.example.com"));
     assert_eq!(facts.title().as_deref(), Some("db01.example.com · 198.51.100.7"));
@@ -622,7 +625,7 @@ async fn before_connecting_dns_gives_a_name_its_address_and_an_address_its_name(
     for _ in 0..100 {
         if core
             .sessions
-            .get(&core.ctx, by_name.id)
+            .get(&core.ctx(), by_name.id)
             .await
             .unwrap()
             .last_hostname
@@ -632,7 +635,7 @@ async fn before_connecting_dns_gives_a_name_its_address_and_an_address_its_name(
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let saved = core.sessions.get(&core.ctx, by_name.id).await.unwrap();
+    let saved = core.sessions.get(&core.ctx(), by_name.id).await.unwrap();
     assert_eq!(saved.last_hostname.as_deref(), Some("web01.test"));
     assert_eq!(saved.last_ip, None);
     core.terminals.close_all().await;
@@ -645,31 +648,31 @@ async fn the_tree_groups_the_library_by_folder_tag_and_label() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let customer = core
         .sessions
-        .create_folder(&core.ctx, "Customer A", None)
+        .create_folder(&core.ctx(), "Customer A", None)
         .await
         .unwrap();
     let site = core
         .sessions
-        .create_folder(&core.ctx, "Site 1", Some(customer.id))
+        .create_folder(&core.ctx(), "Site 1", Some(customer.id))
         .await
         .unwrap();
     let mut web = session_input("web01", "web01.example.com", 22, SessionAuth::Agent);
     web.folder_id = Some(site.id);
     web.environment = Environment::Prod;
     web.tags = vec!["web".into()];
-    let web = core.sessions.create(&core.ctx, web).await.unwrap();
+    let web = core.sessions.create(&core.ctx(), web).await.unwrap();
     let mut db = session_input("db01", "db01.example.com", 22, SessionAuth::Agent);
     db.folder_id = Some(customer.id);
-    let db = core.sessions.create(&core.ctx, db).await.unwrap();
+    let db = core.sessions.create(&core.ctx(), db).await.unwrap();
     let jump = core
         .sessions
-        .create(&core.ctx, session_input("jump", "192.0.2.1", 22, SessionAuth::Agent))
+        .create(&core.ctx(), session_input("jump", "192.0.2.1", 22, SessionAuth::Agent))
         .await
         .unwrap();
 
     let tree = core
         .sessions
-        .tree(&core.ctx, TreeGrouping::Folder, &SessionFilter::default())
+        .tree(&core.ctx(), TreeGrouping::Folder, &SessionFilter::default())
         .await
         .unwrap();
     assert_eq!(tree.nodes.len(), 1);
@@ -682,7 +685,7 @@ async fn the_tree_groups_the_library_by_folder_tag_and_label() {
 
     let tags = core
         .sessions
-        .tree(&core.ctx, TreeGrouping::Tag, &SessionFilter::default())
+        .tree(&core.ctx(), TreeGrouping::Tag, &SessionFilter::default())
         .await
         .unwrap();
     assert_eq!(tags.nodes[0].name, "web");
@@ -692,7 +695,7 @@ async fn the_tree_groups_the_library_by_folder_tag_and_label() {
 
     let labels = core
         .sessions
-        .tree(&core.ctx, TreeGrouping::Label, &SessionFilter::default())
+        .tree(&core.ctx(), TreeGrouping::Label, &SessionFilter::default())
         .await
         .unwrap();
     let keys: Vec<&str> = labels.nodes.iter().map(|n| n.key.as_str()).collect();
@@ -702,7 +705,7 @@ async fn the_tree_groups_the_library_by_folder_tag_and_label() {
     let found = core
         .sessions
         .tree(
-            &core.ctx,
+            &core.ctx(),
             TreeGrouping::Folder,
             &SessionFilter {
                 text: "WEB0".into(),
@@ -744,7 +747,7 @@ async fn reachability_checks_the_watched_sessions_once_per_host_and_port() {
     let web = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("web01", "web01.example.com", 22, SessionAuth::Agent),
         )
         .await
@@ -752,11 +755,11 @@ async fn reachability_checks_the_watched_sessions_once_per_host_and_port() {
     // A second session to the same host and port, as another user.
     let mut again = session_input("web01 as bob", "WEB01.example.com", 22, SessionAuth::Agent);
     again.username = Some("bob".into());
-    let again = core.sessions.create(&core.ctx, again).await.unwrap();
+    let again = core.sessions.create(&core.ctx(), again).await.unwrap();
     let down = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("db01", "db01.example.com", 22, SessionAuth::Agent),
         )
         .await
@@ -766,7 +769,7 @@ async fn reachability_checks_the_watched_sessions_once_per_host_and_port() {
         let s = core
             .sessions
             .create(
-                &core.ctx,
+                &core.ctx(),
                 session_input(
                     &format!("host{n}"),
                     &format!("host{n}.example.com"),
@@ -825,17 +828,17 @@ async fn sessions_behind_a_jump_host_show_the_first_hops_reachability() {
     let bastion = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("bastion", "bastion.example.com", 22, SessionAuth::Agent),
         )
         .await
         .unwrap();
     let mut inner = session_input("inner", "inner.test", 22, SessionAuth::Agent);
     inner.jump_session_id = Some(bastion.id);
-    let inner = core.sessions.create(&core.ctx, inner).await.unwrap();
+    let inner = core.sessions.create(&core.ctx(), inner).await.unwrap();
     let mut db = session_input("db01", "db01.test", 22, SessionAuth::Agent);
     db.jump_session_id = Some(inner.id);
-    let db = core.sessions.create(&core.ctx, db).await.unwrap();
+    let db = core.sessions.create(&core.ctx(), db).await.unwrap();
 
     core.reachability.set_watched([inner.id, db.id]);
     let changed = core.reachability.check_once().await.unwrap();
@@ -880,7 +883,7 @@ async fn reachability_follows_the_setting_and_skips_large_libraries_on_auto() {
         let s = core
             .sessions
             .create(
-                &core.ctx,
+                &core.ctx(),
                 session_input(&format!("web{n}"), "web01.example.com", 22, SessionAuth::Agent),
             )
             .await
@@ -924,22 +927,23 @@ async fn hosts_with_an_open_connection_are_not_probed() {
         .build()
         .await;
     core.terminals.set_tuning(tuning());
+    let ctx = core.ctx();
     let create = |name: &str, host: &str| {
         core.sessions
-            .create(&core.ctx, session_input(name, host, 22, SessionAuth::Agent))
+            .create(&ctx, session_input(name, host, 22, SessionAuth::Agent))
     };
     let web = create("web01", "web01.example.com").await.unwrap();
     let again = create("web01 again", "WEB01.example.com").await.unwrap();
     let bastion = create("bastion", "bastion.example.com").await.unwrap();
     let mut inner = session_input("inner", "inner.test", 22, SessionAuth::Agent);
     inner.jump_session_id = Some(bastion.id);
-    let inner = core.sessions.create(&core.ctx, inner).await.unwrap();
+    let inner = core.sessions.create(&core.ctx(), inner).await.unwrap();
     let other = create("other", "other.example.com").await.unwrap();
 
     // A terminal to web01, and the dashboard watching inner (its kept connection goes through bastion).
-    let mut pane = Pane::new(core.terminals.open(&core.ctx, web.id, SIZE).await.unwrap());
+    let mut pane = Pane::new(core.terminals.open(&core.ctx(), web.id, SIZE).await.unwrap());
     pane.connected().await;
-    core.metrics.set_watched(&core.ctx, inner.id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), inner.id, true).await.unwrap();
     core.metrics.collect_once().await;
     timeout(WAIT, async {
         while !core.terminals.connected_sessions().contains(&web.id) {
@@ -1034,7 +1038,7 @@ async fn a_kept_containers_connection_counts_as_open_until_released() {
     let web = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("web", "web.example.com", 22, SessionAuth::Agent),
         )
         .await
@@ -1042,7 +1046,7 @@ async fn a_kept_containers_connection_counts_as_open_until_released() {
     core.containers
         .marks()
         .set(
-            &core.ctx,
+            &core.ctx(),
             web.id,
             &[MarkInput {
                 engine: EngineKind::Docker,
@@ -1053,7 +1057,7 @@ async fn a_kept_containers_connection_counts_as_open_until_released() {
         .unwrap();
     let host = ContainerHost::Session { session_id: web.id };
     core.containers
-        .containers(&core.ctx, host, EngineKind::Docker)
+        .containers(&core.ctx(), host, EngineKind::Docker)
         .await
         .unwrap();
 
@@ -1087,7 +1091,7 @@ async fn a_host_that_is_down_is_checked_less_often() {
     let web = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("web01", "web01.example.com", 22, SessionAuth::Agent),
         )
         .await
@@ -1095,7 +1099,7 @@ async fn a_host_that_is_down_is_checked_less_often() {
     let db = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("db01", "db01.example.com", 22, SessionAuth::Agent),
         )
         .await
@@ -1144,13 +1148,13 @@ async fn a_real_probe_tells_an_open_port_from_one_nobody_listens_on() {
     });
     let up = core
         .sessions
-        .create(&core.ctx, session_input("up", "127.0.0.1", open, SessionAuth::Agent))
+        .create(&core.ctx(), session_input("up", "127.0.0.1", open, SessionAuth::Agent))
         .await
         .unwrap();
     let down = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("down", "127.0.0.1", closed, SessionAuth::Agent),
         )
         .await
@@ -1171,7 +1175,7 @@ async fn two_panes(core: &Core, server: &TestSshServer, password: &str) -> (Pane
     let session = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input(
                 "web01",
                 "127.0.0.1",
@@ -1181,12 +1185,12 @@ async fn two_panes(core: &Core, server: &TestSshServer, password: &str) -> (Pane
         )
         .await
         .unwrap();
-    let mut saved = Pane::new(core.terminals.open(&core.ctx, session.id, SIZE).await.unwrap());
+    let mut saved = Pane::new(core.terminals.open(&core.ctx(), session.id, SIZE).await.unwrap());
     saved.connected().await;
     saved.expect_output("$ ").await;
     let opened = core
         .terminals
-        .quick_connect(&core.ctx, quick(server, Some(password), None), SIZE)
+        .quick_connect(&core.ctx(), quick(server, Some(password), None), SIZE)
         .await
         .unwrap();
     let mut unsaved = Pane::new(opened.handle);
@@ -1222,14 +1226,14 @@ async fn several_terminals_save_to_one_file_or_one_each_with_secrets_scrubbed() 
     assert!(!copied[0].text.contains(&password));
     assert!(copied[0].text.contains("$ echo [redacted]\n[redacted]\n"));
     assert_eq!(copied[1].text, items[1].text);
-    core.terminals.record_printed(&core.ctx, &copied).await.unwrap();
+    core.terminals.record_printed(&core.ctx(), &copied).await.unwrap();
 
     // One combined file, a header per terminal.
     let folder = common::temp_folder("ss11");
     let combined = folder.join("both.txt");
     let report = core
         .terminals
-        .save_output(&core.ctx, items.clone(), SaveLayout::OneFile, &combined)
+        .save_output(&core.ctx(), items.clone(), SaveLayout::OneFile, &combined)
         .await
         .unwrap();
     assert_eq!(report.terminals, 2);
@@ -1255,7 +1259,7 @@ async fn several_terminals_save_to_one_file_or_one_each_with_secrets_scrubbed() 
     std::fs::create_dir_all(&each).unwrap();
     let report = core
         .terminals
-        .save_output(&core.ctx, items.clone(), SaveLayout::FilePerTerminal, &each)
+        .save_output(&core.ctx(), items.clone(), SaveLayout::FilePerTerminal, &each)
         .await
         .unwrap();
     assert_eq!(report.files.len(), 2);
@@ -1272,7 +1276,7 @@ async fn several_terminals_save_to_one_file_or_one_each_with_secrets_scrubbed() 
     // A single terminal's file holds just its text.
     let single = folder.join("web01.txt");
     core.terminals
-        .save_output(&core.ctx, items[..1].to_vec(), SaveLayout::OneFile, &single)
+        .save_output(&core.ctx(), items[..1].to_vec(), SaveLayout::OneFile, &single)
         .await
         .unwrap();
     assert!(std::fs::read_to_string(&single)
@@ -1317,10 +1321,10 @@ async fn a_session_log_stamps_each_line_and_is_audited_with_its_path() {
 
     let folder = common::temp_folder("ss11-log");
     let path = folder.join("web01.log");
-    core.terminals.start_log(&core.ctx, pane.id, &path).await.unwrap();
+    core.terminals.start_log(&core.ctx(), pane.id, &path).await.unwrap();
     assert_eq!(core.terminals.log_path(pane.id), Some(path.clone()));
     assert!(
-        core.terminals.start_log(&core.ctx, pane.id, &path).await.is_err(),
+        core.terminals.start_log(&core.ctx(), pane.id, &path).await.is_err(),
         "already logging"
     );
     pane.type_text(&core, "echo logged line\r").await;
@@ -1371,18 +1375,18 @@ async fn locking_the_vault_forgets_a_typed_login_password_but_keeps_the_open_she
     trust_server(&core, &server).await;
     let opened = core
         .terminals
-        .quick_connect(&core.ctx, quick(&server, Some(&password), None), SIZE)
+        .quick_connect(&core.ctx(), quick(&server, Some(&password), None), SIZE)
         .await
         .unwrap();
     let mut pane = Pane::new(opened.handle);
     pane.connected().await;
 
     // SS-04: the vault locks; the shell stays open, but a new login asks for the password again.
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
     pane.type_text(&core, "whoami\r").await;
     pane.expect_output("alice\r\n$ ").await;
-    let mut second = Pane::new(core.terminals.open_like(&core.ctx, pane.id, SIZE).await.unwrap());
+    let mut second = Pane::new(core.terminals.open_like(&core.ctx(), pane.id, SIZE).await.unwrap());
     second.expect_output("alice's password: ").await;
     assert_eq!(server.log().iter().filter(|l| *l == "password alice ok").count(), 1);
     core.terminals.close(second.id).await;

@@ -16,8 +16,8 @@
 //! prune that left a lot of free space compacts the file while no job runs. The history stays on this PC: FD-07
 //! exports never carry it. Every row carries the workspace and the user.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -27,7 +27,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{MetricPoint, MetricSource, RecordedRound, RoundObserver};
 use crate::command_bus::human_size;
-use crate::domain::{now_rfc3339, Context, THIS_PC_KEY};
+use crate::domain::{now_rfc3339, Context, WorkspaceId, THIS_PC_KEY};
 use crate::error::Result;
 use crate::jobs::JobRunner;
 use crate::locks;
@@ -511,8 +511,11 @@ pub fn now_ms() -> i64 {
 /// ([`RoundObserver`]); the shell starts the prune's schedule with [`MetricsHistory::run`].
 pub struct MetricsHistory {
     store: Store,
-    ctx: Context,
-    rollup: Mutex<Rollup>,
+    /// FD-02: the workspace shown ([`MetricsHistory::switch_to`]): its settings and size.
+    ctx: RwLock<Context>,
+    /// FD-02: each workspace's open minutes, written under that workspace. The shown workspace gets its VMs, its
+    /// watched hosts and this PC; another workspace its running VMs' host side, so VM-14's idle check works there.
+    rollups: Mutex<HashMap<WorkspaceId, Rollup>>,
     /// One write at a time, in minute order.
     writing: tokio::sync::Mutex<()>,
     /// The job runner, for compacting the file while no job runs.
@@ -526,8 +529,8 @@ impl MetricsHistory {
     pub fn new(store: Store, ctx: Context) -> Self {
         Self {
             store,
-            ctx,
-            rollup: Mutex::new(Rollup::default()),
+            ctx: RwLock::new(ctx),
+            rollups: Mutex::new(HashMap::new()),
             writing: tokio::sync::Mutex::new(()),
             jobs: OnceLock::new(),
             pruning: tokio::sync::Mutex::new(()),
@@ -535,14 +538,34 @@ impl MetricsHistory {
         }
     }
 
+    fn ctx(&self) -> Context {
+        *locks::read(&self.ctx)
+    }
+
+    /// FD-02: another workspace is shown. Each round says whose readings it has, so nothing open moves: the old
+    /// workspace's minutes are written to it as they end.
+    pub async fn switch_to(&self, ctx: Context) -> Result<()> {
+        *locks::write(&self.ctx) = ctx;
+        Ok(())
+    }
+
     /// The job runner, once it exists: a prune compacts the file only while no job runs.
     pub fn set_jobs(&self, jobs: Arc<JobRunner>) {
         let _ = self.jobs.set(jobs);
     }
 
-    /// Adds a round's readings to the open minutes: each VM's host side, each guest polled in it, this PC.
+    /// Adds a round's readings to the open minutes: each VM's host side, each guest polled in it, this PC. FD-02:
+    /// the shown workspace's in it; another workspace's running VMs in theirs.
     pub fn add_round(&self, round: &RecordedRound<'_>) {
-        let mut rollup = locks::lock(&self.rollup);
+        let mut rollups = locks::lock(&self.rollups);
+        for (workspace, sample) in round.host_elsewhere {
+            rollups.entry(*workspace).or_default().add(
+                HistorySource::Host,
+                &sample.target.key(),
+                &super::MetricsHub::point(round.t_ms, sample),
+            );
+        }
+        let rollup = rollups.entry(round.workspace).or_default();
         for sample in round.host.unwrap_or_default() {
             rollup.add(
                 HistorySource::Host,
@@ -566,28 +589,47 @@ impl MetricsHistory {
     pub async fn flush_due(&self, now_ms: i64) -> Result<usize> {
         let minute = now_ms.div_euclid(MINUTE_MS);
         // Nothing to write until a minute is over: no lock, no database.
-        let due = locks::lock(&self.rollup).first_minute().is_some_and(|m| m < minute);
+        let due = locks::lock(&self.rollups)
+            .values()
+            .any(|r| r.first_minute().is_some_and(|m| m < minute));
         if !due {
             return Ok(0);
         }
         let _one = self.writing.lock().await;
-        let rows = locks::lock(&self.rollup).take_before(minute);
+        let rows = Self::take(&mut locks::lock(&self.rollups), |r| r.take_before(minute));
         self.write(rows).await
     }
 
     /// Writes everything, the open minute too: the app is closing.
     pub async fn flush_all(&self) -> Result<usize> {
         let _one = self.writing.lock().await;
-        let rows = locks::lock(&self.rollup).take_all();
+        let rows = Self::take(&mut locks::lock(&self.rollups), Rollup::take_all);
         self.write(rows).await
     }
 
-    async fn write(&self, rows: Vec<MinuteRow>) -> Result<usize> {
-        if rows.is_empty() {
-            return Ok(0);
+    /// Each workspace's rows `take` gives, dropping the rollups left empty.
+    fn take(
+        rollups: &mut HashMap<WorkspaceId, Rollup>,
+        take: impl Fn(&mut Rollup) -> Vec<MinuteRow>,
+    ) -> Vec<(WorkspaceId, Vec<MinuteRow>)> {
+        let rows = rollups
+            .iter_mut()
+            .map(|(workspace, rollup)| (*workspace, take(rollup)))
+            .filter(|(_, rows)| !rows.is_empty())
+            .collect();
+        rollups.retain(|_, rollup| !rollup.is_empty());
+        rows
+    }
+
+    /// One transaction per workspace with rows (one in the usual case).
+    async fn write(&self, rows: Vec<(WorkspaceId, Vec<MinuteRow>)>) -> Result<usize> {
+        let user_id = self.ctx().user_id;
+        let mut count = 0;
+        for (workspace_id, rows) in rows {
+            let ctx = Context { workspace_id, user_id };
+            self.store.write_history(&ctx, &rows).await?;
+            count += rows.len();
         }
-        let count = rows.len();
-        self.store.write_history(&self.ctx, &rows).await?;
         Ok(count)
     }
 
@@ -623,7 +665,7 @@ impl MetricsHistory {
     pub async fn retention(&self) -> Result<HistoryRetention> {
         Ok(self
             .store
-            .get_setting::<HistoryRetention>(&self.ctx, HISTORY_RETENTION_KEY)
+            .get_setting::<HistoryRetention>(&self.ctx(), HISTORY_RETENTION_KEY)
             .await?
             .unwrap_or_default())
     }
@@ -631,7 +673,7 @@ impl MetricsHistory {
     pub async fn info(&self) -> Result<HistoryInfo> {
         Ok(HistoryInfo {
             retention: self.retention().await?,
-            size: self.store.history_size(&self.ctx).await?,
+            size: self.store.history_size(&self.ctx()).await?,
             last_prune: locks::lock(&self.last_prune).clone(),
         })
     }
@@ -643,7 +685,7 @@ impl MetricsHistory {
         let old = self.retention().await?;
         if old != retention {
             self.store
-                .put_setting(&self.ctx, HISTORY_RETENTION_KEY, &retention)
+                .put_setting(&self.ctx(), HISTORY_RETENTION_KEY, &retention)
                 .await?;
             let detail = format!(
                 "{} -> {}; kept on this PC only, pruned daily",
@@ -651,6 +693,7 @@ impl MetricsHistory {
                 retention.label()
             );
             self.audit(
+                &self.ctx(),
                 "setting_changed",
                 "Set how long the dashboard keeps its history",
                 &detail,
@@ -674,7 +717,23 @@ impl MetricsHistory {
         let before = cutoff
             .format(&time::format_description::well_known::Rfc3339)
             .unwrap_or_else(|_| cutoff.unix_timestamp().to_string());
-        let removed = self.store.prune_history(&self.ctx, before_minute, &before).await?;
+        // FD-02: the retention is this PC's, so every workspace's history is pruned, each audited in its own log.
+        let mut removed = HistoryPruned::default();
+        let mut pruned = Vec::new();
+        let ctx = self.ctx();
+        for workspace in self.store.list_workspaces(ctx.user_id).await? {
+            let ctx = Context {
+                workspace_id: workspace.id,
+                user_id: ctx.user_id,
+            };
+            let got = self.store.prune_history(&ctx, before_minute, &before).await?;
+            if got.removed_any() {
+                removed.minutes += got.minutes;
+                removed.series += got.series;
+                removed.alerts += got.alerts;
+                pruned.push((ctx, got));
+            }
+        }
         let mut compacted = false;
         if removed.removed_any() {
             if let Err(err) = self.store.checkpoint().await {
@@ -698,9 +757,20 @@ impl MetricsHistory {
             removed,
             compacted,
         };
+        for (ctx, got) in &pruned {
+            let theirs = HistoryPruneReport {
+                removed: *got,
+                ..report.clone()
+            };
+            self.audit(
+                ctx,
+                "history_pruned",
+                "Removed old dashboard history",
+                &describe(&theirs),
+            )
+            .await?;
+        }
         if removed.removed_any() {
-            self.audit("history_pruned", "Removed old dashboard history", &describe(&report))
-                .await?;
             tracing::info!(
                 minutes = removed.minutes,
                 series = removed.series,
@@ -731,10 +801,10 @@ impl MetricsHistory {
         }
     }
 
-    async fn audit(&self, event: &str, action: &str, detail: &str) -> Result<()> {
+    async fn audit(&self, ctx: &Context, event: &str, action: &str, detail: &str) -> Result<()> {
         self.store
             .append_audit(
-                &self.ctx,
+                ctx,
                 NewAuditEntry {
                     event,
                     action,

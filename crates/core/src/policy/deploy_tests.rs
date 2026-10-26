@@ -72,6 +72,7 @@ fn deploying_five_or_more_vms_is_high_without_a_safety_snapshot() {
                 ApprovalStep::ImpactPreview,
                 ApprovalStep::TypeTargetCount { expected: n as usize },
                 ApprovalStep::Reason,
+                ApprovalStep::ChangeId { required: false },
                 ApprovalStep::Countdown { seconds: 10 },
             ],
             "nothing to snapshot: the VMs don't exist yet"

@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::Context;
 use crate::error::Result;
 use crate::locks;
 use crate::policy;
@@ -127,11 +126,14 @@ pub enum Change {
     /// VM-14, VM-27: creating, editing, approving, pausing, resuming and deleting schedules, and the snapshot chain
     /// limits. (While the lock is on, no scheduled run starts either: the bus refuses its commands.)
     Schedules,
+    /// FD-02: creating, renaming, colouring, archiving and switching workspaces, and adding VMs to a workspace or
+    /// taking them out. (Switching closes the terminals open in the workspace, so it is refused too.)
+    Workspaces,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 21] = [
+    pub const ALL: [Change; 22] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -153,6 +155,7 @@ impl Change {
         Change::DashboardLayout,
         Change::Stacks,
         Change::Schedules,
+        Change::Workspaces,
     ];
 
     pub fn label(self) -> &'static str {
@@ -178,6 +181,7 @@ impl Change {
             Change::DashboardLayout => "Change the dashboard layout",
             Change::Stacks => "Edit stacks and their instances",
             Change::Schedules => "Edit, approve, pause or delete schedules",
+            Change::Workspaces => "Change or switch workspaces",
         }
     }
 }
@@ -207,14 +211,15 @@ impl ReadOnlyLock {
 /// The saved setting and the lock it sets (`Core.presentation`).
 pub struct PresentationMode {
     store: Store,
-    ctx: Context,
-    current: Mutex<Presentation>,
+    /// FD-02: the workspace shown, where changes are audited (the setting is this PC's).
+    current: crate::workspaces::Current,
+    mode: Mutex<Presentation>,
 }
 
 impl PresentationMode {
     /// Reads the saved setting and applies its lock. A value that can't be read starts presenting, locked.
-    pub async fn load(store: Store, ctx: Context) -> Self {
-        let current = match store.get_setting::<Presentation>(&ctx, PRESENTATION_KEY).await {
+    pub async fn load(store: Store, shown: crate::workspaces::Current) -> Self {
+        let current = match store.get_setting::<Presentation>(&shown.get(), PRESENTATION_KEY).await {
             Ok(saved) => saved.unwrap_or_default(),
             Err(err) => {
                 tracing::error!(error = %err, "the presentation mode setting can't be read; presenting, locked");
@@ -224,13 +229,13 @@ impl PresentationMode {
         store.read_only().set(current.locked());
         Self {
             store,
-            ctx,
-            current: Mutex::new(current),
+            current: shown,
+            mode: Mutex::new(current),
         }
     }
 
     pub fn get(&self) -> Presentation {
-        *locks::lock(&self.current)
+        *locks::lock(&self.mode)
     }
 
     /// Saves the new setting, applies its lock and audits each change. A lock that comes on applies before anything is
@@ -247,13 +252,15 @@ impl PresentationMode {
         if new.locked() {
             lock.set(true);
         }
-        self.store.put_setting(&self.ctx, PRESENTATION_KEY, &new).await?;
+        self.store
+            .put_setting(&self.current.get(), PRESENTATION_KEY, &new)
+            .await?;
         lock.set(new.locked());
-        *locks::lock(&self.current) = new;
+        *locks::lock(&self.mode) = new;
         for (action, detail) in changes {
             self.store
                 .append_audit(
-                    &self.ctx,
+                    &self.current.get(),
                     NewAuditEntry {
                         event: "setting_changed",
                         action,

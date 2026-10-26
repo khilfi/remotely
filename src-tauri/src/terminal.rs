@@ -86,7 +86,7 @@ pub async fn terminal_open(
     let core = &state.core;
     let handle = core
         .terminals
-        .open(&core.ctx, session_id, PtySize { cols, rows })
+        .open(&core.ctx(), session_id, PtySize { cols, rows })
         .await?;
     Ok(forward(Arc::clone(core), handle, on_output, on_event))
 }
@@ -113,7 +113,7 @@ pub async fn terminal_quick_connect(
     let core = &state.core;
     let QuickOpened { handle, session } = core
         .terminals
-        .quick_connect(&core.ctx, request, PtySize { cols, rows })
+        .quick_connect(&core.ctx(), request, PtySize { cols, rows })
         .await?;
     let id = forward(Arc::clone(core), handle, on_output, on_event);
     Ok(QuickConnected { id, session })
@@ -130,7 +130,10 @@ pub async fn terminal_open_like(
     on_event: Channel<TerminalEvent>,
 ) -> IpcResult<Uuid> {
     let core = &state.core;
-    let handle = core.terminals.open_like(&core.ctx, id, PtySize { cols, rows }).await?;
+    let handle = core
+        .terminals
+        .open_like(&core.ctx(), id, PtySize { cols, rows })
+        .await?;
     Ok(forward(Arc::clone(core), handle, on_output, on_event))
 }
 
@@ -179,7 +182,7 @@ pub fn terminal_host_key_answer(state: State<'_, AppState>, id: Uuid, trust: boo
 #[tauri::command]
 pub async fn terminal_host_key_replace(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.terminals.replace_host_key(&core.ctx, id).await?)
+    Ok(core.terminals.replace_host_key(&core.ctx(), id).await?)
 }
 
 #[tauri::command]
@@ -201,14 +204,14 @@ pub async fn terminal_set_settings(
 #[tauri::command]
 pub async fn known_hosts_list(state: State<'_, AppState>) -> IpcResult<Vec<KnownHost>> {
     let core = &state.core;
-    Ok(core.known_hosts.list(&core.ctx).await?)
+    Ok(core.known_hosts.list(&core.ctx()).await?)
 }
 
 /// SS-05: forgets a key; the next connection asks again. Audited.
 #[tauri::command]
 pub async fn known_host_remove(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.known_hosts.remove(&core.ctx, id).await?)
+    Ok(core.known_hosts.remove(&core.ctx(), id).await?)
 }
 
 // ---- QL-02 history and recent sessions, QL-04 tree and reachability ----------------------------------
@@ -217,21 +220,21 @@ pub async fn known_host_remove(state: State<'_, AppState>, id: Uuid) -> IpcResul
 #[tauri::command]
 pub async fn quick_connect_history(state: State<'_, AppState>) -> IpcResult<Vec<QuickConnectEntry>> {
     let core = &state.core;
-    Ok(core.terminals.quick_connect_history(&core.ctx).await?)
+    Ok(core.terminals.quick_connect_history(&core.ctx()).await?)
 }
 
 /// QL-02: forgets one entry, or the whole history without an id. Audited.
 #[tauri::command]
 pub async fn quick_connect_forget(state: State<'_, AppState>, id: Option<Uuid>) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.terminals.forget_quick_connects(&core.ctx, id).await?)
+    Ok(core.terminals.forget_quick_connects(&core.ctx(), id).await?)
 }
 
 /// QL-02: the sessions opened most recently, newest first.
 #[tauri::command]
 pub async fn sessions_recent(state: State<'_, AppState>, limit: Option<u32>) -> IpcResult<Vec<SessionRecord>> {
     let core = &state.core;
-    Ok(core.sessions.recent(&core.ctx, limit.unwrap_or(10).min(50)).await?)
+    Ok(core.sessions.recent(&core.ctx(), limit.unwrap_or(10).min(50)).await?)
 }
 
 /// QL-04: the Terminal page's session tree.
@@ -244,7 +247,7 @@ pub async fn session_tree(
     let core = &state.core;
     Ok(core
         .sessions
-        .tree(&core.ctx, grouping, &filter.unwrap_or_default())
+        .tree(&core.ctx(), grouping, &filter.unwrap_or_default())
         .await?)
 }
 
@@ -269,7 +272,7 @@ pub async fn terminal_output_print(
 ) -> IpcResult<Vec<TerminalText>> {
     let core = &state.core;
     let items = scrubbed(core, items).await?;
-    core.terminals.record_printed(&core.ctx, &items).await?;
+    core.terminals.record_printed(&core.ctx(), &items).await?;
     Ok(items)
 }
 
@@ -335,7 +338,7 @@ pub async fn terminal_output_save(
         return Ok(None);
     };
     let core = &state.core;
-    let saved = core.terminals.save_output(&core.ctx, items, layout, &dest).await?;
+    let saved = core.terminals.save_output(&core.ctx(), items, layout, &dest).await?;
     tracing::info!(files = saved.files.len(), "terminal output saved");
     Ok(Some(saved))
 }
@@ -364,7 +367,7 @@ pub async fn terminal_log_start(
         return Ok(None);
     };
     let core = &state.core;
-    core.terminals.start_log(&core.ctx, id, &path).await?;
+    core.terminals.start_log(&core.ctx(), id, &path).await?;
     Ok(Some(path.display().to_string()))
 }
 
@@ -372,5 +375,5 @@ pub async fn terminal_log_start(
 #[tauri::command]
 pub async fn terminal_log_stop(state: State<'_, AppState>, id: Uuid) -> IpcResult<bool> {
     let core = &state.core;
-    Ok(core.terminals.stop_log(&core.ctx, id).await?)
+    Ok(core.terminals.stop_log(&core.ctx(), id).await?)
 }

@@ -1142,9 +1142,31 @@ fn high_tier_steps_for_vms() {
             ApprovalStep::SafetySnapshot { default_on: true },
             ApprovalStep::TypeTargetCount { expected: 3 },
             ApprovalStep::Reason,
+            ApprovalStep::ChangeId { required: false },
             ApprovalStep::Countdown { seconds: 10 },
         ]
     );
+}
+
+#[test]
+fn high_and_critical_ask_for_an_optional_change_id_and_lower_tiers_do_not() {
+    // AP-08: the step is always there from High up; the command bus makes it required by the workspace's rule.
+    let one = vms(1);
+    let two = vms(2);
+    let change_id = |d: &Decision| {
+        d.steps
+            .iter()
+            .find(|s| matches!(s, ApprovalStep::ChangeId { .. }))
+            .cloned()
+    };
+    let low = engine().evaluate(&power(PowerOp::Start { gui: false }, &one), &one);
+    let medium = engine().evaluate(&power(PowerOp::Suspend, &one), &one);
+    let high = engine().evaluate(&power(PowerOp::Stop { mode: SOFT }, &two), &two);
+    let critical = engine().evaluate(&power(PowerOp::Stop { mode: HARD }, &one), &one);
+    assert_eq!(change_id(&low), None);
+    assert_eq!(change_id(&medium), None);
+    assert_eq!(change_id(&high), Some(ApprovalStep::ChangeId { required: false }));
+    assert_eq!(change_id(&critical), Some(ApprovalStep::ChangeId { required: false }));
 }
 
 #[test]

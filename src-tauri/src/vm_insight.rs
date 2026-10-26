@@ -60,7 +60,7 @@ pub async fn vm_timeline(
 #[tauri::command]
 pub async fn host_networks(state: State<'_, AppState>) -> IpcResult<HostNetworksReport> {
     let core = &state.core;
-    Ok(core.networks.report(&core.ctx).await?)
+    Ok(core.networks.report(&core.ctx()).await?)
 }
 
 /// VM-11, QL-21: the host networks alone, without VMs or forwards: the topology map's network nodes.

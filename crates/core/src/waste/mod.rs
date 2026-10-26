@@ -16,7 +16,7 @@ pub mod rules;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -24,11 +24,12 @@ use serde::Serialize;
 use crate::adapters::host_networks::{showvminfo_pairs, vm_paths};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::vmware::path_key;
-use crate::domain::{now_rfc3339, Context, Environment, PowerState};
+use crate::domain::{now_rfc3339, Environment, PowerState};
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::metrics::history::{now_ms, HistoryRetention, HistorySource, HISTORY_RETENTION_KEY, MINUTE_MS};
 use crate::store::{Store, VmRecord, SCAN_FOLDERS_KEY};
+use crate::workspaces::Current;
 
 pub use folders::{OrphanFolder, OrphanKind, SkippedFolder};
 pub use rules::{IdleVerdict, WasteOptions};
@@ -145,17 +146,27 @@ fn gb(bytes: u64) -> String {
 
 /// VM-16, VM-14: the waste finder.
 pub struct WasteFinder {
-    ctx: Context,
+    /// FD-02: the workspace shown.
+    current: Current,
     store: Store,
     hypervisors: Hypervisors,
     /// The folders the last report named, which Open folder may open (by [`path_key`]).
     reported: Mutex<HashSet<String>>,
+    /// FD-02: the VMs no workspace has, which hold their folders as much as any workspace's VM does.
+    inventory: Option<Arc<crate::inventory::Inventory>>,
 }
 
 impl WasteFinder {
-    pub fn new(ctx: Context, store: Store, hypervisors: Hypervisors) -> Self {
+    /// FD-02: the inventory's Unassigned list, so their folders don't look orphaned.
+    pub fn with_inventory(mut self, inventory: Arc<crate::inventory::Inventory>) -> Self {
+        self.inventory = Some(inventory);
+        self
+    }
+
+    pub fn new(current: Current, store: Store, hypervisors: Hypervisors) -> Self {
         Self {
-            ctx,
+            inventory: None,
+            current,
             store,
             hypervisors,
             reported: Mutex::new(HashSet::new()),
@@ -165,11 +176,11 @@ impl WasteFinder {
     /// VM-16, VM-14: the report, read now.
     pub async fn report(&self, options: WasteOptions) -> Result<WasteReport> {
         let options = options.clamped();
-        let vms = self.store.list_vms(&self.ctx).await?;
+        let vms = self.store.list_vms(&self.current.get()).await?;
         let mut notes = Vec::new();
         let retention = self
             .store
-            .get_setting::<HistoryRetention>(&self.ctx, HISTORY_RETENTION_KEY)
+            .get_setting::<HistoryRetention>(&self.current.get(), HISTORY_RETENTION_KEY)
             .await?
             .unwrap_or_default();
         let kept = u32::try_from(retention.days()).unwrap_or(u32::MAX);
@@ -236,19 +247,25 @@ impl WasteFinder {
     async fn idle(&self, vms: &[VmRecord], days: u32) -> Result<Vec<IdleVm>> {
         let to = now_ms().div_euclid(MINUTE_MS);
         let from = to - i64::from(days) * 24 * 60;
-        let linked = self.store.sessions_by_vm(&self.ctx).await?;
+        let linked = self.store.sessions_by_vm(&self.current.get()).await?;
         let mut out = Vec::new();
         for vm in vms.iter().filter(|v| v.power_state == PowerState::Running) {
             let host = self
                 .store
-                .read_history(&self.ctx, HistorySource::Host, &vm.vmx_path, from, to)
+                .read_history(&self.current.get(), HistorySource::Host, &vm.vmx_path, from, to)
                 .await?;
             // The linked session with the most guest history, if any is watched.
             let mut guest: Option<(uuid::Uuid, Vec<crate::metrics::history::MinuteRow>)> = None;
             for session in linked.get(&vm.id).into_iter().flatten() {
                 let rows = self
                     .store
-                    .read_history(&self.ctx, HistorySource::Guest, &session.to_string(), from, to)
+                    .read_history(
+                        &self.current.get(),
+                        HistorySource::Guest,
+                        &session.to_string(),
+                        from,
+                        to,
+                    )
                     .await?;
                 if !rows.is_empty() && guest.as_ref().is_none_or(|(_, g)| g.len() < rows.len()) {
                     guest = Some((*session, rows));
@@ -265,7 +282,7 @@ impl WasteFinder {
                 continue;
             }
             let guest_session = match &guest {
-                Some((id, _)) => self.store.get_session(&self.ctx, *id).await?.map(|s| s.name),
+                Some((id, _)) => self.store.get_session(&self.current.get(), *id).await?.map(|s| s.name),
                 None => None,
             };
             out.push(IdleVm {
@@ -417,7 +434,7 @@ impl WasteFinder {
     async fn orphans(&self, vms: &[VmRecord]) -> Result<(Vec<OrphanFolder>, Vec<String>, Vec<SkippedFolder>)> {
         let mut roots: Vec<PathBuf> = self
             .store
-            .get_setting::<Vec<String>>(&self.ctx, SCAN_FOLDERS_KEY)
+            .get_setting::<Vec<String>>(&self.current.get(), SCAN_FOLDERS_KEY)
             .await?
             .unwrap_or_default()
             .into_iter()
@@ -426,7 +443,7 @@ impl WasteFinder {
         // R2's reads (VM-21): Workstation's preference or Documents, and VirtualBox's default machine folder.
         roots.extend(self.hypervisors.vmware().default_vm_folder().await.ok());
         roots.extend(self.hypervisors.virtualbox().default_machine_folder().await.ok());
-        for template in self.store.list_catalog_templates(&self.ctx).await? {
+        for template in self.store.list_catalog_templates(&self.current.get()).await? {
             roots.extend(template.spec.vm_folder.map(PathBuf::from));
         }
         let mut seen = HashSet::new();
@@ -443,7 +460,30 @@ impl WasteFinder {
             })
             .map(|(root, _)| root)
             .collect();
-        let known: HashSet<String> = vms.iter().filter_map(vm_folder).map(|f| path_key(&f)).collect();
+        // FD-02: a folder is a VM's when any workspace's VM, or one no workspace has yet, uses it: those VMs are
+        // this PC's, not this workspace's to call orphans.
+        let all = self.store.list_vms_all_workspaces(self.current.get().user_id).await?;
+        let unassigned = self
+            .inventory
+            .as_ref()
+            .map(|inventory| inventory.unassigned())
+            .unwrap_or_default();
+        let known: HashSet<String> = vms
+            .iter()
+            .chain(&all)
+            .filter_map(vm_folder)
+            .chain(unassigned.iter().filter_map(|vm| {
+                match vm.hypervisor {
+                    Hypervisor::Vmware => Path::new(&vm.vmx_path).parent().map(Path::to_path_buf),
+                    Hypervisor::VirtualBox => vm
+                        .config_path
+                        .as_deref()
+                        .and_then(|p| Path::new(p).parent())
+                        .map(Path::to_path_buf),
+                }
+            }))
+            .map(|f| path_key(&f))
+            .collect();
         blocking(move || {
             let mut found = Vec::new();
             let mut searched = Vec::new();
@@ -476,7 +516,7 @@ impl WasteFinder {
             (_, Some(key)) => {
                 let vm = self
                     .store
-                    .find_vm(&self.ctx, key)
+                    .find_vm(&self.current.get(), key)
                     .await?
                     .ok_or_else(|| CoreError::UnknownTarget(key.to_owned()))?;
                 vm_folder(&vm).ok_or_else(|| CoreError::InvalidInput("That VM's folder is not known.".into()))?

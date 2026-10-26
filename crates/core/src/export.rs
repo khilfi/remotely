@@ -90,7 +90,7 @@ pub fn audit_file_name() -> String {
 /// the others the hash covers, with `prev_hash` and `hash`, let anyone recompute the hash chain from
 /// the file alone ([`AuditEntry::compute_hash`]; an empty cell stands for no value). Rows marked
 /// `redacted` no longer match their hash, by design.
-pub const AUDIT_CSV_COLUMNS: [&str; 23] = [
+pub const AUDIT_CSV_COLUMNS: [&str; 24] = [
     "seq",
     "id",
     "time",
@@ -102,6 +102,8 @@ pub const AUDIT_CSV_COLUMNS: [&str; 23] = [
     "target_count",
     "typed_target_count",
     "reason",
+    // AP-08: the ticket or change number given with the approval.
+    "change_id",
     "safety_snapshot",
     "vault_reauth",
     "approved_at",
@@ -171,6 +173,7 @@ pub fn audit_csv_row(e: &AuditEntry) -> (String, bool) {
         targets.len().to_string(),
         field("typedTargetCount"),
         clean(&field("reason")),
+        clean(&field("changeId")),
         field("safetySnapshot"),
         field("vaultReauth"),
         field("approvedAt"),
@@ -379,14 +382,14 @@ mod tests {
 
     #[test]
     fn exports_one_row_per_entry_with_the_approval_answers() {
-        let approval = r#"{"requestId":"r","tier":"high","typedTargetCount":2,"reason":"CHG-1234, lab","safetySnapshot":true,"vaultReauth":false,"approvedAt":"2026-10-18T01:59:00Z"}"#;
+        let approval = r#"{"requestId":"r","tier":"high","typedTargetCount":2,"reason":"CHG-1234, lab","safetySnapshot":true,"vaultReauth":false,"approvedAt":"2026-10-18T01:59:00Z","changeId":"CHG0012345"}"#;
         let (csv, redacted) = audit_csv(&[entry(1, "Suspend 2 VMs", Some(approval))]);
         assert_eq!(redacted, 0);
         assert!(csv.starts_with('\u{FEFF}'));
         let lines: Vec<&str> = csv.trim_start_matches('\u{FEFF}').split("\r\n").collect();
         assert_eq!(lines[0], AUDIT_CSV_COLUMNS.join(","));
         // The target names are quoted: `;` splits cells in many locales' Excel.
-        assert!(lines[1].starts_with("1,id-1,2026-10-18T01:59:23Z,approval_granted,Suspend 2 VMs,high,,\"web01; =db01\",2,2,\"CHG-1234, lab\",true,false,2026-10-18T01:59:00Z,"), "{}", lines[1]);
+        assert!(lines[1].starts_with("1,id-1,2026-10-18T01:59:23Z,approval_granted,Suspend 2 VMs,high,,\"web01; =db01\",2,2,\"CHG-1234, lab\",CHG0012345,true,false,2026-10-18T01:59:00Z,"), "{}", lines[1]);
         assert!(lines[1].ends_with(",false"));
         assert_eq!(lines[2], "", "the file ends with a line break");
     }

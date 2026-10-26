@@ -346,6 +346,9 @@ pub enum ApprovalStep {
     TypeTargetCount { expected: usize },
     /// High: a reason or ticket number (AP-03).
     Reason,
+    /// AP-08, High and Critical: a ticket or change number, kept with the approval. Optional, unless the
+    /// workspace requires one for Prod targets (the command bus sets `required` from that rule).
+    ChangeId { required: bool },
     /// High: the job waits this long after approval and can be cancelled meanwhile (AP-03).
     Countdown { seconds: u32 },
     /// Critical: the vault password again (AP-06).
@@ -1414,6 +1417,7 @@ impl PolicyEngine {
                 }
                 steps.push(ApprovalStep::TypeTargetCount { expected: target_count });
                 steps.push(ApprovalStep::Reason);
+                steps.push(ApprovalStep::ChangeId { required: false });
                 steps.push(ApprovalStep::Countdown {
                     seconds: self.rules.countdown_seconds,
                 });

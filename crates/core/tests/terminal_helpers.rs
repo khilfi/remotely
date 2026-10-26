@@ -68,12 +68,12 @@ async fn trust_server(core: &Core, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 async fn secret(core: &Core, kind: SecretKind, label: &str, value: &str) -> SecretId {
     core.vault
-        .add(&core.ctx, kind, label, SecretString::new(value))
+        .add(&core.ctx(), kind, label, SecretString::new(value))
         .await
         .unwrap()
         .id
@@ -84,7 +84,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str) -> Uuid {
     let login = secret(core, SecretKind::Password, "alice login", password).await;
     core.sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: "web01".into(),
                 folder_id: None,
@@ -111,7 +111,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str) -> Uuid {
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 300).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 300).await.unwrap()
 }
 
 /// A pane under test: what it printed so far, and its events.
@@ -126,7 +126,7 @@ struct Pane {
 
 impl Pane {
     async fn open(core: &Core, session_id: Uuid) -> Self {
-        let handle: TerminalHandle = core.terminals.open(&core.ctx, session_id, SIZE).await.unwrap();
+        let handle: TerminalHandle = core.terminals.open(&core.ctx(), session_id, SIZE).await.unwrap();
         let mut pane = Self {
             id: handle.id,
             output: handle.output,
@@ -255,7 +255,7 @@ async fn a_vault_password_answers_sudo_without_ever_showing() {
     pane.type_text(&core, "sudo whoami\r").await;
     pane.expect_output("[sudo] password for alice: ").await;
     core.terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
+        .type_secret(&core.ctx(), pane.id, sudo_id, false, None)
         .await
         .unwrap();
     pane.expect_output("ok\r\n$ ").await;
@@ -281,7 +281,7 @@ async fn a_vault_password_answers_sudo_without_ever_showing() {
         "{}",
         typed.targets_json
     );
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -300,7 +300,7 @@ async fn at_a_shell_prompt_the_password_is_held_back_unless_the_user_insists() {
 
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
+        .type_secret(&core.ctx(), pane.id, sudo_id, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "no_password_prompt");
@@ -316,14 +316,14 @@ async fn at_a_shell_prompt_the_password_is_held_back_unless_the_user_insists() {
     // command, as a real one would).
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, true, None)
+        .type_secret(&core.ctx(), pane.id, sudo_id, true, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "reauth_required");
     assert!(err.to_string().contains("No password prompt is showing"), "{err}");
     core.terminals
         .type_secret(
-            &core.ctx,
+            &core.ctx(),
             pane.id,
             sudo_id,
             true,
@@ -372,21 +372,21 @@ async fn a_typed_password_is_scrubbed_from_saved_output_and_the_session_log() {
     let mut pane = Pane::open(&core, session_id).await;
     let dir = common::temp_folder("typed-secret");
     let log_path = dir.join("web01.log");
-    core.terminals.start_log(&core.ctx, pane.id, &log_path).await.unwrap();
+    core.terminals.start_log(&core.ctx(), pane.id, &log_path).await.unwrap();
 
     pane.type_text(&core, "sudo id\r").await;
     pane.expect_output("password for alice: ").await;
     core.terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
+        .type_secret(&core.ctx(), pane.id, sudo_id, false, None)
         .await
         .unwrap();
     pane.expect_output(&format!("ok {sudo}\r\n$ ")).await;
-    core.terminals.stop_log(&core.ctx, pane.id).await.unwrap();
+    core.terminals.stop_log(&core.ctx(), pane.id).await.unwrap();
 
     let saved_path = dir.join("saved.txt");
     core.terminals
         .save_output(
-            &core.ctx,
+            &core.ctx(),
             vec![TerminalText {
                 terminal_id: Some(pane.id),
                 title: "web01".into(),
@@ -431,26 +431,26 @@ async fn only_passwords_and_passphrases_of_an_unlocked_vault_are_typed() {
 
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, key, false, None)
+        .type_secret(&core.ctx(), pane.id, key, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, SecretId(Uuid::new_v4()), false, None)
+        .type_secret(&core.ctx(), pane.id, SecretId(Uuid::new_v4()), false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "unknown_target");
     let err = core
         .terminals
-        .type_secret(&core.ctx, Uuid::new_v4(), sudo_id, false, None)
+        .type_secret(&core.ctx(), Uuid::new_v4(), sudo_id, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "unknown_target");
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
+        .type_secret(&core.ctx(), pane.id, sudo_id, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "vault_locked");
@@ -480,7 +480,7 @@ async fn nothing_is_typed_into_a_terminal_that_is_not_connected() {
     let err = core
         .terminals
         .type_secret(
-            &core.ctx,
+            &core.ctx(),
             pane.id,
             sudo_id,
             true,
@@ -509,7 +509,7 @@ async fn a_password_no_saved_session_sends_to_this_host_needs_the_vault_password
         .vault
         .vault()
         .put(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "customer root",
             SecretString::new(&sudo),
@@ -522,7 +522,7 @@ async fn a_password_no_saved_session_sends_to_this_host_needs_the_vault_password
 
     let err = core
         .terminals
-        .type_secret(&core.ctx, pane.id, other, false, None)
+        .type_secret(&core.ctx(), pane.id, other, false, None)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "reauth_required");
@@ -535,7 +535,7 @@ async fn a_password_no_saved_session_sends_to_this_host_needs_the_vault_password
     let err = core
         .terminals
         .type_secret(
-            &core.ctx,
+            &core.ctx(),
             pane.id,
             other,
             false,
@@ -548,7 +548,7 @@ async fn a_password_no_saved_session_sends_to_this_host_needs_the_vault_password
 
     core.terminals
         .type_secret(
-            &core.ctx,
+            &core.ctx(),
             pane.id,
             other,
             false,
@@ -573,7 +573,7 @@ async fn a_password_no_saved_session_sends_to_this_host_needs_the_vault_password
     pane.type_text(&core, "sudo whoami\r").await;
     pane.expect_output("[sudo] password for alice: ").await;
     core.terminals
-        .type_secret(&core.ctx, pane.id, other, false, None)
+        .type_secret(&core.ctx(), pane.id, other, false, None)
         .await
         .unwrap();
     pane.expect_output("ok\r\n$ ").await;
@@ -600,7 +600,7 @@ async fn a_copied_selection_is_scrubbed_of_the_terminals_secrets() {
     pane.type_text(&core, "sudo id\r").await;
     pane.expect_output("password for alice: ").await;
     core.terminals
-        .type_secret(&core.ctx, pane.id, sudo_id, false, None)
+        .type_secret(&core.ctx(), pane.id, sudo_id, false, None)
         .await
         .unwrap();
     pane.expect_output(&format!("ok {sudo}\r\n$ ")).await;

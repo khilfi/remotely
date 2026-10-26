@@ -55,7 +55,7 @@ fn session(name: &str, host: &str) -> SessionInput {
 }
 
 async fn add_session(core: &Core, name: &str, host: &str) -> Uuid {
-    core.sessions.create(&core.ctx, session(name, host)).await.unwrap().id
+    core.sessions.create(&core.ctx(), session(name, host)).await.unwrap().id
 }
 
 fn group(name: &str, sessions: &[Uuid]) -> GroupInput {
@@ -72,7 +72,7 @@ fn member_names(group: &MultiExecGroup) -> Vec<&str> {
 async fn group_audit(core: &Core) -> Vec<AuditEntry> {
     let mut entries: Vec<AuditEntry> = core
         .store
-        .recent_audit(&core.ctx, 1000)
+        .recent_audit(&core.ctx(), 1000)
         .await
         .unwrap()
         .into_iter()
@@ -92,7 +92,7 @@ fn invalid(result: remotely_core::Result<MultiExecGroup>, says: &str) {
 #[tokio::test]
 async fn a_group_is_saved_changed_and_deleted_and_each_change_is_audited() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web01 = add_session(&core, "web01", "web01.example.com").await;
     let web02 = add_session(&core, "web02", "web02.example.com").await;
     let web03 = add_session(&core, "web03", "192.0.2.13").await;
@@ -178,7 +178,7 @@ async fn a_group_is_saved_changed_and_deleted_and_each_change_is_audited() {
 #[tokio::test]
 async fn names_and_members_are_checked_and_capped() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web01 = add_session(&core, "web01", "web01.example.com").await;
     let web02 = add_session(&core, "web02", "web02.example.com").await;
     let first = core.groups.create(ctx, group("Web servers", &[web01])).await.unwrap();
@@ -243,7 +243,7 @@ async fn names_and_members_are_checked_and_capped() {
 #[tokio::test]
 async fn a_deleted_session_leaves_its_groups() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web01 = add_session(&core, "web01", "web01.example.com").await;
     let web02 = add_session(&core, "web02", "web02.example.com").await;
     let web = core.groups.create(ctx, group("Web", &[web01, web02])).await.unwrap();
@@ -267,7 +267,7 @@ async fn a_deleted_session_leaves_its_groups() {
 #[tokio::test]
 async fn the_read_only_lock_refuses_every_group_edit() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web01 = add_session(&core, "web01", "web01.example.com").await;
     let web = core.groups.create(ctx, group("Web", &[web01])).await.unwrap();
     core.presentation
@@ -322,16 +322,16 @@ async fn export(core: &Core, dir: &Path) -> PathBuf {
     let path = dir.join(format!("export-{}.remotely", Uuid::new_v4().simple()));
     let report = core
         .transfer
-        .export(&core.ctx, &path, request(), &core.vault, "Remotely test")
+        .export(&core.ctx(), &path, request(), &core.vault, "Remotely test")
         .await
         .unwrap();
-    assert_eq!(report.groups, core.groups.list(&core.ctx).await.unwrap().len());
+    assert_eq!(report.groups, core.groups.list(&core.ctx()).await.unwrap().len());
     path
 }
 
 async fn open(core: &Core, path: &Path) -> TransferPreview {
     core.transfer
-        .open(&core.ctx, path, SecretString::new(PASSPHRASE), &core.vault)
+        .open(&core.ctx(), path, SecretString::new(PASSPHRASE), &core.vault)
         .await
         .unwrap()
 }
@@ -349,7 +349,7 @@ async fn commit(
     };
     core.transfer
         .commit(
-            &core.ctx,
+            &core.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 sessions: choices(sessions),
@@ -381,7 +381,7 @@ fn row<'a>(items: &'a [remotely_core::transfer::PreviewItem], name: &str) -> &'a
 
 async fn by_name(core: &Core, name: &str) -> MultiExecGroup {
     core.groups
-        .list(&core.ctx)
+        .list(&core.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -397,11 +397,11 @@ async fn groups_travel_in_the_encrypted_export_with_their_sessions() {
     let web02 = add_session(&a, "web02", "web02.example.com").await;
     let db01 = add_session(&a, "db01", "192.0.2.20").await;
     a.groups
-        .create(&a.ctx, group("Web servers", &[web02, web01]))
+        .create(&a.ctx(), group("Web servers", &[web02, web01]))
         .await
         .unwrap();
     a.groups
-        .create(&a.ctx, group("Everything", &[db01, web01, web02]))
+        .create(&a.ctx(), group("Everything", &[db01, web01, web02]))
         .await
         .unwrap();
     let path = export(&a, &dir).await;
@@ -409,7 +409,7 @@ async fn groups_travel_in_the_encrypted_export_with_their_sessions() {
     assert!(!text.contains("Web servers"), "the file is encrypted");
     let exported = a
         .store
-        .recent_audit(&a.ctx, 50)
+        .recent_audit(&a.ctx(), 50)
         .await
         .unwrap()
         .into_iter()
@@ -436,7 +436,7 @@ async fn groups_travel_in_the_encrypted_export_with_their_sessions() {
     );
     let imported = b
         .store
-        .recent_audit(&b.ctx, 100)
+        .recent_audit(&b.ctx(), 100)
         .await
         .unwrap()
         .into_iter()
@@ -458,7 +458,7 @@ async fn groups_travel_in_the_encrypted_export_with_their_sessions() {
 
     // B changes its copy: a conflict, replaced on request.
     b.groups
-        .update(&b.ctx, web.id, group("Web servers", &[web01]))
+        .update(&b.ctx(), web.id, group("Web servers", &[web01]))
         .await
         .unwrap();
     let conflict = open(&b, &path).await;
@@ -478,7 +478,7 @@ async fn groups_travel_in_the_encrypted_export_with_their_sessions() {
 
     // Keep both: a second group under a free name.
     b.groups
-        .update(&b.ctx, web.id, group("Web servers", &[web02]))
+        .update(&b.ctx(), web.id, group("Web servers", &[web02]))
         .await
         .unwrap();
     let both = open(&b, &path).await;
@@ -498,10 +498,10 @@ async fn members_become_the_sessions_here_or_are_left_out_with_a_note() {
     let web02 = add_session(&a, "web02", "web02.example.com").await;
     let db01 = add_session(&a, "db01", "192.0.2.20").await;
     a.groups
-        .create(&a.ctx, group("Web servers", &[web01, web02]))
+        .create(&a.ctx(), group("Web servers", &[web01, web02]))
         .await
         .unwrap();
-    a.groups.create(&a.ctx, group("Databases", &[db01])).await.unwrap();
+    a.groups.create(&a.ctx(), group("Databases", &[db01])).await.unwrap();
     let path = export(&a, &dir).await;
 
     // B has web01 already, under another id (the same user, host and port), and skips web02 and db01.
@@ -547,7 +547,7 @@ async fn members_become_the_sessions_here_or_are_left_out_with_a_note() {
     assert!(none.reason.contains("None of its sessions is here"), "{}", none.reason);
     assert!(b
         .groups
-        .list(&b.ctx)
+        .list(&b.ctx())
         .await
         .unwrap()
         .iter()

@@ -86,13 +86,13 @@ async fn bulk_stop_of_twenty_vms_takes_well_under_a_minute_including_approval() 
     setup.rules = PolicyRules::default();
     let vmware = Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let mut events = core.jobs.subscribe();
 
     let started = Instant::now();
     let SubmitOutcome::NeedsApproval { request } = core
         .bus
-        .submit(&core.ctx, power(&names, PowerOp::Stop { mode: StopMode::Soft }))
+        .submit(&core.ctx(), power(&names, PowerOp::Stop { mode: StopMode::Soft }))
         .await
         .unwrap()
     else {
@@ -223,7 +223,7 @@ fn audit_gaps(entries: &[AuditEntry], high_risk_jobs: &[String]) -> Vec<String> 
 }
 
 async fn submit_needing_approval(core: &Core, command: Command) -> remotely_core::command_bus::ApprovalRequest {
-    match core.bus.submit(&core.ctx, command).await.unwrap() {
+    match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::NeedsApproval { request } => request,
         SubmitOutcome::Queued { summary, .. } => panic!("{summary} ran without approval"),
     }
@@ -251,9 +251,9 @@ async fn every_high_and_critical_action_is_logged_from_approval_to_finish() {
     let mut setup = Setup::new(fake);
     setup.remote = Arc::new(FakeRemote::default());
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let mut events = core.jobs.subscribe();
-    let ctx = core.ctx;
+    let ctx = core.ctx();
 
     // High: stop 20 VMs.
     let (tier, status) = approve_and_wait(
@@ -372,7 +372,7 @@ async fn every_high_and_critical_action_is_logged_from_approval_to_finish() {
     core.bus.cancel_approval(request.id).await.unwrap();
 
     // The log: intact, and with no gap.
-    let chain = core.store.verify_audit_chain().await.unwrap();
+    let chain = core.store.verify_audit_chain(&core.ctx()).await.unwrap();
     assert!(chain.ok, "{chain:?}");
     let entries = core.store.audit_for_export(&ctx).await.unwrap();
     let jobs = core.store.recent_jobs(&ctx, 100).await.unwrap();

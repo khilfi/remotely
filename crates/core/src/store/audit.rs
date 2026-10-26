@@ -7,6 +7,10 @@
 //! Entries are kept for good, so their free text (the action, result and detail) is redacted before it is
 //! hashed and stored ([`redact_secrets`]): a secret typed into a command never lands in the log. Verifying
 //! and exporting read the log row by row, however long it is.
+//!
+//! FD-02: each workspace has its own chain, so its log verifies and exports on its own entries and never holds
+//! another's. A workspace's first entry links to its own start hash ([`chain_start`]); entries written before
+//! workspaces (migration 0029) keep the single chain they were written in.
 
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::Serialize;
@@ -90,11 +94,31 @@ pub struct ChainCheck {
 }
 
 impl Store {
+    /// FD-02: what a workspace's next entry links to: its last entry's hash, or, before its first entry since
+    /// workspaces (migration 0029), its chain's start ([`chain_start`]).
+    async fn chain_head(&self, ctx: &Context) -> Result<String> {
+        let legacy_until: i64 = sqlx::query_scalar("SELECT audit_legacy_until FROM workspaces WHERE id = ?")
+            .bind(ctx.workspace_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or(0);
+        let last: Option<(i64, String)> =
+            sqlx::query_as("SELECT seq, hash FROM audit_log WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1")
+                .bind(ctx.workspace_id.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(match last {
+            Some((seq, hash)) if seq > legacy_until => hash,
+            last => chain_start(
+                &ctx.workspace_id.to_string(),
+                last.as_ref().map(|(_, hash)| hash.as_str()),
+            ),
+        })
+    }
+
     pub async fn append_audit(&self, ctx: &Context, e: NewAuditEntry<'_>) -> Result<AuditEntry> {
         let _chain = self.audit_lock.lock().await;
-        let prev: Option<String> = sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY seq DESC LIMIT 1")
-            .fetch_optional(&self.pool)
-            .await?;
+        let prev_hash = self.chain_head(ctx).await?;
 
         // AP-05: kept for good, so no secret typed into a command or a reason stays in it.
         let clean = |text: &str| redact_secrets(text).0;
@@ -112,7 +136,7 @@ impl Store {
             approval_json: e.approval.map(serde_json::to_string).transpose()?,
             result: e.result.map(clean),
             detail: e.detail.map(clean),
-            prev_hash: prev.unwrap_or_else(|| GENESIS_HASH.to_owned()),
+            prev_hash,
             hash: String::new(),
         };
         entry.hash = entry.compute_hash();
@@ -168,27 +192,53 @@ impl Store {
             .map(|row| row.map_err(Into::into).and_then(|row| row_to_entry(&row)))
     }
 
-    /// Walks the whole chain and recomputes every hash, one row at a time.
-    pub async fn verify_audit_chain(&self) -> Result<ChainCheck> {
-        let mut rows = sqlx::query("SELECT * FROM audit_log ORDER BY seq").fetch(&self.pool);
-        let mut expected_prev = GENESIS_HASH.to_owned();
+    /// AP-05, FD-02: walks the workspace's chain and recomputes every hash of its entries, one row at a time.
+    ///
+    /// Entries written before workspaces (up to the workspace's `audit_legacy_until`) were one chain for the whole
+    /// file: each links to the entry just before it, whichever workspace that was, so for those the walk reads the
+    /// other entries' hashes (never their content, which isn't checked or returned here). From then on each entry
+    /// links to its workspace's previous one, the first to the workspace's chain start.
+    pub async fn verify_audit_chain(&self, ctx: &Context) -> Result<ChainCheck> {
+        let workspace = ctx.workspace_id.to_string();
+        let legacy_until: i64 = sqlx::query_scalar("SELECT audit_legacy_until FROM workspaces WHERE id = ?")
+            .bind(&workspace)
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or(0);
         let mut checked: u64 = 0;
+        let bad = |checked: u64, seq: i64, problem: &str| ChainCheck {
+            entries: checked,
+            ok: false,
+            first_bad_seq: Some(seq),
+            problem: Some(problem.to_owned()),
+        };
+        let mut tail: Option<String> = None;
+        if legacy_until > 0 {
+            let mut rows = sqlx::query("SELECT * FROM audit_log WHERE seq <= ? ORDER BY seq")
+                .bind(legacy_until)
+                .fetch(&self.pool);
+            let mut before = GENESIS_HASH.to_owned();
+            while let Some(row) = rows.try_next().await? {
+                let entry = row_to_entry(&row)?;
+                if entry.workspace_id == workspace {
+                    if let Some(problem) = check_link(&entry, &before) {
+                        return Ok(bad(checked, entry.seq, problem));
+                    }
+                    checked += 1;
+                    tail = Some(entry.hash.clone());
+                }
+                before = entry.hash;
+            }
+        }
+        let mut expected_prev = chain_start(&workspace, tail.as_deref());
+        let mut rows = sqlx::query("SELECT * FROM audit_log WHERE workspace_id = ? AND seq > ? ORDER BY seq")
+            .bind(&workspace)
+            .bind(legacy_until)
+            .fetch(&self.pool);
         while let Some(row) = rows.try_next().await? {
             let entry = row_to_entry(&row)?;
-            let problem = if entry.prev_hash != expected_prev {
-                Some("link to the previous entry is broken (an entry was removed or reordered)")
-            } else if entry.compute_hash() != entry.hash {
-                Some("entry content does not match its hash (it was modified)")
-            } else {
-                None
-            };
-            if let Some(problem) = problem {
-                return Ok(ChainCheck {
-                    entries: checked,
-                    ok: false,
-                    first_bad_seq: Some(entry.seq),
-                    problem: Some(problem.to_owned()),
-                });
+            if let Some(problem) = check_link(&entry, &expected_prev) {
+                return Ok(bad(checked, entry.seq, problem));
             }
             expected_prev = entry.hash;
             checked += 1;
@@ -200,6 +250,28 @@ impl Store {
             problem: None,
         })
     }
+}
+
+/// What is wrong with an entry that should link to `prev`, if anything.
+fn check_link(entry: &AuditEntry, prev: &str) -> Option<&'static str> {
+    if entry.prev_hash != prev {
+        Some("link to the previous entry is broken (an entry was removed or reordered)")
+    } else if entry.compute_hash() != entry.hash {
+        Some("entry content does not match its hash (it was modified)")
+    } else {
+        None
+    }
+}
+
+/// FD-02, AP-05: what a workspace's first entry since workspaces links to: SHA-256 (hex) over the workspace's id and
+/// its last entry from before (none for a workspace made since). Each workspace's is its own, so no two entries share
+/// a previous hash, and the old entries stay bound to the new ones.
+pub fn chain_start(workspace_id: &str, last_before: Option<&str>) -> String {
+    let text = format!(
+        "remotely/audit-chain/v1/{workspace_id}/{}",
+        last_before.unwrap_or_default()
+    );
+    hex::encode(Sha256::digest(text.as_bytes()))
 }
 
 pub(super) fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> Result<AuditEntry> {

@@ -80,6 +80,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Highlight and alert rules",
     keywords: "highlight colour regex error warning alert terminal rules",
   },
+  {
+    id: "change-ids",
+    tab: "rules",
+    title: "Change IDs",
+    keywords: "ticket change number chg prod required approval workspace",
+  },
   { id: "rules", tab: "rules", title: "Approval rules", keywords: "policy tiers read-only commands dangerous" },
   { id: "about", tab: "about", title: "About and logs", keywords: "version logs crash reports folder" },
 ];

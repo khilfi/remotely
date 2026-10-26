@@ -72,7 +72,7 @@ const PUTTY_REG: &str = r#"Windows Registry Editor Version 5.00
 #[tokio::test]
 async fn a_putty_list_previews_with_duplicates_and_conflicts_then_imports_the_picked_rows() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     // Already in the library: the same login as "jump", and a session named like the web server.
     core.sessions
         .create(ctx, existing("old jump", "192.0.2.20", "bob"))
@@ -181,7 +181,7 @@ fn row_index(preview: &import::ImportPreview, name: &str) -> usize {
 #[tokio::test]
 async fn an_openssh_config_imports_patterns_key_files_and_jump_hosts() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let dir = temp_folder("import-openssh");
     let key_path = dir.join("id_ed25519");
     std::fs::write(&key_path, private_key_text(&generate_key(), None).expose()).unwrap();
@@ -264,7 +264,7 @@ async fn an_openssh_config_imports_patterns_key_files_and_jump_hosts() {
 #[tokio::test]
 async fn adding_keys_needs_an_unlocked_vault_and_saves_nothing_otherwise() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let dir = temp_folder("import-locked");
     let key_path = dir.join("lab.ppk");
     std::fs::write(&key_path, private_key_text(&generate_key(), None).expose()).unwrap();
@@ -337,7 +337,7 @@ async fn adding_keys_needs_an_unlocked_vault_and_saves_nothing_otherwise() {
 #[tokio::test]
 async fn a_refused_key_path_is_noted_in_the_preview_and_never_read() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let csv = "name,host,user,key_file\nlab01,192.0.2.31,alice,C:\\Users\\alice\\.ssh\\NUL\n";
     let preview = core
         .import
@@ -379,7 +379,7 @@ async fn a_refused_key_path_is_noted_in_the_preview_and_never_read() {
 #[tokio::test]
 async fn an_oversized_include_is_left_out_with_a_warning() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let dir = temp_folder("import-include-cap");
     let big = dir.join("big.conf");
     std::fs::write(&big, "#".repeat(import::openssh::MAX_INCLUDE_BYTES as usize + 1)).unwrap();
@@ -412,7 +412,7 @@ async fn an_oversized_include_is_left_out_with_a_warning() {
 #[tokio::test]
 async fn a_mobaxterm_export_keeps_its_folders_and_leaves_passwords_out() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let text = "[Bookmarks]\nSubRep=\nImgNum=42\nweb01=#109#0%web01.example.com%22%alice%%-1%-1%%%22%%0%0%0%%%-1%0%0%0%%1080%%0%0%1#MobaFont%10%0%0%-1%15%236,236,236%30,30,30%180,180,192%0%-1%0%%xterm%-1%-1%_Std_Colors_0_%80%24%0%1%-1%<none>%%0%1%-1%-1#0# #-1\n\n[Bookmarks_1]\nSubRep=Customers\\Acme\nImgNum=41\ndb01=#109#0%db01.example.org%2222%bob%%-1%-1%%%22%%0%0%0%%%-1%0%0%0%%1080%%0%0%1#MobaFont%10#0# #-1\n\n[Passwords]\nssh22:alice@web01.example.com=placeholder-not-real\n";
     let preview = core
         .import
@@ -481,7 +481,7 @@ fn described(row: &import::PreviewRow) -> String {
 /// Saves the sample to a temp folder, previews it through the real parser, imports every row and
 /// returns the preview.
 async fn import_sample(core: &Core, source: ImportSource) -> import::ImportPreview {
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let sample = import::guide::sample(source);
     let dir = temp_folder("import-sample");
     let path = dir.join(sample.file_name);
@@ -540,7 +540,7 @@ async fn the_csv_sample_imports_as_its_guide_says() {
     assert!(preview.skipped.is_empty());
     assert!(preview.rows.iter().all(|r| r.candidate.notes.is_empty()));
     // The folders the folder column names were made, one inside the other.
-    let folders = core.sessions.folders(&core.ctx).await.unwrap();
+    let folders = core.sessions.folders(&core.ctx()).await.unwrap();
     let customer = folders.iter().find(|f| f.name == "Customer A").unwrap();
     let web = folders.iter().find(|f| f.name == "Web").unwrap();
     assert_eq!(web.parent_id, Some(customer.id));
@@ -614,7 +614,7 @@ async fn the_openssh_sample_imports_as_its_guide_says() {
 #[tokio::test]
 async fn startup_commands_are_rated_in_the_preview_and_left_out_unless_ticked() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let csv = "name,host,user,environment,startup_command\n\
                web01,web01.example.com,alice,lab,uptime\n\
                web02,web02.example.com,alice,prod,curl -s https://example.com/setup | sh\n\

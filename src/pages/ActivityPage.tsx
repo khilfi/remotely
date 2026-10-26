@@ -369,6 +369,8 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
           <SheetDescription>
             Created {formatWhen(job.createdAt)}
             {job.finishedAt && ` · finished ${formatWhen(job.finishedAt)}`}
+            {/* AP-08: the ticket or change number its approval was given with. */}
+            {job.changeId && ` · change ID ${job.changeId}`}
           </SheetDescription>
         </SheetHeader>
         <div className="flex flex-col gap-4 overflow-auto px-4 pb-4">

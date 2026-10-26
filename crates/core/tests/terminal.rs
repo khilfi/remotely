@@ -78,7 +78,11 @@ fn session(server: &TestSshServer, auth: SessionAuth) -> SessionInput {
 }
 
 async fn secret(core: &Core, kind: SecretKind, label: &str, value: &SecretString) -> SecretId {
-    core.vault.add(&core.ctx, kind, label, value.clone()).await.unwrap().id
+    core.vault
+        .add(&core.ctx(), kind, label, value.clone())
+        .await
+        .unwrap()
+        .id
 }
 
 async fn trust_server(core: &Core, server: &TestSshServer) {
@@ -88,15 +92,15 @@ async fn trust_server(core: &Core, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 async fn create(core: &Core, input: SessionInput) -> Uuid {
-    core.sessions.create(&core.ctx, input).await.unwrap().id
+    core.sessions.create(&core.ctx(), input).await.unwrap().id
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 200).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 200).await.unwrap()
 }
 
 /// A pane under test: everything it printed so far, and its events.
@@ -122,7 +126,7 @@ impl Pane {
     }
 
     async fn open(core: &Core, session: Uuid) -> Self {
-        Self::new(core.terminals.open(&core.ctx, session, SIZE).await.unwrap())
+        Self::new(core.terminals.open(&core.ctx(), session, SIZE).await.unwrap())
     }
 
     /// Reads output until `needle` appears; returns what came up to and including it.
@@ -228,7 +232,7 @@ async fn a_password_from_the_vault_opens_a_shell_after_the_host_key_is_trusted()
     assert!(log.contains(&"resize 120x40".to_owned()), "{log:?}");
     assert!(log.contains(&"password alice ok".to_owned()), "{log:?}");
 
-    let saved = core.known_hosts.list(&core.ctx).await.unwrap();
+    let saved = core.known_hosts.list(&core.ctx()).await.unwrap();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].fingerprint, server.host_key_fingerprint());
 
@@ -254,7 +258,7 @@ async fn a_password_from_the_vault_opens_a_shell_after_the_host_key_is_trusted()
         assert!(!text.contains("whoami"), "{text}");
         assert!(!text.contains("Welcome"), "{text}");
     }
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -502,7 +506,7 @@ async fn a_host_key_that_is_not_trusted_stops_the_connection() {
         unreachable!()
     };
     assert_eq!(code, "host_key_rejected");
-    assert!(core.known_hosts.list(&core.ctx).await.unwrap().is_empty());
+    assert!(core.known_hosts.list(&core.ctx()).await.unwrap().is_empty());
     assert!(
         !server.log().iter().any(|l| l.starts_with("password")),
         "no login was tried"
@@ -543,7 +547,7 @@ async fn a_changed_host_key_blocks_the_connection_until_it_is_replaced() {
         "nothing was sent"
     );
     // Still the old key, and no automatic retry.
-    assert_eq!(core.known_hosts.list(&core.ctx).await.unwrap()[0].fingerprint, old);
+    assert_eq!(core.known_hosts.list(&core.ctx()).await.unwrap()[0].fingerprint, old);
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(server.connections(), 1);
     let blocked = audit(&core)
@@ -560,9 +564,9 @@ async fn a_changed_host_key_blocks_the_connection_until_it_is_replaced() {
         .await;
 
     // Replacing is explicit and audited, with both fingerprints, then it connects.
-    core.terminals.replace_host_key(&core.ctx, pane.id).await.unwrap();
+    core.terminals.replace_host_key(&core.ctx(), pane.id).await.unwrap();
     pane.connected().await;
-    assert_eq!(core.known_hosts.list(&core.ctx).await.unwrap()[0].fingerprint, new);
+    assert_eq!(core.known_hosts.list(&core.ctx()).await.unwrap()[0].fingerprint, new);
     let retrusted = audit(&core)
         .await
         .into_iter()
@@ -570,7 +574,7 @@ async fn a_changed_host_key_blocks_the_connection_until_it_is_replaced() {
         .unwrap();
     let detail = retrusted.detail.unwrap();
     assert!(detail.contains(&format!("{old} -> {new}")), "{detail}");
-    assert!(core.terminals.replace_host_key(&core.ctx, pane.id).await.is_err());
+    assert!(core.terminals.replace_host_key(&core.ctx(), pane.id).await.is_err());
 }
 
 #[tokio::test]
@@ -789,14 +793,14 @@ async fn jump_hosts_that_go_round_in_a_loop_are_refused() {
     bastion.jump_session_id = Some(bastion_id);
     let inner = create(&core, bastion.clone()).await;
     // The editor won't save it.
-    let back = core.sessions.get(&core.ctx, bastion_id).await.unwrap();
+    let back = core.sessions.get(&core.ctx(), bastion_id).await.unwrap();
     let input = SessionInput {
         jump_session_id: Some(inner),
         name: back.name.clone(),
         host: back.host.clone(),
         ..bastion
     };
-    let refused = core.sessions.update(&core.ctx, bastion_id, input).await.unwrap_err();
+    let refused = core.sessions.update(&core.ctx(), bastion_id, input).await.unwrap_err();
     assert!(refused.to_string().contains("through its own jump host"), "{refused}");
     // Written behind the library's back, it can't connect.
     sqlx::query("UPDATE sessions SET jump_session_id = ? WHERE id = ?")
@@ -806,7 +810,7 @@ async fn jump_hosts_that_go_round_in_a_loop_are_refused() {
         .await
         .unwrap();
     let before = audit(&core).await.len();
-    let err = core.terminals.open(&core.ctx, inner, SIZE).await.err().unwrap();
+    let err = core.terminals.open(&core.ctx(), inner, SIZE).await.err().unwrap();
     assert_eq!(err.code(), "jump_chain", "{err}");
     assert!(err.to_string().contains("'inner' -> 'bastion' -> 'inner'"), "{err}");
     assert_eq!(audit(&core).await.len(), before, "nothing was opened");
@@ -821,7 +825,7 @@ async fn a_locked_vault_is_reported_and_unlocking_lets_enter_retry() {
     trust_server(&core, &server).await;
     let id = secret(&core, SecretKind::Password, "lab alice", &SecretString::new(&password)).await;
     let session_id = create(&core, session(&server, SessionAuth::Password { password_id: Some(id) })).await;
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
 
     let mut pane = Pane::open(&core, session_id).await;
     let status = pane
@@ -835,7 +839,7 @@ async fn a_locked_vault_is_reported_and_unlocking_lets_enter_retry() {
 
     core.vault
         .unlock(
-            &core.ctx,
+            &core.ctx(),
             remotely_core::vault::UnlockMethod::MasterPassword(SecretString::new(common::VAULT_PASSWORD)),
         )
         .await
@@ -855,7 +859,7 @@ async fn closing_a_pane_during_the_host_key_question_closes_it_cleanly() {
     core.terminals.close(pane.id).await;
     pane.expect_status(|s| *s == TerminalStatus::Closed).await;
     assert_eq!(core.terminals.open_count(), 0);
-    assert!(core.known_hosts.list(&core.ctx).await.unwrap().is_empty());
+    assert!(core.known_hosts.list(&core.ctx()).await.unwrap().is_empty());
     assert!(core.terminals.answer_host_key(pane.id, true).is_err());
     let closed = audit(&core)
         .await
@@ -875,10 +879,10 @@ async fn known_hosts_can_be_listed_and_removed_and_removal_is_audited() {
         key_type: "ssh-ed25519".into(),
         fingerprint: fingerprint(&key),
     };
-    core.known_hosts.trust(&core.ctx, &host_key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &host_key, None).await.unwrap();
     // Trusting the same key again changes nothing.
-    core.known_hosts.trust(&core.ctx, &host_key, None).await.unwrap();
-    let saved = core.known_hosts.list(&core.ctx).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &host_key, None).await.unwrap();
+    let saved = core.known_hosts.list(&core.ctx()).await.unwrap();
     assert_eq!(saved.len(), 1);
     let trusted: Vec<AuditEntry> = audit(&core)
         .await
@@ -894,17 +898,17 @@ async fn known_hosts_can_be_listed_and_removed_and_removal_is_audited() {
         ..host_key.clone()
     };
     assert_eq!(
-        core.known_hosts.check(&core.ctx, &upper).await.unwrap(),
+        core.known_hosts.check(&core.ctx(), &upper).await.unwrap(),
         remotely_core::known_hosts::HostKeyCheck::Trusted
     );
 
-    core.known_hosts.remove(&core.ctx, saved[0].id).await.unwrap();
-    assert!(core.known_hosts.list(&core.ctx).await.unwrap().is_empty());
+    core.known_hosts.remove(&core.ctx(), saved[0].id).await.unwrap();
+    assert!(core.known_hosts.list(&core.ctx()).await.unwrap().is_empty());
     let removed = audit(&core).await.remove(0);
     assert_eq!(removed.event, "host_key_removed");
     assert_eq!(removed.action, "Removed the trusted host key of web01.example.com:22");
     assert!(removed.detail.unwrap().contains(&host_key.fingerprint));
-    assert!(core.known_hosts.remove(&core.ctx, saved[0].id).await.is_err());
+    assert!(core.known_hosts.remove(&core.ctx(), saved[0].id).await.is_err());
 }
 
 /// SS-01: the startup command is typed on the connections the user opens. After the pane reconnects by
@@ -934,7 +938,7 @@ async fn the_startup_command_is_not_typed_again_after_an_automatic_reconnect_unl
 
     // The session asks for it: typed after the next automatic reconnect.
     input.startup_on_reconnect = true;
-    core.sessions.update(&core.ctx, session_id, input).await.unwrap();
+    core.sessions.update(&core.ctx(), session_id, input).await.unwrap();
     server.drop_connections();
     pane.expect_status(|s| matches!(s, TerminalStatus::Reconnecting { .. }))
         .await;

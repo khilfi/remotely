@@ -43,35 +43,35 @@ pub fn catalog_sites() -> Vec<ImageSite> {
 #[tauri::command]
 pub async fn catalog_sizes(state: State<'_, AppState>) -> IpcResult<Vec<Size>> {
     let core = &state.core;
-    Ok(core.catalog.sizes(&core.ctx).await?)
+    Ok(core.catalog.sizes(&core.ctx()).await?)
 }
 
 /// Audited.
 #[tauri::command]
 pub async fn catalog_size_add(state: State<'_, AppState>, input: SizeInput) -> IpcResult<Size> {
     let core = &state.core;
-    Ok(core.catalog.add_size(&core.ctx, input).await?)
+    Ok(core.catalog.add_size(&core.ctx(), input).await?)
 }
 
 /// An own size; built-ins are read only. Audited.
 #[tauri::command]
 pub async fn catalog_size_update(state: State<'_, AppState>, id: String, input: SizeInput) -> IpcResult<Size> {
     let core = &state.core;
-    Ok(core.catalog.update_size(&core.ctx, &id, input).await?)
+    Ok(core.catalog.update_size(&core.ctx(), &id, input).await?)
 }
 
 /// Audited.
 #[tauri::command]
 pub async fn catalog_size_delete(state: State<'_, AppState>, id: String) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.catalog.delete_size(&core.ctx, &id).await?)
+    Ok(core.catalog.delete_size(&core.ctx(), &id).await?)
 }
 
 /// Every image, each with why it can't deploy now.
 #[tauri::command]
 pub async fn catalog_images(state: State<'_, AppState>) -> IpcResult<Vec<Image>> {
     let core = &state.core;
-    Ok(core.catalog.images(&core.ctx).await?)
+    Ok(core.catalog.images(&core.ctx()).await?)
 }
 
 /// Asks for an image file of `kind` (Downloads by default). `None` when the dialog was closed.
@@ -163,7 +163,7 @@ pub async fn catalog_image_add(
             },
         );
     });
-    let image = core.catalog.add_image(&core.ctx, request, input, progress).await?;
+    let image = core.catalog.add_image(&core.ctx(), request, input, progress).await?;
     tracing::info!(kind = image.kind().as_str(), "image added to the catalogue");
     Ok(image)
 }
@@ -178,35 +178,35 @@ pub fn catalog_image_cancel(state: State<'_, AppState>, request: Uuid) -> bool {
 #[tauri::command]
 pub async fn catalog_image_update(state: State<'_, AppState>, id: Uuid, edit: ImageEdit) -> IpcResult<Image> {
     let core = &state.core;
-    Ok(core.catalog.update_image(&core.ctx, id, edit).await?)
+    Ok(core.catalog.update_image(&core.ctx(), id, edit).await?)
 }
 
 /// The catalogue's entry only; the file or VM stays. Audited.
 #[tauri::command]
 pub async fn catalog_image_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.catalog.delete_image(&core.ctx, id).await?)
+    Ok(core.catalog.delete_image(&core.ctx(), id).await?)
 }
 
 /// Every launch template, each with why it can't deploy now.
 #[tauri::command]
 pub async fn catalog_templates(state: State<'_, AppState>) -> IpcResult<Vec<LaunchTemplate>> {
     let core = &state.core;
-    Ok(core.catalog.templates(&core.ctx).await?)
+    Ok(core.catalog.templates(&core.ctx()).await?)
 }
 
 /// The editor's check while it is filled in: its problems and the names its default count would get.
 #[tauri::command]
 pub async fn catalog_template_preview(state: State<'_, AppState>, input: TemplateInput) -> IpcResult<TemplatePreview> {
     let core = &state.core;
-    Ok(core.catalog.preview(&core.ctx, &input).await?)
+    Ok(core.catalog.preview(&core.ctx(), &input).await?)
 }
 
 /// Audited.
 #[tauri::command]
 pub async fn catalog_template_add(state: State<'_, AppState>, input: TemplateInput) -> IpcResult<LaunchTemplate> {
     let core = &state.core;
-    Ok(core.catalog.add_template(&core.ctx, input).await?)
+    Ok(core.catalog.add_template(&core.ctx(), input).await?)
 }
 
 /// Audited.
@@ -217,14 +217,14 @@ pub async fn catalog_template_update(
     input: TemplateInput,
 ) -> IpcResult<LaunchTemplate> {
     let core = &state.core;
-    Ok(core.catalog.update_template(&core.ctx, id, input).await?)
+    Ok(core.catalog.update_template(&core.ctx(), id, input).await?)
 }
 
 /// Audited.
 #[tauri::command]
 pub async fn catalog_template_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.catalog.delete_template(&core.ctx, id).await?)
+    Ok(core.catalog.delete_template(&core.ctx(), id).await?)
 }
 
 /// Opens an official cloud image page in the default browser. Any address not on the core's list of those sites is

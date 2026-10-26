@@ -91,8 +91,8 @@ pub fn app_info(state: State<'_, AppState>) -> AppInfo {
     let core = &state.core;
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),
-        workspace_id: core.ctx.workspace_id.to_string(),
-        user_id: core.ctx.user_id.to_string(),
+        workspace_id: core.ctx().workspace_id.to_string(),
+        user_id: core.ctx().user_id.to_string(),
         vmrun_path: core.vmrun_path().map(|p| p.display().to_string()),
         vboxmanage_path: core.vboxmanage_path().map(|p| p.display().to_string()),
     }
@@ -103,7 +103,7 @@ pub fn app_info(state: State<'_, AppState>) -> AppInfo {
 #[tauri::command]
 pub async fn vm_refresh(state: State<'_, AppState>) -> IpcResult<RefreshReport> {
     let core = &state.core;
-    let report = core.inventory.refresh(&core.ctx).await?;
+    let report = core.inventory.refresh(&core.ctx()).await?;
     tracing::info!(
         vms = report.vms.len(),
         warnings = report.warnings.len(),
@@ -117,26 +117,26 @@ pub async fn vm_refresh(state: State<'_, AppState>) -> IpcResult<RefreshReport> 
 #[tauri::command]
 pub async fn vm_list(state: State<'_, AppState>, filter: Option<VmFilter>) -> IpcResult<Vec<VmRecord>> {
     let core = &state.core;
-    Ok(core.inventory.list(&core.ctx, &filter.unwrap_or_default()).await?)
+    Ok(core.inventory.list(&core.ctx(), &filter.unwrap_or_default()).await?)
 }
 
 /// VM-02: tags are the app's own labels for picking VMs; they change no VM, so they skip the bus.
 #[tauri::command]
 pub async fn tags_list(state: State<'_, AppState>) -> IpcResult<Vec<Tag>> {
     let core = &state.core;
-    Ok(core.store.list_tags(&core.ctx).await?)
+    Ok(core.store.list_tags(&core.ctx()).await?)
 }
 
 #[tauri::command]
 pub async fn vm_tag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: String) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.store.tag_vms(&core.ctx, &vmx_paths, &tag).await?)
+    Ok(core.store.tag_vms(&core.ctx(), &vmx_paths, &tag).await?)
 }
 
 #[tauri::command]
 pub async fn vm_untag(state: State<'_, AppState>, vmx_paths: Vec<String>, tag: String) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.store.untag_vms(&core.ctx, &vmx_paths, &tag).await?)
+    Ok(core.store.untag_vms(&core.ctx(), &vmx_paths, &tag).await?)
 }
 
 /// SS-06 for VMs: the environment label (none, lab, staging, prod) of each VM. A Prod VM moves
@@ -150,34 +150,34 @@ pub async fn vm_set_environment(
     let core = &state.core;
     Ok(core
         .inventory
-        .set_environment(&core.ctx, &vmx_paths, environment)
+        .set_environment(&core.ctx(), &vmx_paths, environment)
         .await?)
 }
 
 #[tauri::command]
 pub async fn tag_delete(state: State<'_, AppState>, tag: String) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.store.delete_tag(&core.ctx, &tag).await?)
+    Ok(core.store.delete_tag(&core.ctx(), &tag).await?)
 }
 
 /// VM-02: saved filters, for selecting the same VMs again.
 #[tauri::command]
 pub async fn filters_list(state: State<'_, AppState>) -> IpcResult<Vec<SavedFilter>> {
     let core = &state.core;
-    Ok(core.store.list_saved_filters(&core.ctx).await?)
+    Ok(core.store.list_saved_filters(&core.ctx()).await?)
 }
 
 /// Saving under an existing name replaces that filter.
 #[tauri::command]
 pub async fn filter_save(state: State<'_, AppState>, name: String, filter: VmFilter) -> IpcResult<SavedFilter> {
     let core = &state.core;
-    Ok(core.store.save_filter(&core.ctx, &name, &filter).await?)
+    Ok(core.store.save_filter(&core.ctx(), &name, &filter).await?)
 }
 
 #[tauri::command]
 pub async fn filter_delete(state: State<'_, AppState>, id: String) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.store.delete_saved_filter(&core.ctx, &id).await?)
+    Ok(core.store.delete_saved_filter(&core.ctx(), &id).await?)
 }
 
 /// The one way in for changes: command bus -> policy engine -> (approval) -> job runner.
@@ -189,7 +189,7 @@ pub async fn command_submit(state: State<'_, AppState>, command: Command) -> Ipc
     // keys MultiExec held and rated; `multiexec_input` is the way in.
     command.check_from_ui()?;
     let core = &state.core;
-    Ok(core.bus.submit(&core.ctx, command).await?)
+    Ok(core.bus.submit(&core.ctx(), command).await?)
 }
 
 #[tauri::command]
@@ -208,20 +208,21 @@ pub async fn command_cancel_approval(state: State<'_, AppState>, request_id: Uui
 
 #[tauri::command]
 pub fn job_cancel(state: State<'_, AppState>, job_id: Uuid) -> bool {
-    state.core.jobs.cancel(job_id)
+    let core = &state.core;
+    core.jobs.cancel_in(core.ctx().workspace_id, job_id)
 }
 
 #[tauri::command]
 pub async fn jobs_recent(state: State<'_, AppState>, limit: Option<u32>) -> IpcResult<Vec<JobSummary>> {
     let core = &state.core;
-    Ok(core.store.recent_jobs(&core.ctx, limit.unwrap_or(50)).await?)
+    Ok(core.store.recent_jobs(&core.ctx(), limit.unwrap_or(50)).await?)
 }
 
 /// A job's results per target, with the safety snapshot taken on each (VM-05).
 #[tauri::command]
 pub async fn job_targets(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<Vec<JobTargetRecord>> {
     let core = &state.core;
-    Ok(core.store.job_targets(&core.ctx, job_id).await?)
+    Ok(core.store.job_targets(&core.ctx(), job_id).await?)
 }
 
 /// VM-04: snapshot trees read from each VM's .vmsd (a read, so no bus). `None` lists every VM the
@@ -229,7 +230,7 @@ pub async fn job_targets(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<
 #[tauri::command]
 pub async fn snapshots_list(state: State<'_, AppState>, vmx_paths: Option<Vec<String>>) -> IpcResult<Vec<VmSnapshots>> {
     let core = &state.core;
-    Ok(core.snapshots.list(&core.ctx, vmx_paths.as_deref()).await?)
+    Ok(core.snapshots.list(&core.ctx(), vmx_paths.as_deref()).await?)
 }
 
 /// Fixed facts the snapshot manager shows and checks against.
@@ -309,7 +310,7 @@ pub async fn policy_set_rules(
     let core = &state.core;
     let changes = core
         .bus
-        .set_rules_with(&core.ctx, rules, vault_password.as_ref())
+        .set_rules_with(&core.ctx(), rules, vault_password.as_ref())
         .await?;
     Ok(PolicySaved {
         rules: core.bus.rules(),
@@ -321,12 +322,14 @@ pub async fn policy_set_rules(
 #[tauri::command]
 pub async fn audit_recent(state: State<'_, AppState>, limit: Option<u32>) -> IpcResult<Vec<AuditEntry>> {
     let core = &state.core;
-    Ok(core.store.recent_audit(&core.ctx, limit.unwrap_or(100)).await?)
+    Ok(core.store.recent_audit(&core.ctx(), limit.unwrap_or(100)).await?)
 }
 
+/// AP-05, FD-02: checks the shown workspace's own hash chain.
 #[tauri::command]
 pub async fn audit_verify(state: State<'_, AppState>) -> IpcResult<ChainCheck> {
-    Ok(state.core.store.verify_audit_chain().await?)
+    let core = &state.core;
+    Ok(core.store.verify_audit_chain(&core.ctx()).await?)
 }
 
 /// BX-02: how long job outputs and command text are kept, and the last purge since the app started.
@@ -606,7 +609,7 @@ pub async fn vault_setup(
     windows_login: bool,
 ) -> IpcResult<VaultInfo> {
     let core = &state.core;
-    Ok(core.vault.setup(&core.ctx, password, windows_login).await?)
+    Ok(core.vault.setup(&core.ctx(), password, windows_login).await?)
 }
 
 /// With a password, unlocks with it; without, with the Windows login.
@@ -617,13 +620,13 @@ pub async fn vault_unlock(state: State<'_, AppState>, password: Option<SecretStr
         Some(password) => UnlockMethod::MasterPassword(password),
         None => UnlockMethod::WindowsLogin,
     };
-    Ok(core.vault.unlock(&core.ctx, method).await?)
+    Ok(core.vault.unlock(&core.ctx(), method).await?)
 }
 
 #[tauri::command]
 pub async fn vault_lock(state: State<'_, AppState>) -> IpcResult<VaultInfo> {
     let core = &state.core;
-    Ok(core.vault.lock(&core.ctx).await?)
+    Ok(core.vault.lock(&core.ctx()).await?)
 }
 
 #[tauri::command]
@@ -633,7 +636,7 @@ pub async fn vault_change_password(
     new: SecretString,
 ) -> IpcResult<VaultInfo> {
     let core = &state.core;
-    Ok(core.vault.change_password(&core.ctx, &current, new).await?)
+    Ok(core.vault.change_password(&core.ctx(), &current, new).await?)
 }
 
 #[tauri::command]
@@ -643,14 +646,14 @@ pub async fn vault_set_windows_login(
     enabled: bool,
 ) -> IpcResult<VaultInfo> {
     let core = &state.core;
-    Ok(core.vault.set_windows_login(&core.ctx, &password, enabled).await?)
+    Ok(core.vault.set_windows_login(&core.ctx(), &password, enabled).await?)
 }
 
 /// SS-04: one click, no password: the Windows login stops unlocking the vault.
 #[tauri::command]
 pub async fn vault_turn_off_windows_login(state: State<'_, AppState>) -> IpcResult<VaultInfo> {
     let core = &state.core;
-    Ok(core.vault.turn_off_windows_login(&core.ctx).await?)
+    Ok(core.vault.turn_off_windows_login(&core.ctx()).await?)
 }
 
 /// SS-04: the user typed or clicked in the window (the UI sends this at most every few seconds), so
@@ -680,7 +683,7 @@ pub fn passphrase_generate() -> IpcResult<String> {
 #[tauri::command]
 pub async fn secrets_list(state: State<'_, AppState>) -> IpcResult<Vec<SecretMeta>> {
     let core = &state.core;
-    Ok(core.vault.list(&core.ctx).await?)
+    Ok(core.vault.list(&core.ctx()).await?)
 }
 
 #[tauri::command]
@@ -691,7 +694,7 @@ pub async fn secret_add(
     value: SecretString,
 ) -> IpcResult<SecretMeta> {
     let core = &state.core;
-    Ok(core.vault.add(&core.ctx, kind, &label, value).await?)
+    Ok(core.vault.add(&core.ctx(), kind, &label, value).await?)
 }
 
 /// SS-04: asks for a private key file, then stores it in the vault. The dialog opens here and the
@@ -727,7 +730,7 @@ pub async fn secret_import_key(
     let key = read_key_file(&path).await?;
     let core = &state.core;
     Ok(Some(
-        core.vault.add(&core.ctx, SecretKind::PrivateKey, &label, key).await?,
+        core.vault.add(&core.ctx(), SecretKind::PrivateKey, &label, key).await?,
     ))
 }
 
@@ -756,20 +759,20 @@ async fn read_key_file(path: &std::path::Path) -> Result<SecretString, CoreError
 #[tauri::command]
 pub async fn secret_replace(state: State<'_, AppState>, id: SecretId, value: SecretString) -> IpcResult<SecretMeta> {
     let core = &state.core;
-    Ok(core.vault.replace(&core.ctx, id, value).await?)
+    Ok(core.vault.replace(&core.ctx(), id, value).await?)
 }
 
 #[tauri::command]
 pub async fn secret_rename(state: State<'_, AppState>, id: SecretId, label: String) -> IpcResult<SecretMeta> {
     let core = &state.core;
-    Ok(core.vault.rename(&core.ctx, id, &label).await?)
+    Ok(core.vault.rename(&core.ctx(), id, &label).await?)
 }
 
 /// Sessions that used it lose it.
 #[tauri::command]
 pub async fn secret_delete(state: State<'_, AppState>, id: SecretId) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.vault.delete(&core.ctx, id).await?)
+    Ok(core.vault.delete(&core.ctx(), id).await?)
 }
 
 // ---- Session library (SS-01, SS-06) -------------------------------------------------------------
@@ -778,13 +781,13 @@ pub async fn secret_delete(state: State<'_, AppState>, id: SecretId) -> IpcResul
 #[tauri::command]
 pub async fn sessions_list(state: State<'_, AppState>, filter: Option<SessionFilter>) -> IpcResult<Vec<SessionRecord>> {
     let core = &state.core;
-    Ok(core.sessions.list(&core.ctx, &filter.unwrap_or_default()).await?)
+    Ok(core.sessions.list(&core.ctx(), &filter.unwrap_or_default()).await?)
 }
 
 #[tauri::command]
 pub async fn session_folders(state: State<'_, AppState>) -> IpcResult<Vec<SessionFolder>> {
     let core = &state.core;
-    Ok(core.sessions.folders(&core.ctx).await?)
+    Ok(core.sessions.folders(&core.ctx()).await?)
 }
 
 /// SS-04, AP-06: `vault_password` is the master password, when the core asked for it (`reauth_required`:
@@ -798,7 +801,7 @@ pub async fn session_create(
     let core = &state.core;
     Ok(core
         .sessions
-        .create_with(&core.ctx, input, vault_password.as_ref())
+        .create_with(&core.ctx(), input, vault_password.as_ref())
         .await?)
 }
 
@@ -812,20 +815,20 @@ pub async fn session_update(
     let core = &state.core;
     Ok(core
         .sessions
-        .update_with(&core.ctx, id, input, vault_password.as_ref())
+        .update_with(&core.ctx(), id, input, vault_password.as_ref())
         .await?)
 }
 
 #[tauri::command]
 pub async fn session_duplicate(state: State<'_, AppState>, id: Uuid) -> IpcResult<SessionRecord> {
     let core = &state.core;
-    Ok(core.sessions.duplicate(&core.ctx, id).await?)
+    Ok(core.sessions.duplicate(&core.ctx(), id).await?)
 }
 
 #[tauri::command]
 pub async fn session_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.sessions.delete(&core.ctx, id).await?)
+    Ok(core.sessions.delete(&core.ctx(), id).await?)
 }
 
 /// QL-01: links the session to a VM by hand, or removes its link with `vm_id: None`. Auto-linking
@@ -837,14 +840,14 @@ pub async fn session_link_vm(
     vm_id: Option<String>,
 ) -> IpcResult<SessionRecord> {
     let core = &state.core;
-    Ok(core.links.link(&core.ctx, session_id, vm_id).await?)
+    Ok(core.links.link(&core.ctx(), session_id, vm_id).await?)
 }
 
 /// QL-01: keeps an automatic link, so auto-linking never changes it. Audited.
 #[tauri::command]
 pub async fn session_confirm_vm_link(state: State<'_, AppState>, session_id: Uuid) -> IpcResult<SessionRecord> {
     let core = &state.core;
-    Ok(core.links.confirm(&core.ctx, session_id).await?)
+    Ok(core.links.confirm(&core.ctx(), session_id).await?)
 }
 
 /// QL-01: sessions whose address several VMs have, which auto-linking leaves for the user to pick.
@@ -865,7 +868,7 @@ pub async fn sessions_move(
     let core = &state.core;
     Ok(core
         .sessions
-        .move_to_with(&core.ctx, &ids, folder_id, vault_password.as_ref())
+        .move_to_with(&core.ctx(), &ids, folder_id, vault_password.as_ref())
         .await?)
 }
 
@@ -876,13 +879,13 @@ pub async fn folder_create(
     parent_id: Option<Uuid>,
 ) -> IpcResult<SessionFolder> {
     let core = &state.core;
-    Ok(core.sessions.create_folder(&core.ctx, &name, parent_id).await?)
+    Ok(core.sessions.create_folder(&core.ctx(), &name, parent_id).await?)
 }
 
 #[tauri::command]
 pub async fn folder_rename(state: State<'_, AppState>, id: Uuid, name: String) -> IpcResult<SessionFolder> {
     let core = &state.core;
-    Ok(core.sessions.rename_folder(&core.ctx, id, &name).await?)
+    Ok(core.sessions.rename_folder(&core.ctx(), id, &name).await?)
 }
 
 #[tauri::command]
@@ -895,7 +898,7 @@ pub async fn folder_move(
     let core = &state.core;
     Ok(core
         .sessions
-        .move_folder_with(&core.ctx, id, parent_id, vault_password.as_ref())
+        .move_folder_with(&core.ctx(), id, parent_id, vault_password.as_ref())
         .await?)
 }
 
@@ -909,7 +912,7 @@ pub async fn folder_delete(
     let core = &state.core;
     Ok(core
         .sessions
-        .delete_folder_with(&core.ctx, id, vault_password.as_ref())
+        .delete_folder_with(&core.ctx(), id, vault_password.as_ref())
         .await?)
 }
 
@@ -925,7 +928,7 @@ pub async fn folder_set_defaults(
     let core = &state.core;
     Ok(core
         .sessions
-        .set_folder_defaults_with(&core.ctx, id, defaults, vault_password.as_ref())
+        .set_folder_defaults_with(&core.ctx(), id, defaults, vault_password.as_ref())
         .await?)
 }
 
@@ -938,7 +941,7 @@ pub async fn session_inherited(
     session_id: Option<Uuid>,
 ) -> IpcResult<Effective> {
     let core = &state.core;
-    Ok(core.sessions.inherited(&core.ctx, folder_id, session_id).await?)
+    Ok(core.sessions.inherited(&core.ctx(), folder_id, session_id).await?)
 }
 
 // ---- Session import (SS-02) ---------------------------------------------------------------------
@@ -957,7 +960,7 @@ pub async fn import_preview(
 ) -> IpcResult<Option<ImportPreview>> {
     let core = &state.core;
     if source == ImportSource::Putty {
-        return Ok(Some(core.import.preview_putty(&core.ctx).await?));
+        return Ok(Some(core.import.preview_putty(&core.ctx()).await?));
     }
     let path = if source == ImportSource::Openssh && !choose_file {
         let path = import::default_openssh_config();
@@ -997,7 +1000,7 @@ pub async fn import_preview(
             .into_path()
             .map_err(|err| CoreError::InvalidInput(format!("can't read that file: {err}")))?
     };
-    Ok(Some(core.import.preview_file(&core.ctx, source, &path).await?))
+    Ok(Some(core.import.preview_file(&core.ctx(), source, &path).await?))
 }
 
 /// QL-10: the format guide for a source, made from its parser's own tables.
@@ -1043,7 +1046,7 @@ pub async fn import_commit(state: State<'_, AppState>, request: ImportRequest) -
     let core = &state.core;
     Ok(core
         .import
-        .commit(&core.ctx, &request, &core.sessions, &core.vault)
+        .commit(&core.ctx(), &request, &core.sessions, &core.vault)
         .await?)
 }
 
@@ -1088,7 +1091,7 @@ pub async fn transfer_export(
     let by = format!("Remotely {}", env!("CARGO_PKG_VERSION"));
     let report = core
         .transfer
-        .export(&core.ctx, &path, request, &core.vault, &by)
+        .export(&core.ctx(), &path, request, &core.vault, &by)
         .await?;
     tracing::info!(sessions = report.sessions, "sessions exported");
     Ok(Some(report))
@@ -1124,14 +1127,14 @@ pub async fn transfer_choose(window: WebviewWindow, state: State<'_, AppState>) 
 #[tauri::command]
 pub async fn transfer_open(state: State<'_, AppState>, passphrase: SecretString) -> IpcResult<TransferPreview> {
     let core = &state.core;
-    Ok(core.transfer.open_chosen(&core.ctx, passphrase, &core.vault).await?)
+    Ok(core.transfer.open_chosen(&core.ctx(), passphrase, &core.vault).await?)
 }
 
 /// The opened file compared with the library again (after the vault was unlocked, say).
 #[tauri::command]
 pub async fn transfer_refresh(state: State<'_, AppState>, preview_id: Uuid) -> IpcResult<TransferPreview> {
     let core = &state.core;
-    Ok(core.transfer.refresh(&core.ctx, preview_id, &core.vault).await?)
+    Ok(core.transfer.refresh(&core.ctx(), preview_id, &core.vault).await?)
 }
 
 /// The import dialog was closed: the opened file (and any secrets in it) is dropped.
@@ -1146,7 +1149,7 @@ pub async fn transfer_commit(state: State<'_, AppState>, request: TransferCommit
     Ok(core
         .transfer
         .commit(
-            &core.ctx,
+            &core.ctx(),
             request,
             &core.sessions,
             &core.vault,
@@ -1164,20 +1167,20 @@ pub async fn transfer_commit(state: State<'_, AppState>, request: TransferCommit
 #[tauri::command]
 pub async fn ssh_keys_list(state: State<'_, AppState>) -> IpcResult<Vec<SshKey>> {
     let core = &state.core;
-    Ok(core.keys.list(&core.ctx).await?)
+    Ok(core.keys.list(&core.ctx()).await?)
 }
 
 #[tauri::command]
 pub async fn ssh_key_generate(state: State<'_, AppState>, request: GenerateKey) -> IpcResult<SshKey> {
     let core = &state.core;
-    Ok(core.keys.generate(&core.ctx, request).await?)
+    Ok(core.keys.generate(&core.ctx(), request).await?)
 }
 
 /// The key with its public half, read from the private key if needed (the vault must be unlocked).
 #[tauri::command]
 pub async fn ssh_key_public(state: State<'_, AppState>, id: SecretId) -> IpcResult<SshKey> {
     let core = &state.core;
-    Ok(core.keys.read_public_key(&core.ctx, id).await?)
+    Ok(core.keys.read_public_key(&core.ctx(), id).await?)
 }
 
 /// Sessions log in with this key from now on. Returns the sessions changed.
@@ -1188,7 +1191,7 @@ pub async fn ssh_key_attach(
     session_ids: Vec<Uuid>,
 ) -> IpcResult<Vec<SessionRecord>> {
     let core = &state.core;
-    Ok(core.keys.attach(&core.ctx, id, &session_ids, &core.sessions).await?)
+    Ok(core.keys.attach(&core.ctx(), id, &session_ids, &core.sessions).await?)
 }
 
 /// Checks a pasted public key and returns it in OpenSSH form, for pushing a key from elsewhere.
@@ -1224,14 +1227,14 @@ pub fn bulk_limits() -> BulkLimits {
 #[tauri::command]
 pub async fn bulk_targets(state: State<'_, AppState>, picks: TargetPicks) -> IpcResult<ResolvedTargets> {
     let core = &state.core;
-    Ok(core.bulk.resolve(&core.ctx, &picks).await?)
+    Ok(core.bulk.resolve(&core.ctx(), &picks).await?)
 }
 
 /// BX-06: the tier and the dangerous-command rules the command would get, without submitting it.
 #[tauri::command]
 pub async fn bulk_preview(state: State<'_, AppState>, command: Command) -> IpcResult<CommandPreview> {
     let core = &state.core;
-    Ok(core.bus.preview(&core.ctx, &command).await?)
+    Ok(core.bus.preview(&core.ctx(), &command).await?)
 }
 
 /// BX-02: the newest bulk runs.
@@ -1241,7 +1244,7 @@ pub async fn bulk_runs(
     limit: Option<u32>,
 ) -> IpcResult<Vec<remotely_core::store::JobSummary>> {
     let core = &state.core;
-    Ok(core.bulk.recent(&core.ctx, limit.unwrap_or(20)).await?)
+    Ok(core.bulk.recent(&core.ctx(), limit.unwrap_or(20)).await?)
 }
 
 /// BX-03: a run's results so far, grouped by output.
@@ -1254,7 +1257,7 @@ pub async fn bulk_results(
     let core = &state.core;
     let mut results = core
         .bulk
-        .results(&core.ctx, job_id, options.unwrap_or_default())
+        .results(&core.ctx(), job_id, options.unwrap_or_default())
         .await?;
     results.canary = core.jobs.canary_wait(job_id);
     Ok(results)
@@ -1264,7 +1267,7 @@ pub async fn bulk_results(
 #[tauri::command]
 pub async fn bulk_host_output(state: State<'_, AppState>, job_id: Uuid, target_key: String) -> IpcResult<HostOutput> {
     let core = &state.core;
-    Ok(core.bulk.host_output(&core.ctx, job_id, &target_key).await?)
+    Ok(core.bulk.host_output(&core.ctx(), job_id, &target_key).await?)
 }
 
 /// BX-03: the line diff between two hosts' outputs (the UI passes two groups' samples).
@@ -1279,7 +1282,7 @@ pub async fn bulk_diff(
     let core = &state.core;
     Ok(core
         .bulk
-        .diff(&core.ctx, job_id, &left, &right, options.unwrap_or_default())
+        .diff(&core.ctx(), job_id, &left, &right, options.unwrap_or_default())
         .await?)
 }
 
@@ -1294,7 +1297,7 @@ pub async fn bulk_retry_failed(
     let core = &state.core;
     Ok(core
         .bus
-        .retry_failed(&core.ctx, job_id, include_unknown.unwrap_or(false))
+        .retry_failed(&core.ctx(), job_id, include_unknown.unwrap_or(false))
         .await?)
 }
 
@@ -1302,7 +1305,7 @@ pub async fn bulk_retry_failed(
 #[tauri::command]
 pub async fn bulk_go_on(state: State<'_, AppState>, job_id: Uuid) -> IpcResult<bool> {
     let core = &state.core;
-    Ok(core.bus.go_on(&core.ctx, job_id).await?)
+    Ok(core.bus.go_on(&core.ctx(), job_id).await?)
 }
 
 /// BX-05: asks where to save, then writes the run's results there. `None` when the user closed the
@@ -1335,7 +1338,7 @@ pub async fn bulk_export(
     let core = &state.core;
     let export = core
         .bulk
-        .export(&core.ctx, job_id, format, options.unwrap_or_default(), &path)
+        .export(&core.ctx(), job_id, format, options.unwrap_or_default(), &path)
         .await?;
     tracing::info!(hosts = export.hosts, "bulk run exported");
     Ok(Some(export))
@@ -1346,7 +1349,7 @@ pub async fn bulk_export(
 #[tauri::command]
 pub async fn command_preview(state: State<'_, AppState>, command: Command) -> IpcResult<CommandPreview> {
     let core = &state.core;
-    Ok(core.bus.preview(&core.ctx, &command).await?)
+    Ok(core.bus.preview(&core.ctx(), &command).await?)
 }
 
 /// MO-03: the overview grid: running VMs and watched hosts with their latest samples, guest states
@@ -1354,7 +1357,7 @@ pub async fn command_preview(state: State<'_, AppState>, command: Command) -> Ip
 #[tauri::command]
 pub async fn metrics_overview(state: State<'_, AppState>) -> IpcResult<DashboardOverview> {
     let core = &state.core;
-    Ok(core.metrics.overview(&core.ctx).await?)
+    Ok(core.metrics.overview(&core.ctx()).await?)
 }
 
 /// MO-03 drill-down: up to 30 minutes of one series (kept in memory only).
@@ -1374,14 +1377,14 @@ pub fn metrics_host_usage(state: State<'_, AppState>) -> Vec<VmHostUsage> {
 #[tauri::command]
 pub async fn metrics_capacity(state: State<'_, AppState>) -> IpcResult<HostCapacity> {
     let core = &state.core;
-    Ok(core.metrics.capacity(&core.ctx).await)
+    Ok(core.metrics.capacity(&core.ctx()).await)
 }
 
 /// MO-02: starts or stops guest metrics for a session (logs in over SSH every round). Audited.
 #[tauri::command]
 pub async fn metrics_watch(state: State<'_, AppState>, session_id: Uuid, watch: bool) -> IpcResult<Vec<Uuid>> {
     let core = &state.core;
-    Ok(core.metrics.set_watched(&core.ctx, session_id, watch).await?)
+    Ok(core.metrics.set_watched(&core.ctx(), session_id, watch).await?)
 }
 
 /// MO-02, CT-01: Retry on a host whose background logins are parked (a refused login or sudo, a

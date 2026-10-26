@@ -28,14 +28,14 @@ fn checked(ids: &Option<Vec<u64>>) -> IpcResult<()> {
 #[tauri::command]
 pub fn notifications_list(state: State<'_, AppState>) -> NotificationList {
     let core = &state.core;
-    core.notifications.list(&core.ctx)
+    core.notifications.list(&core.ctx())
 }
 
 /// QL-25: keeps a notification the UI showed (or a toast worth keeping). The core redacts its text.
 #[tauri::command]
 pub fn notifications_add(state: State<'_, AppState>, input: NotificationInput) -> IpcResult<Notification> {
     let core = &state.core;
-    Ok(core.notifications.add(&core.ctx, input)?)
+    Ok(core.notifications.add(&core.ctx(), input)?)
 }
 
 /// QL-25: marks these entries read, or all of them when `ids` is null.
@@ -43,7 +43,7 @@ pub fn notifications_add(state: State<'_, AppState>, input: NotificationInput) -
 pub fn notifications_mark_read(state: State<'_, AppState>, ids: Option<Vec<u64>>) -> IpcResult<NotificationList> {
     checked(&ids)?;
     let core = &state.core;
-    Ok(core.notifications.mark_read(&core.ctx, ids.as_deref()))
+    Ok(core.notifications.mark_read(&core.ctx(), ids.as_deref()))
 }
 
 /// QL-25: removes these entries, or all of them when `ids` is null.
@@ -51,7 +51,7 @@ pub fn notifications_mark_read(state: State<'_, AppState>, ids: Option<Vec<u64>>
 pub fn notifications_clear(state: State<'_, AppState>, ids: Option<Vec<u64>>) -> IpcResult<NotificationList> {
     checked(&ids)?;
     let core = &state.core;
-    Ok(core.notifications.clear(&core.ctx, ids.as_deref()))
+    Ok(core.notifications.clear(&core.ctx(), ids.as_deref()))
 }
 
 /// QL-21: every VM's network adapters for the map: what was read before, and a read of the VMs never read
@@ -59,7 +59,7 @@ pub fn notifications_clear(state: State<'_, AppState>, ids: Option<Vec<u64>>) ->
 #[tauri::command]
 pub async fn topology_vm_networks(state: State<'_, AppState>, fresh: bool) -> IpcResult<Vec<VmNetworks>> {
     let core = &state.core;
-    Ok(core.host_details.vm_networks(&core.ctx, fresh).await?)
+    Ok(core.host_details.vm_networks(&core.ctx(), fresh).await?)
 }
 
 /// QL-23: the first-run wizard's folder dialog, for a folder that holds VMs. Only picks it: adding it to the

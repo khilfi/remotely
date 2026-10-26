@@ -68,7 +68,7 @@ async fn core_with_web() -> (Core, Arc<std::sync::Mutex<Vec<VmProcess>>>) {
     let setup = Setup::new(fake);
     let processes = Arc::clone(&setup.host.processes);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     (core, processes)
 }
 
@@ -85,20 +85,20 @@ async fn rounds_are_written_once_a_minute_in_one_go_and_read_back_in_buckets() {
         *processes.lock().unwrap() = vec![process("web", host_cpu)];
         core.metrics.collect_once_at(t).await;
         t += ROUND;
-        let size = core.store.history_size(&core.ctx).await.unwrap();
+        let size = core.store.history_size(&core.ctx()).await.unwrap();
         assert_eq!(size.minutes, 0, "nothing written while the minute is open (round {i})");
     }
     // The first round of the next minute writes the last one: the VM's and this PC's.
     *processes.lock().unwrap() = vec![process("web", 5.0)];
     core.metrics.collect_once_at(t).await;
-    let size = core.store.history_size(&core.ctx).await.unwrap();
+    let size = core.store.history_size(&core.ctx()).await.unwrap();
     assert_eq!((size.series, size.minutes), (2, 2));
     assert!(size.bytes.is_some_and(|b| b > 0), "{size:?}");
 
     let series = core
         .history
         .series(
-            &core.ctx,
+            &core.ctx(),
             HistorySource::Host,
             &vmx("web").to_lowercase(),
             HistoryRange::Hour,
@@ -125,7 +125,7 @@ async fn rounds_are_written_once_a_minute_in_one_go_and_read_back_in_buckets() {
     // This PC: 8 GB of 32 in use, and its paging file.
     let pc = core
         .history
-        .series(&core.ctx, HistorySource::ThisPc, THIS_PC_KEY, HistoryRange::Hour, t)
+        .series(&core.ctx(), HistorySource::ThisPc, THIS_PC_KEY, HistoryRange::Hour, t)
         .await
         .unwrap();
     assert_eq!(pc.points[0].mem_bytes, Some(8 * GB));
@@ -134,12 +134,12 @@ async fn rounds_are_written_once_a_minute_in_one_go_and_read_back_in_buckets() {
 
     // The open minute is written when the app closes.
     core.shutdown().await;
-    assert_eq!(core.store.history_size(&core.ctx).await.unwrap().minutes, 4);
+    assert_eq!(core.store.history_size(&core.ctx()).await.unwrap().minutes, 4);
     // Reads only: no job and no audit entry.
-    assert!(core.store.recent_jobs(&core.ctx, 10).await.unwrap().is_empty());
+    assert!(core.store.recent_jobs(&core.ctx(), 10).await.unwrap().is_empty());
     assert!(core
         .store
-        .recent_audit(&core.ctx, 20)
+        .recent_audit(&core.ctx(), 20)
         .await
         .unwrap()
         .iter()
@@ -237,7 +237,7 @@ async fn the_daily_prune_removes_old_minutes_series_and_resolved_alerts_and_is_a
         rows.push(minute_row(&kept, now_minute - 8 * day - m, 12, 5.0));
         rows.push(minute_row(&kept, now_minute - m, 12, 5.0));
     }
-    core.store.write_history(&core.ctx, &rows).await.unwrap();
+    core.store.write_history(&core.ctx(), &rows).await.unwrap();
     let old_alert = alert("2026-01-01T00:00:00Z", Some("2026-01-01T00:05:00Z"));
     let still_open = alert("2026-01-02T00:00:00Z", None);
     let recent = alert(
@@ -247,12 +247,12 @@ async fn the_daily_prune_removes_old_minutes_series_and_resolved_alerts_and_is_a
         )),
     );
     for a in [&old_alert, &still_open, &recent] {
-        core.store.insert_alert(&core.ctx, a).await.unwrap();
+        core.store.insert_alert(&core.ctx(), a).await.unwrap();
     }
     if let Some(r) = &recent.resolved_at {
         core.store
             .resolve_alert(
-                &core.ctx,
+                &core.ctx(),
                 recent.id,
                 remotely_core::alerts::Resolution::Cleared,
                 None,
@@ -263,7 +263,7 @@ async fn the_daily_prune_removes_old_minutes_series_and_resolved_alerts_and_is_a
     }
     core.store
         .resolve_alert(
-            &core.ctx,
+            &core.ctx(),
             old_alert.id,
             remotely_core::alerts::Resolution::Cleared,
             None,
@@ -277,9 +277,9 @@ async fn the_daily_prune_removes_old_minutes_series_and_resolved_alerts_and_is_a
     assert_eq!(report.removed.minutes, 20);
     assert_eq!(report.removed.series, 1, "the host no longer watched");
     assert_eq!(report.removed.alerts, 1, "an open alert stays, however old");
-    let size = core.store.history_size(&core.ctx).await.unwrap();
+    let size = core.store.history_size(&core.ctx()).await.unwrap();
     assert_eq!((size.series, size.minutes), (1, 10));
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "history_pruned");
     assert!(
         audit[0].detail.as_deref().unwrap().starts_with("older than 7 days"),
@@ -300,7 +300,10 @@ async fn the_daily_prune_removes_old_minutes_series_and_resolved_alerts_and_is_a
     // Nothing left to remove: no audit entry.
     let again = core.history.prune().await.unwrap();
     assert!(!again.removed.removed_any());
-    assert_eq!(core.store.recent_audit(&core.ctx, 1).await.unwrap()[0].id, audit[0].id);
+    assert_eq!(
+        core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0].id,
+        audit[0].id
+    );
 }
 
 #[tokio::test]
@@ -312,12 +315,12 @@ async fn the_retention_setting_is_audited_prunes_at_once_when_shorter_and_is_loc
         .into_iter()
         .map(|m| minute_row(&key, m, 12, 1.0))
         .collect();
-    core.store.write_history(&core.ctx, &rows).await.unwrap();
+    core.store.write_history(&core.ctx(), &rows).await.unwrap();
 
     let info = core.history.set_retention(HistoryRetention::Day1).await.unwrap();
     assert_eq!(info.retention, HistoryRetention::Day1);
     assert_eq!(info.size.minutes, 1, "3 days old: pruned at once");
-    let audit = core.store.recent_audit(&core.ctx, 2).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 2).await.unwrap();
     assert_eq!(audit[1].event, "setting_changed");
     assert_eq!(audit[1].action, "Set how long the dashboard keeps its history");
     assert_eq!(
@@ -495,7 +498,7 @@ async fn a_layout_is_saved_per_workspace_audited_reset_and_locked_while_presenti
     let saved = core.layouts.set(layout.clone()).await.unwrap();
     assert!(saved.custom);
     assert_eq!(core.layouts.get().await.unwrap().layout, layout);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "dashboard_layout_changed");
     assert_eq!(
         audit[0].detail.as_deref(),
@@ -528,7 +531,7 @@ async fn a_layout_is_saved_per_workspace_audited_reset_and_locked_while_presenti
     assert!(!reset.custom);
     assert_eq!(reset.layout, DashboardLayout::default());
     assert_eq!(
-        core.store.recent_audit(&core.ctx, 1).await.unwrap()[0].action,
+        core.store.recent_audit(&core.ctx(), 1).await.unwrap()[0].action,
         "Reset the dashboard layout"
     );
 }
@@ -579,11 +582,11 @@ async fn the_services_widget_reads_on_the_dashboards_connection_and_never_logs_i
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
     let password_id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "web01 login",
             SecretString::new(&password),
@@ -594,7 +597,7 @@ async fn the_services_widget_reads_on_the_dashboards_connection_and_never_logs_i
     let id = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: "web01".into(),
                 folder_id: None,
@@ -624,7 +627,7 @@ async fn the_services_widget_reads_on_the_dashboards_connection_and_never_logs_i
     assert_eq!(read, ServicesRead::NotConnected { watched: false });
     assert_eq!(server.connections(), 0);
 
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
     core.metrics.collect_once().await;
     let ServicesRead::Read { report } = core.host_details.services(id).await.unwrap() else {
         panic!("not read")
