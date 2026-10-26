@@ -155,6 +155,15 @@ impl Store {
             .collect())
     }
 
+    /// FD-02: whether any workspace has a session with this id (ids are unique in the file, not per workspace).
+    pub(crate) async fn session_id_taken(&self, id: Uuid) -> Result<bool> {
+        let found: Option<String> = sqlx::query_scalar("SELECT id FROM sessions WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(found.is_some())
+    }
+
     // ---- VM assignments ----------------------------------------------------------------------------------------
 
     /// Every VM key assigned to a workspace, lower case, with its workspace and that workspace's user.

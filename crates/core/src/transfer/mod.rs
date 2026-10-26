@@ -2074,7 +2074,9 @@ impl Transfer {
                         .await
                 }
                 _ => {
-                    let id = if used_ids.contains(&entry.id) {
+                    // FD-02: an id another workspace uses (an export imported on the laptop it came from, into
+                    // another workspace) gets a new one too.
+                    let id = if used_ids.contains(&entry.id) || self.store.session_id_taken(entry.id).await? {
                         Uuid::new_v4()
                     } else {
                         entry.id

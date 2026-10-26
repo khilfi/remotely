@@ -30,6 +30,8 @@ mod timeline;
 #[cfg(test)]
 mod upgrade_tests;
 mod vault;
+#[cfg(test)]
+mod workspace_upgrade_tests;
 mod workspaces;
 
 use std::path::Path;
