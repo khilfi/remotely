@@ -31,7 +31,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
+import { StackDetailsView } from "@/components/StackDetailsView";
 import {
   api,
   changedRequest,
@@ -112,6 +114,26 @@ function ContainerImpactLines({ impact }: { impact: ContainerImpact }) {
 
 /** After approval: the job waits until `until` and can be cancelled meanwhile (AP-03). */
 type Countdown = { jobId: string; until: number; seconds: number };
+
+/** VM-08: a stack instance's VMs together (in the request's order within each), other targets after them. A stack
+ * command's own targets keep their order: it is the order they run in. */
+function groupedTargets(request: ApprovalRequest): ApprovalRequest["targets"] {
+  if (request.stack) return request.targets;
+  const instanceOf = new Map(request.impact.filter((i) => i.stack).map((i) => [i.target, i.stack!.instanceName]));
+  const order: string[] = [];
+  for (const t of request.targets) {
+    const name = instanceOf.get(targetKey(t.target));
+    if (name !== undefined && !order.includes(name)) order.push(name);
+  }
+  const rank = (t: ApprovalRequest["targets"][number]) => {
+    const name = instanceOf.get(targetKey(t.target));
+    return name === undefined ? order.length : order.indexOf(name);
+  };
+  return request.targets
+    .map((t, i) => ({ t, i }))
+    .sort((a, b) => rank(a.t) - rank(b.t) || a.i - b.i)
+    .map(({ t }) => t);
+}
 
 export function ApprovalDialog({
   request: asked,
@@ -251,9 +273,12 @@ export function ApprovalDialog({
         {/* VM-21: the VMs a deploy makes, where, and the disk they may take; its warnings are listed below. */}
         {request.deploy && <DeployPreviewView preview={request.deploy} showWarnings={false} />}
         {request.vmChange && <VmChangeSummary change={request.vmChange} />}
+        {/* VM-08: a stack command's instance and steps in the order they run; VM-26: this PC after a deploy. */}
+        {request.stack && <StackDetailsView details={request.stack} showWarnings={false} />}
+        {request.capacity && <CapacityPlanView capacity={request.capacity} />}
         {request.standing && <StandingSummary standing={request.standing} />}
 
-        <div className="grid gap-1.5" hidden={request.deploy !== null}>
+        <div className="grid gap-1.5" hidden={request.deploy !== null || request.stack?.action === "deploy"}>
           <div className="max-h-64 overflow-auto rounded-md border">
             <Table>
               <TableHeader>
@@ -276,7 +301,7 @@ export function ApprovalDialog({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {request.targets.map((t) => {
+                {groupedTargets(request).map((t) => {
                   const key = targetKey(t.target);
                   const now = impact.get(key);
                   return (
@@ -286,6 +311,12 @@ export function ApprovalDialog({
                         {t.target.kind === "vm" && (
                           <div className="font-mono text-xs break-all text-muted-foreground">
                             {targetLocation(t.target.vmxPath)}
+                          </div>
+                        )}
+                        {now?.stack && (
+                          <div className="text-xs text-muted-foreground">
+                            Stack instance {now.stack.instanceName}, step {now.stack.step} of {now.stack.steps}
+                            {now.stack.byHand && " (added by hand)"}
                           </div>
                         )}
                         {now?.container && <ContainerImpactLines impact={now.container} />}
@@ -360,9 +391,9 @@ export function ApprovalDialog({
             <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
               <InfoIcon className="mt-px size-3.5 shrink-0" aria-hidden />
               <span>
-                Up for is how long each VM has run since it was last powered on or resumed. Linked clones made from a
-                VM's snapshots show under it when a delete would break them. Not shown yet: users logged in to each
-                guest (that needs a guest login) and other VMs that depend on these (that needs lab blueprints).
+                Up for is how long each VM has run since it was last powered on or resumed; a VM in a stack instance
+                says which one and its step. Linked clones made from a VM's snapshots show under it when a delete would
+                break them. Not shown yet: users logged in to each guest (that needs a guest login).
               </span>
             </p>
           )}

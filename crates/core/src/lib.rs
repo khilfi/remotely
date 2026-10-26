@@ -58,6 +58,7 @@ pub mod adapters;
 pub mod alerts;
 pub mod bulk;
 pub mod capacity;
+pub mod capacity_plan;
 pub mod catalog;
 pub mod command_bus;
 pub mod containers;
@@ -94,6 +95,7 @@ pub mod settings;
 pub mod snapshots;
 pub mod snippets;
 pub mod ssh_keys;
+pub mod stacks;
 pub mod store;
 pub mod terminal;
 pub mod transfer;
@@ -235,6 +237,9 @@ pub struct Core {
     /// VM-21, VM-22, VM-10: deploys from launch templates or the Deploy dialog, and bulk clones; each is a
     /// command on [`Core::bus`].
     pub deploy: deploy::service::Deploys,
+    /// VM-08: stacks of launch templates, their instances (deployed, started, stopped and torn down through
+    /// [`Core::bus`]) and the VMs each instance holds.
+    pub stacks: stacks::Stacks,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
     /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
@@ -318,6 +323,8 @@ pub struct Core {
     bindings: SecretBindings,
     /// VM-21: what the job runner makes new VMs with; tests shorten its waits.
     deployer: Arc<deploy::runner::Deployer>,
+    /// VM-08: what the job runner waits on between a stack's steps; tests give it their own clock.
+    stack_runner: Arc<stacks::StackRunner>,
     /// CV-01 to CV-03, VM-17: Image tools (Inspect, Convert, Verify), a VM's Export, and the conversion tools.
     /// Conversions and exports are commands on [`Core::bus`]; an import is a deploy ([`Core::deploy`]).
     pub convert: convert::service::Conversions,
@@ -428,6 +435,7 @@ impl Core {
         // MO-02, CT-01: one guard for every background login (dashboard and Containers page).
         let login_guard = LoginGuard::new();
         known_hosts.set_login_guard(login_guard.clone());
+        let network = Arc::clone(&adapters.network);
         let links = Arc::new(VmLinks::new(store.clone(), Arc::clone(&adapters.network)));
         let containers = Containers::new(
             store.clone(),
@@ -582,6 +590,23 @@ impl Core {
             Arc::clone(&bus),
         )
         .with_converter(Arc::clone(&converter));
+        // VM-08: the job runner runs a stack's steps through the deploy runner and power commands, and waits between
+        // them through the stack runner.
+        let stack_runner = Arc::new(stacks::StackRunner::new(
+            store.clone(),
+            hypervisors.clone(),
+            Arc::clone(&network),
+        ));
+        jobs.set_stacks(stack_runner.clone());
+        let stacks = stacks::Stacks::new(
+            store.clone(),
+            catalog.clone(),
+            deploy.clone(),
+            hypervisors.clone(),
+            Arc::clone(&adapters.host_counters),
+            Arc::clone(&bus),
+            Arc::clone(&inventory),
+        );
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
         let insight = vm_insight::VmInsight::new(ctx, store.clone(), hypervisors.clone());
         let waste = waste::WasteFinder::new(ctx, store.clone(), hypervisors.clone());
@@ -597,17 +622,19 @@ impl Core {
         });
         let core = Self {
             vm_settings,
-            convert,
-            converter,
             networks,
             insight,
             waste,
+            convert,
+            converter,
             ctx,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog,
             deploy,
             inventory,
             deployer,
+            stack_runner,
+            stacks,
             schedules,
             vault: VaultService::new(adapters.vault, store.clone())
                 .with_login_guard(login_guard.clone())
@@ -684,6 +711,13 @@ impl Core {
     /// VM-21: how the deploy runner waits for a guest's IP and for VirtualBox to let go of a VM; tests shorten it.
     pub fn set_deploy_tuning(&self, tuning: deploy::runner::DeployTuning) {
         self.deployer.set_tuning(tuning);
+    }
+
+    /// VM-08: the clock a stack job's readiness checks and delays wait on (tests give a fake one, so nothing sleeps),
+    /// and how often a readiness check asks.
+    pub fn set_stack_clock(&self, clock: Arc<dyn stacks::StackClock>, tuning: stacks::StackTuning) {
+        self.stack_runner.set_clock(clock);
+        self.stack_runner.set_tuning(tuning);
     }
 
     /// CV-03: how the conversion runner retries removing what a cancelled tool still holds; tests shorten it.

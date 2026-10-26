@@ -77,7 +77,9 @@ pub enum ScheduleTarget {
     Vm { vm_key: String },
     /// Every VM with this tag.
     Tag { tag: String },
-    // R6 (VM-08): `Stack { stack_id }`, a stack's VMs, looked up like a tag's ([`super::Schedules::resolve`]).
+    /// VM-08: every VM of every instance of this stack, looked up like a tag's ([`super::Schedules::resolve`]); a
+    /// VM that joins an instance later asks again before it is touched.
+    Stack { stack_id: Uuid },
 }
 
 impl ScheduleTarget {
@@ -85,6 +87,7 @@ impl ScheduleTarget {
         match self {
             ScheduleTarget::Vm { vm_key } => (0, vm_key.to_lowercase()),
             ScheduleTarget::Tag { tag } => (1, tag.to_lowercase()),
+            ScheduleTarget::Stack { stack_id } => (2, stack_id.to_string()),
         }
     }
 }
@@ -125,6 +128,7 @@ impl ScheduleSpec {
                     let tag = crate::store::clean_name("tag", &tag, crate::store::MAX_TAG_LEN)?;
                     ScheduleTarget::Tag { tag }
                 }
+                ScheduleTarget::Stack { stack_id } => ScheduleTarget::Stack { stack_id },
             };
             if !targets
                 .iter()
@@ -134,10 +138,12 @@ impl ScheduleSpec {
             }
         }
         if targets.is_empty() {
-            return invalid("Choose at least one VM or tag.".into());
+            return invalid("Choose at least one VM, tag or stack.".into());
         }
         if targets.len() > MAX_TARGETS {
-            return invalid(format!("A schedule can list at most {MAX_TARGETS} VMs and tags."));
+            return invalid(format!(
+                "A schedule can list at most {MAX_TARGETS} VMs, tags and stacks."
+            ));
         }
         targets.sort_by_key(ScheduleTarget::sort_key);
         Ok(Self {

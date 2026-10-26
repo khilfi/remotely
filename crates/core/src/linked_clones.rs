@@ -384,6 +384,11 @@ impl<'a> Deletes<'a> {
                 op: VmLifecycleOp::Delete,
                 ..
             } => Some(Self::Vm),
+            // VM-08: a stack teardown is VM-24's delete on each of the instance's VMs.
+            Command::Stack {
+                op: crate::stacks::StackOp::Teardown { .. },
+                ..
+            } => Some(Self::Vm),
             _ => None,
         }
     }
@@ -596,5 +601,36 @@ mod tests {
             })
             .collect();
         assert!(clone_list(&many).ends_with("lab09, and 2 more"));
+    }
+
+    #[test]
+    fn a_stack_teardown_is_a_vm_delete_and_its_power_is_not() {
+        use crate::stacks::{StackOp, StackPowerSpec, StackTeardownSpec};
+        let id = uuid::Uuid::new_v4();
+        let teardown = Command::Stack {
+            targets: Vec::new(),
+            op: StackOp::Teardown {
+                spec: Box::new(StackTeardownSpec {
+                    instance_id: id,
+                    instance_name: "web lab 1".into(),
+                    stack_name: "web lab".into(),
+                    kept: Vec::new(),
+                }),
+            },
+        };
+        assert!(deletes(&teardown));
+        assert!(matches!(Deletes::of(&teardown), Some(Deletes::Vm)));
+        let power = Command::Stack {
+            targets: Vec::new(),
+            op: StackOp::Power {
+                spec: Box::new(StackPowerSpec {
+                    instance_id: id,
+                    instance_name: "web lab 1".into(),
+                    op: crate::command_bus::PowerOp::Start { gui: false },
+                    steps: Vec::new(),
+                }),
+            },
+        };
+        assert!(!deletes(&power));
     }
 }

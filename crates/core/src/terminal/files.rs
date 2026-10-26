@@ -1042,6 +1042,9 @@ pub enum Existing {
 }
 
 /// SS-08: how starting an upload went.
+// Built once per upload and handed straight to the UI, so the approval request it may carry (grown by VM-08's and
+// VM-14's previews) isn't worth a box, which would also stop callers matching into it.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UploadStart {

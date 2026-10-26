@@ -17,6 +17,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { DeployProgressView, useDeployProgress } from "@/components/DeployDialog";
+import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
@@ -173,6 +174,14 @@ export function CloneDialog({ vms, onSubmitted, onClose }: Props) {
               </p>
             )}
             {current?.preview && <DeployPreviewView preview={current.preview} />}
+            {/* VM-26: this PC after it, and what to suspend when it won't fit. */}
+            {current?.capacity && (
+              <CapacityPlanView
+                capacity={current.capacity}
+                readOnly={readOnly}
+                onSubmitted={(outcome) => onSubmitted(outcome, () => {})}
+              />
+            )}
           </div>
         )}
 

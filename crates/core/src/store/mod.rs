@@ -21,6 +21,7 @@ mod retention_tests;
 mod schedules;
 mod sessions;
 mod ssh_keys;
+mod stacks;
 mod tags;
 mod terminal_rules;
 #[cfg(test)]
@@ -58,6 +59,8 @@ pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub use schedules::MAX_RUNS_KEPT;
 pub(crate) use schedules::{RunRow, ScheduleRow, SnapshotEnd, TakenSnapshot};
 pub(crate) use sessions::unsaved_spec;
+pub use stacks::MemberOrigin;
+pub(crate) use stacks::{InstanceRow, NewInstance, StackRow};
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};
 pub use tags::{SavedFilter, Tag};
 pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};

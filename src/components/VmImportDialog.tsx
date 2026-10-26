@@ -23,6 +23,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DeployProgressView, useDeployProgress } from "@/components/DeployDialog";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
+import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { useDebounced } from "@/hooks/use-debounced";
@@ -561,6 +562,14 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
               </p>
             )}
             {current?.preview && <DeployPreviewView preview={current.preview} />}
+            {/* VM-26: an import is a deploy: this PC after it, and what to suspend when it won't fit. */}
+            {current?.capacity && (
+              <CapacityPlanView
+                capacity={current.capacity}
+                readOnly={readOnly}
+                onSubmitted={(outcome) => onSubmitted(outcome, () => {})}
+              />
+            )}
           </div>
         )}
 

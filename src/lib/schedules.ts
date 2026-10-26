@@ -66,6 +66,8 @@ export interface ScheduleForm {
   /** VM keys. */
   vms: string[];
   tags: string[];
+  /** VM-08: stack ids. */
+  stacks: string[];
 }
 
 export function emptyForm(vms: string[] = []): ScheduleForm {
@@ -83,6 +85,7 @@ export function emptyForm(vms: string[] = []): ScheduleForm {
     cpuBelow: "5",
     vms,
     tags: [],
+    stacks: [],
   };
 }
 
@@ -110,6 +113,7 @@ export function formFromView(view: ScheduleView): ScheduleForm {
   }
   form.vms = targets.filter((t) => t.kind === "vm").map((t) => (t as { vmKey: string }).vmKey);
   form.tags = targets.filter((t) => t.kind === "tag").map((t) => (t as { tag: string }).tag);
+  form.stacks = targets.filter((t) => t.kind === "stack").map((t) => (t as { stackId: string }).stackId);
   return form;
 }
 
@@ -131,7 +135,7 @@ export function formProblem(form: ScheduleForm): string | null {
   const name = form.name.trim();
   if (!name) return "Give the schedule a name";
   if (name.length > MAX_NAME) return `A name can be at most ${MAX_NAME} characters`;
-  if (form.vms.length + form.tags.length === 0) return "Choose at least one VM or tag";
+  if (form.vms.length + form.tags.length + form.stacks.length === 0) return "Choose at least one VM, tag or stack";
   if (form.action === "snapshot" && form.keepOn) {
     const keep = whole(form.keep);
     if (keep === null || keep < 1 || keep > MAX_KEEP) return `Keep 1 to ${MAX_KEEP} snapshots`;
@@ -190,6 +194,7 @@ export function formToInput(form: ScheduleForm): ScheduleInput {
   const targets: ScheduleTarget[] = [
     ...form.vms.map((vmKey): ScheduleTarget => ({ kind: "vm", vmKey })),
     ...form.tags.map((tag): ScheduleTarget => ({ kind: "tag", tag })),
+    ...form.stacks.map((stackId): ScheduleTarget => ({ kind: "stack", stackId })),
   ];
   return { id: form.id, name: form.name.trim(), spec: { action, targets, timing } };
 }
@@ -257,8 +262,8 @@ export function outcomeTone(outcome: RunOutcome): Tone {
 export function targetsText(view: Pick<ScheduleView, "targets">): string {
   return view.targets
     .map((t) =>
-      t.target.kind === "tag"
-        ? `tag '${t.name}' (${t.vms === 1 ? "1 VM" : `${t.vms} VMs`})`
+      t.target.kind === "tag" || t.target.kind === "stack"
+        ? `${t.target.kind} '${t.name}' (${t.vms === 1 ? "1 VM" : `${t.vms} VMs`})`
         : t.vms === 0
           ? `${t.name} (not in the VM list)`
           : t.name,

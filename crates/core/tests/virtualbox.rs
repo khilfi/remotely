@@ -605,7 +605,11 @@ async fn a_bulk_start_reaches_both_hypervisors_and_counts_both_in_the_capacity_c
     };
     assert_eq!(
         request.warnings,
-        ["Running VMs would be assigned 14.0 GB of RAM, more than this host's 8.0 GB."]
+        [
+            "Running VMs would be assigned 14.0 GB of RAM, more than this host's 8.0 GB.",
+            // VM-26: what suspending would free; the paused VM is never suggested.
+            "Even suspending every running VM that can be ('vbox-web') frees only 4.0 GB of the 6.0 GB needed."
+        ]
     );
     let mut events = core.jobs.subscribe();
     let job = core.bus.approve(request.id, confirm()).await.unwrap();

@@ -138,6 +138,11 @@ impl CapacityChecker {
         &self.host
     }
 
+    /// VM-26: the planner reads the VM list through the same store.
+    pub(crate) fn store(&self) -> &Store {
+        &self.store
+    }
+
     pub fn new(store: Store, hypervisors: Hypervisors, host: Arc<dyn HostCounters>) -> Self {
         Self {
             store,
@@ -148,7 +153,7 @@ impl CapacityChecker {
 
     /// The keys of the VMs running now: each hypervisor's own list, or for one that can't be asked,
     /// what the last refresh saw of its VMs.
-    async fn running(&self, inventory: &[VmRecord]) -> Vec<String> {
+    pub(crate) async fn running(&self, inventory: &[VmRecord]) -> Vec<String> {
         let now = self.hypervisors.running().await;
         let last_seen = |hypervisor: Hypervisor| {
             inventory
@@ -292,7 +297,7 @@ impl CapacityChecker {
 
     /// The VM's assigned RAM (MB) and vCPUs: from the inventory (`known`, read once per check: P8),
     /// else its .vmx (VirtualBox: `showvminfo`).
-    async fn size(&self, known: &HashMap<String, &VmRecord>, vmx_path: &str) -> (Option<u32>, Option<u32>) {
+    pub(crate) async fn size(&self, known: &HashMap<String, &VmRecord>, vmx_path: &str) -> (Option<u32>, Option<u32>) {
         let (mut ram, mut cpus) = match known.get(&path_key(Path::new(vmx_path))) {
             Some(vm) => (vm.memsize_mb, vm.num_vcpus),
             None => (None, None),
@@ -438,14 +443,14 @@ fn unchecked(what: &str, err: &crate::error::CoreError) -> CapacityWarning {
 
 /// `C:` for `C:\VMs\web`, `\\server\share` for a UNC path; the folder itself otherwise.
 /// The inventory by [`path_key`], so each VM is looked up without a query.
-fn by_key(inventory: &[VmRecord]) -> HashMap<String, &VmRecord> {
+pub(crate) fn by_key(inventory: &[VmRecord]) -> HashMap<String, &VmRecord> {
     inventory
         .iter()
         .map(|vm| (path_key(Path::new(&vm.vmx_path)), vm))
         .collect()
 }
 
-fn drive_of(folder: &Path) -> String {
+pub(crate) fn drive_of(folder: &Path) -> String {
     match folder.components().next() {
         Some(Component::Prefix(prefix)) => prefix.as_os_str().to_string_lossy().into_owned(),
         _ => folder.display().to_string(),

@@ -51,7 +51,7 @@ const view = (over: Partial<ScheduleView> = {}): ScheduleView => ({
 test("a new form needs a name and a target before it saves", () => {
   const form = emptyForm();
   assert.equal(formProblem(form), "Give the schedule a name");
-  assert.equal(formProblem({ ...form, name: "nightly" }), "Choose at least one VM or tag");
+  assert.equal(formProblem({ ...form, name: "nightly" }), "Choose at least one VM, tag or stack");
   assert.equal(formProblem({ ...form, name: "nightly", vms: ["k"] }), null);
 });
 

@@ -40,6 +40,7 @@ import {
   type TimingKind,
 } from "@/lib/schedules";
 import { schedulesApi, type Day, type SaveOutcome, type SchedulePreview, type ScheduleView } from "@/lib/schedules-api";
+import { stacksApi } from "@/lib/stacks-api";
 
 interface Props {
   /** A schedule to edit; without it, a new one. */
@@ -61,6 +62,28 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
   const [filter, setFilter] = useState("");
   const problem = formProblem(form);
   const set = (change: Partial<ScheduleForm>) => setForm((f) => ({ ...f, ...change }));
+  // VM-08: stacks as targets, with the VMs their instances hold now.
+  const [stacks, setStacks] = useState<{ id: string; name: string; vms: number }[]>([]);
+  useEffect(() => {
+    let live = true;
+    Promise.all([stacksApi.list(), stacksApi.instances()]).then(
+      ([list, instances]) =>
+        live &&
+        setStacks(
+          list.map((s) => ({
+            id: s.id,
+            name: s.name,
+            vms: instances
+              .filter((i) => i.stackId === s.id)
+              .reduce((n, i) => n + i.vms.filter((v) => v.powerState !== null).length, 0),
+          })),
+        ),
+      () => live && setStacks([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // The core's preview, once the form is complete, a moment after the last change.
   const input = useMemo(() => (problem === null ? formToInput(form) : null), [form, problem]);
@@ -275,6 +298,19 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
                         onCheckedChange={(on) => set({ tags: toggle(form.tags, tag.name, on === true) })}
                       />
                       Tag &lsquo;{tag.name}&rsquo; ({tag.vmCount === 1 ? "1 VM" : `${tag.vmCount} VMs`})
+                    </label>
+                  ))}
+                </div>
+              )}
+              {stacks.length > 0 && (
+                <div className="flex flex-wrap gap-3">
+                  {stacks.map((stack) => (
+                    <label key={stack.id} className="flex items-center gap-1.5 text-sm">
+                      <Checkbox
+                        checked={form.stacks.includes(stack.id)}
+                        onCheckedChange={(on) => set({ stacks: toggle(form.stacks, stack.id, on === true) })}
+                      />
+                      Stack &lsquo;{stack.name}&rsquo; ({stack.vms === 1 ? "1 VM" : `${stack.vms} VMs`})
                     </label>
                   ))}
                 </div>

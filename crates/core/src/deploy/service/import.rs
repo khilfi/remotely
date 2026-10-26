@@ -15,7 +15,6 @@ use crate::catalog::templates::{self, check_guest_user, check_packages, AfterDep
 use crate::command_bus::SubmitOutcome;
 use crate::convert::formats::GIB;
 use crate::convert::import::{analyze, copied_by_deploy, ImportAnalysis, ImportKind};
-use crate::deploy::preview::preview;
 use crate::deploy::spec::{
     DeployOrigin, DeploySource, DeploySpec, DeployVm, DiskPlan, FirstBootSpec, ImportDisk, ProfileSpec, SizeSpec,
     DEFAULT_IP_WAIT_SECS,
@@ -367,6 +366,7 @@ impl Deploys {
             after_deploy: request.after_deploy,
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
             unattended: None,
+            stack: None,
             vms: vec![DeployVm {
                 number: 1,
                 hostname: templates::hostname(&name, 1),
@@ -427,15 +427,18 @@ impl Deploys {
             Err(problems) => Ok(DeployCheck {
                 problems,
                 preview: None,
+                capacity: None,
             }),
             Ok((spec, _)) => {
-                let mut checked = preview(&spec, &self.hypervisors, self.host.as_ref()).await;
+                // VM-26: an import is a deploy, so it shows this PC after it too.
+                let (mut checked, capacity) = self.preview_spec(ctx, &spec).await;
                 let mut notes = self.import_notes(&spec);
                 notes.append(&mut checked.notes);
                 checked.notes = notes;
                 Ok(DeployCheck {
                     problems: Vec::new(),
                     preview: Some(checked),
+                    capacity: Some(capacity),
                 })
             }
         }

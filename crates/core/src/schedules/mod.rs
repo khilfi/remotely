@@ -333,6 +333,8 @@ struct Resolved {
     vms: Vec<VmRecord>,
     /// The tag that brought each VM (lower-case key).
     via_tag: HashMap<String, String>,
+    /// VM-08: the stack that brought each VM (lower-case key).
+    via_stack: HashMap<String, String>,
     /// "tag 'lab': web01, web02".
     shown: Vec<String>,
     /// Targets not found.
@@ -770,6 +772,40 @@ impl Schedules {
                         }
                     }
                 }
+                // VM-08: the VMs of every instance of the stack now (gone ones left out).
+                ScheduleTarget::Stack { stack_id } => {
+                    let instances = self.store().list_stack_instances(self.ctx()).await?;
+                    let mine: Vec<_> = instances.iter().filter(|i| i.stack_id == *stack_id).collect();
+                    let name = match self.store().stack(self.ctx(), *stack_id).await? {
+                        Some(row) => row.input.name,
+                        None => mine
+                            .first()
+                            .map_or_else(|| "(deleted)".to_owned(), |i| i.stack_name.clone()),
+                    };
+                    let keys: HashSet<String> = mine
+                        .iter()
+                        .flat_map(|i| i.members.iter().map(|m| vm_key(&m.vm_key)))
+                        .collect();
+                    let with: Vec<&VmRecord> = all.iter().filter(|vm| keys.contains(&vm_key(&vm.vmx_path))).collect();
+                    resolved.views.push(TargetView {
+                        target: target.clone(),
+                        name: name.clone(),
+                        vms: with.len(),
+                    });
+                    let names: Vec<&str> = with.iter().map(|vm| vm.display_name.as_str()).collect();
+                    resolved.shown.push(if names.is_empty() {
+                        format!("stack '{name}': no VMs now")
+                    } else {
+                        format!("stack '{name}': {}", names.join(", "))
+                    });
+                    for vm in with {
+                        let key = vm_key(&vm.vmx_path);
+                        resolved.via_stack.entry(key.clone()).or_insert_with(|| name.clone());
+                        if seen.insert(key) {
+                            resolved.vms.push(vm.clone());
+                        }
+                    }
+                }
             }
         }
         Ok(resolved)
@@ -801,9 +837,10 @@ impl Schedules {
                     vmx_path: vm.vmx_path.clone(),
                 });
             } else {
-                changes.push(match resolved.via_tag.get(&key) {
-                    Some(tag) => format!("{} has the tag '{tag}' now", vm.display_name),
-                    None => format!("{} was not among the approved targets", vm.display_name),
+                changes.push(match (resolved.via_tag.get(&key), resolved.via_stack.get(&key)) {
+                    (Some(tag), _) => format!("{} has the tag '{tag}' now", vm.display_name),
+                    (None, Some(stack)) => format!("{} is in the stack '{stack}' now", vm.display_name),
+                    (None, None) => format!("{} was not among the approved targets", vm.display_name),
                 });
             }
         }

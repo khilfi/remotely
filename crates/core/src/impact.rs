@@ -7,8 +7,9 @@
 //! been running, and its .vmsd for the snapshot count. A VirtualBox VM (VM-18) answers all three
 //! through `showvminfo` (its state, when that state began, its snapshots) and its .vbox file (snapshot
 //! times). VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it would delete
-//! ([`crate::linked_clones`]). Users logged in to the guest need a guest login, and other dependent VMs need lab
-//! blueprints (VM-08, v2); neither is shown yet.
+//! ([`crate::linked_clones`]). VM-08: a VM in a stack instance says which one and its step ([`StackMembership`]),
+//! so the dialog shows a stack's VMs as a group. Users logged in to the guest need a guest login; they are not shown
+//! yet.
 
 use std::path::Path;
 
@@ -45,9 +46,26 @@ pub struct TargetImpact {
     /// CT-01, CT-02: for a container target, what it is now (the VM fields are empty then).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<ContainerImpact>,
+    /// VM-08: the stack instance the VM belongs to, so the dialog shows a stack's VMs as a group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<StackMembership>,
     /// VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it would delete, by
     /// snapshot. Such a VM is refused ([`crate::linked_clones`]).
     pub linked_clones: Vec<SnapshotClones>,
+}
+
+/// VM-08: a VM's place in its stack instance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StackMembership {
+    pub instance_id: uuid::Uuid,
+    pub instance_name: String,
+    pub stack_name: String,
+    /// Its step, from 1 (the first to boot).
+    pub step: u32,
+    pub steps: u32,
+    /// Added to the instance by hand: a teardown keeps it.
+    pub by_hand: bool,
 }
 
 /// CT-01, CT-02: one container, image or volume target as it is now, or what a pull or prune on a host
@@ -120,7 +138,34 @@ impl ImpactPreviewer {
     /// VM-23, VM-24: for a VM settings or lifecycle command, what it changes on each VM, the files that go,
     /// and why a VM would be refused. `None` for other commands. Reads only.
     pub async fn vm_change(&self, command: &Command, targets: &[Target]) -> Option<VmChangePreview> {
+        // VM-08: a teardown is R3's delete on each of the instance's VMs, so its preview is the delete's: every file
+        // that goes, and why a VM would be refused (running, Workstation's lock).
+        if let Command::Stack {
+            targets: vms,
+            op: crate::stacks::StackOp::Teardown { .. },
+        } = command
+        {
+            let delete = Command::VmLifecycle {
+                targets: vms.clone(),
+                op: crate::vm_settings::VmLifecycleOp::Delete,
+            };
+            return self.editor.preview(&delete, targets).await;
+        }
         self.editor.preview(command, targets).await
+    }
+
+    /// VM-08: for a stack command, the instance, its steps in order and each step's VMs (a deploy's with R2's
+    /// preview per step). `None` for other commands. Reads only.
+    pub async fn stack(
+        &self,
+        command: &Command,
+        targets: &[Target],
+        host: &dyn crate::adapters::host_counters::HostCounters,
+    ) -> Option<crate::stacks::StackDetails> {
+        let Command::Stack { op, .. } = command else {
+            return None;
+        };
+        Some(crate::stacks::preview::stack_details(op, targets, &self.hypervisors, host).await)
     }
 
     /// CT-01, CT-02: container targets are previewed by the containers service.
@@ -188,13 +233,47 @@ impl ImpactPreviewer {
             None
         };
         let now = OffsetDateTime::now_utc();
+        let memberships = self.memberships(ctx).await;
         let mut out = Vec::with_capacity(vms.len());
         for key in vms {
-            let impact = match Hypervisor::of_key(key) {
+            let mut impact = match Hypervisor::of_key(key) {
                 Hypervisor::Vmware => self.one_vmware(ctx, key, running.as_ref(), now).await,
                 Hypervisor::VirtualBox => self.one_virtualbox(key, now).await,
             };
+            impact.stack = memberships
+                .get(&crate::adapters::vmware::path_key(Path::new(key)))
+                .cloned();
             out.push(impact);
+        }
+        out
+    }
+
+    /// VM-08: each VM in a stack instance, by [`crate::adapters::vmware::path_key`]. Empty when it can't be read
+    /// (the preview goes on without the groups).
+    async fn memberships(&self, ctx: &Context) -> std::collections::HashMap<String, StackMembership> {
+        let instances = match self.store.list_stack_instances(ctx).await {
+            Ok(instances) => instances,
+            Err(err) => {
+                tracing::debug!(error = %err, "could not read the stack instances for a preview");
+                return Default::default();
+            }
+        };
+        let mut out = std::collections::HashMap::new();
+        for instance in instances {
+            let steps = instance.steps.len().max(1) as u32;
+            for member in &instance.members {
+                out.insert(
+                    crate::adapters::vmware::path_key(Path::new(&member.vm_key)),
+                    StackMembership {
+                        instance_id: instance.id,
+                        instance_name: instance.name.clone(),
+                        stack_name: instance.stack_name.clone(),
+                        step: member.step + 1,
+                        steps,
+                        by_hand: member.origin == crate::store::MemberOrigin::Hand,
+                    },
+                );
+            }
         }
         out
     }
@@ -265,6 +344,7 @@ impl ImpactPreviewer {
             old_snapshot_count,
             notes,
             container: None,
+            stack: None,
             linked_clones: Vec::new(),
         }
     }
@@ -296,6 +376,7 @@ impl ImpactPreviewer {
             old_snapshot_count,
             notes,
             container: None,
+            stack: None,
             linked_clones: Vec::new(),
         }
     }

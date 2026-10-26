@@ -210,6 +210,35 @@ launch template, or from **Custom** values typed in the dialog.
 - **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
   job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
   VMs they copy: started as they are, they would use their source's name and addresses.
+- **This PC after the deploy** (VM-26): every deploy dialog (Deploy, Clone, Import, a stack's) and its approval show RAM,
+  CPU and disk on this PC after it, next to what runs now. RAM counts what the running VMs are assigned plus the new VMs
+  that start; over this PC's RAM, it won't fit (VM-07's rule, which still runs at every power-on). CPU counts vCPUs
+  against logical CPUs: a VM with more vCPUs than this PC has won't start, and more than twice as many in all warns.
+  Disk counts thin disks at their full size per drive. When the RAM won't fit, it names the running VMs to suspend to
+  make room (never a protected or paused VM, Prod only when nothing else frees enough, as few as it can) and offers
+  **Suspend**, the usual power command with its approval. Suspending writes each VM's memory to its folder's drive.
+
+### Stacks
+
+VM-08 (0.5.0): the Templates page's **Stacks** tab. A stack is launch templates in boot order, each with a count, and
+between steps what the next one waits for: nothing, the guest tools (VMware Tools, Guest Additions) running, or a port
+open on the guest's IP (SSH's 22, a database's 5432...), for at most a set time, then an optional delay. Steps can mix
+Workstation and VirtualBox.
+
+- **Deploy** makes a stack _instance_ in one job: one preview listing every VM of every step (each step's deploy
+  preview, as above) and this PC after it, one approval with a deploy's tier for all its VMs (Medium for 1 to 4, High for
+  5 or more), then the steps in boot order. A step whose VMs don't all succeed, or aren't ready in time, stops the steps
+  after it; the job says why. A failed VM is cleaned up as any deploy's is, and the VMs made so far stay in the
+  instance; **Retry** in Activity makes the failed ones and the steps that never started.
+- The instance remembers which VMs it holds. They show as a group on the VMs page, under a header with **Start** (boot
+  order, with the stack's waits and delays), **Shut down** and **Suspend** (the last step first): the power commands'
+  own work and tiers, with VM-07's capacity check at start. Approval dialogs show each VM's instance and step.
+- **Tear down** is **Critical**: R3's delete on each VM the instance's deploy made, with every file that goes in the
+  preview and the vault password asked again. A protected VM is skipped, a running one refused (shut the instance down
+  first), and a VM added to the instance by hand (**Add a VM**) is kept unless you tick it. Once no VM is left, the
+  instance goes. **Forget** takes the instance away and leaves its VMs as they are.
+- Stack edits are the app's own data: audited, refused while presenting read-only, and carried by **Export** with the
+  launch templates (each step points at what its template became on the other laptop; instances stay on this PC).
 
 ### Image tools, Import and Export
 
@@ -277,7 +306,8 @@ and a VM's **Schedules** tab open it too) runs actions on VMs on a timetable, or
 - **What**: take a snapshot of each VM, optionally keeping only the last N it took; start; shut down (through the
   guest); suspend; or resume (only the suspended VMs: the ones that are off stay off). A power action leaves alone the
   VMs already in that state, and says so.
-- **On**: VMs by name, and tags (every VM with the tag when it runs).
+- **On**: VMs by name, tags (every VM with the tag when it runs), and stacks (every VM of every instance of the stack
+  when it runs; a VM that joins an instance later asks again first, like a newly tagged one).
 - **When**: every hour at a minute, every day at a time, or on chosen days at a time, in local time; or **when idle**
   (auto-suspend): a running VM whose own CPU stayed under a limit for a set time (10 minutes to 24 hours), measured
   from the dashboard's history and its live readings. A VM Remotely didn't watch for the whole time (closed, asleep,
@@ -1306,6 +1336,8 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                               | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                          |
 | Spec catalogue     | `crates/core/src/catalog/`                                        | VM-19, VM-20, VM-21, FD-07                                                                                                                          | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                          |
 | Deploy             | `crates/core/src/deploy/`                                         | VM-10, VM-21, VM-22, AP-02                                                                                                                          | Working: deploys from a template or Custom values (golden VM clone, cloud image with cloud-init, ISO, OVA/OVF) and bulk clones, one job step per VM with cleanup after a failure or cancel; preview with disk space; Medium, High from 5 VMs                   |
+| Stacks             | `crates/core/src/stacks/`                                         | VM-08, FD-07                                                                                                                                        | Working: stacks of launch templates deployed as one job in boot order with readiness checks and delays; instances started, stopped and torn down (Critical) as one; hand-added VMs kept                                                                        |
+| Capacity planner   | `crates/core/src/capacity_plan.rs`                                | VM-26, VM-07                                                                                                                                        | Working: RAM, CPU and disk after any deploy next to now (thin disks at full size), running VMs to suspend when RAM won't fit                                                                                                                                   |
 | Conversion         | `crates/core/src/convert/`                                        | VM-17, CV-01, CV-02, CV-03                                                                                                                          | Working: Inspect, Convert and Verify on Image tools (hypervisors' tools first, qemu-img for qcow2 and VHDX when installed), imports as deploys, exports for ESXi, Hyper-V, Azure, KVM, Proxmox, OVA/OVF and raw with a README; Low jobs, Prod exports Medium   |
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                               | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                      |
 | Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                       | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec    |

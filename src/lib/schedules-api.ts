@@ -20,7 +20,11 @@ export type ScheduleAction =
   | { kind: "resume" };
 
 /** A VM by its key (.vmx path or VirtualBox UUID), or every VM with a tag. */
-export type ScheduleTarget = { kind: "vm"; vmKey: string } | { kind: "tag"; tag: string };
+export type ScheduleTarget =
+  | { kind: "vm"; vmKey: string }
+  | { kind: "tag"; tag: string }
+  /** VM-08: every VM of every instance of the stack. */
+  | { kind: "stack"; stackId: string };
 
 export interface ScheduleSpec {
   action: ScheduleAction;

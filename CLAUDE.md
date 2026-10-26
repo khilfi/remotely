@@ -162,6 +162,24 @@ crates/core/          remotely-core: all app logic
                       the next run)
     capacity.rs       VM-07 capacity check before power-on; VM-02 `bridged`: starting 2+ VMs warns about bridged
                       adapters plugged in at power-on (one confirm)
+    capacity_plan.rs  VM-26 the deploy capacity planner: RAM, CPU and disk per drive after a deploy next to now
+                      (thin disks at full size; `plan` pure, `deploy_capacity` reads), in DeployCheck, the stack
+                      deploy check and the approval (ApprovalRequest.capacity); `suggest_suspend` names running VMs
+                      to suspend when RAM won't fit (never protected or paused, Prod last, fewest VMs), also added to
+                      VM-07's warning at power-on
+    stacks/           VM-08 stacks (migration 0028; audited `stack_changed`, no tier, Change::Stacks, FD-07 inside
+                      the catalogue's section): spec.rs StackInput (templates with counts in boot order, Readiness
+                      none, tools or a port, wait and delay per step) and StackOp, what Command::Stack carries:
+                      Deploy (each step a whole DeploySpec tagged with `stack: StackTag`, so R2's runner records each
+                      VM in the instance as it is made), Power (start in boot order with the readiness checks and
+                      delays, shut down or suspend the last step first; the power op's own ActionKind) and Teardown
+                      (R3's delete on each VM, linked-clone guard included; ActionKind::StackTeardown, Critical;
+                      hand-added VMs only when picked);
+                      mod.rs Stacks (Core.stacks: CRUD, check, deploy, instances, power, teardown, add or take a VM
+                      out by hand, forget, `stack_vms` for R7); runner.rs StackRunner, the job runner's StackActions
+                      (instance records, readiness waits and delays on a StackClock: fakes/stack_clock.rs in tests);
+                      preview.rs StackDetails for AP-02. The job runner runs a stack's steps in order (`run_stack`): a
+                      step that fails or isn't ready in time skips the steps after it; a retry runs those too
     snapshots.rs      VM-04 snapshot trees (from .vmsd, or VirtualBox's showvminfo and .vbox), VM-05 safety snapshot
                       names
     catalog/          VM-19 to VM-21 the spec catalogue (migration 0019; audited `catalog_changed`, no tier,
@@ -260,7 +278,8 @@ crates/core/          remotely-core: all app logic
                       as the grid shows them, rule edits and acknowledge audited and locked (Change::Alerts), the
                       alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
     schedules/        VM-14, VM-27 (migration 0025, Core.schedules, Change::Schedules): spec.rs ScheduleSpec (action:
-                      snapshot keep N, start, stop, suspend, resume; targets: VMs, tags, stacks once R6 adds them;
+                      snapshot keep N, start, stop, suspend, resume; targets: VMs, tags, VM-08 stacks (every VM of every
+                      instance, via_stack for the ask-again message);
                       content_hash; snapshot_name `Remotely schedule '<name>' <local time> (run <id>)`), timing.rs
                       (hourly, daily, weekly in local time, idle; next_after: a time the clocks jump over runs at the
                       first minute after, a repeated one once, both noted; due_between for missed runs), clock.rs
@@ -405,7 +424,8 @@ crates/core/          remotely-core: all app logic
     linked_clones.rs  VM-04, VM-21, VM-24 linked clones: Workstation's from the golden VM's .vmsd (SnapshotInfo's
                       linked_clones; a clone whose .vmx is gone left out, one on a share counted unopened), VirtualBox's
                       from `list --long hdds` (vbox_clones: other VMs on disks made from a snapshot's). A snapshot or VM
-                      delete they depend on is refused (CoreError::LinkedClones, the clones named): by the bus before
+                      delete (a VM-08 stack teardown too) they depend on is refused (CoreError::LinkedClones, the
+                      clones named): by the bus before
                       it asks when every VM would be, else an approval warning and the AP-02 preview
                       (TargetImpact.linked_clones, VM-24's problem), and by the job runner just before it deletes; a
                       read failure refuses too. The snapshot list shows them (SnapshotNode.linked_clones); VM-27
@@ -422,7 +442,8 @@ crates/core/          remotely-core: all app logic
                       templates mapped to this laptop's images, sizes and keys; QL-16 sessions travel with what they
                       set themselves and folders with their defaults (a folder here with other defaults: keep or
                       replace); groups.rs QL-19 MultiExec groups by name with their sessions' ids (members become the
-                      sessions imported or matched here, the rest left out with a note)
+                      sessions imported or matched here, the rest left out with a note); stacks.rs VM-08 stacks with
+                      the catalogue, each step's template mapped to what it became here (instances stay out)
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -462,20 +483,22 @@ crates/core/          remotely-core: all app logic
     fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
     fakes/github_server.rs  FD-14 fake GitHub API, github.com download links and release storage on 127.0.0.1
                       (private or public, rate limits), throwaway update-signing key
+    fakes/stack_clock.rs  VM-08 FakeStackClock: a stack job's readiness waits and delays move fake time at once,
+                      run `at` hooks (a port opening, a tool failing) and record each sleep
+    fakes/host_networks.rs  VM-11 the fakes' vmnets and forwards (as_admin, with_forwards_in_conf_only) and VirtualBox's
+                      host-only interfaces, NAT networks, VM NAT rules and showvminfo paths, with the tools' refusals
     fakes/disk_tools.rs  CV-01 to CV-03 FakeDiskTools: no program runs; each tool's arguments read and small files
                       with the right header written (VirtualBox's media list kept as VirtualBox keeps it), failing
                       tools, delays, qemu-img only with_qemu_img; fakes/disk_images.rs small test images of every
                       format (VMDK sparse and stream, VDI, VHD, VHDX, qcow2, raw, OVA tars, OVF text), TempFolder
-    fakes/host_networks.rs  VM-11 the fakes' vmnets and forwards (as_admin, with_forwards_in_conf_only) and VirtualBox's
-                      host-only interfaces, NAT networks, VM NAT rules and showvminfo paths, with the tools' refusals
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
                       QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16;
                       host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
-                      VM-27 on a FakeClock, no sleeping; conversion.rs: CV-01 to CV-03, VM-17); opt-in
-                      workstation_it.rs, virtualbox_it.rs and conversion_it.rs (the real conversion tools on small
-                      images in the temp folder)
+                      VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
+                      conversion.rs: CV-01 to CV-03, VM-17); opt-in workstation_it.rs, virtualbox_it.rs and
+                      conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
@@ -504,10 +527,11 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       Clone dialogs' checks and submits, host adapters, the default VM folder); R4 vm_insight.rs (VM-25
                       logs and the timeline, VM-11 host networks, VM-16 the waste report and Explorer at a folder the
                       core names); VM-14, VM-27 schedules.rs (the scheduler's loop, `schedules://event`, the
-                      Schedules page's and VM tab's commands); CV-01 to CV-03, VM-17 convert.rs (Image tools' file
-                      dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify` progress,
-                      Export's options and folder dialog, Import's analysis, check and submit, QEMU's page after
-                      checked_qemu_site; Settings' qemu-img path in ipc.rs)
+                      Schedules page's and VM tab's commands); VM-08 stacks.rs (stacks, their deploy, instances' power
+                      and teardown, VMs added or taken out by hand); CV-01 to CV-03, VM-17 convert.rs (Image tools'
+                      file dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify`
+                      progress, Export's options and folder dialog, Import's analysis, check and submit, QEMU's page
+                      after checked_qemu_site; Settings' qemu-img path in ipc.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -533,9 +557,13 @@ src/                  React + TypeScript UI
                       VM-21, VM-22, VM-10: TemplateFields (the template editor's fields, also the Deploy dialog's
                       Custom), DeployDialog (a template or Custom, count, names, the preview, then the job's step per
                       VM: DeployProgressView, useDeployProgress), DeployPreviewView (also in the approval dialog),
-                      CloneDialog; CV-01 VmImportDialog (a file analysed, then a deploy with DeployPreviewView and
-                      DeployProgressView), VM-17 VmExportDialog (each target with its plan or why not), CV-03
-                      QemuImgCard (Settings' Conversion tools; ImportDialog and ExportDialog are SS-02's and FD-07's);
+                      CloneDialog; VM-08, VM-26: StacksTab (the Templates page's Stacks tab: stacks and instances),
+                      StackDialog, StackDeployDialog, StackDetailsView (also in the approval dialog), StackGroupRow
+                      (an instance's header row on the VMs page), CapacityPlanView (the Deploy, Clone, Import and stack
+                      deploy dialogs and the approval; Suspend what it suggests); CV-01 VmImportDialog (a file analysed,
+                      then a deploy with DeployPreviewView, CapacityPlanView and DeployProgressView), VM-17
+                      VmExportDialog (each target with its plan or why not), CV-03 QemuImgCard (Settings' Conversion
+                      tools; ImportDialog and ExportDialog are SS-02's and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
@@ -591,9 +619,10 @@ src/                  React + TypeScript UI
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
                       wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
-                      rows' QL-08 reasons), convert.ts and convert-api.ts (CV-01 to CV-03, VM-17 texts, QL-08
-                      reasons, the Verify verdict; the conversion IPC's types and wrappers), vm-snapshots.ts (QL-14
-                      snapshot reasons, picks, tier hints), vm-settings.ts
+                      rows' QL-08 reasons), stacks.ts and stacks-api.ts (VM-08, VM-26 texts, QL-08 reasons, the VMs
+                      page's grouping by instance; types and IPC wrappers), convert.ts and convert-api.ts (CV-01 to
+                      CV-03, VM-17 texts, QL-08 reasons, the Verify verdict; the conversion IPC's types and wrappers),
+                      vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
@@ -920,6 +949,9 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   `set_failing` for cleanup, `with_clone_delay` to cancel mid-way) in temp folders; the real adapters' command lines
   are checked against stand-in vmrun, ovftool and VBoxManage `.cmd` files made at run time (a batch file gets an
   argument with `=` quoted).
+- Stacks (VM-08): `tests/stacks.rs` deploys, starts, stops and tears down stacks on the same fakes, with
+  `Core::set_stack_clock(FakeStackClock)` so readiness waits and delays never sleep (`at` hooks open a `FakeNetwork`
+  port or make a fake fail at a given fake time).
 - Conversion (CV-01 to CV-03, VM-17): never convert, export or import a real VM's disks or a downloaded image in a
   test. `tests/conversion.rs` runs through the bus with `fakes::FakeDiskTools` (it runs no program and writes small
   files with each format's header) on images from `fakes::disk_images` made at run time in the system temp folder;

@@ -619,7 +619,11 @@ async fn starting_vms_that_would_overcommit_host_ram_asks_for_a_confirm() {
     assert_eq!(request.steps, [ApprovalStep::Confirm]);
     assert_eq!(
         request.warnings,
-        ["Running VMs would be assigned 44.0 GB of RAM, more than this host's 32.0 GB."],
+        [
+            "Running VMs would be assigned 44.0 GB of RAM, more than this host's 32.0 GB.",
+            // VM-26: the VMs being started are never suggested for a suspend.
+            "Even suspending every running VM that can be ('c') frees only 8.0 GB of the 12.0 GB needed."
+        ],
         "a is already running, so only b counts as starting"
     );
     let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();

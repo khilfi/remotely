@@ -46,7 +46,7 @@ Every VM action uses tools Workstation Pro already ships: `vmrun`, the `vmrest` 
 | VM-05 | Safety snapshot, on by default, before any high-risk bulk action | `vmrun snapshot` | MVP |
 | VM-06 | Limit parallel power-ons (default 3) to avoid host disk and CPU spikes | App job runner | MVP |
 | VM-07 | Capacity check before power-on: warn when running VMs' assigned RAM would exceed host RAM, or the VM folder's disk has under 10% free | Windows APIs, `memsize` in .vmx | MVP |
-| VM-08 | Lab blueprints: named VM groups with boot order, delays and readiness checks (Tools running, SSH port open) before the next VM starts | `vmrun checkToolsState`, TCP probe | v2 |
+| VM-08 | Lab blueprints (stacks, 0.5.0): named sets of launch templates with counts, boot order, delays and readiness checks (Tools running, SSH port open) before the next step starts; deployed and torn down as one, started and stopped in boot order | `vmrun checkToolsState`, VirtualBox Guest Additions run level, TCP probe | 0.5.0 |
 | VM-09 | Run commands and copy files through VMware Tools when a VM has no network (needs the guest login) | `vmrun` runProgramInGuest, copyFileFromHostToGuest, copyFileFromGuestToHost | v2 |
 | VM-10 | Full or linked clones from templates with a naming pattern; create N VMs at once | `vmrun clone` | v2 |
 | VM-11 | Connect or disconnect network adapters in bulk; show virtual networks, NAT port forwards and VM IPs | vmrest | v2 |
@@ -130,6 +130,15 @@ Deploy (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-21, VM-10). Each new VM i
 | Deploy 5 or more VMs (the bulk tier for deploys, from 5 VMs by default), or VMs labelled Prod | High |
 | Deploy 5 or more VMs labelled Prod | Critical |
 
+Stacks (0.5.0, `docs/plan-0.5.md` "Approval tiers"; VM-08). A stack instance's VMs are the targets; protected VMs are skipped, and a Prod label moves each up one tier:
+
+| Action | Tier |
+| --- | --- |
+| Deploy a stack: a deploy of all its VMs, made step by step in boot order (one approval) | As a deploy: Medium for 1 to 4 VMs, High for 5 or more |
+| Start, shut down or suspend a stack instance (boot order to start, the last step first to stop) | The power action's own tier on its VMs (start Low; shut down or suspend Medium for one VM, High for 2 or more) |
+| Tear down a stack instance (deletes the VMs its deploy made, with their files; VMs added by hand only when picked) | Critical |
+| Edit a stack, or add or take a VM out of an instance by hand (nothing in a VM changes) | No tier; audited |
+
 Conversion (0.5.0, `docs/plan-0.5.md` "Approval tiers"; CV-01 to CV-03, VM-17). The source is only read and only new files are written, so these are Low; a Prod-labelled VM moves its export up one tier, and a protected VM is skipped. An import of a foreign VM or disk is a deploy, with the deploy rows above. Inspect and Verify only read, so they are not commands:
 
 | Action | Tier |
@@ -145,7 +154,7 @@ Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 | --- | --- |
 | A scheduled snapshot, start, shut down, suspend or resume, or auto-suspend of idle VMs | The action's own tier on the schedule's VMs (Prod raises it, protected VMs are skipped), approved when the schedule is saved with the same steps as running it then, AP-06 included; the countdown is each run's |
 | A snapshot schedule that keeps the last N | The higher of taking and deleting a snapshot (High): retention deletes the schedule's own snapshots |
-| A run after the schedule was edited, a VM became Prod or protected or got its tag, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
+| A run after the schedule was edited, a VM became Prod or protected, got its tag or joined its stack, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
 | Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
 
 | ID | Requirement | Phase |

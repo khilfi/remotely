@@ -170,6 +170,14 @@ pub enum Command {
         targets: Vec<TargetRef>,
         spec: Box<crate::deploy::DeploySpec>,
     },
+    /// VM-08: a stack instance: deployed (each step's VMs made by the deploy runner, step by step in boot order,
+    /// with the stack's readiness checks and delays between steps), started, shut down or suspended in boot order
+    /// (the power commands' own work and tiers), or torn down (R3's delete on each of its VMs, Critical). Never
+    /// built by the UI: the stacks service ([`crate::stacks`]) builds it from the stack or the instance.
+    Stack {
+        targets: Vec<TargetRef>,
+        op: crate::stacks::StackOp,
+    },
     /// CV-03: convert a disk image into a new one on this PC. The one target is the new image
     /// ([`TargetRef::DiskImage`]). Never built by the UI: the conversion service builds it from the file the user
     /// picked and the place the shell's save dialog chose.
@@ -597,6 +605,8 @@ impl Command {
             }
             // VM-21: the paths and values a deploy uses come from the catalogue.
             Command::Deploy { .. } => "Deploys start from the Deploy dialog, a launch template or Clone on the VMs page.",
+            // VM-08: a stack's steps, an instance's VMs and their order come from the stacks the core keeps.
+            Command::Stack { .. } => "Stacks deploy, start, stop and tear down from the Stacks tab or the VMs page.",
             // VM-23, VM-24: a file or folder of this PC the guest (or the VM list) gets comes from a dialog or a
             // drop in the shell, never from the UI: an attached file or a shared folder is the guest's to read.
             Command::VmDevice {
@@ -695,6 +705,7 @@ impl Command {
             Command::VmDevice { targets, op } => vm_ops::validate_device(targets, op),
             Command::VmDisk { targets, op } => vm_ops::validate_disk(targets, op),
             Command::VmLifecycle { targets, op } => vm_ops::validate_lifecycle(targets, op),
+            Command::Stack { targets, op } => op.validate(targets),
             Command::HostNetwork { targets, op } => net_ops::validate(targets, op),
             _ => Ok(()),
         }
@@ -723,6 +734,11 @@ impl Command {
             Command::Deploy { targets, spec } => {
                 **spec = spec.only(&new);
                 *targets = spec.targets();
+            }
+            // VM-08: the instance's VMs that failed or never started, in their steps and order.
+            Command::Stack { targets, op } => {
+                *op = op.only(&new);
+                *targets = op.targets().unwrap_or(new);
             }
             // CV-03, VM-17: one target, the same file or VM; a failed job left nothing behind, so it runs again as asked.
             Command::ImageConvert { targets, .. } | Command::VmExport { targets, .. } => {
@@ -761,10 +777,10 @@ impl Command {
             | Command::VmDevice { targets, .. }
             | Command::VmDisk { targets, .. }
             | Command::VmLifecycle { targets, .. }
-            | Command::HostNetwork { targets, .. }
             | Command::Deploy { targets, .. }
-            | Command::ImageConvert { targets, .. }
-            | Command::VmExport { targets, .. } => targets,
+            | Command::HostNetwork { targets, .. }
+            | Command::Stack { targets, .. } => targets,
+            Command::ImageConvert { targets, .. } | Command::VmExport { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -788,9 +804,10 @@ impl Command {
             Command::VmDevice { .. } => "vmDevice",
             Command::VmDisk { .. } => "vmDisk",
             Command::VmLifecycle { .. } => "vmLifecycle",
+            Command::Stack { .. } => "stack",
+            Command::HostNetwork { .. } => "hostNetwork",
             Command::ImageConvert { .. } => "imageConvert",
             Command::VmExport { .. } => "vmExport",
-            Command::HostNetwork { .. } => "hostNetwork",
         }
     }
 
@@ -920,9 +937,10 @@ impl Command {
             Command::VmDevice { op, .. } => op.summary(target_count),
             Command::VmDisk { op, .. } => op.summary(target_count),
             Command::VmLifecycle { op, .. } => op.summary(target_count),
+            Command::Stack { op, .. } => op.summary(target_count),
+            Command::HostNetwork { targets, op } => op.summary(targets),
             Command::ImageConvert { spec, .. } => spec.summary(),
             Command::VmExport { spec, .. } => spec.summary(),
-            Command::HostNetwork { targets, op } => op.summary(targets),
         }
     }
 }
@@ -975,6 +993,11 @@ pub struct ApprovalRequest {
     /// VM-23, VM-24: for a VM settings or lifecycle change, what changes on each VM, every file that is
     /// deleted, and why a VM would be refused.
     pub vm_change: Option<Box<VmChangePreview>>,
+    /// VM-08: for a stack command, the instance and its steps in the order they run (a deploy's with each
+    /// step's deploy preview, a teardown's with the VMs it keeps).
+    pub stack: Option<Box<crate::stacks::StackDetails>>,
+    /// VM-26: for a deploy, RAM, CPU and disk on this PC after it, next to now.
+    pub capacity: Option<Box<crate::capacity_plan::DeployCapacity>>,
     /// VM-14, VM-27: for a schedule's approval, when it runs and what each run does.
     pub standing: Option<Box<StandingDetails>>,
 }
@@ -984,6 +1007,8 @@ pub struct ApprovalRequest {
 struct Previews {
     impact: Option<Vec<TargetImpact>>,
     vm_change: Option<VmChangePreview>,
+    stack: Option<crate::stacks::StackDetails>,
+    capacity: Option<crate::capacity_plan::DeployCapacity>,
     /// VM-04, VM-21, VM-24: the VM targets a snapshot or VM delete must not touch, for linked clones.
     linked_clones: Vec<Blocked>,
 }
@@ -1562,11 +1587,15 @@ impl CommandBus {
             .iter()
             .filter(|t| t.status == TargetStatus::Unknown.as_str())
             .count();
+        // VM-08: a stack's steps that never started (an earlier step failed or wasn't ready) go again with the
+        // ones that failed: they never ran.
+        let stack = matches!(command, Command::Stack { .. });
         let failed: Vec<TargetRef> = targets
             .iter()
             .filter(|t| {
                 t.status == TargetStatus::Failed.as_str()
                     || (include_unknown && t.status == TargetStatus::Unknown.as_str())
+                    || (stack && t.status == TargetStatus::Skipped.as_str())
             })
             .filter_map(|t| t.target_ref())
             .collect();
@@ -1860,13 +1889,70 @@ impl CommandBus {
             problems.extend(preview.warnings.iter().cloned());
             decision.add_warnings(problems);
         }
+        let (stack, capacity) = self.add_deploy_warnings(ctx, command, decision).await;
         // VM-11: who can reach a forward, whose address it leads to, and the VMs on the network.
         decision.add_warnings(self.impact.network_warnings(ctx, command).await);
         Previews {
             impact: self.add_power_warnings(ctx, command, decision).await,
             vm_change,
+            stack,
+            capacity,
             linked_clones,
         }
+    }
+
+    /// VM-08: a stack command's details, and its steps' warnings and refusals (what changed since the stacks service
+    /// checked it: those VMs fail when their turn comes). VM-26: for a deploy (R2's or a stack's), this PC after it;
+    /// when it won't fit, why, and which running VMs to suspend.
+    async fn add_deploy_warnings(
+        &self,
+        ctx: &Context,
+        command: &Command,
+        decision: &mut Decision,
+    ) -> (
+        Option<crate::stacks::StackDetails>,
+        Option<crate::capacity_plan::DeployCapacity>,
+    ) {
+        let host = self.capacity.host().as_ref();
+        let stack = self.impact.stack(command, &decision.targets, host).await;
+        let demands = match (command, &stack) {
+            (Command::Deploy { spec, .. }, _) => self
+                .impact
+                .deploy(command, host)
+                .await
+                .map(|preview| crate::capacity_plan::deploy_demands(spec, &preview)),
+            (
+                Command::Stack {
+                    op: crate::stacks::StackOp::Deploy { spec },
+                    ..
+                },
+                Some(details),
+            ) => {
+                decision.add_warnings(details.warnings.iter().chain(&details.refusals).cloned().collect());
+                Some(
+                    spec.steps
+                        .iter()
+                        .zip(&details.steps)
+                        .filter_map(|(step, shown)| {
+                            shown
+                                .deploy
+                                .as_ref()
+                                .map(|preview| crate::capacity_plan::deploy_demands(&step.spec, preview))
+                        })
+                        .flatten()
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => None,
+        };
+        let capacity = match demands {
+            Some(demands) => Some(self.capacity.deploy_capacity(ctx, &demands).await),
+            None => None,
+        };
+        if let Some(capacity) = &capacity {
+            decision.add_warnings(capacity.approval_warnings());
+        }
+        (stack, capacity)
     }
 
     async fn add_power_warnings(
@@ -1884,14 +1970,40 @@ impl CommandBus {
         if let Some(deploy) = self.impact.deploy(command, self.capacity.host().as_ref()).await {
             decision.add_warnings(deploy.warnings.into_iter().chain(deploy.refusals).collect());
         }
-        if let Command::VmPower {
-            op: PowerOp::Start { .. },
-            ..
-        } = command
-        {
+        let starts = match command {
+            Command::VmPower {
+                op: PowerOp::Start { .. },
+                ..
+            } => true,
+            // VM-08: an instance's start is the same power-on.
+            Command::Stack {
+                op: crate::stacks::StackOp::Power { spec },
+                ..
+            } => spec.starts(),
+            _ => false,
+        };
+        if starts {
             // VM-07: capacity check before power-on.
             let warnings = self.capacity.check_power_on(ctx, &decision.targets).await;
-            decision.add_warnings(warnings.iter().map(|w| w.message()).collect());
+            let mut messages: Vec<String> = warnings.iter().map(|w| w.message()).collect();
+            // VM-26: which other running VMs to suspend to make room.
+            for warning in &warnings {
+                if let crate::capacity::CapacityWarning::Ram {
+                    assigned_mb,
+                    physical_mb,
+                } = warning
+                {
+                    let starting: Vec<String> = decision.targets.iter().map(|t| t.target.key()).collect();
+                    if let Some(advice) = self
+                        .capacity
+                        .suspend_advice(ctx, assigned_mb.saturating_sub(*physical_mb), &starting)
+                        .await
+                    {
+                        messages.push(advice.describe());
+                    }
+                }
+            }
+            decision.add_warnings(messages);
             // VM-02: VMs that join this PC's own network when they start.
             let bridged = self.capacity.bridged(ctx, &decision.targets).await;
             decision.add_warnings(bridged);
@@ -1925,6 +2037,8 @@ impl CommandBus {
         let Previews {
             impact,
             vm_change,
+            stack,
+            capacity,
             linked_clones,
         } = previews;
         let mut impact = match impact {
@@ -1958,6 +2072,8 @@ impl CommandBus {
                 .await
                 .map(Box::new),
             vm_change: vm_change.map(Box::new),
+            stack: stack.map(Box::new),
+            capacity: capacity.map(Box::new),
             standing: None,
         })
     }
