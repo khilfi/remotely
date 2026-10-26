@@ -329,6 +329,11 @@ pub enum CoreError {
     #[error("{0} is not in this workspace")]
     NotInWorkspace(String),
 
+    /// FD-02: a VM no workspace has (the VMs page's Unassigned, or one Remotely never found). Nothing acts on it, or
+    /// reads it by its key, until a workspace adds it; nothing adds it by itself.
+    #[error("{0} isn't in any workspace: add it to this workspace first (VMs page: Unassigned, or Add VM…)")]
+    VmUnassigned(String),
+
     /// FD-02: no workspace of this user has that id.
     #[error("that workspace doesn't exist")]
     UnknownWorkspace,
@@ -485,6 +490,7 @@ impl CoreError {
             CoreError::VmSettingRefused(_) => "vm_setting_refused",
             CoreError::LinkedClones(_) => "linked_clones",
             CoreError::NotInWorkspace(_) => "not_in_workspace",
+            CoreError::VmUnassigned(_) => "vm_unassigned",
             CoreError::UnknownWorkspace => "unknown_workspace",
             CoreError::WorkspaceBusy { .. } => "workspace_busy",
             CoreError::HostNetworkRefused(_) => "host_network_refused",

@@ -289,9 +289,9 @@ async fn protected_vms_are_skipped_until_they_are_unprotected() {
 #[tokio::test]
 async fn protecting_a_vm_not_in_the_inventory_fails() {
     let core = Setup::new(FakeVmware::default()).build().await;
-    // FD-02: a VM the workspace doesn't list is refused by the bus before anything is queued.
+    // FD-02: a VM no workspace has is refused by the bus before anything is queued: add it first.
     let refused = core.bus.submit(&core.ctx(), protect(&["nope"], true)).await;
-    assert!(matches!(refused, Err(CoreError::NotInWorkspace(_))), "{refused:?}");
+    assert!(matches!(refused, Err(CoreError::VmUnassigned(_))), "{refused:?}");
 }
 
 // ---- SS-06: environment labels on VMs -----------------------------------------------------------

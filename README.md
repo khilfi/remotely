@@ -467,8 +467,9 @@ and colour) and switches to another; **New workspace…**, **Rename or recolour 
   acts on it: the command bus refuses an action on a VM from any other workspace. While only one workspace is active,
   every VM joins it by itself, so nothing changes until you make a second one. After that, a VM no workspace has yet is
   under **Unassigned** on the VMs page, where you add it to the current workspace, and **Take out of this workspace**
-  (a VM's menu) puts one back there (never a protected or Prod VM). Nothing acts on an unassigned VM: the command bus
-  refuses it until a workspace adds it, and adding is never done for you. A VM Remotely deploys, clones, imports or adds
+  (a VM's menu) puts one back there (never a protected or Prod VM). Nothing acts on an unassigned VM: power, snapshots,
+  settings, delete, protect, a clone of it and reads of its files are refused with "add it to this workspace first"
+  until a workspace adds it, and adding is never done for you. A VM Remotely deploys, clones, imports or adds
   joins the workspace that made it. The capacity check and planner still count every running VM, shown as "a VM
   outside this workspace", and never suggest suspending one.
 - **Vault**: one vault password and one key for every workspace, so one unlock is enough; each secret is sealed with

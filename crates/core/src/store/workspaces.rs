@@ -198,15 +198,15 @@ impl Store {
         Ok(self.vm_owner(vm_key).await? == Some(ctx.workspace_id))
     }
 
-    /// FD-02: refuses a VM the context's workspace doesn't have (another workspace's, or none's), for reads of one VM
-    /// by its key, as the command bus refuses actions on it.
+    /// FD-02: refuses a VM the context's workspace doesn't have, for actions on it (the command bus) and reads of one
+    /// VM by its key. One no workspace has must be added first (`VmUnassigned`); another workspace's is only "not in
+    /// this workspace", which says nothing of that workspace.
     pub async fn require_vm_here(&self, ctx: &Context, vm_key: &str) -> Result<()> {
-        if self.vm_in_workspace(ctx, vm_key).await? {
-            Ok(())
-        } else {
-            Err(crate::error::CoreError::NotInWorkspace(crate::inventory::vm_named(
-                vm_key,
-            )))
+        let name = || crate::inventory::vm_named(vm_key);
+        match self.vm_owner(vm_key).await? {
+            Some(owner) if owner == ctx.workspace_id => Ok(()),
+            Some(_) => Err(crate::error::CoreError::NotInWorkspace(name())),
+            None => Err(crate::error::CoreError::VmUnassigned(name())),
         }
     }
 
