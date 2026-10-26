@@ -18,7 +18,7 @@
 //! * Refused with the reason: settings and disks of a VM that is running or suspended; expanding, compacting,
 //!   defragmenting or removing a disk of a VM with snapshots (the snapshots' deltas depend on the disk, and a
 //!   resized base under them leaves the guest seeing its old size); removing a disk outside the VM's folder
-//!   (another VM may use it).
+//!   (another VM may use it); deleting a VM linked clones are made from ([`crate::linked_clones`]).
 
 pub mod ops;
 pub mod service;
@@ -46,6 +46,7 @@ use crate::adapters::vmx_file::VmxFile;
 use crate::command_bus::Command;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::linked_clones::{LinkedClones, VboxMedia};
 use crate::store::Store;
 
 /// VM-24: `.vmx` files added by hand (Add existing VM), which inventory refreshes list like the library's.
@@ -271,11 +272,17 @@ fn tag_of(job_id: Uuid) -> String {
 pub struct VmEditor {
     hypervisors: Hypervisors,
     store: Store,
+    /// VM-24, VM-21: a VM that linked clones depend on is not deleted.
+    linked_clones: LinkedClones,
 }
 
 impl VmEditor {
     pub fn new(hypervisors: Hypervisors, store: Store) -> Self {
-        Self { hypervisors, store }
+        Self {
+            linked_clones: LinkedClones::new(hypervisors.clone()),
+            hypervisors,
+            store,
+        }
     }
 
     /// Carries out `command` on one VM. Returns a line for the job's end in the audit log: the VM and what
@@ -426,6 +433,20 @@ impl VmEditor {
 
     async fn vmx(&self, vmx: &Path) -> Result<VmxFile> {
         VmxFile::parse(&self.hypervisors.vmware().vmx_bytes(vmx).await?)
+    }
+
+    /// VM-24, VM-21: a VM whose snapshots linked clones are made from is not deleted: `vmrun deleteVM` would delete
+    /// the disks they need without a word, and `unregistervm --delete` unregister it and delete its disk before failing
+    /// ([`crate::linked_clones`]). The reason names the clones; the preview shows it as the VM's problem.
+    async fn require_no_linked_clones(&self, key: &str) -> Result<()> {
+        match self
+            .linked_clones
+            .vm_delete_refusal(key, &mut VboxMedia::default())
+            .await
+        {
+            Some(reason) => Err(CoreError::LinkedClones(reason)),
+            None => Ok(()),
+        }
     }
 
     /// VM-23: nothing writes a Workstation VM's .vmx or disks while Workstation holds its lock on the VM
@@ -817,6 +838,7 @@ impl VmEditor {
                         "The VM is running: shut it down (or power it off) before it is deleted.",
                     ));
                 }
+                self.require_no_linked_clones(&vmx.to_string_lossy()).await?;
                 let file = self.vmx(vmx).await?;
                 self.require_unlocked(vmx, &file).await?;
                 let folder = vmx.parent().unwrap_or(Path::new(""));
@@ -858,6 +880,7 @@ impl VmEditor {
                         "The VM is running: shut it down (or power it off) before it is deleted.",
                     ));
                 }
+                self.require_no_linked_clones(uuid).await?;
                 let info = vbox.vm_info(uuid).await?;
                 let extras = vbox.settings_extras(&info).await.unwrap_or_default();
                 let mut deletes: Vec<(PathBuf, u64)> = Vec::new();

@@ -10,11 +10,13 @@ use std::path::PathBuf;
 
 use common::{temp_folder, Setup};
 use remotely_core::adapters::vmware::VmxInfo;
-use remotely_core::domain::PowerState;
+use remotely_core::command_bus::Command;
+use remotely_core::domain::{PowerState, TargetRef};
 use remotely_core::fakes::{FakeVirtualBox, FakeVmware};
 use remotely_core::metrics::history::{now_ms, HistorySource, MinuteRow, MINUTE_MS};
+use remotely_core::vm_settings::VmLifecycleOp;
 use remotely_core::waste::{OrphanKind, WasteOptions};
-use remotely_core::Core;
+use remotely_core::{Core, CoreError};
 use time::OffsetDateTime;
 
 const SAVED: &str = "9d1e2f3a-0000-4000-8000-0000000000cc";
@@ -263,4 +265,50 @@ async fn open_folder_takes_only_folders_the_report_or_a_known_vm_names() {
     let by_vm = waste.folder_to_open(None, Some(&lab.chained)).await.unwrap();
     assert_eq!(by_vm, lab.root.0.join("chained"));
     assert!(waste.folder_to_open(None, None).await.is_err());
+}
+
+#[tokio::test]
+async fn deleting_a_suspended_golden_vm_from_the_report_is_refused_for_its_linked_clones() {
+    // VM-04, VM-21, VM-24: a Suspended row's Delete VM is R3's VM delete on the bus, so the linked-clone guard refuses
+    // it before anything is asked, and names the clone that deleting the golden VM would break.
+    let root = Folder(temp_folder("r4-waste-golden"));
+    let golden = root.file("golden/golden.vmx", 10);
+    root.file("golden/golden-6f1a.vmss", 3_000);
+    let clone = root.0.join("web-01").join("web-01.vmx").display().to_string();
+    let fake = FakeVmware::default()
+        .in_folder(&root.0.display().to_string(), &golden)
+        .with_vmx(
+            &golden,
+            VmxInfo {
+                display_name: Some("golden".into()),
+                suspended: true,
+                ..Default::default()
+            },
+        )
+        .with_snapshot(&golden, "base", OffsetDateTime::now_utc() - time::Duration::days(10))
+        .with_linked_clone(&golden, "base", &clone);
+    let setup = Setup::new(fake);
+    let vmware = std::sync::Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    core.set_scan_folders(vec![root.0.clone()]).await.unwrap();
+    core.inventory.refresh(&core.ctx).await.unwrap();
+
+    let report = core.waste.report(WasteOptions::default()).await.unwrap();
+    let row = report.suspended.iter().find(|s| s.vm.vmx_path == golden).unwrap();
+    // What WasteFinderSheet's Delete VM submits for the row.
+    let delete = Command::VmLifecycle {
+        targets: vec![TargetRef::Vm {
+            vmx_path: row.vm.vmx_path.clone(),
+        }],
+        op: VmLifecycleOp::Delete,
+    };
+    let err = core.bus.submit(&core.ctx, delete).await.unwrap_err();
+    assert!(matches!(err, CoreError::LinkedClones(_)), "{err:?}");
+    assert!(
+        err.to_string().starts_with(&format!(
+            "'golden': 1 linked clone depends on its snapshots: 'base' (web-01 ({clone}))"
+        )),
+        "{err}"
+    );
+    assert!(!vmware.calls().iter().any(|c| c.contains("deleteVM")));
 }

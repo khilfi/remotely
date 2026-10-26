@@ -600,6 +600,7 @@ impl Containers {
                 old_snapshot_count: None,
                 notes,
                 container: Some(container),
+                linked_clones: Vec::new(),
             });
         }
         out

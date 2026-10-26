@@ -318,6 +318,12 @@ pub enum CoreError {
     /// need administrator rights, the host port is taken, the rule is gone...
     #[error("{0}")]
     HostNetworkRefused(String),
+
+    /// VM-04, VM-21, VM-24: deleting a snapshot or a VM would break the linked clones made from it (they share its
+    /// disk as it was at the snapshot); the message names the VM, what would go and the clones.
+    #[error("{0}")]
+    LinkedClones(String),
+
     /// VM-21: ovftool.exe (the OVFTool folder next to vmrun.exe, `REMOTELY_OVFTOOL` or the Settings path) is not
     /// there, so an OVA or OVF can't be imported into Workstation.
     #[error("ovftool.exe was not found: it comes with Workstation, in its OVFTool folder. Set its path in Settings, or import the appliance into VirtualBox")]
@@ -447,6 +453,7 @@ impl CoreError {
             CoreError::VdiskManagerNotFound => "vdiskmanager_not_found",
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",
             CoreError::VmSettingRefused(_) => "vm_setting_refused",
+            CoreError::LinkedClones(_) => "linked_clones",
             CoreError::HostNetworkRefused(_) => "host_network_refused",
             CoreError::OvftoolNotFound => "ovftool_not_found",
             CoreError::Ovftool { .. } => "ovftool_failed",

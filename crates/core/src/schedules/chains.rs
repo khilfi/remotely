@@ -224,6 +224,7 @@ mod tests {
             description: None,
             created_at: None,
             id: None,
+            linked_clones: Vec::new(),
         };
         let tree = SnapshotTree {
             snapshots: (1..=7).map(|uid| snap(uid, (uid > 1).then(|| uid - 1))).collect(),

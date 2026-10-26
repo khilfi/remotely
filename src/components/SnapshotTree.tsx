@@ -1,9 +1,10 @@
 // VM-04 one VM's snapshot tree, in its details panel on the Virtual machines page (QL-14): read from the VM's .vmsd
 // (tree order, creation times, "you are here"), snapshots older than the limit flagged and Remotely's safety snapshots
-// (VM-05) marked. Revert and delete on a snapshot are commands for the bus; the approval dialog follows.
+// (VM-05) marked, and (VM-04, VM-21) the linked clones made from each snapshot, which keep it from being deleted. Revert
+// and delete on a snapshot are commands for the bus; the approval dialog follows.
 
 import type { ReactElement } from "react";
-import { CameraIcon, MapPinIcon, Trash2Icon, Undo2Icon } from "lucide-react";
+import { CameraIcon, CopyIcon, MapPinIcon, Trash2Icon, Undo2Icon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -11,7 +12,13 @@ import { WhyDisabled } from "@/components/WhyDisabled";
 import type { SnapshotNode, VmSnapshots } from "@/lib/api";
 import { formatAge } from "@/lib/format";
 import { cn } from "@/lib/utils";
-import { snapshotActionReason, unreachableByName } from "@/lib/vm-snapshots";
+import {
+  cloneNames,
+  linkedClonesLabel,
+  snapshotActionReason,
+  snapshotDeleteReason,
+  unreachableByName,
+} from "@/lib/vm-snapshots";
 
 interface Props {
   tree: VmSnapshots;
@@ -29,13 +36,9 @@ export function SnapshotTree({ tree, oldAfterDays, readOnly, busy, hints, onReve
   return (
     <ol aria-label={`Snapshots of ${tree.displayName}`} className="flex flex-col gap-0.5">
       {tree.snapshots.map((node) => {
-        const reason = snapshotActionReason({
-          node,
-          hypervisor: tree.hypervisor,
-          readOnly,
-          protected: tree.protected,
-          busy,
-        });
+        const input = { node, hypervisor: tree.hypervisor, readOnly, protected: tree.protected, busy };
+        const reason = snapshotActionReason(input);
+        const deleteReason = snapshotDeleteReason(input);
         const label = node.name || "(no name)";
         return (
           <li
@@ -70,6 +73,19 @@ export function SnapshotTree({ tree, oldAfterDays, readOnly, busy, hints, onReve
                     Older than {oldAfterDays} days
                   </Badge>
                 )}
+                {node.linkedClones.length > 0 && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Badge variant="outline" className="font-normal">
+                        <CopyIcon />
+                        {linkedClonesLabel(node.linkedClones.length)}
+                      </Badge>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-72">
+                      Made from this snapshot, so it is kept: {cloneNames(node.linkedClones, 10)}
+                    </TooltipContent>
+                  </Tooltip>
+                )}
               </div>
               <div className="text-xs text-muted-foreground">
                 {node.createdAt ? (
@@ -101,7 +117,7 @@ export function SnapshotTree({ tree, oldAfterDays, readOnly, busy, hints, onReve
               <IconAction
                 label={`Delete the snapshot ${label} of ${tree.displayName}`}
                 tip={hints.delete ? `Delete this snapshot. ${hints.delete}` : "Delete this snapshot"}
-                reason={reason}
+                reason={deleteReason}
                 destructive
                 onClick={() => onDelete(node)}
               >

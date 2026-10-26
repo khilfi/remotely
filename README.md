@@ -54,6 +54,11 @@ QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page
   its tree: "You are here", creation times, descriptions, old and safety snapshots marked, and Take, Revert and Delete
   with the tier each would get (Prod raises it), then the approval dialog with its impact preview and the safety
   snapshot offer.
+- **Linked clones** (0.5.0): a snapshot a linked clone was made from shows "1 linked clone" (hover for the names),
+  and its Delete is off: the clone shares the golden VM's disk as it was then, and Workstation or VirtualBox would
+  break it without a word. Delete the clones first; snapshots before or after theirs delete as usual. A delete on
+  several VMs leaves that VM out (the approval names its clones), a schedule's retention keeps such a snapshot, and
+  deleting the golden VM itself is refused the same way.
 - Snapshot trees are read for the VM you open, the selection when you open its Snapshots menu and the VMs shown when
   you select by snapshots, so a long VM list stays quick.
 - Ctrl+3 and "Snapshots" in the Ctrl+K palette open the snapshot view of the open or first selected VM; in the palette
@@ -188,7 +193,8 @@ launch template, or from **Custom** values typed in the dialog.
   "Bulk threshold for deploys") or for Prod. The job has one step per VM, two at a time, and can be cancelled. When a
   VM fails or the job is cancelled, Remotely removes what it made for that VM (never a folder that was there before);
   VMs already made stay. The audit log has the deploy's start and each VM's result.
-- **Golden VM**: a full or linked clone of the snapshot the image names. **Cloud image**: a copy of the image (the
+- **Golden VM**: a full or linked clone of the snapshot the image names. While a linked clone is there, that snapshot
+  and the golden VM can't be deleted (see Virtual machines and snapshots). **Cloud image**: a copy of the image (the
   file itself never changes) as the boot disk, grown to the size's disk; its first boot (cloud-init) sets the hostname,
   the guest user, the SSH key's public half and the packages, through the `.vmx`'s `guestinfo` keys on Workstation and
   a small `cidata` disc on VirtualBox, taken out after the first boot. A password never goes into these: they are

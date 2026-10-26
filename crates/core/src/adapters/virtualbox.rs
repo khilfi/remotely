@@ -332,6 +332,97 @@ pub trait VirtualBoxAdapter: Send + Sync {
     async fn unattended_detect(&self, _iso: &Path) -> Result<(bool, Option<String>)> {
         Err(CoreError::VboxManageNotFound)
     }
+
+    /// VM-04, VM-21: every hard disk image VirtualBox knows (`list --long hdds`), with its parent and what uses it:
+    /// how Remotely finds the linked clones that depend on a VM's snapshot ([`crate::linked_clones`]). A read.
+    async fn media(&self) -> Result<Vec<VboxMedium>> {
+        Err(CoreError::VboxManageNotFound)
+    }
+}
+
+/// VM-04, VM-21: one hard disk image in VirtualBox's media list (`list --long hdds`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct VboxMedium {
+    /// Lower case, without braces.
+    pub uuid: String,
+    /// The image this differencing image was made from; `None` for a base image (`Parent UUID: base`).
+    pub parent: Option<String>,
+    pub location: String,
+    /// Every UUID its `In use by VMs` field names, in lower case: each VM that uses the image and, in brackets after
+    /// it, that VM's snapshots that do (`golden (UUID: …) [base (UUID: …)]`).
+    pub used_by: Vec<String>,
+}
+
+/// Parses `VBoxManage list --long hdds` (VirtualBox 7.2, hand check), a block per image, blocks apart by a blank line:
+///
+/// ```text
+/// UUID:           255d216d-d135-4bfc-8b45-736f64edeab7
+/// Parent UUID:    base
+/// Location:       C:\Users\alice\VirtualBox VMs\golden\golden.vdi
+/// In use by VMs:  golden (UUID: 520326dd-…) [base (UUID: 7d2053f2-…)]
+/// Child UUIDs:    6e843b30-…
+///                 a1147608-…
+/// ```
+///
+/// A field may go on over indented lines. `In use by VMs` is read for its UUIDs only: a VM's name is any text, so
+/// one that holds `(UUID: …)` can add a UUID, never hide one.
+pub fn parse_media(out: &str) -> Vec<VboxMedium> {
+    fn uuids(text: &str, into: &mut Vec<String>) {
+        let mut rest = text;
+        while let Some(at) = rest.find("UUID:") {
+            rest = &rest[at + "UUID:".len()..];
+            let candidate: String = rest
+                .trim_start()
+                .chars()
+                .take_while(|c| c.is_ascii_hexdigit() || *c == '-')
+                .collect();
+            if let Some(uuid) = virtualbox_key(&candidate) {
+                if !into.contains(&uuid) {
+                    into.push(uuid);
+                }
+            }
+        }
+    }
+    let mut out_media = Vec::new();
+    let mut current: Option<VboxMedium> = None;
+    let mut field = String::new();
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            out_media.extend(current.take().filter(|m| !m.uuid.is_empty()));
+            field.clear();
+            continue;
+        }
+        let continued = line.starts_with([' ', '\t']);
+        let value = if continued {
+            line.trim()
+        } else {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            field = key.trim().to_ascii_lowercase();
+            let value = value.trim();
+            if field == "uuid" {
+                out_media.extend(current.take().filter(|m| !m.uuid.is_empty()));
+                current = Some(VboxMedium {
+                    uuid: virtualbox_key(value).unwrap_or_default(),
+                    ..VboxMedium::default()
+                });
+                continue;
+            }
+            value
+        };
+        let Some(medium) = current.as_mut() else {
+            continue;
+        };
+        match field.as_str() {
+            "parent uuid" => medium.parent = virtualbox_key(value),
+            "location" if !continued => medium.location = value.to_owned(),
+            "in use by vms" => uuids(value, &mut medium.used_by),
+            _ => {}
+        }
+    }
+    out_media.extend(current.filter(|m| !m.uuid.is_empty()));
+    out_media
 }
 
 /// VM-23: a guest OS type VirtualBox knows: the id `modifyvm --ostype` takes and its description.
@@ -637,6 +728,12 @@ impl VirtualBoxAdapter for VBoxManageCli {
             )
             .await?;
         Ok(parse_list_vms(&out).into_iter().map(|vm| vm.uuid).collect())
+    }
+
+    async fn media(&self) -> Result<Vec<VboxMedium>> {
+        let args = vec!["list".into(), "--long".into(), "hdds".into()];
+        let out = self.run("list hdds", args, LIST_TIMEOUT).await?;
+        Ok(parse_media(&out))
     }
 
     async fn vm_info(&self, uuid: &str) -> Result<VboxVmInfo> {
@@ -979,6 +1076,9 @@ impl VirtualBoxAdapter for SwitchableVirtualBox {
     }
     async fn unattended_detect(&self, iso: &Path) -> Result<(bool, Option<String>)> {
         self.current().unattended_detect(iso).await
+    }
+    async fn media(&self) -> Result<Vec<VboxMedium>> {
+        self.current().media().await
     }
     async fn settings_extras(&self, info: &VboxVmInfo) -> Option<VboxSettingsExtras> {
         self.current().settings_extras(info).await
@@ -1533,6 +1633,7 @@ pub fn snapshot_tree(pairs: &[(String, String)]) -> SnapshotTree {
                 description: descriptions.get(suffix).cloned().filter(|d| !d.trim().is_empty()),
                 created_at: None,
                 id: ids.get(suffix).and_then(|id| virtualbox_key(id)),
+                linked_clones: Vec::new(),
             }
         })
         .collect();
@@ -1876,6 +1977,83 @@ CurrentSnapshotNode="SnapshotName-1"
         ] {
             assert_eq!(power_state_of(state), want, "{state}");
         }
+    }
+
+    /// VM-04, VM-21: `list --long hdds` as VirtualBox 7.2 printed it (hand check) for a golden VM with a snapshot
+    /// "base", two linked clones of it, and a snapshot "own" one clone took.
+    const MEDIA: &str = "UUID:           255d216d-d135-4bfc-8b45-736f64edeab7
+Parent UUID:    base
+State:          created
+Type:           normal (base)
+Location:       C:\\Users\\alice\\VirtualBox VMs\\golden\\golden.vdi
+Storage format: VDI
+Capacity:       32 MBytes
+In use by VMs:  golden (UUID: 520326dd-e514-4317-8c58-517f7c751b13) [base (UUID: 7d2053f2-f6d0-4fbb-a779-e1887961ddcf)]
+Child UUIDs:    6e843b30-5f44-44af-85c1-40e021565877
+                a1147608-9605-4bc6-8a03-f8eaf1edac2c
+                75089146-fa67-4f0e-b5a5-8358eea707e1
+
+UUID:           6e843b30-5f44-44af-85c1-40e021565877
+Parent UUID:    255d216d-d135-4bfc-8b45-736f64edeab7
+State:          created
+Type:           normal (differencing)
+Location:       C:\\Users\\alice\\VirtualBox VMs\\golden\\Snapshots\\{6e843b30-5f44-44af-85c1-40e021565877}.vdi
+In use by VMs:  golden (UUID: 520326dd-e514-4317-8c58-517f7c751b13)
+
+UUID:           a1147608-9605-4bc6-8a03-f8eaf1edac2c
+Parent UUID:    255d216d-d135-4bfc-8b45-736f64edeab7
+Location:       C:\\Users\\alice\\VirtualBox VMs\\web-01\\Snapshots\\{a1147608-9605-4bc6-8a03-f8eaf1edac2c}.vdi
+In use by VMs:  web-01 (UUID: b687ee40-7b2d-426e-91a5-cd86b996001a) [own (UUID: ac2f81ed-9bfa-48db-891e-7908536dfa7f)]
+Child UUIDs:    729e4cc1-1e9a-4982-b42d-069378bcb44a
+
+UUID:           729e4cc1-1e9a-4982-b42d-069378bcb44a
+Parent UUID:    a1147608-9605-4bc6-8a03-f8eaf1edac2c
+Location:       C:\\Users\\alice\\VirtualBox VMs\\web-01\\Snapshots\\{729e4cc1-1e9a-4982-b42d-069378bcb44a}.vdi
+In use by VMs:  web-01 (UUID: b687ee40-7b2d-426e-91a5-cd86b996001a)
+
+UUID:           75089146-fa67-4f0e-b5a5-8358eea707e1
+Parent UUID:    255d216d-d135-4bfc-8b45-736f64edeab7
+Location:       C:\\Users\\alice\\VirtualBox VMs\\web-02\\Snapshots\\{75089146-fa67-4f0e-b5a5-8358eea707e1}.vdi
+In use by VMs:  web-02 (UUID: a423e999-d1b2-4805-948d-0aa4857e27f2)
+";
+
+    #[test]
+    fn parses_the_media_list_with_parents_and_users() {
+        let media = parse_media(MEDIA);
+        let summary: Vec<_> = media
+            .iter()
+            .map(|m| (&m.uuid[..8], m.parent.as_deref().map(|p| &p[..8]), m.used_by.len()))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("255d216d", None, 2),
+                ("6e843b30", Some("255d216d"), 1),
+                ("a1147608", Some("255d216d"), 2),
+                ("729e4cc1", Some("a1147608"), 1),
+                ("75089146", Some("255d216d"), 1),
+            ]
+        );
+        assert_eq!(
+            media[0].used_by,
+            [
+                "520326dd-e514-4317-8c58-517f7c751b13",
+                "7d2053f2-f6d0-4fbb-a779-e1887961ddcf"
+            ],
+            "the VM, then its snapshot in brackets"
+        );
+        assert_eq!(media[0].location, r"C:\Users\alice\VirtualBox VMs\golden\golden.vdi");
+        assert!(parse_media("").is_empty());
+
+        // Two VMs on one image, the second on a line of its own; a name can't hide the UUID after it.
+        let shared = "UUID: 255d216d-d135-4bfc-8b45-736f64edeab7\nParent UUID: base\nIn use by VMs:  a (UUID: b) (UUID: 520326dd-e514-4317-8c58-517f7c751b13),\n                web-02 (UUID: a423e999-d1b2-4805-948d-0aa4857e27f2)\n";
+        assert_eq!(
+            parse_media(shared)[0].used_by,
+            [
+                "520326dd-e514-4317-8c58-517f7c751b13",
+                "a423e999-d1b2-4805-948d-0aa4857e27f2"
+            ]
+        );
     }
 
     #[test]

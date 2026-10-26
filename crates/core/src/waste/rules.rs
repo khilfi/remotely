@@ -354,6 +354,7 @@ mod tests {
             description: None,
             created_at: None,
             id: None,
+            linked_clones: Vec::new(),
         }
     }
 

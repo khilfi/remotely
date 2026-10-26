@@ -372,6 +372,14 @@ crates/core/          remotely-core: all app logic
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited; a new key type for a host
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
+    linked_clones.rs  VM-04, VM-21, VM-24 linked clones: Workstation's from the golden VM's .vmsd (SnapshotInfo's
+                      linked_clones; a clone whose .vmx is gone left out, one on a share counted unopened), VirtualBox's
+                      from `list --long hdds` (vbox_clones: other VMs on disks made from a snapshot's). A snapshot or VM
+                      delete they depend on is refused (CoreError::LinkedClones, the clones named): by the bus before
+                      it asks when every VM would be, else an approval warning and the AP-02 preview
+                      (TargetImpact.linked_clones, VM-24's problem), and by the job runner just before it deletes; a
+                      read failure refuses too. The snapshot list shows them (SnapshotNode.linked_clones); VM-27
+                      retention keeps such a snapshot (its record too, so it goes once the clones are gone)
     ssh_keys.rs       SS-09 SSH keys: generated into the vault, public halves, attach to sessions, the
                       authorized_keys push script with KeyOptions (expiry-time, from) and remove_key_script (the push
                       and the removal are Command::PushSshKey and Command::RemoveSshKey on the bus, both Medium)
@@ -658,7 +666,10 @@ src/                  React + TypeScript UI
   Workstation 26 (hand check): a full clone's disk keeps the source's name with `-cl1` (`golden-cl1.vmdk`), and a
   linked clone's is a delta whose `parentFileNameHint` is the golden VM's disk by absolute path. A full clone writes
   nothing of the golden VM's; a linked clone adds `snapshotN.cloneM = "<clone's .vmx>"` and `snapshotN.numClones` to
-  its .vmsd, yet `vmrun deleteSnapshot` deletes that snapshot without a word (the linked clone breaks). Both clone a
+  its .vmsd, yet `vmrun deleteSnapshot` of that snapshot and `vmrun deleteVM` of the golden VM break the clone without a
+  word (it no longer powers on), while deleting the snapshot's parent or a later one is safe; `deleteVM` of a clone
+  lowers `numClones` but may leave its last `cloneM` line, so only the first `numClones` count (`linked_clones`
+  refuses both deletes, naming the clones). Both clone a
   running golden VM from its snapshot, and the golden VM runs on; a VM started with `vmrun start ... nogui` has
   `<disk>.vmdk.lck` folders (and a `.vmem.lck`) but no `.vmx.lck`; and vmrun ignores a `.vmx.lck` (an open tab's): it
   clones beside one and writes the linked clone's record anyway, so only Remotely's own check stops it; ovftool writes .vmx
@@ -737,8 +748,13 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   gives `Default machine folder:`; `list hostonlyifs` and `list bridgedifs` the adapters a network can use. A cancelled
   `clonevm` may hold the VM for a moment, so cleanup tries `unregistervm --delete` again a few times. VirtualBox 7.2
   (hand check): `unregistervm --delete` deletes a VM's disks but leaves its DVD images in the media list, so cleanup
-  closes the seed with `closemedium dvd`; it refuses to delete a golden VM while a linked clone uses its snapshot;
-  `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing `IsInstallSupported="off"`, and
+  closes the seed with `closemedium dvd`; a linked clone's differencing disk sits under the snapshot's disk in the golden
+  VM's media registry (`list --long hdds`: each disk's `Parent UUID`, and in `In use by VMs` the VMs and `[snapshots]`
+  using it): `snapshot delete` of that snapshot fails ("more than one child hard disk") while the golden VM's own disk
+  is a child too, but once the golden VM restored an older snapshot it merges the clone's disk away (the clone no longer
+  starts), and `unregistervm --delete` of the golden VM unregisters it and deletes its current disk before it fails
+  ("Cannot close medium ... because it has 1 child media"); deleting the snapshot's parent is safe (`linked_clones`
+  refuses the other two up front); `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing `IsInstallSupported="off"`, and
   Remotely takes any failure as "can't install it by itself"; `import` takes an OVA that ovftool made, and a truncated
   one fails with VERR_EOF. Windows' own `tar.exe` (libarchive) lists a seed's Joliet names, a check that doesn't use
   Remotely's reader.

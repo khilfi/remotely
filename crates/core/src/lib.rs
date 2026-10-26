@@ -76,6 +76,7 @@ pub mod import;
 pub mod inventory;
 pub mod jobs;
 pub mod known_hosts;
+pub mod linked_clones;
 pub mod locks;
 pub mod login_guard;
 pub mod metrics;

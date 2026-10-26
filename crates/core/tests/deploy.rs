@@ -19,7 +19,7 @@ use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::catalog::{
     AfterDeploy, CloneMode, HashProgress, Image, ImageInput, Network, SourceInput, TemplateInput,
 };
-use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, SubmitOutcome};
+use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, Command, SnapshotOp, SubmitOutcome};
 use remotely_core::deploy::runner::DeployTuning;
 use remotely_core::deploy::seed::read_joliet;
 use remotely_core::deploy::service::{CloneRequest, DeployFrom, DeployRequest};
@@ -29,7 +29,8 @@ use remotely_core::jobs::JobStatus;
 use remotely_core::policy::{ApprovalStep, Tier};
 use remotely_core::ssh_keys::{GenerateKey, KeyType};
 use remotely_core::vault::{SecretKind, SecretString};
-use remotely_core::Core;
+use remotely_core::vm_settings::VmLifecycleOp;
+use remotely_core::{Core, CoreError};
 use time::macros::datetime;
 use uuid::Uuid;
 
@@ -489,6 +490,35 @@ async fn golden_vm_clones_are_full_and_grow_or_linked_and_say_why_not() {
         note.contains("a linked clone keeps the golden VM's disk size"),
         "{note}"
     );
+
+    // VM-04, VM-21, VM-24: the clone is recorded in the golden VM's .vmsd, so deleting "base" or the golden VM, which
+    // would break linked-1, is refused before anything is asked.
+    let linked_vmx = dir.join("linked-1").join("linked-1.vmx").display().to_string();
+    assert_eq!(
+        fake.linked_clones(&golden),
+        [("base".to_owned(), vec![linked_vmx.clone()])]
+    );
+    let golden_target = TargetRef::Vm {
+        vmx_path: golden.clone(),
+    };
+    for command in [
+        Command::VmSnapshot {
+            targets: vec![golden_target.clone()],
+            op: SnapshotOp::Delete { name: "base".into() },
+        },
+        Command::VmLifecycle {
+            targets: vec![golden_target.clone()],
+            op: VmLifecycleOp::Delete,
+        },
+    ] {
+        let err = core.bus.submit(ctx, command).await.unwrap_err();
+        assert!(matches!(err, CoreError::LinkedClones(_)), "{err:?}");
+        assert!(err.to_string().contains(&format!("linked-1 ({linked_vmx})")), "{err}");
+    }
+    assert!(!fake
+        .calls()
+        .iter()
+        .any(|c| c.contains("snapshot delete") || c.contains("deleteVM")));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -753,6 +783,8 @@ async fn a_failed_virtualbox_clone_is_unregistered_with_its_files() {
     assert!(calls.contains("--options=Link"), "{calls}");
     assert!(calls.contains("change unregistervm "), "{calls}");
     assert!(fake.vm_named("golden").is_some(), "the golden VM stays");
+    // VM-04, VM-21: the half-made clone's disk went with it, so nothing holds the golden VM's snapshot any more.
+    assert!(fake.linked_clones(golden).is_empty());
     let error = job_outputs(&core, job).await[0].3.clone().unwrap();
     assert!(error.contains("what it made was removed"), "{error}");
     std::fs::remove_dir_all(dir).unwrap();
