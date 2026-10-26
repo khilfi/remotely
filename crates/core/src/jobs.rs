@@ -67,6 +67,7 @@ use crate::containers::ContainerActions;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
+use crate::linked_clones::{LinkedClones, VboxMedia};
 use crate::locks;
 use crate::policy::{safety_snapshot_applies, ApprovalStep, Decision, Tier};
 use crate::snapshots::safety_snapshot_name;
@@ -546,6 +547,8 @@ pub struct JobRunner {
     hypervisors: Hypervisors,
     /// VM-11, VM-12, VM-15, VM-16, VM-23, VM-24: settings, devices, disks and lifecycle changes.
     vm_editor: VmEditor,
+    /// VM-04, VM-21: a snapshot delete is checked again just before it runs, for linked clones made since the approval.
+    linked_clones: LinkedClones,
     remote: Arc<dyn RemoteAdapter>,
     updater: Arc<dyn UpdaterAdapter>,
     /// BX-02, BX-07: login and sudo secrets, read per host just before it connects.
@@ -591,6 +594,7 @@ impl JobRunner {
         let (events, _) = broadcast::channel(1024);
         Arc::new(Self {
             vm_editor: VmEditor::new(hypervisors.clone(), store.clone()),
+            linked_clones: LinkedClones::new(hypervisors.clone()),
             store,
             hypervisors,
             remote,
@@ -1349,6 +1353,11 @@ impl JobRunner {
                 Ok(TargetOutcome::done())
             }
             (Command::VmSnapshot { op, .. }, TargetRef::Vm { vmx_path }) => {
+                // VM-04, VM-21: a linked clone made from the snapshot since the approval (a deploy) counts too.
+                let mut media = VboxMedia::default();
+                if let Some(reason) = self.linked_clones.refusal(&spec.command, vmx_path, &mut media).await {
+                    return Err(CoreError::LinkedClones(reason));
+                }
                 self.hypervisors.snapshot(vmx_path, op).await?;
                 Ok(TargetOutcome::done())
             }
@@ -1535,6 +1544,29 @@ impl JobRunner {
                 Ok(TargetOutcome {
                     output: Some(output),
                     note: done.note.map(|note| format!("{}: {note}", target.name)),
+                    ..TargetOutcome::done()
+                })
+            }
+            // VM-11: one forward on one network or VirtualBox VM. Cancel stops waiting; vmrun or VBoxManage may still
+            // finish it.
+            (Command::HostNetwork { op, .. }, network @ (TargetRef::Network { .. } | TargetRef::Vm { .. })) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let in_flight = match network {
+                    TargetRef::Network {
+                        hypervisor: Hypervisor::Vmware,
+                        ..
+                    } => CoreError::CancelledInFlight,
+                    _ => CoreError::VboxCancelledInFlight,
+                };
+                let note = tokio::select! {
+                    biased;
+                    done = crate::host_networks::apply(&self.hypervisors, std::slice::from_ref(network), op) => done?,
+                    _ = token.cancelled() => return Err(in_flight),
+                };
+                Ok(TargetOutcome {
+                    note: Some(note),
                     ..TargetOutcome::done()
                 })
             }
@@ -1914,8 +1946,8 @@ impl JobRunner {
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
-            // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal.
-            Command::FileUpload { .. } | Command::OpenTunnel { .. } => 1,
+            // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal. VM-11: one forward.
+            Command::FileUpload { .. } | Command::OpenTunnel { .. } | Command::HostNetwork { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
             // CV-03, VM-17: one image or one VM.
@@ -1997,6 +2029,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::VmLifecycle { .. } => "delete",
         Command::ImageConvert { .. } => "conversion",
         Command::VmExport { .. } => "export",
+        Command::HostNetwork { .. } => "port forward",
     }
 }
 

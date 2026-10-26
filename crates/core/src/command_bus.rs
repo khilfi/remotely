@@ -21,8 +21,10 @@ use crate::domain::{now_rfc3339, ContainerHost, Context, Environment, Target, Ta
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
 use crate::forwards::PortForward;
+use crate::host_networks::{ops as net_ops, HostNetworkOp};
 use crate::impact::{ImpactPreviewer, TargetImpact};
 use crate::jobs::{JobRunner, JobSpec, TargetStatus};
+use crate::linked_clones::Blocked;
 use crate::locks;
 use crate::policy::{ActionKind, ApprovalStep, DangerousMatch, Decision, PolicyEngine, PolicyRules, Tier};
 use crate::presentation::Change;
@@ -155,6 +157,10 @@ pub enum Command {
     VmDisk { targets: Vec<TargetRef>, op: VmDiskOp },
     /// VM-24: deleting VMs, and adding an existing one.
     VmLifecycle { targets: Vec<TargetRef>, op: VmLifecycleOp },
+    /// VM-11: add or remove a NAT port forward on a Workstation vmnet or a VirtualBox NAT network
+    /// ([`TargetRef::Network`]), or on a VirtualBox VM's NAT adapter ([`TargetRef::Vm`]); one target
+    /// ([`crate::host_networks`]).
+    HostNetwork { targets: Vec<TargetRef>, op: HostNetworkOp },
     /// VM-21, VM-22, VM-10: make new VMs, from a launch template or the Deploy dialog's own values (a clone of a
     /// golden VM, a cloud image with cloud-init, an ISO install or an OVA/OVF import), or clones of the VMs
     /// picked on the VMs page. Every target is one of the spec's [`TargetRef::NewVm`]s. Never built by the UI:
@@ -689,6 +695,7 @@ impl Command {
             Command::VmDevice { targets, op } => vm_ops::validate_device(targets, op),
             Command::VmDisk { targets, op } => vm_ops::validate_disk(targets, op),
             Command::VmLifecycle { targets, op } => vm_ops::validate_lifecycle(targets, op),
+            Command::HostNetwork { targets, op } => net_ops::validate(targets, op),
             _ => Ok(()),
         }
     }
@@ -725,9 +732,11 @@ impl Command {
             }
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
+            // VM-11: a forward belongs to its network or VM.
             Command::AppUpdate { .. }
             | Command::TerminalLine { .. }
             | Command::OpenTunnel { .. }
+            | Command::HostNetwork { .. }
             | Command::VmLifecycle {
                 op: VmLifecycleOp::Register { .. },
                 ..
@@ -752,6 +761,7 @@ impl Command {
             | Command::VmDevice { targets, .. }
             | Command::VmDisk { targets, .. }
             | Command::VmLifecycle { targets, .. }
+            | Command::HostNetwork { targets, .. }
             | Command::Deploy { targets, .. }
             | Command::ImageConvert { targets, .. }
             | Command::VmExport { targets, .. } => targets,
@@ -780,6 +790,7 @@ impl Command {
             Command::VmLifecycle { .. } => "vmLifecycle",
             Command::ImageConvert { .. } => "imageConvert",
             Command::VmExport { .. } => "vmExport",
+            Command::HostNetwork { .. } => "hostNetwork",
         }
     }
 
@@ -911,6 +922,7 @@ impl Command {
             Command::VmLifecycle { op, .. } => op.summary(target_count),
             Command::ImageConvert { spec, .. } => spec.summary(),
             Command::VmExport { spec, .. } => spec.summary(),
+            Command::HostNetwork { targets, op } => op.summary(targets),
         }
     }
 }
@@ -972,6 +984,8 @@ pub struct ApprovalRequest {
 struct Previews {
     impact: Option<Vec<TargetImpact>>,
     vm_change: Option<VmChangePreview>,
+    /// VM-04, VM-21, VM-24: the VM targets a snapshot or VM delete must not touch, for linked clones.
+    linked_clones: Vec<Blocked>,
 }
 
 /// SS-07: a tunnel as the approval dialog shows it.
@@ -1750,6 +1764,11 @@ impl CommandBus {
             return Err(CoreError::NoTargets);
         }
         command.validate()?;
+        // VM-11: what this PC can't do at all (Workstation's NAT forwards need administrator rights) is refused
+        // before anything is asked.
+        if let Some(why) = self.impact.refusal(&command) {
+            return Err(CoreError::HostNetworkRefused(why));
+        }
         self.check_sudo_password(ctx, &command).await?;
         let targets = self.resolve_targets(ctx, &command).await?;
 
@@ -1759,6 +1778,12 @@ impl CommandBus {
             return Err(CoreError::AllTargetsProtected);
         }
         let impact = self.add_warnings(ctx, &command, &mut decision).await;
+        // VM-04, VM-21, VM-24: a snapshot or VM delete that linked clones stop on every VM is refused before anything is
+        // asked; with other VMs left, the approval says which it refuses, and each of those fails when its turn comes.
+        if !impact.linked_clones.is_empty() && impact.linked_clones.len() >= decision.targets.len() {
+            let reasons: Vec<&str> = impact.linked_clones.iter().map(|b| b.reason.as_str()).collect();
+            return Err(CoreError::LinkedClones(reasons.join(" ")));
+        }
         self.ask_for_sudo_places(ctx, &command, &mut decision).await?;
         self.ask_for_guest_password(ctx, &command, &mut decision).await?;
         let summary = command.summary(decision.targets.len());
@@ -1817,6 +1842,12 @@ impl CommandBus {
     /// revert powering a VM off, VM-23 a VM a settings change would be refused on), and the previews read for
     /// them. Asking again (AP-01) adds them too.
     async fn add_warnings(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Previews {
+        // VM-04, VM-21: a snapshot delete says which VMs it refuses for linked clones (VM-24's VM delete says it as the
+        // VM's problem in its own preview, below).
+        let linked_clones = self.impact.linked_clones(command, &decision.targets).await;
+        if matches!(command, Command::VmSnapshot { .. }) {
+            decision.add_warnings(linked_clones.iter().map(|b| b.reason.clone()).collect());
+        }
         let vm_change = self.impact.vm_change(command, &decision.targets).await;
         if let Some(preview) = &vm_change {
             // VM-23: a Low change (an ISO, a cable) gets a confirm too when a VM would refuse it, so it is seen.
@@ -1829,9 +1860,12 @@ impl CommandBus {
             problems.extend(preview.warnings.iter().cloned());
             decision.add_warnings(problems);
         }
+        // VM-11: who can reach a forward, whose address it leads to, and the VMs on the network.
+        decision.add_warnings(self.impact.network_warnings(ctx, command).await);
         Previews {
             impact: self.add_power_warnings(ctx, command, decision).await,
             vm_change,
+            linked_clones,
         }
     }
 
@@ -1888,7 +1922,22 @@ impl CommandBus {
         previews: Previews,
         retry_of: Option<Uuid>,
     ) -> Result<ApprovalRequest> {
-        let Previews { impact, vm_change } = previews;
+        let Previews {
+            impact,
+            vm_change,
+            linked_clones,
+        } = previews;
+        let mut impact = match impact {
+            Some(impact) => impact,
+            // CT-01, CT-02: container targets are previewed by the containers service.
+            None => self.impact.preview_for(ctx, command, &decision.targets).await,
+        };
+        // VM-04, VM-21, VM-24: the clones each refused VM's delete would break.
+        for row in &mut impact {
+            if let Some(blocked) = linked_clones.iter().find(|b| b.target == row.target) {
+                row.linked_clones = blocked.snapshots.clone();
+            }
+        }
         Ok(ApprovalRequest {
             id,
             action: decision.action,
@@ -1899,11 +1948,7 @@ impl CommandBus {
             skipped: decision.skipped.clone(),
             reasons: decision.reasons.clone(),
             warnings: decision.warnings.clone(),
-            impact: match impact {
-                Some(impact) => impact,
-                // CT-01, CT-02: container targets are previewed by the containers service.
-                None => self.impact.preview_for(ctx, command, &decision.targets).await,
-            },
+            impact,
             exec: self.exec_details(ctx, command, retry_of).await?,
             upload: UploadDetails::of(command),
             tunnel: TunnelDetails::of(command),
@@ -2312,6 +2357,20 @@ mod tests {
             Command::Container {
                 targets: vec![],
                 op: ContainerOp::Start,
+            },
+            Command::HostNetwork {
+                targets: vec![],
+                op: HostNetworkOp::RemoveForward {
+                    forward: crate::host_networks::NatForward {
+                        name: Some("web".into()),
+                        protocol: crate::adapters::host_networks::ForwardProtocol::Tcp,
+                        host_ip: None,
+                        host_port: 8080,
+                        guest_ip: Some("203.0.113.10".into()),
+                        guest_port: 80,
+                        slot: None,
+                    },
+                },
             },
         ]
     }

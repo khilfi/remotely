@@ -6,6 +6,7 @@
 import { Channel, invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tauri-apps/api/event";
 import { learnFields, masker } from "@/lib/presentation";
+import type { HostNetworkOp } from "@/lib/vm-insight-api";
 
 // FD-03: every answer and event passes the host, IP and user fields it holds to the presentation masker, so those
 // values are masked wherever they show while presenting (presentation.ts). Nothing is changed or stored. Exported for
@@ -44,6 +45,8 @@ export type TargetRef =
   | { kind: "terminal"; terminalId: string; sessionId?: string | null }
   /** CT-01, CT-02: a container, image or volume on a container host, or the engine itself (pull, prune). */
   | { kind: "container"; host: ContainerHost; engine: EngineKind; object: ContainerObject }
+  /** VM-11: a Workstation vmnet or a VirtualBox NAT network whose port forwards change. */
+  | { kind: "network"; hypervisor: Hypervisor; name: string }
   /** VM-21, VM-10: a VM a deploy makes, by the name and label it will have. */
   | { kind: "newVm"; hypervisor: Hypervisor; name: string; environment: Environment }
   /** CV-03: the new image a conversion writes on this PC, by its full path. */
@@ -197,6 +200,22 @@ export interface SnapshotNode {
   safety: boolean;
   /** The VM's current state was taken from this snapshot. */
   current: boolean;
+  /** VM-04, VM-21: linked clones made from this snapshot; it is not deleted while there are any. */
+  linkedClones: LinkedClone[];
+}
+
+/** VM-04, VM-21: a VM made as a linked clone of another VM's snapshot. */
+export interface LinkedClone {
+  name: string;
+  /** Its key: the .vmx path for Workstation, the UUID for VirtualBox. */
+  key: string;
+}
+
+/** VM-04, VM-21, VM-24: one snapshot and the linked clones made from it. */
+export interface SnapshotClones {
+  snapshot: string;
+  uid: number;
+  clones: LinkedClone[];
 }
 
 export interface VmSnapshots {
@@ -280,6 +299,8 @@ export type Command =
   | { type: "vmDisk"; targets: TargetRef[]; op: VmDiskOp }
   /** VM-24: deleting VMs (an existing VM is added only through `vmPickExisting`). */
   | { type: "vmLifecycle"; targets: TargetRef[]; op: VmLifecycleOp }
+  /** VM-11: add or remove a NAT port forward on a network, or a VirtualBox VM's NAT adapter (one target). */
+  | { type: "hostNetwork"; targets: TargetRef[]; op: HostNetworkOp }
   /** VM-21, VM-10: new VMs. Never submitted by the UI: `deploySubmit` and `deployCloneSubmit` build it in the core. */
   | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> }
   /** CV-03: a conversion. Never submitted by the UI: `convertSubmit` builds it in the core after a save dialog. */
@@ -402,6 +423,8 @@ export interface TargetImpact {
   notes: string[];
   /** CT-01, CT-02: a container target as it is now (the VM fields are empty then). */
   container?: ContainerImpact;
+  /** VM-04, VM-21, VM-24: for a snapshot or VM delete, the linked clones that depend on what it deletes; such a VM is refused. */
+  linkedClones: SnapshotClones[];
 }
 
 /** CT-01, CT-02: one container, image or volume target now, or what a pull or prune does on a host. */

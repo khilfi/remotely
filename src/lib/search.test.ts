@@ -16,10 +16,12 @@ import type {
 } from "./api.ts";
 import type { ScheduleView } from "./schedules-api.ts";
 import { cachedContainers, keepContainerHosts, rememberContainers, resetContainerCache } from "./container-cache.ts";
+import { cachedHostNetworks, rememberHostNetworks } from "./host-networks-cache.ts";
 import { groupRanked, matchQuality, normalise, queryWords, rankItems, scoreItem, type SearchItem } from "./search.ts";
 import {
   actionItems,
   containerItems,
+  hostNetworkItems,
   imageItems,
   pageItems,
   scheduleItems,
@@ -305,4 +307,36 @@ test("schedules are found by name, their VMs and tags, and what they do; choosin
   for (const query of ["nightly", "web01", "lab", "snapshot", "daily"]) {
     assert.equal(rankItems(query, items).length, 1, query);
   }
+});
+
+test("VM-11: host networks the map or the networks view read are found by name and subnet, and open the view", () => {
+  assert.deepEqual(cachedHostNetworks(), [], "nothing read yet");
+  rememberHostNetworks([
+    {
+      key: "vmware:vmnet8",
+      label: "NAT (VMnet8)",
+      detail: "Workstation · 198.51.100.0/24 · 1 port forward",
+      link: { kind: "hostNetworks" },
+    },
+    { key: "virtualbox:natnetwork:lab-net", label: "NAT network: lab-net", detail: "VirtualBox · 10.0.5.0/24" },
+  ]);
+  const items = hostNetworkItems(cachedHostNetworks());
+  assert.deepEqual(
+    items.map((i) => [i.id, i.provider, i.title]),
+    [
+      ["hostNetwork:vmware:vmnet8", "hostNetworks", "NAT (VMnet8)"],
+      ["hostNetwork:virtualbox:natnetwork:lab-net", "hostNetworks", "NAT network: lab-net"],
+    ],
+  );
+  assert.ok(items.every((i) => JSON.stringify(i.target) === JSON.stringify({ open: { kind: "hostNetworks" } })));
+  assert.deepEqual(
+    rankItems("vmnet8", items).map((r) => r.item.title),
+    ["NAT (VMnet8)"],
+  );
+  assert.deepEqual(
+    rankItems("lab-net", items).map((r) => r.item.title),
+    ["NAT network: lab-net"],
+  );
+  assert.equal(rankItems("virtualbox", items).length, 1, "the detail says which hypervisor");
+  rememberHostNetworks([]);
 });

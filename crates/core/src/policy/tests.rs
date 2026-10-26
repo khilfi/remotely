@@ -3531,6 +3531,7 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
         super::convert_tests::export(Environment::Lab, false),
     ])
     .chain(super::vm_settings_tests::every_vm_settings_command())
+    .chain(super::host_networks_tests::every_host_network_command())
     .collect()
 }
 

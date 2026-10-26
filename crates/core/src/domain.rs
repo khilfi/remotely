@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::adapters::containers::{ContainerId, EngineKind, ImageId, VolumeName};
+use crate::adapters::hypervisor::Hypervisor;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -136,6 +137,9 @@ pub enum TargetRef {
         engine: EngineKind,
         object: ContainerObject,
     },
+    /// VM-11: a hypervisor's host network whose NAT port forwards change: a Workstation vmnet (`vmnet8`) or a
+    /// VirtualBox NAT network (by its name). A change there reaches every VM on it.
+    Network { hypervisor: Hypervisor, name: String },
     /// VM-21, VM-10: a VM a deploy makes, by the name it will have; one job step each. `environment` is the label
     /// it will get, which the policy engine reads like any target's.
     NewVm {
@@ -248,6 +252,7 @@ impl TargetRef {
             TargetRef::App => "app",
             TargetRef::Terminal { .. } => "terminal",
             TargetRef::Container { .. } => "container",
+            TargetRef::Network { .. } => "network",
             TargetRef::NewVm { .. } => "new_vm",
             TargetRef::DiskImage { .. } => "disk_image",
         }
@@ -264,6 +269,8 @@ impl TargetRef {
             TargetRef::Container { host, engine, object } => {
                 format!("{}/{}/{}", host.key(), engine.as_str(), object.key())
             }
+            // VM-11: `vmware:vmnet8`, `virtualbox:lab-net`.
+            TargetRef::Network { hypervisor, name } => format!("{}:{name}", hypervisor.as_str()),
             // VM-21: `new-vm/vmware/web-1`. Names are unique (any letter case) within a deploy.
             TargetRef::NewVm { hypervisor, name, .. } => format!("{NEW_VM_KEY}/{}/{name}", hypervisor.as_str()),
             // CV-03: `disk-image/C:\Images\rocky.vmdk`.
@@ -275,6 +282,16 @@ impl TargetRef {
     pub fn disk_image_from_key(key: &str) -> Option<TargetRef> {
         let path = key.strip_prefix(DISK_IMAGE_KEY)?.strip_prefix('/')?;
         (!path.is_empty()).then(|| TargetRef::DiskImage { path: path.to_owned() })
+    }
+
+    /// VM-11: a network target from its [`TargetRef::key`].
+    pub fn network_from_key(key: &str) -> Option<TargetRef> {
+        let (hypervisor, name) = key.split_once(':')?;
+        let hypervisor = Hypervisor::ALL.into_iter().find(|h| h.as_str() == hypervisor)?;
+        (!name.is_empty()).then(|| TargetRef::Network {
+            hypervisor,
+            name: name.to_owned(),
+        })
     }
 
     /// VM-21: a new VM target from its [`TargetRef::key`] (the label is the deploy's, not in the key).

@@ -11,6 +11,8 @@ export interface VmNetworks {
   vmxPath: string;
   hypervisor: Hypervisor;
   nics: VirtualNic[];
+  /** VM-11: the guest's addresses the hypervisor reported with them. */
+  guestIps: string[];
   collectedAt: string | null;
   /** What was read before (the files could not be read now, or nothing asked for a fresh read). */
   stored: boolean;

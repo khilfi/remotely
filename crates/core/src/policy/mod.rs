@@ -17,6 +17,8 @@ mod commands;
 mod convert_tests;
 #[cfg(test)]
 mod deploy_tests;
+#[cfg(test)]
+mod host_networks_tests;
 mod standing;
 #[cfg(test)]
 mod tests;
@@ -33,6 +35,7 @@ use crate::adapters::remote::forward::ForwardKind;
 use crate::command_bus::{Command, ContainerOp, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::host_networks::HostNetworkOp;
 use crate::presentation::Change;
 use crate::vm_settings::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
@@ -163,6 +166,10 @@ pub enum ActionKind {
     VmDelete,
     /// Add an existing VM to the list (a .vmx) or to VirtualBox (a .vbox) (VM-24).
     VmRegister,
+    /// Add a NAT port forward: a port of this PC reaches a guest, for every VM on the network to share (VM-11).
+    NatForwardAdd,
+    /// Remove a NAT port forward: connections through it stop (VM-11).
+    NatForwardRemove,
     /// VM-21, VM-10 (docs/plan-0.5.md, "Approval tiers"): make new VMs (create, clone, import). Its bulk tier
     /// applies from [`PolicyRules::deploy_bulk_threshold`] VMs.
     VmDeploy,
@@ -174,7 +181,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 52] = [
+    pub const ALL: [ActionKind; 54] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -200,6 +207,8 @@ impl ActionKind {
         ActionKind::VmDiskRemove,
         ActionKind::VmRegister,
         ActionKind::VmDelete,
+        ActionKind::NatForwardAdd,
+        ActionKind::NatForwardRemove,
         ActionKind::VmDeploy,
         ActionKind::VmExport,
         ActionKind::ImageConvert,
@@ -281,6 +290,8 @@ impl ActionKind {
             ActionKind::VmDiskRemove => "Remove a virtual disk (deletes its files)",
             ActionKind::VmDelete => "Delete VMs (deletes their files)",
             ActionKind::VmRegister => "Add an existing VM",
+            ActionKind::NatForwardAdd => "Add a NAT port forward",
+            ActionKind::NatForwardRemove => "Remove a NAT port forward",
             ActionKind::VmDeploy => "Deploy VMs (create, clone or import)",
             ActionKind::ImageConvert => "Convert a disk image (writes a new file)",
             ActionKind::VmExport => "Export a VM (writes new files)",
@@ -894,6 +905,9 @@ impl Default for PolicyRules {
             (VmDelete, TierRule::same(Critical)),
             // Lists a VM (or registers it with VirtualBox); nothing in it changes.
             (VmRegister, TierRule::same(Low)),
+            // VM-11: a forward opens a port of this PC to a guest, or closes one, for the whole network.
+            (NatForwardAdd, TierRule::same(High)),
+            (NatForwardRemove, TierRule::same(High)),
             // VM-21, VM-10 (docs/plan-0.5.md): 1 to 4 VMs are one confirm, 5 or more (deploy_bulk_threshold) the
             // full approval; a Prod label moves it up one, as for every action.
             (
@@ -1137,6 +1151,10 @@ impl PolicyEngine {
             Command::VmLifecycle { op, .. } => match op {
                 VmLifecycleOp::Delete => ActionKind::VmDelete,
                 VmLifecycleOp::Register { .. } => ActionKind::VmRegister,
+            },
+            Command::HostNetwork { op, .. } => match op {
+                HostNetworkOp::AddForward { .. } => ActionKind::NatForwardAdd,
+                HostNetworkOp::RemoveForward { .. } => ActionKind::NatForwardRemove,
             },
             Command::Deploy { .. } => ActionKind::VmDeploy,
             Command::ImageConvert { .. } => ActionKind::ImageConvert,
@@ -1424,6 +1442,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::FileUpload { .. }
         | Command::OpenTunnel { .. }
         | Command::Container { .. }
+        // VM-11: a forward is the network's (or a NAT adapter's) setting; a snapshot of the guest wouldn't undo it.
+        | Command::HostNetwork { .. }
         // VM-21: the VMs don't exist yet, and a clone's source is only read.
         | Command::Deploy { .. }
         // CV-03, VM-17: the source is only read.

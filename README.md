@@ -54,6 +54,11 @@ QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page
   its tree: "You are here", creation times, descriptions, old and safety snapshots marked, and Take, Revert and Delete
   with the tier each would get (Prod raises it), then the approval dialog with its impact preview and the safety
   snapshot offer.
+- **Linked clones** (0.5.0): a snapshot a linked clone was made from shows "1 linked clone" (hover for the names),
+  and its Delete is off: the clone shares the golden VM's disk as it was then, and Workstation or VirtualBox would
+  break it without a word. Delete the clones first; snapshots before or after theirs delete as usual. A delete on
+  several VMs leaves that VM out (the approval names its clones), a schedule's retention keeps such a snapshot, and
+  deleting the golden VM itself is refused the same way.
 - Snapshot trees are read for the VM you open, the selection when you open its Snapshots menu and the VMs shown when
   you select by snapshots, so a long VM list stays quick.
 - Ctrl+3 and "Snapshots" in the Ctrl+K palette open the snapshot view of the open or first selected VM; in the palette
@@ -113,6 +118,33 @@ with its size, and a VM it would refuse (running, snapshots in the way).
   nothing, so it has no tier, but it is in the audit log and off while presenting with the read-only lock. ISOs, shared
   folders and existing VMs are picked in Windows' own dialogs; a network share or a device path is refused.
 
+### VM insight, host networks and the waste finder
+
+0.5.0 (VM-25, VM-11, VM-16, VM-14). Reads, so no approval and nothing in the audit log; each action they offer goes
+through the bus and its approvals like anywhere else.
+
+- **Log tab** in a VM's details: Workstation's `vmware.log` and its older `vmware-N.log`, VirtualBox's `VBox.log` and
+  `VBox.log.N`, read only, with search. It shows a log's last 256 KB (a huge log is never read whole) and, for the
+  current log of a running VM, follows it: what was added is read every 2 seconds, only while the tab shows and the
+  window is visible.
+- **Timeline tab**: everything Remotely did to the VM, from the audit log (approvals, jobs, label changes, Open
+  console...) with each job's outcome for this VM from the job journal, newest first, 50 at a time.
+- **Networks** (the VMs page's button, or the palette): Workstation's vmnets and VirtualBox's host-only interfaces,
+  NAT networks, bridged and internal networks, the VMs on each, and their NAT port forwards: a Workstation NAT vmnet's,
+  a VirtualBox NAT network's rules and each VirtualBox VM's NAT adapter rules. Adding or removing one is **High** (it
+  reaches every VM on the network; Critical when a VM on it is labelled Prod), and the approval says who can reach it
+  and whose address it leads to. Workstation keeps its forwards in `C:\ProgramData\VMware\vmnetnat.conf`, which only
+  administrators can change, and Remotely never asks to run as administrator: change those in Workstation's Virtual
+  Network Editor, or start Remotely with Run as administrator. VirtualBox's need no administrator rights. The
+  topology map names its networks the way Workstation and VirtualBox list them, shows the ones no VM is on yet, and
+  opens Networks from a network's box; the palette's search finds the networks the map or Networks read last.
+- **Waste finder** (the VMs page's button, or the palette): running VMs idle for days (from the dashboard's history:
+  their busiest hour under 2% of this PC's CPU, and their guest's CPU and network quiet when a linked session is
+  watched), suspended VMs and what their saved state takes, long or large snapshot chains, and folders with VM files no
+  VM in the list uses. Only the scanned folders and the hypervisors' and launch templates' VM folders are searched,
+  never a whole disk; a folder on a network share is skipped and named. Each row offers Suspend, Delete VM, the VM's
+  Snapshots or Open folder.
+
 ### VM templates: sizes, images and launch templates
 
 VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does, and **Deploy**
@@ -161,7 +193,8 @@ launch template, or from **Custom** values typed in the dialog.
   "Bulk threshold for deploys") or for Prod. The job has one step per VM, two at a time, and can be cancelled. When a
   VM fails or the job is cancelled, Remotely removes what it made for that VM (never a folder that was there before);
   VMs already made stay. The audit log has the deploy's start and each VM's result.
-- **Golden VM**: a full or linked clone of the snapshot the image names. **Cloud image**: a copy of the image (the
+- **Golden VM**: a full or linked clone of the snapshot the image names. While a linked clone is there, that snapshot
+  and the golden VM can't be deleted (see Virtual machines and snapshots). **Cloud image**: a copy of the image (the
   file itself never changes) as the boot disk, grown to the size's disk; its first boot (cloud-init) sets the hostname,
   the guest user, the SSH key's public half and the packages, through the `.vmx`'s `guestinfo` keys on Workstation and
   a small `cidata` disc on VirtualBox, taken out after the first boot. A password never goes into these: they are
@@ -1256,6 +1289,9 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                               | Works: this repository's public GitHub Releases, without a token or with the optional one from the vault; install is a Medium-tier job that runs alone                                                                                                         |
 | Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                              | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; one refresh at a time, requests meanwhile share the next; filters; audited environment labels                                                                     |
 | VM settings        | `crates/core/src/vm_settings/`, `adapters/vmx_file.rs`            | VM-11, VM-12, VM-15, VM-16, VM-23, VM-24                                                                                                            | Working: the Settings tab's full read of both hypervisors; .vmx edits after a backup (unknown keys kept), vdiskmanager and VBoxManage disk changes, devices on running VMs, bulk resize, delete, rename, add an existing VM, Open console (audited), ISO drops |
+| Host networks      | `crates/core/src/host_networks/`, `adapters/host_networks.rs`     | VM-11                                                                                                                                               | Working: vmnets, VirtualBox host-only interfaces and NAT networks with the VMs on each; NAT port forwards added and removed on the bus (High); Workstation's refused without administrator rights                                                              |
+| VM insight         | `crates/core/src/vm_insight/`, `store/timeline.rs`                | VM-25                                                                                                                                               | Working: a VM's logs (capped tails, following), its timeline from the audit log and the job journal                                                                                                                                                            |
+| Waste finder       | `crates/core/src/waste/`                                          | VM-16, VM-14                                                                                                                                        | Working: idle VMs from the dashboard's history, suspended VMs, long snapshot chains, folders no VM uses                                                                                                                                                        |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                        | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                      |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                   | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                            |
 | Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                               | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                   |

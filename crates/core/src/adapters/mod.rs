@@ -7,6 +7,7 @@ pub mod disk_tools;
 pub mod exec_output;
 pub mod github;
 pub mod host_counters;
+pub mod host_networks;
 pub mod hypervisor;
 pub mod network;
 pub mod paging;

@@ -8,10 +8,12 @@ import { READ_ONLY_REASON } from "./disabled-reasons.ts";
 import {
   approvalHint,
   bulkSnapshotReasons,
+  cloneNames,
   noMatchText,
   PROTECTED_REASON,
   snapshotActionReason,
   snapshotArg,
+  snapshotDeleteReason,
   summarize,
   takeReason,
   vmsMatching,
@@ -30,6 +32,7 @@ function node(uid: number, name: string, extra: Partial<SnapshotNode> = {}): Sna
     old: false,
     safety: false,
     current: false,
+    linkedClones: [],
     ...extra,
   };
 }
@@ -77,6 +80,29 @@ test("revert and delete on one snapshot say why they are off", () => {
   assert.match(snapshotActionReason({ ...ok, busy: true }) ?? "", /Sending/);
   // The lock comes first: it is the one thing the user has to change before anything else works.
   assert.equal(snapshotActionReason({ ...ok, readOnly: READ_ONLY_REASON, protected: true }), READ_ONLY_REASON);
+});
+
+test("a snapshot linked clones are made from can be reverted to but not deleted", () => {
+  // VM-04, VM-21: deleting it would break the clones; the core refuses it too.
+  const clones = [
+    { name: "web-01", key: "C:\\VMs\\web-01\\web-01.vmx" },
+    { name: "web-02", key: "5b1c0000-0000-4000-8000-000000000002" },
+  ];
+  const ok = { node: node(1, "base", { linkedClones: clones }), readOnly: null, protected: false, busy: false };
+  assert.equal(snapshotActionReason(ok), null, "revert leaves the clones alone");
+  assert.equal(
+    snapshotDeleteReason(ok),
+    "2 linked clones are made from this snapshot (web-01, web-02): deleting it would break them. Delete those clones first.",
+  );
+  assert.match(
+    snapshotDeleteReason({ ...ok, node: node(1, "base", { linkedClones: [clones[0]] }) }) ?? "",
+    /^1 linked clone is made/,
+  );
+  assert.equal(snapshotDeleteReason({ ...ok, node: node(1, "base") }), null);
+  // The lock and protection still come first.
+  assert.equal(snapshotDeleteReason({ ...ok, readOnly: READ_ONLY_REASON }), READ_ONLY_REASON);
+  const many = Array.from({ length: 7 }, (_, n) => ({ name: `lab${n}`, key: `k${n}` }));
+  assert.equal(cloneNames(many), "lab0, lab1, lab2, lab3, lab4 and 2 more");
 });
 
 test("taking a snapshot of one VM waits for its tree", () => {
