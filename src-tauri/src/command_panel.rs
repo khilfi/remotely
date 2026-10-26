@@ -33,28 +33,28 @@ const MAX_BODY: usize = 400;
 #[tauri::command]
 pub async fn favourites_list(state: State<'_, AppState>) -> IpcResult<Vec<Favourite>> {
     let core = &state.core;
-    Ok(core.snippets.favourites(&core.ctx).await?)
+    Ok(core.snippets.favourites(&core.ctx()).await?)
 }
 
 /// BX-08: saves a new favourite at the end of its folder. Audited (name and folder, not the command).
 #[tauri::command]
 pub async fn favourite_add(state: State<'_, AppState>, input: FavouriteInput) -> IpcResult<Favourite> {
     let core = &state.core;
-    Ok(core.snippets.add(&core.ctx, input).await?)
+    Ok(core.snippets.add(&core.ctx(), input).await?)
 }
 
 /// BX-08: changes a favourite; another folder puts it at that folder's end. Audited.
 #[tauri::command]
 pub async fn favourite_update(state: State<'_, AppState>, id: Uuid, input: FavouriteInput) -> IpcResult<Favourite> {
     let core = &state.core;
-    Ok(core.snippets.update(&core.ctx, id, input).await?)
+    Ok(core.snippets.update(&core.ctx(), id, input).await?)
 }
 
 /// BX-08. Audited.
 #[tauri::command]
 pub async fn favourite_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
-    Ok(core.snippets.delete(&core.ctx, id).await?)
+    Ok(core.snippets.delete(&core.ctx(), id).await?)
 }
 
 /// BX-08: one folder's favourites in a new order (`folder` null: the top level). Audited.
@@ -65,7 +65,7 @@ pub async fn favourites_reorder(
     ids: Vec<Uuid>,
 ) -> IpcResult<Vec<Favourite>> {
     let core = &state.core;
-    Ok(core.snippets.reorder(&core.ctx, folder.as_deref(), &ids).await?)
+    Ok(core.snippets.reorder(&core.ctx(), folder.as_deref(), &ids).await?)
 }
 
 /// BX-08: the built-in commands, each with what the policy engine makes of it under the current rules.
@@ -161,7 +161,7 @@ pub async fn terminal_type_secret(
     let core = &state.core;
     Ok(core
         .terminals
-        .type_secret(&core.ctx, id, secret_id, force, vault_password.as_ref())
+        .type_secret(&core.ctx(), id, secret_id, force, vault_password.as_ref())
         .await?)
 }
 

@@ -60,22 +60,22 @@ fn session(name: &str, host: &str) -> SessionInput {
 }
 
 async fn vm_id(core: &Core, name: &str) -> String {
-    core.store.find_vm(&core.ctx, &vmx(name)).await.unwrap().unwrap().id
+    core.store.find_vm(&core.ctx(), &vmx(name)).await.unwrap().unwrap().id
 }
 
 async fn get(core: &Core, id: Uuid) -> SessionRecord {
-    core.sessions.get(&core.ctx, id).await.unwrap()
+    core.sessions.get(&core.ctx(), id).await.unwrap()
 }
 
 async fn audit_count(core: &Core) -> usize {
-    core.store.recent_audit(&core.ctx, 1000).await.unwrap().len()
+    core.store.recent_audit(&core.ctx(), 1000).await.unwrap().len()
 }
 
 #[tokio::test]
 async fn sessions_whose_host_is_or_resolves_to_a_vm_ip_are_linked_by_a_refresh() {
     let (core, network) =
         lab_core(FakeNetwork::default().with_addresses("db01.example.com", &["203.0.113.9", "192.0.2.20"])).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     // Saved before the VMs were ever listed: nothing to link to yet.
     let web = core.sessions.create(ctx, session("web", "192.0.2.10")).await.unwrap();
     let db = core
@@ -165,13 +165,13 @@ async fn sessions_whose_host_is_or_resolves_to_a_vm_ip_are_linked_by_a_refresh()
     assert!(again.links.linked.is_empty() && again.links.unlinked.is_empty());
     assert_eq!(audit_count(&core).await, before);
     assert_eq!(network.lookups().len(), lookups, "resolved names are kept for a while");
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
 async fn a_session_is_linked_as_soon_as_it_is_saved_and_follows_its_host() {
     let (core, _) = lab_core(FakeNetwork::default().with_addresses("web01.example.com", &["192.0.2.10"])).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
 
     let by_name = core
@@ -205,7 +205,7 @@ async fn a_session_is_linked_as_soon_as_it_is_saved_and_follows_its_host() {
 #[tokio::test]
 async fn hosts_that_match_no_vm_are_not_linked() {
     let (core, network) = lab_core(FakeNetwork::default().with_addresses("mail.example.org", &["203.0.113.25"])).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let ids = [
         core.sessions
             .create(ctx, session("outside", "203.0.113.50"))
@@ -250,7 +250,7 @@ async fn hosts_that_match_no_vm_are_not_linked() {
 #[tokio::test]
 async fn several_matching_vms_are_left_for_the_user_to_pick() {
     let (core, _) = lab_core(FakeNetwork::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let clone = core
         .sessions
         .create(ctx, session("clone", "198.51.100.7"))
@@ -285,7 +285,7 @@ async fn several_matching_vms_are_left_for_the_user_to_pick() {
 #[tokio::test]
 async fn a_manual_link_is_never_overwritten() {
     let (core, _) = lab_core(FakeNetwork::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let (web_vm, db_vm) = (vm_id(&core, "web").await, vm_id(&core, "db").await);
 
@@ -371,13 +371,13 @@ async fn a_manual_link_is_never_overwritten() {
         core.links.link(ctx, plain.id, Some("no-such-vm".into())).await,
         Err(CoreError::InvalidInput(_))
     ));
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
 async fn imported_sessions_are_linked_in_one_pass() {
     let (core, network) = lab_core(FakeNetwork::default().with_addresses("web.example.com", &["192.0.2.10"])).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let dir = temp_folder("vm-links-import");
     let config = dir.join("config");
@@ -424,7 +424,7 @@ async fn a_dns_server_that_does_not_answer_does_not_hold_up_a_refresh() {
         .with_addresses("web01.example.com", &["192.0.2.10"])
         .with_lookup_delay(Duration::from_secs(60));
     let (core, network) = lab_core(network).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     // Saved before any VM has an address: nothing could match, so nothing is looked up.
     let started = Instant::now();
     let mut ids = Vec::new();
@@ -460,7 +460,7 @@ async fn lookups_done_in_time_count_and_a_slow_one_is_kept_for_the_next_pass() {
         .with_addresses("db.lab.test", &["192.0.2.20"])
         .with_slow_name("db.lab.test", Duration::from_millis(800));
     let (core, network) = lab_core(network).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.links.set_lookups_deadline(Duration::from_millis(200));
     let web = core
         .sessions
@@ -503,7 +503,7 @@ async fn a_session_behind_a_jump_host_is_never_looked_up() {
         .with_addresses("bastion.lab.test", &["203.0.113.5"])
         .with_addresses("db.internal.test", &["192.0.2.20"]);
     let (core, network) = lab_core(network).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let bastion = core
         .sessions
         .create(ctx, session("bastion", "bastion.lab.test"))
@@ -535,7 +535,7 @@ async fn a_session_behind_a_jump_host_is_never_looked_up() {
 #[tokio::test]
 async fn a_bulk_run_reaches_a_vm_through_an_automatic_link_only_once_it_is_confirmed() {
     let (core, _network) = lab_core(FakeNetwork::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web = core.sessions.create(ctx, session("web", "192.0.2.10")).await.unwrap();
     core.inventory.refresh(ctx).await.unwrap();
     assert_eq!(get(&core, web.id).await.vm_link, Some(VmLink::Auto));
@@ -581,7 +581,7 @@ async fn a_bulk_run_reaches_a_vm_through_an_automatic_link_only_once_it_is_confi
 #[tokio::test]
 async fn sessions_behind_a_jump_host_or_with_another_label_are_never_linked_automatically() {
     let (core, _network) = lab_core(FakeNetwork::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let bastion = core
         .sessions
         .create(ctx, session("bastion", "bastion.example.com"))

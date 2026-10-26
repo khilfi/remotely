@@ -42,20 +42,20 @@ fn session(name: &str, host: &str) -> SessionInput {
 
 async fn secret(core: &Core, kind: SecretKind, label: &str, value: &str) -> remotely_core::vault::SecretId {
     core.vault
-        .add(&core.ctx, kind, label, SecretString::new(value))
+        .add(&core.ctx(), kind, label, SecretString::new(value))
         .await
         .unwrap()
         .id
 }
 
 async fn last_audit(core: &Core) -> remotely_core::store::AuditEntry {
-    core.store.recent_audit(&core.ctx, 1).await.unwrap().remove(0)
+    core.store.recent_audit(&core.ctx(), 1).await.unwrap().remove(0)
 }
 
 #[tokio::test]
 async fn a_session_stores_where_and_how_to_connect() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let password = secret(&core, SecretKind::Password, "web01 alice", "pw-value-1").await;
     let bastion = core
         .sessions
@@ -120,7 +120,7 @@ async fn a_session_stores_where_and_how_to_connect() {
 #[tokio::test]
 async fn keys_and_passphrases_must_be_vault_items_of_the_right_kind() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let key = secret(&core, SecretKind::PrivateKey, "deploy key", &fake_private_key()).await;
     let phrase = secret(&core, SecretKind::Passphrase, "deploy key passphrase", "pass phrase").await;
     let password = secret(&core, SecretKind::Password, "root", "pw").await;
@@ -169,7 +169,7 @@ async fn keys_and_passphrases_must_be_vault_items_of_the_right_kind() {
 #[tokio::test]
 async fn deleting_a_secret_leaves_its_sessions_without_it_and_says_so() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let password = secret(&core, SecretKind::Password, "web root", "pw").await;
     let input = SessionInput {
         auth: SessionAuth::Password {
@@ -191,7 +191,7 @@ async fn deleting_a_secret_leaves_its_sessions_without_it_and_says_so() {
 #[tokio::test]
 async fn edits_are_audited_field_by_field_and_an_edit_that_changes_nothing_writes_nothing() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let created = core
         .sessions
         .create(ctx, session("web01", "web01.example.com"))
@@ -226,13 +226,13 @@ async fn edits_are_audited_field_by_field_and_an_edit_that_changes_nothing_write
         audit.detail.as_deref(),
         Some("port: 22 -> 2200; user: alice -> none; environment: none -> prod; tags: none -> web; startup command added (rated High: other)")
     );
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
 async fn a_jump_host_must_be_another_session_and_never_lead_back() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let a = core.sessions.create(ctx, session("a", "a.example.com")).await.unwrap();
     let b = core
         .sessions
@@ -277,7 +277,7 @@ async fn a_jump_host_must_be_another_session_and_never_lead_back() {
 #[tokio::test]
 async fn search_matches_text_tags_labels_and_folders_with_their_subfolders() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let customer = core.sessions.create_folder(ctx, "Customer A", None).await.unwrap();
     let site = core
         .sessions
@@ -301,7 +301,7 @@ async fn search_matches_text_tags_labels_and_folders_with_their_subfolders() {
         let core = &core;
         async move {
             core.sessions
-                .list(&core.ctx, &filter)
+                .list(&core.ctx(), &filter)
                 .await
                 .unwrap()
                 .into_iter()
@@ -357,7 +357,7 @@ async fn search_matches_text_tags_labels_and_folders_with_their_subfolders() {
 #[tokio::test]
 async fn folders_nest_rename_move_and_delete_without_losing_sessions() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let a = core.sessions.create_folder(ctx, "A", None).await.unwrap();
     let b = core.sessions.create_folder(ctx, "B", Some(a.id)).await.unwrap();
     let c = core.sessions.create_folder(ctx, "C", Some(b.id)).await.unwrap();
@@ -421,7 +421,7 @@ async fn folders_nest_rename_move_and_delete_without_losing_sessions() {
 #[tokio::test]
 async fn duplicating_copies_everything_but_the_name() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let original = core
         .sessions
         .create(
@@ -445,7 +445,7 @@ async fn duplicating_copies_everything_but_the_name() {
 #[tokio::test]
 async fn deleting_sessions_cleans_up_tags_left_on_nothing() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let s = core
         .sessions
         .create(
@@ -482,7 +482,7 @@ fn exec(script: &str, sessions: &[Uuid]) -> Command {
 #[tokio::test]
 async fn a_prod_session_raises_the_tier_and_a_lab_one_does_not() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let mut events = core.jobs.subscribe();
     let lab = core
         .sessions
@@ -558,7 +558,7 @@ async fn a_prod_session_raises_the_tier_and_a_lab_one_does_not() {
 #[tokio::test]
 async fn relabelling_a_session_changes_the_tier_of_the_next_command_and_is_audited() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let s = core
         .sessions
         .create(
@@ -599,7 +599,7 @@ async fn relabelling_a_session_changes_the_tier_of_the_next_command_and_is_audit
 async fn an_unknown_session_target_is_refused() {
     let core = core().await;
     assert!(matches!(
-        core.bus.submit(&core.ctx, exec("uptime", &[Uuid::new_v4()])).await,
+        core.bus.submit(&core.ctx(), exec("uptime", &[Uuid::new_v4()])).await,
         Err(CoreError::UnknownTarget(_))
     ));
 }

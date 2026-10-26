@@ -170,7 +170,7 @@ async fn a_wrong_master_password_does_not_unlock_and_the_attempt_is_audited() {
     let audit = store.recent_audit(&ctx, 1).await.unwrap();
     assert_eq!(audit[0].event, "vault_unlocked");
     assert_eq!(audit[0].detail.as_deref(), Some("with the vault password"));
-    assert!(store.verify_audit_chain().await.unwrap().ok);
+    assert!(store.verify_audit_chain(&ctx).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -523,7 +523,7 @@ async fn no_secret_reaches_debug_output_the_audit_log_errors_or_what_the_ui_rece
             assert!(!text.contains(secret), "{secret} leaked into: {text}");
         }
     }
-    assert!(store.verify_audit_chain().await.unwrap().ok);
+    assert!(store.verify_audit_chain(&ctx).await.unwrap().ok);
 }
 
 // ---- AP-06 through the command bus, with the real vault ----------------------------------------
@@ -544,6 +544,7 @@ fn critical_answers(password: &str) -> ApprovalAnswers {
         reason: Some("hung VM".into()),
         safety_snapshot: Some(false),
         vault_password: Some(pw(password)),
+        change_id: None,
     }
 }
 
@@ -553,11 +554,15 @@ async fn critical_actions_ask_for_the_master_password_even_when_windows_unlocked
     let vmware = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     assert!(core.vault.info().windows_login);
-    core.vault.lock(&core.ctx).await.unwrap();
-    core.vault.unlock(&core.ctx, UnlockMethod::WindowsLogin).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
+    core.vault
+        .unlock(&core.ctx(), UnlockMethod::WindowsLogin)
+        .await
+        .unwrap();
     let mut events = core.jobs.subscribe();
 
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, hard_stop("web01")).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), hard_stop("web01")).await.unwrap()
+    else {
         panic!("a hard power-off is Critical");
     };
     // The Windows login is not enough: no password, a wrong one, then the right one.
@@ -588,7 +593,7 @@ async fn critical_actions_ask_for_the_master_password_even_when_windows_unlocked
         [format!("power Stop {{ mode: Hard }} {}", common::vmx("web01"))]
     );
 
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     assert!(audit.iter().any(|e| e.event == "approval_rejected"));
     assert!(audit.iter().any(|e| e
         .approval_json
@@ -601,9 +606,10 @@ async fn critical_actions_ask_for_the_master_password_even_when_windows_unlocked
 async fn a_locked_vault_still_lets_a_critical_action_through_with_the_password() {
     let fake = FakeVmware::with_running([common::vmx("web01").as_str()]);
     let core = Setup::new(fake).with_real_vault().build().await;
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
     let mut events = core.jobs.subscribe();
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, hard_stop("web01")).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), hard_stop("web01")).await.unwrap()
+    else {
         panic!("a hard power-off is Critical");
     };
     let job = core

@@ -38,14 +38,14 @@ fn input(folder: Option<&str>, name: &str, command: &str) -> FavouriteInput {
 
 async fn add(core: &Core, folder: Option<&str>, name: &str, command: &str) -> Favourite {
     core.snippets
-        .add(&core.ctx, input(folder, name, command))
+        .add(&core.ctx(), input(folder, name, command))
         .await
         .unwrap()
 }
 
 async fn names(core: &Core) -> Vec<String> {
     core.snippets
-        .favourites(&core.ctx)
+        .favourites(&core.ctx())
         .await
         .unwrap()
         .iter()
@@ -57,7 +57,7 @@ async fn names(core: &Core) -> Vec<String> {
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 300).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 300).await.unwrap()
 }
 
 async fn favourite_audit(core: &Core) -> Vec<(String, String)> {
@@ -79,7 +79,7 @@ async fn favourites_are_added_in_folders_and_listed_in_order() {
     let restart = core
         .snippets
         .add(
-            &core.ctx,
+            &core.ctx(),
             FavouriteInput {
                 folder: Some("  Web  ".into()),
                 name: " Restart nginx ".into(),
@@ -128,8 +128,8 @@ async fn favourites_are_added_in_folders_and_listed_in_order() {
             .fetch_one(core.store.pool())
             .await
             .unwrap();
-    assert_eq!(workspace, core.ctx.workspace_id.to_string());
-    assert_eq!(user, core.ctx.user_id.to_string());
+    assert_eq!(workspace, core.ctx().workspace_id.to_string());
+    assert_eq!(user, core.ctx().user_id.to_string());
 }
 
 #[tokio::test]
@@ -138,7 +138,7 @@ async fn names_are_unique_within_a_folder_and_inputs_are_checked() {
     add(&core, Some("Web"), "Logs", "journalctl -u nginx").await;
     let err = core
         .snippets
-        .add(&core.ctx, input(Some("WEB"), "logs", "tail /var/log/syslog"))
+        .add(&core.ctx(), input(Some("WEB"), "logs", "tail /var/log/syslog"))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
@@ -155,7 +155,7 @@ async fn names_are_unique_within_a_folder_and_inputs_are_checked() {
         input(None, &"n".repeat(81), "uptime"),
         input(None, "Too long", &"x".repeat(9 * 1024)),
     ] {
-        let err = core.snippets.add(&core.ctx, bad.clone()).await.unwrap_err();
+        let err = core.snippets.add(&core.ctx(), bad.clone()).await.unwrap_err();
         assert_eq!(err.code(), "invalid_input", "{bad:?}");
     }
     assert_eq!(names(&core).await.len(), 3, "nothing bad was saved");
@@ -172,7 +172,7 @@ async fn changing_a_favourite_moves_renames_and_audits_without_the_command() {
     let moved = core
         .snippets
         .update(
-            &core.ctx,
+            &core.ctx(),
             a.id,
             FavouriteInput {
                 folder: Some("db".into()),
@@ -193,7 +193,7 @@ async fn changing_a_favourite_moves_renames_and_audits_without_the_command() {
     let same = core
         .snippets
         .update(
-            &core.ctx,
+            &core.ctx(),
             a.id,
             FavouriteInput {
                 folder: Some("DB".into()),
@@ -210,7 +210,7 @@ async fn changing_a_favourite_moves_renames_and_audits_without_the_command() {
     // Renaming onto another favourite in the folder is refused.
     let err = core
         .snippets
-        .update(&core.ctx, a.id, input(Some("DB"), "three", "uptime"))
+        .update(&core.ctx(), a.id, input(Some("DB"), "three", "uptime"))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
@@ -231,7 +231,7 @@ async fn changing_a_favourite_moves_renames_and_audits_without_the_command() {
     for entry in audit(&core).await {
         assert!(!format!("{entry:?}").contains(&secretish), "{entry:?}");
     }
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn favourites_are_reordered_within_their_folder_and_deleted() {
 
     let listed = core
         .snippets
-        .reorder(&core.ctx, Some("web"), &[c.id, a.id, b.id])
+        .reorder(&core.ctx(), Some("web"), &[c.id, a.id, b.id])
         .await
         .unwrap();
     let order: Vec<&str> = listed.iter().map(|f| f.name.as_str()).collect();
@@ -252,14 +252,18 @@ async fn favourites_are_reordered_within_their_folder_and_deleted() {
 
     // Not exactly the folder's favourites: refused, nothing changes.
     for wrong in [vec![c.id, a.id], vec![c.id, a.id, b.id, top.id], vec![c.id, c.id, a.id]] {
-        let err = core.snippets.reorder(&core.ctx, Some("Web"), &wrong).await.unwrap_err();
+        let err = core
+            .snippets
+            .reorder(&core.ctx(), Some("Web"), &wrong)
+            .await
+            .unwrap_err();
         assert_eq!(err.code(), "invalid_input");
     }
     assert_eq!(names(&core).await, ["Top", "Web/C", "Web/A", "Web/B"]);
 
-    core.snippets.delete(&core.ctx, a.id).await.unwrap();
+    core.snippets.delete(&core.ctx(), a.id).await.unwrap();
     assert_eq!(names(&core).await, ["Top", "Web/C", "Web/B"]);
-    let err = core.snippets.delete(&core.ctx, a.id).await.unwrap_err();
+    let err = core.snippets.delete(&core.ctx(), a.id).await.unwrap_err();
     assert_eq!(err.code(), "unknown_target");
     // A new one goes to the end, after the reordered ones.
     add(&core, Some("Web"), "D", "id").await;
@@ -631,7 +635,7 @@ async fn library_entries_are_classified_by_the_policy_engine() {
     });
     // AP-06: dropping two dangerous-command rules loosens the rules.
     core.bus
-        .set_rules_with(&core.ctx, rules, Some(&SecretString::new(common::VAULT_PASSWORD)))
+        .set_rules_with(&core.ctx(), rules, Some(&SecretString::new(common::VAULT_PASSWORD)))
         .await
         .unwrap();
     let library = core.snippets.library();
@@ -710,7 +714,7 @@ async fn a_library_entry_can_be_copied_into_the_favourites() {
     let fav = core
         .snippets
         .add(
-            &core.ctx,
+            &core.ctx(),
             FavouriteInput {
                 folder: Some(entry.group_label.into()),
                 name: entry.name.into(),
@@ -746,7 +750,7 @@ async fn favourites_travel_in_the_encrypted_export() {
     let report = a
         .transfer
         .export(
-            &a.ctx,
+            &a.ctx(),
             &path,
             ExportRequest {
                 passphrase: SecretString::new("five unrelated words here"),
@@ -769,7 +773,12 @@ async fn favourites_travel_in_the_encrypted_export() {
 
     let preview = b
         .transfer
-        .open(&b.ctx, &path, SecretString::new("five unrelated words here"), &b.vault)
+        .open(
+            &b.ctx(),
+            &path,
+            SecretString::new("five unrelated words here"),
+            &b.vault,
+        )
         .await
         .unwrap();
     let rows: Vec<(&str, ItemStatus)> = preview.favourites.iter().map(|i| (i.name.as_str(), i.status)).collect();
@@ -791,7 +800,7 @@ async fn favourites_travel_in_the_encrypted_export() {
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -821,7 +830,7 @@ async fn favourites_travel_in_the_encrypted_export() {
     assert!(report.problems.is_empty(), "{:?}", report.problems);
     assert_eq!(names(&b).await, ["Disk", "web/Logs", "web/Logs (2)", "web/Restart"]);
     // B's own Logs is untouched; each import was audited by the panel's module.
-    let kept = b.snippets.get(&b.ctx, local_logs.id).await.unwrap();
+    let kept = b.snippets.get(&b.ctx(), local_logs.id).await.unwrap();
     assert_eq!(kept.command, local_logs.command);
     let log = favourite_audit(&b).await;
     assert!(log
@@ -840,13 +849,18 @@ async fn favourites_travel_in_the_encrypted_export() {
     // Importing again with Replace overwrites the local one in place.
     let preview = b
         .transfer
-        .open(&b.ctx, &path, SecretString::new("five unrelated words here"), &b.vault)
+        .open(
+            &b.ctx(),
+            &path,
+            SecretString::new("five unrelated words here"),
+            &b.vault,
+        )
         .await
         .unwrap();
     let logs_row = preview.favourites.iter().find(|i| i.name == "Logs").unwrap();
     b.transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -870,7 +884,7 @@ async fn favourites_travel_in_the_encrypted_export() {
         )
         .await
         .unwrap();
-    let replaced = b.snippets.get(&b.ctx, local_logs.id).await.unwrap();
+    let replaced = b.snippets.get(&b.ctx(), local_logs.id).await.unwrap();
     assert_eq!(replaced.command, "journalctl -u nginx -n 100");
     let _ = std::fs::remove_dir_all(dir);
 }

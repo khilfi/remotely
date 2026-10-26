@@ -41,7 +41,7 @@ async fn lab_core(fake: FakeVmware) -> (Core, std::sync::Arc<FakeVmware>) {
     let setup = Setup::new(fake);
     let fake = std::sync::Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     (core, fake)
 }
 
@@ -65,7 +65,7 @@ fn high_answers(count: usize, safety_snapshot: Option<bool>) -> ApprovalAnswers 
 /// Submits a command that needs approval, approves it and waits for the job.
 async fn approve_and_run(core: &Core, command: Command, answers: ApprovalAnswers) -> (Uuid, JobStatus) {
     let mut events = core.jobs.subscribe();
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), command).await.unwrap() else {
         panic!("expected an approval");
     };
     let job = core.bus.approve(request.id, answers).await.unwrap();
@@ -78,7 +78,7 @@ async fn approve_and_run(core: &Core, command: Command, answers: ApprovalAnswers
 async fn the_snapshot_manager_lists_each_vms_tree_and_flags_old_snapshots() {
     let (core, fake) = lab_core(lab()).await;
     let calls_before = fake.calls().len();
-    let list = core.snapshots.list(&core.ctx, None).await.unwrap();
+    let list = core.snapshots.list(&core.ctx(), None).await.unwrap();
 
     let names: Vec<_> = list.iter().map(|v| v.display_name.as_str()).collect();
     assert_eq!(names, ["db01", "web01"]);
@@ -99,7 +99,7 @@ async fn the_snapshot_manager_lists_each_vms_tree_and_flags_old_snapshots() {
         "reading snapshots runs no vmrun command"
     );
 
-    let only_db = core.snapshots.list(&core.ctx, Some(&[vmx("DB01")])).await.unwrap();
+    let only_db = core.snapshots.list(&core.ctx(), Some(&[vmx("DB01")])).await.unwrap();
     assert_eq!(only_db.len(), 1, "paths match in any letter case");
 }
 
@@ -115,7 +115,7 @@ async fn opening_one_vms_details_reads_only_that_vms_snapshots() {
     let (core, fake) = lab_core(fake).await;
     let reads_before = fake.snapshot_reads().len();
 
-    let opened = core.snapshots.list(&core.ctx, Some(&[vmx("web01")])).await.unwrap();
+    let opened = core.snapshots.list(&core.ctx(), Some(&[vmx("web01")])).await.unwrap();
 
     assert_eq!(opened.len(), 1);
     assert_eq!(opened[0].display_name, "web01");
@@ -130,7 +130,7 @@ async fn opening_one_vms_details_reads_only_that_vms_snapshots() {
 
     // The selection's Snapshots menu reads just the selected VMs, in one call.
     let selection = [vmx("db01"), vmx("lab07")];
-    let picked = core.snapshots.list(&core.ctx, Some(&selection)).await.unwrap();
+    let picked = core.snapshots.list(&core.ctx(), Some(&selection)).await.unwrap();
     assert_eq!(picked.len(), 2);
     assert!(picked.iter().any(|v| v.display_name == "db01" && v.error.is_some()));
     assert_eq!(fake.snapshot_reads().len() - reads_before, 3);
@@ -139,7 +139,7 @@ async fn opening_one_vms_details_reads_only_that_vms_snapshots() {
 #[tokio::test]
 async fn a_vm_whose_snapshots_cannot_be_read_shows_the_error_and_the_rest_still_list() {
     let (core, _) = lab_core(lab().unreadable_snapshots(&vmx("db01"))).await;
-    let list = core.snapshots.list(&core.ctx, None).await.unwrap();
+    let list = core.snapshots.list(&core.ctx(), None).await.unwrap();
     assert!(list[0]
         .error
         .as_deref()
@@ -161,7 +161,7 @@ async fn taking_a_snapshot_of_many_vms_is_low_and_needs_no_approval() {
             name: "before demo".into(),
         },
     );
-    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx, take).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx(), take).await.unwrap() else {
         panic!("taking a snapshot is Low");
     };
     assert_eq!(tier, Tier::Low);
@@ -169,7 +169,7 @@ async fn taking_a_snapshot_of_many_vms_is_low_and_needs_no_approval() {
     for name in ["web01", "db01"] {
         assert_eq!(fake.current_snapshot(&vmx(name)).as_deref(), Some("before demo"));
     }
-    let web = &core.snapshots.list(&core.ctx, Some(&[vmx("web01")])).await.unwrap()[0];
+    let web = &core.snapshots.list(&core.ctx(), Some(&[vmx("web01")])).await.unwrap()[0];
     let new = web.snapshots.iter().find(|s| s.name == "before demo").unwrap();
     assert_eq!(new.path, "base/patched/before demo");
     assert!(!new.old && !new.safety);
@@ -180,11 +180,11 @@ async fn a_vm_that_already_has_the_name_fails_alone() {
     let (core, fake) = lab_core(lab().with_snapshot(&vmx("db01"), "demo", days_ago(0))).await;
     let mut events = core.jobs.subscribe();
     let take = snapshot(&["web01", "db01"], SnapshotOp::Take { name: "demo".into() });
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, take).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), take).await.unwrap() else {
         panic!("Low");
     };
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::PartiallyFailed);
-    let targets = core.store.job_targets(&core.ctx, job_id).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job_id).await.unwrap();
     let db = targets.iter().find(|t| t.target_name == "db01").unwrap();
     assert!(db.error.as_deref().unwrap().contains("already exists"));
     assert_eq!(fake.current_snapshot(&vmx("web01")).as_deref(), Some("demo"));
@@ -194,7 +194,7 @@ async fn a_vm_that_already_has_the_name_fails_alone() {
 async fn bulk_revert_is_high_and_takes_one_named_safety_snapshot_per_vm_first() {
     let (core, fake) = lab_core(lab()).await;
     let revert = snapshot(&["web01", "db01"], SnapshotOp::Revert { name: "base".into() });
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, revert.clone()).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), revert.clone()).await.unwrap() else {
         panic!("revert is High");
     };
     assert_eq!(request.tier, Tier::High);
@@ -221,18 +221,18 @@ async fn bulk_revert_is_high_and_takes_one_named_safety_snapshot_per_vm_first() 
     }
 
     // One name for the whole job, recorded per target and in the audit log.
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let names: Vec<_> = targets.iter().map(|t| t.safety_snapshot.clone().unwrap()).collect();
     assert_eq!(names[0], names[1]);
     let safety = &names[0];
     assert!(is_safety_name(safety) && safety.contains("before revert"), "{safety}");
     assert!(safety.contains(&job.simple().to_string()[..8]));
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "job_finished");
     assert!(audit[0].detail.as_deref().unwrap().contains(safety.as_str()));
 
     // The snapshot manager shows it, flagged, on both VMs; the VM now runs from "base".
-    for vm in core.snapshots.list(&core.ctx, None).await.unwrap() {
+    for vm in core.snapshots.list(&core.ctx(), None).await.unwrap() {
         let flagged: Vec<_> = vm.snapshots.iter().filter(|s| s.safety).map(|s| &s.name).collect();
         assert_eq!(flagged, [safety], "{}", vm.display_name);
         assert_eq!(vm.safety_count, 1);
@@ -256,7 +256,7 @@ async fn bulk_revert_is_high_and_takes_one_named_safety_snapshot_per_vm_first() 
 async fn deleting_a_snapshot_is_high_without_a_safety_snapshot_and_keeps_its_children() {
     let (core, fake) = lab_core(lab()).await;
     let delete = snapshot(&["web01"], SnapshotOp::Delete { name: "base".into() });
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, delete.clone()).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), delete.clone()).await.unwrap() else {
         panic!("delete is High");
     };
     assert_eq!(request.tier, Tier::High);
@@ -270,10 +270,10 @@ async fn deleting_a_snapshot_is_high_without_a_safety_snapshot_and_keeps_its_chi
     assert_eq!(status, JobStatus::Succeeded);
     assert_eq!(fake.snapshot_names(&vmx("web01")), ["patched"]);
     assert!(!fake.calls().iter().any(|c| c.contains("take safety")));
-    let web = &core.snapshots.list(&core.ctx, Some(&[vmx("web01")])).await.unwrap()[0];
+    let web = &core.snapshots.list(&core.ctx(), Some(&[vmx("web01")])).await.unwrap()[0];
     assert_eq!(web.snapshots[0].depth, 0, "the child moved up");
     assert_eq!(
-        core.store.job_targets(&core.ctx, job).await.unwrap()[0].safety_snapshot,
+        core.store.job_targets(&core.ctx(), job).await.unwrap()[0].safety_snapshot,
         None
     );
 }
@@ -284,7 +284,7 @@ async fn a_revert_to_a_snapshot_one_vm_lacks_fails_on_that_vm_only() {
     let revert = snapshot(&["web01", "db01"], SnapshotOp::Revert { name: "golden".into() });
     let (job, status) = approve_and_run(&core, revert, high_answers(2, Some(false))).await;
     assert_eq!(status, JobStatus::PartiallyFailed);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let db = targets.iter().find(|t| t.target_name == "db01").unwrap();
     assert_eq!(db.status, "failed");
     assert!(db.error.as_deref().unwrap().contains("does not exist"));
@@ -323,18 +323,18 @@ async fn snapshot_names_are_checked_before_anything_runs() {
         ("Remotely safety mine", "kept for safety snapshots"),
     ] {
         let take = snapshot(&["web01"], SnapshotOp::Take { name: name.into() });
-        match core.bus.submit(&core.ctx, take).await {
+        match core.bus.submit(&core.ctx(), take).await {
             Err(CoreError::InvalidInput(message)) => assert!(message.contains(says), "{name:?}: {message}"),
             other => panic!("{name:?} was accepted: {other:?}"),
         }
     }
     let delete = snapshot(&["web01"], SnapshotOp::Delete { name: " ".into() });
     assert!(matches!(
-        core.bus.submit(&core.ctx, delete).await,
+        core.bus.submit(&core.ctx(), delete).await,
         Err(CoreError::InvalidInput(_))
     ));
     assert!(fake.calls().is_empty());
-    assert!(core.store.recent_audit(&core.ctx, 5).await.unwrap().is_empty());
+    assert!(core.store.recent_audit(&core.ctx(), 5).await.unwrap().is_empty());
 }
 
 // ---- VM-05: every high-risk VM action takes a safety snapshot when the approval keeps it on ----
@@ -399,7 +399,7 @@ async fn every_high_risk_vm_action_takes_a_safety_snapshot_before_it_runs() {
         let safety = calls.iter().filter(|c| c.starts_with("snapshot take safety")).count();
         assert_eq!(safety, count, "{label}: {calls:?}");
         // The safety snapshot is taken before the action on each VM.
-        for target in core.store.job_targets(&core.ctx, job).await.unwrap() {
+        for target in core.store.job_targets(&core.ctx(), job).await.unwrap() {
             let on_vm: Vec<_> = calls.iter().filter(|c| c.ends_with(&target.target_key)).collect();
             assert!(on_vm[0].starts_with("snapshot take safety"), "{label}: {on_vm:?}");
             assert!(target.safety_snapshot.is_some(), "{label}");
@@ -441,14 +441,14 @@ async fn turning_the_safety_snapshot_off_in_the_approval_skips_it_and_says_so() 
     assert!(!fake.calls().iter().any(|c| c.contains("take safety")));
     assert!(core
         .store
-        .job_targets(&core.ctx, job)
+        .job_targets(&core.ctx(), job)
         .await
         .unwrap()
         .iter()
         .all(|t| t.safety_snapshot.is_none()));
     let granted = core
         .store
-        .recent_audit(&core.ctx, 10)
+        .recent_audit(&core.ctx(), 10)
         .await
         .unwrap()
         .into_iter()
@@ -470,7 +470,7 @@ async fn a_failed_safety_snapshot_leaves_that_vm_untouched() {
     let calls = fake.calls();
     assert!(calls.contains(&format!("power Suspend {}", vmx("web01"))));
     assert!(!calls.contains(&format!("power Suspend {}", vmx("db01"))), "{calls:?}");
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let db = targets.iter().find(|t| t.target_name == "db01").unwrap();
     assert!(db.error.as_deref().unwrap().starts_with("the safety snapshot failed"));
     assert_eq!(db.safety_snapshot, None);
@@ -484,7 +484,7 @@ async fn the_snapshot_list_shows_each_vms_label_and_protection() {
         .execute(core.store.pool())
         .await
         .unwrap();
-    let list = core.snapshots.list(&core.ctx, None).await.unwrap();
+    let list = core.snapshots.list(&core.ctx(), None).await.unwrap();
     assert_eq!(list[0].environment, Environment::Lab);
     assert!(list[0].protected);
     assert_eq!(list[0].vmx_path, vmx("db01"));

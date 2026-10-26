@@ -60,9 +60,9 @@ fn now_minus_days(days: i64) -> OffsetDateTime {
 async fn lab_with(setup: Setup, now: OffsetDateTime) -> Lab {
     let vmware = Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let clock = Arc::new(FakeClock::new(now, FakeZone::central_europe()));
-    core.schedules.set_clock(clock.clone());
+    core.schedules().set_clock(clock.clone());
     Lab { core, vmware, clock }
 }
 
@@ -108,16 +108,16 @@ fn answers(request: &ApprovalRequest) -> ApprovalAnswers {
 
 /// Saves the schedule and answers its approval, if it asks one.
 async fn save_and_approve(core: &Core, input: ScheduleInput) -> ScheduleView {
-    let saved = core.schedules.save(input).await.unwrap();
+    let saved = core.schedules().save(input).await.unwrap();
     match saved.approval {
-        Some(request) => core.schedules.approve(request.id, answers(&request)).await.unwrap(),
+        Some(request) => core.schedules().approve(request.id, answers(&request)).await.unwrap(),
         None => saved.schedule,
     }
 }
 
 async fn tick(lab: &Lab) -> remotely_core::schedules::TickReport {
-    let report = lab.core.schedules.tick().await.unwrap();
-    lab.core.schedules.wait_runs().await;
+    let report = lab.core.schedules().tick().await.unwrap();
+    lab.core.schedules().wait_runs().await;
     report
 }
 
@@ -127,7 +127,7 @@ fn due(view: &ScheduleView) -> OffsetDateTime {
 }
 
 async fn audit_events(core: &Core) -> Vec<remotely_core::store::AuditEntry> {
-    core.store.recent_audit(&core.ctx, 500).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 500).await.unwrap()
 }
 
 fn schedule_snapshots(fake: &FakeVmware, name: &str) -> Vec<String> {
@@ -144,7 +144,7 @@ async fn retention_deletes_snapshots_so_the_save_asks_the_high_steps_without_the
     let lab = lab(&[], datetime!(2026-06-10 10:00 UTC)).await;
     let saved = lab
         .core
-        .schedules
+        .schedules()
         .save(input(
             "nightly",
             ScheduleAction::Snapshot { keep: Some(2) },
@@ -175,8 +175,13 @@ async fn retention_deletes_snapshots_so_the_save_asks_the_high_steps_without_the
     // A wrong answer leaves it waiting; the right ones make it active from its next time.
     let mut wrong = answers(&request);
     wrong.typed_target_count = Some(3);
-    assert!(lab.core.schedules.approve(request.id, wrong).await.is_err());
-    let view = lab.core.schedules.approve(request.id, answers(&request)).await.unwrap();
+    assert!(lab.core.schedules().approve(request.id, wrong).await.is_err());
+    let view = lab
+        .core
+        .schedules()
+        .approve(request.id, answers(&request))
+        .await
+        .unwrap();
     assert_eq!(view.state, ScheduleState::Active);
     assert_eq!(view.approval.as_ref().unwrap().tier, Tier::High);
     // 02:00 in Paris in June is 00:00 UTC.
@@ -209,7 +214,7 @@ async fn snapshot_runs_keep_the_last_n_of_their_own_and_are_audited_as_runs_of_t
         assert_eq!(names[0], "base", "{name}: a snapshot the schedule didn't take stays");
         assert_eq!(schedule_snapshots(&lab.vmware, name).len(), 2, "{name}: {names:?}");
     }
-    let runs = lab.core.schedules.runs(view.id, 10).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 10).await.unwrap();
     assert_eq!(runs.len(), 3);
     assert!(runs.iter().all(|r| r.outcome == RunOutcome::Succeeded), "{runs:?}");
     let last = runs[0].detail.as_deref().unwrap();
@@ -240,7 +245,7 @@ async fn snapshot_runs_keep_the_last_n_of_their_own_and_are_audited_as_runs_of_t
         .iter()
         .all(|e| e.approval_json.as_deref().unwrap().contains(&view.id.to_string())));
     assert_eq!(audit.iter().filter(|e| e.event == "schedule_run").count(), 3);
-    assert!(lab.core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(lab.core.store.verify_audit_chain(&lab.core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -299,7 +304,7 @@ async fn retention_keeps_a_snapshot_a_linked_clone_is_made_from_until_the_clone_
     let web = schedule_snapshots(&lab.vmware, "web01");
     assert_eq!(web.len(), 2, "the clone's snapshot and the new one: {web:?}");
     assert!(web.contains(&cloned[0]));
-    let runs = lab.core.schedules.runs(view.id, 10).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 10).await.unwrap();
     assert_eq!(runs[0].outcome, RunOutcome::Succeeded, "{runs:?}");
     let detail = runs[0].detail.as_deref().unwrap();
     assert!(
@@ -319,7 +324,7 @@ async fn retention_keeps_a_snapshot_a_linked_clone_is_made_from_until_the_clone_
 
     // The delete command's own guard covers a scheduled run too: a delete of that snapshot under the schedule's approval
     // fails on web01 with the clone named, and the snapshot stays.
-    let view = lab.core.schedules.get(view.id).await.unwrap();
+    let view = lab.core.schedules().get(view.id).await.unwrap();
     let delete = StandingRun {
         approval_id: view.approval.as_ref().unwrap().id,
         content_hash: view.spec.content_hash(),
@@ -334,9 +339,9 @@ async fn retention_keeps_a_snapshot_a_linked_clone_is_made_from_until_the_clone_
         due: "02:00".into(),
     };
     let mut jobs = lab.core.jobs.subscribe();
-    let job = lab.core.bus.submit_standing(&lab.core.ctx, delete).await.unwrap();
+    let job = lab.core.bus.submit_standing(&lab.core.ctx(), delete).await.unwrap();
     assert_eq!(wait_finished(&mut jobs, job).await, JobStatus::Failed);
-    let targets = lab.core.store.job_targets(&lab.core.ctx, job).await.unwrap();
+    let targets = lab.core.store.job_targets(&lab.core.ctx(), job).await.unwrap();
     let error = targets[0].error.as_deref().unwrap();
     assert!(error.contains("linked clone") && error.contains("web-clone"), "{error}");
     assert!(schedule_snapshots(&lab.vmware, "web01").contains(&cloned[0]));
@@ -346,7 +351,7 @@ async fn retention_keeps_a_snapshot_a_linked_clone_is_made_from_until_the_clone_
     lab.clock.set(first + Duration::days(2) + Duration::seconds(20));
     tick(&lab).await;
     assert_eq!(schedule_snapshots(&lab.vmware, "web01").len(), 1);
-    let detail = lab.core.schedules.runs(view.id, 1).await.unwrap()[0]
+    let detail = lab.core.schedules().runs(view.id, 1).await.unwrap()[0]
         .detail
         .clone()
         .unwrap();
@@ -396,7 +401,7 @@ async fn a_snapshot_schedule_without_retention_is_low_and_approved_without_a_dia
     let lab = lab(&[], datetime!(2026-06-10 10:00 UTC)).await;
     let saved = lab
         .core
-        .schedules
+        .schedules()
         .save(input(
             "hourly",
             ScheduleAction::Snapshot { keep: None },
@@ -431,13 +436,13 @@ async fn missed_runs_are_reported_once_and_not_caught_up() {
         ),
     )
     .await;
-    let mut events = lab.core.schedules.subscribe();
+    let mut events = lab.core.schedules().subscribe();
     // Remotely was closed (or the PC asleep) for three and a half days.
     lab.clock.set(due(&view) + Duration::days(3) + Duration::hours(10));
     let report = tick(&lab).await;
     assert_eq!((report.started, report.missed), (0, 1));
     assert!(schedule_snapshots(&lab.vmware, "web01").is_empty(), "nothing caught up");
-    let runs = lab.core.schedules.runs(view.id, 10).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 10).await.unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].outcome, RunOutcome::Missed);
     let detail = runs[0].detail.as_deref().unwrap();
@@ -451,7 +456,7 @@ async fn missed_runs_are_reported_once_and_not_caught_up() {
         Ok(remotely_core::schedules::ScheduleEvent::Missed { .. })
     ));
     // The next run is the next time from now.
-    let view = lab.core.schedules.get(view.id).await.unwrap();
+    let view = lab.core.schedules().get(view.id).await.unwrap();
     assert_eq!(due(&view), datetime!(2026-06-15 00:00 UTC));
     assert!(audit_events(&lab.core)
         .await
@@ -462,7 +467,7 @@ async fn missed_runs_are_reported_once_and_not_caught_up() {
     lab.clock.set(due(&view) + Duration::minutes(5));
     assert_eq!(tick(&lab).await.missed, 1);
     // One just due runs.
-    let view = lab.core.schedules.get(view.id).await.unwrap();
+    let view = lab.core.schedules().get(view.id).await.unwrap();
     lab.clock.set(due(&view) + Duration::seconds(30));
     assert_eq!(tick(&lab).await.started, 1);
 }
@@ -489,12 +494,12 @@ async fn a_time_the_clocks_jump_over_runs_once_after_the_jump_and_says_so() {
     );
     lab.clock.set(datetime!(2026-03-29 01:00:20 UTC));
     assert_eq!(tick(&lab).await.started, 1);
-    let runs = lab.core.schedules.runs(view.id, 5).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 5).await.unwrap();
     assert!(
         runs[0].detail.as_deref().unwrap().contains("doesn't exist"),
         "the run says it too"
     );
-    let view = lab.core.schedules.get(view.id).await.unwrap();
+    let view = lab.core.schedules().get(view.id).await.unwrap();
     assert_eq!(
         due(&view),
         datetime!(2026-03-30 00:30 UTC),
@@ -554,7 +559,7 @@ async fn weekly_runs_on_its_days_only() {
     assert_eq!(tick(&lab).await.started, 1);
     assert!(common::running(&lab.vmware).contains(&"db01".to_owned()));
     assert_eq!(
-        due(&lab.core.schedules.get(view.id).await.unwrap()),
+        due(&lab.core.schedules().get(view.id).await.unwrap()),
         datetime!(2026-06-20 06:00 UTC)
     );
 }
@@ -580,7 +585,7 @@ async fn resume_starts_only_the_suspended_vms() {
     lab.clock.set(due(&view) + Duration::seconds(10));
     assert_eq!(tick(&lab).await.started, 1);
     assert_eq!(common::running(&lab.vmware), ["web01"]);
-    let runs = lab.core.schedules.runs(view.id, 5).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 5).await.unwrap();
     let detail = runs[0].detail.as_deref().unwrap();
     assert_eq!(runs[0].outcome, RunOutcome::Succeeded);
     assert!(detail.contains("resumed 1 of 1"), "{detail}");
@@ -597,7 +602,7 @@ async fn a_power_run_leaves_vms_already_in_the_state_alone() {
     .await;
     lab.clock.set(due(&view) + Duration::seconds(10));
     tick(&lab).await;
-    let runs = lab.core.schedules.runs(view.id, 5).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 5).await.unwrap();
     assert_eq!(runs[0].outcome, RunOutcome::Succeeded);
     assert!(runs[0].detail.as_deref().unwrap().starts_with("nothing to do"));
     assert!(runs[0].job_ids.is_empty());
@@ -615,19 +620,19 @@ async fn a_target_labelled_prod_pauses_the_schedule_and_asks_again_with_the_high
     .await;
     assert_eq!(view.approval.as_ref().unwrap().tier, Tier::Medium);
     let old_approval = view.approval.as_ref().unwrap().id;
-    let mut events = lab.core.schedules.subscribe();
+    let mut events = lab.core.schedules().subscribe();
     lab.core
         .inventory
-        .set_environment(&lab.core.ctx, &[vmx("web01")], Environment::Prod)
+        .set_environment(&lab.core.ctx(), &[vmx("web01")], Environment::Prod)
         .await
         .unwrap();
     // The list shows it before the scheduler's next look.
-    let listed = lab.core.schedules.get(view.id).await.unwrap();
+    let listed = lab.core.schedules().get(view.id).await.unwrap();
     assert_eq!(listed.asks_again, ["web01 is labelled Prod now"]);
 
     let report = tick(&lab).await;
     assert_eq!(report.paused, 1);
-    let paused = lab.core.schedules.get(view.id).await.unwrap();
+    let paused = lab.core.schedules().get(view.id).await.unwrap();
     assert_eq!(paused.state, ScheduleState::NeedsApproval);
     assert_eq!(paused.state_reason.as_deref(), Some("web01 is labelled Prod now"));
     assert!(paused.next_run.is_none());
@@ -638,7 +643,7 @@ async fn a_target_labelled_prod_pauses_the_schedule_and_asks_again_with_the_high
     assert!(lab
         .core
         .bus
-        .standing_grant(&lab.core.ctx, old_approval)
+        .standing_grant(&lab.core.ctx(), old_approval)
         .await
         .unwrap()
         .is_none());
@@ -649,10 +654,15 @@ async fn a_target_labelled_prod_pauses_the_schedule_and_asks_again_with_the_high
     assert_eq!(common::running(&lab.vmware), ["web01"]);
 
     // Asked again: Medium plus Prod is High.
-    let again = lab.core.schedules.ask_approval(view.id).await.unwrap();
+    let again = lab.core.schedules().ask_approval(view.id).await.unwrap();
     let request = again.approval.unwrap();
     assert_eq!(request.tier, Tier::High);
-    let view = lab.core.schedules.approve(request.id, answers(&request)).await.unwrap();
+    let view = lab
+        .core
+        .schedules()
+        .approve(request.id, answers(&request))
+        .await
+        .unwrap();
     assert_eq!(view.state, ScheduleState::Active);
     assert!(audit_events(&lab.core)
         .await
@@ -678,7 +688,7 @@ async fn a_target_protected_since_pauses_the_schedule() {
         .core
         .bus
         .submit(
-            &lab.core.ctx,
+            &lab.core.ctx(),
             Command::VmProtect {
                 targets: vec![vm("db01")],
                 protected: true,
@@ -693,7 +703,7 @@ async fn a_target_protected_since_pauses_the_schedule() {
     lab.clock.set(due(&view) + Duration::seconds(10));
     let report = tick(&lab).await;
     assert_eq!((report.paused, report.started), (1, 0));
-    let view = lab.core.schedules.get(view.id).await.unwrap();
+    let view = lab.core.schedules().get(view.id).await.unwrap();
     assert_eq!(view.state_reason.as_deref(), Some("db01 is protected now"));
     assert!(schedule_snapshots(&lab.vmware, "web01").is_empty());
 }
@@ -720,7 +730,7 @@ async fn an_edit_withdraws_the_approval_and_waits_for_a_new_one() {
         view.spec.timing.clone(),
     );
     renamed.id = Some(view.id);
-    let saved = lab.core.schedules.save(renamed).await.unwrap();
+    let saved = lab.core.schedules().save(renamed).await.unwrap();
     assert!(saved.approval.is_none());
     assert_eq!(saved.schedule.state, ScheduleState::Active);
     assert_eq!(saved.schedule.approval.as_ref().unwrap().id, old);
@@ -732,11 +742,17 @@ async fn an_edit_withdraws_the_approval_and_waits_for_a_new_one() {
         daily(3, 0),
     );
     edited.id = Some(view.id);
-    let saved = lab.core.schedules.save(edited).await.unwrap();
+    let saved = lab.core.schedules().save(edited).await.unwrap();
     assert_eq!(saved.schedule.state, ScheduleState::NeedsApproval);
     assert_eq!(saved.schedule.state_reason.as_deref(), Some("the schedule was edited"));
     assert!(saved.approval.is_some(), "the dialog opens at once");
-    assert!(lab.core.bus.standing_grant(&lab.core.ctx, old).await.unwrap().is_none());
+    assert!(lab
+        .core
+        .bus
+        .standing_grant(&lab.core.ctx(), old)
+        .await
+        .unwrap()
+        .is_none());
     // The old time comes and goes: nothing runs until it is approved.
     lab.clock.set(due(&view) + Duration::hours(1) + Duration::seconds(5));
     assert_eq!(tick(&lab).await.started, 0);
@@ -769,7 +785,7 @@ async fn the_rules_that_rated_it_changing_pauses_it_but_other_rules_dont() {
         },
     );
     unrelated.read_only_commands.retain(|c| c != "uptime");
-    lab.core.bus.set_rules(&lab.core.ctx, unrelated).await.unwrap();
+    lab.core.bus.set_rules(&lab.core.ctx(), unrelated).await.unwrap();
     assert_eq!(tick(&lab).await.paused, 0);
 
     let mut stricter = lab.core.bus.rules();
@@ -780,13 +796,13 @@ async fn the_rules_that_rated_it_changing_pauses_it_but_other_rules_dont() {
             bulk: Tier::Medium,
         },
     );
-    lab.core.bus.set_rules(&lab.core.ctx, stricter).await.unwrap();
+    lab.core.bus.set_rules(&lab.core.ctx(), stricter).await.unwrap();
     assert_eq!(tick(&lab).await.paused, 1);
-    let view = lab.core.schedules.get(view.id).await.unwrap();
+    let view = lab.core.schedules().get(view.id).await.unwrap();
     assert_eq!(view.state_reason.as_deref(), Some("the approval rules changed"));
     let request = lab
         .core
-        .schedules
+        .schedules()
         .ask_approval(view.id)
         .await
         .unwrap()
@@ -798,7 +814,7 @@ async fn the_rules_that_rated_it_changing_pauses_it_but_other_rules_dont() {
 #[tokio::test]
 async fn a_vm_that_gets_the_tag_is_asked_about_before_it_is_touched() {
     let lab = lab(&[], datetime!(2026-06-10 10:00 UTC)).await;
-    let ctx = lab.core.ctx;
+    let ctx = lab.core.ctx();
     lab.core.store.tag_vms(&ctx, &[vmx("web01")], "lab").await.unwrap();
     let view = save_and_approve(
         &lab.core,
@@ -813,12 +829,12 @@ async fn a_vm_that_gets_the_tag_is_asked_about_before_it_is_touched() {
     assert_eq!(view.targets[0].vms, 1);
     lab.core.store.tag_vms(&ctx, &[vmx("db01")], "lab").await.unwrap();
     assert_eq!(tick(&lab).await.paused, 1);
-    let view = lab.core.schedules.get(view.id).await.unwrap();
+    let view = lab.core.schedules().get(view.id).await.unwrap();
     assert_eq!(view.state_reason.as_deref(), Some("db01 has the tag 'lab' now"));
     // Untagging one is fine: it acts on fewer VMs than approved.
-    let request = lab.core.schedules.ask_approval(view.id).await.unwrap();
+    let request = lab.core.schedules().ask_approval(view.id).await.unwrap();
     let view = match request.approval {
-        Some(r) => lab.core.schedules.approve(r.id, answers(&r)).await.unwrap(),
+        Some(r) => lab.core.schedules().approve(r.id, answers(&r)).await.unwrap(),
         None => request.schedule,
     };
     lab.core.store.untag_vms(&ctx, &[vmx("db01")], "lab").await.unwrap();
@@ -855,18 +871,18 @@ async fn nothing_runs_while_the_read_only_lock_is_on_and_it_is_not_caught_up() {
     lab.clock.set(due(&view) + Duration::seconds(10));
     let report = tick(&lab).await;
     assert_eq!((report.started, report.skipped), (0, 1));
-    let runs = lab.core.schedules.runs(view.id, 5).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 5).await.unwrap();
     assert_eq!(runs[0].outcome, RunOutcome::Skipped);
     assert!(runs[0].detail.as_deref().unwrap().contains("read-only lock"));
     // Edits are refused too.
     let refused = lab
         .core
-        .schedules
+        .schedules()
         .save(input("other", ScheduleAction::Start, vms(&["db01"]), daily(8, 0)))
         .await;
     assert!(matches!(refused, Err(CoreError::ReadOnlyLock { .. })));
     assert!(matches!(
-        lab.core.schedules.pause(view.id).await,
+        lab.core.schedules().pause(view.id).await,
         Err(CoreError::ReadOnlyLock { .. })
     ));
     // The bus refuses a scheduled command itself.
@@ -874,7 +890,7 @@ async fn nothing_runs_while_the_read_only_lock_is_on_and_it_is_not_caught_up() {
         .core
         .bus
         .submit_standing(
-            &lab.core.ctx,
+            &lab.core.ctx(),
             StandingRun {
                 approval_id: view.approval.as_ref().unwrap().id,
                 content_hash: view.spec.content_hash(),
@@ -918,18 +934,18 @@ async fn runs_never_overlap() {
     .await;
     let mut jobs = lab.core.jobs.subscribe();
     lab.clock.set(due(&view) + Duration::seconds(5));
-    assert_eq!(lab.core.schedules.tick().await.unwrap().started, 1);
+    assert_eq!(lab.core.schedules().tick().await.unwrap().started, 1);
     let job = loop {
         if let JobEvent::Countdown { job_id, .. } = jobs.recv().await.unwrap() {
             break job_id;
         }
     };
     lab.clock.advance(Duration::hours(1));
-    let report = lab.core.schedules.tick().await.unwrap();
+    let report = lab.core.schedules().tick().await.unwrap();
     assert_eq!((report.started, report.skipped), (0, 1));
     assert!(lab.core.jobs.cancel(job));
-    lab.core.schedules.wait_runs().await;
-    let runs = lab.core.schedules.runs(view.id, 5).await.unwrap();
+    lab.core.schedules().wait_runs().await;
+    let runs = lab.core.schedules().runs(view.id, 5).await.unwrap();
     assert_eq!(runs.len(), 2);
     assert_eq!(runs[0].outcome, RunOutcome::Skipped);
     assert!(runs[0].detail.as_deref().unwrap().contains("still going"));
@@ -980,7 +996,7 @@ async fn auto_suspend_suspends_the_vms_idle_long_enough_only() {
     )
     .await;
     assert!(view.next_run.is_none(), "auto-suspend has no times");
-    let ctx = lab.core.ctx;
+    let ctx = lab.core.ctx();
     // web01 idle for 30 minutes; db01 busy; neither long enough yet at first.
     lab.core
         .store
@@ -1004,7 +1020,7 @@ async fn auto_suspend_suspends_the_vms_idle_long_enough_only() {
     lab.clock.advance(Duration::seconds(45));
     assert_eq!(tick(&lab).await.started, 1);
     assert_eq!(common::running(&lab.vmware), ["db01"]);
-    let runs = lab.core.schedules.runs(view.id, 5).await.unwrap();
+    let runs = lab.core.schedules().runs(view.id, 5).await.unwrap();
     assert_eq!(runs[0].outcome, RunOutcome::Succeeded);
     let detail = runs[0].detail.as_deref().unwrap();
     assert!(
@@ -1036,7 +1052,7 @@ async fn the_bus_refuses_a_scheduled_command_its_approval_does_not_cover() {
         targets: vec![vm("web01")],
         op: PowerOp::Stop { mode: StopMode::Hard },
     };
-    let ctx = lab.core.ctx;
+    let ctx = lab.core.ctx();
     assert!(lab
         .core
         .bus
@@ -1082,7 +1098,7 @@ async fn the_bus_refuses_a_scheduled_command_its_approval_does_not_cover() {
 #[tokio::test]
 async fn a_vms_tab_lists_the_schedules_that_reach_it_and_its_chain() {
     let lab = lab(&[], datetime!(2026-06-10 10:00 UTC)).await;
-    let ctx = lab.core.ctx;
+    let ctx = lab.core.ctx();
     lab.core.store.tag_vms(&ctx, &[vmx("web01")], "lab").await.unwrap();
     save_and_approve(
         &lab.core,
@@ -1099,17 +1115,17 @@ async fn a_vms_tab_lists_the_schedules_that_reach_it_and_its_chain() {
         input("db only", ScheduleAction::Start, vms(&["db01"]), daily(8, 0)),
     )
     .await;
-    let tab = lab.core.schedules.for_vm(&vmx("web01")).await.unwrap();
+    let tab = lab.core.schedules().for_vm(&vmx("web01")).await.unwrap();
     assert_eq!(tab.schedules.len(), 1);
     assert_eq!(tab.schedules[0].name, "lab nightly");
     let chain = tab.chain.unwrap();
     assert_eq!(chain.snapshots, Some(1));
-    assert_eq!(lab.core.schedules.list().await.unwrap().len(), 2);
+    assert_eq!(lab.core.schedules().list().await.unwrap().len(), 2);
 
     // Chain limits: audited, and warn in the list.
     let limits = lab
         .core
-        .schedules
+        .schedules()
         .set_chain_limits(remotely_core::schedules::ChainLimits {
             max_depth: 1,
             max_size_gb: 100,
@@ -1139,12 +1155,12 @@ async fn deleting_a_schedule_withdraws_its_approval_and_keeps_its_snapshots() {
     lab.clock.set(due(&view) + Duration::seconds(10));
     tick(&lab).await;
     let approval = view.approval.as_ref().unwrap().id;
-    lab.core.schedules.delete(view.id).await.unwrap();
-    assert!(lab.core.schedules.list().await.unwrap().is_empty());
+    lab.core.schedules().delete(view.id).await.unwrap();
+    assert!(lab.core.schedules().list().await.unwrap().is_empty());
     assert!(lab
         .core
         .bus
-        .standing_grant(&lab.core.ctx, approval)
+        .standing_grant(&lab.core.ctx(), approval)
         .await
         .unwrap()
         .is_none());

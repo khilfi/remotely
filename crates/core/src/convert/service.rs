@@ -324,6 +324,7 @@ impl Conversions {
 
     /// VM-17, CV-02: every target the VM can be exported to here, each disk's plan, and why not. A read.
     pub async fn export_options(&self, ctx: &Context, vm_key: &str) -> Result<ExportOptions> {
+        self.store.require_vm_here(ctx, vm_key).await?;
         let vm = self
             .store
             .find_vm(ctx, vm_key)

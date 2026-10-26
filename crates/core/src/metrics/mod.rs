@@ -1125,6 +1125,7 @@ mod tests {
                     50.0,
                 )],
                 statuses: vec![GuestStatus::new(web, GuestState::Ok, None)],
+                running: None,
             }),
         );
         let usage = hub.host_usage();
@@ -1158,6 +1159,7 @@ mod tests {
         let guest_round = |cpu: f64| SourceRound {
             samples: vec![sample(MetricSource::Guest, TargetRef::Session { session_id: web }, cpu)],
             statuses: vec![GuestStatus::new(web, GuestState::Ok, None)],
+            running: None,
         };
 
         hub.record(
@@ -1201,6 +1203,7 @@ mod tests {
             Some(SourceRound {
                 samples: Vec::new(),
                 statuses: Vec::new(),
+                running: None,
             }),
         );
         assert!(hub.latest(MetricSource::Guest, &web.to_string()).is_none());

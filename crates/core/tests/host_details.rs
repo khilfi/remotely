@@ -101,7 +101,7 @@ async fn trust(core: &Core, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 /// A session on 127.0.0.1 logging in as alice with `password` from the vault.
@@ -109,7 +109,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str, vm_id: Opt
     let id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "lab login",
             SecretString::new(password),
@@ -119,7 +119,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str, vm_id: Opt
         .id;
     core.sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: "web01".into(),
                 folder_id: None,
@@ -147,7 +147,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str, vm_id: Opt
 async fn stored_specs(core: &Core, id: Uuid) -> remotely_core::host_details::SessionSpecs {
     timeout(WAIT, async {
         loop {
-            if let Some(specs) = core.host_details.session_specs(&core.ctx, id).await.unwrap() {
+            if let Some(specs) = core.host_details.session_specs(&core.ctx(), id).await.unwrap() {
                 return specs;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -165,7 +165,7 @@ async fn a_terminal_reads_the_hosts_facts_beside_its_shell_without_showing_them(
     trust(&core, &server).await;
     let id = session(&core, &server, &password, None).await;
 
-    let handle = core.terminals.open(&core.ctx, id, SIZE).await.unwrap();
+    let handle = core.terminals.open(&core.ctx(), id, SIZE).await.unwrap();
     let mut output = handle.output;
     let mut events = handle.events;
     timeout(WAIT, async {
@@ -217,7 +217,7 @@ async fn a_terminal_reads_the_hosts_facts_beside_its_shell_without_showing_them(
     );
 
     // A second terminal within ten minutes reads nothing again.
-    let second = core.terminals.open(&core.ctx, id, SIZE).await.unwrap();
+    let second = core.terminals.open(&core.ctx(), id, SIZE).await.unwrap();
     let mut second_events = second.events;
     timeout(WAIT, async {
         while let Some(event) = second_events.recv().await {
@@ -234,12 +234,12 @@ async fn a_terminal_reads_the_hosts_facts_beside_its_shell_without_showing_them(
     .await
     .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let again = core.host_details.session_specs(&core.ctx, id).await.unwrap().unwrap();
+    let again = core.host_details.session_specs(&core.ctx(), id).await.unwrap().unwrap();
     assert_eq!(again.collected_at, read.collected_at, "not read twice in ten minutes");
 
     // MO-14 on the open terminal's connection: no new login.
     let logins = server.connections();
-    let admin = core.host_details.admin(&core.ctx, id).await.unwrap();
+    let admin = core.host_details.admin(&core.ctx(), id).await.unwrap();
     assert_eq!(admin.via, Via::Terminal);
     assert_eq!(server.connections(), logins);
     assert_eq!(admin.details.service_manager, ServiceManager::Systemd);
@@ -262,10 +262,15 @@ async fn refresh_without_a_connection_logs_in_once_and_keeps_it_for_the_next_rea
     let core = core().await;
     trust(&core, &server).await;
     let id = session(&core, &server, &password, None).await;
-    assert!(core.host_details.session_specs(&core.ctx, id).await.unwrap().is_none());
+    assert!(core
+        .host_details
+        .session_specs(&core.ctx(), id)
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(server.connections(), 0, "nothing reads on its own");
 
-    let read = core.host_details.refresh_session(&core.ctx, id).await.unwrap();
+    let read = core.host_details.refresh_session(&core.ctx(), id).await.unwrap();
     assert_eq!(read.collected_by, CollectedBy::Refresh);
     assert_eq!(read.specs.os.id.as_deref(), Some("rhel"));
     // No lscpu here: /proc/cpuinfo; no lsblk JSON: its KEY="value" form.
@@ -274,17 +279,17 @@ async fn refresh_without_a_connection_logs_in_once_and_keeps_it_for_the_next_rea
     assert!(read.specs.disks.iter().any(|d| d.name == "centos-root" && d.depth == 2));
     assert_eq!(server.connections(), 1);
 
-    let admin = core.host_details.admin(&core.ctx, id).await.unwrap();
+    let admin = core.host_details.admin(&core.ctx(), id).await.unwrap();
     assert_eq!(admin.via, Via::OwnConnection);
-    let updates = core.host_details.updates(&core.ctx, id).await.unwrap();
+    let updates = core.host_details.updates(&core.ctx(), id).await.unwrap();
     assert_eq!(updates.report.manager, Some(PackageManager::Dnf));
     assert_eq!(updates.report.packages.len(), 3);
     assert_eq!(updates.report.error, None);
-    core.host_details.refresh_session(&core.ctx, id).await.unwrap();
+    core.host_details.refresh_session(&core.ctx(), id).await.unwrap();
     assert_eq!(server.connections(), 1, "one login for every read the panel asked for");
 
     core.host_details.release(id).await;
-    core.host_details.admin(&core.ctx, id).await.unwrap();
+    core.host_details.admin(&core.ctx(), id).await.unwrap();
     assert_eq!(
         server.connections(),
         2,
@@ -299,7 +304,7 @@ async fn pending_apt_updates_say_which_are_security_ones_and_when_the_lists_were
     let core = core().await;
     trust(&core, &server).await;
     let id = session(&core, &server, &password, None).await;
-    let updates = core.host_details.updates(&core.ctx, id).await.unwrap();
+    let updates = core.host_details.updates(&core.ctx(), id).await.unwrap();
     assert_eq!(updates.report.manager, Some(PackageManager::Apt));
     assert_eq!(updates.report.packages.len(), 2);
     assert_eq!(updates.report.security_count, 1);
@@ -325,7 +330,7 @@ async fn the_dashboard_reads_old_facts_on_its_kept_connection_and_shares_it() {
     let core = core().await;
     trust(&core, &server).await;
     let id = session(&core, &server, &password, None).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
 
     core.metrics.collect_once().await;
     let read = stored_specs(&core, id).await;
@@ -341,7 +346,7 @@ async fn the_dashboard_reads_old_facts_on_its_kept_connection_and_shares_it() {
     assert_eq!(point.swap_total_bytes, Some(2_097_148 * 1024));
 
     // The dashboard row carries the one-line summary.
-    let overview = core.metrics.overview(&core.ctx).await.unwrap();
+    let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     let row = &overview.rows[0];
     assert_eq!(row.vcpus, Some(4));
     assert_eq!(row.memsize_mb, Some(3933), "the MO-02 sample's MemTotal");
@@ -349,10 +354,10 @@ async fn the_dashboard_reads_old_facts_on_its_kept_connection_and_shares_it() {
     assert!(row.specs_at.is_some());
 
     // Refresh and admin reads use the dashboard's connection.
-    let refreshed = core.host_details.refresh_session(&core.ctx, id).await.unwrap();
+    let refreshed = core.host_details.refresh_session(&core.ctx(), id).await.unwrap();
     assert_eq!(refreshed.collected_by, CollectedBy::Refresh);
     assert_eq!(
-        core.host_details.admin(&core.ctx, id).await.unwrap().via,
+        core.host_details.admin(&core.ctx(), id).await.unwrap().via,
         Via::Dashboard
     );
     assert_eq!(server.connections(), 1);
@@ -365,9 +370,14 @@ async fn a_host_that_is_not_linux_stores_nothing() {
     let core = core().await;
     trust(&core, &server).await;
     let id = session(&core, &server, &password, None).await;
-    let err = core.host_details.refresh_session(&core.ctx, id).await.unwrap_err();
+    let err = core.host_details.refresh_session(&core.ctx(), id).await.unwrap_err();
     assert!(err.to_string().contains("not like Linux"), "{err}");
-    assert!(core.host_details.session_specs(&core.ctx, id).await.unwrap().is_none());
+    assert!(core
+        .host_details
+        .session_specs(&core.ctx(), id)
+        .await
+        .unwrap()
+        .is_none());
 }
 
 #[tokio::test]
@@ -377,8 +387,8 @@ async fn a_refresh_that_needs_the_vault_says_so_without_connecting() {
     let core = core().await;
     trust(&core, &server).await;
     let id = session(&core, &server, &password, None).await;
-    core.vault.lock(&core.ctx).await.unwrap();
-    let err = core.host_details.refresh_session(&core.ctx, id).await.unwrap_err();
+    core.vault.lock(&core.ctx()).await.unwrap();
+    let err = core.host_details.refresh_session(&core.ctx(), id).await.unwrap_err();
     assert_eq!(err.code(), "vault_locked");
     assert_eq!(server.connections(), 0);
 }
@@ -397,8 +407,8 @@ async fn the_read_only_lock_does_not_stop_host_details() {
         })
         .await
         .unwrap();
-    assert!(core.host_details.refresh_session(&core.ctx, id).await.is_ok());
-    assert!(core.host_details.admin(&core.ctx, id).await.is_ok());
+    assert!(core.host_details.refresh_session(&core.ctx(), id).await.is_ok());
+    assert!(core.host_details.admin(&core.ctx(), id).await.is_ok());
 }
 
 #[test]
@@ -464,9 +474,9 @@ async fn vm_hardware_is_read_from_its_files_and_kept_for_when_they_cant_be() {
     }
     .build()
     .await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
-    let read = core.host_details.vm_specs(&core.ctx, &vmx("web")).await.unwrap();
+    let read = core.host_details.vm_specs(&core.ctx(), &vmx("web")).await.unwrap();
     assert!(!read.stored);
     assert_eq!(read.problem, None);
     assert_eq!(read.hardware, web_hardware());
@@ -475,14 +485,14 @@ async fn vm_hardware_is_read_from_its_files_and_kept_for_when_they_cant_be() {
 
     // The files can't be read now: what was read before shows, with why.
     fake.set_hardware_failing(true);
-    let offline = core.host_details.vm_specs(&core.ctx, &vmx("web")).await.unwrap();
+    let offline = core.host_details.vm_specs(&core.ctx(), &vmx("web")).await.unwrap();
     assert!(offline.stored);
     assert_eq!(offline.collected_at, read.collected_at);
     assert_eq!(offline.hardware, web_hardware());
     assert!(offline.problem.unwrap().contains("not there"));
     assert!(core
         .host_details
-        .vm_specs(&core.ctx, r"C:\VMs\nope\nope.vmx")
+        .vm_specs(&core.ctx(), r"C:\VMs\nope\nope.vmx")
         .await
         .is_err());
 }
@@ -509,9 +519,9 @@ async fn the_topology_map_reads_each_vms_networks_once_then_uses_what_was_read()
     }
     .build()
     .await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
-    let first = core.host_details.vm_networks(&core.ctx, false).await.unwrap();
+    let first = core.host_details.vm_networks(&core.ctx(), false).await.unwrap();
     assert_eq!(first.len(), 2);
     let web = first.iter().find(|v| v.vmx_path == vmx("web")).unwrap();
     assert!(!web.stored, "never read before: read now");
@@ -522,14 +532,14 @@ async fn the_topology_map_reads_each_vms_networks_once_then_uses_what_was_read()
 
     // Opening the map again reads nothing: the files may be gone and it still shows what was read.
     fake.set_hardware_failing(true);
-    let again = core.host_details.vm_networks(&core.ctx, false).await.unwrap();
+    let again = core.host_details.vm_networks(&core.ctx(), false).await.unwrap();
     let web = again.iter().find(|v| v.vmx_path == vmx("web")).unwrap();
     assert!(web.stored);
     assert_eq!(web.problem, None, "nothing was read");
     assert_eq!(web.nics, hardware.nics);
 
     // A Refresh reads every VM; one that can't be read keeps what was read before, and says why.
-    let fresh = core.host_details.vm_networks(&core.ctx, true).await.unwrap();
+    let fresh = core.host_details.vm_networks(&core.ctx(), true).await.unwrap();
     let web = fresh.iter().find(|v| v.vmx_path == vmx("web")).unwrap();
     assert!(web.stored);
     assert!(web.problem.as_deref().unwrap().contains("not there"));
@@ -545,8 +555,8 @@ async fn a_virtualbox_vm_shows_its_disks_adapters_and_guest_os() {
         .with_guest_property(VBOX, "/VirtualBox/GuestInfo/OS/Product", "Linux");
     let fake = fake.with_guest_property(VBOX, "/VirtualBox/GuestInfo/OS/Release", "6.8.0-45-generic");
     let core = core_with(FakeVmware::default(), fake).await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
-    let read = core.host_details.vm_specs(&core.ctx, VBOX).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    let read = core.host_details.vm_specs(&core.ctx(), VBOX).await.unwrap();
     assert_eq!(read.hardware.vcpus, Some(2));
     assert_eq!(read.hardware.memory_mb, Some(2048));
     assert_eq!(read.hardware.firmware.as_deref(), Some("BIOS"));
@@ -574,13 +584,13 @@ async fn a_vm_shows_its_guests_facts_from_a_linked_session() {
         .in_library(&vmx("web"), Some("web"))
         .with_hardware(&vmx("web"), web_hardware());
     let core = core_with(fake, FakeVirtualBox::new()).await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
-    let vm = core.store.find_vm(&core.ctx, &vmx("web")).await.unwrap().unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    let vm = core.store.find_vm(&core.ctx(), &vmx("web")).await.unwrap().unwrap();
     trust(&core, &server).await;
     let id = session(&core, &server, &password, Some(vm.id.clone())).await;
-    core.host_details.refresh_session(&core.ctx, id).await.unwrap();
+    core.host_details.refresh_session(&core.ctx(), id).await.unwrap();
 
-    let read = core.host_details.vm_specs(&core.ctx, &vmx("web")).await.unwrap();
+    let read = core.host_details.vm_specs(&core.ctx(), &vmx("web")).await.unwrap();
     let guest = read.guest.expect("the linked session's facts");
     assert_eq!(guest.session_id, id);
     assert_eq!(read.guest_session_name.as_deref(), Some("web01"));
@@ -598,7 +608,7 @@ async fn this_pcs_ram_and_paging_files_are_kept_round_by_round() {
     assert_eq!(points[0].mem_bytes, Some(8 << 30));
     assert_eq!(points[0].swap_total_bytes, Some(4 << 30));
     assert_eq!(points[0].swap_used_bytes, Some(1 << 30));
-    let capacity = core.metrics.capacity(&core.ctx).await;
+    let capacity = core.metrics.capacity(&core.ctx()).await;
     let paging = capacity.paging.expect("the paging files");
     assert_eq!(paging.files[0].path, r"C:\pagefile.sys");
     assert_eq!(paging.commit_limit_bytes, 36 << 30);

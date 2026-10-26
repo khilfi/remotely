@@ -50,7 +50,7 @@ async fn core() -> Core {
 async fn existing(core: &Core, label: &str) -> SecretId {
     core.vault
         .vault()
-        .put(&core.ctx, SecretKind::Password, label, pw(&format!("{label}-value")))
+        .put(&core.ctx(), SecretKind::Password, label, pw(&format!("{label}-value")))
         .await
         .unwrap()
 }
@@ -59,7 +59,7 @@ async fn key(core: &Core, label: &str) -> SecretId {
     core.vault
         .vault()
         .put(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::PrivateKey,
             label,
             pw(&common::fake_private_key()),
@@ -104,16 +104,16 @@ fn reauth_required<T: std::fmt::Debug>(result: &Result<T, CoreError>) -> bool {
 }
 
 async fn get(core: &Core, id: Uuid) -> SessionRecord {
-    core.sessions.get(&core.ctx, id).await.unwrap()
+    core.sessions.get(&core.ctx(), id).await.unwrap()
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 300).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 300).await.unwrap()
 }
 
 async fn set_defaults(core: &Core, folder: Uuid, defaults: FolderDefaults) {
     core.sessions
-        .set_folder_defaults_with(&core.ctx, folder, defaults, Some(&pw(VAULT_PASSWORD)))
+        .set_folder_defaults_with(&core.ctx(), folder, defaults, Some(&pw(VAULT_PASSWORD)))
         .await
         .unwrap();
 }
@@ -121,7 +121,7 @@ async fn set_defaults(core: &Core, folder: Uuid, defaults: FolderDefaults) {
 #[tokio::test]
 async fn a_session_value_wins_then_its_folder_then_the_folder_above_then_the_app_default() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let k1 = key(&core, "customer key").await;
     let p2 = existing(&core, "web password").await;
     let outer = core
@@ -248,7 +248,7 @@ async fn a_session_value_wins_then_its_folder_then_the_folder_above_then_the_app
 #[tokio::test]
 async fn the_editor_keeps_what_a_session_sets_itself_and_sees_what_a_folder_would_give() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let folder = core.sessions.create_folder(ctx, "Lab", None).await.unwrap();
     set_defaults(
         &core,
@@ -296,7 +296,7 @@ async fn the_editor_keeps_what_a_session_sets_itself_and_sees_what_a_folder_woul
 #[tokio::test]
 async fn a_prod_label_from_a_folder_raises_the_tier_like_the_sessions_own() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let prod = core.sessions.create_folder(ctx, "Production", None).await.unwrap();
     set_defaults(
         &core,
@@ -348,7 +348,7 @@ async fn a_prod_label_from_a_folder_raises_the_tier_like_the_sessions_own() {
 #[tokio::test]
 async fn a_folder_password_for_new_hosts_asks_for_the_vault_password_like_editing_each_session() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let root = existing(&core, "customer root").await;
     let folder = core.sessions.create_folder(ctx, "Customer", None).await.unwrap();
     let a = core
@@ -458,7 +458,7 @@ async fn a_folder_password_for_new_hosts_asks_for_the_vault_password_like_editin
 #[tokio::test]
 async fn moving_sessions_or_folders_under_a_folder_password_asks_like_editing_them() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let root = existing(&core, "customer root").await;
     let secured = core.sessions.create_folder(ctx, "Secured", None).await.unwrap();
     set_defaults(
@@ -562,7 +562,7 @@ async fn moving_sessions_or_folders_under_a_folder_password_asks_like_editing_th
 #[tokio::test]
 async fn a_folder_jump_host_that_moves_sessions_sending_vault_passwords_asks() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let root = existing(&core, "customer root").await;
     let folder = core.sessions.create_folder(ctx, "Behind", None).await.unwrap();
     let s = core
@@ -615,7 +615,7 @@ async fn a_folder_jump_host_that_moves_sessions_sending_vault_passwords_asks() {
 #[tokio::test]
 async fn folder_defaults_are_checked_audited_and_refused_by_the_read_only_lock() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let folder = core.sessions.create_folder(ctx, "Lab", None).await.unwrap();
     // Checked like a session's own values.
     let long = "x".repeat(101);
@@ -711,7 +711,7 @@ async fn folder_defaults_are_checked_audited_and_refused_by_the_read_only_lock()
 #[tokio::test]
 async fn a_folder_jump_host_never_loops_and_reachability_checks_it_first() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let dmz = core.sessions.create_folder(ctx, "DMZ", None).await.unwrap();
     let inner = core
         .sessions
@@ -792,7 +792,7 @@ async fn a_folder_jump_host_never_loops_and_reachability_checks_it_first() {
 #[tokio::test]
 async fn an_import_into_a_folder_takes_its_user_label_and_key() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let k = key(&core, "customer key").await;
     let folder = core.sessions.create_folder(ctx, "Customer", None).await.unwrap();
     set_defaults(
@@ -852,7 +852,7 @@ async fn an_import_into_a_folder_takes_its_user_label_and_key() {
 #[tokio::test]
 async fn an_imported_session_never_takes_a_folders_vault_password_without_asking() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let root = existing(&core, "customer root").await;
     let folder = core.sessions.create_folder(ctx, "Customer", None).await.unwrap();
     set_defaults(
@@ -897,7 +897,7 @@ async fn export(core: &Core, dir: &Path) -> std::path::PathBuf {
     let path = dir.join(format!("export-{}.remotely", Uuid::new_v4().simple()));
     core.transfer
         .export(
-            &core.ctx,
+            &core.ctx(),
             &path,
             ExportRequest {
                 passphrase: pw(PASSPHRASE),
@@ -922,7 +922,7 @@ fn format_of(path: &Path) -> u64 {
 #[tokio::test]
 async fn an_export_says_format_2_only_when_it_uses_folder_defaults() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let dir = temp_folder("folder-defaults-format");
     let folder = core.sessions.create_folder(ctx, "Customer", None).await.unwrap();
     let s = core
@@ -998,7 +998,7 @@ fn commit_all(
 #[tokio::test]
 async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_other_laptop() {
     let a = core().await;
-    let ctx = &a.ctx;
+    let ctx = &a.ctx();
     let k = a
         .vault
         .add(
@@ -1064,7 +1064,11 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
     let path = export(&a, &dir).await;
 
     let b = core().await;
-    let preview = b.transfer.open(&b.ctx, &path, pw(PASSPHRASE), &b.vault).await.unwrap();
+    let preview = b
+        .transfer
+        .open(&b.ctx(), &path, pw(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
     assert_eq!(preview.folder_defaults.len(), 2);
     assert!(preview.folder_defaults.iter().all(|f| f.status == ItemStatus::New));
     let web_row = preview.sessions.iter().find(|s| s.name == "web01").unwrap();
@@ -1082,7 +1086,7 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit_all(&preview, vec![], None),
             &b.sessions,
             &b.vault,
@@ -1093,7 +1097,7 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
         .unwrap();
     assert_eq!(report.folder_defaults.added, 2, "{:?}", report.problems);
     assert!(report.problems.is_empty(), "{:?}", report.problems);
-    let on_b = b.sessions.list(&b.ctx, &Default::default()).await.unwrap();
+    let on_b = b.sessions.list(&b.ctx(), &Default::default()).await.unwrap();
     let web = on_b.iter().find(|s| s.name == "web01").unwrap();
     let db = on_b.iter().find(|s| s.name == "db01").unwrap();
     let bastion_b = on_b.iter().find(|s| s.name == "bastion").unwrap();
@@ -1111,7 +1115,11 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
     assert_eq!(db.environment, Environment::Prod);
 
     // Opened again: the same defaults here. Changed here: a choice, keeping this laptop's by default.
-    let again = b.transfer.open(&b.ctx, &path, pw(PASSPHRASE), &b.vault).await.unwrap();
+    let again = b
+        .transfer
+        .open(&b.ctx(), &path, pw(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
     assert!(
         again.folder_defaults.iter().all(|f| f.status == ItemStatus::Same),
         "{:?}",
@@ -1120,7 +1128,7 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
     b.transfer.close(again.id);
     let customer_b = b
         .sessions
-        .folders(&b.ctx)
+        .folders(&b.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -1130,7 +1138,11 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
     changed.username = Some("bob".into());
     changed.environment = Some(Environment::Staging);
     set_defaults(&b, customer_b.id, changed).await;
-    let preview = b.transfer.open(&b.ctx, &path, pw(PASSPHRASE), &b.vault).await.unwrap();
+    let preview = b
+        .transfer
+        .open(&b.ctx(), &path, pw(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
     let row = preview
         .folder_defaults
         .iter()
@@ -1141,7 +1153,7 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
     assert_eq!(row.default_action, ItemAction::Skip);
     b.transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit_all(&preview, vec![], None),
             &b.sessions,
             &b.vault,
@@ -1150,9 +1162,13 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
         )
         .await
         .unwrap();
-    let web = b.sessions.get(&b.ctx, web.id).await.unwrap();
+    let web = b.sessions.get(&b.ctx(), web.id).await.unwrap();
     assert_eq!(web.username.as_deref(), Some("bob"), "kept this laptop's");
-    let preview = b.transfer.open(&b.ctx, &path, pw(PASSPHRASE), &b.vault).await.unwrap();
+    let preview = b
+        .transfer
+        .open(&b.ctx(), &path, pw(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
     let row = preview.folder_defaults.iter().find(|f| f.name == "Customer A").unwrap();
     let choice = vec![ItemChoice {
         index: row.index,
@@ -1161,7 +1177,7 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit_all(&preview, choice, None),
             &b.sessions,
             &b.vault,
@@ -1171,7 +1187,7 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
         .await
         .unwrap();
     assert_eq!(report.folder_defaults.replaced, 1, "{:?}", report.problems);
-    let web = b.sessions.get(&b.ctx, web.id).await.unwrap();
+    let web = b.sessions.get(&b.ctx(), web.id).await.unwrap();
     assert_eq!(web.username.as_deref(), Some("alice"));
     assert_eq!(web.environment, Environment::Prod);
     let _ = std::fs::remove_dir_all(dir);
@@ -1180,7 +1196,7 @@ async fn folder_defaults_go_with_an_export_and_sessions_resolve_the_same_on_the_
 #[tokio::test]
 async fn an_import_whose_folder_gives_a_password_already_here_asks_for_the_vault_password() {
     let a = core().await;
-    let ctx = &a.ctx;
+    let ctx = &a.ctx();
     let root = existing(&a, "customer root").await;
     let folder = a.sessions.create_folder(ctx, "Customer", None).await.unwrap();
     set_defaults(
@@ -1221,11 +1237,15 @@ async fn an_import_whose_folder_gives_a_password_already_here_asks_for_the_vault
     // The other laptop has a password with that label: the file's folder would give it to web01's host.
     let b = core().await;
     existing(&b, "customer root").await;
-    let preview = b.transfer.open(&b.ctx, &path, pw(PASSPHRASE), &b.vault).await.unwrap();
+    let preview = b
+        .transfer
+        .open(&b.ctx(), &path, pw(PASSPHRASE), &b.vault)
+        .await
+        .unwrap();
     let err = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit_all(&preview, vec![], None),
             &b.sessions,
             &b.vault,
@@ -1237,7 +1257,7 @@ async fn an_import_whose_folder_gives_a_password_already_here_asks_for_the_vault
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit_all(&preview, vec![], Some(VAULT_PASSWORD)),
             &b.sessions,
             &b.vault,
@@ -1247,7 +1267,7 @@ async fn an_import_whose_folder_gives_a_password_already_here_asks_for_the_vault
         .await
         .unwrap();
     assert!(report.problems.is_empty(), "{:?}", report.problems);
-    let web = b.sessions.list(&b.ctx, &Default::default()).await.unwrap();
+    let web = b.sessions.list(&b.ctx(), &Default::default()).await.unwrap();
     assert!(matches!(web[0].auth, SessionAuth::Password { password_id: Some(_) }));
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -1263,7 +1283,7 @@ async fn a_terminal_and_a_compare_run_log_in_as_the_folder_says() {
         .with_ssh()
         .build()
         .await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let secret = core
         .vault
         .add(ctx, SecretKind::Password, "lab alice", pw(&password))

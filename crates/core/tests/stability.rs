@@ -45,6 +45,7 @@ fn all_answers(targets: usize) -> ApprovalAnswers {
         reason: Some("CHG-1001".into()),
         safety_snapshot: Some(false),
         vault_password: Some(SecretString::new(VAULT_PASSWORD)),
+        change_id: None,
     }
 }
 
@@ -52,19 +53,19 @@ async fn lab_core(names: &[&str]) -> (Core, Arc<FakeVmware>) {
     let setup = Setup::new(lab(names).with_power_delay(Duration::from_millis(50)));
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     (core, fake)
 }
 
 async fn needs_approval(core: &Core, command: Command) -> ApprovalRequest {
-    match core.bus.submit(&core.ctx, command).await.unwrap() {
+    match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::NeedsApproval { request } => request,
         SubmitOutcome::Queued { .. } => panic!("expected an approval"),
     }
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 1_000).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 1_000).await.unwrap()
 }
 
 fn pauses(fake: &FakeVmware) -> usize {
@@ -114,7 +115,7 @@ async fn a_journal_that_fails_mid_job_stops_no_target_and_the_job_still_ends_aud
     let detail = end.detail.as_deref().unwrap_or_default();
     assert!(detail.contains("3 succeeded"), "{detail}");
     assert!(detail.contains("could not keep the result of 3 target(s)"), "{detail}");
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 /// The audit write at the end fails: the job's result stays what it was, not "failed".
@@ -134,10 +135,10 @@ async fn a_failing_final_audit_write_does_not_overwrite_the_result() {
     assert_eq!(wait_finished(&mut events, job).await, JobStatus::Succeeded);
     assert_eq!(pauses(&fake), 2);
     assert_eq!(core.store.job_status(job).await.unwrap(), Some(JobStatus::Succeeded));
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert!(targets.iter().all(|t| t.status == "succeeded"), "{targets:?}");
     assert!(
-        core.store.verify_audit_chain().await.unwrap().ok,
+        core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok,
         "the chain has no gap"
     );
 }
@@ -303,7 +304,7 @@ async fn a_target_labelled_prod_meanwhile_is_asked_again_at_its_new_tier() {
     let asked = needs_approval(&core, pause(&["web01"])).await;
     assert_eq!(asked.tier, Tier::Medium);
     core.inventory
-        .set_environment(&core.ctx, &[vmx("web01")], Environment::Prod)
+        .set_environment(&core.ctx(), &[vmx("web01")], Environment::Prod)
         .await
         .unwrap();
 
@@ -344,7 +345,7 @@ async fn a_target_protected_meanwhile_is_left_out_after_asking_again() {
         targets: vec![vm("db01")],
         protected: true,
     };
-    let job = match core.bus.submit(&core.ctx, protect).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), protect).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, all_answers(1)).await.unwrap(),
     };
@@ -375,7 +376,7 @@ async fn a_target_protected_meanwhile_is_left_out_after_asking_again() {
         targets: vec![vm("web01")],
         protected: true,
     };
-    let job = match core.bus.submit(&core.ctx, protect).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), protect).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, all_answers(1)).await.unwrap(),
     };

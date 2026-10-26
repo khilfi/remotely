@@ -58,7 +58,7 @@ async fn workstation_vm() -> (Core, Folder, String) {
             },
         );
     let core = Setup::new(fake).build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     (core, folder, vmx)
 }
 
@@ -175,7 +175,7 @@ async fn a_virtualbox_vms_logs_are_in_its_log_folder() {
         .with_vm(LAB, "lab01", PowerState::Running)
         .with_info(LAB, |vm| vm.config_file = Some(vbox_file.clone()));
     let core = Setup::new(FakeVmware::default()).with_virtualbox(vbox).build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let listing = core.insight.logs(LAB).await.unwrap();
     let names: Vec<&str> = listing.files.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["VBox.log", "VBox.log.1"]);
@@ -190,7 +190,7 @@ async fn a_vm_without_logs_yet_says_so() {
     let core = Setup::new(FakeVmware::default().in_library(&vmx, Some("new")))
         .build()
         .await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let listing = core.insight.logs(&vmx).await.unwrap();
     assert!(listing.files.is_empty());
     assert!(listing.problem.unwrap().contains("No log files yet"));
@@ -204,20 +204,20 @@ async fn the_timeline_lists_what_remotely_did_to_the_vm_newest_first_in_pages() 
         .in_library(&web, Some("web"))
         .in_library(&db, Some("db"));
     let core = Setup::new(fake).build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let mut rx = core.jobs.subscribe();
     let start = |key: &str| Command::VmPower {
         targets: vec![TargetRef::Vm { vmx_path: key.into() }],
         op: PowerOp::Start { gui: false },
     };
     for command in [start(&web), start(&db)] {
-        let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+        let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), command).await.unwrap() else {
             panic!("starting is Low");
         };
         wait_finished(&mut rx, job_id).await;
     }
     core.inventory
-        .set_environment(&core.ctx, std::slice::from_ref(&web), Environment::Lab)
+        .set_environment(&core.ctx(), std::slice::from_ref(&web), Environment::Lab)
         .await
         .unwrap();
 

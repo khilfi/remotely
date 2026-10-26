@@ -578,21 +578,43 @@ impl HostNetworks {
             .collect())
     }
 
-    /// Every VM's adapters as last stored (resolving a network target reads no VM).
-    async fn stored(&self, ctx: &Context) -> Result<Vec<VmAdapters>> {
+    /// Every VM's adapters as last stored (resolving a network target reads no VM). FD-02: the workspace's VMs,
+    /// or with `everywhere` every workspace's (a network is this PC's: a change there reaches all of them).
+    async fn stored(&self, ctx: &Context, everywhere: bool) -> Result<Vec<VmAdapters>> {
+        let workspaces = if everywhere {
+            self.store
+                .list_workspaces(ctx.user_id)
+                .await?
+                .into_iter()
+                .map(|w| Context {
+                    workspace_id: w.id,
+                    user_id: ctx.user_id,
+                })
+                .collect()
+        } else {
+            vec![*ctx]
+        };
         let mut out = Vec::new();
-        for vm in self.store.list_vms(ctx).await? {
-            let stored = self.store.vm_specs(ctx, &vm.id).await?;
-            if let Some(entry) = stored_adapters(&vm, stored.as_ref().map(|s| s.specs.as_str())) {
-                out.push(entry);
+        for ws in &workspaces {
+            for vm in self.store.list_vms(ws).await? {
+                let stored = self.store.vm_specs(ws, &vm.id).await?;
+                if let Some(entry) = stored_adapters(&vm, stored.as_ref().map(|s| s.specs.as_str())) {
+                    out.push(entry);
+                }
             }
         }
         Ok(out)
     }
 
-    /// The VMs on a network target, from the stored adapters.
-    async fn vms_on(&self, ctx: &Context, hypervisor: Hypervisor, name: &str) -> Result<Vec<NetworkVm>> {
-        let vms = self.stored(ctx).await?;
+    /// The VMs on a network target, from the stored adapters (FD-02: every workspace's with `everywhere`).
+    async fn vms_on(
+        &self,
+        ctx: &Context,
+        hypervisor: Hypervisor,
+        name: &str,
+        everywhere: bool,
+    ) -> Result<Vec<NetworkVm>> {
+        let vms = self.stored(ctx, everywhere).await?;
         Ok(match hypervisor {
             Hypervisor::Vmware => {
                 // Which vmnet `nat` adapters are on: the listed NAT vmnet, else vmnet8.
@@ -633,11 +655,12 @@ impl HostNetworks {
     }
 
     /// VM-11: a network target for the policy engine: Prod when a VM on it is labelled Prod (AP-01, the Prod rule).
+    /// FD-02: a VM of any workspace counts (none is named): the change reaches every VM on the network.
     pub async fn target(&self, ctx: &Context, target: &TargetRef) -> Result<Target> {
         let TargetRef::Network { hypervisor, name } = target else {
             return Err(CoreError::UnknownTarget(target.key()));
         };
-        let vms = self.vms_on(ctx, *hypervisor, name).await?;
+        let vms = self.vms_on(ctx, *hypervisor, name, true).await?;
         let prod = vms.iter().any(|v| v.environment == Environment::Prod);
         let label = match hypervisor {
             Hypervisor::Vmware => format!("{name} (Workstation)"),
@@ -709,30 +732,49 @@ impl HostNetworks {
             ForwardPlace::NatNetwork(name) => (Hypervisor::VirtualBox, name),
             ForwardPlace::VboxVm(..) => return out,
         };
-        let vms = match self.vms_on(ctx, hypervisor, name).await {
+        let vms = match self.vms_on(ctx, hypervisor, name, true).await {
             Ok(vms) => vms,
             Err(err) => {
                 tracing::debug!(error = %err, "could not read the VMs on a network for an approval");
                 return out;
             }
         };
+        // FD-02: the workspace's own VMs are named; the others on the network are only counted.
+        let mine: std::collections::HashSet<String> = match self.store.list_vms(ctx).await {
+            Ok(list) => list.into_iter().map(|vm| vm.vmx_path.to_lowercase()).collect(),
+            Err(_) => std::collections::HashSet::new(),
+        };
+        let is_mine = |vm: &NetworkVm| mine.contains(&vm.vmx_path.to_lowercase());
         if let Some(ip) = forward.guest_ip.as_deref() {
             let owner = vms.iter().find(|v| v.ips.iter().any(|i| i == ip));
             out.push(match owner {
-                Some(vm) => format!("{ip} is {}'s address on {name}", vm.name),
+                Some(vm) if is_mine(vm) => format!("{ip} is {}'s address on {name}", vm.name),
+                Some(_) => format!("{ip} is the address of a VM outside this workspace on {name}"),
                 None => format!("No VM Remotely knows on {name} has the address {ip}"),
             });
         }
-        if !vms.is_empty() {
-            let mut names: Vec<&str> = vms.iter().map(|v| v.name.as_str()).collect();
-            names.dedup();
+        let mut names: Vec<&str> = vms.iter().filter(|v| is_mine(v)).map(|v| v.name.as_str()).collect();
+        names.dedup();
+        let mut others: Vec<&str> = vms
+            .iter()
+            .filter(|v| !is_mine(v))
+            .map(|v| v.vmx_path.as_str())
+            .collect();
+        others.sort_unstable();
+        others.dedup();
+        if !names.is_empty() || !others.is_empty() {
             let shown: Vec<&str> = names.iter().take(8).copied().collect();
             let more = names.len().saturating_sub(shown.len());
-            let list = if more > 0 {
+            let mut list = if more > 0 {
                 format!("{}, and {more} more", shown.join(", "))
             } else {
                 shown.join(", ")
             };
+            match (others.len(), list.is_empty()) {
+                (0, _) => {}
+                (n, true) => list = format!("{n} outside this workspace"),
+                (n, false) => list = format!("{list}; and {n} outside this workspace"),
+            }
             out.push(format!("VMs on {name}: {list}"));
         }
         out

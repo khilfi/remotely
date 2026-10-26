@@ -765,8 +765,11 @@ fn to_csv(data: &ExportData) -> String {
         "stderr",
         "output_truncated",
         "error",
+        // AP-08: the run's change ID, on every row.
+        "change_id",
     ];
     push_row(&mut out, header.iter().map(|h| (*h).to_owned()));
+    let change_id = data.job.change_id.clone().unwrap_or_default();
     for r in &data.rows {
         push_row(
             &mut out,
@@ -780,6 +783,7 @@ fn to_csv(data: &ExportData) -> String {
                 r.stderr.clone(),
                 r.truncated.to_string(),
                 r.error.clone(),
+                change_id.clone(),
             ]
             .into_iter(),
         );
@@ -799,6 +803,7 @@ fn to_json(data: &ExportData) -> Result<String> {
             "startedAt": job.started_at,
             "finishedAt": job.finished_at,
             "retryOf": job.retry_of,
+            "changeId": job.change_id,
         },
         "command": data.run.as_ref().map(|r| json!({
             "script": r.script,
@@ -880,6 +885,9 @@ fn to_html(data: &ExportData) -> String {
         e(job.started_at.as_deref().unwrap_or("not yet")),
         e(job.finished_at.as_deref().unwrap_or("not yet"))
     ));
+    if let Some(change_id) = &job.change_id {
+        out.push_str(&format!("<p class=\"muted\">Change ID {}</p>\n", e(change_id)));
+    }
     out.push_str(&format!(
         "<p><strong>{}</strong> <span class=\"muted\">(grouped by {})</span></p>\n",
         e(&data.headline),
@@ -965,6 +973,8 @@ pub struct RecordedRun {
     pub recorded_at: String,
     pub job_id: Option<Uuid>,
     pub targets: Vec<JobTargetRecord>,
+    /// AP-08: the change ID its line's approval was given with (the export reads it from the journal).
+    pub change_id: Option<String>,
 }
 
 /// What a recordings export wrote.
@@ -997,6 +1007,8 @@ pub fn recorded_export_file_name(line_id: Option<Uuid>, format: ExportFormat) ->
 struct RecordedSection {
     line: String,
     tier: Tier,
+    /// AP-08.
+    change_id: String,
     recorded_at: String,
     job_id: Option<Uuid>,
     headline: String,
@@ -1057,6 +1069,7 @@ fn recorded_sections(runs: &[RecordedRun], opts: GroupOptions, r: &mut Redactor)
             RecordedSection {
                 line: r.clean(&run.line),
                 tier: run.tier,
+                change_id: r.opt(run.change_id.as_deref()),
                 recorded_at: run.recorded_at.clone(),
                 job_id: run.job_id,
                 headline: grouped.headline,
@@ -1089,6 +1102,7 @@ fn recorded_csv(sections: &[RecordedSection]) -> String {
         "line",
         "recorded_at",
         "tier",
+        "change_id",
         "terminal",
         "group",
         "status",
@@ -1115,6 +1129,7 @@ fn recorded_csv(sections: &[RecordedSection]) -> String {
                     s.line.clone(),
                     s.recorded_at.clone(),
                     s.tier.as_str().to_owned(),
+                    s.change_id.clone(),
                     r.name.clone(),
                     r.group.clone(),
                     r.status.clone(),
@@ -1139,6 +1154,7 @@ fn recorded_json(sections: &[RecordedSection], grouped_by: &str) -> Result<Strin
             "line": s.line,
             "recordedAt": s.recorded_at,
             "tier": s.tier,
+            "changeId": if s.change_id.is_empty() { None } else { Some(&s.change_id) },
             "jobId": s.job_id,
             "headline": s.headline,
             "groups": s.groups.iter().zip(&s.diffs).map(|(g, diff)| json!({
@@ -1179,10 +1195,15 @@ fn recorded_html(sections: &[RecordedSection], grouped_by: &str) -> String {
     ));
     for s in sections {
         out.push_str(&format!(
-            "<h2><code>{}</code></h2>\n<p class=\"muted\">Recorded {} &middot; tier {}</p>\n<p><strong>{}</strong></p>\n",
+            "<h2><code>{}</code></h2>\n<p class=\"muted\">Recorded {} &middot; tier {}{}</p>\n<p><strong>{}</strong></p>\n",
             e(&s.line),
             e(&s.recorded_at),
             e(s.tier.as_str()),
+            if s.change_id.is_empty() {
+                String::new()
+            } else {
+                format!(" &middot; change ID {}", e(&s.change_id))
+            },
             e(&s.headline)
         ));
         for (g, diff) in s.groups.iter().zip(&s.diffs) {
@@ -1629,6 +1650,20 @@ impl BulkRuns {
             return Err(CoreError::InvalidInput("There is no recorded line to export.".into()));
         }
         crate::save_guard::refuse_repository(path, crate::save_guard::Saved::Results)?;
+        // AP-08: each line's change ID, from its job's approval.
+        let mut runs = runs.to_vec();
+        for run in &mut runs {
+            if run.change_id.is_none() {
+                if let Some(job) = run.job_id {
+                    run.change_id = self
+                        .store
+                        .job_detail(ctx, job)
+                        .await?
+                        .and_then(|(summary, _)| summary.change_id);
+                }
+            }
+        }
+        let runs = runs.as_slice();
         let (text, redacted, outputs) = render_recorded(runs, format, opts)?;
         tokio::fs::write(path, text).await?;
         let file = path

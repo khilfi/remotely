@@ -39,7 +39,7 @@ pub async fn metrics_history(
         return Err(CoreError::InvalidInput("Choose a VM or host.".into()).into());
     }
     let core = &state.core;
-    Ok(core.history.series(&core.ctx, source, &key, range, now_ms()).await?)
+    Ok(core.history.series(&core.ctx(), source, &key, range, now_ms()).await?)
 }
 
 /// MO-06: how long the history is kept, what it holds and the last prune, for Settings.

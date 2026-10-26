@@ -61,7 +61,7 @@ async fn refresh_lists_the_library_chosen_folders_and_running_vms() {
     let core = Setup::new(fake).build().await;
     core.set_scan_folders(vec![folder.clone()]).await.unwrap();
 
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     let names: Vec<_> = report.vms.iter().map(|v| v.display_name.as_str()).collect();
     assert_eq!(
@@ -96,7 +96,7 @@ async fn without_vmrun_the_library_still_lists_with_a_warning() {
         .without_vmrun();
     let core = Setup::new(fake).build().await;
 
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(report.vms.len(), 1);
     assert_eq!(report.vms[0].power_state, PowerState::Unknown);
     assert_eq!(report.warnings.len(), 1);
@@ -111,7 +111,7 @@ async fn a_folder_that_cannot_be_scanned_is_a_warning_not_a_failure() {
     core.set_scan_folders(vec![folder.clone()]).await.unwrap();
     std::fs::remove_dir_all(&folder).unwrap();
 
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(report.vms.len(), 1);
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0].message.contains("Could not scan"));
@@ -125,9 +125,9 @@ async fn vms_no_longer_found_drop_out_of_the_list() {
     let core = Setup::new(fake).build().await;
 
     core.set_scan_folders(vec![folder.clone()]).await.unwrap();
-    assert_eq!(core.inventory.refresh(&core.ctx).await.unwrap().vms.len(), 1);
+    assert_eq!(core.inventory.refresh(&core.ctx()).await.unwrap().vms.len(), 1);
     core.set_scan_folders(vec![]).await.unwrap();
-    assert!(core.inventory.refresh(&core.ctx).await.unwrap().vms.is_empty());
+    assert!(core.inventory.refresh(&core.ctx()).await.unwrap().vms.is_empty());
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
@@ -139,12 +139,12 @@ async fn a_folder_saved_with_forward_slashes_lists_a_running_vm_once() {
     let core = Setup::new(fake).build().await;
     // Saved as typed, as set_scan_folders did before it saved folders with `\`.
     core.store
-        .put_setting(&core.ctx, remotely_core::store::SCAN_FOLDERS_KEY, &["C:/VMs"])
+        .put_setting(&core.ctx(), remotely_core::store::SCAN_FOLDERS_KEY, &["C:/VMs"])
         .await
         .unwrap();
 
     for _ in 0..2 {
-        let report = core.inventory.refresh(&core.ctx).await.unwrap();
+        let report = core.inventory.refresh(&core.ctx()).await.unwrap();
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
         assert_eq!(report.vms.len(), 1, "{:?}", report.vms);
         assert_eq!(report.vms[0].power_state, PowerState::Running);
@@ -181,9 +181,9 @@ async fn scan_folders_must_exist_are_deduplicated_and_audited() {
     );
     assert_eq!(text(&core.scan_folders().await.unwrap()), text(&kept));
 
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "setting_changed");
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
@@ -208,11 +208,11 @@ async fn protected_vms_are_skipped_until_they_are_unprotected() {
     let setup = Setup::new(FakeVmware::with_running([vmx("a"), vmx("b")]));
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let mut events = core.jobs.subscribe();
 
     // Protecting is Low: logged, no approval, and no VM is touched.
-    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx, protect(&["a"], true)).await.unwrap()
+    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx(), protect(&["a"], true)).await.unwrap()
     else {
         panic!("protecting is Low");
     };
@@ -220,7 +220,7 @@ async fn protected_vms_are_skipped_until_they_are_unprotected() {
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Succeeded);
     assert!(
         core.store
-            .find_vm(&core.ctx, &vmx("a"))
+            .find_vm(&core.ctx(), &vmx("a"))
             .await
             .unwrap()
             .unwrap()
@@ -232,7 +232,7 @@ async fn protected_vms_are_skipped_until_they_are_unprotected() {
         targets: vec![vm("a"), vm("b")],
         op: PowerOp::Suspend,
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend).await.unwrap() else {
         panic!("suspending one VM is Medium");
     };
     assert_eq!(request.tier, Tier::Medium);
@@ -247,19 +247,19 @@ async fn protected_vms_are_skipped_until_they_are_unprotected() {
         targets: names.iter().map(|n| vm(n)).collect(),
         op: PowerOp::Start { gui: false },
     };
-    let SubmitOutcome::Queued { skipped, job_id, .. } = core.bus.submit(&core.ctx, start(&["a", "b"])).await.unwrap()
+    let SubmitOutcome::Queued { skipped, job_id, .. } = core.bus.submit(&core.ctx(), start(&["a", "b"])).await.unwrap()
     else {
         panic!("starting is Low");
     };
     assert_eq!(names(&skipped), ["a"]);
     wait_finished(&mut events, job_id).await;
     assert!(matches!(
-        core.bus.submit(&core.ctx, start(&["a"])).await,
+        core.bus.submit(&core.ctx(), start(&["a"])).await,
         Err(CoreError::AllTargetsProtected)
     ));
 
     // Unlocking needs one confirm, and reaches the protected VM.
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, protect(&["a"], false)).await.unwrap()
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), protect(&["a"], false)).await.unwrap()
     else {
         panic!("unprotecting is Medium");
     };
@@ -269,28 +269,28 @@ async fn protected_vms_are_skipped_until_they_are_unprotected() {
     assert!(
         !core
             .store
-            .find_vm(&core.ctx, &vmx("a"))
+            .find_vm(&core.ctx(), &vmx("a"))
             .await
             .unwrap()
             .unwrap()
             .protected
     );
 
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     for action in ["Protect 1 VM", "Unprotect 1 VM"] {
         assert!(
             audit.iter().any(|e| e.event == "job_finished" && e.action == action),
             "{action}"
         );
     }
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
 async fn protecting_a_vm_not_in_the_inventory_fails() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let mut events = core.jobs.subscribe();
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, protect(&["nope"], true)).await.unwrap()
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), protect(&["nope"], true)).await.unwrap()
     else {
         panic!("protecting is Low");
     };
@@ -309,9 +309,10 @@ fn soft_stop(names: &[&str]) -> Command {
 #[tokio::test]
 async fn a_prod_label_moves_a_shutdown_of_one_vm_from_medium_to_high_and_outlasts_a_refresh() {
     let core = Setup::new(FakeVmware::with_running([vmx("a"), vmx("b")])).build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft_stop(&["a"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), soft_stop(&["a"])).await.unwrap()
+    else {
         panic!("stopping one VM is Medium");
     };
     assert_eq!(request.tier, Tier::Medium);
@@ -320,12 +321,12 @@ async fn a_prod_label_moves_a_shutdown_of_one_vm_from_medium_to_high_and_outlast
     // Labelling is the app's own data: no approval, and audited with what changed.
     let changed = core
         .inventory
-        .set_environment(&core.ctx, &[vmx("a")], Environment::Prod)
+        .set_environment(&core.ctx(), &[vmx("a")], Environment::Prod)
         .await
         .unwrap();
     assert_eq!(changed.len(), 1);
     assert_eq!(changed[0].environment, Environment::Prod);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "vm_label_changed");
     assert_eq!(audit[0].action, "Changed the label of VM 'a'");
     assert_eq!(audit[0].detail.as_deref(), Some("label: none -> prod"));
@@ -335,7 +336,7 @@ async fn a_prod_label_moves_a_shutdown_of_one_vm_from_medium_to_high_and_outlast
     assert_eq!(targets[0].environment, Environment::Prod);
 
     // A refresh keeps the label.
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     let by_name = |n: &str| report.vms.iter().find(|v| v.display_name == n).unwrap();
     assert_eq!(by_name("a").environment, Environment::Prod);
     assert_eq!(by_name("b").environment, Environment::None);
@@ -343,12 +344,13 @@ async fn a_prod_label_moves_a_shutdown_of_one_vm_from_medium_to_high_and_outlast
         environments: vec![Environment::Prod],
         ..Default::default()
     };
-    let picked = core.inventory.list(&core.ctx, &prod).await.unwrap();
+    let picked = core.inventory.list(&core.ctx(), &prod).await.unwrap();
     assert_eq!(picked.len(), 1);
     assert_eq!(picked[0].display_name, "a");
 
     // The same shutdown is now High, and says why.
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft_stop(&["a"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), soft_stop(&["a"])).await.unwrap()
+    else {
         panic!("stopping a Prod VM is High");
     };
     assert_eq!(request.tier, Tier::High);
@@ -364,33 +366,41 @@ async fn a_prod_label_moves_a_shutdown_of_one_vm_from_medium_to_high_and_outlast
     core.bus.cancel_approval(request.id).await.unwrap();
 
     // The unlabelled VM is still Medium.
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft_stop(&["b"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), soft_stop(&["b"])).await.unwrap()
+    else {
         panic!("stopping one VM is Medium");
     };
     assert_eq!(request.tier, Tier::Medium);
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
 async fn labelling_checks_every_vm_first_and_logs_only_real_changes() {
     let core = Setup::new(FakeVmware::with_running([vmx("a"), vmx("b")])).build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let label = |vm: &str| {
         let core = &core;
         let vmx = vmx(vm);
-        async move { core.store.find_vm(&core.ctx, &vmx).await.unwrap().unwrap().environment }
+        async move {
+            core.store
+                .find_vm(&core.ctx(), &vmx)
+                .await
+                .unwrap()
+                .unwrap()
+                .environment
+        }
     };
-    let audit_count = || async { core.store.recent_audit(&core.ctx, 100).await.unwrap().len() };
+    let audit_count = || async { core.store.recent_audit(&core.ctx(), 100).await.unwrap().len() };
     let before = audit_count().await;
 
     assert!(matches!(
-        core.inventory.set_environment(&core.ctx, &[], Environment::Lab).await,
+        core.inventory.set_environment(&core.ctx(), &[], Environment::Lab).await,
         Err(CoreError::NoTargets)
     ));
     // A VM not in the inventory fails the whole change.
     let unknown = core
         .inventory
-        .set_environment(&core.ctx, &[vmx("a"), vmx("nope")], Environment::Lab)
+        .set_environment(&core.ctx(), &[vmx("a"), vmx("nope")], Environment::Lab)
         .await
         .unwrap_err();
     assert!(matches!(unknown, CoreError::UnknownTarget(p) if p == vmx("nope")));
@@ -401,7 +411,7 @@ async fn labelling_checks_every_vm_first_and_logs_only_real_changes() {
     let changed = core
         .inventory
         .set_environment(
-            &core.ctx,
+            &core.ctx(),
             &[vmx("a"), vmx("a").to_uppercase(), vmx("b")],
             Environment::Lab,
         )
@@ -409,14 +419,14 @@ async fn labelling_checks_every_vm_first_and_logs_only_real_changes() {
         .unwrap();
     assert_eq!(changed.len(), 2);
     assert_eq!(audit_count().await, before + 1);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].action, "Changed the label of 2 VMs");
     assert_eq!(audit[0].detail.as_deref(), Some("label: none -> lab"));
 
     // Nothing to change: nothing written.
     let unchanged = core
         .inventory
-        .set_environment(&core.ctx, &[vmx("a"), vmx("b")], Environment::Lab)
+        .set_environment(&core.ctx(), &[vmx("a"), vmx("b")], Environment::Lab)
         .await
         .unwrap();
     assert!(unchanged.is_empty());
@@ -424,32 +434,32 @@ async fn labelling_checks_every_vm_first_and_logs_only_real_changes() {
 
     // Mixed labels before: each VM's change is named. VMs that already have the label are left out.
     core.inventory
-        .set_environment(&core.ctx, &[vmx("a")], Environment::Prod)
+        .set_environment(&core.ctx(), &[vmx("a")], Environment::Prod)
         .await
         .unwrap();
     let changed = core
         .inventory
-        .set_environment(&core.ctx, &[vmx("a"), vmx("b")], Environment::Prod)
+        .set_environment(&core.ctx(), &[vmx("a"), vmx("b")], Environment::Prod)
         .await
         .unwrap();
     assert_eq!(changed.len(), 1);
     assert_eq!(changed[0].display_name, "b");
     core.inventory
-        .set_environment(&core.ctx, &[vmx("a")], Environment::Staging)
+        .set_environment(&core.ctx(), &[vmx("a")], Environment::Staging)
         .await
         .unwrap();
     core.inventory
-        .set_environment(&core.ctx, &[vmx("a"), vmx("b")], Environment::None)
+        .set_environment(&core.ctx(), &[vmx("a"), vmx("b")], Environment::None)
         .await
         .unwrap();
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(
         audit[0].detail.as_deref(),
         Some("label: staging -> none (a); prod -> none (b)")
     );
     assert_eq!(label("a").await, Environment::None);
     assert_eq!(label("b").await, Environment::None);
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 // ---- VM-02: tags, saved filters and start -------------------------------------------------------
@@ -465,17 +475,17 @@ async fn a_saved_filter_picks_the_stopped_lab_vms_which_start_with_a_console_win
     );
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let lab: Vec<String> = ["a", "b", "c"].iter().map(|n| vmx(n)).collect();
-    core.store.tag_vms(&core.ctx, &lab, "lab").await.unwrap();
+    core.store.tag_vms(&core.ctx(), &lab, "lab").await.unwrap();
 
     let filter = VmFilter {
         tags: vec!["lab".into()],
         power_states: vec![PowerState::NotRunning],
         ..Default::default()
     };
-    let saved = core.store.save_filter(&core.ctx, "Lab, off", &filter).await.unwrap();
-    let picked = core.inventory.list(&core.ctx, &saved.filter).await.unwrap();
+    let saved = core.store.save_filter(&core.ctx(), "Lab, off", &filter).await.unwrap();
+    let picked = core.inventory.list(&core.ctx(), &saved.filter).await.unwrap();
     let names: Vec<_> = picked.iter().map(|v| v.display_name.as_str()).collect();
     assert_eq!(names, ["a", "b"]);
 
@@ -484,7 +494,7 @@ async fn a_saved_filter_picks_the_stopped_lab_vms_which_start_with_a_console_win
         targets: picked.iter().map(|v| vm(&v.display_name)).collect(),
         op: PowerOp::Start { gui: true },
     };
-    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx, start).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, tier, .. } = core.bus.submit(&core.ctx(), start).await.unwrap() else {
         panic!("starting VMs is Low");
     };
     assert_eq!(tier, Tier::Low);
@@ -499,7 +509,12 @@ async fn a_saved_filter_picks_the_stopped_lab_vms_which_start_with_a_console_win
         ]
     );
     // The list shows them running before the next refresh.
-    assert!(core.inventory.list(&core.ctx, &saved.filter).await.unwrap().is_empty());
+    assert!(core
+        .inventory
+        .list(&core.ctx(), &saved.filter)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 // ---- VM-06: parallel power-on limit ------------------------------------------------------------
@@ -510,7 +525,7 @@ async fn start_all(core: &Core, names: &[&str]) -> JobStatus {
         targets: names.iter().map(|n| vm(n)).collect(),
         op: PowerOp::Start { gui: false },
     };
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, start).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), start).await.unwrap() else {
         panic!("starting VMs is Low");
     };
     wait_finished(&mut events, job_id).await
@@ -543,7 +558,7 @@ async fn the_power_on_limit_is_a_saved_setting() {
     // Kept across a restart.
     let again = Core::assemble(
         core.store.clone(),
-        core.ctx,
+        core.ctx(),
         Adapters {
             vmware: Arc::new(FakeVmware::default()),
             virtualbox: Arc::new(remotely_core::fakes::FakeVirtualBox::new()),
@@ -568,7 +583,7 @@ async fn the_power_on_limit_is_a_saved_setting() {
         ));
     }
     assert_eq!(core.power_on_limit(), 1);
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     assert!(audit
         .iter()
         .any(|e| e.event == "setting_changed" && e.detail.as_deref() == Some("1")));
@@ -606,13 +621,14 @@ async fn starting_vms_that_would_overcommit_host_ram_asks_for_a_confirm() {
     let mut events = core.jobs.subscribe();
 
     // 16 GB running + 8 GB fits.
-    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx, start(&["c"])).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), start(&["c"])).await.unwrap() else {
         panic!("enough RAM: no dialog");
     };
     wait_finished(&mut events, job_id).await;
 
     // 24 GB running + 20 GB does not. Starting is still Low, but the warning needs a confirm.
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, start(&["a", "b"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), start(&["a", "b"])).await.unwrap()
+    else {
         panic!("over the host's RAM: a confirm");
     };
     assert_eq!(request.tier, Tier::Low);
@@ -626,7 +642,7 @@ async fn starting_vms_that_would_overcommit_host_ram_asks_for_a_confirm() {
         ],
         "a is already running, so only b counts as starting"
     );
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "approval_requested");
     assert!(audit[0].detail.as_deref().unwrap().contains("44.0 GB"));
 
@@ -642,7 +658,8 @@ async fn a_nearly_full_vm_drive_asks_for_a_confirm() {
     setup.host.free_disk_pct = 5.0;
     let core = setup.build().await;
 
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, start(&["a", "b"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), start(&["a", "b"])).await.unwrap()
+    else {
         panic!("low disk: a confirm");
     };
     assert_eq!(
@@ -658,7 +675,7 @@ async fn a_capacity_check_that_cannot_run_is_a_warning_too() {
     setup.host.unavailable = true;
     let core = setup.build().await;
 
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, start(&["a"])).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), start(&["a"])).await.unwrap() else {
         panic!("unchecked capacity: a confirm");
     };
     assert!(request.warnings.iter().all(|w| w.starts_with("Capacity not checked")));
@@ -692,7 +709,7 @@ async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first(
     // Starting is Low, but the warning needs a confirm, and it names the VM and its adapter.
     let SubmitOutcome::NeedsApproval { request } = core
         .bus
-        .submit(&core.ctx, start(&["clone", "unplugged", "natted"]))
+        .submit(&core.ctx(), start(&["clone", "unplugged", "natted"]))
         .await
         .unwrap()
     else {
@@ -717,13 +734,13 @@ async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first(
     // Without a bridged adapter, a start runs as before; one VM the user picked is not asked about.
     assert!(matches!(
         core.bus
-            .submit(&core.ctx, start(&["natted", "unplugged"]))
+            .submit(&core.ctx(), start(&["natted", "unplugged"]))
             .await
             .unwrap(),
         SubmitOutcome::Queued { .. }
     ));
     assert!(matches!(
-        core.bus.submit(&core.ctx, start(&["clone"])).await.unwrap(),
+        core.bus.submit(&core.ctx(), start(&["clone"])).await.unwrap(),
         SubmitOutcome::Queued { .. }
     ));
 
@@ -736,10 +753,10 @@ async fn starting_several_vms_names_those_with_a_bridged_adapter_and_asks_first(
         .with_hardware(&vmx("natted"), hardware(vec![nic("ethernet0", "nat", true)]))
         .with_hardware(&vmx("unplugged"), hardware(vec![nic("ethernet0", "bridged", false)]));
     let core = Setup::new(fake).build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     assert!(matches!(
         core.bus
-            .submit(&core.ctx, start(&["clone", "natted", "unplugged"]))
+            .submit(&core.ctx(), start(&["clone", "natted", "unplugged"]))
             .await
             .unwrap(),
         SubmitOutcome::Queued { .. }
@@ -756,7 +773,7 @@ async fn other_actions_skip_the_capacity_check() {
         op: PowerOp::Unpause,
     };
     assert!(matches!(
-        core.bus.submit(&core.ctx, unpause).await.unwrap(),
+        core.bus.submit(&core.ctx(), unpause).await.unwrap(),
         SubmitOutcome::Queued { .. }
     ));
 }
@@ -806,7 +823,7 @@ async fn a_vm_that_will_not_shut_down_is_left_running_until_a_separate_critical_
         targets: vec![vm("a"), vm("b")],
         op: PowerOp::Stop { mode: StopMode::Soft },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), soft).await.unwrap() else {
         panic!("stopping 2 VMs is High");
     };
     let job = core.bus.approve(request.id, high_answers(2)).await.unwrap();
@@ -816,7 +833,7 @@ async fn a_vm_that_will_not_shut_down_is_left_running_until_a_separate_critical_
     assert_eq!(common::running(&fake), ["b"], "never forced off by the soft stop");
     assert!(!fake.calls().iter().any(|c| c.contains("Hard")));
 
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert!(audit[0]
         .detail
         .as_deref()
@@ -828,7 +845,7 @@ async fn a_vm_that_will_not_shut_down_is_left_running_until_a_separate_critical_
         targets: vec![vm("b")],
         op: PowerOp::Stop { mode: StopMode::Hard },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, hard).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), hard).await.unwrap() else {
         panic!("a hard power-off is Critical");
     };
     assert_eq!(request.tier, Tier::Critical);
@@ -858,7 +875,7 @@ async fn a_soft_stop_that_outlasts_the_wait_counts_as_still_running() {
         targets: vec![vm("a")],
         op: PowerOp::Stop { mode: StopMode::Soft },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), soft).await.unwrap() else {
         panic!("stopping one VM is Medium");
     };
     let started = std::time::Instant::now();
@@ -869,7 +886,7 @@ async fn a_soft_stop_that_outlasts_the_wait_counts_as_still_running() {
     assert_eq!(still_running, ["a"]);
     assert_eq!(common::running(&fake), ["a"]);
 
-    let jobs = core.store.recent_jobs(&core.ctx, 1).await.unwrap();
+    let jobs = core.store.recent_jobs(&core.ctx(), 1).await.unwrap();
     assert_eq!(jobs[0].targets_failed, 1);
 }
 
@@ -882,7 +899,7 @@ async fn a_clean_shutdown_reports_nothing_still_running() {
         targets: vec![vm("a")],
         op: PowerOp::Stop { mode: StopMode::Soft },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), soft).await.unwrap() else {
         panic!("stopping one VM is Medium");
     };
     let job = core.bus.approve(request.id, confirm()).await.unwrap();
@@ -890,7 +907,7 @@ async fn a_clean_shutdown_reports_nothing_still_running() {
         finish_with_still_running(&mut events, job).await,
         (JobStatus::Succeeded, vec![])
     );
-    let vm = core.store.find_vm(&core.ctx, &vmx("a")).await.unwrap();
+    let vm = core.store.find_vm(&core.ctx(), &vmx("a")).await.unwrap();
     assert!(vm.is_none() || vm.unwrap().power_state == PowerState::NotRunning);
 }
 
@@ -906,7 +923,7 @@ async fn the_shutdown_wait_is_a_checked_saved_setting() {
     }
     core.set_shutdown_wait_secs(300).await.unwrap();
     assert_eq!(core.shutdown_wait_secs(), 300);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].detail.as_deref(), Some("300 s"));
 }
 
@@ -914,7 +931,7 @@ async fn the_shutdown_wait_is_a_checked_saved_setting() {
 
 /// Each target's name and error, in the order the job lists them.
 async fn target_errors(core: &Core, job: uuid::Uuid) -> Vec<(String, Option<String>)> {
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     targets.into_iter().map(|t| (t.target_name, t.error)).collect()
 }
 
@@ -930,7 +947,7 @@ async fn a_shutdown_without_vmware_tools_is_reported_at_once_instead_of_after_th
         targets: vec![vm("a")],
         op: PowerOp::Stop { mode: StopMode::Soft },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, soft).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), soft).await.unwrap() else {
         panic!("stopping one VM is Medium");
     };
     let job = core.bus.approve(request.id, confirm()).await.unwrap();
@@ -973,7 +990,7 @@ async fn suspend_and_restart_without_vmware_tools_fail_at_once_and_say_why() {
         targets: vec![vm("a"), vm("b"), vm("c")],
         op: PowerOp::Suspend,
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend).await.unwrap() else {
         panic!("suspending 3 VMs is High");
     };
     let job = core.bus.approve(request.id, high_answers(3)).await.unwrap();
@@ -1009,7 +1026,7 @@ async fn suspend_and_restart_without_vmware_tools_fail_at_once_and_say_why() {
         targets: vec![vm("b")],
         op: PowerOp::Reset { mode: StopMode::Soft },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, restart).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), restart).await.unwrap() else {
         panic!("restarting one VM is Medium");
     };
     let job = core.bus.approve(request.id, confirm()).await.unwrap();
@@ -1035,7 +1052,7 @@ async fn a_vm_that_is_not_running_goes_straight_to_vmrun() {
         targets: vec![vm("a")],
         op: PowerOp::Suspend,
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend).await.unwrap() else {
         panic!("suspending one VM is Medium");
     };
     let job = core.bus.approve(request.id, confirm()).await.unwrap();
@@ -1065,7 +1082,7 @@ async fn cancel_stops_waiting_for_a_vm_that_waits_for_an_answer_in_workstation()
         targets: vec![vm("a"), vm("b")],
         op: PowerOp::Start { gui: false },
     };
-    let SubmitOutcome::Queued { job_id: job, .. } = core.bus.submit(&core.ctx, start).await.unwrap() else {
+    let SubmitOutcome::Queued { job_id: job, .. } = core.bus.submit(&core.ctx(), start).await.unwrap() else {
         panic!("starting VMs is Low");
     };
     // a starts; b's start waits for an answer that never comes.
@@ -1075,7 +1092,7 @@ async fn cancel_stops_waiting_for_a_vm_that_waits_for_an_answer_in_workstation()
     assert_eq!(fake.in_flight(), 0, "b's call was dropped, which kills vmrun");
     assert_eq!(common::running(&fake), ["a"]);
 
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let outcomes: Vec<_> = targets
         .iter()
         .map(|t| (t.target_name.as_str(), t.status.as_str(), t.error.as_deref()))
@@ -1091,7 +1108,7 @@ async fn cancel_stops_waiting_for_a_vm_that_waits_for_an_answer_in_workstation()
             ),
         ]
     );
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "job_finished");
     assert_eq!(audit[0].result.as_deref(), Some("cancelled"));
     assert!(audit[0]

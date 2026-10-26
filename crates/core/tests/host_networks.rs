@@ -109,7 +109,7 @@ fn rule(name: &str, host_port: u16, guest_port: u16) -> VboxRule {
 
 async fn built(setup: Setup) -> Core {
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     core
 }
 
@@ -168,13 +168,14 @@ async fn approve(core: &Core, request: &ApprovalRequest) -> Uuid {
         reason: Some("R4 test".into()),
         safety_snapshot: None,
         vault_password: vault.then(|| SecretString::new(VAULT_PASSWORD)),
+        change_id: None,
     };
     core.bus.approve(request.id, answers).await.unwrap()
 }
 
 async fn run(core: &Core, command: Command) -> (Uuid, JobStatus) {
     let mut rx = core.jobs.subscribe();
-    let job = match core.bus.submit(&core.ctx, command).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => approve(core, &request).await,
     };
@@ -183,7 +184,7 @@ async fn run(core: &Core, command: Command) -> (Uuid, JobStatus) {
 
 async fn finished_detail(core: &Core) -> String {
     core.store
-        .recent_audit(&core.ctx, 20)
+        .recent_audit(&core.ctx(), 20)
         .await
         .unwrap()
         .into_iter()
@@ -195,7 +196,7 @@ async fn finished_detail(core: &Core) -> String {
 #[tokio::test]
 async fn the_report_lists_each_network_its_vms_and_forwards() {
     let core = built(Setup::new(workstation()).with_virtualbox(virtualbox())).await;
-    let report = core.networks.report(&core.ctx).await.unwrap();
+    let report = core.networks.report(&core.ctx()).await.unwrap();
 
     let vmware = &report.vmware;
     assert!(vmware.available);
@@ -265,15 +266,15 @@ async fn the_report_shares_the_maps_adapter_read_and_falls_back_to_what_it_store
     let setup = Setup::new(workstation());
     let vmware = Arc::clone(&setup.vmware);
     let core = built(setup).await;
-    core.networks.report(&core.ctx).await.unwrap();
-    let stored = core.host_details.vm_networks(&core.ctx, false).await.unwrap();
+    core.networks.report(&core.ctx()).await.unwrap();
+    let stored = core.host_details.vm_networks(&core.ctx(), false).await.unwrap();
     let web = stored.iter().find(|n| n.vmx_path == vmx("web")).unwrap();
     assert!(web.stored, "the report's read was kept for the map");
     assert_eq!(web.nics.len(), 2);
     assert_eq!(web.guest_ips, ["203.0.113.10", "192.0.2.77"]);
 
     vmware.set_hardware_failing(true);
-    let report = core.networks.report(&core.ctx).await.unwrap();
+    let report = core.networks.report(&core.ctx()).await.unwrap();
     let mut stale = report.stale_vms.clone();
     stale.sort();
     assert_eq!(stale, ["db", "web"]);
@@ -290,7 +291,7 @@ async fn the_report_shares_the_maps_adapter_read_and_falls_back_to_what_it_store
 #[tokio::test]
 async fn forwards_read_from_vmnetnat_conf_when_vmrun_prints_them_in_another_form() {
     let core = built(Setup::new(workstation().with_forwards_in_conf_only())).await;
-    let report = core.networks.report(&core.ctx).await.unwrap();
+    let report = core.networks.report(&core.ctx()).await.unwrap();
     let nat = report
         .vmware
         .networks
@@ -305,7 +306,7 @@ async fn forwards_read_from_vmnetnat_conf_when_vmrun_prints_them_in_another_form
 #[tokio::test]
 async fn without_the_hypervisors_the_report_says_they_are_not_there() {
     let core = built(Setup::new(FakeVmware::default()).with_virtualbox(FakeVirtualBox::not_installed())).await;
-    let report = core.networks.report(&core.ctx).await.unwrap();
+    let report = core.networks.report(&core.ctx()).await.unwrap();
     assert!(report.vmware.networks.is_empty());
     assert!(!report.virtualbox.available);
 }
@@ -317,12 +318,12 @@ async fn a_workstation_forward_is_refused_before_asking_when_remotely_isnt_an_ad
     let core = built(setup).await;
     let err = core
         .bus
-        .submit(&core.ctx, add(vmnet8(), web_forward(8080)))
+        .submit(&core.ctx(), add(vmnet8(), web_forward(8080)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "host_network_refused");
     assert!(err.to_string().contains("administrator"), "{err}");
-    let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 20).await.unwrap();
     assert!(
         audit.iter().all(|e| e.event != "approval_requested"),
         "nothing was asked"
@@ -336,11 +337,11 @@ async fn adding_and_removing_a_workstation_forward_goes_through_a_high_approval(
     let fake = Arc::clone(&setup.vmware);
     let core = built(setup).await;
     // The adapters are read (and stored) for the network's VMs.
-    core.networks.report(&core.ctx).await.unwrap();
+    core.networks.report(&core.ctx()).await.unwrap();
 
     let request = asked(
         core.bus
-            .submit(&core.ctx, add(vmnet8(), web_forward(8080)))
+            .submit(&core.ctx(), add(vmnet8(), web_forward(8080)))
             .await
             .unwrap(),
     );
@@ -366,7 +367,7 @@ async fn adding_and_removing_a_workstation_forward_goes_through_a_high_approval(
         .iter()
         .any(|c| c == "host setPortForwarding vmnet8 tcp 8080 203.0.113.10 80 web"));
     assert!(finished_detail(&core).await.contains("1 succeeded"));
-    let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 20).await.unwrap();
     let started = audit.iter().find(|e| e.event == "job_started").unwrap();
     assert!(
         started.targets_json.contains("\"kind\":\"network\""),
@@ -405,14 +406,14 @@ async fn a_workstation_forward_on_a_port_in_use_is_refused_rather_than_replaced(
 #[tokio::test]
 async fn a_network_with_a_prod_vm_on_it_is_critical() {
     let core = built(Setup::new(workstation().as_admin())).await;
-    core.networks.report(&core.ctx).await.unwrap();
+    core.networks.report(&core.ctx()).await.unwrap();
     core.inventory
-        .set_environment(&core.ctx, &[vmx("web")], Environment::Prod)
+        .set_environment(&core.ctx(), &[vmx("web")], Environment::Prod)
         .await
         .unwrap();
     let request = asked(
         core.bus
-            .submit(&core.ctx, add(vmnet8(), web_forward(8080)))
+            .submit(&core.ctx(), add(vmnet8(), web_forward(8080)))
             .await
             .unwrap(),
     );
@@ -434,7 +435,7 @@ async fn virtualbox_nat_network_rules_add_and_remove() {
     };
     let request = asked(
         core.bus
-            .submit(&core.ctx, add(lab_net(), forward.clone()))
+            .submit(&core.ctx(), add(lab_net(), forward.clone()))
             .await
             .unwrap(),
     );
@@ -517,7 +518,7 @@ async fn a_suspended_vms_rules_are_refused() {
     };
     let (_, status) = run(&core, add(vbox_vm(LAB), rule)).await;
     assert_eq!(status, JobStatus::Failed);
-    let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 20).await.unwrap();
     let finished = audit.iter().find(|e| e.event == "job_finished").unwrap();
     assert!(finished.detail.as_deref().unwrap_or_default().contains("1 failed"));
 }
@@ -534,11 +535,11 @@ async fn the_read_only_lock_refuses_port_forwards_and_not_the_report() {
         .unwrap();
     let err = core
         .bus
-        .submit(&core.ctx, add(vmnet8(), web_forward(8080)))
+        .submit(&core.ctx(), add(vmnet8(), web_forward(8080)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "read_only_lock");
-    assert!(core.networks.report(&core.ctx).await.is_ok());
+    assert!(core.networks.report(&core.ctx()).await.is_ok());
 }
 
 #[tokio::test]
@@ -554,7 +555,7 @@ async fn the_ui_cant_send_a_forward_to_the_wrong_kind_of_target() {
             },
         },
     ] {
-        let err = core.bus.submit(&core.ctx, command).await.unwrap_err();
+        let err = core.bus.submit(&core.ctx(), command).await.unwrap_err();
         assert_eq!(err.code(), "invalid_input", "{err}");
     }
 }

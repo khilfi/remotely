@@ -310,6 +310,24 @@ pub enum JobEvent {
     },
 }
 
+impl JobEvent {
+    /// The job it is about (FD-02: the shell forwards only the shown workspace's).
+    pub fn job_id(&self) -> Uuid {
+        match self {
+            JobEvent::Queued { job_id, .. }
+            | JobEvent::Countdown { job_id, .. }
+            | JobEvent::Started { job_id }
+            | JobEvent::TargetStarted { job_id, .. }
+            | JobEvent::TargetFinished { job_id, .. }
+            | JobEvent::CanaryWaiting { job_id, .. }
+            | JobEvent::StackStep { job_id, .. }
+            | JobEvent::TargetProgress { job_id, .. }
+            | JobEvent::StillRunning { job_id, .. }
+            | JobEvent::Finished { job_id, .. } => *job_id,
+        }
+    }
+}
+
 /// VM-01: what a job may have changed. The VM page refreshes the inventory after a `Vms` job and the
 /// Containers page reads its hosts again after a `Containers` one; nothing is read again after the
 /// rest (remote commands, uploads, tunnels, MultiExec lines, updates).

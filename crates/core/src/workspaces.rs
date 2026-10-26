@@ -479,6 +479,47 @@ impl crate::Core {
     }
 }
 
+/// FD-02, FD-07: an import into a new workspace: the workspace made, and what was imported into it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewWorkspaceImport {
+    pub workspace: Workspace,
+    pub report: crate::transfer::TransferReport,
+}
+
+impl crate::Core {
+    /// FD-02, FD-07: imports the opened file into a new workspace instead of the shown one: the workspace is made,
+    /// then the file's items go into it as into an empty library (nothing to replace), each audited in the new
+    /// workspace's log. The shown workspace doesn't change (the UI offers to open the new one).
+    pub async fn import_into_new_workspace(
+        &self,
+        input: WorkspaceInput,
+        request: crate::transfer::TransferCommit,
+    ) -> Result<NewWorkspaceImport> {
+        self.store.read_only().check(Change::Transfer)?;
+        let made = self.workspaces.create(input).await?;
+        let ctx = Context {
+            workspace_id: made.id,
+            user_id: self.ctx().user_id,
+        };
+        let report = self
+            .transfer
+            .commit(
+                &ctx,
+                request,
+                &self.sessions,
+                &self.vault,
+                &self.known_hosts,
+                &self.snippets,
+            )
+            .await?;
+        Ok(NewWorkspaceImport {
+            workspace: self.workspaces.get(made.id).await?,
+            report,
+        })
+    }
+}
+
 fn plural(n: usize, one: &str, many: &str) -> String {
     match n {
         1 => format!("1 {one}"),

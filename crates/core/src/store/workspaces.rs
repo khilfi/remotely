@@ -189,6 +189,18 @@ impl Store {
         Ok(self.vm_owner(vm_key).await? == Some(ctx.workspace_id))
     }
 
+    /// FD-02: refuses a VM the context's workspace doesn't have (another workspace's, or none's), for reads of one VM
+    /// by its key, as the command bus refuses actions on it.
+    pub async fn require_vm_here(&self, ctx: &Context, vm_key: &str) -> Result<()> {
+        if self.vm_in_workspace(ctx, vm_key).await? {
+            Ok(())
+        } else {
+            Err(crate::error::CoreError::NotInWorkspace(crate::inventory::vm_named(
+                vm_key,
+            )))
+        }
+    }
+
     /// Assigns the VM to the context's workspace. False when a workspace has it already (this one included).
     pub(crate) async fn assign_vm(&self, ctx: &Context, vm_key: &str) -> Result<bool> {
         let done = sqlx::query(

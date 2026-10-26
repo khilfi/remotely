@@ -1328,6 +1328,7 @@ impl Recorder {
             recorded_at: l.recorded_at.clone(),
             job_id: l.job_id,
             targets: l.views().iter().map(|v| target_record(v, now)).collect(),
+            change_id: None,
         };
         match line_id {
             Some(id) => Ok(vec![run(book.line(id)?)]),

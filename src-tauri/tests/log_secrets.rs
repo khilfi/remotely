@@ -105,7 +105,7 @@ async fn the_log_file_never_holds_a_secret() {
     let login_id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "login",
             SecretString::new(login.as_str()),
@@ -116,7 +116,7 @@ async fn the_log_file_never_holds_a_secret() {
     let sudo_id = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "sudo",
             SecretString::new(sudo.as_str()),
@@ -141,7 +141,7 @@ async fn the_log_file_never_holds_a_secret() {
             key_type: "ssh-ed25519".into(),
             fingerprint: server.host_key_fingerprint(),
         };
-        core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+        core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
         let input = SessionInput {
             name: name.into(),
             folder_id: None,
@@ -161,14 +161,14 @@ async fn the_log_file_never_holds_a_secret() {
             tags: vec![],
             vm_id: None,
         };
-        sessions.push(core.sessions.create(&core.ctx, input).await.unwrap().id);
+        sessions.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
         servers.push(server);
     }
 
     // A terminal logs in with the vault's login password.
     let mut pane = core
         .terminals
-        .open(&core.ctx, sessions[0], PtySize { cols: 80, rows: 24 })
+        .open(&core.ctx(), sessions[0], PtySize { cols: 80, rows: 24 })
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(15), async {
@@ -199,7 +199,7 @@ async fn the_log_file_never_holds_a_secret() {
         rollout: Default::default(),
     };
     // SS-04, AP-06: the chosen sudo password is new to these hosts, so the run asks for the vault password.
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), command).await.unwrap() else {
         panic!("a sudo password new to these hosts asks for the vault password");
     };
     let job = core

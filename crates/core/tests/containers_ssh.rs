@@ -69,7 +69,7 @@ async fn core() -> Core {
 
 async fn saved(core: &Core, label: &str, password: &str) -> SecretId {
     core.vault
-        .add(&core.ctx, SecretKind::Password, label, SecretString::new(password))
+        .add(&core.ctx(), SecretKind::Password, label, SecretString::new(password))
         .await
         .unwrap()
         .id
@@ -82,7 +82,7 @@ async fn trust(core: &Core, host: &str, port: u16, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 fn input(name: &str, host: &str, port: u16, user: &str, password: SecretId, jump: Option<Uuid>) -> SessionInput {
@@ -128,7 +128,7 @@ async fn container_host(
     let id = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             input("web01", "127.0.0.1", server.port(), "alice", login, None),
         )
         .await
@@ -136,7 +136,7 @@ async fn container_host(
         .id;
     core.containers
         .marks()
-        .set(&core.ctx, id, &[MarkInput { engine, sudo }])
+        .set(&core.ctx(), id, &[MarkInput { engine, sudo }])
         .await
         .unwrap();
     (server, id, password)
@@ -174,7 +174,7 @@ fn answers(request: &ApprovalRequest) -> ApprovalAnswers {
 
 async fn run(core: &Core, command: Command) -> (Uuid, JobStatus) {
     let mut events = core.jobs.subscribe();
-    let job = match core.bus.submit(&core.ctx, command).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, answers(&request)).await.unwrap(),
     };
@@ -199,7 +199,7 @@ fn cli_lines(server: &TestSshServer) -> Vec<String> {
 async fn docker_over_ssh_reads_every_list_from_its_json() {
     let core = core().await;
     let (server, web, _) = container_host(&core, DOCKER, Fixture::sample(), SudoMode::Off, |s| s).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let version = core.containers.version(ctx, host(web), DOCKER).await.unwrap();
     assert_eq!(version.server.as_deref(), Some("27.3.1"));
     let list = core.containers.containers(ctx, host(web), DOCKER).await.unwrap();
@@ -288,7 +288,7 @@ async fn docker_over_ssh_reads_every_list_from_its_json() {
 async fn podman_over_ssh_reads_its_own_json() {
     let core = core().await;
     let (_server, web, _) = container_host(&core, PODMAN, Fixture::sample(), SudoMode::Off, |s| s).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let version = core.containers.version(ctx, host(web), PODMAN).await.unwrap();
     assert_eq!(version.client.as_deref(), Some("4.9.3"));
     let list = core.containers.containers(ctx, host(web), PODMAN).await.unwrap();
@@ -328,7 +328,10 @@ async fn changes_run_on_the_host_through_the_bus_with_every_word_quoted() {
         .map(|c| (c.name.clone(), c.id.clone()))
         .collect();
     let id = |name: &str| ids.iter().find(|(n, _)| n == name).unwrap().1.clone();
-    core.containers.containers(&core.ctx, host(web), DOCKER).await.unwrap();
+    core.containers
+        .containers(&core.ctx(), host(web), DOCKER)
+        .await
+        .unwrap();
 
     let (_, status) = run(
         &core,
@@ -363,7 +366,7 @@ async fn changes_run_on_the_host_through_the_bus_with_every_word_quoted() {
     )
     .await;
     assert_eq!(status, JobStatus::Failed);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert!(
         targets[0].error.as_deref().unwrap().contains("container is running"),
         "{:?}",
@@ -384,7 +387,7 @@ async fn outside_the_docker_group_docker_runs_with_sudo_and_the_password_never_s
     })
     .await;
     let server = server.with_sudo(ServerSudo::Password(password.clone()));
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let err = core.containers.containers(ctx, host(web), DOCKER).await.unwrap_err();
     assert_eq!(err.code(), "container_needs_sudo");
     assert!(err.to_string().contains("docker group"), "{err}");
@@ -446,7 +449,7 @@ async fn detection_suggests_nopasswd_sudo_and_finds_podman() {
             .with_containers(PODMAN, Fixture::empty())
     })
     .await;
-    let found = core.containers.detect(&core.ctx, web, None).await.unwrap();
+    let found = core.containers.detect(&core.ctx(), web, None).await.unwrap();
     let docker = found.engines.iter().find(|e| e.engine == DOCKER).unwrap();
     assert_eq!(docker.suggested, Some(SudoMode::NoPassword));
     let podman = found.engines.iter().find(|e| e.engine == PODMAN).unwrap();
@@ -457,7 +460,7 @@ async fn detection_suggests_nopasswd_sudo_and_finds_podman() {
         .iter()
         .any(|l| l.starts_with("exec sudo -n 'docker' 'version'")));
     // A read: nothing was marked or audited.
-    let marks = core.containers.marks().list(&core.ctx, Some(web)).await.unwrap();
+    let marks = core.containers.marks().list(&core.ctx(), Some(web)).await.unwrap();
     assert_eq!(marks.len(), 1);
 }
 
@@ -465,7 +468,11 @@ async fn detection_suggests_nopasswd_sudo_and_finds_podman() {
 async fn hostile_container_names_are_shown_but_only_ids_reach_the_host() {
     let core = core().await;
     let (server, web, _) = container_host(&core, DOCKER, Fixture::hostile(), SudoMode::Off, |s| s).await;
-    let list = core.containers.containers(&core.ctx, host(web), DOCKER).await.unwrap();
+    let list = core
+        .containers
+        .containers(&core.ctx(), host(web), DOCKER)
+        .await
+        .unwrap();
     let evil = list.containers.iter().find(|c| c.name.contains("touch")).unwrap();
     assert_eq!(evil.name, "x'; touch /tmp/pwned; echo '");
     assert_eq!(evil.image, "evil$(touch /tmp/pwned)");
@@ -489,7 +496,7 @@ async fn hostile_container_names_are_shown_but_only_ids_reach_the_host() {
     .await;
     assert_eq!(status, JobStatus::Succeeded);
     core.containers
-        .details(&core.ctx, host(web), DOCKER, &evil.id)
+        .details(&core.ctx(), host(web), DOCKER, &evil.id)
         .await
         .unwrap();
     for line in cli_lines(&server) {
@@ -500,7 +507,7 @@ async fn hostile_container_names_are_shown_but_only_ids_reach_the_host() {
     }
     assert!(server.file("/tmp/pwned").is_none(), "nothing ran");
     // The audit names the container as text.
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     assert!(audit.iter().any(|e| e.targets_json.contains("touch /tmp/pwned")));
 }
 
@@ -523,7 +530,7 @@ async fn a_host_behind_jump_hosts_is_read_through_the_chain() {
     let bastion_id = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             input("bastion", "127.0.0.1", bastion.port(), "bob", bastion_login, None),
         )
         .await
@@ -532,7 +539,7 @@ async fn a_host_behind_jump_hosts_is_read_through_the_chain() {
     let docker01 = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             input("docker01", "docker01.test", 22, "alice", inner_login, Some(bastion_id)),
         )
         .await
@@ -541,7 +548,7 @@ async fn a_host_behind_jump_hosts_is_read_through_the_chain() {
     core.containers
         .marks()
         .set(
-            &core.ctx,
+            &core.ctx(),
             docker01,
             &[MarkInput {
                 engine: DOCKER,
@@ -550,11 +557,11 @@ async fn a_host_behind_jump_hosts_is_read_through_the_chain() {
         )
         .await
         .unwrap();
-    let hosts = core.containers.hosts(&core.ctx).await.unwrap();
+    let hosts = core.containers.hosts(&core.ctx()).await.unwrap();
     assert_eq!(hosts[0].via, ["bastion"]);
     let list = core
         .containers
-        .containers(&core.ctx, host(docker01), DOCKER)
+        .containers(&core.ctx(), host(docker01), DOCKER)
         .await
         .unwrap();
     assert_eq!(list.containers.len(), 6);
@@ -568,7 +575,7 @@ async fn open_a_shell_runs_docker_exec_in_a_terminal_and_is_audited_with_the_con
     let fixture = server.containers(DOCKER);
     let site = fixture.container("shop-web-1").unwrap();
     let id = ContainerId::parse(&site.id).unwrap();
-    let shell = core.containers.shell(&core.ctx, web, DOCKER, &id).await.unwrap();
+    let shell = core.containers.shell(&core.ctx(), web, DOCKER, &id).await.unwrap();
     assert_eq!(shell.title, "shop-web-1 (web01)");
     assert_eq!(
         shell.command,
@@ -579,7 +586,7 @@ async fn open_a_shell_runs_docker_exec_in_a_terminal_and_is_audited_with_the_con
     );
     let handle: TerminalHandle = core
         .terminals
-        .open_container_shell(&core.ctx, web, shell, PtySize { cols: 80, rows: 24 })
+        .open_container_shell(&core.ctx(), web, shell, PtySize { cols: 80, rows: 24 })
         .await
         .unwrap();
     let mut output = handle.output;
@@ -599,7 +606,7 @@ async fn open_a_shell_runs_docker_exec_in_a_terminal_and_is_audited_with_the_con
         .log()
         .iter()
         .any(|l| l == &format!("container shell docker {}", site.short_id())));
-    let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 20).await.unwrap();
     let opened = audit.iter().find(|e| e.event == "terminal_opened").unwrap();
     assert_eq!(
         opened.action,
@@ -614,7 +621,7 @@ async fn open_a_shell_runs_docker_exec_in_a_terminal_and_is_audited_with_the_con
     let worker = ContainerId::parse(&fixture.container("shop-worker-1").unwrap().id).unwrap();
     let err = core
         .containers
-        .shell(&core.ctx, web, DOCKER, &worker)
+        .shell(&core.ctx(), web, DOCKER, &worker)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("is not running"), "{err}");
@@ -626,7 +633,7 @@ async fn open_a_shell_runs_docker_exec_in_a_terminal_and_is_audited_with_the_con
 #[tokio::test]
 async fn refused_sudo_logins_and_changed_keys_are_not_retried_at_every_poll() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let (server, web, password) = container_host(&core, DOCKER, Fixture::sample(), SudoMode::Off, |s| {
         s.without_docker_group()
     })
@@ -767,7 +774,7 @@ async fn refused_sudo_logins_and_changed_keys_are_not_retried_at_every_poll() {
 #[tokio::test]
 async fn locking_the_vault_closes_the_kept_connection_that_logged_in_with_its_secrets() {
     let core = core().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let (server, web, _password) = container_host(&core, DOCKER, Fixture::sample(), SudoMode::Off, |s| s).await;
     core.containers.containers(ctx, host(web), DOCKER).await.unwrap();
     core.containers.containers(ctx, host(web), DOCKER).await.unwrap();

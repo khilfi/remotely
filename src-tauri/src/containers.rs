@@ -26,13 +26,13 @@ type IpcResult<T> = Result<T, IpcError>;
 #[tauri::command]
 pub async fn containers_hosts(state: State<'_, AppState>) -> IpcResult<Vec<ContainerHostInfo>> {
     let core = &state.core;
-    Ok(core.containers.hosts(&core.ctx).await?)
+    Ok(core.containers.hosts(&core.ctx()).await?)
 }
 
 #[tauri::command]
 pub async fn containers_marks(state: State<'_, AppState>, session_id: Uuid) -> IpcResult<Vec<ContainerMark>> {
     let core = &state.core;
-    Ok(core.containers.marks().list(&core.ctx, Some(session_id)).await?)
+    Ok(core.containers.marks().list(&core.ctx(), Some(session_id)).await?)
 }
 
 /// Replaces a session's engines (an empty list: no container host any more). Audited. SS-04, AP-06:
@@ -48,7 +48,7 @@ pub async fn containers_set_marks(
     let saved = core
         .containers
         .marks()
-        .set_with(&core.ctx, session_id, &marks, vault_password.as_ref())
+        .set_with(&core.ctx(), session_id, &marks, vault_password.as_ref())
         .await?;
     // How the engines run may have changed: the next read connects afresh.
     core.containers.release(session_id).await;
@@ -67,7 +67,7 @@ pub async fn containers_detect(
     let core = &state.core;
     Ok(core
         .containers
-        .detect_with(&core.ctx, session_id, sudo_password_id, vault_password.as_ref())
+        .detect_with(&core.ctx(), session_id, sudo_password_id, vault_password.as_ref())
         .await?)
 }
 
@@ -78,7 +78,7 @@ pub async fn containers_version(
     engine: EngineKind,
 ) -> IpcResult<EngineVersion> {
     let core = &state.core;
-    Ok(core.containers.version(&core.ctx, host, engine).await?)
+    Ok(core.containers.version(&core.ctx(), host, engine).await?)
 }
 
 #[tauri::command]
@@ -88,7 +88,7 @@ pub async fn containers_list(
     engine: EngineKind,
 ) -> IpcResult<ContainerList> {
     let core = &state.core;
-    Ok(core.containers.containers(&core.ctx, host, engine).await?)
+    Ok(core.containers.containers(&core.ctx(), host, engine).await?)
 }
 
 #[tauri::command]
@@ -98,7 +98,7 @@ pub async fn containers_stats(
     engine: EngineKind,
 ) -> IpcResult<Vec<ContainerStats>> {
     let core = &state.core;
-    Ok(core.containers.stats(&core.ctx, host, engine).await?)
+    Ok(core.containers.stats(&core.ctx(), host, engine).await?)
 }
 
 #[tauri::command]
@@ -109,7 +109,7 @@ pub async fn containers_details(
     id: ContainerId,
 ) -> IpcResult<ContainerDetails> {
     let core = &state.core;
-    Ok(core.containers.details(&core.ctx, host, engine, &id).await?)
+    Ok(core.containers.details(&core.ctx(), host, engine, &id).await?)
 }
 
 #[tauri::command]
@@ -121,7 +121,7 @@ pub async fn containers_logs(
     query: LogQuery,
 ) -> IpcResult<Logs> {
     let core = &state.core;
-    Ok(core.containers.logs(&core.ctx, host, engine, &id, &query).await?)
+    Ok(core.containers.logs(&core.ctx(), host, engine, &id, &query).await?)
 }
 
 #[tauri::command]
@@ -131,7 +131,7 @@ pub async fn containers_images(
     engine: EngineKind,
 ) -> IpcResult<Vec<ImageSummary>> {
     let core = &state.core;
-    Ok(core.containers.images(&core.ctx, host, engine).await?)
+    Ok(core.containers.images(&core.ctx(), host, engine).await?)
 }
 
 #[tauri::command]
@@ -141,7 +141,7 @@ pub async fn containers_volumes(
     engine: EngineKind,
 ) -> IpcResult<Vec<VolumeSummary>> {
     let core = &state.core;
-    Ok(core.containers.volumes(&core.ctx, host, engine).await?)
+    Ok(core.containers.volumes(&core.ctx(), host, engine).await?)
 }
 
 #[tauri::command]
@@ -151,7 +151,7 @@ pub async fn containers_networks(
     engine: EngineKind,
 ) -> IpcResult<Vec<NetworkSummary>> {
     let core = &state.core;
-    Ok(core.containers.networks(&core.ctx, host, engine).await?)
+    Ok(core.containers.networks(&core.ctx(), host, engine).await?)
 }
 
 /// Closes a host's kept connection (the page went away from it).
@@ -186,12 +186,12 @@ pub async fn container_shell_open(
     let core = &state.core;
     let shell = core
         .containers
-        .shell(&core.ctx, session_id, engine, &container_id)
+        .shell(&core.ctx(), session_id, engine, &container_id)
         .await?;
     let title = shell.title.clone();
     let handle = core
         .terminals
-        .open_container_shell(&core.ctx, session_id, shell, PtySize { cols, rows })
+        .open_container_shell(&core.ctx(), session_id, shell, PtySize { cols, rows })
         .await?;
     let id = crate::terminal::forward(Arc::clone(core), handle, on_output, on_event);
     Ok(ContainerShellOpened { id, title })

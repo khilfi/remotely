@@ -75,7 +75,7 @@ fn no_progress() -> Arc<dyn Fn(HashProgress) + Send + Sync> {
 async fn add_image(core: &Core, name: &str, source: SourceInput, profile: &str) -> Image {
     core.catalog
         .add_image(
-            &core.ctx,
+            &core.ctx(),
             Uuid::new_v4(),
             ImageInput {
                 name: name.into(),
@@ -93,7 +93,7 @@ async fn add_image(core: &Core, name: &str, source: SourceInput, profile: &str) 
 async fn deploy_key(core: &Core) -> remotely_core::vault::SecretId {
     core.keys
         .generate(
-            &core.ctx,
+            &core.ctx(),
             GenerateKey {
                 label: "deploy key".into(),
                 key_type: KeyType::Ed25519,
@@ -158,6 +158,7 @@ async fn approve_and_wait(core: &Core, request: &ApprovalRequest) -> (Uuid, JobS
             .steps
             .contains(&ApprovalStep::VaultReauth)
             .then(|| SecretString::new(VAULT_PASSWORD)),
+        change_id: None,
     };
     let job = core.bus.approve(request.id, answers).await.unwrap();
     let status = tokio::time::timeout(Duration::from_secs(30), core.jobs.wait(job))
@@ -178,7 +179,7 @@ fn fast(core: &Core) {
 
 async fn job_outputs(core: &Core, job: Uuid) -> Vec<(String, String, Option<String>, Option<String>)> {
     core.store
-        .job_targets(&core.ctx, job)
+        .job_targets(&core.ctx(), job)
         .await
         .unwrap()
         .into_iter()
@@ -213,7 +214,7 @@ async fn a_cloud_image_template_deploys_on_workstation_with_cloud_init_and_after
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let image = add_image(
         &core,
         "Noble",
@@ -349,7 +350,7 @@ async fn a_cloud_image_template_deploys_on_workstation_with_cloud_init_and_after
         !format!("{audit:?}").contains("AAAAC3"),
         "the audit names the key, never its data"
     );
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -371,7 +372,7 @@ async fn golden_vm_clones_are_full_and_grow_or_linked_and_say_why_not() {
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let image = add_image(
         &core,
@@ -535,7 +536,7 @@ async fn a_failed_or_cancelled_vm_leaves_only_what_was_there_before() {
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let image = add_image(
         &core,
@@ -599,7 +600,7 @@ async fn a_failed_or_cancelled_vm_leaves_only_what_was_there_before() {
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let image = add_image(
         &core,
@@ -653,7 +654,7 @@ async fn a_virtualbox_cloud_image_boots_with_a_nocloud_seed() {
     let fake = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let image = add_image(
         &core,
         "Noble",
@@ -752,7 +753,7 @@ async fn a_failed_virtualbox_clone_is_unregistered_with_its_files() {
     let fake = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let image = add_image(
         &core,
@@ -800,7 +801,7 @@ async fn a_virtualbox_deploy_that_fails_to_start_closes_its_seed() {
     let fake = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let image = add_image(
         &core,
         "Noble",
@@ -839,7 +840,7 @@ async fn appliances_import_on_both_hypervisors_with_the_sizes_cpu_and_memory() {
     let vb = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let image = add_image(
         &core,
         "app",
@@ -900,7 +901,7 @@ async fn iso_installs_boot_the_iso_and_virtualbox_installs_by_itself_with_a_vaul
     let vb = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let image = add_image(
         &core,
         "Noble ISO",
@@ -1025,7 +1026,7 @@ async fn a_bulk_clone_copies_the_picked_vms_as_one_job() {
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     fast(&core);
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     core.inventory
         .set_environment(ctx, &[vmx("db01")], Environment::Prod)
@@ -1094,7 +1095,7 @@ async fn tiers_the_read_only_lock_and_the_free_space_check() {
     // A 1 TB drive with about 50 GB free.
     setup.host.free_disk_pct = 5.0;
     let core = setup.build().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let image = add_image(
         &core,
         "Noble",
@@ -1210,7 +1211,7 @@ async fn a_templates_first_boot_settings_are_saved_audited_and_checked() {
     let dir = temp_folder("deploy-template-fields");
     let image_file = write(&dir, "noble.vmdk", &vmdk_bytes());
     let core = Setup::new(FakeVmware::default()).build().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let image = add_image(
         &core,
         "Noble",

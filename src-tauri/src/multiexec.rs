@@ -153,7 +153,7 @@ pub async fn multiexec_export(
     let runs = core.multiexec.recorded_runs(line_id)?;
     let export = core
         .bulk
-        .export_recorded(&core.ctx, &runs, format, options.unwrap_or_default(), &path)
+        .export_recorded(&core.ctx(), &runs, format, options.unwrap_or_default(), &path)
         .await?;
     tracing::info!(lines = export.lines, "MultiExec recordings exported");
     Ok(Some(export))

@@ -48,7 +48,7 @@ async fn the_vmsd_lists_the_same_snapshots_as_vmrun() {
         return;
     }
     let (core, dir) = real_core().await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     let vmrun = vmware::connect(None);
     let mut snapshots = 0;
     // VM-18: VirtualBox VMs (when it is installed too) are not vmrun's.
@@ -77,7 +77,7 @@ async fn the_vmsd_lists_the_same_snapshots_as_vmrun() {
     }
     let listed: usize = core
         .snapshots
-        .list(&core.ctx, None)
+        .list(&core.ctx(), None)
         .await
         .unwrap()
         .iter()
@@ -99,7 +99,7 @@ async fn lists_every_vm_through_the_core() {
     let (core, dir) = real_core().await;
 
     assert!(core.vmrun_path().is_some(), "vmrun.exe was not found");
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     let running = report
         .vms

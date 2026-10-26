@@ -136,13 +136,13 @@ async fn lab() -> Lab {
         .with_info(SAVED, |vm| vm.config_file = Some(PathBuf::from(&vbox_file)));
     let core = Setup::new(fake).with_virtualbox(vbox).build().await;
     core.set_scan_folders(vec![root.0.clone()]).await.unwrap();
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     core.store
-        .write_history(&core.ctx, &minutes(&quiet, 3, 0.3))
+        .write_history(&core.ctx(), &minutes(&quiet, 3, 0.3))
         .await
         .unwrap();
     core.store
-        .write_history(&core.ctx, &minutes(&busy, 3, 25.0))
+        .write_history(&core.ctx(), &minutes(&busy, 3, 25.0))
         .await
         .unwrap();
     Lab {
@@ -291,7 +291,7 @@ async fn deleting_a_suspended_golden_vm_from_the_report_is_refused_for_its_linke
     let vmware = std::sync::Arc::clone(&setup.vmware);
     let core = setup.build().await;
     core.set_scan_folders(vec![root.0.clone()]).await.unwrap();
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
     let report = core.waste.report(WasteOptions::default()).await.unwrap();
     let row = report.suspended.iter().find(|s| s.vm.vmx_path == golden).unwrap();
@@ -302,7 +302,7 @@ async fn deleting_a_suspended_golden_vm_from_the_report_is_refused_for_its_linke
         }],
         op: VmLifecycleOp::Delete,
     };
-    let err = core.bus.submit(&core.ctx, delete).await.unwrap_err();
+    let err = core.bus.submit(&core.ctx(), delete).await.unwrap_err();
     assert!(matches!(err, CoreError::LinkedClones(_)), "{err:?}");
     assert!(
         err.to_string().starts_with(&format!(

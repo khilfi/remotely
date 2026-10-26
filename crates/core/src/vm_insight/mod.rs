@@ -96,6 +96,7 @@ impl VmInsight {
     }
 
     async fn vm(&self, key: &str) -> Result<VmRecord> {
+        self.store.require_vm_here(&self.current.get(), key).await?;
         self.store
             .find_vm(&self.current.get(), key)
             .await?

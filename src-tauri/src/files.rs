@@ -156,7 +156,7 @@ pub async fn files_download(
         }
     };
     let core = &state.core;
-    Ok(Some(core.terminals.download(&core.ctx, id, &paths, &dest).await?))
+    Ok(Some(core.terminals.download(&core.ctx(), id, &paths, &dest).await?))
 }
 
 /// SS-08: every transfer the panel shows, newest last.

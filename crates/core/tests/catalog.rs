@@ -66,7 +66,7 @@ fn cloud(name: &str, path: &Path, os_profile: &str) -> ImageInput {
 
 async fn add_image(core: &Core, input: ImageInput) -> Image {
     core.catalog
-        .add_image(&core.ctx, Uuid::new_v4(), input, no_progress())
+        .add_image(&core.ctx(), Uuid::new_v4(), input, no_progress())
         .await
         .unwrap()
 }
@@ -116,7 +116,7 @@ fn template(name: &str, image: &Image, size_id: &str) -> TemplateInput {
 async fn catalog_audit(core: &Core) -> Vec<AuditEntry> {
     let mut entries: Vec<AuditEntry> = core
         .store
-        .recent_audit(&core.ctx, 200)
+        .recent_audit(&core.ctx(), 200)
         .await
         .unwrap()
         .into_iter()
@@ -133,7 +133,7 @@ fn actions(entries: &[AuditEntry]) -> Vec<&str> {
 #[tokio::test]
 async fn built_in_sizes_come_first_and_are_read_only() {
     let core = Setup::new(FakeVmware::default()).build().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let sizes = core.catalog.sizes(ctx).await.unwrap();
     assert_eq!(sizes.len(), 12);
     assert!(sizes.iter().all(|s| s.built_in));
@@ -193,13 +193,13 @@ async fn built_in_sizes_come_first_and_are_read_only() {
     );
     assert!(audit[1].detail.as_deref().unwrap().contains("renamed to 'files.large'"));
     assert!(audit.iter().all(|e| e.tier.is_none()), "no approval tier");
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
 async fn image_files_are_checked_hashed_and_audited() {
     let core = Setup::new(FakeVmware::default()).build().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let folder = temp_folder("catalog-images");
     let bytes = vmdk_bytes(3 * 1024 * 1024);
     let noble = write(&folder, "noble.vmdk", &bytes);
@@ -420,14 +420,14 @@ async fn hashing_can_be_cancelled() {
     let adding = {
         let core = Arc::clone(&core);
         let input = cloud("big", &big, "ubuntu");
-        tokio::spawn(async move { core.catalog.add_image(&core.ctx, request, input, progress).await })
+        tokio::spawn(async move { core.catalog.add_image(&core.ctx(), request, input, progress).await })
     };
     started.notified().await;
     assert!(core.catalog.cancel_hash(request));
     go_on.send(()).unwrap();
     let err = adding.await.unwrap().unwrap_err();
     assert_eq!(err.code(), "cancelled");
-    assert!(core.catalog.images(&core.ctx).await.unwrap().is_empty());
+    assert!(core.catalog.images(&core.ctx()).await.unwrap().is_empty());
     assert!(!core.catalog.cancel_hash(request), "nothing is hashed under it now");
     std::fs::remove_dir_all(folder).unwrap();
 }
@@ -450,7 +450,7 @@ async fn golden_vm_images_name_a_snapshot_on_the_vms_own_hypervisor() {
     )
     .build()
     .await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
 
     let input = |vm_key: &str, snapshot: &str, hypervisors: Vec<Hypervisor>| ImageInput {
@@ -517,7 +517,7 @@ async fn launch_templates_check_what_they_name_and_resolve_into_a_plan() {
     let core = Setup::new(FakeVmware::default().in_library(&vmx("web-1"), Some("web-1")))
         .build()
         .await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let folder = temp_folder("catalog-templates");
     let noble = write(&folder, "noble.vmdk", &vmdk_bytes(1024));
@@ -672,7 +672,7 @@ async fn launch_templates_check_what_they_name_and_resolve_into_a_plan() {
 #[tokio::test]
 async fn a_templates_ssh_key_goes_by_its_public_half() {
     let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let folder = temp_folder("catalog-keys");
     let image = add_image(
         &core,
@@ -719,7 +719,7 @@ async fn a_templates_ssh_key_goes_by_its_public_half() {
 #[tokio::test]
 async fn the_read_only_lock_refuses_every_catalogue_edit() {
     let core = Setup::new(FakeVmware::default()).build().await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let folder = temp_folder("catalog-lock");
     let noble = write(&folder, "noble.vmdk", &vmdk_bytes(16));
     let image = add_image(&core, cloud("Noble", &noble, "ubuntu")).await;
@@ -828,7 +828,7 @@ async fn laptop() -> Core {
 async fn the_catalogue_travels_to_another_laptop() {
     let folder = temp_folder("catalog-transfer");
     let a = laptop().await;
-    let ctx = &a.ctx;
+    let ctx = &a.ctx();
     let noble = write(&folder, "noble.vmdk", &vmdk_bytes(4096));
     let image = add_image(&a, cloud("Noble", &noble, "ubuntu")).await;
     let gone = write(&folder, "gone.vmdk", &vmdk_bytes(16));
@@ -886,7 +886,7 @@ async fn the_catalogue_travels_to_another_laptop() {
     let b = laptop().await;
     let preview = b
         .transfer
-        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &file, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap();
     let catalog = &preview.catalog;
@@ -902,7 +902,7 @@ async fn the_catalogue_travels_to_another_laptop() {
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -935,20 +935,20 @@ async fn the_catalogue_travels_to_another_laptop() {
     assert_eq!(report.catalog.images_missing_here, 1);
 
     // On the other laptop, the templates point at its own image, size and key.
-    let b_sizes = b.catalog.sizes(&b.ctx).await.unwrap();
+    let b_sizes = b.catalog.sizes(&b.ctx()).await.unwrap();
     let b_size = b_sizes.iter().find(|s| s.name == "web.small").unwrap();
-    let b_images = b.catalog.images(&b.ctx).await.unwrap();
+    let b_images = b.catalog.images(&b.ctx()).await.unwrap();
     let b_noble = b_images.iter().find(|i| i.name == "Noble").unwrap();
     assert_eq!(b_noble.sha256, image.sha256, "the checksum taken on the first laptop");
     assert_eq!(b_noble.source, image.source, "by path");
     assert!(b_images.iter().find(|i| i.name == "Gone").unwrap().problem.is_some());
-    let b_templates = b.catalog.templates(&b.ctx).await.unwrap();
+    let b_templates = b.catalog.templates(&b.ctx()).await.unwrap();
     let b_web = b_templates.iter().find(|t| t.spec.name == "web").unwrap();
     assert_eq!(b_web.spec.image_id, b_noble.id);
     assert_eq!(b_web.spec.size_id, b_size.id);
     let b_key = b
         .keys
-        .list(&b.ctx)
+        .list(&b.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -967,14 +967,14 @@ async fn the_catalogue_travels_to_another_laptop() {
         "{imported:?}"
     );
     assert!(imported.contains(&"Imported the launch template 'web' from a Remotely export".to_owned()));
-    let summary = b.store.recent_audit(&b.ctx, 1).await.unwrap().remove(0);
+    let summary = b.store.recent_audit(&b.ctx(), 1).await.unwrap().remove(0);
     assert_eq!(summary.event, "data_imported");
     assert!(summary.detail.unwrap().contains("sizes 1 added"));
 
     // The same file again: everything is here already.
     let again = b
         .transfer
-        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &file, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap();
     assert!(again.catalog.sizes.iter().all(|i| i.status == ItemStatus::Same));
@@ -1017,7 +1017,7 @@ async fn the_catalogue_travels_to_another_laptop() {
     for (action, sizes) in [(ItemAction::KeepBoth, 14), (ItemAction::Replace, 14)] {
         let preview = b
             .transfer
-            .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+            .open(&b.ctx(), &file, SecretString::new(PASSPHRASE), &b.vault)
             .await
             .unwrap();
         let row = &preview.catalog.sizes[0];
@@ -1030,7 +1030,7 @@ async fn the_catalogue_travels_to_another_laptop() {
         let report = b
             .transfer
             .commit(
-                &b.ctx,
+                &b.ctx(),
                 TransferCommit {
                     preview_id: preview.id,
                     catalog: choices,
@@ -1052,9 +1052,9 @@ async fn the_catalogue_travels_to_another_laptop() {
             .await
             .unwrap();
         assert!(report.problems.is_empty(), "{:?}", report.problems);
-        assert_eq!(b.catalog.sizes(&b.ctx).await.unwrap().len(), sizes);
+        assert_eq!(b.catalog.sizes(&b.ctx()).await.unwrap().len(), sizes);
     }
-    let b_sizes = b.catalog.sizes(&b.ctx).await.unwrap();
+    let b_sizes = b.catalog.sizes(&b.ctx()).await.unwrap();
     let names: Vec<(&str, u32)> = b_sizes[12..].iter().map(|s| (s.name.as_str(), s.memory_mb)).collect();
     assert_eq!(names, [("web.small", 8192), ("web.small-2", 8192)]);
     assert_eq!(
@@ -1106,7 +1106,7 @@ async fn an_image_on_a_network_share_in_a_file_can_only_be_skipped() {
     let b = laptop().await;
     let preview = b
         .transfer
-        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &file, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap();
     let row = &preview.catalog.images[0];
@@ -1135,7 +1135,7 @@ async fn an_image_on_a_network_share_in_a_file_can_only_be_skipped() {
     let err = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit(choices),
             &b.sessions,
             &b.vault,
@@ -1148,7 +1148,7 @@ async fn an_image_on_a_network_share_in_a_file_can_only_be_skipped() {
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit(Default::default()),
             &b.sessions,
             &b.vault,
@@ -1158,9 +1158,9 @@ async fn an_image_on_a_network_share_in_a_file_can_only_be_skipped() {
         .await
         .unwrap();
     assert_eq!(report.catalog.images.skipped, 1);
-    assert!(b.catalog.images(&b.ctx).await.unwrap().is_empty());
+    assert!(b.catalog.images(&b.ctx()).await.unwrap().is_empty());
     // The template came, and says it can't deploy until it gets an image.
-    let templates = b.catalog.templates(&b.ctx).await.unwrap();
+    let templates = b.catalog.templates(&b.ctx()).await.unwrap();
     assert_eq!(templates[0].problems[0].code, ProblemCode::ImageGone);
     std::fs::remove_dir_all(folder).unwrap();
 }

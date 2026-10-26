@@ -72,8 +72,8 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
     setup.remote = remote.clone();
     let processes = Arc::clone(&setup.host.processes);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
-    let audit_before = core.store.recent_audit(&core.ctx, 100).await.unwrap().len();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    let audit_before = core.store.recent_audit(&core.ctx(), 100).await.unwrap().len();
 
     // The command line's letter case differs from the library's; a VM the inventory has not seen
     // still shows; a process whose command line could not be read is left out.
@@ -90,7 +90,7 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
     assert_eq!(cost.vms, 3);
     assert_eq!(cost.interval_secs, 5, "MO-01: every 5 seconds");
 
-    let overview = core.metrics.overview(&core.ctx).await.unwrap();
+    let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     let names: Vec<&str> = overview.rows.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, ["db", "tmp", "web"], "'off' is not running");
     let web = overview.rows.iter().find(|r| r.name == "web").unwrap();
@@ -133,7 +133,7 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
         cost.app_cpu_pct.is_some(),
         "the app's own CPU share once two rounds compare"
     );
-    let overview = core.metrics.overview(&core.ctx).await.unwrap();
+    let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     let names: Vec<&str> = overview.rows.iter().map(|r| r.name.as_str()).collect();
     assert_eq!(names, ["web"]);
     let history = core.metrics.hub().series(MetricSource::Host, &vmx("web"));
@@ -142,9 +142,9 @@ async fn running_vms_get_host_side_metrics_without_a_login_or_the_bus() {
     assert_eq!(core.metrics.hub().series(MetricSource::Host, &vmx("db")).len(), 1);
 
     // Reads skip the bus: no job, no audit entry, no remote call.
-    assert!(core.store.recent_jobs(&core.ctx, 10).await.unwrap().is_empty());
+    assert!(core.store.recent_jobs(&core.ctx(), 10).await.unwrap().is_empty());
     assert_eq!(
-        core.store.recent_audit(&core.ctx, 100).await.unwrap().len(),
+        core.store.recent_audit(&core.ctx(), 100).await.unwrap().len(),
         audit_before
     );
     assert!(remote.calls().is_empty());
@@ -164,12 +164,12 @@ async fn capacity_panel_compares_running_vms_with_the_host() {
     setup.host.free_disk_pct = 5.0;
     let processes = Arc::clone(&setup.host.processes);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     *processes.lock().unwrap() = vec![process(1, &vmx("a"), None), process(2, &vmx("b"), None)];
     core.metrics.collect_once().await;
     core.metrics.collect_once().await;
 
-    let capacity = core.metrics.capacity(&core.ctx).await;
+    let capacity = core.metrics.capacity(&core.ctx()).await;
     assert_eq!(capacity.running_vms, 2);
     assert_eq!(capacity.assigned_ram_mb, 36 * 1024, "c is not running");
     assert_eq!(capacity.physical_ram_mb, 32 * 1024);
@@ -199,8 +199,8 @@ async fn capacity_says_what_it_could_not_read() {
     let mut setup = Setup::new(sized(FakeVmware::with_running([vmx("a")]), "a", 2, 4));
     setup.host.unavailable = true;
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
-    let capacity = core.metrics.capacity(&core.ctx).await;
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    let capacity = core.metrics.capacity(&core.ctx()).await;
     assert_eq!(capacity.running_vms, 1, "from vmrun when no round has run");
     assert_eq!(capacity.assigned_ram_mb, 4 * 1024);
     assert!(capacity.drives.is_empty());
@@ -269,7 +269,7 @@ async fn trust(core: &Core, server: &TestSshServer, fingerprint: Option<&str>) {
         key_type: "ssh-ed25519".into(),
         fingerprint: fingerprint.map_or_else(|| server.host_key_fingerprint(), str::to_owned),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 async fn session(core: &Core, name: &str, port: u16, password: Option<&str>) -> Uuid {
@@ -283,7 +283,7 @@ async fn linked_session(core: &Core, name: &str, port: u16, password: Option<&st
         Some(p) => Some(
             core.vault
                 .add(
-                    &core.ctx,
+                    &core.ctx(),
                     SecretKind::Password,
                     &format!("{name} login"),
                     SecretString::new(p),
@@ -296,7 +296,7 @@ async fn linked_session(core: &Core, name: &str, port: u16, password: Option<&st
     };
     core.sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: name.into(),
                 folder_id: None,
@@ -328,7 +328,7 @@ async fn a_watched_host_is_polled_at_its_interval_with_one_grep_and_df_once_a_mi
     let core = ssh_core().await;
     trust(&core, &server, None).await;
     let id = session(&core, "web01", server.port(), Some(&password)).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
     // The collector's rounds come every 5 s; a host is polled once its interval (less 1 s) has passed.
     core.metrics.guest().set_interval(Duration::from_millis(1500));
     let execs = || {
@@ -368,7 +368,7 @@ async fn a_watched_host_is_polled_at_its_interval_with_one_grep_and_df_once_a_mi
     assert!(refused.contains("every 5, 15, 30 or 60 seconds"), "{refused}");
     core.set_guest_poll_secs(30).await.unwrap();
     assert_eq!(core.guest_poll_secs(), 30);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].action, "Set how often the dashboard polls watched hosts");
     assert_eq!(audit[0].detail.as_deref(), Some("every 30 s"));
 }
@@ -384,16 +384,16 @@ async fn a_watched_linux_host_reports_guest_metrics_over_one_kept_connection() {
     // Not watched: nothing is read.
     core.metrics.collect_once().await;
     assert_eq!(server.connections(), 0);
-    assert!(core.metrics.overview(&core.ctx).await.unwrap().rows.is_empty());
+    assert!(core.metrics.overview(&core.ctx()).await.unwrap().rows.is_empty());
 
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "setting_changed");
     assert_eq!(audit[0].action, "Started guest metrics");
 
     let cost = core.metrics.collect_once().await;
     assert_eq!(cost.guests, 1);
-    let overview = core.metrics.overview(&core.ctx).await.unwrap();
+    let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     let row = &overview.rows[0];
     assert_eq!((row.kind, row.name.as_str()), (RowKind::Session, "web01"));
     assert_eq!(
@@ -430,8 +430,8 @@ async fn a_watched_linux_host_reports_guest_metrics_over_one_kept_connection() {
     assert_eq!(core.metrics.hub().series(MetricSource::Guest, &id.to_string()).len(), 3);
 
     // Reads skip the bus, and the password is nowhere in what the UI gets.
-    assert!(core.store.recent_jobs(&core.ctx, 10).await.unwrap().is_empty());
-    let shown = serde_json::to_string(&core.metrics.overview(&core.ctx).await.unwrap()).unwrap();
+    assert!(core.store.recent_jobs(&core.ctx(), 10).await.unwrap().is_empty());
+    let shown = serde_json::to_string(&core.metrics.overview(&core.ctx()).await.unwrap()).unwrap();
     assert!(!shown.contains(&password));
 
     // A dropped connection is noticed and made again in a later round.
@@ -444,15 +444,15 @@ async fn a_watched_linux_host_reports_guest_metrics_over_one_kept_connection() {
     assert_eq!(server.connections(), 2);
 
     // Unwatched: the connection closes and the row, state and history go.
-    core.metrics.set_watched(&core.ctx, id, false).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, false).await.unwrap();
     core.metrics.collect_once().await;
-    assert!(core.metrics.overview(&core.ctx).await.unwrap().rows.is_empty());
+    assert!(core.metrics.overview(&core.ctx()).await.unwrap().rows.is_empty());
     assert!(core
         .metrics
         .hub()
         .series(MetricSource::Guest, &id.to_string())
         .is_empty());
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].action, "Stopped guest metrics");
 }
 
@@ -468,15 +468,15 @@ async fn a_vm_with_a_linked_session_shows_host_and_guest_metrics_in_one_row() {
     let core = setup.build().await;
     core.metrics.guest().set_interval(Duration::ZERO);
     core.metrics.guest().set_tuning(tuning());
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     *processes.lock().unwrap() = vec![process(1, &vmx("web"), Some(2.0))];
     trust(&core, &server, None).await;
-    let vm_id = core.store.find_vm(&core.ctx, &vmx("web")).await.unwrap().unwrap().id;
+    let vm_id = core.store.find_vm(&core.ctx(), &vmx("web")).await.unwrap().unwrap().id;
     let id = linked_session(&core, "web guest", server.port(), Some(&password), Some(vm_id)).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
 
     core.metrics.collect_once().await;
-    let overview = core.metrics.overview(&core.ctx).await.unwrap();
+    let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     assert_eq!(
         overview.rows.len(),
         1,
@@ -498,8 +498,8 @@ async fn a_locked_vault_waits_without_connecting_then_polling_resumes() {
     let core = ssh_core().await;
     trust(&core, &server, None).await;
     let id = session(&core, "web01", server.port(), Some(&password)).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
-    core.vault.lock(&core.ctx).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
+    core.vault.lock(&core.ctx()).await.unwrap();
 
     core.metrics.collect_once().await;
     let status = core.metrics.guest().statuses()[&id].clone();
@@ -510,7 +510,7 @@ async fn a_locked_vault_waits_without_connecting_then_polling_resumes() {
 
     core.vault
         .unlock(
-            &core.ctx,
+            &core.ctx(),
             UnlockMethod::MasterPassword(SecretString::new(VAULT_PASSWORD)),
         )
         .await
@@ -533,7 +533,7 @@ async fn unreachable_hosts_back_off_and_say_why() {
         ..tuning()
     });
     let id = session(&core, "gone", port, Some(&new_password())).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
 
     core.metrics.collect_once().await;
     let status = core.metrics.guest().statuses()[&id].clone();
@@ -548,7 +548,7 @@ async fn unreachable_hosts_back_off_and_say_why() {
     // The next round is within the wait: no new try, same state.
     core.metrics.collect_once().await;
     assert_eq!(core.metrics.guest().statuses()[&id].state, GuestState::Unreachable);
-    let overview = core.metrics.overview(&core.ctx).await.unwrap();
+    let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     assert_eq!(
         overview.rows[0].guest_status.as_ref().unwrap().state,
         GuestState::Unreachable
@@ -562,7 +562,7 @@ async fn untrusted_and_changed_host_keys_stop_guest_polling() {
     let server = linux_server(&password).await;
     let core = ssh_core().await;
     let id = session(&core, "web01", server.port(), Some(&password)).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
 
     // Never trusted: no one is there to ask, so it fails and says where to trust it.
     core.metrics.collect_once().await;
@@ -570,7 +570,7 @@ async fn untrusted_and_changed_host_keys_stop_guest_polling() {
     assert_eq!(status.state, GuestState::HostKey);
     assert!(status.message.unwrap().contains("in a terminal"));
     assert!(
-        core.known_hosts.list(&core.ctx).await.unwrap().is_empty(),
+        core.known_hosts.list(&core.ctx()).await.unwrap().is_empty(),
         "not trusted by polling"
     );
     assert!(
@@ -594,7 +594,7 @@ async fn untrusted_and_changed_host_keys_stop_guest_polling() {
     assert!(status.message.unwrap().contains("has changed"));
     let blocked = core
         .store
-        .recent_audit(&core.ctx, 50)
+        .recent_audit(&core.ctx(), 50)
         .await
         .unwrap()
         .into_iter()
@@ -611,8 +611,8 @@ async fn logins_that_need_something_typed_say_what_to_save() {
     trust(&core, &server, None).await;
     let no_password = session(&core, "asks", server.port(), None).await;
     let wrong = session(&core, "wrong", server.port(), Some("not-the-password")).await;
-    core.metrics.set_watched(&core.ctx, no_password, true).await.unwrap();
-    core.metrics.set_watched(&core.ctx, wrong, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), no_password, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), wrong, true).await.unwrap();
 
     core.metrics.collect_once().await;
     let statuses = core.metrics.guest().statuses();
@@ -641,7 +641,7 @@ async fn a_refused_login_parks_until_retry_or_a_new_password() {
     let core = ssh_core().await;
     trust(&core, &server, None).await;
     let id = session(&core, "web01", server.port(), Some("the-old-password")).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
     let refused = |server: &TestSshServer| {
         server
             .log()
@@ -674,7 +674,7 @@ async fn a_refused_login_parks_until_retry_or_a_new_password() {
     // The password is replaced in the vault: tried again, and it works.
     let secret = core
         .vault
-        .list(&core.ctx)
+        .list(&core.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -682,7 +682,7 @@ async fn a_refused_login_parks_until_retry_or_a_new_password() {
         .unwrap()
         .id;
     core.vault
-        .replace(&core.ctx, secret, SecretString::new(&password))
+        .replace(&core.ctx(), secret, SecretString::new(&password))
         .await
         .unwrap();
     core.metrics.collect_once().await;
@@ -704,7 +704,7 @@ async fn background_logins_are_capped_per_host_per_hour() {
     });
     trust(&core, &server, None).await;
     let id = session(&core, "web01", server.port(), Some(&password)).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
     for _ in 0..2 {
         core.metrics.collect_once().await;
         assert_eq!(core.metrics.guest().statuses()[&id].state, GuestState::Ok);
@@ -738,7 +738,7 @@ async fn hosts_without_proc_are_not_linux() {
     let core = ssh_core().await;
     trust(&core, &server, None).await;
     let id = session(&core, "bsd", server.port(), Some(&password)).await;
-    core.metrics.set_watched(&core.ctx, id, true).await.unwrap();
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
     core.metrics.collect_once().await;
     let status = core.metrics.guest().statuses()[&id].clone();
     assert_eq!(status.state, GuestState::NoData);
@@ -748,6 +748,10 @@ async fn hosts_without_proc_are_not_linux() {
 #[tokio::test]
 async fn watching_an_unknown_session_fails() {
     let core = ssh_core().await;
-    assert!(core.metrics.set_watched(&core.ctx, Uuid::new_v4(), true).await.is_err());
+    assert!(core
+        .metrics
+        .set_watched(&core.ctx(), Uuid::new_v4(), true)
+        .await
+        .is_err());
     assert!(core.metrics.watched().await.unwrap().is_empty());
 }

@@ -75,7 +75,7 @@ struct Library {
 }
 
 async fn fill(core: &Core) -> Library {
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let customer = core.sessions.create_folder(ctx, "Customer A", None).await.unwrap();
     let web_folder = core
         .sessions
@@ -167,7 +167,13 @@ fn request(include_secrets: bool) -> ExportRequest {
 async fn export(core: &Core, dir: &Path, include_secrets: bool) -> PathBuf {
     let path = dir.join(format!("export-{}.remotely", Uuid::new_v4().simple()));
     core.transfer
-        .export(&core.ctx, &path, request(include_secrets), &core.vault, "Remotely test")
+        .export(
+            &core.ctx(),
+            &path,
+            request(include_secrets),
+            &core.vault,
+            "Remotely test",
+        )
         .await
         .unwrap();
     path
@@ -175,7 +181,7 @@ async fn export(core: &Core, dir: &Path, include_secrets: bool) -> PathBuf {
 
 async fn open(core: &Core, path: &Path) -> TransferPreview {
     core.transfer
-        .open(&core.ctx, path, SecretString::new(PASSPHRASE), &core.vault)
+        .open(&core.ctx(), path, SecretString::new(PASSPHRASE), &core.vault)
         .await
         .unwrap()
 }
@@ -198,7 +204,7 @@ async fn try_commit(
     };
     core.transfer
         .commit(
-            &core.ctx,
+            &core.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -229,7 +235,7 @@ async fn commit_keeping(
 ) -> TransferReport {
     core.transfer
         .commit(
-            &core.ctx,
+            &core.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -253,7 +259,10 @@ async fn commit_keeping(
 }
 
 async fn sessions(core: &Core) -> Vec<SessionRecord> {
-    core.sessions.list(&core.ctx, &SessionFilter::default()).await.unwrap()
+    core.sessions
+        .list(&core.ctx(), &SessionFilter::default())
+        .await
+        .unwrap()
 }
 
 async fn by_name(core: &Core, name: &str) -> SessionRecord {
@@ -265,7 +274,7 @@ async fn by_name(core: &Core, name: &str) -> SessionRecord {
 }
 
 async fn folder_path(core: &Core, session: &SessionRecord) -> String {
-    let folders = core.sessions.folders(&core.ctx).await.unwrap();
+    let folders = core.sessions.folders(&core.ctx()).await.unwrap();
     let mut path = Vec::new();
     let mut next = session.folder_id;
     while let Some(id) = next {
@@ -278,7 +287,7 @@ async fn folder_path(core: &Core, session: &SessionRecord) -> String {
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 1000).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 1000).await.unwrap()
 }
 
 fn status_of(preview: &TransferPreview, name: &str) -> ItemStatus {
@@ -363,7 +372,7 @@ async fn sessions_folders_tags_labels_and_host_keys_move_without_secrets() {
     assert_eq!(db.environment, Environment::Staging);
     assert_eq!(db.jump_session_id, Some(lib.bastion));
     assert_eq!(by_name(&b, "bastion").await.port, 2222);
-    let hosts = b.known_hosts.list(&b.ctx).await.unwrap();
+    let hosts = b.known_hosts.list(&b.ctx()).await.unwrap();
     assert_eq!(hosts.len(), 2);
     assert!(hosts
         .iter()
@@ -406,7 +415,7 @@ async fn secrets_move_only_when_ticked_and_with_the_vault_password() {
     no_password.vault_password = None;
     let err = a
         .transfer
-        .export(&a.ctx, &path, no_password, &a.vault, "Remotely test")
+        .export(&a.ctx(), &path, no_password, &a.vault, "Remotely test")
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
@@ -414,7 +423,7 @@ async fn secrets_move_only_when_ticked_and_with_the_vault_password() {
     wrong.vault_password = Some(SecretString::new("not the vault password"));
     let err = a
         .transfer
-        .export(&a.ctx, &path, wrong, &a.vault, "Remotely test")
+        .export(&a.ctx(), &path, wrong, &a.vault, "Remotely test")
         .await
         .unwrap_err();
     assert_eq!(err.code(), "wrong_vault_password");
@@ -422,7 +431,7 @@ async fn secrets_move_only_when_ticked_and_with_the_vault_password() {
     assert!(audit(&a).await.iter().any(|e| e.event == "vault_auth_failed"));
 
     a.transfer
-        .export(&a.ctx, &path, request(true), &a.vault, "Remotely test")
+        .export(&a.ctx(), &path, request(true), &a.vault, "Remotely test")
         .await
         .unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
@@ -448,7 +457,7 @@ async fn secrets_move_only_when_ticked_and_with_the_vault_password() {
     let SessionAuth::Password { password_id: Some(pw) } = web.auth else {
         panic!("web01 has its password: {:?}", web.auth);
     };
-    assert_eq!(b.vault.vault().get(&b.ctx, pw).await.unwrap().expose(), lib.password);
+    assert_eq!(b.vault.vault().get(&b.ctx(), pw).await.unwrap().expose(), lib.password);
     let db = by_name(&b, "db01").await;
     let SessionAuth::Key {
         key_id: Some(key),
@@ -457,14 +466,17 @@ async fn secrets_move_only_when_ticked_and_with_the_vault_password() {
     else {
         panic!("db01 has its key and passphrase: {:?}", db.auth);
     };
-    assert_eq!(b.vault.vault().get(&b.ctx, pp).await.unwrap().expose(), lib.passphrase);
-    let a_key = a.keys.list(&a.ctx).await.unwrap().remove(0);
-    let b_key = b.keys.get(&b.ctx, key).await.unwrap();
+    assert_eq!(
+        b.vault.vault().get(&b.ctx(), pp).await.unwrap().expose(),
+        lib.passphrase
+    );
+    let a_key = a.keys.list(&a.ctx()).await.unwrap().remove(0);
+    let b_key = b.keys.get(&b.ctx(), key).await.unwrap();
     assert_eq!(b_key.public, a_key.public, "the SSH key's public half came along");
     assert!(b_key.generated);
     assert_eq!(
-        b.vault.vault().get(&b.ctx, key).await.unwrap().expose(),
-        a.vault.vault().get(&a.ctx, a_key.id).await.unwrap().expose()
+        b.vault.vault().get(&b.ctx(), key).await.unwrap().expose(),
+        a.vault.vault().get(&a.ctx(), a_key.id).await.unwrap().expose()
     );
 
     // The audit logs name the secrets' count, never their values.
@@ -495,7 +507,7 @@ async fn the_update_token_stays_on_its_laptop() {
     let token = a
         .vault
         .add(
-            &a.ctx,
+            &a.ctx(),
             SecretKind::Password,
             "GitHub update token",
             SecretString::new(format!("tok-{}", Uuid::new_v4().simple())),
@@ -503,7 +515,7 @@ async fn the_update_token_stays_on_its_laptop() {
         .await
         .unwrap();
     a.store
-        .put_setting(&a.ctx, remotely_core::updates::UPDATE_TOKEN_KEY, &Some(token.id))
+        .put_setting(&a.ctx(), remotely_core::updates::UPDATE_TOKEN_KEY, &Some(token.id))
         .await
         .unwrap();
     let path = export(&a, &dir, true).await;
@@ -524,7 +536,7 @@ async fn without_secret_values_sessions_use_the_same_labels_in_this_vault() {
     let here = b
         .vault
         .add(
-            &b.ctx,
+            &b.ctx(),
             SecretKind::Password,
             "Web Root",
             SecretString::new("already here"),
@@ -571,7 +583,7 @@ async fn a_wrong_passphrase_or_a_changed_file_imports_nothing() {
 
     let err = b
         .transfer
-        .open(&b.ctx, &path, SecretString::new("tulip anvil orbiT"), &b.vault)
+        .open(&b.ctx(), &path, SecretString::new("tulip anvil orbiT"), &b.vault)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "wrong_passphrase");
@@ -586,7 +598,7 @@ async fn a_wrong_passphrase_or_a_changed_file_imports_nothing() {
     std::fs::write(&tampered, serde_json::to_vec(&envelope).unwrap()).unwrap();
     let err = b
         .transfer
-        .open(&b.ctx, &tampered, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &tampered, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "wrong_passphrase");
@@ -596,7 +608,7 @@ async fn a_wrong_passphrase_or_a_changed_file_imports_nothing() {
     std::fs::write(&csv, "name,host\nweb01,web01.example.com\n").unwrap();
     let err = b
         .transfer
-        .open(&b.ctx, &csv, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &csv, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not a Remotely export"), "{err}");
@@ -618,7 +630,7 @@ async fn a_closed_preview_can_not_be_imported() {
     let err = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -653,7 +665,7 @@ async fn an_export_is_never_written_into_a_git_repository_or_with_a_weak_passphr
     let inside = dir.join("repo").join("export.remotely");
     let err = a
         .transfer
-        .export(&a.ctx, &inside, request(false), &a.vault, "Remotely test")
+        .export(&a.ctx(), &inside, request(false), &a.vault, "Remotely test")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("Git repository"), "{err}");
@@ -664,7 +676,7 @@ async fn an_export_is_never_written_into_a_git_repository_or_with_a_weak_passphr
     let outside = dir.join("export.remotely");
     let err = a
         .transfer
-        .export(&a.ctx, &outside, short, &a.vault, "Remotely test")
+        .export(&a.ctx(), &outside, short, &a.vault, "Remotely test")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("at least 10 characters"), "{err}");
@@ -676,7 +688,7 @@ async fn an_export_is_never_written_into_a_git_repository_or_with_a_weak_passphr
         guessable.passphrase = SecretString::new(weak);
         let err = a
             .transfer
-            .export(&a.ctx, &outside, guessable, &a.vault, "Remotely test")
+            .export(&a.ctx(), &outside, guessable, &a.vault, "Remotely test")
             .await
             .unwrap_err();
         assert!(
@@ -693,19 +705,19 @@ async fn an_export_is_never_written_into_a_git_repository_or_with_a_weak_passphr
         same.passphrase = SecretString::new(VAULT_PASSWORD);
         let err = a
             .transfer
-            .export(&a.ctx, &outside, same, &a.vault, "Remotely test")
+            .export(&a.ctx(), &outside, same, &a.vault, "Remotely test")
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not your vault password"), "{err}");
         assert!(!err.to_string().contains(VAULT_PASSWORD), "{err}");
         assert!(!outside.exists());
     }
-    a.vault.lock(&a.ctx).await.unwrap();
+    a.vault.lock(&a.ctx()).await.unwrap();
     let mut same = request(false);
     same.passphrase = SecretString::new(VAULT_PASSWORD);
     let err = a
         .transfer
-        .export(&a.ctx, &outside, same, &a.vault, "Remotely test")
+        .export(&a.ctx(), &outside, same, &a.vault, "Remotely test")
         .await
         .unwrap_err();
     assert!(err.to_string().contains("not your vault password"), "{err}");
@@ -714,7 +726,7 @@ async fn an_export_is_never_written_into_a_git_repository_or_with_a_weak_passphr
 
     // Any other good passphrase still exports, the vault locked or not.
     a.transfer
-        .export(&a.ctx, &outside, request(false), &a.vault, "Remotely test")
+        .export(&a.ctx(), &outside, request(false), &a.vault, "Remotely test")
         .await
         .unwrap();
     assert!(outside.exists());
@@ -757,7 +769,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
 
     // Laptop A changes web01 and db01; laptop B has a session of its own to bastion's address and one
     // named like a session of A's, and trusts another key for web01.
-    let mut web = a.sessions.get(&a.ctx, lib.web).await.unwrap();
+    let mut web = a.sessions.get(&a.ctx(), lib.web).await.unwrap();
     let mut change = input(&web.name, &web.host);
     change.folder_id = web.folder_id;
     change.auth = web.auth.clone();
@@ -766,8 +778,8 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     change.environment = web.environment;
     change.color = web.color;
     change.startup_command = web.startup_command.take();
-    a.sessions.update(&a.ctx, lib.web, change).await.unwrap();
-    let mut db = a.sessions.get(&a.ctx, lib.db).await.unwrap();
+    a.sessions.update(&a.ctx(), lib.web, change).await.unwrap();
+    let mut db = a.sessions.get(&a.ctx(), lib.db).await.unwrap();
     let mut db_change = input(&db.name, &db.host);
     db_change.folder_id = db.folder_id;
     db_change.auth = db.auth.clone();
@@ -775,34 +787,34 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     db_change.environment = db.environment;
     db_change.startup_command = db.startup_command.take();
     db_change.port = 2201;
-    a.sessions.update(&a.ctx, lib.db, db_change).await.unwrap();
+    a.sessions.update(&a.ctx(), lib.db, db_change).await.unwrap();
     let mut extra = input("app01", "app01.example.com");
     extra.username = Some("bob".into());
-    a.sessions.create(&a.ctx, extra).await.unwrap();
+    a.sessions.create(&a.ctx(), extra).await.unwrap();
     let second = export(&a, &dir, true).await;
 
-    b.sessions.delete(&b.ctx, lib.bastion).await.unwrap();
+    b.sessions.delete(&b.ctx(), lib.bastion).await.unwrap();
     let mut own_bastion = input("jump box", "bastion.example.org");
     own_bastion.port = 2222;
-    b.sessions.create(&b.ctx, own_bastion).await.unwrap();
+    b.sessions.create(&b.ctx(), own_bastion).await.unwrap();
     b.sessions
-        .create(&b.ctx, input("app01", "elsewhere.example.org"))
+        .create(&b.ctx(), input("app01", "elsewhere.example.org"))
         .await
         .unwrap();
     b.known_hosts
-        .trust(&b.ctx, &host_key("web01.example.com", "SHA256:otherotherother"), None)
+        .trust(&b.ctx(), &host_key("web01.example.com", "SHA256:otherotherother"), None)
         .await
         .unwrap();
     let pw = b
         .vault
-        .list(&b.ctx)
+        .list(&b.ctx())
         .await
         .unwrap()
         .into_iter()
         .find(|m| m.label == "web root")
         .unwrap();
     b.vault
-        .replace(&b.ctx, pw.id, SecretString::new("changed on b"))
+        .replace(&b.ctx(), pw.id, SecretString::new("changed on b"))
         .await
         .unwrap();
 
@@ -843,7 +855,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     let refused = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -876,7 +888,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -930,7 +942,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     assert_eq!(web.port, 2200);
     let labels: Vec<String> = b
         .vault
-        .list(&b.ctx)
+        .list(&b.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -940,9 +952,9 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     let SessionAuth::Password { password_id: Some(pw2) } = web.auth else {
         panic!("{:?}", web.auth)
     };
-    assert_eq!(b.vault.vault().get(&b.ctx, pw2).await.unwrap().expose(), lib.password);
+    assert_eq!(b.vault.vault().get(&b.ctx(), pw2).await.unwrap().expose(), lib.password);
     assert_eq!(
-        b.vault.vault().get(&b.ctx, pw.id).await.unwrap().expose(),
+        b.vault.vault().get(&b.ctx(), pw.id).await.unwrap().expose(),
         "changed on b",
         "B's own value is untouched"
     );
@@ -966,7 +978,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
     assert!(by_name(&b, "app01 (2)").await.host == "app01.example.com");
     assert_eq!(by_name(&b, "app01").await.host, "elsewhere.example.org");
 
-    let hosts = b.known_hosts.list(&b.ctx).await.unwrap();
+    let hosts = b.known_hosts.list(&b.ctx()).await.unwrap();
     let web_key = hosts.iter().find(|h| h.host == "web01.example.com").unwrap();
     assert_eq!(web_key.fingerprint, "SHA256:webwebwebwebweb");
     assert!(audit(&b).await.iter().any(|e| e.event == "host_key_retrusted"));
@@ -979,16 +991,16 @@ async fn a_vm_link_comes_along_when_the_same_vm_is_here() {
     let dir = temp_folder("transfer");
     let with_vm = || FakeVmware::default().in_library(&vmx("build"), Some("build"));
     let a = laptop_with(with_vm()).await;
-    a.inventory.refresh(&a.ctx).await.unwrap();
-    let vm_a = a.store.find_vm(&a.ctx, &vmx("build")).await.unwrap().unwrap();
+    a.inventory.refresh(&a.ctx()).await.unwrap();
+    let vm_a = a.store.find_vm(&a.ctx(), &vmx("build")).await.unwrap().unwrap();
     let mut linked = input("build01", "build01.example.com");
     linked.vm_id = Some(vm_a.id.clone());
-    a.sessions.create(&a.ctx, linked).await.unwrap();
+    a.sessions.create(&a.ctx(), linked).await.unwrap();
     let path = export(&a, &dir, false).await;
 
     let b = laptop_with(with_vm()).await;
-    b.inventory.refresh(&b.ctx).await.unwrap();
-    let vm_b = b.store.find_vm(&b.ctx, &vmx("build")).await.unwrap().unwrap();
+    b.inventory.refresh(&b.ctx()).await.unwrap();
+    let vm_b = b.store.find_vm(&b.ctx(), &vmx("build")).await.unwrap().unwrap();
     let preview = open(&b, &path).await;
     commit(&b, &preview, &[]).await;
     let build = by_name(&b, "build01").await;
@@ -1017,7 +1029,7 @@ async fn keeping_both_renames_only_a_taken_name() {
     // B reaches bastion's user, host and port under another name.
     let mut own = input("jump box", "bastion.example.org");
     own.port = 2222;
-    b.sessions.create(&b.ctx, own).await.unwrap();
+    b.sessions.create(&b.ctx(), own).await.unwrap();
     let preview = open(&b, &path).await;
     assert_eq!(status_of(&preview, "bastion"), ItemStatus::Conflict);
     commit(&b, &preview, &[(index_of(&preview, "bastion"), ItemAction::KeepBoth)]).await;
@@ -1059,7 +1071,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
     fill(&a).await;
     let path = export(&a, &dir, true).await;
     let b = laptop().await;
-    b.vault.lock(&b.ctx).await.unwrap();
+    b.vault.lock(&b.ctx()).await.unwrap();
     let preview = open(&b, &path).await;
     assert!(
         preview.warnings.iter().any(|w| w.contains("Unlock the vault")),
@@ -1072,7 +1084,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
     let err = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             TransferCommit {
                 preview_id: preview.id,
                 catalog: Default::default(),
@@ -1120,7 +1132,7 @@ async fn port_forwards_and_jump_host_chains_move_with_their_sessions() {
     // A second hop: app01 goes through db01, which goes through the bastion.
     let mut app = input("app01", "app01.test");
     app.jump_session_id = Some(lib.db);
-    let app = a.sessions.create(&a.ctx, app).await.unwrap();
+    let app = a.sessions.create(&a.ctx(), app).await.unwrap();
     let forward = |kind, port, dest: &str, dest_port, auto_start| ForwardInput {
         id: None,
         label: (kind == ForwardKind::Local).then(|| "Postgres".to_owned()),
@@ -1134,7 +1146,7 @@ async fn port_forwards_and_jump_host_chains_move_with_their_sessions() {
     let saved = a
         .forwards
         .save(
-            &a.ctx,
+            &a.ctx(),
             app.id,
             &[
                 forward(ForwardKind::Local, 15432, "pg.test", 5432, true),
@@ -1176,7 +1188,7 @@ async fn port_forwards_and_jump_host_chains_move_with_their_sessions() {
     let db_b = by_name(&b, "db01").await;
     assert_eq!(app_b.jump_session_id, Some(db_b.id));
     assert_eq!(db_b.jump_session_id, Some(by_name(&b, "bastion").await.id));
-    let moved = b.forwards.list(&b.ctx, app_b.id).await.unwrap();
+    let moved = b.forwards.list(&b.ctx(), app_b.id).await.unwrap();
     assert_eq!(moved.len(), 2);
     for (here, there) in moved.iter().zip(&saved) {
         assert_eq!(here.spec, there.spec);
@@ -1210,7 +1222,7 @@ async fn a_new_key_type_for_a_host_trusted_here_is_a_conflict_skipped_by_default
         key_type: "ssh-rsa".into(),
         ..host_key("web01.example.com", "SHA256:rsarsarsarsarsa")
     };
-    b.known_hosts.trust(&b.ctx, &rsa, None).await.unwrap();
+    b.known_hosts.trust(&b.ctx(), &rsa, None).await.unwrap();
     let preview = open(&b, &path).await;
     let row = preview
         .known_hosts
@@ -1237,7 +1249,7 @@ async fn a_new_key_type_for_a_host_trusted_here_is_a_conflict_skipped_by_default
     assert!(report.problems.is_empty(), "{:?}", report.problems);
     let web: Vec<String> = b
         .known_hosts
-        .list(&b.ctx)
+        .list(&b.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -1256,10 +1268,10 @@ async fn port_forwards_stay_behind_unless_ticked() {
     let dir = temp_folder("transfer-forwards-default");
     let a = laptop().await;
     fill(&a).await;
-    let app = a.sessions.create(&a.ctx, input("app01", "app01.test")).await.unwrap();
+    let app = a.sessions.create(&a.ctx(), input("app01", "app01.test")).await.unwrap();
     a.forwards
         .save(
-            &a.ctx,
+            &a.ctx(),
             app.id,
             &[ForwardInput {
                 id: None,
@@ -1281,7 +1293,7 @@ async fn port_forwards_stay_behind_unless_ticked() {
     assert_eq!(report.forwards, 0);
     assert_eq!(report.forwards_left_out, 1);
     let app_b = by_name(&b, "app01").await;
-    assert!(b.forwards.list(&b.ctx, app_b.id).await.unwrap().is_empty());
+    assert!(b.forwards.list(&b.ctx(), app_b.id).await.unwrap().is_empty());
     let imported = audit(&b)
         .await
         .into_iter()

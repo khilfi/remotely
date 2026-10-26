@@ -593,6 +593,7 @@ impl HostDetails {
 
     /// MO-13: a VM's hardware, read from its files now; what was read before when they can't be read.
     pub async fn vm_specs(&self, ctx: &Context, vmx_path: &str) -> Result<VmSpecs> {
+        self.inner.store.require_vm_here(ctx, vmx_path).await?;
         let vm = self
             .inner
             .store

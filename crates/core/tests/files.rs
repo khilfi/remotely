@@ -64,7 +64,7 @@ fn tuning() -> TerminalTuning {
 }
 
 async fn audit(core: &Core) -> Vec<AuditEntry> {
-    core.store.recent_audit(&core.ctx, 300).await.unwrap()
+    core.store.recent_audit(&core.ctx(), 300).await.unwrap()
 }
 
 /// A local file with this content, in a fresh temp folder.
@@ -96,7 +96,7 @@ async fn fake(files: FakeFiles, environment: Environment) -> (Fake, Uuid) {
     let session = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: "web01".into(),
                 folder_id: None,
@@ -118,7 +118,7 @@ async fn fake(files: FakeFiles, environment: Environment) -> (Fake, Uuid) {
         .await
         .unwrap()
         .id;
-    let handle = core.terminals.open(&core.ctx, session, SIZE).await.unwrap();
+    let handle = core.terminals.open(&core.ctx(), session, SIZE).await.unwrap();
     let id = handle.id;
     wait_ready(&core, handle).await;
     (Fake { core, files }, id)
@@ -437,7 +437,7 @@ async fn downloads_are_audited_and_never_overwrite_a_file_here() {
     let queued = t
         .core
         .terminals
-        .download(&t.core.ctx, terminal, &["report.pdf".into()], &dest)
+        .download(&t.core.ctx(), terminal, &["report.pdf".into()], &dest)
         .await
         .unwrap();
     assert_eq!(queued[0].remote_path, "/home/alice/report.pdf");
@@ -477,14 +477,14 @@ async fn downloads_are_audited_and_never_overwrite_a_file_here() {
     let err = t
         .core
         .terminals
-        .download(&t.core.ctx, terminal, &["/srv".into()], &dest)
+        .download(&t.core.ctx(), terminal, &["/srv".into()], &dest)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("is a folder"), "{err}");
     let err = t
         .core
         .terminals
-        .download(&t.core.ctx, terminal, &["nope.txt".into()], &dest)
+        .download(&t.core.ctx(), terminal, &["nope.txt".into()], &dest)
         .await
         .unwrap_err();
     assert_eq!(err.code(), "not_found");
@@ -519,7 +519,7 @@ async fn a_name_that_hides_its_real_extension_is_saved_plainly_and_marked() {
         .core
         .terminals
         .download(
-            &t.core.ctx,
+            &t.core.ctx(),
             terminal,
             &["invoice\u{202E}fdp.exe".into(), "notes\u{200B}\u{FEFF}.txt".into()],
             &dest,
@@ -599,14 +599,14 @@ async fn trust(core: &Core, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 async fn ssh_session(core: &Core, server: &TestSshServer, password: &str, startup: Option<&str>) -> Uuid {
     let login = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             "alice login",
             SecretString::new(password),
@@ -616,7 +616,7 @@ async fn ssh_session(core: &Core, server: &TestSshServer, password: &str, startu
         .id;
     core.sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: "web01".into(),
                 folder_id: None,
@@ -653,7 +653,7 @@ struct Pane {
 
 impl Pane {
     async fn open(core: &Core, session: Uuid) -> Self {
-        let handle = core.terminals.open(&core.ctx, session, SIZE).await.unwrap();
+        let handle = core.terminals.open(&core.ctx(), session, SIZE).await.unwrap();
         let mut pane = Self {
             id: handle.id,
             output: handle.output,
@@ -789,7 +789,7 @@ async fn sftp_runs_on_the_terminals_own_connection() {
     let dest = temp_folder("sftp-down");
     let queued = core
         .terminals
-        .download(&core.ctx, pane.id, &["data.csv".into()], &dest)
+        .download(&core.ctx(), pane.id, &["data.csv".into()], &dest)
         .await
         .unwrap();
     let done = timeout(WAIT, async {
@@ -892,7 +892,7 @@ async fn bash_reports_its_folder_through_a_hook_nobody_sees() {
     let session = ssh_session(&core, &server, &password, None).await;
     let log_file = temp_folder("hook-log").join("web01.log");
     let mut pane = Pane::open(&core, session).await;
-    core.terminals.start_log(&core.ctx, pane.id, &log_file).await.unwrap();
+    core.terminals.start_log(&core.ctx(), pane.id, &log_file).await.unwrap();
     pane.until(|p| p.folder().is_some_and(|(_, t)| t == FolderTracking::Following))
         .await;
     assert_eq!(pane.folder().unwrap().0.as_deref(), Some("/home/alice"));
@@ -936,7 +936,7 @@ async fn bash_reports_its_folder_through_a_hook_nobody_sees() {
         ),
         "{text:?}"
     );
-    core.terminals.stop_log(&core.ctx, pane.id).await.unwrap();
+    core.terminals.stop_log(&core.ctx(), pane.id).await.unwrap();
     let logged = std::fs::read_to_string(&log_file).unwrap();
     assert!(!logged.contains("__remotely"), "{logged}");
     assert!(!logged.contains("remotely-user"), "{logged}");
@@ -1103,7 +1103,7 @@ async fn a_folder_the_login_cant_open_leaves_the_drawer_working() {
 async fn the_drawer_says_who_transfers_run_as_and_notices_a_switched_shell() {
     let (_server, core, mut pane) = bob_host().await;
     let log_file = temp_folder("user-log").join("web01.log");
-    core.terminals.start_log(&core.ctx, pane.id, &log_file).await.unwrap();
+    core.terminals.start_log(&core.ctx(), pane.id, &log_file).await.unwrap();
     pane.settle(Duration::from_millis(1000)).await;
     assert_eq!(pane.user(), Some(UserInfo::connected("alice")));
 
@@ -1143,7 +1143,7 @@ async fn the_drawer_says_who_transfers_run_as_and_notices_a_switched_shell() {
         core.terminals.pane_info(pane.id).unwrap().screen.line,
         "root@test-host:~# "
     );
-    core.terminals.stop_log(&core.ctx, pane.id).await.unwrap();
+    core.terminals.stop_log(&core.ctx(), pane.id).await.unwrap();
     let logged = std::fs::read_to_string(&log_file).unwrap();
     assert!(!logged.contains("remotely"), "{logged}");
     assert!(logged.contains("su bob"), "{logged}");
@@ -1184,7 +1184,7 @@ async fn hook_session(
     let login = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Password,
             &format!("{name} login"),
             SecretString::new(password),
@@ -1194,7 +1194,7 @@ async fn hook_session(
         .id;
     core.sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 name: name.into(),
                 folder_id: None,
@@ -1222,7 +1222,7 @@ async fn hook_session(
 
 async fn hook_audits(core: &Core) -> usize {
     core.store
-        .recent_audit(&core.ctx, 200)
+        .recent_audit(&core.ctx(), 200)
         .await
         .unwrap()
         .into_iter()
@@ -1266,7 +1266,7 @@ async fn the_prompt_hook_is_off_for_prod_unless_the_session_says_and_audited_onc
     assert_eq!(hook_audits(&core).await, 1);
     let entry = core
         .store
-        .recent_audit(&core.ctx, 50)
+        .recent_audit(&core.ctx(), 50)
         .await
         .unwrap()
         .into_iter()

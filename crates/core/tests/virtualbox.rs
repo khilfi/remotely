@@ -58,7 +58,7 @@ async fn mixed() -> (Core, Arc<FakeVmware>, Arc<FakeVirtualBox>) {
     let setup = Setup::new(workstation()).with_virtualbox(virtualbox());
     let (vmware, vbox) = (Arc::clone(&setup.vmware), Arc::clone(&setup.virtualbox));
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     (core, vmware, vbox)
 }
 
@@ -90,7 +90,7 @@ fn power(targets: Vec<TargetRef>, op: PowerOp) -> Command {
 /// Submits, approves when asked, and waits for the job.
 async fn run(core: &Core, command: Command, answers: ApprovalAnswers) -> (Uuid, JobStatus) {
     let mut events = core.jobs.subscribe();
-    let job = match core.bus.submit(&core.ctx, command).await.unwrap() {
+    let job = match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, answers).await.unwrap(),
     };
@@ -98,7 +98,7 @@ async fn run(core: &Core, command: Command, answers: ApprovalAnswers) -> (Uuid, 
 }
 
 async fn target_errors(core: &Core, job: Uuid) -> Vec<(String, Option<String>)> {
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     targets.into_iter().map(|t| (t.target_name, t.error)).collect()
 }
 
@@ -107,7 +107,7 @@ async fn target_errors(core: &Core, job: Uuid) -> Vec<(String, Option<String>)> 
 #[tokio::test]
 async fn a_refresh_lists_workstation_and_virtualbox_vms_together() {
     let (core, _, _) = mixed().await;
-    let vms = core.inventory.list(&core.ctx, &VmFilter::default()).await.unwrap();
+    let vms = core.inventory.list(&core.ctx(), &VmFilter::default()).await.unwrap();
     let listed: Vec<(&str, Hypervisor, PowerState)> = vms
         .iter()
         .map(|v| (v.display_name.as_str(), v.hypervisor, v.power_state))
@@ -142,7 +142,7 @@ async fn a_refresh_lists_workstation_and_virtualbox_vms_together() {
         power_states: vec![PowerState::Running],
         ..Default::default()
     };
-    let found = core.inventory.list(&core.ctx, &only_vbox).await.unwrap();
+    let found = core.inventory.list(&core.ctx(), &only_vbox).await.unwrap();
     assert_eq!(
         found.iter().map(|v| v.display_name.as_str()).collect::<Vec<_>>(),
         ["vbox-web"]
@@ -155,7 +155,7 @@ async fn without_virtualbox_there_are_only_workstation_vms_and_no_warning() {
         .with_virtualbox(FakeVirtualBox::not_installed())
         .build()
         .await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert!(report.vms.iter().all(|v| v.hypervisor == Hypervisor::Vmware));
     assert_eq!(report.vms.len(), 2);
@@ -168,7 +168,7 @@ async fn with_only_virtualbox_a_missing_workstation_is_no_warning() {
         .with_virtualbox(virtualbox())
         .build()
         .await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     assert_eq!(report.vms.len(), 4);
 
@@ -181,7 +181,7 @@ async fn with_only_virtualbox_a_missing_workstation_is_no_warning() {
     .with_virtualbox(virtualbox())
     .build()
     .await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(report.warnings.len(), 1);
     assert_eq!(report.warnings[0].code, "vmrun_not_found");
 }
@@ -190,7 +190,7 @@ async fn with_only_virtualbox_a_missing_workstation_is_no_warning() {
 async fn when_virtualbox_cannot_be_asked_its_vms_stay_listed_with_a_warning() {
     let (core, _, vbox) = mixed().await;
     vbox.set_failing_list(true);
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(report.warnings.len(), 1);
     assert_eq!(report.warnings[0].code, "vboxmanage_failed");
     assert!(report.warnings[0]
@@ -206,14 +206,14 @@ async fn when_virtualbox_cannot_be_asked_its_vms_stay_listed_with_a_warning() {
         "kept as the last refresh found them"
     );
     vbox.set_failing_list(false);
-    assert!(core.inventory.refresh(&core.ctx).await.unwrap().warnings.is_empty());
+    assert!(core.inventory.refresh(&core.ctx()).await.unwrap().warnings.is_empty());
 }
 
 #[tokio::test]
 async fn a_virtualbox_vm_that_cannot_be_read_is_a_warning_and_the_rest_still_list() {
     let setup = Setup::new(FakeVmware::default()).with_virtualbox(virtualbox().unreadable(DB));
     let core = setup.build().await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(report.warnings.len(), 1);
     assert!(report.warnings[0]
         .message
@@ -226,7 +226,7 @@ async fn a_virtualbox_vm_that_cannot_be_read_is_a_warning_and_the_rest_still_lis
 async fn a_virtualbox_vm_whose_settings_are_gone_is_left_out() {
     let fake = virtualbox().with_info(APP, |vm| vm.accessible = false);
     let core = Setup::new(FakeVmware::default()).with_virtualbox(fake).build().await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert!(report.warnings.is_empty());
     assert!(!report.vms.iter().any(|v| v.vmx_path == APP));
 }
@@ -252,7 +252,7 @@ async fn the_guest_ip_is_the_one_the_host_can_reach_not_the_nat_one() {
         .with_guest_property(WEB, "/VirtualBox/GuestInfo/OS/Product", "Windows 11")
         .with_guest_property(WEB, "/VirtualBox/GuestInfo/OS/Release", "10.0.22631");
     let core = Setup::new(FakeVmware::default()).with_virtualbox(fake).build().await;
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(report.vms[0].ip_address.as_deref(), Some("192.0.2.31"));
     assert_eq!(report.vms[0].guest_os_name.as_deref(), Some("Windows 11 10.0.22631"));
 }
@@ -292,7 +292,7 @@ async fn a_refresh_asks_virtualbox_twice_per_running_vm() {
     let vbox = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
     let before = vbox.vboxmanage_runs();
-    let report = core.inventory.refresh(&core.ctx).await.unwrap();
+    let report = core.inventory.refresh(&core.ctx()).await.unwrap();
     let runs = vbox.vboxmanage_runs() - before;
     eprintln!("VBoxManage runs for one refresh of 40 running VMs: {runs}");
     assert_eq!(
@@ -314,7 +314,8 @@ async fn refreshes_asked_for_while_one_runs_share_one_more_run() {
     let (vbox, vmware) = (Arc::clone(&setup.virtualbox), Arc::clone(&setup.vmware));
     let core = setup.build().await;
     let (vbox_before, vmrun_before) = (vbox.vboxmanage_runs(), vmware.vmrun_runs());
-    let reports = futures::future::join_all((0..10).map(|_| core.inventory.refresh(&core.ctx))).await;
+    let ctx = core.ctx();
+    let reports = futures::future::join_all((0..10).map(|_| core.inventory.refresh(&ctx))).await;
     assert!(reports.iter().all(|r| r.as_ref().is_ok_and(|r| r.vms.len() == 3)));
     let (vbox_runs, vmrun_runs) = (vbox.vboxmanage_runs() - vbox_before, vmware.vmrun_runs() - vmrun_before);
     eprintln!("ten overlapping refreshes: {vbox_runs} VBoxManage runs, {vmrun_runs} vmrun runs");
@@ -322,7 +323,7 @@ async fn refreshes_asked_for_while_one_runs_share_one_more_run() {
     assert_eq!(vmrun_runs, 2, "vmrun list, twice");
 
     // One asked for after they are done runs again: nothing it could share was still running.
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     assert_eq!(vbox.vboxmanage_runs() - vbox_before, 3 * (1 + 3 * 2));
 }
 
@@ -359,7 +360,7 @@ async fn every_power_and_snapshot_command_gets_the_same_tier_on_either_hyperviso
     }
     let preview = |command: Command| {
         let core = &core;
-        async move { core.bus.preview(&core.ctx, &command).await.unwrap() }
+        async move { core.bus.preview(&core.ctx(), &command).await.unwrap() }
     };
     for make in &commands {
         for (vmware, vbox) in [
@@ -379,7 +380,7 @@ async fn every_power_and_snapshot_command_gets_the_same_tier_on_either_hyperviso
 
     // Prod raises a VirtualBox VM's tier like a VMware VM's.
     core.inventory
-        .set_environment(&core.ctx, &[vmx("web"), WEB.to_owned()], Environment::Prod)
+        .set_environment(&core.ctx(), &[vmx("web"), WEB.to_owned()], Environment::Prod)
         .await
         .unwrap();
     let stop = |target| power(vec![target], PowerOp::Stop { mode: StopMode::Soft });
@@ -400,10 +401,10 @@ async fn a_protected_virtualbox_vm_is_skipped_until_it_is_unprotected() {
     };
     let (_, status) = run(&core, protect, confirm()).await;
     assert_eq!(status, JobStatus::Succeeded);
-    assert!(core.store.find_vm(&core.ctx, WEB).await.unwrap().unwrap().protected);
+    assert!(core.store.find_vm(&core.ctx(), WEB).await.unwrap().unwrap().protected);
 
     let suspend = power(vec![vbox_vm(WEB), vbox_vm(APP)], PowerOp::Suspend);
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, suspend).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), suspend).await.unwrap() else {
         panic!("suspending one VM is Medium");
     };
     assert_eq!(request.tier, Tier::Medium, "one VM left");
@@ -411,7 +412,7 @@ async fn a_protected_virtualbox_vm_is_skipped_until_it_is_unprotected() {
     core.bus.cancel_approval(request.id).await.unwrap();
     assert!(matches!(
         core.bus
-            .submit(&core.ctx, power(vec![vbox_vm(WEB)], PowerOp::Pause))
+            .submit(&core.ctx(), power(vec![vbox_vm(WEB)], PowerOp::Pause))
             .await,
         Err(CoreError::AllTargetsProtected)
     ));
@@ -433,7 +434,7 @@ async fn power_commands_reach_virtualbox_through_the_bus_and_are_audited() {
     .await;
     assert_eq!(status, JobStatus::Succeeded);
     assert_eq!(vbox.power_state(APP), PowerState::Running);
-    let vm = core.store.find_vm(&core.ctx, APP).await.unwrap().unwrap();
+    let vm = core.store.find_vm(&core.ctx(), APP).await.unwrap().unwrap();
     assert_eq!(
         vm.power_state,
         PowerState::Running,
@@ -471,7 +472,7 @@ async fn power_commands_reach_virtualbox_through_the_bus_and_are_audited() {
     assert!(vmware.calls().is_empty(), "nothing went to Workstation");
 
     // The audit log names the VM and its key, the start and end of each job, and the chain holds.
-    let audit = core.store.recent_audit(&core.ctx, 100).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 100).await.unwrap();
     let start = audit
         .iter()
         .find(|e| e.event == "job_started" && e.job_id.as_deref() == Some(job.to_string().as_str()))
@@ -482,7 +483,7 @@ async fn power_commands_reach_virtualbox_through_the_bus_and_are_audited() {
     assert!(audit.iter().any(|e| e.event == "job_finished"
         && e.action == "Shut down 1 VM"
         && e.result.as_deref() == Some("succeeded")));
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -490,14 +491,14 @@ async fn a_guest_that_ignores_the_acpi_button_is_left_running_until_a_critical_f
     let setup = Setup::new(FakeVmware::default()).with_virtualbox(virtualbox().ignores_acpi(WEB));
     let vbox = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     core.set_shutdown_wait_secs(1).await.unwrap();
     let mut events = core.jobs.subscribe();
 
     let SubmitOutcome::NeedsApproval { request } = core
         .bus
         .submit(
-            &core.ctx,
+            &core.ctx(),
             power(vec![vbox_vm(WEB)], PowerOp::Stop { mode: StopMode::Soft }),
         )
         .await
@@ -533,7 +534,7 @@ async fn a_guest_that_ignores_the_acpi_button_is_left_running_until_a_critical_f
     let SubmitOutcome::NeedsApproval { request } = core
         .bus
         .submit(
-            &core.ctx,
+            &core.ctx(),
             power(vec![vbox_vm(WEB)], PowerOp::Stop { mode: StopMode::Hard }),
         )
         .await
@@ -557,7 +558,7 @@ async fn a_graceful_restart_needs_the_guest_additions_and_says_so_at_once() {
     let setup = Setup::new(FakeVmware::default()).with_virtualbox(virtualbox().without_guest_additions(WEB));
     let vbox = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let restart = power(vec![vbox_vm(WEB)], PowerOp::Reset { mode: StopMode::Soft });
     let (job, status) = run(&core, restart, confirm()).await;
     assert_eq!(status, JobStatus::Failed);
@@ -569,7 +570,7 @@ async fn a_graceful_restart_needs_the_guest_additions_and_says_so_at_once() {
              that needs its own approval."
         )
     );
-    let vm = core.store.find_vm(&core.ctx, WEB).await.unwrap().unwrap();
+    let vm = core.store.find_vm(&core.ctx(), WEB).await.unwrap().unwrap();
     assert_eq!(vm.tools_state.as_deref(), Some("notRunning"));
 
     // With Guest Additions running, the restart goes ahead.
@@ -596,11 +597,11 @@ async fn a_bulk_start_reaches_both_hypervisors_and_counts_both_in_the_capacity_c
     setup.host.totals.physical_ram_mb = 8 * 1024;
     let (vmware, vbox) = (Arc::clone(&setup.vmware), Arc::clone(&setup.virtualbox));
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
     // vbox-web (4 GB) and vbox-idle (2 GB, paused) run; big (6 GB) and vbox-app (2 GB) would start.
     let start = power(vec![vm("big"), vbox_vm(APP)], PowerOp::Start { gui: false });
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, start).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), start).await.unwrap() else {
         panic!("a start that would overcommit RAM asks for a confirm");
     };
     assert_eq!(
@@ -627,7 +628,7 @@ async fn cancel_stops_waiting_for_a_virtualbox_power_call() {
     let mut events = core.jobs.subscribe();
     let SubmitOutcome::Queued { job_id: job, .. } = core
         .bus
-        .submit(&core.ctx, power(vec![vbox_vm(APP)], PowerOp::Start { gui: false }))
+        .submit(&core.ctx(), power(vec![vbox_vm(APP)], PowerOp::Start { gui: false }))
         .await
         .unwrap()
     else {
@@ -647,7 +648,7 @@ async fn cancel_stops_waiting_for_a_virtualbox_power_call() {
         target_errors(&core, job).await[0].1.as_deref(),
         Some("cancelled while VBoxManage was running; VirtualBox may still finish the action, so check the VM's state")
     );
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert!(audit[0]
         .detail
         .as_deref()
@@ -669,11 +670,11 @@ async fn a_virtualbox_vms_snapshot_tree_lists_like_a_workstation_one() {
     let setup = Setup::new(workstation()).with_virtualbox(with_snapshots());
     let (vmware, vbox) = (Arc::clone(&setup.vmware), Arc::clone(&setup.virtualbox));
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
     let list = core
         .snapshots
-        .list(&core.ctx, Some(&[WEB.to_uppercase()]))
+        .list(&core.ctx(), Some(&[WEB.to_uppercase()]))
         .await
         .unwrap();
     assert_eq!(list.len(), 1, "keys match in any letter case");
@@ -699,7 +700,7 @@ async fn snapshots_of_virtualbox_vms_are_taken_reverted_and_deleted_through_the_
     let setup = Setup::new(FakeVmware::default()).with_virtualbox(with_snapshots());
     let vbox = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
 
     // Take (Low): queued at once. VirtualBox takes names with '/'.
     let take = Command::VmSnapshot {
@@ -732,7 +733,7 @@ async fn snapshots_of_virtualbox_vms_are_taken_reverted_and_deleted_through_the_
         targets: vec![vbox_vm(WEB)],
         op: SnapshotOp::Revert { name: "base".into() },
     };
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, revert).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), revert).await.unwrap() else {
         panic!("revert is High");
     };
     assert_eq!(request.tier, Tier::High);
@@ -766,7 +767,7 @@ async fn snapshots_of_virtualbox_vms_are_taken_reverted_and_deleted_through_the_
     );
     assert_eq!(vbox.current_snapshot(WEB).as_deref(), Some("base"));
     assert_eq!(vbox.power_state(WEB), PowerState::NotRunning);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert!(targets[0]
         .safety_snapshot
         .as_deref()
@@ -783,7 +784,7 @@ async fn snapshots_of_virtualbox_vms_are_taken_reverted_and_deleted_through_the_
     let (_, status) = run(&core, delete, high_answers(1, false)).await;
     assert_eq!(status, JobStatus::Succeeded);
     assert!(!vbox.snapshot_names(WEB).contains(&"before/upgrade".to_owned()));
-    assert!(core.store.verify_audit_chain().await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
 }
 
 #[tokio::test]
@@ -795,8 +796,8 @@ async fn a_twin_named_snapshot_is_reverted_by_its_uuid() {
     let setup = Setup::new(FakeVmware::default()).with_virtualbox(fake);
     let vbox = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
-    let tree = core.snapshots.list(&core.ctx, Some(&[APP.to_owned()])).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    let tree = core.snapshots.list(&core.ctx(), Some(&[APP.to_owned()])).await.unwrap();
     let first = &tree[0].snapshots[0];
     assert_eq!(first.name, tree[0].snapshots[1].name);
     assert!(tree[0].snapshots[1].current, "the second twin, taken last");
@@ -808,7 +809,7 @@ async fn a_twin_named_snapshot_is_reverted_by_its_uuid() {
     };
     let (_, status) = run(&core, revert, high_answers(1, false)).await;
     assert_eq!(status, JobStatus::Succeeded);
-    let after = core.snapshots.list(&core.ctx, Some(&[APP.to_owned()])).await.unwrap();
+    let after = core.snapshots.list(&core.ctx(), Some(&[APP.to_owned()])).await.unwrap();
     assert!(after[0].snapshots[0].current, "the first of the twins, by UUID");
     assert!(!after[0].snapshots[1].current);
     assert!(
@@ -824,9 +825,9 @@ async fn a_slash_in_a_new_snapshot_name_is_refused_only_for_workstation_vms() {
         targets,
         op: SnapshotOp::Take { name: "a/b".into() },
     };
-    assert!(core.bus.submit(&core.ctx, take(vec![vbox_vm(APP)])).await.is_ok());
+    assert!(core.bus.submit(&core.ctx(), take(vec![vbox_vm(APP)])).await.is_ok());
     for targets in [vec![vm("web")], vec![vbox_vm(APP), vm("db")]] {
-        let err = core.bus.submit(&core.ctx, take(targets)).await.unwrap_err();
+        let err = core.bus.submit(&core.ctx(), take(targets)).await.unwrap_err();
         assert!(err.to_string().contains("vmrun reads it as the path"), "{err}");
     }
 }
@@ -836,7 +837,7 @@ async fn a_safety_snapshot_that_fails_leaves_the_virtualbox_vm_untouched() {
     let setup = Setup::new(FakeVmware::default()).with_virtualbox(virtualbox().failing_snapshots(WEB));
     let vbox = Arc::clone(&setup.virtualbox);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let stop = power(
         vec![vbox_vm(WEB), vbox_vm(IDLE)],
         PowerOp::Stop { mode: StopMode::Hard },
@@ -876,10 +877,10 @@ async fn a_session_reaching_a_virtualbox_guest_is_linked_by_a_refresh() {
         tags: vec![],
         vm_id: None,
     };
-    let session = core.sessions.create(&core.ctx, input).await.unwrap();
-    core.inventory.refresh(&core.ctx).await.unwrap();
-    let vm = core.store.find_vm(&core.ctx, WEB).await.unwrap().unwrap();
-    let session = core.sessions.get(&core.ctx, session.id).await.unwrap();
+    let session = core.sessions.create(&core.ctx(), input).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
+    let vm = core.store.find_vm(&core.ctx(), WEB).await.unwrap().unwrap();
+    let session = core.sessions.get(&core.ctx(), session.id).await.unwrap();
     assert_eq!(session.vm_id, Some(vm.id));
 }
 
@@ -888,7 +889,7 @@ async fn virtualbox_processes_give_their_vms_host_usage_on_the_dashboard() {
     let setup = Setup::new(FakeVmware::default()).with_virtualbox(virtualbox());
     let processes = Arc::clone(&setup.host.processes);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     let process = |pid: u32, key: Option<&str>, name: Option<&str>| VmProcess {
         pid,
         vmx_path: key.map(String::from),
@@ -905,7 +906,7 @@ async fn virtualbox_processes_give_their_vms_host_usage_on_the_dashboard() {
     ];
     let cost = core.metrics.collect_once().await;
     assert_eq!(cost.vms, 2);
-    let overview = core.metrics.overview(&core.ctx).await.unwrap();
+    let overview = core.metrics.overview(&core.ctx()).await.unwrap();
     let rows: Vec<(&str, Option<Hypervisor>, Option<PowerState>)> = overview
         .rows
         .iter()
@@ -943,7 +944,7 @@ async fn the_vboxmanage_path_is_checked_saved_and_audited() {
 
     core.set_vboxmanage_path(None).await.unwrap();
     assert_eq!(core.saved_vboxmanage_path().await.unwrap(), None);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "setting_changed");
     assert_eq!(audit[0].action, "Set the VBoxManage.exe path");
     assert!(audit[0]

@@ -175,6 +175,7 @@ impl VmSettings {
 
     /// VM-23: the guest OS types the VM's hypervisor offers.
     pub async fn guest_os_types(&self, key: &str) -> Result<Vec<GuestOsType>> {
+        self.store.require_vm_here(&self.current.get(), key).await?;
         match Hypervisor::of_key(key) {
             Hypervisor::Vmware => Ok(WORKSTATION_GUEST_OS
                 .iter()
@@ -196,6 +197,7 @@ impl VmSettings {
 
     /// VM-23: a running VirtualBox VM's screen, as PNG. A read: nothing changes and nothing is kept.
     pub async fn screenshot(&self, key: &str) -> Result<Vec<u8>> {
+        self.store.require_vm_here(&self.current.get(), key).await?;
         if Hypervisor::of_key(key) != Hypervisor::VirtualBox {
             return Err(CoreError::VmSettingRefused(
                 "Screenshots come from VirtualBox; for a Workstation VM, open its console.".into(),
@@ -237,6 +239,7 @@ impl VmSettings {
 
     /// VM-24: the hypervisor's own window on the VM (see the module's notes on why it is audited, not rated).
     pub async fn open_console(&self, key: &str) -> Result<ConsoleOutcome> {
+        self.store.require_vm_here(&self.current.get(), key).await?;
         if self.store.read_only().is_locked() {
             return Err(CoreError::ReadOnlyLock {
                 what: "Open a VM's console".into(),

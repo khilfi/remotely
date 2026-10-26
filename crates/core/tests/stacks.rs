@@ -99,7 +99,7 @@ async fn lab_both(label: &str, vmware: impl FnOnce(&Path) -> FakeVmware, virtual
     let image = core
         .catalog
         .add_image(
-            &core.ctx,
+            &core.ctx(),
             Uuid::new_v4(),
             ImageInput {
                 name: "Noble".into(),
@@ -139,7 +139,7 @@ async fn template_on(lab: &Lab, name: &str, hypervisor: Hypervisor, network: Net
     lab.core
         .catalog
         .add_template(
-            &lab.core.ctx,
+            &lab.core.ctx(),
             TemplateInput {
                 name: name.into(),
                 image_id: lab.image.id,
@@ -182,7 +182,7 @@ async fn stack(lab: &Lab, name: &str, steps: Vec<StackStep>) -> Uuid {
     lab.core
         .stacks
         .add(
-            &lab.core.ctx,
+            &lab.core.ctx(),
             StackInput {
                 name: name.into(),
                 description: None,
@@ -212,6 +212,7 @@ async fn approve_and_wait(core: &Core, request: &ApprovalRequest) -> (Uuid, JobS
             .steps
             .contains(&ApprovalStep::VaultReauth)
             .then(|| SecretString::new(VAULT_PASSWORD)),
+        change_id: None,
     };
     let job = core.bus.approve(request.id, answers).await.unwrap();
     let status = tokio::time::timeout(Duration::from_secs(30), core.jobs.wait(job))
@@ -236,7 +237,7 @@ async fn run(core: &Core, outcome: SubmitOutcome) -> (Uuid, JobStatus) {
 
 async fn targets_of(core: &Core, job: Uuid) -> Vec<(String, String, Option<String>)> {
     core.store
-        .job_targets(&core.ctx, job)
+        .job_targets(&core.ctx(), job)
         .await
         .unwrap()
         .into_iter()
@@ -246,7 +247,7 @@ async fn targets_of(core: &Core, job: Uuid) -> Vec<(String, String, Option<Strin
 
 async fn job_end_detail(core: &Core, job: Uuid) -> String {
     core.store
-        .recent_audit(&core.ctx, 500)
+        .recent_audit(&core.ctx(), 500)
         .await
         .unwrap()
         .into_iter()
@@ -267,7 +268,7 @@ fn first(calls: &[String], what: impl Fn(&str) -> bool) -> usize {
 async fn a_stack_deploys_as_one_job_in_boot_order_with_its_delays() {
     let lab = lab("stack-order").await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let db = template(&lab, "db").await;
     let web = template(&lab, "web").await;
     let id = stack(
@@ -393,7 +394,7 @@ async fn readiness_waits_on_the_clock_until_the_guest_port_opens() {
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let db = template(&lab, "db").await;
     let web = template(&lab, "web").await;
     let id = stack(
@@ -442,7 +443,7 @@ async fn a_step_not_ready_in_time_stops_the_steps_after_it_and_a_retry_finishes_
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let db = template(&lab, "db").await;
     let web = template(&lab, "web").await;
     let id = stack(
@@ -503,7 +504,7 @@ async fn a_failure_mid_stack_cleans_up_only_its_own_vm() {
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let db = template(&lab, "db").await;
     let app = template(&lab, "app").await;
@@ -563,7 +564,7 @@ async fn an_instance_starts_and_stops_in_boot_order_and_tears_down_only_its_own_
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let db = template(&lab, "db").await;
     let web = template(&lab, "web").await;
@@ -768,7 +769,7 @@ async fn a_hand_added_vm_is_deleted_only_when_picked() {
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let db = template(&lab, "db").await;
     let id = stack(&lab, "solo", vec![step(db, 1, Readiness::None, 600, 0)]).await;
@@ -823,7 +824,7 @@ async fn a_hand_added_vm_is_deleted_only_when_picked() {
 /// A one-step instance ("solo 1": db-1 from the deploy) with `golden` added by hand and the instance shut down.
 async fn solo_with_golden(lab: &Lab) -> Uuid {
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let db = template(lab, "db").await;
     let id = stack(lab, "solo", vec![step(db, 1, Readiness::None, 600, 0)]).await;
@@ -878,7 +879,7 @@ async fn a_teardown_refuses_a_golden_vm_linked_clones_depend_on_and_names_them()
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let instance_id = solo_with_golden(&lab).await;
 
     // Picked with db-1: the approval names the clones as golden's problem (AP-02), and the job deletes only db-1.
@@ -946,7 +947,7 @@ async fn a_linked_clone_made_after_a_teardowns_approval_stops_the_golden_vm_when
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let instance_id = solo_with_golden(&lab).await;
     let approval = needs_approval(core.stacks.teardown(ctx, instance_id, &[vmx("golden")]).await.unwrap());
     assert!(approval.impact.iter().all(|i| i.linked_clones.is_empty()));
@@ -969,7 +970,7 @@ async fn a_linked_clone_made_after_a_teardowns_approval_stops_the_golden_vm_when
 async fn stack_edits_are_audited_checked_and_refused_by_the_read_only_lock() {
     let lab = lab("stack-edits").await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let db = template(&lab, "db").await;
     let input = StackInput {
         name: "web lab".into(),
@@ -1068,7 +1069,7 @@ async fn the_capacity_planner_shows_this_pc_after_a_deploy_and_what_to_suspend()
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let web = template(&lab, "web").await;
     let request = |count| DeployRequest {
@@ -1156,7 +1157,7 @@ async fn vm_07_at_power_on_names_vms_to_suspend() {
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let outcome = core
         .bus
@@ -1213,7 +1214,7 @@ fn commit_all(preview_id: Uuid, stacks: Vec<ItemChoice>) -> TransferCommit {
 #[tokio::test]
 async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_instances() {
     let a = lab("stack-transfer-a").await;
-    let ctx = &a.core.ctx;
+    let ctx = &a.core.ctx();
     a.core.transfer.use_insecure_fast_kdf();
     let db = template(&a, "db").await;
     let web = template(&a, "web").await;
@@ -1267,7 +1268,7 @@ async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_inst
 
     let preview = b
         .transfer
-        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &file, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap();
     let row = &preview.catalog.stacks[0];
@@ -1278,7 +1279,7 @@ async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_inst
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit_all(preview.id, vec![]),
             &b.sessions,
             &b.vault,
@@ -1291,13 +1292,13 @@ async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_inst
     assert_eq!(report.catalog.stacks.added, 1);
 
     // On the other laptop, its steps point at that laptop's own templates; no instance came along.
-    let stacks = b.stacks.list(&b.ctx).await.unwrap();
+    let stacks = b.stacks.list(&b.ctx()).await.unwrap();
     assert_eq!(stacks.len(), 1);
     let names: Vec<Option<&str>> = stacks[0].steps.iter().map(|s| s.template_name.as_deref()).collect();
     assert_eq!(names, [Some("db"), Some("web")]);
     let b_db = b
         .catalog
-        .templates(&b.ctx)
+        .templates(&b.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -1308,8 +1309,8 @@ async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_inst
     assert_eq!(stacks[0].steps[0].step.readiness, Readiness::SshPort { port: 5432 });
     assert_eq!(stacks[0].steps[0].step.delay_secs, 20);
     assert_eq!(stacks[0].instances, 0);
-    assert!(b.stacks.instances(&b.ctx).await.unwrap().is_empty());
-    let audit = b.store.recent_audit(&b.ctx, 100).await.unwrap();
+    assert!(b.stacks.instances(&b.ctx()).await.unwrap().is_empty());
+    let audit = b.store.recent_audit(&b.ctx(), 100).await.unwrap();
     assert!(audit
         .iter()
         .any(|e| e.event == "stack_changed" && e.action == "Imported the stack 'web lab' from a Remotely export"));
@@ -1317,28 +1318,28 @@ async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_inst
     // The same file again: the same stack. Changed here: a conflict, kept as a second copy.
     let again = b
         .transfer
-        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &file, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap();
     assert_eq!(again.catalog.stacks[0].status, ItemStatus::Same);
-    let mut changed = b.stacks.get(&b.ctx, stacks[0].id).await.unwrap();
+    let mut changed = b.stacks.get(&b.ctx(), stacks[0].id).await.unwrap();
     let mut input = StackInput {
         name: changed.name.clone(),
         description: changed.description.take(),
         steps: changed.steps.iter().map(|s| s.step.clone()).collect(),
     };
     input.steps[1].count = 4;
-    b.stacks.update(&b.ctx, stacks[0].id, input).await.unwrap();
+    b.stacks.update(&b.ctx(), stacks[0].id, input).await.unwrap();
     let again = b
         .transfer
-        .open(&b.ctx, &file, SecretString::new(PASSPHRASE), &b.vault)
+        .open(&b.ctx(), &file, SecretString::new(PASSPHRASE), &b.vault)
         .await
         .unwrap();
     assert_eq!(again.catalog.stacks[0].status, ItemStatus::Conflict);
     let report = b
         .transfer
         .commit(
-            &b.ctx,
+            &b.ctx(),
             commit_all(
                 again.id,
                 vec![ItemChoice {
@@ -1356,7 +1357,7 @@ async fn stacks_travel_to_another_laptop_with_their_templates_but_not_their_inst
     assert_eq!(report.catalog.stacks.kept_both, 1);
     let names: Vec<String> = b
         .stacks
-        .list(&b.ctx)
+        .list(&b.ctx())
         .await
         .unwrap()
         .into_iter()
@@ -1377,7 +1378,7 @@ async fn a_stack_mixes_virtualbox_and_workstation_steps() {
     )
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     lab.network.set_open("192.0.2.51", 22, true);
     let db = template_on(&lab, "vdb", Hypervisor::VirtualBox, Network::HostOnly).await;
     let web = template(&lab, "web").await;
@@ -1440,13 +1441,13 @@ async fn a_schedule_on_a_stack_reaches_its_instances_vms_and_asks_again_for_one_
     })
     .await;
     let core = &lab.core;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     core.inventory.refresh(ctx).await.unwrap();
     let clock = Arc::new(FakeClock::new(
         time::macros::datetime!(2026-06-10 10:00 UTC),
         FakeZone::central_europe(),
     ));
-    core.schedules.set_clock(clock);
+    core.schedules().set_clock(clock);
     let db = template(&lab, "db").await;
     let web = template(&lab, "web").await;
     let id = stack(
@@ -1476,7 +1477,7 @@ async fn a_schedule_on_a_stack_reaches_its_instances_vms_and_asks_again_for_one_
 
     // A nightly snapshot of the stack: its two VMs.
     let saved = core
-        .schedules
+        .schedules()
         .save(ScheduleInput {
             id: None,
             name: "lab nightly".into(),
@@ -1492,7 +1493,7 @@ async fn a_schedule_on_a_stack_reaches_its_instances_vms_and_asks_again_for_one_
         .unwrap();
     let view = match saved.approval {
         Some(request) => core
-            .schedules
+            .schedules()
             .approve(
                 request.id,
                 ApprovalAnswers {
@@ -1509,8 +1510,8 @@ async fn a_schedule_on_a_stack_reaches_its_instances_vms_and_asks_again_for_one_
     // A VM that joins the instance is asked about before a run touches it.
     let instance = core.stacks.instances(ctx).await.unwrap()[0].id;
     core.stacks.add_vm(ctx, instance, &vmx("tools01"), 1).await.unwrap();
-    assert_eq!(core.schedules.tick().await.unwrap().paused, 1);
-    let view = core.schedules.get(view.id).await.unwrap();
+    assert_eq!(core.schedules().tick().await.unwrap().paused, 1);
+    let view = core.schedules().get(view.id).await.unwrap();
     assert_eq!(
         view.state_reason.as_deref(),
         Some("tools01 is in the stack 'web lab' now")

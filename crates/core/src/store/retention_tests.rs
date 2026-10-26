@@ -228,7 +228,7 @@ async fn audit_summaries_and_details_are_stored_redacted_and_still_verify() {
     );
     let stored = store.recent_audit(&ctx, 1).await.unwrap();
     assert_eq!(stored[0].action, entry.action);
-    assert!(store.verify_audit_chain().await.unwrap().ok, "hashed as stored");
+    assert!(store.verify_audit_chain(&ctx).await.unwrap().ok, "hashed as stored");
 }
 
 #[tokio::test]
@@ -316,7 +316,7 @@ async fn the_purge_empties_old_bodies_and_keeps_everything_else() {
 
     // The audit log is not touched, and still verifies.
     assert_eq!(store.recent_audit(&ctx, 10).await.unwrap().len(), before_audit.len());
-    assert!(store.verify_audit_chain().await.unwrap().ok);
+    assert!(store.verify_audit_chain(&ctx).await.unwrap().ok);
 
     // Done once: nothing is read again.
     assert_eq!(
@@ -583,7 +583,7 @@ async fn verify_and_export_read_the_audit_log_row_by_row() {
             .await
             .unwrap();
     }
-    let check = store.verify_audit_chain().await.unwrap();
+    let check = store.verify_audit_chain(&ctx).await.unwrap();
     assert_eq!((check.ok, check.entries), (true, 2500));
     let mut seqs = Vec::new();
     let mut rows = store.audit_entries(&ctx);
@@ -603,7 +603,7 @@ async fn verify_and_export_read_the_audit_log_row_by_row() {
         .execute(store.pool())
         .await
         .unwrap();
-    let check = store.verify_audit_chain().await.unwrap();
+    let check = store.verify_audit_chain(&ctx).await.unwrap();
     assert_eq!(
         (check.ok, check.entries, check.first_bad_seq),
         (false, 1999, Some(2000))

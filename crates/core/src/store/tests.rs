@@ -77,7 +77,7 @@ async fn audit_chain_links_and_verifies() {
     assert_eq!(a.workspace_id, ctx.workspace_id.to_string());
     assert_eq!(a.user_id, ctx.user_id.to_string());
 
-    let check = store.verify_audit_chain().await.unwrap();
+    let check = store.verify_audit_chain(&ctx).await.unwrap();
     assert_eq!(
         check,
         ChainCheck {
@@ -121,7 +121,7 @@ async fn verify_catches_edits_that_bypass_the_triggers() {
         .await
         .unwrap();
 
-    let check = store.verify_audit_chain().await.unwrap();
+    let check = store.verify_audit_chain(&ctx).await.unwrap();
     assert!(!check.ok);
     assert_eq!(check.first_bad_seq, Some(3));
     assert_eq!(check.entries, 2, "entries before the bad one");
@@ -143,7 +143,7 @@ async fn verify_catches_a_removed_entry() {
         .await
         .unwrap();
 
-    let check = store.verify_audit_chain().await.unwrap();
+    let check = store.verify_audit_chain(&ctx).await.unwrap();
     assert!(!check.ok);
     assert_eq!(check.first_bad_seq, Some(3));
 }
@@ -285,7 +285,7 @@ async fn a_refresh_that_could_not_ask_virtualbox_keeps_its_vms() {
         .unwrap();
     // Only Workstation was read: the VirtualBox VM stays listed as it was.
     store
-        .record_inventory_for(&ctx, &[], &[Hypervisor::Vmware])
+        .record_discovery(ctx.user_id, &[], &[Hypervisor::Vmware], Some(&ctx))
         .await
         .unwrap();
     let names: Vec<String> = store

@@ -56,7 +56,7 @@ fn vbox_lab() -> FakeVirtualBox {
 
 async fn built(setup: Setup) -> Core {
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     core
 }
 
@@ -91,6 +91,7 @@ async fn approve_and_wait(core: &Core, request: &ApprovalRequest) -> (Uuid, JobS
         reason: Some("linked clones test".into()),
         safety_snapshot: Some(false),
         vault_password: vault.then(|| SecretString::new(VAULT_PASSWORD)),
+        change_id: None,
     };
     let job = core.bus.approve(request.id, answers).await.unwrap();
     (job, wait_finished(&mut rx, job).await)
@@ -98,7 +99,7 @@ async fn approve_and_wait(core: &Core, request: &ApprovalRequest) -> (Uuid, JobS
 
 /// The refusal's message, for a command every VM of which linked clones stop.
 async fn refused(core: &Core, command: Command) -> String {
-    match core.bus.submit(&core.ctx, command).await {
+    match core.bus.submit(&core.ctx(), command).await {
         Err(err @ CoreError::LinkedClones(_)) => {
             assert_eq!(err.code(), "linked_clones");
             err.to_string()
@@ -108,7 +109,7 @@ async fn refused(core: &Core, command: Command) -> String {
 }
 
 async fn target_error(core: &Core, job: Uuid, name: &str) -> String {
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let target = targets.iter().find(|t| t.target_name == name).unwrap();
     assert_eq!(target.status, "failed", "{target:?}");
     target.error.clone().unwrap_or_default()
@@ -121,7 +122,7 @@ async fn deleting_the_snapshot_a_linked_clone_is_made_from_is_refused_before_any
     let setup = Setup::new(lab());
     let fake = std::sync::Arc::clone(&setup.vmware);
     let core = built(setup).await;
-    let audit_before = core.store.recent_audit(&core.ctx, 100).await.unwrap().len();
+    let audit_before = core.store.recent_audit(&core.ctx(), 100).await.unwrap().len();
 
     let message = refused(&core, delete_snapshot(vec![vm("golden")], "base")).await;
     assert!(
@@ -134,7 +135,7 @@ async fn deleting_the_snapshot_a_linked_clone_is_made_from_is_refused_before_any
     assert!(!fake.calls().iter().any(|c| c.contains("snapshot delete")));
     assert_eq!(fake.snapshot_names(&vmx("golden")), ["base", "patched"]);
     assert_eq!(
-        core.store.recent_audit(&core.ctx, 100).await.unwrap().len(),
+        core.store.recent_audit(&core.ctx(), 100).await.unwrap().len(),
         audit_before,
         "nothing was asked, so nothing is logged"
     );
@@ -142,7 +143,7 @@ async fn deleting_the_snapshot_a_linked_clone_is_made_from_is_refused_before_any
     // A snapshot taken after the clone's is not the clone's: it is deleted as usual.
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vm("golden")], "base/patched"))
+            .submit(&core.ctx(), delete_snapshot(vec![vm("golden")], "base/patched"))
             .await
             .unwrap(),
     );
@@ -167,7 +168,7 @@ async fn the_parent_of_a_clones_snapshot_is_deleted_as_usual() {
     let core = built(setup).await;
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vm("golden")], "base"))
+            .submit(&core.ctx(), delete_snapshot(vec![vm("golden")], "base"))
             .await
             .unwrap(),
     );
@@ -184,7 +185,7 @@ async fn a_bulk_delete_names_the_clones_and_refuses_only_the_vm_they_depend_on()
     let core = built(setup).await;
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vm("golden"), vm("db01")], "base"))
+            .submit(&core.ctx(), delete_snapshot(vec![vm("golden"), vm("db01")], "base"))
             .await
             .unwrap(),
     );
@@ -230,7 +231,7 @@ async fn a_linked_clone_made_after_the_approval_stops_the_delete_when_its_turn_c
     let core = built(setup).await;
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vm("golden")], "base"))
+            .submit(&core.ctx(), delete_snapshot(vec![vm("golden")], "base"))
             .await
             .unwrap(),
     );
@@ -256,7 +257,7 @@ async fn a_clone_gone_from_disk_no_longer_holds_the_snapshot() {
     fake.set_file(&vmx("web-01"), false);
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vm("golden")], "base"))
+            .submit(&core.ctx(), delete_snapshot(vec![vm("golden")], "base"))
             .await
             .unwrap(),
     );
@@ -288,7 +289,7 @@ async fn a_clone_on_a_share_counts_without_being_opened() {
 #[tokio::test]
 async fn the_snapshot_list_shows_each_snapshots_linked_clones() {
     let core = built(Setup::new(lab())).await;
-    let list = core.snapshots.list(&core.ctx, Some(&[vmx("golden")])).await.unwrap();
+    let list = core.snapshots.list(&core.ctx(), Some(&[vmx("golden")])).await.unwrap();
     let nodes: Vec<(&str, Vec<&str>)> = list[0]
         .snapshots
         .iter()
@@ -321,7 +322,7 @@ async fn deleting_a_golden_vm_is_refused_with_its_clones_and_a_clone_can_go() {
     // With another VM: the preview names the clones as golden's problem, and the job deletes only the other one.
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_vms(vec![vm("golden"), vm("db01")]))
+            .submit(&core.ctx(), delete_vms(vec![vm("golden"), vm("db01")]))
             .await
             .unwrap(),
     );
@@ -341,7 +342,7 @@ async fn deleting_a_golden_vm_is_refused_with_its_clones_and_a_clone_can_go() {
     // Deleting the clone itself is fine, and Workstation takes it off golden's .vmsd: golden is free again.
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_vms(vec![vm("web-01")]))
+            .submit(&core.ctx(), delete_vms(vec![vm("web-01")]))
             .await
             .unwrap(),
     );
@@ -350,7 +351,7 @@ async fn deleting_a_golden_vm_is_refused_with_its_clones_and_a_clone_can_go() {
     assert!(fake.linked_clones(&vmx("golden")).is_empty());
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vm("golden")], "base"))
+            .submit(&core.ctx(), delete_snapshot(vec![vm("golden")], "base"))
             .await
             .unwrap(),
     );
@@ -380,7 +381,7 @@ async fn virtualbox_refuses_deleting_a_snapshot_a_linked_clone_is_made_from() {
     let request = asked(
         core.bus
             .submit(
-                &core.ctx,
+                &core.ctx(),
                 delete_snapshot(vec![vbox_vm(GOLDEN), vbox_vm(OTHER)], "base"),
             )
             .await
@@ -401,7 +402,7 @@ async fn virtualbox_refuses_deleting_a_snapshot_a_linked_clone_is_made_from() {
 
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vbox_vm(GOLDEN)], "later"))
+            .submit(&core.ctx(), delete_snapshot(vec![vbox_vm(GOLDEN)], "later"))
             .await
             .unwrap(),
     );
@@ -411,7 +412,7 @@ async fn virtualbox_refuses_deleting_a_snapshot_a_linked_clone_is_made_from() {
     // The snapshot list shows the clone under "base".
     let list = core
         .snapshots
-        .list(&core.ctx, Some(&[GOLDEN.to_owned()]))
+        .list(&core.ctx(), Some(&[GOLDEN.to_owned()]))
         .await
         .unwrap();
     let base = list[0].snapshots.iter().find(|n| n.name == "base").unwrap();
@@ -450,7 +451,7 @@ async fn a_delete_whose_clones_cant_be_checked_is_refused_too() {
     vbox.set_failing("media", false);
     let request = asked(
         core.bus
-            .submit(&core.ctx, delete_snapshot(vec![vbox_vm(OTHER)], "base"))
+            .submit(&core.ctx(), delete_snapshot(vec![vbox_vm(OTHER)], "base"))
             .await
             .unwrap(),
     );

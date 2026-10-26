@@ -74,7 +74,7 @@ fn session_input(name: &str, port: u16, auth: SessionAuth) -> SessionInput {
 
 async fn add_password(core: &Core, label: &str, password: &str) -> remotely_core::vault::SecretId {
     core.vault
-        .add(&core.ctx, SecretKind::Password, label, SecretString::new(password))
+        .add(&core.ctx(), SecretKind::Password, label, SecretString::new(password))
         .await
         .unwrap()
         .id
@@ -87,7 +87,7 @@ async fn trust(core: &Core, server: &TestSshServer) {
         key_type: "ssh-ed25519".into(),
         fingerprint: server.host_key_fingerprint(),
     };
-    core.known_hosts.trust(&core.ctx, &key, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
 }
 
 /// A session on `server` that logs in as alice with `password` (saved in the vault), its key trusted.
@@ -97,7 +97,7 @@ async fn host(core: &Core, server: &TestSshServer, name: &str, password: remotel
     common::vault_password_given(core).await;
     core.sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input(
                 name,
                 server.port(),
@@ -167,7 +167,7 @@ fn answers(request: &ApprovalRequest) -> ApprovalAnswers {
 
 /// Submits, approving whatever it needs. Returns the job id.
 async fn run(core: &Core, command: Command) -> Uuid {
-    match core.bus.submit(&core.ctx, command).await.unwrap() {
+    match core.bus.submit(&core.ctx(), command).await.unwrap() {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => {
             let answers = answers(&request);
@@ -213,7 +213,7 @@ async fn a_script_runs_on_each_host_with_its_output_exit_code_and_duration() {
 
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(results.counts.failed, 2);
@@ -225,7 +225,11 @@ async fn a_script_runs_on_each_host_with_its_output_exit_code_and_duration() {
         assert!(host.duration_ms.is_some());
     }
     let web01 = results.hosts.iter().find(|h| h.name == "web01").unwrap();
-    let out = core.bulk.host_output(&core.ctx, job, &web01.target_key).await.unwrap();
+    let out = core
+        .bulk
+        .host_output(&core.ctx(), job, &web01.target_key)
+        .await
+        .unwrap();
     assert_eq!(out.stdout, "web01\n");
     assert_eq!(out.stderr, "to stderr\n");
     assert!(!out.truncated);
@@ -270,7 +274,7 @@ async fn fifty_hosts_show_grouped_results_within_five_seconds_of_the_slowest() {
         let pane = core
             .terminals
             .open(
-                &core.ctx,
+                &core.ctx(),
                 *id,
                 remotely_core::adapters::remote::PtySize { cols: 80, rows: 24 },
             )
@@ -283,7 +287,7 @@ async fn fifty_hosts_show_grouped_results_within_five_seconds_of_the_slowest() {
         session_ids: ids[2..].to_vec(),
         ..TargetPicks::default()
     };
-    let resolved = core.bulk.resolve(&core.ctx, &picks).await.unwrap();
+    let resolved = core.bulk.resolve(&core.ctx(), &picks).await.unwrap();
     assert_eq!(resolved.hosts.len(), 50);
     assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
     let web02 = resolved.hosts.iter().find(|h| h.name == "web02").unwrap();
@@ -293,7 +297,7 @@ async fn fifty_hosts_show_grouped_results_within_five_seconds_of_the_slowest() {
     let started = Instant::now();
     let SubmitOutcome::Queued { job_id, .. } = core
         .bus
-        .submit(&core.ctx, exec("cat /etc/os-release", &targets))
+        .submit(&core.ctx(), exec("cat /etc/os-release", &targets))
         .await
         .unwrap()
     else {
@@ -302,7 +306,7 @@ async fn fifty_hosts_show_grouped_results_within_five_seconds_of_the_slowest() {
     assert_eq!(finished(&mut events, job_id).await, JobStatus::Succeeded);
     let results = core
         .bulk
-        .results(&core.ctx, job_id, GroupOptions::default())
+        .results(&core.ctx(), job_id, GroupOptions::default())
         .await
         .unwrap();
     let grouped = Instant::now();
@@ -341,7 +345,7 @@ async fn fifty_hosts_show_grouped_results_within_five_seconds_of_the_slowest() {
     // BX-03: the diff between the two groups shows the one line that differs.
     let diff = core
         .bulk
-        .diff(&core.ctx, job_id, &big.sample, &small.sample, GroupOptions::default())
+        .diff(&core.ctx(), job_id, &big.sample, &small.sample, GroupOptions::default())
         .await
         .unwrap();
     let changed: Vec<(String, &str)> = diff
@@ -374,7 +378,7 @@ async fn big_outputs_are_capped_but_still_grouped_by_the_whole_output() {
 
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(results.groups.len(), 1, "same output, though only part of it is stored");
@@ -382,7 +386,7 @@ async fn big_outputs_are_capped_but_still_grouped_by_the_whole_output() {
     let host = &results.hosts[0];
     assert!(host.truncated);
     assert_eq!(host.stdout_bytes, Some(full as i64));
-    let out = core.bulk.host_output(&core.ctx, job, &host.target_key).await.unwrap();
+    let out = core.bulk.host_output(&core.ctx(), job, &host.target_key).await.unwrap();
     assert!(out.stdout.len() < 70 * 1024, "{} bytes stored", out.stdout.len());
     assert!(out.stdout.starts_with("1\n2\n3\n"));
     assert!(out.stdout.ends_with("99999\n100000\n"));
@@ -409,14 +413,14 @@ async fn trailing_whitespace_can_be_ignored_when_grouping() {
 
     let exact = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(exact.groups.len(), 2);
     let loose = GroupOptions {
         ignore_trailing_whitespace: true,
     };
-    let grouped = core.bulk.results(&core.ctx, job, loose).await.unwrap();
+    let grouped = core.bulk.results(&core.ctx(), job, loose).await.unwrap();
     assert_eq!(grouped.groups.len(), 1);
     assert_eq!(grouped.headline, "All 2 hosts the same");
 }
@@ -438,7 +442,7 @@ async fn failures_name_their_cause_per_host_and_group_by_it() {
     let gone = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("gone", closed_port, SessionAuth::Password { password_id: Some(pw) }),
         )
         .await
@@ -450,7 +454,7 @@ async fn failures_name_their_cause_per_host_and_group_by_it() {
     assert_eq!(finished(&mut events, job).await, JobStatus::PartiallyFailed);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     let code = |name: &str| {
@@ -489,7 +493,7 @@ async fn each_host_has_the_runs_time_limit() {
     assert!(started.elapsed() < Duration::from_secs(8));
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     // H9: the command may have started, so the host is not counted as failed.
@@ -516,11 +520,11 @@ async fn bad_scripts_and_time_limits_are_refused_before_anything_runs() {
         if let Command::RemoteExec { timeout_secs, .. } = &mut command {
             *timeout_secs = timeout;
         }
-        let err = core.bus.submit(&core.ctx, command).await.unwrap_err();
+        let err = core.bus.submit(&core.ctx(), command).await.unwrap_err();
         assert_eq!(err.code(), "invalid_input", "{script:?} {timeout:?}");
     }
     let huge = "x".repeat(65 * 1024);
-    let err = core.bus.submit(&core.ctx, exec(&huge, &target)).await.unwrap_err();
+    let err = core.bus.submit(&core.ctx(), exec(&huge, &target)).await.unwrap_err();
     assert_eq!(err.code(), "invalid_input");
 }
 
@@ -535,7 +539,7 @@ async fn unknown_host_keys_fail_unless_the_run_trusts_them_and_changed_keys_alwa
     let id = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input(
                 "new box",
                 server.port(),
@@ -551,11 +555,11 @@ async fn unknown_host_keys_fail_unless_the_run_trusts_them_and_changed_keys_alwa
     assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(results.hosts[0].error_code.as_deref(), Some("host_key_unknown"));
-    assert!(core.known_hosts.list(&core.ctx).await.unwrap().is_empty());
+    assert!(core.known_hosts.list(&core.ctx()).await.unwrap().is_empty());
 
     let mut trusting = exec("uptime", &[id]);
     if let Command::RemoteExec {
@@ -566,10 +570,10 @@ async fn unknown_host_keys_fail_unless_the_run_trusts_them_and_changed_keys_alwa
     }
     let job = run(&core, trusting.clone()).await;
     assert_eq!(finished(&mut events, job).await, JobStatus::Succeeded);
-    let known = core.known_hosts.list(&core.ctx).await.unwrap();
+    let known = core.known_hosts.list(&core.ctx()).await.unwrap();
     assert_eq!(known.len(), 1);
     assert_eq!(known[0].fingerprint, server.host_key_fingerprint());
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     assert!(audit.iter().any(|e| e.event == "host_key_trusted"));
 
     // A new key for the same host blocks, even for a run that trusts new keys.
@@ -578,11 +582,11 @@ async fn unknown_host_keys_fail_unless_the_run_trusts_them_and_changed_keys_alwa
     assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(results.hosts[0].error_code.as_deref(), Some("host_key_changed"));
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     assert!(audit.iter().any(|e| e.event == "host_key_changed"));
 }
 
@@ -601,11 +605,11 @@ async fn trusting_new_keys_never_trusts_a_new_key_type_for_a_host_with_a_trusted
         key_type: "ssh-rsa".into(),
         fingerprint: "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into(),
     };
-    core.known_hosts.trust(&core.ctx, &rsa, None).await.unwrap();
+    core.known_hosts.trust(&core.ctx(), &rsa, None).await.unwrap();
     let id = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             session_input("web01", server.port(), SessionAuth::Password { password_id: Some(pw) }),
         )
         .await
@@ -623,18 +627,18 @@ async fn trusting_new_keys_never_trusts_a_new_key_type_for_a_host_with_a_trusted
     assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(results.hosts[0].error_code.as_deref(), Some("host_key_changed"));
-    let known = core.known_hosts.list(&core.ctx).await.unwrap();
+    let known = core.known_hosts.list(&core.ctx()).await.unwrap();
     assert_eq!(known.len(), 1, "the new type was not trusted: {known:?}");
     assert_eq!(known[0].key_type, "ssh-rsa");
     assert!(
         !server.log().iter().any(|l| l.starts_with("password")),
         "no password offered to it"
     );
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     let blocked = audit.iter().find(|e| e.event == "host_key_changed").unwrap();
     assert!(blocked.action.contains("new kind of host key"), "{blocked:?}");
 }
@@ -682,7 +686,7 @@ async fn cancelling_stops_hosts_in_flight_and_those_not_started() {
 
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     // H9: the host that was running may still finish the command: its outcome is unknown.
@@ -695,7 +699,7 @@ async fn cancelling_stops_hosts_in_flight_and_those_not_started() {
     assert_eq!(in_flight.len(), 1, "one host was running when it was cancelled");
     assert_eq!(in_flight[0].status, "unknown");
     assert_eq!(results.groups.len(), 1, "the unknown host is a group of its own");
-    let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 20).await.unwrap();
     let end = audit.iter().find(|e| e.event == "job_finished").unwrap();
     assert!(end.detail.as_deref().unwrap().contains("the host may still finish it"));
 }
@@ -715,14 +719,14 @@ async fn retrying_reruns_only_the_failed_hosts_as_a_new_linked_job() {
     let first = run(&core, exec("cat /etc/app.conf", &ids)).await;
     assert_eq!(finished(&mut events, first).await, JobStatus::PartiallyFailed);
 
-    let SubmitOutcome::Queued { job_id: retry, .. } = core.bus.retry_failed(&core.ctx, first, false).await.unwrap()
+    let SubmitOutcome::Queued { job_id: retry, .. } = core.bus.retry_failed(&core.ctx(), first, false).await.unwrap()
     else {
         panic!("a read-only command on one host is Low");
     };
     assert_eq!(finished(&mut events, retry).await, JobStatus::Failed);
     let results = core
         .bulk
-        .results(&core.ctx, retry, GroupOptions::default())
+        .results(&core.ctx(), retry, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(results.hosts.len(), 1);
@@ -738,7 +742,7 @@ async fn retrying_reruns_only_the_failed_hosts_as_a_new_linked_job() {
         1,
         "the host that worked was left alone"
     );
-    let audit = core.store.recent_audit(&core.ctx, 50).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 50).await.unwrap();
     let started = audit
         .iter()
         .find(|e| e.event == "job_started" && e.job_id.as_deref() == Some(retry.to_string().as_str()))
@@ -748,7 +752,7 @@ async fn retrying_reruns_only_the_failed_hosts_as_a_new_linked_job() {
     // Nothing left to retry in a job where everything worked.
     let fine = run(&core, exec("cat /etc/app.conf", &ids[..1])).await;
     finished(&mut events, fine).await;
-    let err = core.bus.retry_failed(&core.ctx, fine, false).await.unwrap_err();
+    let err = core.bus.retry_failed(&core.ctx(), fine, false).await.unwrap_err();
     assert_eq!(err.code(), "invalid_input");
 }
 
@@ -780,13 +784,13 @@ async fn sudo_takes_the_login_password_or_a_chosen_one_and_reports_a_wrong_one_p
     assert_eq!(finished(&mut events, job).await, JobStatus::PartiallyFailed);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     let same_host = results.hosts.iter().find(|h| h.name == "same").unwrap();
     let out = core
         .bulk
-        .host_output(&core.ctx, job, &same_host.target_key)
+        .host_output(&core.ctx(), job, &same_host.target_key)
         .await
         .unwrap();
     assert_eq!(out.stdout, "root\n");
@@ -817,7 +821,7 @@ async fn sudo_without_a_password_to_give_fails_that_host_with_what_to_do() {
     let key_session = core
         .sessions
         .create(
-            &core.ctx,
+            &core.ctx(),
             SessionInput {
                 host: "db01.example.com".into(),
                 ..session_input("db01", 22, SessionAuth::Agent)
@@ -831,7 +835,7 @@ async fn sudo_without_a_password_to_give_fails_that_host_with_what_to_do() {
     assert_eq!(finished(&mut events, job).await, JobStatus::Failed);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(results.hosts[0].error_code.as_deref(), Some("no_sudo_password"));
@@ -845,7 +849,7 @@ async fn sudo_without_a_password_to_give_fails_that_host_with_what_to_do() {
     let key = core
         .vault
         .add(
-            &core.ctx,
+            &core.ctx(),
             SecretKind::Passphrase,
             "a passphrase",
             SecretString::new("not-a-password"),
@@ -855,7 +859,7 @@ async fn sudo_without_a_password_to_give_fails_that_host_with_what_to_do() {
         .id;
     let err = core
         .bus
-        .submit(&core.ctx, with_sudo(exec("whoami", &[key_session]), Some(key)))
+        .submit(&core.ctx(), with_sudo(exec("whoami", &[key_session]), Some(key)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
@@ -868,13 +872,13 @@ async fn the_editor_and_the_approval_dialog_name_the_dangerous_rule_that_matched
     let core = Setup::new(FakeVmware::default()).build().await;
     let s = core
         .sessions
-        .create(&core.ctx, session_input("web01", 22, SessionAuth::Agent))
+        .create(&core.ctx(), session_input("web01", 22, SessionAuth::Agent))
         .await
         .unwrap()
         .id;
     let command = exec("cd /srv/app\nrm -rf ./cache\nsystemctl restart app", &[s]);
 
-    let preview = core.bus.preview(&core.ctx, &command).await.unwrap();
+    let preview = core.bus.preview(&core.ctx(), &command).await.unwrap();
     assert_eq!(preview.tier, Tier::High);
     assert_eq!(preview.dangerous.len(), 1);
     assert_eq!(preview.dangerous[0].rule, "rm -r / rm -rf");
@@ -883,7 +887,7 @@ async fn the_editor_and_the_approval_dialog_name_the_dangerous_rule_that_matched
     // A preview queues and audits nothing.
     assert!(core
         .store
-        .recent_audit(&core.ctx, 10)
+        .recent_audit(&core.ctx(), 10)
         .await
         .unwrap()
         .iter()
@@ -892,12 +896,12 @@ async fn the_editor_and_the_approval_dialog_name_the_dangerous_rule_that_matched
     // Still typing, no target yet: the rule shows all the same.
     let early = core
         .bus
-        .preview(&core.ctx, &exec("shutdown -h now", &[]))
+        .preview(&core.ctx(), &exec("shutdown -h now", &[]))
         .await
         .unwrap();
     assert_eq!(early.dangerous[0].rule, "shutdown / reboot");
 
-    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx, command).await.unwrap() else {
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), command).await.unwrap() else {
         panic!("a dangerous command needs approval");
     };
     let details = request.exec.as_ref().unwrap();
@@ -920,18 +924,18 @@ async fn lab_core(remote: FakeRemote) -> Core {
     let mut setup = Setup::new(fake);
     setup.remote = Arc::new(remote);
     let core = setup.build().await;
-    core.inventory.refresh(&core.ctx).await.unwrap();
+    core.inventory.refresh(&core.ctx()).await.unwrap();
     core
 }
 
 async fn vm_id(core: &Core, name: &str) -> String {
-    core.store.find_vm(&core.ctx, &vmx(name)).await.unwrap().unwrap().id
+    core.store.find_vm(&core.ctx(), &vmx(name)).await.unwrap().unwrap().id
 }
 
 #[tokio::test]
 async fn targets_come_from_sessions_vms_with_a_linked_session_tags_and_saved_filters() {
     let core = lab_core(FakeRemote::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web_vm = vm_id(&core, "web").await;
     let web = core
         .sessions
@@ -1004,12 +1008,12 @@ async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cann
     let server = TestSshServer::start().await.with_password("alice", &password);
     let saved = host(&core, &server, "web01", pw).await;
     let size = remotely_core::adapters::remote::PtySize { cols: 80, rows: 24 };
-    let tab = core.terminals.open(&core.ctx, saved, size).await.unwrap();
-    let split = core.terminals.open(&core.ctx, saved, size).await.unwrap();
+    let tab = core.terminals.open(&core.ctx(), saved, size).await.unwrap();
+    let split = core.terminals.open(&core.ctx(), saved, size).await.unwrap();
     let quick = core
         .terminals
         .quick_connect(
-            &core.ctx,
+            &core.ctx(),
             remotely_core::terminal::quick::QuickConnect {
                 host: format!("alice@127.0.0.1:{}", server.port()),
                 port: None,
@@ -1023,7 +1027,7 @@ async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cann
         )
         .await
         .unwrap();
-    let closed = core.terminals.open(&core.ctx, saved, size).await.unwrap();
+    let closed = core.terminals.open(&core.ctx(), saved, size).await.unwrap();
     core.terminals.close(closed.id).await;
     tokio::time::timeout(WAIT, async {
         while core.terminals.pane_info(closed.id).is_some() {
@@ -1036,7 +1040,7 @@ async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cann
     let resolved = core
         .bulk
         .resolve(
-            &core.ctx,
+            &core.ctx(),
             &TargetPicks {
                 terminal_ids: vec![tab.id, split.id, quick.handle.id, closed.id],
                 ..Default::default()
@@ -1056,7 +1060,7 @@ async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cann
 #[tokio::test]
 async fn a_session_counts_as_prod_or_protected_when_its_vm_is() {
     let core = lab_core(FakeRemote::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let web_vm = vm_id(&core, "web").await;
     let session = core
         .sessions
@@ -1120,7 +1124,7 @@ async fn a_session_counts_as_prod_or_protected_when_its_vm_is() {
 #[tokio::test]
 async fn linking_a_session_to_a_vm_is_checked_and_audited() {
     let core = lab_core(FakeRemote::default()).await;
-    let ctx = &core.ctx;
+    let ctx = &core.ctx();
     let err = core
         .sessions
         .create(
@@ -1185,7 +1189,7 @@ async fn hosts_run_ten_at_a_time_by_default_and_the_limit_is_a_setting() {
             host: format!("h{i}.example.com"),
             ..session_input(&format!("h{i}"), 22, SessionAuth::Agent)
         };
-        ids.push(core.sessions.create(&core.ctx, input).await.unwrap().id);
+        ids.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
     }
     let mut events = core.jobs.subscribe();
     let job = run(&core, exec("uptime", &ids)).await;
@@ -1200,7 +1204,7 @@ async fn hosts_run_ten_at_a_time_by_default_and_the_limit_is_a_setting() {
     }
     core.set_bulk_parallel_limit(3).await.unwrap();
     assert_eq!(core.bulk_parallel_limit(), 3);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].action, "Set the hosts a bulk run reaches at once");
 }
 
@@ -1221,14 +1225,18 @@ async fn exports_hold_every_host_in_csv_json_and_html_without_secrets() {
             host: format!("{name}.example.com"),
             ..session_input(name, 22, SessionAuth::Agent)
         };
-        ids.push(core.sessions.create(&core.ctx, input).await.unwrap().id);
+        ids.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
     }
     let mut events = core.jobs.subscribe();
     let job = run(&core, exec("deploy --token tok-123 && cat app.conf", &ids)).await;
     finished(&mut events, job).await;
 
     let opts = GroupOptions::default();
-    let (csv, redacted, hosts) = core.bulk.render(&core.ctx, job, ExportFormat::Csv, opts).await.unwrap();
+    let (csv, redacted, hosts) = core
+        .bulk
+        .render(&core.ctx(), job, ExportFormat::Csv, opts)
+        .await
+        .unwrap();
     assert_eq!(hosts, 2);
     assert!(redacted >= 1);
     assert!(csv.starts_with("\u{FEFF}host,group,status,exit_code,duration_ms,stdout,stderr,output_truncated,error\r\n"));
@@ -1237,7 +1245,7 @@ async fn exports_hold_every_host_in_csv_json_and_html_without_secrets() {
 
     let (json, _, _) = core
         .bulk
-        .render(&core.ctx, job, ExportFormat::Json, opts)
+        .render(&core.ctx(), job, ExportFormat::Json, opts)
         .await
         .unwrap();
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -1248,7 +1256,7 @@ async fn exports_hold_every_host_in_csv_json_and_html_without_secrets() {
 
     let (html, _, _) = core
         .bulk
-        .render(&core.ctx, job, ExportFormat::Html, opts)
+        .render(&core.ctx(), job, ExportFormat::Html, opts)
         .await
         .unwrap();
     assert!(html.starts_with("<!doctype html>"));
@@ -1260,12 +1268,12 @@ async fn exports_hold_every_host_in_csv_json_and_html_without_secrets() {
     let path = dir.join("run.html");
     let export = core
         .bulk
-        .export(&core.ctx, job, ExportFormat::Html, opts, &path)
+        .export(&core.ctx(), job, ExportFormat::Html, opts, &path)
         .await
         .unwrap();
     assert_eq!(export.hosts, 2);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), html);
-    let audit = core.store.recent_audit(&core.ctx, 1).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 1).await.unwrap();
     assert_eq!(audit[0].event, "job_exported");
     assert_eq!(audit[0].action, "Exported a bulk run's results to HTML");
     assert_eq!(audit[0].detail.as_deref(), Some("2 hosts to run.html"));
@@ -1277,7 +1285,7 @@ async fn recent_runs_list_only_remote_commands() {
     let core = lab_core(FakeRemote::default()).await;
     let s = core
         .sessions
-        .create(&core.ctx, session_input("web", 22, SessionAuth::Agent))
+        .create(&core.ctx(), session_input("web", 22, SessionAuth::Agent))
         .await
         .unwrap()
         .id;
@@ -1293,7 +1301,7 @@ async fn recent_runs_list_only_remote_commands() {
     )
     .await;
     finished(&mut events, protect).await;
-    let runs = core.bulk.recent(&core.ctx, 10).await.unwrap();
+    let runs = core.bulk.recent(&core.ctx(), 10).await.unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, job.to_string());
     assert_eq!(runs[0].summary, "Run `uptime` on 1 host");
@@ -1313,7 +1321,7 @@ async fn fake_hosts(remote: FakeRemote, count: usize) -> (Core, Arc<FakeRemote>,
             host: format!("h{i}.example.com"),
             ..session_input(&format!("h{i}"), 22, SessionAuth::Agent)
         };
-        ids.push(core.sessions.create(&core.ctx, input).await.unwrap().id);
+        ids.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
     }
     (core, remote, ids)
 }
@@ -1363,15 +1371,18 @@ async fn a_canary_runs_on_one_host_and_the_rest_wait_for_the_go_ahead() {
     assert_eq!(core.jobs.waiting_for_go_ahead(), [job]);
     let wait = core.jobs.canary_wait(job).unwrap();
     assert_eq!((wait.name.as_str(), wait.rest), ("h0", 3));
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let pending = targets.iter().filter(|t| t.status == "pending").count();
     assert_eq!(pending, 3);
 
-    assert!(core.bus.go_on(&core.ctx, job).await.unwrap());
+    assert!(core.bus.go_on(&core.ctx(), job).await.unwrap());
     assert_eq!(finished(&mut events, job).await, JobStatus::Succeeded);
     assert_eq!(ran_on(&remote).len(), 4);
-    assert!(!core.bus.go_on(&core.ctx, job).await.unwrap(), "nothing waits any more");
-    let audit = core.store.recent_audit(&core.ctx, 20).await.unwrap();
+    assert!(
+        !core.bus.go_on(&core.ctx(), job).await.unwrap(),
+        "nothing waits any more"
+    );
+    let audit = core.store.recent_audit(&core.ctx(), 20).await.unwrap();
     let go = audit
         .iter()
         .find(|e| e.event == "canary_go_on")
@@ -1394,7 +1405,7 @@ async fn a_canary_that_fails_stops_the_run_and_cancel_stops_the_wait() {
     assert_eq!(ran_on(&remote), ["h0.example.com"]);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!((results.counts.failed, results.counts.skipped), (1, 2));
@@ -1433,7 +1444,7 @@ async fn the_go_ahead_is_refused_while_presenting_read_only() {
         })
         .await
         .unwrap();
-    let err = core.bus.go_on(&core.ctx, job).await.unwrap_err();
+    let err = core.bus.go_on(&core.ctx(), job).await.unwrap_err();
     assert_eq!(err.code(), "read_only_lock");
     assert_eq!(core.jobs.waiting_for_go_ahead(), [job], "still waiting");
     assert!(core.jobs.cancel(job));
@@ -1458,11 +1469,11 @@ async fn a_run_stops_starting_hosts_after_its_failures() {
     assert_eq!(ran_on(&remote).len(), 2, "two failed, then none started");
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!((results.counts.failed, results.counts.skipped), (2, 8));
-    let audit = core.store.recent_audit(&core.ctx, 5).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 5).await.unwrap();
     let end = audit.iter().find(|e| e.event == "job_finished").unwrap();
     let detail = end.detail.as_deref().unwrap();
     assert!(detail.contains("8 not started"), "{detail}");
@@ -1471,7 +1482,7 @@ async fn a_run_stops_starting_hosts_after_its_failures() {
     // A stop of 0 failures makes no sense.
     let err = core
         .bus
-        .submit(&core.ctx, with_rollout(exec("uptime", &ids), false, Some(0)))
+        .submit(&core.ctx(), with_rollout(exec("uptime", &ids), false, Some(0)))
         .await
         .unwrap_err();
     assert_eq!(err.code(), "invalid_input");
@@ -1490,7 +1501,7 @@ async fn hosts_already_running_finish_when_the_stop_comes() {
     assert_eq!(finished(&mut events, job).await, JobStatus::PartiallyFailed);
     let results = core
         .bulk
-        .results(&core.ctx, job, GroupOptions::default())
+        .results(&core.ctx(), job, GroupOptions::default())
         .await
         .unwrap();
     assert_eq!(
@@ -1519,27 +1530,27 @@ async fn a_timed_out_host_is_retried_only_when_asked() {
     }
     let first = run(&core, command).await;
     finished(&mut events, first).await;
-    let summary = core.store.recent_jobs(&core.ctx, 1).await.unwrap().remove(0);
+    let summary = core.store.recent_jobs(&core.ctx(), 1).await.unwrap().remove(0);
     assert_eq!((summary.targets_failed, summary.targets_unknown), (1, 1));
 
     // By default only the host that failed runs again.
-    let SubmitOutcome::Queued { job_id: retry, .. } = core.bus.retry_failed(&core.ctx, first, false).await.unwrap()
+    let SubmitOutcome::Queued { job_id: retry, .. } = core.bus.retry_failed(&core.ctx(), first, false).await.unwrap()
     else {
         panic!("a read-only command on one host is Low");
     };
     finished(&mut events, retry).await;
-    let targets = core.store.job_targets(&core.ctx, retry).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), retry).await.unwrap();
     let names: Vec<&str> = targets.iter().map(|t| t.target_name.as_str()).collect();
     assert_eq!(names, ["bad"]);
 
     // Asked, the host whose outcome is unknown runs again too.
-    let outcome = core.bus.retry_failed(&core.ctx, first, true).await.unwrap();
+    let outcome = core.bus.retry_failed(&core.ctx(), first, true).await.unwrap();
     let job = match outcome {
         SubmitOutcome::Queued { job_id, .. } => job_id,
         SubmitOutcome::NeedsApproval { request } => core.bus.approve(request.id, answers(&request)).await.unwrap(),
     };
     finished(&mut events, job).await;
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     let mut names: Vec<&str> = targets.iter().map(|t| t.target_name.as_str()).collect();
     names.sort_unstable();
     assert_eq!(names, ["bad", "slow"]);
@@ -1551,7 +1562,11 @@ async fn a_timed_out_host_is_retried_only_when_asked() {
     }
     let only_unknown = run(&core, command).await;
     finished(&mut events, only_unknown).await;
-    let err = core.bus.retry_failed(&core.ctx, only_unknown, false).await.unwrap_err();
+    let err = core
+        .bus
+        .retry_failed(&core.ctx(), only_unknown, false)
+        .await
+        .unwrap_err();
     assert!(err.to_string().contains("outcome unknown"), "{err}");
 }
 
@@ -1565,11 +1580,11 @@ async fn each_host_is_journaled_with_the_address_reached_and_the_key_accepted() 
     let mut events = core.jobs.subscribe();
     let job = run(&core, exec("uptime", &[id])).await;
     assert_eq!(finished(&mut events, job).await, JobStatus::Succeeded);
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert_eq!(targets[0].peer_ip.as_deref(), Some("127.0.0.1"));
     let key = format!("ssh-ed25519 {}", server.host_key_fingerprint());
     assert_eq!(targets[0].host_key.as_deref(), Some(key.as_str()));
-    let audit = core.store.recent_audit(&core.ctx, 5).await.unwrap();
+    let audit = core.store.recent_audit(&core.ctx(), 5).await.unwrap();
     let end = audit.iter().find(|e| e.event == "job_finished").unwrap();
     let detail = end.detail.as_deref().unwrap();
     assert!(
@@ -1582,7 +1597,7 @@ async fn each_host_is_journaled_with_the_address_reached_and_the_key_accepted() 
     let other = host(&core, &server, "web02", wrong).await;
     let job = run(&core, exec("uptime", &[other])).await;
     finished(&mut events, job).await;
-    let targets = core.store.job_targets(&core.ctx, job).await.unwrap();
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
     assert_eq!(targets[0].status, "failed");
     assert_eq!(targets[0].host_key.as_deref(), Some(key.as_str()));
     assert_eq!(targets[0].peer_ip, None);

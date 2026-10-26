@@ -157,7 +157,7 @@ impl Setup {
 pub async fn vault_password_given(core: &Core) {
     core.secret_bindings()
         .confirm(
-            &core.ctx,
+            &core.ctx(),
             Some(&SecretString::new(VAULT_PASSWORD)),
             "test",
             "sessions on several test servers share one vault password",

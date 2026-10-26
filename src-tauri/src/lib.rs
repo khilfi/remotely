@@ -26,6 +26,7 @@ pub mod updater;
 mod vm_insight;
 mod vm_settings;
 mod wake;
+mod workspaces;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -224,7 +225,7 @@ fn start(app: &mut App, log_dir: Option<&Path>) -> Result<(), Box<dyn std::error
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             let detail = format!("the database could not be opened ({err}); it was kept as {name}");
             let noted = tauri::async_runtime::block_on(core.store.append_audit(
-                &core.ctx,
+                &core.ctx(),
                 NewAuditEntry {
                     event: "database_set_aside",
                     action: "Started with an empty database",
@@ -282,14 +283,18 @@ fn turn_off_browser_keys(app: &App) {
 /// Core events -> UI, and the background readers (metrics, reachability).
 fn forward_events(app: &App, core: &Arc<Core>) {
     {
-        // Job progress -> UI.
+        // Job progress -> UI. FD-02: only the shown workspace's jobs (another's schedule runs go on unseen).
         let mut job_events = core.jobs.subscribe();
         let handle = app.handle().clone();
+        let jobs = Arc::clone(&core.jobs);
+        let shown = core.current().clone();
         tauri::async_runtime::spawn(async move {
             loop {
                 match job_events.recv().await {
                     Ok(event) => {
-                        let _ = handle.emit("job://event", &event);
+                        if jobs.workspace_of(event.job_id()) == Some(shown.get().workspace_id) {
+                            let _ = handle.emit("job://event", &event);
+                        }
                     }
                     Err(RecvError::Lagged(missed)) => tracing::warn!(missed, "UI missed job events"),
                     Err(RecvError::Closed) => break,
@@ -721,6 +726,22 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_cancel,
         files::files_retry,
         files::files_open_folder,
+        // FD-02 workspaces, AP-08 change ID rule.
+        workspaces::workspaces_list,
+        workspaces::workspace_current,
+        workspaces::workspace_create,
+        workspaces::workspace_rename,
+        workspaces::workspace_set_color,
+        workspaces::workspace_archive,
+        workspaces::workspace_restore,
+        workspaces::workspace_switch_preview,
+        workspaces::workspace_switch,
+        workspaces::vm_unassigned,
+        workspaces::vm_claim,
+        workspaces::vm_release,
+        workspaces::change_id_rules,
+        workspaces::change_id_rules_set,
+        workspaces::transfer_commit_new_workspace,
     ]
 }
 

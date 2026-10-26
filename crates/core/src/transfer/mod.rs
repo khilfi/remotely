@@ -102,6 +102,10 @@ struct Payload {
     /// The app and version that wrote it, for the preview.
     #[serde(default)]
     exported_by: String,
+    /// FD-02: the workspace it was exported from (an export holds one workspace), offered as the name of a new
+    /// workspace to import it into. Files from before 0.5.0 have none.
+    #[serde(default)]
+    workspace: Option<String>,
     #[serde(default)]
     folders: Vec<FolderEntry>,
     #[serde(default)]
@@ -458,6 +462,8 @@ pub struct TransferPreview {
     pub file: String,
     pub exported_at: String,
     pub exported_by: String,
+    /// FD-02: the workspace the file was exported from, if it says.
+    pub workspace: Option<String>,
     pub folders: usize,
     /// Folders not here yet. Created when a session imported into them needs them.
     pub new_folders: usize,
@@ -1422,6 +1428,11 @@ impl Transfer {
         let payload = Payload {
             exported_at: now_rfc3339(),
             exported_by: exported_by.to_owned(),
+            workspace: self
+                .store
+                .workspace(ctx.user_id, ctx.workspace_id)
+                .await?
+                .map(|w| w.name),
             folders: folders
                 .iter()
                 .map(|f| FolderEntry {
@@ -1858,6 +1869,7 @@ impl Transfer {
                 .map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned()),
             exported_at: payload.exported_at.clone(),
             exported_by: payload.exported_by.clone(),
+            workspace: payload.workspace.clone(),
             folders: payload.folders.len(),
             new_folders,
             sessions,
