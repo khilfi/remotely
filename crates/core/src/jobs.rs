@@ -787,6 +787,10 @@ impl JobRunner {
     /// H9: the rest of a job whose canary host finished may start. Only the command bus calls this
     /// ([`crate::command_bus::CommandBus::go_on`]). False when the job is not waiting for it.
     pub(crate) fn go_on(&self, ctx: &Context, job_id: Uuid) -> bool {
+        // FD-02: only from the workspace the job was started in.
+        if self.workspace_of(job_id) != Some(ctx.workspace_id) {
+            return false;
+        }
         match locks::lock(&self.waiting).remove(&job_id) {
             Some((go, _)) => go.send(*ctx).is_ok(),
             None => false,
@@ -813,6 +817,12 @@ impl JobRunner {
             }
             None => false,
         }
+    }
+
+    /// FD-02: the UI's Cancel. A job started in another workspace (a schedule's run there) can't be cancelled from
+    /// this one: false, as for a job that is not open.
+    pub fn cancel_in(&self, workspace: WorkspaceId, job_id: Uuid) -> bool {
+        self.workspace_of(job_id) == Some(workspace) && self.cancel(job_id)
     }
 
     /// Only the command bus calls this, after policy and approval.

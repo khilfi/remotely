@@ -118,7 +118,7 @@ impl Store {
 
     pub async fn append_audit(&self, ctx: &Context, e: NewAuditEntry<'_>) -> Result<AuditEntry> {
         let _chain = self.audit_lock.lock().await;
-        let prev = Some(self.chain_head(ctx).await?);
+        let prev_hash = self.chain_head(ctx).await?;
 
         // AP-05: kept for good, so no secret typed into a command or a reason stays in it.
         let clean = |text: &str| redact_secrets(text).0;
@@ -136,7 +136,7 @@ impl Store {
             approval_json: e.approval.map(serde_json::to_string).transpose()?,
             result: e.result.map(clean),
             detail: e.detail.map(clean),
-            prev_hash: prev.unwrap_or_else(|| GENESIS_HASH.to_owned()),
+            prev_hash,
             hash: String::new(),
         };
         entry.hash = entry.compute_hash();

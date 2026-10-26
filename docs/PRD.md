@@ -104,7 +104,7 @@ Every action that changes something gets one of four risk tiers, and the tier de
 | --- | --- | --- |
 | Low | Start VMs, take a snapshot, read-only commands | None; logged only |
 | Medium | Suspend or pause VMs, reset one VM, open a tunnel to a Prod host | One confirm showing the impact summary |
-| High | Stop, reset or suspend 2 or more VMs; revert or delete snapshots; any command flagged dangerous | Impact preview, safety snapshot (on by default), type the number of targets, give a reason or ticket number, 10-second countdown with cancel |
+| High | Stop, reset or suspend 2 or more VMs; revert or delete snapshots; any command flagged dangerous | Impact preview, safety snapshot (on by default), type the number of targets, give a reason, an optional change ID (AP-08; a workspace can require one for Prod targets), 10-second countdown with cancel |
 | Critical | Hard power-off, bulk network disconnect, deleting VMs or disks, any High action on Prod | All High steps, then the vault password again |
 
 VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-labelled VM moves each up one tier, and protected VMs are skipped):
@@ -148,6 +148,14 @@ Conversion (0.5.0, `docs/plan-0.5.md` "Approval tiers"; CV-01 to CV-03, VM-17). 
 | Export a VM labelled Prod | Medium |
 | Import a foreign VM or disk as a new VM (CV-01) | As a deploy: Medium, High for Prod |
 
+Workspaces (0.5.0, FD-02). A VM belongs to one workspace, and the bus refuses an action on a VM from any other. Workspace edits and moving VMs between workspaces change nothing outside Remotely:
+
+| Action | Tier |
+| --- | --- |
+| Create, rename, recolour, archive or restore a workspace; switch workspaces (refused while a job started in the shown one runs) | No tier; audited, refused by the read-only lock |
+| Add an unassigned VM to the shown workspace, or take one out (never a protected or Prod VM) | No tier; audited, refused by the read-only lock |
+| Change the workspace's change ID rule (AP-08) | No tier; audited, refused by the read-only lock |
+
 Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 
 | Action | Tier |
@@ -166,6 +174,7 @@ Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 | AP-05 | Append-only audit log of who, what, targets, approval answers, result and output; each entry is hash-chained to the previous one so edits show; exports to CSV | MVP |
 | AP-06 | Critical tier asks for the vault password again | MVP |
 | AP-07 | Maintenance windows: High and Critical actions outside them need an extra override reason; Windows Hello as a re-auth option | v2 |
+| AP-08 | Change IDs (0.5.0; the ID's old meaning, a second approver, was dropped with team mode): an optional ticket or change number on High and Critical approvals, standing approvals for schedules included; a setting per workspace makes it required for actions on Prod targets. Trimmed, at most 64 characters, secrets redacted; kept in the audit entry, the job, the AP-05 audit CSV and the Compare and MultiExec exports | 0.5.0 |
 
 ## Monitoring dashboard
 
@@ -196,7 +205,7 @@ These features are for work at customer sites: keeping engagements apart, sharin
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | FD-01 | Command palette (Ctrl+K), full keyboard use, dark and light themes | MVP |
-| FD-02 | Customer workspaces: sessions, vault, logs and notes kept separate per engagement; one-click switch | v2 |
+| FD-02 | Customer workspaces (0.5.0): sessions, VMs, templates, stacks, schedules, vault items, jobs, audit log, rules and per-engagement settings kept separate per engagement; switched from the top bar; an FD-07 export holds one workspace | 0.5.0 |
 | FD-03 | Presentation mode: mask IPs, hostnames, usernames and secrets on screen; optional read-only lock | v2 |
 | FD-04 | Support bundle: collect logs, configs and system info from many hosts into one timestamped zip | v2 |
 | FD-05 | Inventory export (OS, IPs, MACs, CPU, RAM, packages, open ports) to Excel | v2 |

@@ -176,6 +176,41 @@ pub async fn repair_workspace(store: &Store, ctx: &Context) -> Result<Vec<&'stat
     Ok(reset)
 }
 
+async fn check<T: DeserializeOwned>(
+    store: &Store,
+    ctx: &Context,
+    key: &'static str,
+    what: &str,
+    reset: &mut Vec<&'static str>,
+) -> Result<()> {
+    let err = match store.get_setting::<T>(ctx, key).await {
+        Ok(_) => return Ok(()),
+        Err(CoreError::Json(err)) => err,
+        Err(other) => return Err(other),
+    };
+    tracing::error!(setting = key, error = %err, "a saved setting can't be read; its default applies");
+    // Audited first: if the audit can't be written, the setting stays as it was and the start fails as before.
+    let detail = format!("{what} ({key}) could not be read ({err}); the default applies, and the saved value is kept as {key}.unreadable");
+    store
+        .append_audit(
+            ctx,
+            NewAuditEntry {
+                event: "setting_changed",
+                action: "Reset an unreadable setting to its default",
+                tier: None,
+                job_id: None,
+                targets: &[],
+                approval: None,
+                result: None,
+                detail: Some(&detail),
+            },
+        )
+        .await?;
+    store.set_setting_aside(ctx, key).await?;
+    reset.push(key);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,39 +275,4 @@ mod tests {
             })
         );
     }
-}
-
-async fn check<T: DeserializeOwned>(
-    store: &Store,
-    ctx: &Context,
-    key: &'static str,
-    what: &str,
-    reset: &mut Vec<&'static str>,
-) -> Result<()> {
-    let err = match store.get_setting::<T>(ctx, key).await {
-        Ok(_) => return Ok(()),
-        Err(CoreError::Json(err)) => err,
-        Err(other) => return Err(other),
-    };
-    tracing::error!(setting = key, error = %err, "a saved setting can't be read; its default applies");
-    // Audited first: if the audit can't be written, the setting stays as it was and the start fails as before.
-    let detail = format!("{what} ({key}) could not be read ({err}); the default applies, and the saved value is kept as {key}.unreadable");
-    store
-        .append_audit(
-            ctx,
-            NewAuditEntry {
-                event: "setting_changed",
-                action: "Reset an unreadable setting to its default",
-                tier: None,
-                job_id: None,
-                targets: &[],
-                approval: None,
-                result: None,
-                detail: Some(&detail),
-            },
-        )
-        .await?;
-    store.set_setting_aside(ctx, key).await?;
-    reset.push(key);
-    Ok(())
 }

@@ -48,6 +48,9 @@ pub struct Setup {
     pub containers: Arc<dyn ContainerEngines>,
     /// CV-01 to CV-03: the conversion tools, without qemu-img unless a test installs it ([`FakeDiskTools::with_qemu_img`]).
     pub disk_tools: Arc<FakeDiskTools>,
+    /// FD-02: the fakes' VMs are listed (refreshed into the workspace) before the test starts, unless
+    /// [`Setup::unlisted`].
+    pub listed: bool,
 }
 
 impl Setup {
@@ -67,6 +70,7 @@ impl Setup {
             network: Arc::new(FakeNetwork::default()),
             containers: Arc::new(FakeContainers::default()),
             disk_tools: Arc::new(FakeDiskTools::new()),
+            listed: true,
         }
     }
 
@@ -102,6 +106,12 @@ impl Setup {
     pub fn with_ssh(mut self) -> Self {
         self.remote = Arc::new(RusshAdapter::new());
         self.containers = Arc::new(CliEngines::without_this_pc());
+        self
+    }
+
+    /// No first refresh: the VMs aren't listed until the test refreshes (QL-01 tests that save sessions first).
+    pub fn unlisted(mut self) -> Self {
+        self.listed = false;
         self
     }
 
@@ -150,6 +160,9 @@ impl Setup {
             .unwrap();
         // FD-02: the bus acts only on VMs the workspace lists. The app lists them when the VMs page opens; tests start
         // with the fakes' VMs listed (one workspace: every VM joins it).
+        if !self.listed {
+            return core;
+        }
         if let Err(err) = core.inventory.refresh(&core.ctx()).await {
             eprintln!("the test setup's first inventory refresh failed: {err}");
         }

@@ -404,7 +404,7 @@ async fn the_catalogue_rules_groups_container_marks_and_notifications_are_per_wo
         .await
         .unwrap()
         .into_iter()
-        .find(|w| w.current == false)
+        .find(|w| !w.current)
         .unwrap();
     switch(&core, &home).await;
     assert_eq!(custom_alerts(&core), 1, "Acme's rule is back with Acme");
@@ -434,7 +434,7 @@ async fn a_vm_belongs_to_one_workspace_and_the_bus_refuses_it_from_any_other() {
     let report = core.inventory.refresh(&acme).await.unwrap();
     assert_eq!(names(report.vms), ["db", "web"]);
     let waiting: Vec<String> = report.unassigned.iter().map(|v| v.vmx_path.clone()).collect();
-    assert_eq!(waiting, [late.clone()]);
+    assert_eq!(waiting, std::slice::from_ref(&late));
     let refused = core
         .bus
         .submit(
@@ -480,7 +480,7 @@ async fn a_vm_belongs_to_one_workspace_and_the_bus_refuses_it_from_any_other() {
     );
 
     // Globex adds the late VM; Acme gives db up and Globex takes it.
-    core.inventory.claim(&b, &[late.clone()]).await.unwrap();
+    core.inventory.claim(&b, std::slice::from_ref(&late)).await.unwrap();
     let home = core
         .workspaces
         .list()
@@ -830,6 +830,8 @@ async fn switching_waits_for_running_jobs_then_closes_terminals_multiexec_and_ap
     assert!(matches!(busy, Err(CoreError::WorkspaceBusy { .. })), "{busy:?}");
     assert_eq!(core.ctx(), acme, "nothing changed");
     assert_eq!(core.terminals.open_count(), 1);
+    // Only the workspace a job was started in can cancel it.
+    assert!(!core.jobs.cancel_in(globex.id, job_id));
     wait_finished(&mut jobs, job_id).await;
 
     switch(&core, &globex).await;

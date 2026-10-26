@@ -35,7 +35,7 @@ fn lab() -> FakeVmware {
 
 async fn lab_core(network: FakeNetwork) -> (Core, Arc<FakeNetwork>) {
     let network = Arc::new(network);
-    let core = Setup::new(lab()).with_network(network.clone()).build().await;
+    let core = Setup::new(lab()).with_network(network.clone()).unlisted().build().await;
     (core, network)
 }
 

@@ -26,6 +26,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { api, errorMessage } from "@/lib/api";
 import { READ_ONLY_REASON } from "@/lib/disabled-reasons";
+import { workspacesApi } from "@/lib/workspaces-api";
 import {
   presentationView,
   readOnlyLocked,
@@ -48,7 +49,14 @@ export function useReadOnlyReason(): string | null {
  * connections (their hosts, IPs and users). The answers are learnt on the way in (api.ts). Never waits long.
  */
 export async function primeMasker(waitMs = 1500): Promise<void> {
-  const reads = Promise.allSettled([api.sessions(), api.vmList(), api.knownHosts(), api.quickConnectHistory()]);
+  // FD-02: the workspace list teaches the masker every workspace name, archived ones included.
+  const reads = Promise.allSettled([
+    api.sessions(),
+    api.vmList(),
+    api.knownHosts(),
+    api.quickConnectHistory(),
+    workspacesApi.list(),
+  ]);
   await Promise.race([reads, new Promise((resolve) => window.setTimeout(resolve, waitMs))]);
 }
 

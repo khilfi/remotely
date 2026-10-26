@@ -208,7 +208,8 @@ pub async fn command_cancel_approval(state: State<'_, AppState>, request_id: Uui
 
 #[tauri::command]
 pub fn job_cancel(state: State<'_, AppState>, job_id: Uuid) -> bool {
-    state.core.jobs.cancel(job_id)
+    let core = &state.core;
+    core.jobs.cancel_in(core.ctx().workspace_id, job_id)
 }
 
 #[tauri::command]
