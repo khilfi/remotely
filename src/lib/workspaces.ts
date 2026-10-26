@@ -127,3 +127,18 @@ export function claimReason(selected: number, readOnly: string | null): string |
   if (selected === 0) return "Select the VMs to add first.";
   return null;
 }
+
+/**
+ * The VMs page's empty state while two or more workspaces are active, or null for the usual "No VMs found" (with one
+ * workspace every VM found joins it, so an empty list means none was found).
+ */
+export function noVmsHere(activeWorkspaces: number, unassigned: number): { title: string; description: string } | null {
+  if (activeWorkspaces < 2) return null;
+  const description =
+    unassigned > 0
+      ? `Each VM belongs to one workspace. ${
+          unassigned === 1 ? "1 VM no workspace has yet is" : `${unassigned} VMs no workspace has yet are`
+        } under Unassigned: add the ones this engagement uses.`
+      : "Each VM belongs to one workspace, and every VM Remotely found is in another one. Take a VM out there (its menu, Take out of this workspace), then add it here from Unassigned.";
+  return { title: "No VMs in this workspace", description };
+}

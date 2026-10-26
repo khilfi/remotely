@@ -138,7 +138,7 @@ import {
 } from "@/lib/vm-snapshots";
 import { bulkResizeReason, resizeTargets } from "@/lib/vm-settings";
 import { UnassignedVmsSheet } from "@/components/UnassignedVmsSheet";
-import { releaseReason } from "@/lib/workspaces";
+import { noVmsHere, releaseReason } from "@/lib/workspaces";
 import { workspacesApi, type UnassignedVm } from "@/lib/workspaces-api";
 
 /** VM-11, VM-16: the side sheets the page opens. */
@@ -819,6 +819,7 @@ export function VmsPage({
   const powerOff = power(POWER_OFF);
   // FD-02: taking VMs out of this workspace, into Unassigned.
   const releaseOff = readOnly ?? releaseReason(selectedVms, activeWorkspaces);
+  const noVms = noVmsHere(activeWorkspaces, unassigned.length);
   async function release() {
     try {
       const keys = selectedVms.map((v) => v.vmxPath);
@@ -1420,14 +1421,19 @@ export function VmsPage({
             <EmptyMedia variant="icon">
               <MonitorOffIcon />
             </EmptyMedia>
-            <EmptyTitle>No VMs found</EmptyTitle>
+            <EmptyTitle>{noVms?.title ?? "No VMs found"}</EmptyTitle>
             <EmptyDescription>
-              Remotely lists the VMs in VMware Workstation&apos;s library and in folders you choose, and the VMs
-              registered in Oracle VirtualBox. Open a VM in Workstation once, add the folder that holds your VMs, or
-              register the VM in VirtualBox.
+              {noVms?.description ?? (
+                <>
+                  Remotely lists the VMs in VMware Workstation&apos;s library and in folders you choose, and the VMs
+                  registered in Oracle VirtualBox. Open a VM in Workstation once, add the folder that holds your VMs, or
+                  register the VM in VirtualBox.
+                </>
+              )}
             </EmptyDescription>
           </EmptyHeader>
-          <EmptyContent>
+          <EmptyContent className="flex-row justify-center">
+            {unassigned.length > 0 && <Button onClick={() => setUnassignedOpen(true)}>Unassigned VMs</Button>}
             <Button variant="outline" onClick={onOpenSettings}>
               <FolderPlusIcon data-icon="inline-start" />
               Add a VM folder

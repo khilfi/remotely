@@ -6,6 +6,7 @@ import {
   colorClass,
   MAX_WORKSPACE_NAME,
   nameProblem,
+  noVmsHere,
   releaseReason,
   switchable,
   switchCloses,
@@ -61,6 +62,14 @@ test("FD-02: only unprotected, non-Prod VMs leave a workspace, and only when ano
   assert.match(releaseReason([], 2) ?? "", /Select/);
   assert.equal(claimReason(2, null), null);
   assert.equal(claimReason(2, "Presenting: read-only"), "Presenting: read-only");
+});
+
+test("FD-02: an empty VM list says why when other workspaces have the VMs", () => {
+  assert.equal(noVmsHere(1, 0), null, "one workspace: nothing was found");
+  assert.equal(noVmsHere(2, 0)?.title, "No VMs in this workspace");
+  assert.match(noVmsHere(2, 0)?.description ?? "", /every VM Remotely found is in another one/);
+  assert.match(noVmsHere(3, 1)?.description ?? "", /1 VM no workspace has yet is under Unassigned/);
+  assert.match(noVmsHere(2, 4)?.description ?? "", /4 VMs no workspace has yet are under Unassigned/);
 });
 
 test("FD-02: every colour the core knows has a class; an unknown one falls back", () => {
