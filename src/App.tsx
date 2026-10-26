@@ -41,6 +41,8 @@ import {
   KeyboardIcon,
   KeyRoundIcon,
   LayersIcon,
+  HardDriveIcon,
+  ImportIcon,
   NetworkIcon,
   Rows3Icon,
   RocketIcon,
@@ -87,6 +89,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { DeployDialog } from "@/components/DeployDialog";
+import { VmExportDialog } from "@/components/VmExportDialog";
+import { VmImportDialog } from "@/components/VmImportDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReauthDialog } from "@/components/ReauthDialog";
@@ -141,6 +145,7 @@ import { MapPage } from "@/pages/MapPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
+import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage, type VmPageRequest, type VmPanel } from "@/pages/VmsPage";
@@ -161,6 +166,7 @@ import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 type PageId =
   | "vms"
   | "templates"
+  | "images"
   | "schedules"
   | "map"
   | "dashboard"
@@ -176,6 +182,8 @@ type PageId =
 const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
   { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
   { id: "templates", label: "Templates", title: "VM templates", icon: LayersIcon, shortcut: "Ctrl+9" },
+  // CV-03: Ctrl+; beside the Schedules page's Ctrl+. (no Ctrl+digit was left).
+  { id: "images", label: "Image tools", title: "Image tools", icon: HardDriveIcon, shortcut: "Ctrl+;" },
   // VM-14, VM-27: no Ctrl+digit was left.
   { id: "schedules", label: "Schedules", title: "Schedules", icon: CalendarClockIcon, shortcut: "Ctrl+." },
   { id: "map", label: "Map", title: "Topology map", icon: NetworkIcon, shortcut: "Ctrl+0" },
@@ -192,6 +200,7 @@ const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; short
 // P6: memoised pages. Each one renders again only when its own props change; App passes them stable callbacks.
 const Vms = memo(VmsPage);
 const Templates = memo(TemplatesPage);
+const ImageTools = memo(ImageToolsPage);
 const Schedules = memo(SchedulesPage);
 const TopologyMap = memo(MapPage);
 const Dashboard = memo(DashboardPage);
@@ -259,6 +268,15 @@ export default function App() {
   const [deploying, setDeploying] = useState<{ templateId: string | null } | null>(null);
   const openDeploy = useCallback((templateId?: string) => setDeploying({ templateId: templateId ?? null }), []);
   const openDeployBlank = useCallback(() => setDeploying({ templateId: null }), []);
+  // CV-01: the Import dialog (on a file Image tools inspected, or none); VM-17: the Export dialog on a VM.
+  const [importing, setImporting] = useState<{ path: string | null } | null>(null);
+  // A path only when it is one (a click handler may pass its event).
+  const openImport = useCallback(
+    (path?: unknown) => setImporting({ path: typeof path === "string" ? path : null }),
+    [],
+  );
+  const [exporting, setExporting] = useState<string | null>(null);
+  const openExport = useCallback((vmKey: string) => setExporting(vmKey), []);
   // VM-14, VM-27: a new schedule (for some VMs) or one schedule's runs, asked from a VM's tab or the palette.
   const [schedulesRequest, setSchedulesRequest] = useState<SchedulesRequest | null>(null);
   // SS-03: a session to open in a new terminal tab; CT-01: a shell in one of its containers.
@@ -353,7 +371,7 @@ export default function App() {
         return;
       }
       if (terminal || e.shiftKey || paletteOpen.current) return;
-      const target = /^[0-9,.]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
+      const target = /^[0-9,.;]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
       if (target) {
         e.preventDefault();
         go(target);
@@ -517,6 +535,10 @@ export default function App() {
         case "started":
           // Updates keep the earlier description unless it is cleared.
           toast.loading("Running…", { id, description: null });
+          break;
+        case "targetProgress":
+          // CV-03, VM-17: a conversion's or export's own progress.
+          toast.loading(`Running… ${Math.round(event.percent)}%`, { id, description: event.step });
           break;
         case "canaryWaiting":
           // H9: the rest wait for a look at the canary's result (Compare output, or the key push dialog), so the
@@ -741,6 +763,20 @@ export default function App() {
       icon: RocketIcon,
       keywords: "vm template create clone cloud-init iso ova new virtual machine",
       run: () => openDeployBlank(),
+    },
+    {
+      id: "import-vm",
+      label: "Import a VM or disk (OVA, VHDX, qcow2, libvirt, Proxmox)…",
+      icon: ImportIcon,
+      keywords: "convert hyper-v kvm proxmox azure ova ovf vhd vhdx qcow2 raw img vdi vmdk foreign virtual machine",
+      run: () => openImport(),
+    },
+    {
+      id: "image-tools",
+      label: "Image tools: inspect, convert or verify a disk image",
+      icon: HardDriveIcon,
+      keywords: "convert vmdk vdi vhd vhdx qcow2 raw qemu-img checksum sha256 disk",
+      run: () => setPage("images"),
     },
     {
       id: "new-template",
@@ -1101,6 +1137,8 @@ export default function App() {
                   active={page === "vms"}
                   onSubmitted={submitted}
                   onDeploy={openDeployBlank}
+                  onImport={openImport}
+                  onExport={openExport}
                   onOpenSettings={show.settings}
                   onActions={openPalette}
                   request={vmRequest}
@@ -1112,6 +1150,16 @@ export default function App() {
             <section hidden={page !== "templates"}>
               <ErrorBoundary name="Templates">
                 <Templates active={page === "templates"} request={templatesRequest} onDeploy={openDeploy} />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "images"}>
+              <ErrorBoundary name="Image tools">
+                <ImageTools
+                  active={page === "images"}
+                  onSubmitted={submitted}
+                  onImport={openImport}
+                  onOpenSettings={show.settings}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "schedules"}>
@@ -1230,6 +1278,10 @@ export default function App() {
       {deploying && (
         <DeployDialog templateId={deploying.templateId} onSubmitted={submitted} onClose={() => setDeploying(null)} />
       )}
+      {importing && (
+        <VmImportDialog initialPath={importing.path} onSubmitted={submitted} onClose={() => setImporting(null)} />
+      )}
+      {exporting && <VmExportDialog vmKey={exporting} onSubmitted={submitted} onClose={() => setExporting(null)} />}
       {approval && (
         <ApprovalDialog
           request={approval.request}

@@ -140,7 +140,10 @@ crates/core/          remotely-core: all app logic
                       streamed through exec_output's OutputCollector (A9: capped, never buffered whole); parse.rs both
                       CLIs' JSON field by field (env values never leave it; a command and entrypoint go through
                       export::redact_secrets, parse::command_line); names.rs checked ids, volume names and
-                      image references, every word shell-quoted on hosts)
+                      image references, every word shell-quoted on hosts), disk_tools.rs (CV-01 to CV-03, VM-17 the
+                      conversion tools behind DiskTools: qemu-img found from Settings, `REMOTELY_QEMU_IMG`, then
+                      QEMU's default folder, never shipped; vdiskmanager, VBoxManage and ovftool from the hypervisor
+                      adapters' paths; each run streamed for its own progress, timed, killed on cancel)
     containers/       CT-01, CT-02 container hosts: marks.rs (sessions marked Docker or Podman, how each runs: as the
                       user or with sudo; migration 0013, audited like session edits, Change::ContainerHosts, FD-07);
                       mod.rs the Containers service: detection, reads on kept connections (closed when idle), target
@@ -195,7 +198,34 @@ crates/core/          remotely-core: all app logic
                       VM's .vmx; cloud_init.rs VM-22 meta-data and user-data (hostname, guest user with sudo, SSH
                       public key, packages; never a password) and Workstation's guestinfo keys; seed.rs the NoCloud
                       seed (ISO 9660 with Joliet, label `cidata`) and its reader for tests; ovf.rs an OVF's or OVA's
-                      disk capacities for the preview (an OVA's first tar members only)
+                      disk capacities for the preview (an OVA's first tar members only) and its descriptor (CV-01);
+                      CV-01 service/import.rs: an import is a deploy (ImportRequest, check_import, submit_import;
+                      DeploySource::Import, DeployOrigin::Import); the runner copies VMDK and raw (Workstation) or
+                      VMDK, VDI, VHD and raw (VirtualBox) itself and converts the rest (qcow2, VHDX; VHD and VDI on
+                      Workstation) through Converter::convert_into, which also makes R1's qcow2 cloud images deploy
+    convert/          CV-01 to CV-03, VM-17 conversion (other hypervisors' formats read and written, never managed).
+                      formats.rs DiskFormat and OutputKind (VMDK sparse, flat, stream-optimized, ESXi's vmfs; VDI,
+                      VHD, VHDX dynamic or fixed; qcow2; raw); inspect.rs CV-03 Inspect from each header (MO-13's
+                      readers, VHDX's region and metadata tables, qcow2's backing file and encryption, a raw disk's
+                      MBR or GPT; a parent or backing file is a problem but a Workstation delta, which vdiskmanager
+                      flattens); plan.rs which tools, pure: the hypervisors' own first (vdiskmanager for VMDK,
+                      VBoxManage for VDI, VHD and raw, VirtualBox's own differencing chains), qemu-img for qcow2 and
+                      VHDX, at most two steps through a growable VMDK or VDI, Azure's whole MB through a VDI or qcow2
+                      a tool resizes; qemu-img never reads a disk with a parent; NoPlan::NeedsQemuImg says what
+                      needs it; args.rs every command line (qemu-img always with `-f`/`-F`); spec.rs ConvertSpec
+                      (Command::ImageConvert, TargetRef::DiskImage `disk-image/<path>`, migration 0027) and
+                      ExportSpec (Command::VmExport, the VM as target), both refused from the UI and Low (a Prod
+                      VM's export Medium; policy/convert_tests.rs); runner.rs Converter, the job runner's
+                      ConvertActions: a work folder `.remotely-<job>` beside the output, files moved into place,
+                      nothing ever replaced, a free-space check first, VirtualBox's media list restored (clonemedium
+                      registers its source and target), the job's progress (JobEvent::TargetProgress), everything
+                      the job made removed on failure or cancel; an export makes `<folder>\<vm>-<target>`; targets.rs
+                      each target's README (how to import, driver changes), the libvirt domain XML and the Proxmox
+                      script (names are slugs); describe.rs OVF, libvirt XML and Proxmox .conf read as untrusted
+                      (1 MB cap, no DTD, depth and element caps); import.rs CV-01 what a picked file is and brings;
+                      verify.rs CV-03 Verify (sizes, SHA-256 of each file, qemu-img compare); service.rs
+                      Conversions (Core.convert): tools, Inspect, options and submits, Verify, QEMU's download page
+                      (checked_qemu_site)
     impact.rs         AP-02 impact preview for the approval dialog
     export.rs         AP-05 audit log CSV export and secret redaction; A10 every CSV the core writes (audit, BX-05
                       Compare, QL-12 MultiExec) goes through push_row/csv_cell: a `'` before a cell that starts a
@@ -432,6 +462,10 @@ crates/core/          remotely-core: all app logic
     fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
     fakes/github_server.rs  FD-14 fake GitHub API, github.com download links and release storage on 127.0.0.1
                       (private or public, rate limits), throwaway update-signing key
+    fakes/disk_tools.rs  CV-01 to CV-03 FakeDiskTools: no program runs; each tool's arguments read and small files
+                      with the right header written (VirtualBox's media list kept as VirtualBox keeps it), failing
+                      tools, delays, qemu-img only with_qemu_img; fakes/disk_images.rs small test images of every
+                      format (VMDK sparse and stream, VDI, VHD, VHDX, qcow2, raw, OVA tars, OVF text), TempFolder
     fakes/host_networks.rs  VM-11 the fakes' vmnets and forwards (as_admin, with_forwards_in_conf_only) and VirtualBox's
                       host-only interfaces, NAT networks, VM NAT rules and showvminfo paths, with the tools' refusals
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
@@ -439,8 +473,9 @@ crates/core/          remotely-core: all app logic
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
                       QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16;
                       host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
-                      VM-27 on a FakeClock, no sleeping); opt-in
-                      workstation_it.rs and virtualbox_it.rs
+                      VM-27 on a FakeClock, no sleeping; conversion.rs: CV-01 to CV-03, VM-17); opt-in
+                      workstation_it.rs, virtualbox_it.rs and conversion_it.rs (the real conversion tools on small
+                      images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
@@ -469,7 +504,10 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       Clone dialogs' checks and submits, host adapters, the default VM folder); R4 vm_insight.rs (VM-25
                       logs and the timeline, VM-11 host networks, VM-16 the waste report and Explorer at a folder the
                       core names); VM-14, VM-27 schedules.rs (the scheduler's loop, `schedules://event`, the
-                      Schedules page's and VM tab's commands)
+                      Schedules page's and VM tab's commands); CV-01 to CV-03, VM-17 convert.rs (Image tools' file
+                      dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify` progress,
+                      Export's options and folder dialog, Import's analysis, check and submit, QEMU's page after
+                      checked_qemu_site; Settings' qemu-img path in ipc.rs)
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -495,7 +533,9 @@ src/                  React + TypeScript UI
                       VM-21, VM-22, VM-10: TemplateFields (the template editor's fields, also the Deploy dialog's
                       Custom), DeployDialog (a template or Custom, count, names, the preview, then the job's step per
                       VM: DeployProgressView, useDeployProgress), DeployPreviewView (also in the approval dialog),
-                      CloneDialog;
+                      CloneDialog; CV-01 VmImportDialog (a file analysed, then a deploy with DeployPreviewView and
+                      DeployProgressView), VM-17 VmExportDialog (each target with its plan or why not), CV-03
+                      QemuImgCard (Settings' Conversion tools; ImportDialog and ExportDialog are SS-02's and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
@@ -507,7 +547,9 @@ src/                  React + TypeScript UI
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
                       templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
-                      VM-21 and VM-10; MapPage at Ctrl+0: QL-21 HTML nodes over an SVG of lines only, so FD-03's
+                      VM-21 and VM-10, Import... and the selection's Export..., CV-01 and VM-17; ImageToolsPage
+                      at Ctrl+; after Templates: CV-03 Inspect, Convert, Verify, the tools found and
+                      QEMU's link; MapPage at Ctrl+0: QL-21 HTML nodes over an SVG of lines only, so FD-03's
                       DOM masking covers it; SchedulesPage at Ctrl+. (VM-14, VM-27; no Ctrl+digit was left), also from the palette and a
                       VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
                       take a request to show one item (Sessions `focus`, Activity `focusJob`, Settings `focus` by
@@ -545,11 +587,13 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0), catalog.ts (VM-19 to VM-21 texts, the
-                      size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and packages, a job's steps
-                      from its events and targets), vm-insight-api.ts and vm-insight.ts (R4 wrappers; a followed log,
-                      search, timeline groups, the forward form and its command, the waste rows' QL-08 reasons),
-                      vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
+                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0, Image tools Ctrl+;), catalog.ts (VM-19
+                      to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
+                      packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
+                      wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
+                      rows' QL-08 reasons), convert.ts and convert-api.ts (CV-01 to CV-03, VM-17 texts, QL-08
+                      reasons, the Verify verdict; the conversion IPC's types and wrappers), vm-snapshots.ts (QL-14
+                      snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
                       and a followed log are read), polling.ts (CT-01 when a background read may run, the next one's
@@ -809,6 +853,33 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   again up to three times (`host_networks::showvminfo_pairs`, `vbox_busy`), and the waste finder reads each VM once
   per report, in sequence.
 
+## Conversion tools facts
+
+CV-01 to CV-03, VM-17, from 0.5.0 (`docs/plan-0.5.md`, R5). Checked by hand with Workstation 26's vdiskmanager and
+ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
+
+- vmware-vdiskmanager `-r <src> -t <n> <dst>` reads any VMDK, a snapshot delta with its whole chain (it flattens it),
+  and a raw disk through a flat-extent descriptor. `-t 0` growable, `-t 2` preallocated (`<name>.vmdk` with
+  createType `monolithicFlat` and a `<name>-flat.vmdk` extent holding the raw bytes), `-t 4` ESXi's preallocated
+  layout (createType `vmfs`, the same two files), `-t 5` stream-optimized (a `KDMV` file). It prints
+  `\r  Convert: NN% done.` and refuses a target that is there. It reads no VHD, VDI, VHDX or qcow2.
+- `ovftool <vmx> <file.ova|.ovf>` exports the VM as it is now; it has no OVF 2.0 option (OVF 1.0 only), and
+  `--shaAlgorithm=SHA256` (the default) writes the manifest. `--noImageFiles` leaves an attached ISO out.
+- `VBoxManage clonemedium disk <src> <dst> --format VDI|VMDK|VHD|RAW [--variant Standard|Fixed|Stream]` registers
+  **both** the source and the target in VirtualBox's media list (`list hdds`); `closemedium disk <file>` takes one
+  out (the file stays). `convertfromraw` registers nothing. A VirtualBox VM's current disk (its snapshot's
+  differencing image) is cloned whole, its chain merged. Progress is `0%...10%...` on stderr. Its VHDX backend
+  (`list hddbackends`: capabilities 0x0240, no create) is read-only and refused qemu-img's own VHDX ("BAT region not
+  marked as required"), so VHDX goes through qemu-img; its QCOW backend isn't used either. `VBoxManage export
+  <uuid> --output <file> --ovf10|--ovf20 --manifest` writes an appliance of the VM as it is now.
+- qemu-img (QEMU for Windows, `C:\Program Files\qemu\qemu-img.exe` by default; GPL, never shipped): `convert -p -f <in>
+  -O <out> [-o ...]` prints `    (NN.NN/100%)\r`; `-O vpc -o subformat=fixed,force_size=on` keeps a VHD's exact size
+  (without force_size it rounds to a CHS geometry), `-O vhdx -o subformat=dynamic|fixed`, `-O vdi -o static=on`,
+  `-O qcow2 -o preallocation=metadata` (on Windows its file driver refuses `full` and `falloc`, and `metadata` makes the file its full size), `-O vmdk -o subformat=monolithicSparse|monolithicFlat|streamOptimized` (no
+  `vmfs`). A failure prints `C:\...\qemu-img.exe: <message>` and exits 1. `compare -f A -F B a b` exits 0 ("Images
+  are identical."), 1 when they differ ("Content mismatch at offset N!"), 2 on an error. Remotely always passes `-f`
+  (and `-F`), so it never probes, and never gives it a disk with a parent or a backing file.
+
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
@@ -849,6 +920,12 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   `set_failing` for cleanup, `with_clone_delay` to cancel mid-way) in temp folders; the real adapters' command lines
   are checked against stand-in vmrun, ovftool and VBoxManage `.cmd` files made at run time (a batch file gets an
   argument with `=` quoted).
+- Conversion (CV-01 to CV-03, VM-17): never convert, export or import a real VM's disks or a downloaded image in a
+  test. `tests/conversion.rs` runs through the bus with `fakes::FakeDiskTools` (it runs no program and writes small
+  files with each format's header) on images from `fakes::disk_images` made at run time in the system temp folder;
+  never an image on a network share. The opt-in `conversion_it.rs` runs the real tools on 64 MB images in the temp
+  folder and exports an `it-` Workstation VM made of files there, never registered; it checks VirtualBox's media
+  list is as it was.
 - Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use
   `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).
@@ -882,6 +959,7 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   (from the second server on, docker needs sudo); mark a session as a container host on the Containers page.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Opt-in test against real VirtualBox (reads only: `list vms`, then for `it-` VMs only `showvminfo`, snapshots, guest properties and their processes): `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`
+- Opt-in test against the real conversion tools (vdiskmanager, VBoxManage, qemu-img when installed, ovftool; temp images and an `it-` VM's files only): `REMOTELY_IT=1 cargo test -p remotely-core --test conversion_it -- --nocapture`
 - Lint: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `npm run lint` (tsc, ESLint, Prettier)
 - UI tests: `npm test` (Node's own test runner over `src/**/*.test.ts`: pure helpers only, no DOM; and the release scripts' tests, `scripts/*.test.mjs`, against a fake GitHub on 127.0.0.1)
 - Dependency scan, as CI runs it: `cargo deny --locked check advisories bans sources` (cargo-deny is not a project dependency), `npm audit --omit=dev`

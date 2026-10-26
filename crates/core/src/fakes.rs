@@ -6,6 +6,8 @@
 
 pub mod clock;
 pub mod containers;
+pub mod disk_images;
+pub mod disk_tools;
 pub mod github_server;
 pub mod host_networks;
 pub mod ssh_server;
@@ -108,6 +110,8 @@ pub struct FakeVmware {
     failing: Mutex<HashSet<String>>,
     /// VM-21: no ovftool.exe on this PC.
     no_ovftool: bool,
+    /// CV-03: no vmware-vdiskmanager.exe for conversions.
+    no_vdiskmanager: bool,
     /// VM-21: a clone takes this long once its files are there (so a test can cancel it halfway).
     clone_delay: Duration,
 }
@@ -368,6 +372,13 @@ impl FakeVmware {
     /// VM-21: Workstation without its OVFTool folder.
     pub fn without_ovftool(mut self) -> Self {
         self.no_ovftool = true;
+        self
+    }
+
+    /// CV-03: Workstation without its conversion tools (no vmware-vdiskmanager.exe, no ovftool.exe).
+    pub fn without_disk_tools(mut self) -> Self {
+        self.no_ovftool = true;
+        self.no_vdiskmanager = true;
         self
     }
 
@@ -1093,6 +1104,11 @@ impl VmwareAdapter for FakeVmware {
         (!self.no_ovftool).then(|| PathBuf::from(r"C:\Program Files\VMware\VMware Workstation\OVFTool\ovftool.exe"))
     }
 
+    fn vdiskmanager_path(&self) -> Option<PathBuf> {
+        (!self.no_vdiskmanager)
+            .then(|| PathBuf::from(r"C:\Program Files\VMware\VMware Workstation\vmware-vdiskmanager.exe"))
+    }
+
     async fn workstation_window_open(&self) -> bool {
         self.workstation_open.load(Ordering::SeqCst)
     }
@@ -1159,6 +1175,7 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
 }
 
 pub use containers::FakeContainers;
+pub use disk_tools::FakeDiskTools;
 
 /// VM-18: VirtualBox in memory. VMs are registered with a UUID, a name and a state; power calls
 /// change the state and snapshot calls the tree the way VBoxManage would, through the same checks as

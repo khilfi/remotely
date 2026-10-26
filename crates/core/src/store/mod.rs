@@ -71,6 +71,8 @@ pub const VMRUN_PATH_KEY: &str = "vmware.vmrunPath";
 pub const OVFTOOL_PATH_KEY: &str = "vmware.ovftoolPath";
 /// VM-18: full path to VBoxManage.exe chosen in Settings; JSON null means "find it automatically".
 pub const VBOXMANAGE_PATH_KEY: &str = "virtualbox.vboxmanagePath";
+/// CV-03: full path to qemu-img.exe chosen in Settings; none: `REMOTELY_QEMU_IMG`, then QEMU's default folder.
+pub const QEMU_IMG_PATH_KEY: &str = "convert.qemuImgPath";
 /// FD-14: whether the app checks GitHub Releases for updates; off for air-gapped sites. Default on.
 pub const UPDATE_CHECKS_KEY: &str = "updates.checkEnabled";
 /// VM-01: folders scanned for .vmx files, besides Workstation's library. A JSON list of paths.

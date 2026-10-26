@@ -211,6 +211,46 @@ launch template, or from **Custom** values typed in the dialog.
   job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
   VMs they copy: started as they are, they would use their source's name and addresses.
 
+### Image tools, Import and Export
+
+CV-01 to CV-03, VM-17 (0.5.0): Remotely reads and writes other hypervisors' disk and VM formats (Hyper-V, KVM and
+QEMU, Proxmox, ESXi, Azure and other clouds). It never manages those hypervisors, and it never changes a source: every
+conversion writes new files.
+
+- **Image tools** (Ctrl+;, in the sidebar after Templates; or the palette) makes no VM. **Inspect** reads an image's header: its
+  format (VMDK, VDI, VHD, VHDX, qcow2, raw), layout (growable, preallocated, stream-optimized...), virtual size, size
+  on disk, and its parent or backing file. **Convert** turns it into VMDK (growable, preallocated, stream-optimized,
+  or ESXi's own preallocated layout), VDI, VHD or VHDX (dynamic or fixed), qcow2 (thin or preallocated) or raw. It asks
+  where the new image goes (never over a file that is there, never into a Git working tree), checks the drive's free
+  space first, and runs as a Low job with its progress in the job's notice and in Activity; cancel stops the tool and
+  removes what it made. **Verify** takes the SHA-256 of an image's files and compares two images' sizes, and with
+  qemu-img their contents.
+- **The tools**: the hypervisors' own first, which come with Workstation (`vmware-vdiskmanager`, `ovftool`) and
+  VirtualBox (`VBoxManage clonemedium`, `convertfromraw`, `export`). qcow2 and VHDX need **qemu-img**, which Remotely
+  never ships (it is GPL-licensed): install QEMU for Windows from QEMU's own download page (Image tools links to it)
+  and Remotely finds `qemu-img.exe` in its default folder, through `REMOTELY_QEMU_IMG`, or at the path in Settings
+  (Conversion tools). Without it, each output that needs it says so. qemu-img is always told the input's format, so it
+  never guesses one, and it never reads a disk with a parent: a Workstation snapshot chain is flattened with
+  vmware-vdiskmanager first, a VirtualBox one with VBoxManage, and a foreign differencing disk is refused (convert the
+  whole chain where it was made). VirtualBox adds the images it converts to its media list; Remotely takes them out
+  again.
+- **Import** (VMs page, Image tools or the palette) makes a new VM from an OVA or OVF of any vendor, a disk image (VHD
+  and VHDX from Hyper-V or Azure; qcow2, raw and `.img` from KVM, Proxmox or OpenStack; a VDI for Workstation, a VMDK
+  for VirtualBox), or a VM's own description: a libvirt domain XML (`virsh dumpxml`) or a Proxmox `.conf`, with its
+  disks in the same folder. CPU, memory and firmware come from the description when there is one (it is read as
+  untrusted input, at most 1 MB), else from a size. An import is a deploy: the same preview, approval (Medium; High for
+  Prod), job and cleanup. Each disk is copied or converted into the new VM's folder; the source stays as it was. A
+  cloud image (OpenStack, KVM) can get cloud-init's first-boot setup. qcow2 cloud images in the catalogue deploy the
+  same way once qemu-img is installed.
+- **Export** (a VM's menu on the VMs page) writes a powered-off VM as it is now, its snapshots merged: an **OVA or
+  OVF** (OVF 1.0 from Workstation's ovftool; 1.0 or 2.0 from VirtualBox), **VMDK for ESXi** (stream-optimized, or
+  preallocated for a datastore), **VHDX for Hyper-V**, a **fixed VHD for Azure** (its size rounded up to a whole
+  megabyte, as Azure requires), **qcow2 with a libvirt domain XML** for KVM, a **Proxmox** import script
+  (`qm create`, `qm importdisk`, `qm set`), or **raw** disks. It goes into a new folder `<vm>-<target>` with a
+  README.md that says how to import it there and which drivers the guest may need (VMware Tools or Guest Additions
+  out; virtio drivers in for KVM and Proxmox, and Windows needs its storage driver before it moves). A Low job; a Prod
+  VM's export asks for a confirm.
+
 ### Reachability dots
 
 QL-04: the dots in the Terminal page's session tree. A check opens a TCP connection to the session's SSH port and
@@ -1266,6 +1306,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                               | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                          |
 | Spec catalogue     | `crates/core/src/catalog/`                                        | VM-19, VM-20, VM-21, FD-07                                                                                                                          | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                          |
 | Deploy             | `crates/core/src/deploy/`                                         | VM-10, VM-21, VM-22, AP-02                                                                                                                          | Working: deploys from a template or Custom values (golden VM clone, cloud image with cloud-init, ISO, OVA/OVF) and bulk clones, one job step per VM with cleanup after a failure or cancel; preview with disk space; Medium, High from 5 VMs                   |
+| Conversion         | `crates/core/src/convert/`                                        | VM-17, CV-01, CV-02, CV-03                                                                                                                          | Working: Inspect, Convert and Verify on Image tools (hypervisors' tools first, qemu-img for qcow2 and VHDX when installed), imports as deploys, exports for ESXi, Hyper-V, Azure, KVM, Proxmox, OVA/OVF and raw with a README; Low jobs, Prod exports Medium   |
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                               | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                      |
 | Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                       | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec    |
 | MultiExec          | `crates/core/src/terminal/multiexec.rs`                           | SS-10, QL-07, QL-12                                                                                                                                 | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                    |

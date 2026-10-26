@@ -154,6 +154,15 @@ pub async fn appliance_disks(path: &str, format: ImageFormat) -> Result<Vec<u64>
     Ok(text.as_deref().map(disk_capacities).unwrap_or_default())
 }
 
+/// CV-01: the appliance's OVF descriptor (at most [`MAX_DESCRIPTOR_BYTES`]), or `None` when an OVA has none among its
+/// first members.
+pub async fn appliance_descriptor(path: &str, format: ImageFormat) -> Result<Option<String>> {
+    let path = PathBuf::from(path);
+    tokio::task::spawn_blocking(move || read_descriptor_blocking(&path, format))
+        .await
+        .map_err(|err| CoreError::InvalidInput(format!("the appliance couldn't be read: {err}")))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

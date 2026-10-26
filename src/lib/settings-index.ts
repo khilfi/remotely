@@ -38,6 +38,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Oracle VirtualBox",
     keywords: "vboxmanage path vboxmanage.exe hypervisor",
   },
+  {
+    id: "qemu-img",
+    tab: "general",
+    title: "Conversion tools",
+    keywords: "qemu qemu-img.exe path qcow2 vhdx convert image tools export import",
+  },
   { id: "docker", tab: "general", title: "Docker Desktop on this PC", keywords: "docker.exe path containers" },
   { id: "vm-folders", tab: "general", title: "VM folders", keywords: "scan folders vmx library find vms" },
   {

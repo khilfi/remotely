@@ -3526,6 +3526,10 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
     .into_iter()
     .chain(every_container_command())
     .chain([super::deploy_tests::deploy(1, Environment::Lab)])
+    .chain([
+        super::convert_tests::convert(),
+        super::convert_tests::export(Environment::Lab, false),
+    ])
     .chain(super::vm_settings_tests::every_vm_settings_command())
     .chain(super::host_networks_tests::every_host_network_command())
     .collect()

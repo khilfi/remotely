@@ -61,6 +61,7 @@ pub mod capacity;
 pub mod catalog;
 pub mod command_bus;
 pub mod containers;
+pub mod convert;
 pub mod dashboard;
 pub mod deploy;
 pub mod domain;
@@ -186,6 +187,8 @@ pub struct Adapters {
     pub network: Arc<dyn NetworkAdapter>,
     /// CT-01, CT-02: container engines: their CLIs over SSH and Docker Desktop's on this PC.
     pub containers: Arc<dyn ContainerEngines>,
+    /// CV-01 to CV-03, VM-17: the disk conversion tools (qemu-img when installed; the hypervisors' own).
+    pub disk_tools: Arc<dyn adapters::disk_tools::DiskTools>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -315,6 +318,11 @@ pub struct Core {
     bindings: SecretBindings,
     /// VM-21: what the job runner makes new VMs with; tests shorten its waits.
     deployer: Arc<deploy::runner::Deployer>,
+    /// CV-01 to CV-03, VM-17: Image tools (Inspect, Convert, Verify), a VM's Export, and the conversion tools.
+    /// Conversions and exports are commands on [`Core::bus`]; an import is a deploy ([`Core::deploy`]).
+    pub convert: convert::service::Conversions,
+    /// CV-03: what the job runner converts with; tests shorten its waits.
+    converter: Arc<convert::Converter>,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -375,6 +383,7 @@ impl Core {
             Arc::from(adapters::virtualbox::connect(config.vboxmanage_path.or(saved_vbox)));
         // SS-04: the vault in this database, unlocked by the Windows login (DPAPI) or the master password.
         let vault = LocalVault::open(store.clone(), ctx, Arc::new(Dpapi), VaultOptions::default()).await?;
+        let qemu_img = saved_qemu_img_path(&store, &ctx).await?;
         Self::assemble(
             store,
             ctx,
@@ -387,6 +396,7 @@ impl Core {
                 updater: config.updater,
                 network: Arc::new(SystemNetwork),
                 containers: Arc::new(CliEngines::new(docker.as_deref())),
+                disk_tools: Arc::new(adapters::disk_tools::LocalDiskTools::new(qemu_img)),
             },
             JobLimits::default(),
         )
@@ -538,7 +548,9 @@ impl Core {
         let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
         let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
-        let catalog = Catalog::new(store.clone()).with_hypervisors(hypervisors.clone());
+        let catalog = Catalog::new(store.clone())
+            .with_hypervisors(hypervisors.clone())
+            .with_disk_tools(Arc::clone(&adapters.disk_tools));
         let inventory = Arc::new(Inventory::new(store.clone(), hypervisors.clone(), Arc::clone(&links)));
         // VM-21, VM-22, VM-10: the job runner makes each new VM through the deploy runner.
         let deployer = Arc::new(deploy::runner::Deployer::new(
@@ -553,13 +565,23 @@ impl Core {
             Arc::clone(&adapters.vault),
         ));
         jobs.set_deployer(deployer.clone());
+        // CV-01 to CV-03, VM-17: conversions and exports are jobs; imports convert through the deploy runner.
+        let converter = Arc::new(convert::Converter::new(
+            hypervisors.clone(),
+            Arc::clone(&adapters.disk_tools),
+            Arc::clone(&adapters.host_counters),
+        ));
+        jobs.set_converter(converter.clone());
+        deployer.set_converter(Arc::clone(&converter));
+        let convert = convert::service::Conversions::new(store.clone(), Arc::clone(&converter), Arc::clone(&bus));
         let deploy = deploy::service::Deploys::new(
             store.clone(),
             catalog.clone(),
             hypervisors.clone(),
             Arc::clone(&adapters.host_counters),
             Arc::clone(&bus),
-        );
+        )
+        .with_converter(Arc::clone(&converter));
         let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
         let insight = vm_insight::VmInsight::new(ctx, store.clone(), hypervisors.clone());
         let waste = waste::WasteFinder::new(ctx, store.clone(), hypervisors.clone());
@@ -575,6 +597,8 @@ impl Core {
         });
         let core = Self {
             vm_settings,
+            convert,
+            converter,
             networks,
             insight,
             waste,
@@ -660,6 +684,46 @@ impl Core {
     /// VM-21: how the deploy runner waits for a guest's IP and for VirtualBox to let go of a VM; tests shorten it.
     pub fn set_deploy_tuning(&self, tuning: deploy::runner::DeployTuning) {
         self.deployer.set_tuning(tuning);
+    }
+
+    /// CV-03: how the conversion runner retries removing what a cancelled tool still holds; tests shorten it.
+    pub fn set_convert_tuning(&self, tuning: convert::runner::ConvertTuning) {
+        self.converter.set_tuning(tuning);
+    }
+
+    /// CV-03: the qemu-img.exe in use, or `None` when it isn't installed (or not found).
+    pub fn qemu_img_path(&self) -> Option<PathBuf> {
+        self.converter.disk_tools().qemu_img()
+    }
+
+    /// CV-03: the qemu-img.exe path saved in Settings, if any.
+    pub async fn saved_qemu_img_path(&self) -> Result<Option<PathBuf>> {
+        saved_qemu_img_path(&self.store, &self.ctx).await
+    }
+
+    /// CV-03: saves the qemu-img.exe path (`None` = find it: `REMOTELY_QEMU_IMG`, then QEMU's default folder) and
+    /// looks for it again at once. The path must be an existing qemu-img.exe. Audited, since it decides which
+    /// program converts qcow2 and VHDX images.
+    pub async fn set_qemu_img_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::disk_tools::validate_qemu_img_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx, store::QEMU_IMG_PATH_KEY, &as_text)
+            .await?;
+        self.converter.disk_tools().locate_qemu_img(path);
+        let in_use = self.qemu_img_path();
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the qemu-img.exe path", &detail).await?;
+        Ok(in_use)
     }
 
     /// SS-04, AP-06: where vault passwords may go without asking; tests shorten its grace period.
@@ -1149,6 +1213,13 @@ async fn saved_vmrun_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf
 async fn saved_ovftool_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
     let saved = store
         .get_setting::<Option<String>>(ctx, store::OVFTOOL_PATH_KEY)
+        .await?;
+    Ok(saved.flatten().map(PathBuf::from))
+}
+
+async fn saved_qemu_img_path(store: &Store, ctx: &Context) -> Result<Option<PathBuf>> {
+    let saved = store
+        .get_setting::<Option<String>>(ctx, store::QEMU_IMG_PATH_KEY)
         .await?;
     Ok(saved.flatten().map(PathBuf::from))
 }

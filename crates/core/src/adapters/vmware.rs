@@ -281,6 +281,11 @@ pub trait VmwareAdapter: Send + Sync {
     fn ovftool_path(&self) -> Option<PathBuf> {
         None
     }
+
+    /// CV-01 to CV-03: the vmware-vdiskmanager.exe in use, which conversions run themselves (with progress).
+    fn vdiskmanager_path(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 /// VM-21: `prefvmx.defaultVMPath` from Workstation's `preferences.ini`, when it names a folder.
@@ -816,6 +821,10 @@ impl VmwareAdapter for VmrunAdapter {
 
     fn ovftool_path(&self) -> Option<PathBuf> {
         self.ovftool.clone()
+    }
+
+    fn vdiskmanager_path(&self) -> Option<PathBuf> {
+        self.vdiskmanager.clone()
     }
 
     async fn open_console(&self, vmx: &Path) -> Result<()> {
@@ -1371,6 +1380,9 @@ impl VmwareAdapter for SwitchableVmware {
     }
     fn ovftool_path(&self) -> Option<PathBuf> {
         self.current().ovftool_path()
+    }
+    fn vdiskmanager_path(&self) -> Option<PathBuf> {
+        self.current().vdiskmanager_path()
     }
     async fn vmx_bytes(&self, vmx: &Path) -> Result<Vec<u8>> {
         self.current().vmx_bytes(vmx).await

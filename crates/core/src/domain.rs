@@ -148,10 +148,14 @@ pub enum TargetRef {
         #[serde(default)]
         environment: Environment,
     },
+    /// CV-03: a disk image a conversion writes on this PC, by its full path (it is new: nothing is there yet).
+    DiskImage { path: String },
 }
 
 /// VM-21: [`TargetRef::NewVm`]'s key prefix.
 pub const NEW_VM_KEY: &str = "new-vm";
+/// CV-03: [`TargetRef::DiskImage`]'s key prefix.
+pub const DISK_IMAGE_KEY: &str = "disk-image";
 
 /// CT-01, CT-02: where containers run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -250,6 +254,7 @@ impl TargetRef {
             TargetRef::Container { .. } => "container",
             TargetRef::Network { .. } => "network",
             TargetRef::NewVm { .. } => "new_vm",
+            TargetRef::DiskImage { .. } => "disk_image",
         }
     }
 
@@ -268,7 +273,15 @@ impl TargetRef {
             TargetRef::Network { hypervisor, name } => format!("{}:{name}", hypervisor.as_str()),
             // VM-21: `new-vm/vmware/web-1`. Names are unique (any letter case) within a deploy.
             TargetRef::NewVm { hypervisor, name, .. } => format!("{NEW_VM_KEY}/{}/{name}", hypervisor.as_str()),
+            // CV-03: `disk-image/C:\Images\rocky.vmdk`.
+            TargetRef::DiskImage { path } => format!("{DISK_IMAGE_KEY}/{path}"),
         }
+    }
+
+    /// CV-03: a disk image target from its [`TargetRef::key`].
+    pub fn disk_image_from_key(key: &str) -> Option<TargetRef> {
+        let path = key.strip_prefix(DISK_IMAGE_KEY)?.strip_prefix('/')?;
+        (!path.is_empty()).then(|| TargetRef::DiskImage { path: path.to_owned() })
     }
 
     /// VM-11: a network target from its [`TargetRef::key`].

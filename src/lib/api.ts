@@ -48,7 +48,9 @@ export type TargetRef =
   /** VM-11: a Workstation vmnet or a VirtualBox NAT network whose port forwards change. */
   | { kind: "network"; hypervisor: Hypervisor; name: string }
   /** VM-21, VM-10: a VM a deploy makes, by the name and label it will have. */
-  | { kind: "newVm"; hypervisor: Hypervisor; name: string; environment: Environment };
+  | { kind: "newVm"; hypervisor: Hypervisor; name: string; environment: Environment }
+  /** CV-03: the new image a conversion writes on this PC, by its full path. */
+  | { kind: "diskImage"; path: string };
 
 export interface Target {
   target: TargetRef;
@@ -300,7 +302,11 @@ export type Command =
   /** VM-11: add or remove a NAT port forward on a network, or a VirtualBox VM's NAT adapter (one target). */
   | { type: "hostNetwork"; targets: TargetRef[]; op: HostNetworkOp }
   /** VM-21, VM-10: new VMs. Never submitted by the UI: `deploySubmit` and `deployCloneSubmit` build it in the core. */
-  | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> };
+  | { type: "deploy"; targets: TargetRef[]; spec: Record<string, unknown> }
+  /** CV-03: a conversion. Never submitted by the UI: `convertSubmit` builds it in the core after a save dialog. */
+  | { type: "imageConvert"; targets: TargetRef[]; spec: Record<string, unknown> }
+  /** VM-17, CV-02: an export. Never submitted by the UI: `exportSubmit` builds it in the core after a folder dialog. */
+  | { type: "vmExport"; targets: TargetRef[]; spec: Record<string, unknown> };
 
 /** VM-11: what a network adapter is attached to. */
 export type NicNetwork =
@@ -587,6 +593,8 @@ export type JobEvent =
     }
   /** H9: the canary host finished well; `rest` hosts wait until `until` for the go-ahead (`bulkGoOn`). */
   | { event: "canaryWaiting"; jobId: string; target: string; name: string; rest: number; until: string }
+  /** CV-03, VM-17: how far a conversion or export is (0 to 100), and what it does now. A few a second at most. */
+  | { event: "targetProgress"; jobId: string; target: string; percent: number; step: string }
   /** VM-03: these VMs did not shut down. Forcing them off is a separate, Critical command. */
   | { event: "stillRunning"; jobId: string; targets: Target[] }
   /** VM-01: `scope` says what the job may have changed, so only that page reads it again. */
@@ -787,7 +795,7 @@ export interface JobSummary {
 
 /** One target of a job and how it went. */
 export interface JobTarget {
-  targetKind: "vm" | "session" | "app" | "terminal" | "container" | "new_vm";
+  targetKind: "vm" | "session" | "app" | "terminal" | "container" | "new_vm" | "network" | "disk_image";
   targetKey: string;
   targetName: string;
   status: TargetStatus;
@@ -883,6 +891,10 @@ export type ActionKind =
   | "vmRegister"
   /** VM-21, VM-10: make new VMs. */
   | "vmDeploy"
+  /** VM-17, CV-02: export a VM (writes new files). */
+  | "vmExport"
+  /** CV-03: convert a disk image (writes a new file). */
+  | "imageConvert"
   | "appUpdate";
 
 export interface TierRule {
@@ -993,6 +1005,10 @@ export interface Settings {
   dockerPathInUse: string | null;
   /** MO-02: seconds between two dashboard polls of each watched host over SSH: 5 (default), 15, 30 or 60. */
   guestPollSecs: number;
+  /** CV-03: the qemu-img.exe path chosen; null: REMOTELY_QEMU_IMG, then QEMU's default folder. */
+  qemuImgPathSaved: string | null;
+  /** CV-03: the qemu-img.exe in use; null: not installed, so qcow2 and VHDX conversions can't run. */
+  qemuImgPathInUse: string | null;
 }
 
 /** SS-04. */
@@ -2153,7 +2169,11 @@ export interface CloneRequest {
 }
 
 export type DeployOrigin =
-  { kind: "template"; id: string; name: string } | { kind: "custom"; name: string } | { kind: "bulkClone" };
+  | { kind: "template"; id: string; name: string }
+  | { kind: "custom"; name: string }
+  | { kind: "bulkClone" }
+  /** CV-01: an import of the file it names. */
+  | { kind: "import"; name: string };
 
 export interface DeployDisk {
   sizeGb: number;

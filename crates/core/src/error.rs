@@ -341,6 +341,21 @@ pub enum CoreError {
     /// never holds a secret, a log line or an environment value.
     #[error("{message}")]
     Container { problem: ContainerProblem, message: String },
+
+    /// CV-01 to CV-03: a conversion needs qemu-img (qcow2, VHDX), which isn't installed. Remotely never ships it
+    /// (it is GPL-licensed): the owner installs QEMU for Windows and Remotely finds it.
+    #[error(
+        "this needs qemu-img, which isn't installed: install QEMU for Windows (Image tools links to its download page), or set qemu-img.exe's path in Settings"
+    )]
+    QemuImgNotFound,
+
+    /// CV-01 to CV-03, VM-17: a conversion tool answered with an error; `message` is its own text.
+    #[error("{tool} failed: {message}")]
+    ConversionTool { tool: String, message: String },
+
+    /// CV-01 to CV-03, VM-17: a conversion or export that can't be done as asked, and why in words.
+    #[error("{0}")]
+    ConversionRefused(String),
 }
 
 /// CT-01, CT-02: why a container CLI failed, for the UI to offer what helps.
@@ -459,6 +474,9 @@ impl CoreError {
             CoreError::Ovftool { .. } => "ovftool_failed",
             CoreError::DeployFailed { .. } => "deploy_failed",
             CoreError::Container { problem, .. } => problem.code(),
+            CoreError::QemuImgNotFound => "qemu_img_not_found",
+            CoreError::ConversionTool { .. } => "conversion_failed",
+            CoreError::ConversionRefused(_) => "conversion_refused",
         }
     }
 }

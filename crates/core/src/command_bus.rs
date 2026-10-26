@@ -170,6 +170,19 @@ pub enum Command {
         targets: Vec<TargetRef>,
         spec: Box<crate::deploy::DeploySpec>,
     },
+    /// CV-03: convert a disk image into a new one on this PC. The one target is the new image
+    /// ([`TargetRef::DiskImage`]). Never built by the UI: the conversion service builds it from the file the user
+    /// picked and the place the shell's save dialog chose.
+    ImageConvert {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::convert::spec::ConvertSpec>,
+    },
+    /// VM-17, CV-02: export a powered-off VM for another hypervisor into a new folder. The one target is the VM.
+    /// Never built by the UI: the folder comes from the shell's folder dialog.
+    VmExport {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::convert::spec::ExportSpec>,
+    },
 }
 
 /// CT-01, CT-02: what a [`Command::Container`] does.
@@ -598,6 +611,9 @@ impl Command {
                 op: VmLifecycleOp::Register { .. },
                 ..
             } => "An existing VM is added from a file dialog.",
+            // CV-03, VM-17: the new files' place comes from a save or folder dialog.
+            Command::ImageConvert { .. } => "Conversions start from Image tools, which asks where the new image goes.",
+            Command::VmExport { .. } => "Exports start from a VM's Export, which asks for the folder.",
             _ => return Ok(()),
         };
         Err(CoreError::InvalidInput(refused.into()))
@@ -659,6 +675,22 @@ impl Command {
                 }
                 Ok(())
             }
+            Command::ImageConvert { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput(
+                        "A conversion's target is the image it makes.".into(),
+                    ));
+                }
+                Ok(())
+            }
+            Command::VmExport { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput("An export's target is its VM.".into()));
+                }
+                Ok(())
+            }
             Command::VmConfig { targets, edit } => vm_ops::validate_config(targets, edit),
             Command::VmDevice { targets, op } => vm_ops::validate_device(targets, op),
             Command::VmDisk { targets, op } => vm_ops::validate_disk(targets, op),
@@ -692,6 +724,12 @@ impl Command {
                 **spec = spec.only(&new);
                 *targets = spec.targets();
             }
+            // CV-03, VM-17: one target, the same file or VM; a failed job left nothing behind, so it runs again as asked.
+            Command::ImageConvert { targets, .. } | Command::VmExport { targets, .. } => {
+                if *targets != new {
+                    return None;
+                }
+            }
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
             // VM-11: a forward belongs to its network or VM.
@@ -724,7 +762,9 @@ impl Command {
             | Command::VmDisk { targets, .. }
             | Command::VmLifecycle { targets, .. }
             | Command::HostNetwork { targets, .. }
-            | Command::Deploy { targets, .. } => targets,
+            | Command::Deploy { targets, .. }
+            | Command::ImageConvert { targets, .. }
+            | Command::VmExport { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -748,6 +788,8 @@ impl Command {
             Command::VmDevice { .. } => "vmDevice",
             Command::VmDisk { .. } => "vmDisk",
             Command::VmLifecycle { .. } => "vmLifecycle",
+            Command::ImageConvert { .. } => "imageConvert",
+            Command::VmExport { .. } => "vmExport",
             Command::HostNetwork { .. } => "hostNetwork",
         }
     }
@@ -878,6 +920,8 @@ impl Command {
             Command::VmDevice { op, .. } => op.summary(target_count),
             Command::VmDisk { op, .. } => op.summary(target_count),
             Command::VmLifecycle { op, .. } => op.summary(target_count),
+            Command::ImageConvert { spec, .. } => spec.summary(),
+            Command::VmExport { spec, .. } => spec.summary(),
             Command::HostNetwork { targets, op } => op.summary(targets),
         }
     }

@@ -82,6 +82,7 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
   if (target.kind === "container") return containerTargetKey(target);
   if (target.kind === "network") return `${target.hypervisor}:${target.name}`;
   if (target.kind === "newVm") return `new-vm/${target.hypervisor}/${target.name}`;
+  if (target.kind === "diskImage") return `disk-image/${target.path}`;
   return "app";
 }
 
