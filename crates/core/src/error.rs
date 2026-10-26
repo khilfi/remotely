@@ -324,6 +324,21 @@ pub enum CoreError {
     #[error("{0}")]
     LinkedClones(String),
 
+    /// FD-02: a VM, session, terminal or other record that belongs to another workspace or to none, named the way
+    /// the caller named it. Nothing of another workspace is said.
+    #[error("{0} is not in this workspace")]
+    NotInWorkspace(String),
+
+    /// FD-02: no workspace of this user has that id.
+    #[error("that workspace doesn't exist")]
+    UnknownWorkspace,
+
+    /// FD-02: a workspace can't be switched while jobs started from it are still open; the message says how many.
+    #[error(
+        "{open} still open in this workspace: wait for {them} to finish, or cancel {them} in Activity, then switch"
+    )]
+    WorkspaceBusy { open: String, them: &'static str },
+
     /// VM-21: ovftool.exe (the OVFTool folder next to vmrun.exe, `REMOTELY_OVFTOOL` or the Settings path) is not
     /// there, so an OVA or OVF can't be imported into Workstation.
     #[error("ovftool.exe was not found: it comes with Workstation, in its OVFTool folder. Set its path in Settings, or import the appliance into VirtualBox")]
@@ -469,6 +484,9 @@ impl CoreError {
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",
             CoreError::VmSettingRefused(_) => "vm_setting_refused",
             CoreError::LinkedClones(_) => "linked_clones",
+            CoreError::NotInWorkspace(_) => "not_in_workspace",
+            CoreError::UnknownWorkspace => "unknown_workspace",
+            CoreError::WorkspaceBusy { .. } => "workspace_busy",
             CoreError::HostNetworkRefused(_) => "host_network_refused",
             CoreError::OvftoolNotFound => "ovftool_not_found",
             CoreError::Ovftool { .. } => "ovftool_failed",

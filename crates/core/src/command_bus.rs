@@ -36,6 +36,8 @@ use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretStri
 use crate::vm_settings::{ops as vm_ops, VmChangePreview, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
 // VM-14, VM-27: schedules are approved when they are saved; each run submits under that standing approval.
+mod change_id;
+pub use change_id::{clean_change_id, ChangeIdRules, CHANGE_ID_KEY, MAX_CHANGE_ID_CHARS};
 mod standing;
 pub use standing::{StandingAsk, StandingDetails, StandingDraft, StandingGrant, StandingRun, StandingUse};
 
@@ -1170,6 +1172,10 @@ pub struct ApprovalAnswers {
     pub safety_snapshot: Option<bool>,
     /// Only for Critical. Checked against the vault, never stored or logged.
     pub vault_password: Option<SecretString>,
+    /// AP-08: the ticket or change number, for High and Critical (ignored below). Cleaned and redacted
+    /// ([`clean_change_id`]) before it is kept.
+    #[serde(default)]
+    pub change_id: Option<String>,
 }
 
 /// What gets journaled with the job and written to the audit log. No secrets.
@@ -1186,6 +1192,10 @@ pub struct ApprovalRecord {
     /// VM-14, VM-27: a scheduled run's job: the standing approval it runs under, and which run it is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub standing: Option<StandingUse>,
+    /// AP-08: the ticket or change number given with a High or Critical approval (a schedule's runs carry the one
+    /// given when it was approved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change_id: Option<String>,
 }
 
 /// AP-01: how long an approval waits for its answer. After that the targets' state, labels and protection
@@ -1367,6 +1377,61 @@ impl CommandBus {
                 .await?;
         }
         Ok(())
+    }
+
+    /// AP-08: whether the decision's change ID is required, by the workspace's rule (Prod targets).
+    pub(crate) async fn apply_change_id_rule(&self, ctx: &Context, decision: &mut Decision) -> Result<()> {
+        if !decision
+            .steps
+            .iter()
+            .any(|s| matches!(s, ApprovalStep::ChangeId { .. }))
+        {
+            return Ok(());
+        }
+        let required = ChangeIdRules::load(&self.store, ctx).await?.requires(&decision.targets);
+        for step in &mut decision.steps {
+            if let ApprovalStep::ChangeId { required: r } = step {
+                *r = required;
+            }
+        }
+        Ok(())
+    }
+
+    /// AP-08: the workspace's change ID rule.
+    pub async fn change_id_rules(&self, ctx: &Context) -> Result<ChangeIdRules> {
+        ChangeIdRules::load(&self.store, ctx).await
+    }
+
+    /// AP-08: makes a change ID required, or optional again, for High and Critical actions on the workspace's Prod
+    /// targets. A setting of the workspace (FD-02), audited there; refused by the read-only lock. Approvals asked
+    /// from now on follow it.
+    pub async fn set_change_id_rules(&self, ctx: &Context, rules: ChangeIdRules) -> Result<ChangeIdRules> {
+        self.store.read_only().check(Change::Settings)?;
+        if ChangeIdRules::load(&self.store, ctx).await? == rules {
+            return Ok(rules);
+        }
+        self.store.put_setting(ctx, CHANGE_ID_KEY, &rules).await?;
+        let detail = if rules.required_for_prod {
+            "a change ID is required for High and Critical actions on Prod targets"
+        } else {
+            "a change ID is optional"
+        };
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "setting_changed",
+                    action: "Set the change ID rule",
+                    tier: None,
+                    job_id: None,
+                    targets: &[],
+                    approval: None,
+                    result: None,
+                    detail: Some(detail),
+                },
+            )
+            .await?;
+        Ok(rules)
     }
 
     /// AP-01: how long approvals wait (tests shorten it). Applies to the ones open now too.
@@ -1618,19 +1683,20 @@ impl CommandBus {
     /// BX-06: the tier, steps and matched dangerous-command rules the command would get now. Targets
     /// may be empty while the user is still choosing them.
     pub async fn preview(&self, ctx: &Context, command: &Command) -> Result<CommandPreview> {
-        let mut targets = Vec::with_capacity(command.targets().len());
-        for target in command.targets() {
-            targets.push(self.directory.resolve(ctx, target).await?);
-        }
+        let targets = self.resolve_targets(ctx, command).await?;
         self.note_signed_in(command).await;
-        let policy = locks::read(&self.policy);
-        let decision = policy.evaluate(command, &targets);
-        let dangerous = match command {
-            Command::RemoteExec { script, .. } | Command::TerminalLine { line: script, .. } => {
-                policy.dangerous_details(script)
-            }
-            _ => Vec::new(),
+        let (mut decision, dangerous) = {
+            let policy = locks::read(&self.policy);
+            let decision = policy.evaluate(command, &targets);
+            let dangerous = match command {
+                Command::RemoteExec { script, .. } | Command::TerminalLine { line: script, .. } => {
+                    policy.dangerous_details(script)
+                }
+                _ => Vec::new(),
+            };
+            (decision, dangerous)
         };
+        self.apply_change_id_rule(ctx, &mut decision).await?;
         Ok(CommandPreview {
             action: decision.action,
             tier: decision.tier,
@@ -1803,6 +1869,7 @@ impl CommandBus {
 
         self.note_signed_in(&command).await;
         let mut decision = locks::read(&self.policy).evaluate(&command, &targets);
+        self.apply_change_id_rule(ctx, &mut decision).await?;
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
         }
@@ -1861,8 +1928,31 @@ impl CommandBus {
 
     async fn resolve_targets(&self, ctx: &Context, command: &Command) -> Result<Vec<Target>> {
         let mut targets = Vec::with_capacity(command.targets().len());
+        let adding = matches!(
+            command,
+            Command::VmLifecycle {
+                op: VmLifecycleOp::Register { .. },
+                ..
+            }
+        );
         for target in command.targets() {
-            targets.push(self.directory.resolve(ctx, target).await?);
+            match target {
+                // FD-02, VM-24: a VM being added joins this workspace, so no other workspace may have it.
+                TargetRef::Vm { vmx_path } if adding => {
+                    if let Some(owner) = self.store.vm_owner(vmx_path).await? {
+                        if owner != ctx.workspace_id {
+                            return Err(CoreError::NotInWorkspace(crate::inventory::vm_named(vmx_path)));
+                        }
+                    }
+                    targets.push(Target {
+                        target: target.clone(),
+                        name: crate::inventory::unlisted_name(vmx_path),
+                        environment: Environment::None,
+                        protected: false,
+                    });
+                }
+                _ => targets.push(self.directory.resolve(ctx, target).await?),
+            }
         }
         Ok(targets)
     }
@@ -2142,6 +2232,9 @@ impl CommandBus {
         let ctx = pending.ctx;
         self.note_signed_in(&pending.command).await;
         let mut decision = locks::read(&self.policy).evaluate(&pending.command, &now);
+        if let Err(err) = self.apply_change_id_rule(&ctx, &mut decision).await {
+            return err;
+        }
         let changes = changes.join("; ");
         if decision.targets.is_empty() {
             // Every target is protected now: nothing left to ask about.
@@ -2335,9 +2428,22 @@ impl CommandBus {
     }
 
     async fn check_answers(&self, pending: &Pending, answers: &ApprovalAnswers) -> Result<ApprovalRecord> {
+        check_answers_with(self.vault.as_ref(), &pending.decision, pending.request.id, answers).await
+    }
+}
+
+/// The answers to a decision's steps, as the approval record keeps them (also for a schedule's standing approval).
+pub(crate) async fn check_answers_with(
+    vault: &dyn Vault,
+    decision: &Decision,
+    request_id: Uuid,
+    answers: &ApprovalAnswers,
+) -> Result<ApprovalRecord> {
+    {
         let mut safety_snapshot = false;
         let mut vault_reauth = false;
-        for step in &pending.decision.steps {
+        let mut change_id = None;
+        for step in &decision.steps {
             match step {
                 ApprovalStep::Confirm | ApprovalStep::ImpactPreview => {
                     if !answers.confirmed {
@@ -2361,6 +2467,15 @@ impl CommandBus {
                 ApprovalStep::SafetySnapshot { default_on } => {
                     safety_snapshot = answers.safety_snapshot.unwrap_or(*default_on);
                 }
+                // AP-08: optional, unless the workspace requires one for Prod targets.
+                ApprovalStep::ChangeId { required } => {
+                    change_id = clean_change_id(answers.change_id.as_deref())?;
+                    if *required && change_id.is_none() {
+                        return Err(CoreError::ApprovalRejected(
+                            "this workspace needs a change ID for actions on Prod targets".into(),
+                        ));
+                    }
+                }
                 // Enforced by the job runner: the job waits this long and can be cancelled meanwhile.
                 ApprovalStep::Countdown { .. } => {}
                 // AP-06: the vault's master password, whichever way the vault is unlocked day to day. A
@@ -2371,7 +2486,7 @@ impl CommandBus {
                         .as_ref()
                         .filter(|p| !p.is_empty())
                         .ok_or_else(|| CoreError::ApprovalRejected("the vault password is required".into()))?;
-                    if !self.vault.verify_password(password).await? {
+                    if !vault.verify_password(password).await? {
                         return Err(CoreError::WrongVaultPassword);
                     }
                     vault_reauth = true;
@@ -2379,8 +2494,8 @@ impl CommandBus {
             }
         }
         Ok(ApprovalRecord {
-            request_id: pending.request.id,
-            tier: pending.decision.tier,
+            request_id,
+            tier: decision.tier,
             typed_target_count: answers.typed_target_count,
             // Kept in the audit log for good, so a secret typed into it by mistake is not.
             reason: answers.reason.as_ref().map(|r| redact_secrets(r.trim()).0),
@@ -2388,6 +2503,7 @@ impl CommandBus {
             vault_reauth,
             approved_at: now_rfc3339(),
             standing: None,
+            change_id,
         })
     }
 }

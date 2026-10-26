@@ -60,7 +60,7 @@ use super::record::{RecordLimits, RecordedResults, Recorder, Recordings};
 use super::Terminals;
 use crate::bulk::{GroupOptions, HostOutput, OutputDiff, RecordedRun};
 use crate::command_bus::{ApprovalAnswers, ApprovalRequest, Command, CommandBus, SubmitOutcome};
-use crate::domain::{Context, TargetRef};
+use crate::domain::TargetRef;
 use crate::error::{CoreError, Result};
 use crate::jobs::{JobRunner, JobStatus};
 use crate::policy::Tier;
@@ -893,7 +893,8 @@ struct State {
 }
 
 struct Shared {
-    ctx: Context,
+    /// FD-02: the workspace shown, whose terminals MultiExec types into.
+    workspace: crate::workspaces::Current,
     terminals: Terminals,
     bus: Arc<CommandBus>,
     jobs: Arc<JobRunner>,
@@ -922,11 +923,16 @@ struct Seen {
 }
 
 impl MultiExec {
-    pub fn new(ctx: Context, terminals: Terminals, bus: Arc<CommandBus>, jobs: Arc<JobRunner>) -> Self {
+    pub fn new(
+        workspace: crate::workspaces::Current,
+        terminals: Terminals,
+        bus: Arc<CommandBus>,
+        jobs: Arc<JobRunner>,
+    ) -> Self {
         let (events, _) = broadcast::channel(256);
         Self {
             shared: Arc::new(Shared {
-                ctx,
+                workspace,
                 terminals,
                 bus,
                 jobs,
@@ -1205,7 +1211,12 @@ impl MultiExec {
     /// What a terminal's screen and session say now; `None` once it has closed.
     async fn seen(&self, id: Uuid) -> Option<Seen> {
         let info = self.shared.terminals.pane_info(id)?;
-        let target = self.shared.terminals.target(&self.shared.ctx, id).await.ok();
+        let target = self
+            .shared
+            .terminals
+            .target(&self.shared.workspace.get(), id)
+            .await
+            .ok();
         Some(Seen {
             id,
             name: target.as_ref().map_or_else(|| info.name.clone(), |t| t.name.clone()),
@@ -1505,7 +1516,7 @@ impl MultiExec {
             // Valid UTF-8: the run key is ASCII, and a paste's lines are taken only when they are.
             keys: String::from_utf8_lossy(&keys).into_owned(),
         };
-        let outcome = match self.shared.bus.submit(&self.shared.ctx, command).await {
+        let outcome = match self.shared.bus.submit(&self.shared.workspace.get(), command).await {
             Ok(outcome) => outcome,
             Err(err) => {
                 // Nothing will press Enter: clear the line the terminals hold, so it can't run later.

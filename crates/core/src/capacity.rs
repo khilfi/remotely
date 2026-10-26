@@ -177,7 +177,8 @@ impl CapacityChecker {
     pub async fn check_power_on(&self, ctx: &Context, targets: &[Target]) -> Vec<CapacityWarning> {
         let mut warnings = Vec::new();
 
-        let inventory = match self.store.list_vms(ctx).await {
+        // FD-02: every workspace's VMs hold this PC's RAM.
+        let inventory = match self.store.list_vms_all_workspaces(ctx.user_id).await {
             Ok(vms) => vms,
             Err(err) => {
                 warnings.push(unchecked("which VMs are running", &err));
@@ -349,7 +350,8 @@ impl CapacityChecker {
     /// Never fails: what cannot be read becomes a [`CapacityWarning::Unchecked`].
     pub async fn host_capacity(&self, ctx: &Context, running: Option<Vec<String>>) -> HostCapacity {
         let mut capacity = HostCapacity::default();
-        let inventory = match self.store.list_vms(ctx).await {
+        // FD-02: this PC's capacity: every workspace's VMs count.
+        let inventory = match self.store.list_vms_all_workspaces(ctx.user_id).await {
             Ok(vms) => vms,
             Err(err) => {
                 capacity.warnings.push(unchecked("the VM list", &err));

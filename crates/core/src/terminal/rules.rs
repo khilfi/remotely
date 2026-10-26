@@ -735,6 +735,11 @@ impl TerminalRules {
         self.inner.book.subscribe()
     }
 
+    /// FD-02: another workspace is shown: panes opened from now on follow its alert rules.
+    pub async fn switch_to(&self, ctx: &Context) -> Result<()> {
+        self.publish(ctx).await
+    }
+
     /// Built-in rules first, then the user's, in their order.
     pub async fn list(&self, ctx: &Context) -> Result<Vec<TerminalRule>> {
         let store = &self.inner.store;

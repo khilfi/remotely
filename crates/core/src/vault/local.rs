@@ -162,13 +162,13 @@ impl Inner {
         self.publish(&state);
     }
 
+    /// FD-02: every workspace of the vault's user shares its key; each item is sealed with its own workspace in
+    /// its associated data ([`item_aad`]) and found only by it, so an item reads in its own workspace alone.
     fn check_ctx(&self, ctx: &Context) -> Result<()> {
-        if ctx.workspace_id == self.ctx.workspace_id {
+        if ctx.user_id == self.ctx.user_id {
             Ok(())
         } else {
-            Err(CoreError::InvalidInput(
-                "This vault belongs to another workspace.".into(),
-            ))
+            Err(CoreError::InvalidInput("This vault belongs to another user.".into()))
         }
     }
 
@@ -299,6 +299,8 @@ impl Vault for LocalVault {
     async fn setup(&self, ctx: &Context, password: SecretString, windows_login: bool) -> Result<()> {
         let inner = &self.inner;
         inner.check_ctx(ctx)?;
+        // FD-02: one vault for the user, set up from any workspace: its key is kept with the home workspace.
+        let ctx = &inner.ctx;
         let known = locks::lock(&inner.state).windows_login.is_some();
         if known || inner.store.vault_meta(ctx).await?.is_some() {
             return Err(CoreError::InvalidInput("The vault is already set up.".into()));
@@ -379,8 +381,13 @@ impl Vault for LocalVault {
         let key = Key::generate()?;
         let ctx = inner.ctx;
         let mut items = Vec::new();
-        for (id, item) in inner.store.vault_ciphers(&ctx).await? {
-            let aad = item_aad(&ctx, id, item.kind);
+        for (workspace, id, item) in inner.store.vault_ciphers(&ctx).await? {
+            // FD-02: each item stays sealed to its own workspace.
+            let owner = Context {
+                workspace_id: workspace,
+                user_id: ctx.user_id,
+            };
+            let aad = item_aad(&owner, id, item.kind);
             let plain = crypto::open(&old, &item.nonce, &item.ciphertext, &aad)?.ok_or_else(|| {
                 CoreError::Vault(format!(
                     "the {} '{}' could not be decrypted, so the password was not changed: the vault data was changed or damaged",
@@ -389,7 +396,7 @@ impl Vault for LocalVault {
                 ))
             })?;
             let (nonce, ciphertext) = crypto::seal(&key, &plain, &aad)?;
-            items.push((id, nonce, ciphertext));
+            items.push((workspace, id, nonce, ciphertext));
         }
         let dpapi_key = match meta.dpapi_key {
             Some(_) => Some(inner.protect_with_dpapi(&key).await?),

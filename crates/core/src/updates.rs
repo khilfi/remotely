@@ -106,8 +106,18 @@ impl StoredToken {
     }
 }
 
+/// FD-02: the update token is this PC's, not an engagement's, so it is kept in the home workspace's part of the vault
+/// (its Vault page lists it) and works whichever workspace is shown.
+pub(crate) fn token_ctx(store: &Store, ctx: &Context) -> Context {
+    Context {
+        workspace_id: store.home_workspace().unwrap_or(ctx.workspace_id),
+        user_id: ctx.user_id,
+    }
+}
+
 /// The token's vault id, when it is still in the vault (it can be deleted on the Vault page).
 async fn token_id(store: &Store, vault: &dyn Vault, ctx: &Context) -> Result<Option<SecretId>> {
+    let ctx = &token_ctx(store, ctx);
     let Some(id) = store
         .get_setting::<Option<SecretId>>(ctx, UPDATE_TOKEN_KEY)
         .await?
@@ -121,6 +131,7 @@ async fn token_id(store: &Store, vault: &dyn Vault, ctx: &Context) -> Result<Opt
 
 /// Reads the token from the vault. Shared by update checks and the `AppUpdate` job.
 pub(crate) async fn stored_token(store: &Store, vault: &dyn Vault, ctx: &Context) -> Result<StoredToken> {
+    let ctx = &token_ctx(store, ctx);
     let Some(id) = token_id(store, vault, ctx).await? else {
         return Ok(StoredToken::Missing);
     };
@@ -140,7 +151,7 @@ impl Core {
         if !self.update_checks_enabled().await? {
             return Ok(UpdateCheck::Off);
         }
-        let stored = stored_token(&self.store, self.vault.vault().as_ref(), &self.ctx).await?;
+        let stored = stored_token(&self.store, self.vault.vault().as_ref(), &self.ctx()).await?;
         let token = stored.usable();
         let checked = match self.updater.check(token).await {
             Ok(checked) => checked,
@@ -167,7 +178,7 @@ impl Core {
 
     /// FD-14: whether a token is stored, and when it expires.
     pub async fn update_token_info(&self) -> Result<UpdateTokenInfo> {
-        let stored = token_id(&self.store, self.vault.vault().as_ref(), &self.ctx)
+        let stored = token_id(&self.store, self.vault.vault().as_ref(), &self.ctx())
             .await?
             .is_some();
         let expires_on = match stored {
@@ -183,16 +194,17 @@ impl Core {
         self.store.read_only().check(Change::Settings)?;
         let token = clean_token(&token)?;
         let vault = self.vault.vault();
-        let action = match token_id(&self.store, vault.as_ref(), &self.ctx).await? {
+        let home = token_ctx(&self.store, &self.ctx());
+        let action = match token_id(&self.store, vault.as_ref(), &home).await? {
             Some(id) => {
-                vault.replace(&self.ctx, id, token).await?;
+                vault.replace(&home, id, token).await?;
                 "Replaced the GitHub update token in the vault"
             }
             None => {
                 let id = vault
-                    .put(&self.ctx, SecretKind::Password, UPDATE_TOKEN_LABEL, token)
+                    .put(&home, SecretKind::Password, UPDATE_TOKEN_LABEL, token)
                     .await?;
-                self.store.put_setting(&self.ctx, UPDATE_TOKEN_KEY, &Some(id)).await?;
+                self.store.put_setting(&self.ctx(), UPDATE_TOKEN_KEY, &Some(id)).await?;
                 "Saved the GitHub update token in the vault"
             }
         };
@@ -206,13 +218,14 @@ impl Core {
     pub async fn remove_update_token(&self) -> Result<UpdateTokenInfo> {
         self.store.read_only().check(Change::Settings)?;
         let vault = self.vault.vault();
-        if let Some(id) = token_id(&self.store, vault.as_ref(), &self.ctx).await? {
-            vault.delete(&self.ctx, id).await?;
+        let home = token_ctx(&self.store, &self.ctx());
+        if let Some(id) = token_id(&self.store, vault.as_ref(), &home).await? {
+            vault.delete(&home, id).await?;
             self.audit_token("Removed the GitHub update token from the vault")
                 .await?;
         }
         self.store
-            .put_setting(&self.ctx, UPDATE_TOKEN_KEY, &None::<SecretId>)
+            .put_setting(&self.ctx(), UPDATE_TOKEN_KEY, &None::<SecretId>)
             .await?;
         self.remember_expiry(None).await?;
         self.update_token_info().await
@@ -221,7 +234,7 @@ impl Core {
     /// FD-14: Settings' "Test": asks GitHub whether the stored token can read the releases. A read;
     /// works with update checks turned off, since the user asked.
     pub async fn test_update_token(&self) -> Result<TokenReport> {
-        let token = stored_token(&self.store, self.vault.vault().as_ref(), &self.ctx)
+        let token = stored_token(&self.store, self.vault.vault().as_ref(), &self.ctx())
             .await?
             .require()?;
         match self.updater.test_token(&token).await {
@@ -236,7 +249,7 @@ impl Core {
     async fn saved_expiry(&self) -> Result<Option<String>> {
         Ok(self
             .store
-            .get_setting::<Option<String>>(&self.ctx, UPDATE_TOKEN_EXPIRES_KEY)
+            .get_setting::<Option<String>>(&self.ctx(), UPDATE_TOKEN_EXPIRES_KEY)
             .await?
             .flatten())
     }
@@ -244,7 +257,7 @@ impl Core {
     async fn remember_expiry(&self, expires_on: Option<String>) -> Result<()> {
         if self.saved_expiry().await? != expires_on {
             self.store
-                .put_setting(&self.ctx, UPDATE_TOKEN_EXPIRES_KEY, &expires_on)
+                .put_setting(&self.ctx(), UPDATE_TOKEN_EXPIRES_KEY, &expires_on)
                 .await?;
         }
         Ok(())
@@ -265,7 +278,7 @@ impl Core {
     async fn audit_token(&self, action: &str) -> Result<()> {
         self.store
             .append_audit(
-                &self.ctx,
+                &self.ctx(),
                 NewAuditEntry {
                     event: "vault_changed",
                     action,

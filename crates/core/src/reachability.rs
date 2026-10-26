@@ -38,13 +38,14 @@ use crate::adapters::network::NetworkAdapter;
 use crate::adapters::remote::{
     ConnectRequest, ExecRequest, ExecResult, ExecSession, Prompter, RemoteAdapter, ShellHandle, ShellRequest,
 };
-use crate::domain::{now_rfc3339, Context};
+use crate::domain::now_rfc3339;
 use crate::error::Result;
 use crate::locks;
 use crate::sessions::{SessionRecord, MAX_JUMP_DEPTH};
 use crate::store::Store;
 use crate::terminal::{ReachabilityMode, TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use crate::vault::SecretString;
+use crate::workspaces::Current;
 
 /// With the setting on "auto", libraries larger than this are not checked.
 pub const AUTO_MAX_SESSIONS: usize = 200;
@@ -213,7 +214,8 @@ impl Probed {
 
 pub struct ReachabilityChecker {
     store: Store,
-    ctx: Context,
+    /// FD-02: the workspace shown, whose sessions are checked.
+    current: Current,
     network: Arc<dyn NetworkAdapter>,
     tuning: Mutex<ReachabilityTuning>,
     watched: Mutex<HashSet<Uuid>>,
@@ -226,11 +228,11 @@ pub struct ReachabilityChecker {
 }
 
 impl ReachabilityChecker {
-    pub fn new(store: Store, ctx: Context, network: Arc<dyn NetworkAdapter>) -> Self {
+    pub fn new(store: Store, current: Current, network: Arc<dyn NetworkAdapter>) -> Self {
         let (updates, _) = broadcast::channel(16);
         Self {
             store,
-            ctx,
+            current,
             network,
             tuning: Mutex::new(ReachabilityTuning::default()),
             watched: Mutex::default(),
@@ -305,7 +307,7 @@ impl ReachabilityChecker {
         let tuning = locks::lock(&self.tuning).clone();
         let settings = self
             .store
-            .get_setting::<TerminalSettings>(&self.ctx, TERMINAL_SETTINGS_KEY)
+            .get_setting::<TerminalSettings>(&self.current.get(), TERMINAL_SETTINGS_KEY)
             .await?
             .unwrap_or_default();
         let watched = locks::lock(&self.watched).clone();
@@ -316,7 +318,7 @@ impl ReachabilityChecker {
         let sessions = if settings.reachability == ReachabilityMode::Off {
             Vec::new()
         } else {
-            self.store.list_sessions(&self.ctx).await?
+            self.store.list_sessions(&self.current.get()).await?
         };
         let enabled = match settings.reachability {
             ReachabilityMode::Off => false,

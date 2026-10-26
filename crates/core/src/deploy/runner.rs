@@ -963,6 +963,8 @@ impl Deployer {
         if spec.hypervisor == Hypervisor::Vmware {
             self.scan(ctx, Path::new(&spec.folder)).await?;
         }
+        // FD-02: the new VM belongs to the workspace that made it.
+        self.store.assign_vm(ctx, key).await?;
         self.inventory.refresh(ctx).await?;
         if self.store.find_vm(ctx, key).await?.is_none() {
             made.notes.push("it isn't in the VM list yet: refresh it".into());

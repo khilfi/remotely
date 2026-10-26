@@ -19,10 +19,10 @@ use serde::Serialize;
 use crate::adapters::host_networks::{showvminfo_pairs, vm_paths};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::command_bus::ApprovalRecord;
-use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::store::{vm_needle, Store, VmRecord};
+use crate::workspaces::Current;
 
 pub use logs::{LogChunk, LogFile, LogListing};
 
@@ -77,7 +77,8 @@ pub struct TimelinePage {
 
 /// VM-25: a VM's logs and timeline.
 pub struct VmInsight {
-    ctx: Context,
+    /// FD-02: the workspace shown.
+    current: Current,
     store: Store,
     hypervisors: Hypervisors,
     /// Each VirtualBox VM's log folder once read (`showvminfo`), so following its log runs no VBoxManage.
@@ -85,9 +86,9 @@ pub struct VmInsight {
 }
 
 impl VmInsight {
-    pub fn new(ctx: Context, store: Store, hypervisors: Hypervisors) -> Self {
+    pub fn new(current: Current, store: Store, hypervisors: Hypervisors) -> Self {
         Self {
-            ctx,
+            current,
             store,
             hypervisors,
             log_folders: Mutex::new(HashMap::new()),
@@ -96,7 +97,7 @@ impl VmInsight {
 
     async fn vm(&self, key: &str) -> Result<VmRecord> {
         self.store
-            .find_vm(&self.ctx, key)
+            .find_vm(&self.current.get(), key)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(key.to_owned()))
     }
@@ -183,12 +184,15 @@ impl VmInsight {
         let limit = limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
         let rows = self
             .store
-            .audit_naming(&self.ctx, &vm_needle(&vm.vmx_path), before, limit)
+            .audit_naming(&self.current.get(), &vm_needle(&vm.vmx_path), before, limit)
             .await?;
         let mut job_ids: Vec<String> = rows.iter().filter_map(|r| r.job_id.clone()).collect();
         job_ids.sort();
         job_ids.dedup();
-        let outcomes = self.store.job_rows_for(&self.ctx, &job_ids, &vm.vmx_path).await?;
+        let outcomes = self
+            .store
+            .job_rows_for(&self.current.get(), &job_ids, &vm.vmx_path)
+            .await?;
         let next_before = (rows.len() as u32 == limit)
             .then(|| rows.last().map(|r| r.seq))
             .flatten();

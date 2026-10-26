@@ -64,7 +64,7 @@ use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::{path_key, ToolsState};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, Rollout, SnapshotOp, StopMode};
 use crate::containers::ContainerActions;
-use crate::domain::{Context, PowerState, Target, TargetRef};
+use crate::domain::{Context, PowerState, Target, TargetRef, WorkspaceId};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
 use crate::linked_clones::{LinkedClones, VboxMedia};
@@ -185,6 +185,14 @@ impl Default for JobLimits {
             shutdown_wait: Duration::from_secs(120),
         }
     }
+}
+
+/// FD-02: whose a job is.
+#[derive(Debug, Clone, Copy)]
+struct JobOwner {
+    workspace: WorkspaceId,
+    /// A schedule's run (VM-14, VM-27), which goes on whichever workspace is shown.
+    scheduled: bool,
 }
 
 /// A command the bus has cleared to run.
@@ -583,6 +591,9 @@ pub struct JobRunner {
     events: broadcast::Sender<JobEvent>,
     /// Open jobs (queued, in countdown or running) and their cancel tokens.
     running: Mutex<HashMap<Uuid, CancellationToken>>,
+    /// FD-02: each job's workspace, and whether it is a schedule's run, from when it is queued (kept while the app
+    /// runs: two ids a job).
+    owners: Mutex<HashMap<Uuid, JobOwner>>,
     /// Signalled whenever a job closes, for jobs waiting to run alone (FD-14).
     idle: Notify,
     /// H9: jobs whose canary host finished, waiting for the go-ahead.
@@ -624,6 +635,7 @@ impl JobRunner {
             limits: RwLock::new(limits),
             events,
             running: Mutex::new(HashMap::new()),
+            owners: Mutex::new(HashMap::new()),
             idle: Notify::new(),
             waiting: Mutex::new(HashMap::new()),
             maintenance: tokio::sync::RwLock::new(()),
@@ -683,6 +695,22 @@ impl JobRunner {
     /// Number of open jobs.
     pub fn open_jobs(&self) -> usize {
         locks::lock(&self.running).len()
+    }
+
+    /// FD-02: the workspace a job was started in (the UI shows only the shown workspace's jobs' events).
+    pub fn workspace_of(&self, job_id: Uuid) -> Option<WorkspaceId> {
+        locks::lock(&self.owners).get(&job_id).map(|o| o.workspace)
+    }
+
+    /// FD-02: the jobs started from the UI in the workspace that are still open (queued, in their countdown, running,
+    /// or waiting for the go-ahead after their canary). A schedule's runs are left out: they go on whichever
+    /// workspace is shown.
+    pub fn open_user_jobs(&self, workspace: WorkspaceId) -> usize {
+        let owners = locks::lock(&self.owners);
+        locks::lock(&self.running)
+            .keys()
+            .filter(|id| owners.get(id).is_some_and(|o| o.workspace == workspace && !o.scheduled))
+            .count()
     }
 
     /// BX-02: runs `work` while no job is open, and holds back new ones until it is done (a submit waits for it, so
@@ -810,6 +838,13 @@ impl JobRunner {
             .await?;
 
         let token = CancellationToken::new();
+        locks::lock(&self.owners).insert(
+            id,
+            JobOwner {
+                workspace: spec.ctx.workspace_id,
+                scheduled: spec.approval.as_ref().is_some_and(|a| a.standing.is_some()),
+            },
+        );
         locks::lock(&self.running).insert(id, token.clone());
         self.emit(JobEvent::Queued {
             job_id: id,

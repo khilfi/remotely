@@ -3173,7 +3173,7 @@ impl RemoteWrite for FakeWrite {
 /// [`vault::LocalVault`] with [`FakeKeyProtector`] instead.
 pub struct FakeVault {
     password: String,
-    items: Mutex<HashMap<SecretId, (SecretMeta, SecretString)>>,
+    items: Mutex<HashMap<SecretId, (crate::domain::WorkspaceId, SecretMeta, SecretString)>>,
     status: watch::Sender<VaultStatus>,
 }
 
@@ -3229,13 +3229,19 @@ impl Vault for FakeVault {
         Ok(false)
     }
 
-    async fn list(&self, _: &Context) -> Result<Vec<SecretMeta>> {
-        let mut items: Vec<SecretMeta> = locks::lock(&self.items).values().map(|(m, _)| m.clone()).collect();
+    // FD-02: like the real vault, each secret belongs to the workspace it was put in, and only that workspace
+    // lists, reads or changes it.
+    async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {
+        let mut items: Vec<SecretMeta> = locks::lock(&self.items)
+            .values()
+            .filter(|(ws, _, _)| *ws == ctx.workspace_id)
+            .map(|(_, m, _)| m.clone())
+            .collect();
         items.sort_by(|a, b| a.label.cmp(&b.label));
         Ok(items)
     }
 
-    async fn put(&self, _: &Context, kind: SecretKind, label: &str, secret: SecretString) -> Result<SecretId> {
+    async fn put(&self, ctx: &Context, kind: SecretKind, label: &str, secret: SecretString) -> Result<SecretId> {
         let id = SecretId(Uuid::new_v4());
         let meta = SecretMeta {
             id,
@@ -3245,39 +3251,46 @@ impl Vault for FakeVault {
             created_at: String::new(),
             updated_at: String::new(),
         };
-        locks::lock(&self.items).insert(id, (meta, secret));
+        locks::lock(&self.items).insert(id, (ctx.workspace_id, meta, secret));
         Ok(id)
     }
 
-    async fn replace(&self, _: &Context, id: SecretId, secret: SecretString) -> Result<()> {
+    async fn replace(&self, ctx: &Context, id: SecretId, secret: SecretString) -> Result<()> {
         let mut items = locks::lock(&self.items);
         let item = items
             .get_mut(&id)
+            .filter(|(ws, _, _)| *ws == ctx.workspace_id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))?;
-        item.1 = secret;
+        item.2 = secret;
         Ok(())
     }
 
-    async fn rename(&self, _: &Context, id: SecretId, label: &str) -> Result<()> {
+    async fn rename(&self, ctx: &Context, id: SecretId, label: &str) -> Result<()> {
         let mut items = locks::lock(&self.items);
         let item = items
             .get_mut(&id)
+            .filter(|(ws, _, _)| *ws == ctx.workspace_id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))?;
-        label.clone_into(&mut item.0.label);
+        label.clone_into(&mut item.1.label);
         Ok(())
     }
 
-    async fn delete(&self, _: &Context, id: SecretId) -> Result<()> {
-        locks::lock(&self.items)
-            .remove(&id)
-            .map(drop)
-            .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))
+    async fn delete(&self, ctx: &Context, id: SecretId) -> Result<()> {
+        let mut items = locks::lock(&self.items);
+        match items.get(&id) {
+            Some((ws, _, _)) if *ws == ctx.workspace_id => {
+                items.remove(&id);
+                Ok(())
+            }
+            _ => Err(CoreError::UnknownTarget(format!("secret {id}"))),
+        }
     }
 
-    async fn get(&self, _: &Context, id: SecretId) -> Result<SecretString> {
+    async fn get(&self, ctx: &Context, id: SecretId) -> Result<SecretString> {
         locks::lock(&self.items)
             .get(&id)
-            .map(|(_, s)| s.clone())
+            .filter(|(ws, _, _)| *ws == ctx.workspace_id)
+            .map(|(_, _, s)| s.clone())
             .ok_or_else(|| CoreError::UnknownTarget(format!("secret {id}")))
     }
 }

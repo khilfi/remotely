@@ -484,19 +484,39 @@ fn existing_ancestor(path: &Path) -> Option<PathBuf> {
 impl CapacityChecker {
     /// The running VMs with their sizes, names, labels and protection: from the hypervisors' own lists (the last
     /// refresh for one that can't be asked) and the inventory.
+    ///
+    /// FD-02: every running VM holds this PC's RAM, whichever workspace has it, so all are counted; only the
+    /// workspace's own are named, labelled and offered for a suspend.
     pub async fn running_vms(&self, ctx: &Context, unchecked: &mut Vec<String>) -> Vec<RunningVm> {
-        let inventory = match self.store().list_vms(ctx).await {
+        let inventory = match self.store().list_vms_all_workspaces(ctx.user_id).await {
             Ok(vms) => vms,
             Err(err) => {
                 unchecked.push(format!("could not read the VM list ({err})"));
                 Vec::new()
             }
         };
+        let mine: std::collections::HashSet<String> = match self.store().list_vms(ctx).await {
+            Ok(vms) => vms.iter().map(|vm| path_key(Path::new(&vm.vmx_path))).collect(),
+            Err(_) => std::collections::HashSet::new(),
+        };
         let running = self.running(&inventory).await;
         let known = by_key(&inventory);
         let mut out = Vec::with_capacity(running.len());
         for key in running {
             let (ram, cpus) = self.size(&known, &key).await;
+            if !mine.contains(&path_key(Path::new(&key))) {
+                // Another workspace's VM, or one none has: counted, never named, never suggested (as if protected).
+                out.push(RunningVm {
+                    name: "a VM outside this workspace".to_owned(),
+                    ram_mb: ram.map(u64::from),
+                    vcpus: cpus,
+                    protected: true,
+                    environment: Environment::None,
+                    paused: false,
+                    key,
+                });
+                continue;
+            }
             let record = known.get(&path_key(Path::new(&key)));
             let name = record
                 .map(|vm| vm.display_name.clone())

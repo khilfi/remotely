@@ -28,8 +28,9 @@ fn step_rank(step: &ApprovalStep) -> u8 {
         ApprovalStep::SafetySnapshot { .. } => 2,
         ApprovalStep::TypeTargetCount { .. } => 3,
         ApprovalStep::Reason => 4,
-        ApprovalStep::Countdown { .. } => 5,
-        ApprovalStep::VaultReauth => 6,
+        ApprovalStep::ChangeId { .. } => 5,
+        ApprovalStep::Countdown { .. } => 6,
+        ApprovalStep::VaultReauth => 7,
     }
 }
 
@@ -197,6 +198,7 @@ mod tests {
                 ApprovalStep::ImpactPreview,
                 ApprovalStep::TypeTargetCount { expected: 2 },
                 ApprovalStep::Reason,
+                ApprovalStep::ChangeId { required: false },
             ],
             "no safety snapshot for a delete, and no countdown at the save"
         );

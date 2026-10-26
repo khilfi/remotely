@@ -90,7 +90,7 @@ pub fn audit_file_name() -> String {
 /// the others the hash covers, with `prev_hash` and `hash`, let anyone recompute the hash chain from
 /// the file alone ([`AuditEntry::compute_hash`]; an empty cell stands for no value). Rows marked
 /// `redacted` no longer match their hash, by design.
-pub const AUDIT_CSV_COLUMNS: [&str; 23] = [
+pub const AUDIT_CSV_COLUMNS: [&str; 24] = [
     "seq",
     "id",
     "time",
@@ -102,6 +102,8 @@ pub const AUDIT_CSV_COLUMNS: [&str; 23] = [
     "target_count",
     "typed_target_count",
     "reason",
+    // AP-08: the ticket or change number given with the approval.
+    "change_id",
     "safety_snapshot",
     "vault_reauth",
     "approved_at",
@@ -171,6 +173,7 @@ pub fn audit_csv_row(e: &AuditEntry) -> (String, bool) {
         targets.len().to_string(),
         field("typedTargetCount"),
         clean(&field("reason")),
+        clean(&field("changeId")),
         field("safetySnapshot"),
         field("vaultReauth"),
         field("approvedAt"),

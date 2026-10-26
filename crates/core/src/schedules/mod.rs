@@ -28,7 +28,6 @@ pub mod spec;
 pub mod timing;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -46,7 +45,7 @@ use crate::command_bus::{
     ApprovalAnswers, ApprovalRequest, Command, CommandBus, SnapshotOp, StandingAsk, StandingDetails, StandingDraft,
     StandingGrant, StandingRun,
 };
-use crate::domain::{Context, PowerState, Target, TargetRef};
+use crate::domain::{Context, PowerState, Target, TargetRef, WorkspaceId};
 use crate::error::{CoreError, Result};
 use crate::inventory::Inventory;
 use crate::jobs::{JobRunner, JobStatus, TargetStatus};
@@ -57,6 +56,7 @@ use crate::policy::Tier;
 use crate::presentation::Change;
 use crate::snapshots::tree_nodes;
 use crate::store::{NewAuditEntry, RunRow, ScheduleRow, SnapshotEnd, Store, TakenSnapshot, VmRecord};
+use crate::workspaces::Current;
 
 pub use chains::{ChainInfo, ChainLimits, CHAIN_LIMITS_KEY};
 pub use clock::{Clock, SystemClock};
@@ -470,7 +470,8 @@ enum RunKind {
 }
 
 struct Inner {
-    ctx: Context,
+    /// FD-02: the workspace shown, for [`Schedules::shown`].
+    current: Current,
     store: Store,
     bus: Arc<CommandBus>,
     jobs: Arc<JobRunner>,
@@ -482,25 +483,32 @@ struct Inner {
     running: Mutex<HashMap<Uuid, Uuid>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
     events: broadcast::Sender<ScheduleEvent>,
+    /// FD-02: the same events with the workspace each is about, for the UI (which shows the shown one's).
+    scoped: broadcast::Sender<(WorkspaceId, ScheduleEvent)>,
     /// VM-14: VMs auto-suspend failed on, and when to try again.
     idle_backoff: Mutex<HashMap<String, OffsetDateTime>>,
-    last_idle_check: Mutex<Option<OffsetDateTime>>,
+    /// Per workspace (FD-02).
+    last_idle_check: Mutex<HashMap<WorkspaceId, OffsetDateTime>>,
     chains: Mutex<HashMap<String, (Instant, ChainInfo)>>,
     /// Runs the app was in when it last stopped are marked once, at the first tick.
-    recovered: AtomicBool,
+    /// The workspaces whose runs were marked (FD-02).
+    recovered: Mutex<HashSet<WorkspaceId>>,
     /// One tick at a time.
     ticking: tokio::sync::Mutex<()>,
 }
 
-/// VM-14, VM-27: schedules and the scheduler (`Core.schedules`).
+/// VM-14, VM-27: schedules and the scheduler ([`crate::Core::schedules`]). FD-02: a handle works in one workspace
+/// ([`Schedules::shown`] for the UI's); the scheduler goes through every active workspace, each run in its own.
 #[derive(Clone)]
 pub struct Schedules {
     inner: Arc<Inner>,
+    ctx: Context,
 }
 
 /// What [`Schedules::new`] needs.
 pub struct ScheduleParts {
-    pub ctx: Context,
+    /// FD-02: the workspace shown.
+    pub current: Current,
     pub store: Store,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
@@ -512,9 +520,11 @@ pub struct ScheduleParts {
 impl Schedules {
     pub fn new(parts: ScheduleParts) -> Self {
         let (events, _) = broadcast::channel(256);
+        let (scoped, _) = broadcast::channel(256);
         Self {
+            ctx: parts.current.get(),
             inner: Arc::new(Inner {
-                ctx: parts.ctx,
+                current: parts.current,
                 store: parts.store,
                 bus: parts.bus,
                 jobs: parts.jobs,
@@ -525,10 +535,11 @@ impl Schedules {
                 running: Mutex::new(HashMap::new()),
                 tasks: Mutex::new(Vec::new()),
                 events,
+                scoped,
                 idle_backoff: Mutex::new(HashMap::new()),
-                last_idle_check: Mutex::new(None),
+                last_idle_check: Mutex::new(HashMap::new()),
                 chains: Mutex::new(HashMap::new()),
-                recovered: AtomicBool::new(false),
+                recovered: Mutex::new(HashSet::new()),
                 ticking: tokio::sync::Mutex::new(()),
             }),
         }
@@ -547,12 +558,31 @@ impl Schedules {
         self.inner.events.subscribe()
     }
 
+    /// FD-02: the events with the workspace each is about.
+    pub fn subscribe_scoped(&self) -> broadcast::Receiver<(WorkspaceId, ScheduleEvent)> {
+        self.inner.scoped.subscribe()
+    }
+
+    /// FD-02: this handle in the workspace shown now (what the UI reads and changes).
+    pub fn shown(&self) -> Self {
+        self.in_workspace(self.inner.current.get())
+    }
+
+    /// FD-02: this handle in another workspace.
+    pub(crate) fn in_workspace(&self, ctx: Context) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            ctx,
+        }
+    }
+
     fn emit(&self, event: ScheduleEvent) {
+        let _ = self.inner.scoped.send((self.ctx.workspace_id, event.clone()));
         let _ = self.inner.events.send(event);
     }
 
     fn ctx(&self) -> &Context {
-        &self.inner.ctx
+        &self.ctx
     }
 
     fn store(&self) -> &Store {
@@ -1323,12 +1353,29 @@ impl Schedules {
 
     /// One look at the clock: pauses schedules whose approval no longer fits, reports missed and skipped runs,
     /// starts the runs that are due, and looks for idle VMs (once a minute).
+    ///
+    /// FD-02: every active workspace's schedules, each in its own workspace (its runs, approvals and audit entries
+    /// are its own), whichever workspace is shown. An archived workspace's schedules don't run.
     pub async fn tick(&self) -> Result<TickReport> {
         let _one = self.inner.ticking.lock().await;
+        let mut report = TickReport::default();
+        let user = self.inner.current.get().user_id;
+        for ctx in self.store().active_workspaces(user).await? {
+            let one = self.in_workspace(ctx).tick_here().await?;
+            report.started += one.started;
+            report.missed += one.missed;
+            report.skipped += one.skipped;
+            report.paused += one.paused;
+        }
+        Ok(report)
+    }
+
+    /// One look at the clock for this handle's workspace.
+    async fn tick_here(&self) -> Result<TickReport> {
         let clock = self.clock();
         let now = clock.now();
         let mut report = TickReport::default();
-        if !self.inner.recovered.swap(true, Ordering::SeqCst) {
+        if locks::lock(&self.inner.recovered).insert(self.ctx.workspace_id) {
             let stopped = self.store().mark_interrupted_schedule_runs(self.ctx()).await?;
             if stopped > 0 {
                 tracing::warn!(stopped, "schedule runs were going when Remotely last stopped");
@@ -1408,9 +1455,11 @@ impl Schedules {
         }
         let idle_due = {
             let mut last = locks::lock(&self.inner.last_idle_check);
-            let due = last.is_none_or(|at| now - at >= IDLE_EVERY || now < at);
+            let due = last
+                .get(&self.ctx.workspace_id)
+                .is_none_or(|at| now - *at >= IDLE_EVERY || now < *at);
             if due {
-                *last = Some(now);
+                last.insert(self.ctx.workspace_id, now);
             }
             due
         };

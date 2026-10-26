@@ -1068,16 +1068,17 @@ pub enum Retried {
 /// SS-08: the bus-facing side of file transfers (`Core.files`): files staged for upload, uploads
 /// submitted as commands, retries.
 pub struct FileTransfers {
-    ctx: Context,
+    /// FD-02: the workspace shown, whose terminals the uploads go to.
+    workspace: crate::workspaces::Current,
     terminals: Terminals,
     bus: Arc<CommandBus>,
     staged: Mutex<HashMap<Uuid, Staged>>,
 }
 
 impl FileTransfers {
-    pub fn new(ctx: Context, terminals: Terminals, bus: Arc<CommandBus>) -> Self {
+    pub fn new(workspace: crate::workspaces::Current, terminals: Terminals, bus: Arc<CommandBus>) -> Self {
         Self {
-            ctx,
+            workspace,
             terminals,
             bus,
             staged: Mutex::default(),
@@ -1190,13 +1191,13 @@ impl FileTransfers {
     }
 
     async fn submit(&self, terminal_id: Uuid, folder: &str, files: Vec<UploadFile>) -> Result<UploadStart> {
-        let target = self.terminals.target(&self.ctx, terminal_id).await?;
+        let target = self.terminals.target(&self.workspace.get(), terminal_id).await?;
         let command = Command::FileUpload {
             targets: vec![target.target],
             folder: folder.to_owned(),
             files,
         };
-        let outcome = self.bus.submit(&self.ctx, command).await?;
+        let outcome = self.bus.submit(&self.workspace.get(), command).await?;
         Ok(UploadStart::Submitted { outcome })
     }
 
@@ -1236,7 +1237,7 @@ impl FileTransfers {
                 let transfers = self
                     .terminals
                     .download(
-                        &self.ctx,
+                        &self.workspace.get(),
                         info.terminal_id,
                         std::slice::from_ref(&info.remote_path),
                         &dest,

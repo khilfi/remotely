@@ -12,11 +12,12 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::{Context, THIS_PC_KEY};
+use crate::domain::THIS_PC_KEY;
 use crate::error::{CoreError, Result};
 use crate::metrics::history::HistorySource;
 use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
+use crate::workspaces::Current;
 
 /// The setting: `Option<DashboardLayout>` (null: the default).
 pub const LAYOUT_KEY: &str = "dashboard.layout";
@@ -258,12 +259,13 @@ pub struct LayoutInfo {
 /// MO-16: the saved layout of this workspace (`Core.layouts`).
 pub struct Layouts {
     store: Store,
-    ctx: Context,
+    /// FD-02: the workspace shown; each has its own layout.
+    current: Current,
 }
 
 impl Layouts {
-    pub fn new(store: Store, ctx: Context) -> Self {
-        Self { store, ctx }
+    pub fn new(store: Store, current: Current) -> Self {
+        Self { store, current }
     }
 
     fn info(&self, saved: Option<DashboardLayout>) -> LayoutInfo {
@@ -282,7 +284,7 @@ impl Layouts {
     pub async fn get(&self) -> Result<LayoutInfo> {
         let saved = self
             .store
-            .get_setting::<Option<DashboardLayout>>(&self.ctx, LAYOUT_KEY)
+            .get_setting::<Option<DashboardLayout>>(&self.current.get(), LAYOUT_KEY)
             .await?
             .flatten();
         let saved = saved.filter(|layout| match layout.validate() {
@@ -299,7 +301,9 @@ impl Layouts {
     pub async fn set(&self, layout: DashboardLayout) -> Result<LayoutInfo> {
         self.store.read_only().check(Change::DashboardLayout)?;
         layout.validate()?;
-        self.store.put_setting(&self.ctx, LAYOUT_KEY, &Some(&layout)).await?;
+        self.store
+            .put_setting(&self.current.get(), LAYOUT_KEY, &Some(&layout))
+            .await?;
         self.audit("Changed the dashboard layout", &layout.describe()).await?;
         Ok(self.info(Some(layout)))
     }
@@ -308,7 +312,7 @@ impl Layouts {
     pub async fn reset(&self) -> Result<LayoutInfo> {
         self.store.read_only().check(Change::DashboardLayout)?;
         self.store
-            .put_setting(&self.ctx, LAYOUT_KEY, &Option::<DashboardLayout>::None)
+            .put_setting(&self.current.get(), LAYOUT_KEY, &Option::<DashboardLayout>::None)
             .await?;
         self.audit(
             "Reset the dashboard layout",
@@ -321,7 +325,7 @@ impl Layouts {
     async fn audit(&self, action: &str, detail: &str) -> Result<()> {
         self.store
             .append_audit(
-                &self.ctx,
+                &self.current.get(),
                 NewAuditEntry {
                     event: "dashboard_layout_changed",
                     action,

@@ -29,6 +29,7 @@ use crate::jobs::JobRunner;
 use crate::locks;
 use crate::presentation::Change;
 use crate::store::{NewAuditEntry, PurgedBodies, Store};
+use crate::workspaces::Current;
 
 /// The setting: a [`Retention`].
 pub const RETENTION_KEY: &str = "jobs.retention";
@@ -108,7 +109,9 @@ pub struct RetentionInfo {
 /// The purge and its setting (`Core.retention`). The shell starts the schedule with [`JournalRetention::run`].
 pub struct JournalRetention {
     store: Store,
-    ctx: Context,
+    /// FD-02: the workspace shown, where a setting change and Purge now are audited. The setting is this PC's, and
+    /// the purge goes through every workspace's journal.
+    current: Current,
     jobs: Arc<JobRunner>,
     /// One purge at a time.
     purging: tokio::sync::Mutex<()>,
@@ -116,10 +119,10 @@ pub struct JournalRetention {
 }
 
 impl JournalRetention {
-    pub fn new(store: Store, ctx: Context, jobs: Arc<JobRunner>) -> Self {
+    pub fn new(store: Store, current: Current, jobs: Arc<JobRunner>) -> Self {
         Self {
             store,
-            ctx,
+            current,
             jobs,
             purging: tokio::sync::Mutex::new(()),
             last: Mutex::new(None),
@@ -130,7 +133,7 @@ impl JournalRetention {
     pub async fn retention(&self) -> Result<Retention> {
         Ok(self
             .store
-            .get_setting::<Retention>(&self.ctx, RETENTION_KEY)
+            .get_setting::<Retention>(&self.current.get(), RETENTION_KEY)
             .await?
             .unwrap_or_default())
     }
@@ -147,13 +150,16 @@ impl JournalRetention {
         self.store.read_only().check(Change::Settings)?;
         let old = self.retention().await?;
         if old != retention {
-            self.store.put_setting(&self.ctx, RETENTION_KEY, &retention).await?;
+            self.store
+                .put_setting(&self.current.get(), RETENTION_KEY, &retention)
+                .await?;
             let detail = format!(
                 "{} -> {}; applies at the next purge (daily, or Purge now)",
                 old.label(),
                 retention.label()
             );
             self.audit(
+                &self.current.get(),
                 "setting_changed",
                 "Set how long job outputs and command text are kept",
                 &detail,
@@ -200,10 +206,24 @@ impl JournalRetention {
         let redacted = self.store.redact_old_commands().await?;
         let retention = self.retention().await?;
         let before = retention.days().map(cutoff);
-        let removed = match &before {
-            Some(before) => self.store.purge_job_bodies(&self.ctx, before).await?,
-            None => PurgedBodies::default(),
-        };
+        // FD-02: every workspace's journal, each audited in its own log.
+        let shown = self.current.get();
+        let mut removed = PurgedBodies::default();
+        let mut purged: Vec<(Context, PurgedBodies)> = Vec::new();
+        if let Some(before) = &before {
+            for workspace in self.store.list_workspaces(shown.user_id).await? {
+                let ctx = Context {
+                    workspace_id: workspace.id,
+                    user_id: shown.user_id,
+                };
+                let got = self.store.purge_job_bodies(&ctx, before).await?;
+                removed.jobs += got.jobs;
+                removed.outputs += got.outputs;
+                removed.commands += got.commands;
+                removed.bytes += got.bytes;
+                purged.push((ctx, got));
+            }
+        }
         let changed = removed.removed_any() || redacted > 0;
         let mut compacted = false;
         if changed {
@@ -229,13 +249,25 @@ impl JournalRetention {
             compacted,
             by_hand,
         };
-        if by_hand || changed {
-            let action = if by_hand {
-                "Purged old job outputs and command text"
-            } else {
-                "Removed old job outputs and command text"
-            };
-            self.audit("journal_purged", action, &describe(&report)).await?;
+        let action = if by_hand {
+            "Purged old job outputs and command text"
+        } else {
+            "Removed old job outputs and command text"
+        };
+        for (ctx, got) in &purged {
+            let own = ctx.workspace_id == shown.workspace_id;
+            // Purge now is audited in the workspace it was asked from even when nothing was old enough there.
+            if got.removed_any() || (own && (by_hand || redacted > 0)) {
+                let theirs = PurgeReport {
+                    removed: *got,
+                    redacted: if own { redacted } else { 0 },
+                    ..report.clone()
+                };
+                self.audit(ctx, "journal_purged", action, &describe(&theirs)).await?;
+            }
+        }
+        if purged.is_empty() && (by_hand || changed) {
+            self.audit(&shown, "journal_purged", action, &describe(&report)).await?;
         }
         if changed {
             tracing::info!(
@@ -252,10 +284,10 @@ impl JournalRetention {
         Ok(report)
     }
 
-    async fn audit(&self, event: &str, action: &str, detail: &str) -> Result<()> {
+    async fn audit(&self, ctx: &Context, event: &str, action: &str, detail: &str) -> Result<()> {
         self.store
             .append_audit(
-                &self.ctx,
+                ctx,
                 NewAuditEntry {
                     event,
                     action,

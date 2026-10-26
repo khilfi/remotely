@@ -106,6 +106,7 @@ pub mod vm_insight;
 pub mod vm_links;
 pub mod vm_settings;
 pub mod waste;
+pub mod workspaces;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -224,7 +225,12 @@ impl UiSnapshot {
 }
 
 pub struct Core {
-    pub ctx: Context,
+    /// FD-02: the workspace shown now ([`Core::ctx`]); [`Core::switch_workspace`] changes it.
+    current: workspaces::Current,
+    /// FD-02: the user's home workspace, which keeps this PC's settings and the update token.
+    home: Context,
+    /// FD-02: the user's workspaces (create, rename, colour, archive, restore).
+    pub workspaces: workspaces::Workspaces,
     pub store: Store,
     /// Shared with the deploy runner, which lists the VMs it makes (VM-21), and with [`Core::schedules`], which
     /// reads the VMs' power states before a scheduled run.
@@ -294,8 +300,8 @@ pub struct Core {
     pub layouts: Layouts,
     /// VM-14, VM-27: snapshot and power schedules, auto-suspend of idle VMs, and the scheduler. Each run submits to
     /// [`Core::bus`] under the approval given when its schedule was saved. The shell starts it with
-    /// [`schedules::Schedules::run`].
-    pub schedules: schedules::Schedules,
+    /// [`schedules::Schedules::run`]. FD-02: [`Core::schedules`] gives the shown workspace's.
+    schedules: schedules::Schedules,
     /// QL-25: the notification centre's history, in memory (the module says why not on disk).
     pub notifications: Notifications,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
@@ -411,12 +417,16 @@ impl Core {
     }
 
     /// Wires the modules together. Tests pass fake adapters here.
-    pub async fn assemble(store: Store, ctx: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
+    /// FD-02: `home` is the user's home workspace ([`Store::ensure_identity`]); the workspace shown last opens
+    /// again, or the home one.
+    pub async fn assemble(store: Store, home: Context, adapters: Adapters, limits: JobLimits) -> Result<Self> {
+        let ctx = workspaces::starting(&store, &home).await?;
+        let current = workspaces::Current::new(ctx);
         // QL-15: a setting that can't be read gets its default (audited) rather than stopping the start.
         settings::repair(&store, &ctx).await?;
         let policy = load_policy(&store, &ctx).await?;
         // FD-03: the lock applies before anything else can run.
-        let presentation = PresentationMode::load(store.clone(), ctx).await;
+        let presentation = PresentationMode::load(store.clone(), current.clone()).await;
         // QL-04: every service reaches SSH through this, which notes the kept connections (the
         // dashboard's, the Containers page's, host details') so the reachability checks skip their hosts.
         let tracked = Arc::new(TrackedRemote::new(adapters.remote));
@@ -463,7 +473,7 @@ impl Core {
         terminals.set_specs(specs.clone());
         let reachability = Arc::new(ReachabilityChecker::new(
             store.clone(),
-            ctx,
+            current.clone(),
             Arc::clone(&adapters.network),
         ));
         // QL-04: a host with a connected terminal or a kept connection is not probed.
@@ -472,7 +482,7 @@ impl Core {
         // MO-01 to MO-04: reads only, so the collector holds adapters directly, not the job runner.
         let guest = GuestSource::new(
             store.clone(),
-            ctx,
+            current.clone(),
             Arc::clone(&adapters.remote),
             Arc::clone(&adapters.vault),
             Arc::clone(&known_hosts),
@@ -486,7 +496,7 @@ impl Core {
         }
         let metrics = Arc::new(Metrics::new(MetricsParts {
             store: store.clone(),
-            ctx,
+            current: current.clone(),
             counters: Arc::clone(&adapters.host_counters),
             guest,
             capacity: CapacityChecker::new(store.clone(), hypervisors.clone(), Arc::clone(&adapters.host_counters)),
@@ -552,9 +562,9 @@ impl Core {
         terminals.set_bus(&bus);
         let keys = KeyManager::new(store.clone(), Arc::clone(&adapters.vault));
         let snippets = Snippets::new(store.clone(), bus.policy());
-        let multiexec = MultiExec::new(ctx, terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
-        let files = FileTransfers::new(ctx, terminals.clone(), Arc::clone(&bus));
-        let retention = Arc::new(JournalRetention::new(store.clone(), ctx, Arc::clone(&jobs)));
+        let multiexec = MultiExec::new(current.clone(), terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
+        let files = FileTransfers::new(current.clone(), terminals.clone(), Arc::clone(&bus));
+        let retention = Arc::new(JournalRetention::new(store.clone(), current.clone(), Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
         let catalog = Catalog::new(store.clone())
             .with_hypervisors(hypervisors.clone())
@@ -607,12 +617,14 @@ impl Core {
             Arc::clone(&bus),
             Arc::clone(&inventory),
         );
-        let vm_settings = vm_settings::VmSettings::new(ctx, store.clone(), hypervisors.clone(), Arc::clone(&bus));
-        let insight = vm_insight::VmInsight::new(ctx, store.clone(), hypervisors.clone());
-        let waste = waste::WasteFinder::new(ctx, store.clone(), hypervisors.clone());
+        let vm_settings =
+            vm_settings::VmSettings::new(current.clone(), store.clone(), hypervisors.clone(), Arc::clone(&bus));
+        let insight = vm_insight::VmInsight::new(current.clone(), store.clone(), hypervisors.clone());
+        let waste = waste::WasteFinder::new(current.clone(), store.clone(), hypervisors.clone())
+            .with_inventory(Arc::clone(&inventory));
         // VM-14, VM-27: each run goes through the bus under its schedule's standing approval.
         let schedules = schedules::Schedules::new(schedules::ScheduleParts {
-            ctx,
+            current: current.clone(),
             store: store.clone(),
             bus: Arc::clone(&bus),
             jobs: Arc::clone(&jobs),
@@ -627,7 +639,9 @@ impl Core {
             waste,
             convert,
             converter,
-            ctx,
+            workspaces: workspaces::Workspaces::new(store.clone(), current.clone()),
+            current: current.clone(),
+            home,
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog,
             deploy,
@@ -663,7 +677,7 @@ impl Core {
             metrics,
             history,
             alerts,
-            layouts: Layouts::new(store.clone(), ctx),
+            layouts: Layouts::new(store.clone(), current),
             notifications: Notifications::new(),
             host_details,
             login_guard,
@@ -732,7 +746,7 @@ impl Core {
 
     /// CV-03: the qemu-img.exe path saved in Settings, if any.
     pub async fn saved_qemu_img_path(&self) -> Result<Option<PathBuf>> {
-        saved_qemu_img_path(&self.store, &self.ctx).await
+        saved_qemu_img_path(&self.store, &self.ctx()).await
     }
 
     /// CV-03: saves the qemu-img.exe path (`None` = find it: `REMOTELY_QEMU_IMG`, then QEMU's default folder) and
@@ -745,7 +759,7 @@ impl Core {
         }
         let as_text = path.as_ref().map(|p| p.display().to_string());
         self.store
-            .put_setting(&self.ctx, store::QEMU_IMG_PATH_KEY, &as_text)
+            .put_setting(&self.ctx(), store::QEMU_IMG_PATH_KEY, &as_text)
             .await?;
         self.converter.disk_tools().locate_qemu_img(path);
         let in_use = self.qemu_img_path();
@@ -758,6 +772,27 @@ impl Core {
         );
         self.audit_setting("Set the qemu-img.exe path", &detail).await?;
         Ok(in_use)
+    }
+
+    /// FD-02: who is acting, in the workspace shown now. What the UI reads and changes goes there.
+    pub fn ctx(&self) -> Context {
+        self.current.get()
+    }
+
+    /// FD-02: the user's home workspace (the first one), which keeps this PC's settings.
+    pub fn home(&self) -> Context {
+        self.home
+    }
+
+    /// FD-02: the workspace shown now, as a handle the services that follow it share.
+    pub fn current(&self) -> &workspaces::Current {
+        &self.current
+    }
+
+    /// VM-14, VM-27: the shown workspace's schedules. The scheduler ([`schedules::Schedules::run`]) goes through
+    /// every active workspace whichever is shown.
+    pub fn schedules(&self) -> schedules::Schedules {
+        self.schedules.shown()
     }
 
     /// SS-04, AP-06: where vault passwords may go without asking; tests shorten its grace period.
@@ -817,7 +852,7 @@ impl Core {
 
     /// The vmrun path saved in Settings, if any.
     pub async fn saved_vmrun_path(&self) -> Result<Option<PathBuf>> {
-        saved_vmrun_path(&self.store, &self.ctx).await
+        saved_vmrun_path(&self.store, &self.ctx()).await
     }
 
     /// Saves the vmrun path (`None` = find it automatically) and switches to it right away. The path
@@ -829,9 +864,9 @@ impl Core {
         }
         let as_text = path.as_ref().map(|p| p.display().to_string());
         self.store
-            .put_setting(&self.ctx, store::VMRUN_PATH_KEY, &as_text)
+            .put_setting(&self.ctx(), store::VMRUN_PATH_KEY, &as_text)
             .await?;
-        let ovftool = saved_ovftool_path(&self.store, &self.ctx).await?;
+        let ovftool = saved_ovftool_path(&self.store, &self.ctx()).await?;
         self.vmware
             .replace(Arc::from(adapters::vmware::connect_with(path, ovftool)));
         let in_use = self.vmrun_path();
@@ -853,7 +888,7 @@ impl Core {
 
     /// VM-21: the ovftool.exe path saved in Settings, if any.
     pub async fn saved_ovftool_path(&self) -> Result<Option<PathBuf>> {
-        saved_ovftool_path(&self.store, &self.ctx).await
+        saved_ovftool_path(&self.store, &self.ctx()).await
     }
 
     /// VM-21: saves the ovftool.exe path (`None` = find it: `REMOTELY_OVFTOOL`, then the OVFTool folder next to
@@ -866,9 +901,9 @@ impl Core {
         }
         let as_text = path.as_ref().map(|p| p.display().to_string());
         self.store
-            .put_setting(&self.ctx, store::OVFTOOL_PATH_KEY, &as_text)
+            .put_setting(&self.ctx(), store::OVFTOOL_PATH_KEY, &as_text)
             .await?;
-        let vmrun = saved_vmrun_path(&self.store, &self.ctx).await?;
+        let vmrun = saved_vmrun_path(&self.store, &self.ctx()).await?;
         self.vmware
             .replace(Arc::from(adapters::vmware::connect_with(vmrun, path)));
         let in_use = self.ovftool_path();
@@ -890,7 +925,7 @@ impl Core {
 
     /// CT-02: the docker.exe path saved in Settings, if any.
     pub async fn saved_docker_path(&self) -> Result<Option<PathBuf>> {
-        saved_docker_path(&self.store, &self.ctx).await
+        saved_docker_path(&self.store, &self.ctx()).await
     }
 
     /// CT-02: saves the docker.exe path (`None` = find it: `REMOTELY_DOCKER`, then Docker Desktop's
@@ -903,7 +938,7 @@ impl Core {
         }
         let as_text = path.as_ref().map(|p| p.display().to_string());
         self.store
-            .put_setting(&self.ctx, containers::DOCKER_PATH_KEY, &as_text)
+            .put_setting(&self.ctx(), containers::DOCKER_PATH_KEY, &as_text)
             .await?;
         self.containers.find_this_pc_cli(path.as_deref());
         let in_use = self.docker_path();
@@ -925,7 +960,7 @@ impl Core {
 
     /// VM-18: the VBoxManage path saved in Settings, if any.
     pub async fn saved_vboxmanage_path(&self) -> Result<Option<PathBuf>> {
-        saved_vboxmanage_path(&self.store, &self.ctx).await
+        saved_vboxmanage_path(&self.store, &self.ctx()).await
     }
 
     /// VM-18: saves the VBoxManage path (`None` = find it automatically) and switches to it right
@@ -938,7 +973,7 @@ impl Core {
         }
         let as_text = path.as_ref().map(|p| p.display().to_string());
         self.store
-            .put_setting(&self.ctx, store::VBOXMANAGE_PATH_KEY, &as_text)
+            .put_setting(&self.ctx(), store::VBOXMANAGE_PATH_KEY, &as_text)
             .await?;
         self.virtualbox.replace(Arc::from(adapters::virtualbox::connect(path)));
         let in_use = self.vboxmanage_path();
@@ -955,7 +990,7 @@ impl Core {
 
     /// VM-01: folders scanned for .vmx files, besides Workstation's library.
     pub async fn scan_folders(&self) -> Result<Vec<PathBuf>> {
-        self.inventory.scan_folders(&self.ctx).await
+        self.inventory.scan_folders(&self.ctx()).await
     }
 
     /// VM-01: replaces the folders to scan. Each must be an existing folder; it is saved with `\`, and
@@ -978,7 +1013,7 @@ impl Core {
         }
         let as_text: Vec<String> = kept.iter().map(|p| p.display().to_string()).collect();
         self.store
-            .put_setting(&self.ctx, store::SCAN_FOLDERS_KEY, &as_text)
+            .put_setting(&self.ctx(), store::SCAN_FOLDERS_KEY, &as_text)
             .await?;
         let detail = if as_text.is_empty() {
             "none".to_owned()
@@ -1004,7 +1039,7 @@ impl Core {
             )));
         }
         self.store
-            .put_setting(&self.ctx, store::POWER_ON_LIMIT_KEY, &limit)
+            .put_setting(&self.ctx(), store::POWER_ON_LIMIT_KEY, &limit)
             .await?;
         self.jobs.set_power_on_limit(limit);
         self.audit_setting("Set the parallel power-on limit", &limit.to_string())
@@ -1026,7 +1061,7 @@ impl Core {
             )));
         }
         self.store
-            .put_setting(&self.ctx, store::SHUTDOWN_WAIT_KEY, &secs)
+            .put_setting(&self.ctx(), store::SHUTDOWN_WAIT_KEY, &secs)
             .await?;
         self.jobs.set_shutdown_wait(Duration::from_secs(secs));
         self.audit_setting("Set the shutdown wait", &format!("{secs} s")).await
@@ -1047,7 +1082,7 @@ impl Core {
             )));
         }
         self.store
-            .put_setting(&self.ctx, store::REMOTE_LIMIT_KEY, &limit)
+            .put_setting(&self.ctx(), store::REMOTE_LIMIT_KEY, &limit)
             .await?;
         self.jobs.set_remote_limit(limit);
         self.audit_setting("Set the hosts a bulk run reaches at once", &limit.to_string())
@@ -1075,7 +1110,7 @@ impl Core {
             )));
         }
         self.store
-            .put_setting(&self.ctx, metrics::guest::POLL_KEY, &secs)
+            .put_setting(&self.ctx(), metrics::guest::POLL_KEY, &secs)
             .await?;
         self.metrics.guest().set_interval(Duration::from_secs(secs));
         self.audit_setting(
@@ -1089,7 +1124,7 @@ impl Core {
     pub async fn update_checks_enabled(&self) -> Result<bool> {
         Ok(self
             .store
-            .get_setting::<bool>(&self.ctx, store::UPDATE_CHECKS_KEY)
+            .get_setting::<bool>(&self.ctx(), store::UPDATE_CHECKS_KEY)
             .await?
             .unwrap_or(true))
     }
@@ -1098,7 +1133,7 @@ impl Core {
     pub async fn set_update_checks(&self, enabled: bool) -> Result<()> {
         self.store.read_only().check(Change::Settings)?;
         self.store
-            .put_setting(&self.ctx, store::UPDATE_CHECKS_KEY, &enabled)
+            .put_setting(&self.ctx(), store::UPDATE_CHECKS_KEY, &enabled)
             .await?;
         let detail = if enabled { "on" } else { "off" };
         self.audit_setting("Set update checks", detail).await
@@ -1116,7 +1151,7 @@ impl Core {
             .map_or_else(|| path.display().to_string(), |f| f.to_string_lossy().into_owned());
         self.store
             .append_audit(
-                &self.ctx,
+                &self.ctx(),
                 NewAuditEntry {
                     event: "audit_exported",
                     action: "Exported the audit log to CSV",
@@ -1144,7 +1179,7 @@ impl Core {
         out.write_all(export::audit_csv_header().as_bytes()).await?;
         let (mut entries, mut redacted) = (0, 0);
         // Dropped before anything else reads the database: it holds a connection.
-        let mut rows = self.store.audit_entries(&self.ctx);
+        let mut rows = self.store.audit_entries(&self.ctx());
         while let Some(entry) = rows.try_next().await? {
             let (row, was) = export::audit_csv_row(&entry);
             out.write_all(row.as_bytes()).await?;
@@ -1160,7 +1195,7 @@ impl Core {
     async fn audit_setting(&self, action: &str, detail: &str) -> Result<()> {
         self.store
             .append_audit(
-                &self.ctx,
+                &self.ctx(),
                 NewAuditEntry {
                     event: "setting_changed",
                     action,
@@ -1179,7 +1214,7 @@ impl Core {
     /// SS-03, QL-04, QL-05: keep-alive, auto-reconnect, copy-on-select, font size, scrollback and
     /// reachability checks.
     pub async fn terminal_settings(&self) -> Result<TerminalSettings> {
-        self.terminals.settings(&self.ctx).await
+        self.terminals.settings(&self.ctx()).await
     }
 
     /// SS-03: connection settings apply to terminals opened from now on; QL-05's font size and
@@ -1188,7 +1223,7 @@ impl Core {
         self.store.read_only().check(Change::Settings)?;
         settings.validate()?;
         self.store
-            .put_setting(&self.ctx, TERMINAL_SETTINGS_KEY, &settings)
+            .put_setting(&self.ctx(), TERMINAL_SETTINGS_KEY, &settings)
             .await?;
         self.terminals.apply_settings(&settings);
         self.reachability.poke();

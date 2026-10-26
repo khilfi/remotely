@@ -17,10 +17,11 @@ use super::ops::{VmConfigEdit, VmDeviceOp, VmLifecycleOp};
 use crate::adapters::hypervisor::{virtualbox_key, Hypervisor, Hypervisors};
 use crate::adapters::virtualbox::VboxOsType;
 use crate::command_bus::{Command, CommandBus, PowerOp, SubmitOutcome};
-use crate::domain::{Context, Target, TargetRef};
+use crate::domain::{Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::store::{NewAuditEntry, Store};
 use crate::untrusted::{path_refusal, read_capped, MAX_VM_CONFIG_BYTES};
+use crate::workspaces::Current;
 
 /// VM-24: what Open console did.
 #[derive(Debug, Clone, Serialize)]
@@ -65,7 +66,8 @@ pub const WORKSTATION_GUEST_OS: &[(&str, &str)] = &[
 /// The VM settings the shell reaches (`Core.vm_settings`).
 #[derive(Clone)]
 pub struct VmSettings {
-    ctx: Context,
+    /// FD-02: the workspace shown.
+    current: Current,
     store: Store,
     hypervisors: Hypervisors,
     bus: Arc<CommandBus>,
@@ -88,9 +90,9 @@ pub fn vbox_file_uuid(xml: &str) -> Option<String> {
 }
 
 impl VmSettings {
-    pub fn new(ctx: Context, store: Store, hypervisors: Hypervisors, bus: Arc<CommandBus>) -> Self {
+    pub fn new(current: Current, store: Store, hypervisors: Hypervisors, bus: Arc<CommandBus>) -> Self {
         Self {
-            ctx,
+            current,
             store,
             hypervisors,
             bus,
@@ -106,7 +108,7 @@ impl VmSettings {
                 path: path.display().to_string(),
             },
         };
-        self.bus.submit(&self.ctx, command).await
+        self.bus.submit(&self.current.get(), command).await
     }
 
     /// VM-23: a folder from a folder dialog, shared with the VM as `name`.
@@ -119,7 +121,7 @@ impl VmSettings {
                 writable,
             },
         };
-        self.bus.submit(&self.ctx, command).await
+        self.bus.submit(&self.current.get(), command).await
     }
 
     /// VM-24: an existing VM from a file dialog: a `.vmx` joins the VMs Remotely lists, a `.vbox` is
@@ -162,7 +164,7 @@ impl VmSettings {
                 },
             },
         };
-        self.bus.submit(&self.ctx, command).await
+        self.bus.submit(&self.current.get(), command).await
     }
 
     /// VM-23: whether Workstation's window (`vmware.exe`) runs, for the edit dialogs' warning that it may write its
@@ -242,7 +244,7 @@ impl VmSettings {
         }
         let vm = self
             .store
-            .find_vm(&self.ctx, key)
+            .find_vm(&self.current.get(), key)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(key.to_owned()))?;
         match Hypervisor::of_key(key) {
@@ -254,7 +256,7 @@ impl VmSettings {
                         targets: vec![vm_ref(key)],
                         op: PowerOp::Start { gui: true },
                     };
-                    let outcome = self.bus.submit(&self.ctx, command).await?;
+                    let outcome = self.bus.submit(&self.current.get(), command).await?;
                     return Ok(ConsoleOutcome::Starting {
                         outcome: Box::new(outcome),
                     });
@@ -271,7 +273,7 @@ impl VmSettings {
         let action = format!("Opened the console of VM '{}'", vm.display_name);
         self.store
             .append_audit(
-                &self.ctx,
+                &self.current.get(),
                 NewAuditEntry {
                     event: "vm_console_opened",
                     action: &action,

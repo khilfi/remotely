@@ -68,10 +68,47 @@ impl InventoryWarning {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshReport {
+    /// The workspace's VMs (FD-02).
     pub vms: Vec<VmRecord>,
     pub warnings: Vec<InventoryWarning>,
     /// QL-01: sessions linked to VMs (or unlinked) by IP address after this refresh.
     pub links: AutoLinkReport,
+    /// FD-02: VMs on this PC that no workspace has yet, which the VMs page's Unassigned view lists.
+    pub unassigned: Vec<UnassignedVm>,
+}
+
+/// FD-02: a VM on this PC that no workspace has. It belongs to no engagement, so every workspace may see it in the
+/// Unassigned view; none can act on it until it is added to one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnassignedVm {
+    /// Its key: the .vmx path, or a VirtualBox VM's UUID.
+    pub vmx_path: String,
+    pub hypervisor: Hypervisor,
+    /// VM-18: a VirtualBox VM's .vbox file.
+    pub config_path: Option<String>,
+    pub display_name: String,
+    pub guest_os: Option<String>,
+    pub power_state: PowerState,
+}
+
+impl UnassignedVm {
+    fn of(vm: &DiscoveredVm) -> Self {
+        Self {
+            vmx_path: vm.vmx_path.clone(),
+            hypervisor: vm.hypervisor,
+            config_path: vm.config_path.clone(),
+            display_name: vm.display_name.clone(),
+            guest_os: vm.info.guest_os_name.clone().or_else(|| vm.info.guest_os.clone()),
+            power_state: vm.power_state,
+        }
+    }
+}
+
+/// What one look at this PC found, shared by every workspace's report (FD-02).
+#[derive(Debug, Clone, Default)]
+struct Discovery {
+    warnings: Vec<InventoryWarning>,
 }
 
 /// Which VMs to show or select (VM-02). Empty fields match everything; a VM must match every field
@@ -138,6 +175,8 @@ pub struct Inventory {
     hypervisors: Hypervisors,
     links: Arc<VmLinks>,
     refreshes: RefreshGate,
+    /// FD-02: the VMs the last refresh found that no workspace has.
+    unassigned: Mutex<Vec<DiscoveredVm>>,
 }
 
 /// VM-01: one refresh at a time. Each request takes a ticket; a run covers every ticket taken before
@@ -146,8 +185,8 @@ pub struct Inventory {
 struct RefreshGate {
     tickets: AtomicU64,
     running: tokio::sync::Mutex<()>,
-    /// The last good run: the newest ticket it covers, and its report.
-    last: Mutex<Option<(u64, RefreshReport)>>,
+    /// The last good run: the newest ticket it covers, and what it found.
+    last: Mutex<Option<(u64, Discovery)>>,
 }
 
 /// A .vmx path found by one of the sources, before its file is read.
@@ -163,6 +202,7 @@ impl Inventory {
             hypervisors,
             links,
             refreshes: RefreshGate::default(),
+            unassigned: Mutex::new(Vec::new()),
         }
     }
 
@@ -175,46 +215,21 @@ impl Inventory {
         Ok(saved.unwrap_or_default().into_iter().map(PathBuf::from).collect())
     }
 
-    /// VM-01: finds every VM, saves what it found and returns the full list. A source that cannot be
+    /// VM-01: finds every VM, saves what it found and returns the workspace's list. A source that cannot be
     /// read (vmrun missing, a folder gone) becomes a warning instead of failing the refresh.
+    ///
+    /// FD-02: the look at this PC is the same for every workspace: each VM found goes to the workspace it belongs to,
+    /// and those no workspace has wait in [`RefreshReport::unassigned`] (while the user has one active workspace,
+    /// they join it). The report is the asking workspace's: its VMs and its sessions' links.
     ///
     /// Single-flight and coalesced: while a refresh runs, the requests that come in wait, and when it
     /// is done the first of them runs once more for all of them (what they asked about may have changed
-    /// after the running one read it); the others take that run's report. A request made after a run
-    /// started never takes an older report. A run that fails is shared with nobody: the next waiting
+    /// after the running one read it); the others take what that run found. A request made after a run
+    /// started never takes an older one. A run that fails is shared with nobody: the next waiting
     /// request runs again.
     pub async fn refresh(&self, ctx: &Context) -> Result<RefreshReport> {
-        let gate = &self.refreshes;
-        let ticket = gate.tickets.fetch_add(1, Ordering::SeqCst) + 1;
-        let _running = gate.running.lock().await;
-        if let Some((covers, report)) = locks::lock(&gate.last).as_ref() {
-            if *covers >= ticket {
-                return Ok(report.clone());
-            }
-        }
-        // Every ticket taken so far was asked for before this run reads anything.
-        let covers = gate.tickets.load(Ordering::SeqCst);
-        let report = self.refresh_now(ctx).await?;
-        *locks::lock(&gate.last) = Some((covers, report.clone()));
-        Ok(report)
-    }
-
-    async fn refresh_now(&self, ctx: &Context) -> Result<RefreshReport> {
-        let mut warnings = Vec::new();
-        let mut found = self.refresh_vmware(ctx, &mut warnings).await?;
-        let mut read = vec![Hypervisor::Vmware];
-        // VM-18: someone who uses only VirtualBox has no Workstation and no Workstation VM; saying so on
-        // every refresh would be noise. With a Workstation VM listed, the warning stays.
-        if found.is_empty() && self.hypervisors.virtualbox().tool_path().is_some() {
-            warnings.retain(|w| w.code != CoreError::VmrunNotFound.code());
-        }
-        // VM-18: VirtualBox's VMs, unless it could not be asked this time.
-        let (vbox, vbox_read) = self.refresh_virtualbox(&mut warnings).await;
-        found.extend(vbox);
-        if vbox_read {
-            read.push(Hypervisor::VirtualBox);
-        }
-        self.store.record_inventory_for(ctx, &found, &read).await?;
+        let discovery = self.discover(ctx).await?;
+        let mut warnings = discovery.warnings;
         let links = match self.links.auto_link(ctx).await {
             Ok(links) => links,
             Err(err) => {
@@ -229,7 +244,198 @@ impl Inventory {
             vms: self.store.list_vms(ctx).await?,
             warnings,
             links,
+            unassigned: self.unassigned(),
         })
+    }
+
+    async fn discover(&self, ctx: &Context) -> Result<Discovery> {
+        let gate = &self.refreshes;
+        let ticket = gate.tickets.fetch_add(1, Ordering::SeqCst) + 1;
+        let _running = gate.running.lock().await;
+        if let Some((covers, found)) = locks::lock(&gate.last).as_ref() {
+            if *covers >= ticket {
+                return Ok(found.clone());
+            }
+        }
+        // Every ticket taken so far was asked for before this run reads anything.
+        let covers = gate.tickets.load(Ordering::SeqCst);
+        let found = self.discover_now(ctx).await?;
+        *locks::lock(&gate.last) = Some((covers, found.clone()));
+        Ok(found)
+    }
+
+    async fn discover_now(&self, ctx: &Context) -> Result<Discovery> {
+        let mut warnings = Vec::new();
+        let mut found = self.refresh_vmware(ctx, &mut warnings).await?;
+        let mut read = vec![Hypervisor::Vmware];
+        // VM-18: someone who uses only VirtualBox has no Workstation and no Workstation VM; saying so on
+        // every refresh would be noise. With a Workstation VM listed, the warning stays.
+        if found.is_empty() && self.hypervisors.virtualbox().tool_path().is_some() {
+            warnings.retain(|w| w.code != CoreError::VmrunNotFound.code());
+        }
+        // VM-18: VirtualBox's VMs, unless it could not be asked this time.
+        let (vbox, vbox_read) = self.refresh_virtualbox(&mut warnings).await;
+        found.extend(vbox);
+        if vbox_read {
+            read.push(Hypervisor::VirtualBox);
+        }
+        // FD-02: with one active workspace, every VM is in it, as before workspaces.
+        let active = self.store.active_workspaces(ctx.user_id).await?;
+        let auto = match active.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        };
+        let unassigned = self
+            .store
+            .record_discovery(ctx.user_id, &found, &read, auto.as_ref())
+            .await?;
+        *locks::lock(&self.unassigned) = unassigned;
+        Ok(Discovery { warnings })
+    }
+
+    /// FD-02: the VMs on this PC that no workspace has, as the last refresh found them.
+    pub fn unassigned(&self) -> Vec<UnassignedVm> {
+        locks::lock(&self.unassigned).iter().map(UnassignedVm::of).collect()
+    }
+
+    /// FD-02: adds VMs from the Unassigned view to the workspace: from now on only it lists them and can act on
+    /// them. Each must be one the last refresh found with no workspace (refresh again otherwise). Audited in the
+    /// workspace; refused by the read-only lock. Returns the workspace's VMs.
+    pub async fn claim(&self, ctx: &Context, keys: &[String]) -> Result<Vec<VmRecord>> {
+        self.store.read_only().check(Change::Workspaces)?;
+        if keys.is_empty() {
+            return Err(CoreError::NoTargets);
+        }
+        let waiting: Vec<DiscoveredVm> = locks::lock(&self.unassigned).clone();
+        let mut picked: Vec<DiscoveredVm> = Vec::new();
+        for key in keys {
+            let found = waiting
+                .iter()
+                .find(|vm| vm.vmx_path.eq_ignore_ascii_case(key))
+                .ok_or_else(|| {
+                    CoreError::InvalidInput(format!(
+                        "{key} isn't waiting in Unassigned any more: refresh the VM list."
+                    ))
+                })?;
+            if !picked
+                .iter()
+                .any(|vm| vm.vmx_path.eq_ignore_ascii_case(&found.vmx_path))
+            {
+                picked.push(found.clone());
+            }
+        }
+        let mut added = Vec::new();
+        for vm in &picked {
+            if self.store.assign_vm(ctx, &vm.vmx_path).await? {
+                added.push(vm.clone());
+            }
+        }
+        // Listed at once, as the refresh found them; the next refresh reads them again.
+        self.store.record_discovery(ctx.user_id, &added, &[], None).await?;
+        locks::lock(&self.unassigned).retain(|vm| !added.iter().any(|a| a.vmx_path.eq_ignore_ascii_case(&vm.vmx_path)));
+        if !added.is_empty() {
+            let mut targets = Vec::with_capacity(added.len());
+            for vm in &added {
+                if let Some(record) = self.store.find_vm(ctx, &vm.vmx_path).await? {
+                    targets.push(vm_target(&record));
+                }
+            }
+            let action = match added.as_slice() {
+                [vm] => format!("Added VM '{}' to this workspace", vm.display_name),
+                vms => format!("Added {} VMs to this workspace", vms.len()),
+            };
+            self.audit(ctx, "vm_assigned", &action, &targets, None).await?;
+        }
+        self.store.list_vms(ctx).await
+    }
+
+    /// FD-02: takes VMs out of the workspace, into the Unassigned view, where another workspace can add them. Their
+    /// label, tags and links stay with this workspace (they come back if the VM does). A protected or Prod VM is
+    /// refused: unprotect it or change its label first, which is audited too. With one active workspace every VM
+    /// is in it, so nothing can be taken out. Audited in the workspace; refused by the read-only lock.
+    pub async fn release(&self, ctx: &Context, keys: &[String]) -> Result<Vec<VmRecord>> {
+        self.store.read_only().check(Change::Workspaces)?;
+        if keys.is_empty() {
+            return Err(CoreError::NoTargets);
+        }
+        if self.store.active_workspaces(ctx.user_id).await?.len() < 2 {
+            return Err(CoreError::InvalidInput(
+                "With one workspace, every VM is in it. Make another workspace first.".into(),
+            ));
+        }
+        let mut vms = Vec::new();
+        for key in keys {
+            let vm = match self.store.find_vm(ctx, key).await? {
+                Some(vm) if self.store.vm_in_workspace(ctx, key).await? => vm,
+                _ => return Err(CoreError::NotInWorkspace(format!("The VM {key}"))),
+            };
+            if vm.protected {
+                return Err(CoreError::InvalidInput(format!(
+                    "'{}' is protected: unprotect it before taking it out of the workspace.",
+                    vm.display_name
+                )));
+            }
+            if vm.environment == Environment::Prod {
+                return Err(CoreError::InvalidInput(format!(
+                    "'{}' is labelled Prod: change its label before taking it out of the workspace.",
+                    vm.display_name
+                )));
+            }
+            if !vms.iter().any(|v: &VmRecord| v.id == vm.id) {
+                vms.push(vm);
+            }
+        }
+        for vm in &vms {
+            self.store.release_vm(ctx, &vm.vmx_path).await?;
+        }
+        {
+            let mut waiting = locks::lock(&self.unassigned);
+            for vm in &vms {
+                if !waiting.iter().any(|w| w.vmx_path.eq_ignore_ascii_case(&vm.vmx_path)) {
+                    waiting.push(released(vm));
+                }
+            }
+        }
+        let targets: Vec<Target> = vms.iter().map(vm_target).collect();
+        let action = match vms.as_slice() {
+            [vm] => format!("Took VM '{}' out of this workspace", vm.display_name),
+            vms => format!("Took {} VMs out of this workspace", vms.len()),
+        };
+        self.audit(
+            ctx,
+            "vm_released",
+            &action,
+            &targets,
+            Some("it waits in Unassigned until a workspace adds it"),
+        )
+        .await?;
+        self.store.list_vms(ctx).await
+    }
+
+    async fn audit(
+        &self,
+        ctx: &Context,
+        event: &str,
+        action: &str,
+        targets: &[Target],
+        detail: Option<&str>,
+    ) -> Result<()> {
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event,
+                    action,
+                    tier: None,
+                    job_id: None,
+                    targets,
+                    approval: None,
+                    result: None,
+                    detail,
+                },
+            )
+            .await
+            .map(drop)
     }
 
     /// VM-01: Workstation's VMs: the library, the scanned folders and `vmrun list`.
@@ -550,6 +756,44 @@ fn file_stem(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// FD-02: a VM taken out of a workspace, as the Unassigned view lists it until the next refresh.
+fn released(vm: &VmRecord) -> DiscoveredVm {
+    DiscoveredVm {
+        vmx_path: vm.vmx_path.clone(),
+        display_name: vm.display_name.clone(),
+        info: VmxInfo {
+            display_name: Some(vm.display_name.clone()),
+            guest_os: vm.guest_os.clone(),
+            guest_os_name: vm.guest_os_name.clone(),
+            num_vcpus: vm.num_vcpus,
+            memsize_mb: vm.memsize_mb,
+            suspended: vm.power_state == PowerState::Suspended,
+        },
+        power_state: vm.power_state,
+        tools_state: vm.tools_state.clone(),
+        ip_address: vm.ip_address.clone(),
+        hypervisor: vm.hypervisor,
+        config_path: vm.config_path.clone(),
+    }
+}
+
+/// A VM's name before the VM list has it: its .vmx file's name, or a VirtualBox VM's UUID.
+pub(crate) fn unlisted_name(key: &str) -> String {
+    match Hypervisor::of_key(key) {
+        Hypervisor::Vmware => file_stem(Path::new(key)),
+        Hypervisor::VirtualBox => format!("VirtualBox VM {key}"),
+    }
+}
+
+/// FD-02: how a refusal names a VM the workspace doesn't have: by its key only, never by another workspace's name
+/// for it.
+pub(crate) fn vm_named(key: &str) -> String {
+    match Hypervisor::of_key(key) {
+        Hypervisor::Vmware => format!("The VM '{}'", file_stem(Path::new(key))),
+        Hypervisor::VirtualBox => format!("The VirtualBox VM {key}"),
+    }
+}
+
 fn vm_target(vm: &VmRecord) -> Target {
     Target {
         target: TargetRef::Vm {
@@ -625,6 +869,10 @@ impl TargetDirectory for StoreDirectory {
     async fn resolve(&self, ctx: &Context, target: &TargetRef) -> Result<Target> {
         match target {
             TargetRef::Vm { vmx_path } => {
+                // FD-02: a VM another workspace has, or none has, can't be acted on from this one.
+                if !self.store.vm_in_workspace(ctx, vmx_path).await? {
+                    return Err(CoreError::NotInWorkspace(vm_named(vmx_path)));
+                }
                 let known = self.store.find_vm(ctx, vmx_path).await?;
                 Ok(match known {
                     Some(vm) => Target {
@@ -633,13 +881,10 @@ impl TargetDirectory for StoreDirectory {
                         environment: vm.environment,
                         protected: vm.protected,
                     },
-                    // Not in the inventory yet: no label, not protected.
+                    // In this workspace but not listed yet (a VM it just made or added): no label, not protected.
                     None => Target {
                         target: target.clone(),
-                        name: match Hypervisor::of_key(vmx_path) {
-                            Hypervisor::Vmware => file_stem(Path::new(vmx_path)),
-                            Hypervisor::VirtualBox => format!("VirtualBox VM {vmx_path}"),
-                        },
+                        name: unlisted_name(vmx_path),
                         environment: Environment::None,
                         protected: false,
                     },

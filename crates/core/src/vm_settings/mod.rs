@@ -303,6 +303,17 @@ impl VmEditor {
                 changes.push(more);
             }
         }
+        // FD-02: an existing VM added from a workspace belongs to it; a deleted one belongs to none any more.
+        if let Command::VmLifecycle { op, .. } = command {
+            match op {
+                VmLifecycleOp::Register { .. } => {
+                    self.store.assign_vm(ctx, vmx_path).await?;
+                }
+                VmLifecycleOp::Delete => {
+                    self.store.release_vm(ctx, vmx_path).await?;
+                }
+            }
+        }
         Ok(format!("'{}': {}", target.name, changes.join("; ")))
     }
 

@@ -30,6 +30,7 @@ mod timeline;
 #[cfg(test)]
 mod upgrade_tests;
 mod vault;
+mod workspaces;
 
 use std::path::Path;
 use std::str::FromStr;
@@ -46,7 +47,7 @@ use crate::domain::{now_rfc3339, Context, UserId, WorkspaceId};
 use crate::error::Result;
 use crate::presentation::ReadOnlyLock;
 
-pub use audit::{AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
+pub use audit::{chain_start, AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
 pub(crate) use catalog::{NewImage, TemplateRow};
 pub(crate) use favourites::{FavouriteFields, FavouriteRow};
 pub use host_specs::StoredSpecs;
@@ -66,6 +67,7 @@ pub use tags::{SavedFilter, Tag};
 pub(crate) use terminal_rules::{BuiltinRuleRow, TerminalRuleFields, TerminalRuleRow};
 pub use timeline::{vm_needle, JobTargetBrief};
 pub(crate) use vault::VaultMetaRow;
+pub(crate) use workspaces::{new_workspace_id, WorkspaceRow};
 
 pub const POLICY_RULES_KEY: &str = "policy.rules";
 /// Full path to vmrun.exe chosen in Settings; JSON null means "find it automatically".
@@ -98,6 +100,9 @@ pub struct Store {
     /// FD-03: presentation mode's read-only lock, shared by every service that edits the app's data and by the
     /// command bus. Set by [`crate::presentation::PresentationMode`].
     read_only: ReadOnlyLock,
+    /// FD-02: the user's home workspace, which holds this PC's settings ([`crate::settings::MACHINE_KEYS`]) whatever
+    /// workspace is shown. Set by [`Store::ensure_identity`].
+    home: Arc<std::sync::RwLock<Option<WorkspaceId>>>,
 }
 
 impl Store {
@@ -169,6 +174,7 @@ impl Store {
             pool,
             audit_lock: Arc::new(tokio::sync::Mutex::new(())),
             read_only: ReadOnlyLock::default(),
+            home: Arc::default(),
         })
     }
 
@@ -205,33 +211,56 @@ impl Store {
             .fetch_one(&self.pool)
             .await?;
 
-        let new_ws = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO workspaces (id, user_id, name, created_at) VALUES (?, ?, ?, ?)
-             ON CONFLICT(user_id, name) DO NOTHING",
-        )
-        .bind(&new_ws)
-        .bind(&user_id)
-        .bind(DEFAULT_WORKSPACE)
-        .bind(&now)
-        .execute(&self.pool)
-        .await?;
-        let workspace_id: String = sqlx::query_scalar("SELECT id FROM workspaces WHERE user_id = ? AND name = ?")
-            .bind(&user_id)
-            .bind(DEFAULT_WORKSPACE)
-            .fetch_one(&self.pool)
-            .await?;
+        // FD-02: the user's home workspace (the first one, named Default until renamed), found by its flag so a
+        // rename doesn't make a new one.
+        let home: Option<String> =
+            sqlx::query_scalar("SELECT id FROM workspaces WHERE user_id = ? AND is_home = 1 ORDER BY rowid LIMIT 1")
+                .bind(&user_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        let workspace_id = match home {
+            Some(id) => id,
+            None => {
+                let new_ws = Uuid::new_v4().to_string();
+                sqlx::query(
+                    "INSERT INTO workspaces (id, user_id, name, created_at, is_home) VALUES (?, ?, ?, ?, 1)
+                     ON CONFLICT(user_id, name) DO UPDATE SET is_home = 1",
+                )
+                .bind(&new_ws)
+                .bind(&user_id)
+                .bind(DEFAULT_WORKSPACE)
+                .bind(&now)
+                .execute(&self.pool)
+                .await?;
+                sqlx::query_scalar("SELECT id FROM workspaces WHERE user_id = ? AND is_home = 1 ORDER BY rowid LIMIT 1")
+                    .bind(&user_id)
+                    .fetch_one(&self.pool)
+                    .await?
+            }
+        };
 
-        Ok(Context {
+        let ctx = Context {
             workspace_id: WorkspaceId(parse_uuid(&workspace_id)?),
             user_id: UserId(parse_uuid(&user_id)?),
-        })
+        };
+        *crate::locks::write(&self.home) = Some(ctx.workspace_id);
+        Ok(ctx)
+    }
+
+    /// FD-02: where a setting is kept: this PC's settings ([`crate::settings::MACHINE_KEYS`]) in the home workspace,
+    /// whatever workspace asks; an engagement's in the context's.
+    fn setting_scope(&self, ctx: &Context, key: &str) -> String {
+        let base = key.strip_suffix(".unreadable").unwrap_or(key);
+        match self.home_workspace() {
+            Some(home) if crate::settings::is_machine_key(base) => home.to_string(),
+            _ => ctx.workspace_id.to_string(),
+        }
     }
 
     pub async fn get_setting<T: DeserializeOwned>(&self, ctx: &Context, key: &str) -> Result<Option<T>> {
         let raw: Option<String> =
             sqlx::query_scalar("SELECT value_json FROM settings WHERE workspace_id = ? AND key = ?")
-                .bind(ctx.workspace_id.to_string())
+                .bind(self.setting_scope(ctx, key))
                 .bind(key)
                 .fetch_optional(&self.pool)
                 .await?;
@@ -244,7 +273,7 @@ impl Store {
              ON CONFLICT(workspace_id, key) DO UPDATE SET
                  value_json = excluded.value_json, user_id = excluded.user_id, updated_at = excluded.updated_at",
         )
-        .bind(ctx.workspace_id.to_string())
+        .bind(self.setting_scope(ctx, key))
         .bind(ctx.user_id.to_string())
         .bind(key)
         .bind(serde_json::to_string(value)?)
@@ -261,7 +290,7 @@ impl Store {
             sqlx::query("UPDATE OR REPLACE settings SET key = ?, updated_at = ? WHERE workspace_id = ? AND key = ?")
                 .bind(format!("{key}.unreadable"))
                 .bind(now_rfc3339())
-                .bind(ctx.workspace_id.to_string())
+                .bind(self.setting_scope(ctx, key))
                 .bind(key)
                 .execute(&self.pool)
                 .await?;
