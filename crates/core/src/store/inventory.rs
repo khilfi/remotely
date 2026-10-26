@@ -10,7 +10,7 @@ use uuid::Uuid;
 use super::Store;
 use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::vmware::{path_key, VmxInfo};
-use crate::domain::{now_rfc3339, Context, Environment, PowerState, UserId};
+use crate::domain::{now_rfc3339, Context, Environment, PowerState, UserId, WorkspaceId};
 use crate::error::{CoreError, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,6 +184,25 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         rows.iter().map(row_to_vm).collect()
+    }
+
+    /// FD-02: every VM a workspace of the user lists, with that workspace (a VM is listed in at most one: the one it
+    /// belongs to). For the collector, which records each running VM's host side in its own workspace's history.
+    pub(crate) async fn listed_vms_by_workspace(&self, user: UserId) -> Result<Vec<(WorkspaceId, VmRecord)>> {
+        let rows = sqlx::query(concat!(
+            "SELECT workspace_id AS owner, ",
+            vm_columns!(),
+            " FROM vms WHERE missing = 0 AND workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)"
+        ))
+        .bind(user.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                let owner: String = row.try_get("owner")?;
+                Ok((WorkspaceId(super::parse_uuid(&owner)?), row_to_vm(row)?))
+            })
+            .collect()
     }
 
     /// A VM by its id, including one the last refresh did not find (BX-01: a session's VM).

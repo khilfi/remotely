@@ -281,7 +281,11 @@ crates/core/          remotely-core: all app logic
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
                       GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
                       POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
-                      minute (DF_EVERY), and their parsers); HostProcessSource reads no inventory with no VM process
+                      minute (DF_EVERY), and their parsers); HostProcessSource reads no inventory with no VM process;
+                      FD-02 the samples are the shown workspace's VMs, and other workspaces' running VMs go only to
+                      their own workspace's history (SourceRound::elsewhere, one Rollup per workspace) so VM-14's idle
+                      check works in a hidden workspace; guest polling, the hub and MO-07 alerts follow the shown
+                      workspace only; a round during a switch is dropped
     host_details/     MO-13, MO-14 (reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
                       (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
                       channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the

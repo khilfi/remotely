@@ -938,3 +938,131 @@ async fn a_hidden_workspaces_schedules_run_audited_in_it_and_its_events_name_it(
     clock.advance(time::Duration::days(1));
     assert_eq!(core.schedules().tick().await.unwrap().started, 0);
 }
+
+#[tokio::test]
+async fn a_hidden_workspaces_vms_keep_their_host_history_so_its_idle_auto_suspend_still_works() {
+    use remotely_core::adapters::host_counters::VmProcess;
+    use remotely_core::adapters::vmware::VmxInfo;
+    use remotely_core::command_bus::ApprovalAnswers;
+    use remotely_core::fakes::clock::{FakeClock, FakeZone};
+    use remotely_core::metrics::history::{HistorySource, MINUTE_MS};
+    use remotely_core::metrics::MetricSource;
+    use remotely_core::policy::ApprovalStep;
+    use remotely_core::schedules::{ScheduleAction, ScheduleInput, ScheduleSpec, ScheduleTarget, Timing};
+    use time::macros::datetime;
+
+    let mut fake = listed(FakeVmware::with_running([vmx("web"), vmx("db")]), &["web", "db"]);
+    for name in ["web", "db"] {
+        fake = fake.with_vmx(
+            &vmx(name),
+            VmxInfo {
+                display_name: Some(name.into()),
+                num_vcpus: Some(2),
+                memsize_mb: Some(2048),
+                ..Default::default()
+            },
+        );
+    }
+    let setup = Setup::new(fake);
+    let vmware = Arc::clone(&setup.vmware);
+    let processes = Arc::clone(&setup.host.processes);
+    let core = setup.build().await;
+    let acme = core.ctx();
+    let now = datetime!(2026-10-26 10:00 UTC);
+    let clock = Arc::new(FakeClock::new(now, FakeZone::central_europe()));
+    core.schedules().set_clock(clock.clone());
+
+    // Acme suspends its VMs once they have been idle for 30 minutes (2 VMs: High, approved at the save).
+    let saved = core
+        .schedules()
+        .save(ScheduleInput {
+            id: None,
+            name: "idle lab".into(),
+            spec: ScheduleSpec {
+                action: ScheduleAction::Suspend,
+                targets: vec![
+                    ScheduleTarget::Vm { vm_key: vmx("web") },
+                    ScheduleTarget::Vm { vm_key: vmx("db") },
+                ],
+                timing: Timing::Idle {
+                    minutes: 30,
+                    cpu_below_pct: 5,
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let request = saved.approval.expect("High");
+    let mut answers = ApprovalAnswers {
+        confirmed: true,
+        ..Default::default()
+    };
+    for step in &request.steps {
+        match step {
+            ApprovalStep::TypeTargetCount { expected } => answers.typed_target_count = Some(*expected),
+            ApprovalStep::Reason => answers.reason = Some("idle lab VMs".into()),
+            ApprovalStep::SafetySnapshot { .. } => answers.safety_snapshot = Some(false),
+            _ => {}
+        }
+    }
+    core.schedules().approve(request.id, answers).await.unwrap();
+
+    // Globex is shown while the collector runs for 31 minutes: web idle (0.1% of this PC is 0.8% of its 2 vCPUs),
+    // db busy (40%).
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let globex_ctx = core.ctx();
+    let process = |name: &str, host_cpu: f64| VmProcess {
+        pid: 1,
+        vmx_path: Some(vmx(name)),
+        name: None,
+        cpu_pct: Some(host_cpu),
+        working_set_bytes: Some(1 << 30),
+        read_bps: Some(0.0),
+        write_bps: Some(0.0),
+    };
+    *processes.lock().unwrap() = vec![process("web", 0.1), process("db", 5.0)];
+    let start = (now.unix_timestamp() * 1000) - 31 * MINUTE_MS;
+    for round in 0..=62 {
+        core.metrics.collect_once_at(start + round * 30_000).await;
+    }
+
+    // Acme's history has both VMs' minutes; Globex's has none of them, and its dashboard shows neither.
+    let from = start / MINUTE_MS;
+    let to = from + 40;
+    for name in ["web", "db"] {
+        let key = vmx(name);
+        let rows = core
+            .store
+            .read_history(&acme, HistorySource::Host, &key, from, to)
+            .await
+            .unwrap();
+        assert!(rows.len() >= 30, "{name}: {} minutes in Acme", rows.len());
+        assert!(core
+            .store
+            .read_history(&globex_ctx, HistorySource::Host, &key, from, to)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(core.metrics.hub().latest(MetricSource::Host, &key).is_none());
+        assert!(core
+            .metrics
+            .hub()
+            .latest(MetricSource::Host, &key.to_lowercase())
+            .is_none());
+    }
+
+    // Acme's schedule suspends the idle VM, audited in Acme, while Globex is still shown.
+    let report = core.schedules().tick().await.unwrap();
+    core.schedules().wait_runs().await;
+    assert_eq!(report.started, 1);
+    assert_eq!(common::running(&vmware), ["db"]);
+    assert!(audit_of(&core, &acme)
+        .await
+        .iter()
+        .any(|e| e.event == "job_started" && e.action.to_lowercase().contains("suspend")));
+    assert!(audit_of(&core, &globex_ctx)
+        .await
+        .iter()
+        .all(|e| e.event != "job_started"));
+}

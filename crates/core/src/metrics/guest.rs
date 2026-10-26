@@ -489,6 +489,7 @@ impl MetricsSource for GuestSource {
             samples,
             statuses: watched.iter().filter_map(|id| statuses.get(id).cloned()).collect(),
             running: None,
+            elsewhere: Vec::new(),
         })
     }
 }

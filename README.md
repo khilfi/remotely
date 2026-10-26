@@ -451,10 +451,13 @@ and colour) and switches to another; **New workspace…**, **Rename or recolour 
 
 - **Kept apart per workspace**: sessions and folders (with their defaults), trusted host keys, VM links, saved port
   forwards, container host marks, host details, own VM sizes, images and launch templates, stacks, schedules, vault
-  items, jobs and their outputs, the audit log, the dashboard's alert rules, alerts and history (gathered while the
-  workspace is shown), terminal highlight and alert rules, MultiExec groups, the dashboard layout and watched hosts,
-  notifications and the change ID rule. Search, the map, the status bar and the notification centre show the current
-  workspace's alone.
+  items, jobs and their outputs, the audit log, the dashboard's history, alert rules and alerts, terminal highlight and
+  alert rules, MultiExec groups, the dashboard layout and watched hosts, notifications and the change ID rule. Search,
+  the map, the status bar and the notification centre show the current workspace's alone.
+- **Dashboard history in the background**: every running VM's host side (CPU, RAM, disk I/O, read with no login) is
+  recorded in its own workspace's history whichever workspace is shown, so a hidden workspace's idle auto-suspend
+  schedules still see how busy its VMs are. Logins to watched hosts (guest metrics), this PC's own series, and alert
+  checks and notifications run for the current workspace only. A VM no workspace has isn't recorded.
 - **Shared by every workspace** (this PC's settings): the approval rules, the paths of vmrun, ovftool, VBoxManage,
   qemu-img and Docker, the scanned VM folders, the power-on limit, the shutdown wait, how many hosts a run reaches at
   once, update checks and the update token, how long job outputs and dashboard history are kept, how often guests are
@@ -464,7 +467,8 @@ and colour) and switches to another; **New workspace…**, **Rename or recolour 
   acts on it: the command bus refuses an action on a VM from any other workspace. While only one workspace is active,
   every VM joins it by itself, so nothing changes until you make a second one. After that, a VM no workspace has yet is
   under **Unassigned** on the VMs page, where you add it to the current workspace, and **Take out of this workspace**
-  (a VM's menu) puts one back there (never a protected or Prod VM). A VM Remotely deploys, clones, imports or adds
+  (a VM's menu) puts one back there (never a protected or Prod VM). Nothing acts on an unassigned VM: the command bus
+  refuses it until a workspace adds it, and adding is never done for you. A VM Remotely deploys, clones, imports or adds
   joins the workspace that made it. The capacity check and planner still count every running VM, shown as "a VM
   outside this workspace", and never suggest suspending one.
 - **Vault**: one vault password and one key for every workspace, so one unlock is enough; each secret is sealed with

@@ -32,7 +32,7 @@ use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::paging::PagingInfo;
 use crate::adapters::vmware::path_key;
 use crate::capacity::{CapacityChecker, HostCapacity};
-use crate::domain::{now_rfc3339, Context, Environment, PowerState, TargetRef};
+use crate::domain::{now_rfc3339, Context, Environment, PowerState, TargetRef, WorkspaceId};
 use crate::error::Result;
 use crate::locks;
 use crate::store::{NewAuditEntry, Store};
@@ -210,6 +210,9 @@ pub struct SourceRound {
     /// Host side, FD-02: the keys of every VM process seen, whichever workspace has the VM (the samples are the
     /// shown workspace's only). The capacity panel counts them all: they share this PC.
     pub running: Option<Vec<String>>,
+    /// Host side, FD-02: the running VMs of the workspaces not shown, each with its workspace. They never reach the
+    /// dashboard or the alerts; only their own workspace's history, which VM-14's idle check there reads.
+    pub elsewhere: Vec<(WorkspaceId, MetricSample)>,
 }
 
 #[async_trait]
@@ -219,8 +222,9 @@ pub trait MetricsSource: Send + Sync {
 }
 
 /// MO-01: per-VM CPU, RAM and disk I/O from the `vmware-vmx.exe` processes, read through the host
-/// counters adapter and matched to the inventory by .vmx path. FD-02: only the shown workspace's VMs; a process
-/// whose VM the workspace doesn't list (another workspace's, or one no workspace has) is left out.
+/// counters adapter and matched to the inventory by .vmx path. FD-02: the samples are the shown workspace's VMs;
+/// another workspace's running VMs go to [`SourceRound::elsewhere`] for their own history, and a process whose VM
+/// no workspace has is left out.
 pub struct HostProcessSource {
     counters: Arc<dyn HostCounters>,
     store: Store,
@@ -269,13 +273,24 @@ impl MetricsSource for HostProcessSource {
         let totals = self.counters.host_totals().await.ok();
         let cpus = totals.map(|t| t.logical_cpus);
         let ram_mb = totals.map(|t| t.physical_ram_mb);
-        // The inventory names the VM and gives its size. FD-02: a VM the shown workspace doesn't list isn't shown.
-        let vms = self.store.list_vms(&self.current.get()).await.unwrap_or_default();
+        // The inventory names the VM and gives its size. FD-02: every workspace's VMs, each sample kept with the
+        // workspace that lists its VM; a VM no workspace lists isn't read.
+        let shown = self.current.get();
+        let listed = self
+            .store
+            .listed_vms_by_workspace(shown.user_id)
+            .await
+            .unwrap_or_default();
+        let owners: HashMap<String, WorkspaceId> = listed
+            .iter()
+            .map(|(owner, v)| (path_key(Path::new(&v.vmx_path)), *owner))
+            .collect();
+        let vms: Vec<crate::store::VmRecord> = listed.into_iter().map(|(_, v)| v).collect();
         let by_path: HashMap<String, &crate::store::VmRecord> =
             vms.iter().map(|v| (path_key(Path::new(&v.vmx_path)), v)).collect();
         // VM-18: a VirtualBox process started with the VM's name instead of its UUID.
         let vbox_by_name = virtualbox_names(&vms);
-        let samples: Vec<MetricSample> = processes
+        let all: Vec<MetricSample> = processes
             .into_iter()
             .filter_map(|p| {
                 let by_name = || {
@@ -320,16 +335,26 @@ impl MetricsSource for HostProcessSource {
             .collect();
         // VM-18: a VirtualBox process named by its VM rather than its UUID counts once it is matched.
         let mut running = running;
-        for sample in &samples {
+        for sample in &all {
             let key = sample.target.key();
             if !running.iter().any(|r| r.eq_ignore_ascii_case(&key)) {
                 running.push(key);
+            }
+        }
+        let mut samples = Vec::new();
+        let mut elsewhere = Vec::new();
+        for sample in all {
+            let owner = owners.get(&path_key(Path::new(&sample.target.key()))).copied();
+            match owner {
+                Some(owner) if owner != shown.workspace_id => elsewhere.push((owner, sample)),
+                _ => samples.push(sample),
             }
         }
         Ok(SourceRound {
             samples,
             statuses: Vec::new(),
             running: Some(running),
+            elsewhere,
         })
     }
 }
@@ -560,8 +585,12 @@ fn this_pc_point(t: i64, memory: &ThisPcMemory, cpu_pct: Option<f64>) -> MetricP
 pub struct RecordedRound<'a> {
     /// When the round was recorded, Unix time in milliseconds.
     pub t_ms: i64,
+    /// FD-02: the workspace shown during the round, whose VMs, guests and this PC the round's samples are.
+    pub workspace: WorkspaceId,
     /// The VMs' host-side samples; `None` when the host side could not be read this round.
     pub host: Option<&'a [MetricSample]>,
+    /// FD-02: the running VMs of the workspaces not shown, each with its workspace (for their history only).
+    pub host_elsewhere: &'a [(WorkspaceId, MetricSample)],
     /// The guests polled in this round (a guest polled less often has no sample in the rounds between);
     /// `None` when the guest side failed.
     pub guest: Option<&'a [MetricSample]>,
@@ -736,9 +765,15 @@ impl Metrics {
             let result = source.collect().await;
             (result, started.elapsed().as_secs_f64() * 1000.0)
         }
+        let shown = self.current.get();
         let started = Instant::now();
         let ((host, host_ms), (guest, guest_ms)) = tokio::join!(timed(&self.host), timed(&self.guest));
         let round_ms = started.elapsed().as_secs_f64() * 1000.0;
+        // FD-02: a switch during the round would mix two workspaces' readings: the round is dropped.
+        if self.current.get() != shown {
+            tracing::debug!("the workspace changed during a metrics round; its readings are dropped");
+            return locks::lock(&self.hub.state).cost.clone();
+        }
         let host = host
             .inspect_err(|err| tracing::warn!(source = self.host.name(), error = %err, "metrics source failed"))
             .ok();
@@ -782,7 +817,10 @@ impl Metrics {
         // FD-02: every VM process seen, for the capacity panel (the samples are the shown workspace's only).
         let host_running = host.as_ref().and_then(|r| r.running.clone());
         // Kept for the observers: the hub takes its own copy.
-        let host_samples = host.map(|r| r.samples);
+        let (host_samples, host_elsewhere) = match host {
+            Some(r) => (Some(r.samples), r.elsewhere),
+            None => (None, Vec::new()),
+        };
         let guest_samples = guest.as_ref().map(|r| r.samples.clone());
         let this_pc_kept = this_pc.clone();
         self.hub.record(now_ms, host_samples.clone(), guest);
@@ -803,7 +841,9 @@ impl Metrics {
         if !observers.is_empty() {
             let round = RecordedRound {
                 t_ms: now_ms,
+                workspace: shown.workspace_id,
                 host: host_samples.as_deref(),
+                host_elsewhere: &host_elsewhere,
                 guest: guest_samples.as_deref(),
                 this_pc: this_pc_kept.as_ref(),
                 host_cpu_pct,
@@ -1134,6 +1174,7 @@ mod tests {
                 )],
                 statuses: vec![GuestStatus::new(web, GuestState::Ok, None)],
                 running: None,
+                elsewhere: Vec::new(),
             }),
         );
         let usage = hub.host_usage();
@@ -1168,6 +1209,7 @@ mod tests {
             samples: vec![sample(MetricSource::Guest, TargetRef::Session { session_id: web }, cpu)],
             statuses: vec![GuestStatus::new(web, GuestState::Ok, None)],
             running: None,
+            elsewhere: Vec::new(),
         };
 
         hub.record(
@@ -1212,6 +1254,7 @@ mod tests {
                 samples: Vec::new(),
                 statuses: Vec::new(),
                 running: None,
+                elsewhere: Vec::new(),
             }),
         );
         assert!(hub.latest(MetricSource::Guest, &web.to_string()).is_none());
