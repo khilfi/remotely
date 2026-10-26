@@ -1927,6 +1927,18 @@ impl CommandBus {
     }
 
     async fn resolve_targets(&self, ctx: &Context, command: &Command) -> Result<Vec<Target>> {
+        // FD-02: a deploy's targets are the new VMs; the VMs it clones from must be this workspace's too.
+        let deploys: Vec<&crate::deploy::DeploySpec> = match command {
+            Command::Deploy { spec, .. } => vec![spec.as_ref()],
+            Command::Stack {
+                op: crate::stacks::StackOp::Deploy { spec },
+                ..
+            } => spec.steps.iter().map(|step| &step.spec).collect(),
+            _ => Vec::new(),
+        };
+        for spec in deploys {
+            spec.require_sources_here(&self.store, ctx).await?;
+        }
         let mut targets = Vec::with_capacity(command.targets().len());
         let adding = matches!(
             command,

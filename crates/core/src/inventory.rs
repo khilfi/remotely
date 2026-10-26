@@ -870,9 +870,7 @@ impl TargetDirectory for StoreDirectory {
         match target {
             TargetRef::Vm { vmx_path } => {
                 // FD-02: a VM another workspace has, or none has, can't be acted on from this one.
-                if !self.store.vm_in_workspace(ctx, vmx_path).await? {
-                    return Err(CoreError::NotInWorkspace(vm_named(vmx_path)));
-                }
+                self.store.require_vm_here(ctx, vmx_path).await?;
                 let known = self.store.find_vm(ctx, vmx_path).await?;
                 Ok(match known {
                     Some(vm) => Target {

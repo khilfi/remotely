@@ -445,7 +445,7 @@ async fn a_vm_belongs_to_one_workspace_and_the_bus_refuses_it_from_any_other() {
             },
         )
         .await;
-    assert!(matches!(refused, Err(CoreError::NotInWorkspace(_))), "{refused:?}");
+    assert!(matches!(refused, Err(CoreError::VmUnassigned(_))), "{refused:?}");
 
     // Globex sees none of Acme's VMs, and the bus refuses them there.
     switch(&core, &globex).await;
@@ -500,6 +500,7 @@ async fn a_vm_belongs_to_one_workspace_and_the_bus_refuses_it_from_any_other() {
     );
     core.inventory.release(&acme, &[vmx("db")]).await.unwrap();
     assert_eq!(names(core.store.list_vms(&acme).await.unwrap()), ["web"]);
+    // Taken out, db is unassigned: Acme must add it again before acting on it.
     assert!(matches!(
         core.bus
             .submit(
@@ -510,7 +511,7 @@ async fn a_vm_belongs_to_one_workspace_and_the_bus_refuses_it_from_any_other() {
                 },
             )
             .await,
-        Err(CoreError::NotInWorkspace(_))
+        Err(CoreError::VmUnassigned(_))
     ));
     let events: Vec<String> = audit_of(&core, &acme).await.into_iter().map(|e| e.event).collect();
     assert!(events.contains(&"vm_released".to_owned()));
@@ -1065,4 +1066,138 @@ async fn a_hidden_workspaces_vms_keep_their_host_history_so_its_idle_auto_suspen
         .await
         .iter()
         .all(|e| e.event != "job_started"));
+}
+
+#[tokio::test]
+async fn nothing_acts_on_an_unassigned_vm_until_a_workspace_adds_it() {
+    use remotely_core::command_bus::SnapshotOp;
+    use remotely_core::deploy::service::CloneRequest;
+    use remotely_core::domain::TargetRef;
+    use remotely_core::vm_settings::{VmConfigEdit, VmLifecycleOp};
+
+    let scanned = common::temp_folder("workspaces-unassigned");
+    let late = scanned.join("late").join("late.vmx").display().to_string();
+    let fake = listed(FakeVmware::default(), &["web"]).in_folder(&scanned.display().to_string(), &late);
+    let setup = Setup::new(fake);
+    let vmware = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    let acme = core.ctx();
+    // Two workspaces: a VM found now waits in Unassigned.
+    create(&core, "Globex").await;
+    core.set_scan_folders(vec![scanned.clone()]).await.unwrap();
+    let report = core.inventory.refresh(&acme).await.unwrap();
+    assert_eq!(report.unassigned.len(), 1);
+
+    let target = || vec![TargetRef::Vm { vmx_path: late.clone() }];
+    let power = Command::VmPower {
+        targets: target(),
+        op: PowerOp::Start { gui: false },
+    };
+    let commands = [
+        ("power", power.clone()),
+        (
+            "snapshot",
+            Command::VmSnapshot {
+                targets: target(),
+                op: SnapshotOp::Take { name: "before".into() },
+            },
+        ),
+        (
+            "settings",
+            Command::VmConfig {
+                targets: target(),
+                edit: VmConfigEdit::Resources {
+                    vcpus: Some(4),
+                    cores_per_socket: None,
+                    memory_mb: None,
+                    nested_virtualization: None,
+                },
+            },
+        ),
+        (
+            "delete",
+            Command::VmLifecycle {
+                targets: target(),
+                op: VmLifecycleOp::Delete,
+            },
+        ),
+        (
+            "protect",
+            Command::VmProtect {
+                targets: target(),
+                protected: true,
+            },
+        ),
+    ];
+    for (what, command) in commands {
+        match core.bus.submit(&acme, command.clone()).await {
+            Err(err @ CoreError::VmUnassigned(_)) => {
+                let message = err.to_string();
+                assert!(
+                    message.contains("'late'") && message.contains("add it to this workspace first"),
+                    "{what}: {message}"
+                );
+                assert_eq!(err.code(), "vm_unassigned");
+            }
+            other => panic!("{what}: {other:?}"),
+        }
+        assert!(
+            matches!(core.bus.preview(&acme, &command).await, Err(CoreError::VmUnassigned(_))),
+            "{what}: the approval preview is refused too"
+        );
+    }
+    // Reads by its key, and a clone of it, are refused the same way.
+    assert!(matches!(
+        core.host_details.vm_specs(&acme, &late).await,
+        Err(CoreError::VmUnassigned(_))
+    ));
+    assert!(matches!(
+        core.insight.timeline(&late, None, None).await,
+        Err(CoreError::VmUnassigned(_))
+    ));
+    let clone = CloneRequest {
+        vm_keys: vec![late.clone()],
+        naming_pattern: "{template}-clone".into(),
+        folder: None,
+        environment: None,
+    };
+    assert!(matches!(
+        core.deploy.check_clone(&acme, &clone).await,
+        Err(CoreError::VmUnassigned(_))
+    ));
+    assert!(matches!(
+        core.deploy.submit_clone(&acme, &clone).await,
+        Err(CoreError::VmUnassigned(_))
+    ));
+    // Nothing ran on it, and nothing added it on the way.
+    assert!(
+        vmware.calls().iter().all(|c| !c.contains("late")),
+        "{:?}",
+        vmware.calls()
+    );
+    assert_eq!(core.inventory.unassigned().len(), 1);
+    assert!(audit_of(&core, &acme).await.iter().all(|e| e.event != "vm_assigned"));
+
+    // Once Acme adds it (audited), the same start goes through.
+    core.inventory.claim(&acme, std::slice::from_ref(&late)).await.unwrap();
+    assert!(audit_of(&core, &acme).await.iter().any(|e| e.event == "vm_assigned"));
+    let mut jobs = core.jobs.subscribe();
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&acme, power).await.unwrap() else {
+        panic!("starting one VM is Low");
+    };
+    assert_eq!(wait_finished(&mut jobs, job_id).await, JobStatus::Succeeded);
+
+    // A VM taken out of a workspace is unassigned again, there too: Acme can no longer clone it.
+    core.inventory
+        .release(&acme, std::slice::from_ref(&late))
+        .await
+        .unwrap();
+    let ask = CloneRequest {
+        vm_keys: vec![late.clone()],
+        ..clone
+    };
+    assert!(matches!(
+        core.deploy.check_clone(&acme, &ask).await,
+        Err(CoreError::VmUnassigned(_))
+    ));
 }

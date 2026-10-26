@@ -281,6 +281,36 @@ fn invalid<T>(message: impl Into<String>) -> Result<T> {
 }
 
 impl DeploySpec {
+    /// FD-02: the existing VMs the deploy clones from (a golden VM, or each VM of a bulk clone), by key. The command
+    /// bus requires each to be in the workspace, as for any action on a VM.
+    pub fn source_vms(&self) -> Vec<&str> {
+        let mut keys: Vec<&str> = Vec::new();
+        if let DeploySource::GoldenVm { vm_key, .. } = &self.source {
+            keys.push(vm_key);
+        }
+        for vm in &self.vms {
+            if let Some((key, _)) = &vm.clone_of {
+                if !keys.contains(&key.as_str()) {
+                    keys.push(key);
+                }
+            }
+        }
+        keys
+    }
+
+    /// FD-02: refuses the deploy when a VM it clones from isn't the workspace's (`VmUnassigned` for one no workspace
+    /// has, `NotInWorkspace` for another's), before anything reads that VM's files.
+    pub(crate) async fn require_sources_here(
+        &self,
+        store: &crate::store::Store,
+        ctx: &crate::domain::Context,
+    ) -> crate::error::Result<()> {
+        for key in self.source_vms() {
+            store.require_vm_here(ctx, key).await?;
+        }
+        Ok(())
+    }
+
     /// A template's (or Custom) plan, into the folder `folder` (absolute), with `host_adapter` for VirtualBox.
     pub fn from_plan(plan: &DeployPlan, origin: DeployOrigin, folder: String, host_adapter: Option<String>) -> Self {
         let source = match &plan.image.source {

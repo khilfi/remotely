@@ -343,6 +343,7 @@ impl Deploys {
                 capacity: None,
             }),
             Ok(spec) => {
+                spec.require_sources_here(&self.store, ctx).await?;
                 let (preview, capacity) = self.preview_spec(ctx, &spec).await;
                 Ok(DeployCheck {
                     problems: Vec::new(),
@@ -364,6 +365,7 @@ impl Deploys {
     }
 
     async fn submit_spec(&self, ctx: &Context, spec: DeploySpec) -> Result<SubmitOutcome> {
+        spec.require_sources_here(&self.store, ctx).await?;
         let checked = preview(&spec, &self.hypervisors, self.host.as_ref()).await;
         if !checked.refusals.is_empty() {
             return Err(refused(checked.refusals));
@@ -394,6 +396,8 @@ impl Deploys {
         }
         let mut sources: Vec<VmRecord> = Vec::new();
         for key in &request.vm_keys {
+            // FD-02: only this workspace's VMs are cloned (one taken out still has its row here).
+            self.store.require_vm_here(ctx, key).await?;
             let vm = self
                 .store
                 .find_vm(ctx, key)

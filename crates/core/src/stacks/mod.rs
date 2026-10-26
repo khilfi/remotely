@@ -542,6 +542,9 @@ impl Stacks {
                 capacity: None,
             }),
             Ok(spec) => {
+                for step in &spec.steps {
+                    step.spec.require_sources_here(&self.store, ctx).await?;
+                }
                 let (details, capacity) = self.preview(ctx, &spec).await;
                 Ok(StackDeployCheck {
                     problems: Vec::new(),
@@ -560,6 +563,9 @@ impl Stacks {
             Ok(spec) => spec,
             Err(problems) => return invalid(problems.join(" ")),
         };
+        for step in &spec.steps {
+            step.spec.require_sources_here(&self.store, ctx).await?;
+        }
         let (details, _) = self.preview(ctx, &spec).await;
         if !details.refusals.is_empty() {
             return invalid(details.refusals.join(" "));
