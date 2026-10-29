@@ -31,7 +31,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -50,6 +49,7 @@ import {
   type LibraryEntry,
   type LibrarySection,
 } from "@/lib/api";
+import { EmptyState } from "@/components/EmptyState";
 import { cn } from "@/lib/utils";
 
 const SECTION_KEY = "remotely.terminal.commandsSection";
@@ -370,17 +370,11 @@ export function CommandPanel({ active, targetName, onSend, onClose, query = null
         <TabsContent value="favourites" className="min-h-0">
           <ScrollArea className={cn("h-full pr-2", FIT_WIDTH)}>
             {favourites.length === 0 ? (
-              <Empty className="border">
-                <EmptyHeader>
-                  <EmptyMedia variant="icon">
-                    <StarIcon />
-                  </EmptyMedia>
-                  <EmptyTitle>No favourites yet</EmptyTitle>
-                  <EmptyDescription>
-                    Add your own commands with +, or copy one from the Library (its ⋯ menu).
-                  </EmptyDescription>
-                </EmptyHeader>
-              </Empty>
+              <EmptyState
+                icon={StarIcon}
+                title="No favourites yet"
+                description="Add your own commands with +, or copy one from the Library (its ⋯ menu)."
+              />
             ) : shownFavourites.length === 0 ? (
               <p className="px-1 py-2 text-sm text-muted-foreground">No favourite matches.</p>
             ) : (

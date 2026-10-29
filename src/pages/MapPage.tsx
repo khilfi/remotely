@@ -14,10 +14,10 @@
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { CableIcon, LaptopIcon, MonitorIcon, NetworkIcon, ServerIcon, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { RefreshButton } from "@/components/RefreshButton";
+import { EmptyState } from "@/components/EmptyState";
 import { api, errorMessage, type SessionRecord, type VmRecord } from "@/lib/api";
 import { rememberHostNetworks } from "@/lib/host-networks-cache";
 import type { AppLink } from "@/lib/links";
@@ -148,18 +148,11 @@ export function MapPage({ active, onOpenLink }: Props) {
         Read only: click a node to open it.
       </p>
       {nothing ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <NetworkIcon />
-            </EmptyMedia>
-            <EmptyTitle>Nothing to map yet</EmptyTitle>
-            <EmptyDescription>
-              VMs show here with their networks once Remotely finds them; sessions once they reach a VM, go through a
-              jump host or open a tunnel.
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+        <EmptyState
+          icon={NetworkIcon}
+          title="Nothing to map yet"
+          description="VMs and their networks show here once Remotely finds them."
+        />
       ) : (
         <div
           className="relative min-h-0 flex-1 overflow-auto rounded-md border bg-muted/20"

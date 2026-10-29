@@ -18,7 +18,6 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/u
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -43,6 +42,7 @@ import {
   type SubmitOutcome,
   type VaultInfo,
 } from "@/lib/api";
+import { EmptyState } from "@/components/EmptyState";
 import { compareRunReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
 import { readOnlyLocked } from "@/lib/presentation-state";
@@ -527,18 +527,11 @@ export function ComparePanel({
                 {jobId ? (
                   <BulkResultsView key={jobId} jobId={jobId} onRetry={(outcome) => onSubmit(outcome, setJobId)} />
                 ) : (
-                  <Empty className="border">
-                    <EmptyHeader>
-                      <EmptyMedia variant="icon">
-                        <SquareTerminalIcon />
-                      </EmptyMedia>
-                      <EmptyTitle>No run open</EmptyTitle>
-                      <EmptyDescription>
-                        Type a command and run it: hosts with the same exit code and output are grouped, so 50 hosts
-                        read like a few answers. Or open an earlier run.
-                      </EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
+                  <EmptyState
+                    icon={SquareTerminalIcon}
+                    title="No run open"
+                    description="Run a command: hosts with the same output are grouped together. Or open an earlier run."
+                  />
                 )}
               </div>
             </div>

@@ -40,7 +40,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -50,6 +49,7 @@ import { SECRET_KIND_LABEL } from "@/components/Badges";
 import { PageHeader } from "@/components/PageHeader";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { HelpTip } from "@/components/HelpTip";
+import { EmptyState } from "@/components/EmptyState";
 import type { VaultTab } from "@/lib/navigation";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
@@ -183,17 +183,11 @@ function VaultSecrets({
         </CardHeader>
         <CardContent>
           {secrets.length === 0 ? (
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <KeyRoundIcon />
-                </EmptyMedia>
-                <EmptyTitle>No secrets yet</EmptyTitle>
-                <EmptyDescription>
-                  Add them here, or from the session editor when you choose how a session logs in.
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <EmptyState
+              icon={KeyRoundIcon}
+              title="No secrets yet"
+              description="Add them here, or from the session editor when you choose how a session logs in."
+            />
           ) : (
             <div className="rounded-lg border">
               <Table>
