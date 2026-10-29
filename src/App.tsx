@@ -28,7 +28,7 @@
 // the same. VM-01: a finished job refreshes the VM list only when it may have changed VMs (its scope), and a settings
 // save only when it changed where VMs are found; the Containers page likewise for container jobs and docker.exe.
 
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   CalendarClockIcon,
@@ -1047,6 +1047,13 @@ export default function App() {
     },
   ];
 
+  // UX-01: the pages share one scroll area, so a page opens at its top, its header in view, not where the last one was.
+  // A layout effect: it runs before the pages' own effects, so a link that reveals a row or card still scrolls to it.
+  const contentRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    contentRef.current?.scrollTo({ top: 0 });
+  }, [page]);
+
   // UX-08: status rows only when something needs attention. VirtualBox is optional, and either hypervisor is enough.
   const noHypervisor = info !== null && !info.vmrunPath && !info.vboxmanagePath;
 
@@ -1150,7 +1157,7 @@ export default function App() {
               <Switch checked={resolved === "dark"} onCheckedChange={setDark} />
             </label>
           </header>
-          <div className="min-h-0 flex-1 overflow-auto p-6">
+          <div ref={contentRef} className="min-h-0 flex-1 overflow-auto p-6">
             {READ_ONLY_PAGES[page] && <ReadOnlyNotice {...READ_ONLY_PAGES[page]} />}
             {offered && laterFor !== offered.version && (
               <UpdateBanner

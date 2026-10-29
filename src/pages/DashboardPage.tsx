@@ -146,7 +146,7 @@ const COLUMNS: { key: SortKey; label: string; className?: string; hint?: string 
 ];
 
 const ENVIRONMENTS: { value: Environment | "all"; label: string }[] = [
-  { value: "all", label: "All labels" },
+  { value: "all", label: "All environments" },
   { value: "prod", label: "Prod" },
   { value: "staging", label: "Staging" },
   { value: "lab", label: "Lab" },
@@ -449,7 +449,7 @@ function OverviewWidget({
           </ToggleGroupItem>
         </ToggleGroup>
         <Select value={env} onValueChange={(v) => setEnv(v as Environment | "all")}>
-          <SelectTrigger size="sm" className="w-32" aria-label="Environment">
+          <SelectTrigger size="sm" className="w-40" aria-label="Environment">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

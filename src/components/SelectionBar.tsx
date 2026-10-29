@@ -55,7 +55,7 @@ export function SelectionBar({ count, onClear, children, className }: SelectionB
       </span>
       {children && (
         <>
-          <Separator orientation="vertical" className="data-[orientation=vertical]:h-4" />
+          <Separator orientation="vertical" className="data-vertical:self-center data-[orientation=vertical]:h-4" />
           <div className="flex min-w-0 flex-wrap items-center gap-1">{children}</div>
         </>
       )}

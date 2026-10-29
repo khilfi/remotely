@@ -96,8 +96,8 @@ export function VmTimelineTab({ vm, refreshKey }: { vm: VmRecord; refreshKey: st
           </EmptyMedia>
           <EmptyTitle>Nothing yet</EmptyTitle>
           <EmptyDescription>
-            What Remotely does to this VM (power, snapshots, settings, labels, approvals) shows here, from the audit
-            log.
+            What Remotely does to this VM (power, snapshots, settings, environment, approvals) shows here, from the
+            audit log.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>

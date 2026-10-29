@@ -383,7 +383,8 @@ export function CommandPalette({
                   return (
                     <CommandItem key={item.id} value={item.id} onSelect={() => choose(item)}>
                       <Icon />
-                      <span className="truncate">{item.title}</span>
+                      {/* The title keeps its room; the detail gives way. */}
+                      <span className="max-w-[70%] shrink-0 truncate">{item.title}</span>
                       {item.detail && (
                         <span className="min-w-0 truncate text-xs text-muted-foreground" data-mask={item.detailMask}>
                           {item.detail}
