@@ -22,7 +22,6 @@ import {
   EllipsisIcon,
   FolderIcon,
   FolderOpenIcon,
-  RefreshCwIcon,
   SearchIcon,
   TagIcon,
 } from "lucide-react";
@@ -37,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ColorDot } from "@/components/Badges";
+import { RefreshButton } from "@/components/RefreshButton";
 import { jumpChain, routeText, viaText, type JumpLink } from "@/lib/tunnels";
 import {
   api,
@@ -276,15 +276,7 @@ export function SessionTree({
             onKeyDown={(e) => e.key === "Escape" && setText("")}
           />
         </div>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Reload the sessions"
-          title="Reload the sessions"
-          onClick={() => setReloads((n) => n + 1)}
-        >
-          <RefreshCwIcon />
-        </Button>
+        <RefreshButton onClick={() => setReloads((n) => n + 1)} />
       </div>
       <ToggleGroup
         type="single"

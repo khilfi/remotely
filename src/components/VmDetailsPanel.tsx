@@ -15,7 +15,6 @@ import {
   HistoryIcon,
   InfoIcon,
   MonitorIcon,
-  RefreshCwIcon,
   ShieldIcon,
   TriangleAlertIcon,
   XIcon,
@@ -50,6 +49,7 @@ import {
   type VmRecord,
   type VmSnapshots,
 } from "@/lib/api";
+import { RefreshButton } from "@/components/RefreshButton";
 import { formatWhen, plural } from "@/lib/format";
 import { HYPERVISORS, toolsName, vmLocation } from "@/lib/hypervisors";
 import { formatPct, HOST_SHARE_HINT, type Thresholds } from "@/lib/metrics";
@@ -381,16 +381,7 @@ function SnapshotsTab({
             <TooltipContent className="max-w-72">{hints.take ?? "Take a snapshot of this VM"}</TooltipContent>
           </Tooltip>
         )}
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          aria-label="Read the snapshots again"
-          title="Read the snapshots again"
-          disabled={loading}
-          onClick={onReadTree}
-        >
-          <RefreshCwIcon className={loading ? "animate-spin" : undefined} />
-        </Button>
+        <RefreshButton busy={loading} onClick={onReadTree} />
         {tree && tree.snapshots.length > 0 && (
           <span className="ml-auto text-xs text-muted-foreground">
             {plural(tree.snapshots.length, "snapshot")}

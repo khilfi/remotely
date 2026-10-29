@@ -31,7 +31,15 @@ export interface EmptyStateProps {
   className?: string;
 }
 
-export function EmptyState({ icon: Icon, title, description, help, action, bordered = true, className }: EmptyStateProps) {
+export function EmptyState({
+  icon: Icon,
+  title,
+  description,
+  help,
+  action,
+  bordered = true,
+  className,
+}: EmptyStateProps) {
   return (
     <Empty className={cn(bordered && "border", className)}>
       <EmptyHeader>

@@ -11,7 +11,7 @@
 // masker's patterns (FD-03).
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { NetworkIcon, PlusIcon, RefreshCwIcon, ShieldIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
+import { NetworkIcon, PlusIcon, ShieldIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -34,6 +34,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EnvBadge, StateBadge } from "@/components/Badges";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { RefreshButton } from "@/components/RefreshButton";
 import { api, errorMessage, type SubmitOutcome } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { rememberHostNetworks } from "@/lib/host-networks-cache";
@@ -152,17 +153,7 @@ function NetworksBody({ readOnly, onSubmitted }: Pick<Props, "readOnly" | "onSub
         {report && report.staleVms.length > 0 && (
           <span>· adapters of {report.staleVms.join(", ")} as read before (their files can&apos;t be read now)</span>
         )}
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          className="ml-auto"
-          aria-label="Read the networks again"
-          title="Read the networks again"
-          disabled={loading}
-          onClick={() => setReads((n) => n + 1)}
-        >
-          <RefreshCwIcon className={loading ? "animate-spin" : undefined} />
-        </Button>
+        <RefreshButton className="ml-auto" busy={loading} onClick={() => setReads((n) => n + 1)} />
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-4">
         {error && (

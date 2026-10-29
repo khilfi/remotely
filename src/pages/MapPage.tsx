@@ -12,20 +12,12 @@
 // palette's search. Tunnels come from the panes' own events.
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import {
-  CableIcon,
-  LaptopIcon,
-  MonitorIcon,
-  NetworkIcon,
-  RefreshCwIcon,
-  ServerIcon,
-  type LucideIcon,
-} from "lucide-react";
+import { CableIcon, LaptopIcon, MonitorIcon, NetworkIcon, ServerIcon, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
-import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { RefreshButton } from "@/components/RefreshButton";
 import { api, errorMessage, type SessionRecord, type VmRecord } from "@/lib/api";
 import { rememberHostNetworks } from "@/lib/host-networks-cache";
 import type { AppLink } from "@/lib/links";
@@ -133,10 +125,7 @@ export function MapPage({ active, onOpenLink }: Props) {
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <Button variant="outline" size="sm" disabled={reading} onClick={readAgain}>
-          <RefreshCwIcon className={cn(reading && "animate-spin")} />
-          Read the VMs again
-        </Button>
+        <RefreshButton variant="outline" busy={reading} onClick={readAgain} />
         <div className="flex items-center gap-2">
           <Switch id="map-all-sessions" checked={allSessions} onCheckedChange={setAllSessions} />
           <Label htmlFor="map-all-sessions" className="font-normal">

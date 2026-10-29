@@ -16,7 +16,6 @@ import {
   NetworkIcon,
   PencilIcon,
   PlusIcon,
-  RefreshCwIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -56,6 +55,7 @@ import {
   type VmRecord,
   type VmSpecs,
 } from "@/lib/api";
+import { RefreshButton } from "@/components/RefreshButton";
 import { formatWhen } from "@/lib/format";
 import { toolsName } from "@/lib/hypervisors";
 import { formatBytes } from "@/lib/metrics";
@@ -234,11 +234,10 @@ export function VmSettingsTab({
             Screenshot
           </Button>
         )}
-        <Button
+        <RefreshButton
           className={vbox && running ? undefined : "ml-auto"}
           variant="outline"
-          size="sm"
-          disabled={reading}
+          busy={reading}
           onClick={() => {
             setReading(true);
             api
@@ -249,10 +248,7 @@ export function VmSettingsTab({
               )
               .finally(() => setReading(false));
           }}
-        >
-          <RefreshCwIcon data-icon="inline-start" className={reading ? "animate-spin" : undefined} />
-          Refresh
-        </Button>
+        />
       </div>
 
       {failed && (

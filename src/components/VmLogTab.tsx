@@ -5,9 +5,8 @@
 // lock doesn't stop them.
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { FileTextIcon, RefreshCwIcon, SearchIcon, TriangleAlertIcon } from "lucide-react";
+import { FileTextIcon, SearchIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "@/components/ui/input-group";
 import { Label } from "@/components/ui/label";
@@ -15,6 +14,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { RefreshButton } from "@/components/RefreshButton";
 import { errorMessage, type VmRecord } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { useVisibility, usePoll } from "@/hooks/use-poll";
@@ -169,17 +169,7 @@ export function VmLogTab({ vm }: { vm: VmRecord }) {
             onChange={(e) => setQuery(e.currentTarget.value)}
           />
         </InputGroup>
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          className="ml-auto"
-          aria-label="Read the logs again"
-          title="Read the logs again"
-          disabled={loading}
-          onClick={() => setReloads((n) => n + 1)}
-        >
-          <RefreshCwIcon className={loading ? "animate-spin" : undefined} />
-        </Button>
+        <RefreshButton className="ml-auto" busy={loading} onClick={() => setReloads((n) => n + 1)} />
       </div>
 
       <div className="text-xs text-muted-foreground">

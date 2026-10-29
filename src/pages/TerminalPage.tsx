@@ -80,6 +80,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { ColorDot } from "@/components/Badges";
 import { CommandPanel } from "@/components/CommandPanel";
+import { PageHeader } from "@/components/PageHeader";
 import { ComparePanel, type CompareView } from "@/components/ComparePanel";
 import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
@@ -1796,60 +1797,63 @@ export function TerminalPage({
 
   const mainSize = 100 - (treeShown ? 20 : 0) - (commandsShown ? 22 : 0);
   return (
-    <>
-      {treeShown || commandsShown ? (
-        <ResizablePanelGroup
-          orientation="horizontal"
-          id={`terminal-workspace-${treeShown ? "tree" : "no-tree"}-${commandsShown ? "commands" : "no-commands"}`}
-        >
-          {treeShown && (
-            <>
-              <ResizablePanel id="terminal-tree" defaultSize="20%" minSize="12%" maxSize="40%">
-                <div className="h-full pr-3">
-                  <SessionTree
-                    active={active}
-                    version={version}
-                    openSessions={openSessions}
-                    onOpen={openSession}
-                    picks={treePicks}
-                    onPicksChange={setTreePicks}
-                    onCompare={() => setCompareOpen(true)}
-                    onHostDetails={(s) => setHostDetails({ id: s.id, name: s.name })}
-                  />
-                </div>
-              </ResizablePanel>
-              <ResizableHandle />
-            </>
-          )}
-          <ResizablePanel id="terminal-main" defaultSize={`${mainSize}%`}>
-            <div className={cn("h-full", treeShown && "pl-3", commandsShown && "pr-3")}>{workspace}</div>
-          </ResizablePanel>
-          {commandsShown && (
-            <>
-              <ResizableHandle />
-              <ResizablePanel id="terminal-commands" defaultSize="22%" minSize="14%" maxSize="45%">
-                <div className="h-full pl-3">
-                  <CommandPanel
-                    active={active}
-                    targetName={
-                      multiExec
-                        ? `${plural(pickedPanes.length, "terminal")} (MultiExec)`
-                        : currentPane
-                          ? nameOf(currentPane)
-                          : null
-                    }
-                    onSend={sendToCurrent}
-                    onClose={() => showCommands(false)}
-                    query={panelQuery}
-                  />
-                </div>
-              </ResizablePanel>
-            </>
-          )}
-        </ResizablePanelGroup>
-      ) : (
-        workspace
-      )}
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      <PageHeader page="terminal" />
+      <div className="min-h-0 flex-1">
+        {treeShown || commandsShown ? (
+          <ResizablePanelGroup
+            orientation="horizontal"
+            id={`terminal-workspace-${treeShown ? "tree" : "no-tree"}-${commandsShown ? "commands" : "no-commands"}`}
+          >
+            {treeShown && (
+              <>
+                <ResizablePanel id="terminal-tree" defaultSize="20%" minSize="12%" maxSize="40%">
+                  <div className="h-full pr-3">
+                    <SessionTree
+                      active={active}
+                      version={version}
+                      openSessions={openSessions}
+                      onOpen={openSession}
+                      picks={treePicks}
+                      onPicksChange={setTreePicks}
+                      onCompare={() => setCompareOpen(true)}
+                      onHostDetails={(s) => setHostDetails({ id: s.id, name: s.name })}
+                    />
+                  </div>
+                </ResizablePanel>
+                <ResizableHandle />
+              </>
+            )}
+            <ResizablePanel id="terminal-main" defaultSize={`${mainSize}%`}>
+              <div className={cn("h-full", treeShown && "pl-3", commandsShown && "pr-3")}>{workspace}</div>
+            </ResizablePanel>
+            {commandsShown && (
+              <>
+                <ResizableHandle />
+                <ResizablePanel id="terminal-commands" defaultSize="22%" minSize="14%" maxSize="45%">
+                  <div className="h-full pl-3">
+                    <CommandPanel
+                      active={active}
+                      targetName={
+                        multiExec
+                          ? `${plural(pickedPanes.length, "terminal")} (MultiExec)`
+                          : currentPane
+                            ? nameOf(currentPane)
+                            : null
+                      }
+                      onSend={sendToCurrent}
+                      onClose={() => showCommands(false)}
+                      query={panelQuery}
+                    />
+                  </div>
+                </ResizablePanel>
+              </>
+            )}
+          </ResizablePanelGroup>
+        ) : (
+          workspace
+        )}
+      </div>
       <NewTerminalDialog
         open={newOpen}
         onOpenChange={setNewOpen}
@@ -1951,7 +1955,7 @@ export function TerminalPage({
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 

@@ -120,7 +120,13 @@ export function VaultPage({ tab, onTabChange, active, ...props }: Props) {
   );
 }
 
-function VaultSecrets({ vault, onVaultChanged, active, onSubmitted, onOpenSessions }: Omit<Props, "tab" | "onTabChange">) {
+function VaultSecrets({
+  vault,
+  onVaultChanged,
+  active,
+  onSubmitted,
+  onOpenSessions,
+}: Omit<Props, "tab" | "onTabChange">) {
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [listVersion, setListVersion] = useState(0);
   const [dialog, setDialog] = useState<DialogState>(null);

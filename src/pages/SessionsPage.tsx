@@ -51,6 +51,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ColorDot, EnvBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ExportDialog } from "@/components/ExportDialog";
+import { PageHeader } from "@/components/PageHeader";
 import { FolderDefaultsDialog } from "@/components/FolderDefaultsDialog";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { ImportDialog } from "@/components/ImportDialog";
@@ -267,495 +268,503 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
   }
 
   return (
-    <div className="flex min-h-0 flex-col gap-4 md:flex-row">
-      <aside className="flex shrink-0 flex-col gap-1 md:w-60">
-        <div className="mb-1 flex items-center justify-between">
-          <span className="text-sm font-medium text-muted-foreground">Folders</span>
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="New folder"
-            title="New folder"
-            onClick={() => setDialog({ kind: "newFolder", parentId: null })}
-          >
-            <FolderPlusIcon />
-          </Button>
-        </div>
-        <div className="flex items-center pr-8">
-          <FolderButton active={folderId === null} onClick={() => setFolderId(null)} count={all.length} depth={0}>
-            <LibraryIcon />
-            All sessions
-          </FolderButton>
-        </div>
-        {rows.map(({ folder, depth }) => (
-          <div key={folder.id} className="group/folder flex items-center">
-            <FolderButton
-              active={folderId === folder.id}
-              onClick={() => setFolderId(folder.id)}
-              count={counts.get(folder.id) ?? 0}
-              depth={depth}
+    <div className="flex min-h-0 flex-col gap-4">
+      <PageHeader page="sessions" />
+      <div className="flex min-h-0 flex-col gap-4 md:flex-row">
+        <aside className="flex shrink-0 flex-col gap-1 md:w-60">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-sm font-medium text-muted-foreground">Folders</span>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="New folder"
+              title="New folder"
+              onClick={() => setDialog({ kind: "newFolder", parentId: null })}
             >
-              {folderId === folder.id ? <FolderOpenIcon /> : <FolderIcon />}
-              <span className="truncate">{folder.name}</span>
+              <FolderPlusIcon />
+            </Button>
+          </div>
+          <div className="flex items-center pr-8">
+            <FolderButton active={folderId === null} onClick={() => setFolderId(null)} count={all.length} depth={0}>
+              <LibraryIcon />
+              All sessions
             </FolderButton>
+          </div>
+          {rows.map(({ folder, depth }) => (
+            <div key={folder.id} className="group/folder flex items-center">
+              <FolderButton
+                active={folderId === folder.id}
+                onClick={() => setFolderId(folder.id)}
+                count={counts.get(folder.id) ?? 0}
+                depth={depth}
+              >
+                {folderId === folder.id ? <FolderOpenIcon /> : <FolderIcon />}
+                <span className="truncate">{folder.name}</span>
+              </FolderButton>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="opacity-0 group-hover/folder:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+                    aria-label={`Actions for folder ${folder.name}`}
+                  >
+                    <EllipsisIcon />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start">
+                  <DropdownMenuItem onSelect={() => setDialog({ kind: "newFolder", parentId: folder.id })}>
+                    New folder inside…
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setDialog({ kind: "renameFolder", folder })}>
+                    Rename…
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => setDialog({ kind: "folderDefaults", folder })}>
+                    Defaults…
+                  </DropdownMenuItem>
+                  <DropdownMenuSub>
+                    <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
+                    <DropdownMenuSubContent>
+                      <DropdownMenuItem
+                        disabled={folder.parentId === null}
+                        onSelect={() => void moveFolder(folder, null)}
+                      >
+                        Top level
+                      </DropdownMenuItem>
+                      {rows
+                        .filter(({ folder: f }) => !subtree(folders, folder.id).has(f.id) && f.id !== folder.parentId)
+                        .map(({ folder: f }) => (
+                          <DropdownMenuItem key={f.id} onSelect={() => void moveFolder(folder, f.id)}>
+                            {folderPath(folders, f.id)}
+                          </DropdownMenuItem>
+                        ))}
+                    </DropdownMenuSubContent>
+                  </DropdownMenuSub>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem variant="destructive" onSelect={() => setDialog({ kind: "deleteFolder", folder })}>
+                    Delete…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          ))}
+        </aside>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-full max-w-xs">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                aria-label="Search sessions"
+                placeholder="Search name, host, user, tag"
+                className="pl-8"
+                value={text}
+                onChange={(e) => setText(e.currentTarget.value)}
+              />
+            </div>
+            <ToggleGroup
+              type="multiple"
+              variant="outline"
+              aria-label="Environment"
+              value={environments}
+              onValueChange={(v) => setEnvironments(v as Environment[])}
+            >
+              {LABELS.map((l) => (
+                <ToggleGroupItem key={l.value} value={l.value} className={cn("font-medium", l.className)}>
+                  {l.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="opacity-0 group-hover/folder:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
-                  aria-label={`Actions for folder ${folder.name}`}
-                >
-                  <EllipsisIcon />
+                <Button variant="outline">
+                  <TagIcon data-icon="inline-start" />
+                  Tags{tagFilter.length > 0 ? ` (${tagFilter.length})` : ""}
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuItem onSelect={() => setDialog({ kind: "newFolder", parentId: folder.id })}>
-                  New folder inside…
+              <DropdownMenuContent align="start" className="w-56">
+                <DropdownMenuLabel>Sessions with any of</DropdownMenuLabel>
+                {tags.length === 0 && <DropdownMenuItem disabled>No tags yet</DropdownMenuItem>}
+                {tags.map((t) => (
+                  <DropdownMenuCheckboxItem
+                    key={t.id}
+                    checked={tagFilter.some((x) => x.toLowerCase() === t.name.toLowerCase())}
+                    onSelect={(e) => e.preventDefault()}
+                    onCheckedChange={(checked) =>
+                      setTagFilter((list) =>
+                        checked ? [...list, t.name] : list.filter((x) => x.toLowerCase() !== t.name.toLowerCase()),
+                      )
+                    }
+                  >
+                    {t.name}
+                    <DropdownMenuShortcut>{t.sessionCount}</DropdownMenuShortcut>
+                  </DropdownMenuCheckboxItem>
+                ))}
+                {tagFilter.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={() => setTagFilter([])}>Clear</DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <span className="text-sm text-muted-foreground">
+              {filtered || folderId
+                ? `${shown.length} of ${plural(all.length, "session")}`
+                : plural(all.length, "session")}
+            </span>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" className="ml-auto">
+                  <ImportIcon data-icon="inline-start" />
+                  Import
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onSelect={() => setDialog({ kind: "import" })}>
+                  <ImportIcon />
+                  From PuTTY, MobaXterm, OpenSSH or CSV…
                 </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => setDialog({ kind: "renameFolder", folder })}>
-                  Rename…
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => setDialog({ kind: "folderDefaults", folder })}>
-                  Defaults…
-                </DropdownMenuItem>
-                <DropdownMenuSub>
-                  <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
-                  <DropdownMenuSubContent>
-                    <DropdownMenuItem
-                      disabled={folder.parentId === null}
-                      onSelect={() => void moveFolder(folder, null)}
-                    >
-                      Top level
-                    </DropdownMenuItem>
-                    {rows
-                      .filter(({ folder: f }) => !subtree(folders, folder.id).has(f.id) && f.id !== folder.parentId)
-                      .map(({ folder: f }) => (
-                        <DropdownMenuItem key={f.id} onSelect={() => void moveFolder(folder, f.id)}>
-                          {folderPath(folders, f.id)}
-                        </DropdownMenuItem>
-                      ))}
-                  </DropdownMenuSubContent>
-                </DropdownMenuSub>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onSelect={() => setDialog({ kind: "deleteFolder", folder })}>
-                  Delete…
+                <DropdownMenuItem onSelect={() => setDialog({ kind: "importExport" })}>
+                  <LaptopIcon />
+                  From another laptop (Remotely export)…
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-          </div>
-        ))}
-      </aside>
-
-      <div className="flex min-w-0 flex-1 flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="relative w-full max-w-xs">
-            <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              aria-label="Search sessions"
-              placeholder="Search name, host, user, tag"
-              className="pl-8"
-              value={text}
-              onChange={(e) => setText(e.currentTarget.value)}
-            />
-          </div>
-          <ToggleGroup
-            type="multiple"
-            variant="outline"
-            aria-label="Environment"
-            value={environments}
-            onValueChange={(v) => setEnvironments(v as Environment[])}
-          >
-            {LABELS.map((l) => (
-              <ToggleGroupItem key={l.value} value={l.value} className={cn("font-medium", l.className)}>
-                {l.label}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline">
-                <TagIcon data-icon="inline-start" />
-                Tags{tagFilter.length > 0 ? ` (${tagFilter.length})` : ""}
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-56">
-              <DropdownMenuLabel>Sessions with any of</DropdownMenuLabel>
-              {tags.length === 0 && <DropdownMenuItem disabled>No tags yet</DropdownMenuItem>}
-              {tags.map((t) => (
-                <DropdownMenuCheckboxItem
-                  key={t.id}
-                  checked={tagFilter.some((x) => x.toLowerCase() === t.name.toLowerCase())}
-                  onSelect={(e) => e.preventDefault()}
-                  onCheckedChange={(checked) =>
-                    setTagFilter((list) =>
-                      checked ? [...list, t.name] : list.filter((x) => x.toLowerCase() !== t.name.toLowerCase()),
-                    )
-                  }
-                >
-                  {t.name}
-                  <DropdownMenuShortcut>{t.sessionCount}</DropdownMenuShortcut>
-                </DropdownMenuCheckboxItem>
-              ))}
-              {tagFilter.length > 0 && (
-                <>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={() => setTagFilter([])}>Clear</DropdownMenuItem>
-                </>
-              )}
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <span className="text-sm text-muted-foreground">
-            {filtered || folderId
-              ? `${shown.length} of ${plural(all.length, "session")}`
-              : plural(all.length, "session")}
-          </span>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" className="ml-auto">
-                <ImportIcon data-icon="inline-start" />
-                Import
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem onSelect={() => setDialog({ kind: "import" })}>
-                <ImportIcon />
-                From PuTTY, MobaXterm, OpenSSH or CSV…
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => setDialog({ kind: "importExport" })}>
-                <LaptopIcon />
-                From another laptop (Remotely export)…
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <Button variant="outline" disabled={all.length === 0} onClick={() => setDialog({ kind: "export" })}>
-            <FileLockIcon data-icon="inline-start" />
-            Export
-          </Button>
-          <Button onClick={() => setDialog({ kind: "editSession" })}>
-            <PlusIcon data-icon="inline-start" />
-            New session
-          </Button>
-        </div>
-
-        {vault?.status === "notSetUp" && (
-          <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-            <KeyRoundIcon className="size-4" aria-hidden />
-            Sessions can log in with passwords and keys from the vault once it is set up.
-            <Button variant="link" className="h-auto p-0" onClick={onOpenVault}>
-              Set up the vault
+            <Button variant="outline" disabled={all.length === 0} onClick={() => setDialog({ kind: "export" })}>
+              <FileLockIcon data-icon="inline-start" />
+              Export
             </Button>
-          </p>
-        )}
+            <Button onClick={() => setDialog({ kind: "editSession" })}>
+              <PlusIcon data-icon="inline-start" />
+              New session
+            </Button>
+          </div>
 
-        {loaded && all.length === 0 && (
-          <Empty className="border">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <ListTreeIcon />
-              </EmptyMedia>
-              <EmptyTitle>No sessions yet</EmptyTitle>
-              <EmptyDescription>
-                Save the SSH hosts you work with: host, user, how to log in, a jump host and a startup command. Sort
-                them into folders, tag them and label Prod hosts so actions on them need more approval.
-              </EmptyDescription>
-            </EmptyHeader>
-            <EmptyContent className="flex-row justify-center">
-              <Button onClick={() => setDialog({ kind: "editSession" })}>
-                <PlusIcon data-icon="inline-start" />
-                New session
+          {vault?.status === "notSetUp" && (
+            <p className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+              <KeyRoundIcon className="size-4" aria-hidden />
+              Sessions can log in with passwords and keys from the vault once it is set up.
+              <Button variant="link" className="h-auto p-0" onClick={onOpenVault}>
+                Set up the vault
               </Button>
-              <Button variant="outline" onClick={() => setDialog({ kind: "import" })}>
-                <ImportIcon data-icon="inline-start" />
-                Import from PuTTY, MobaXterm…
-              </Button>
-              <Button variant="outline" onClick={() => setDialog({ kind: "importExport" })}>
-                <LaptopIcon data-icon="inline-start" />
-                Import from another laptop…
-              </Button>
-            </EmptyContent>
-          </Empty>
-        )}
+            </p>
+          )}
 
-        {all.length > 0 && shown.length === 0 && (
-          <p className="text-sm text-muted-foreground">
-            {current && !filtered ? `No sessions in ${current.name}.` : "No sessions match."}
-          </p>
-        )}
+          {loaded && all.length === 0 && (
+            <Empty className="border">
+              <EmptyHeader>
+                <EmptyMedia variant="icon">
+                  <ListTreeIcon />
+                </EmptyMedia>
+                <EmptyTitle>No sessions yet</EmptyTitle>
+                <EmptyDescription>
+                  Save the SSH hosts you work with: host, user, how to log in, a jump host and a startup command. Sort
+                  them into folders, tag them and label Prod hosts so actions on them need more approval.
+                </EmptyDescription>
+              </EmptyHeader>
+              <EmptyContent className="flex-row justify-center">
+                <Button onClick={() => setDialog({ kind: "editSession" })}>
+                  <PlusIcon data-icon="inline-start" />
+                  New session
+                </Button>
+                <Button variant="outline" onClick={() => setDialog({ kind: "import" })}>
+                  <ImportIcon data-icon="inline-start" />
+                  Import from PuTTY, MobaXterm…
+                </Button>
+                <Button variant="outline" onClick={() => setDialog({ kind: "importExport" })}>
+                  <LaptopIcon data-icon="inline-start" />
+                  Import from another laptop…
+                </Button>
+              </EmptyContent>
+            </Empty>
+          )}
 
-        {shown.length > 0 && (
-          <div className="rounded-lg border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Address</TableHead>
-                  <TableHead>Login</TableHead>
-                  <TableHead>Via</TableHead>
-                  <TableHead>VM</TableHead>
-                  <TableHead className="w-20">Label</TableHead>
-                  <TableHead className="w-20">
-                    <span className="sr-only">Actions</span>
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {shown.map((s) => (
-                  <TableRow
-                    key={s.id}
-                    id={`session-row-${s.id}`}
-                    className={cn(
-                      "select-none",
-                      s.environment === "prod" && "bg-env-prod/5",
-                      lit === s.id && "bg-accent ring-2 ring-ring ring-inset",
-                    )}
-                    onDoubleClick={() => connect(s)}
-                  >
-                    <TableCell className="whitespace-normal">
-                      <div className="flex flex-wrap items-center gap-1.5 font-medium">
-                        <span className="inline-flex items-center gap-1.5">
-                          <ColorDot color={s.color} />
-                          {s.name}
-                        </span>
-                        {s.protected && (
+          {all.length > 0 && shown.length === 0 && (
+            <p className="text-sm text-muted-foreground">
+              {current && !filtered ? `No sessions in ${current.name}.` : "No sessions match."}
+            </p>
+          )}
+
+          {shown.length > 0 && (
+            <div className="rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Address</TableHead>
+                    <TableHead>Login</TableHead>
+                    <TableHead>Via</TableHead>
+                    <TableHead>VM</TableHead>
+                    <TableHead className="w-20">Label</TableHead>
+                    <TableHead className="w-20">
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {shown.map((s) => (
+                    <TableRow
+                      key={s.id}
+                      id={`session-row-${s.id}`}
+                      className={cn(
+                        "select-none",
+                        s.environment === "prod" && "bg-env-prod/5",
+                        lit === s.id && "bg-accent ring-2 ring-ring ring-inset",
+                      )}
+                      onDoubleClick={() => connect(s)}
+                    >
+                      <TableCell className="whitespace-normal">
+                        <div className="flex flex-wrap items-center gap-1.5 font-medium">
+                          <span className="inline-flex items-center gap-1.5">
+                            <ColorDot color={s.color} />
+                            {s.name}
+                          </span>
+                          {s.protected && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
+                              </TooltipTrigger>
+                              <TooltipContent>Protected: bulk actions skip this session</TooltipContent>
+                            </Tooltip>
+                          )}
+                          {s.tags.map((t) => (
+                            <Badge key={t} variant="secondary" className="font-normal">
+                              {t}
+                            </Badge>
+                          ))}
+                        </div>
+                        {folderId === null && s.folderId && (
+                          <div className="text-xs text-muted-foreground">{folderPath(folders, s.folderId)}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">
+                        <span data-mask="address">{address(s)}</span>
+                        {(s.lastHostname || s.lastIp) && (
+                          <div
+                            className="font-sans text-muted-foreground"
+                            title={`What the last connection saw, ${formatWhen(s.lastSeenAt)}`}
+                          >
+                            {[s.lastHostname, s.lastIp].filter(Boolean).join(" · ")}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {login(s.auth)}
+                        {s.inherited.auth && <FromFolderNote name={s.inherited.auth.name} />}
+                      </TableCell>
+                      <TableCell className="text-sm" title={chainTitle(s.id)}>
+                        {s.jumpSessionId ? (
+                          (sessionName.get(s.jumpSessionId) ?? "—")
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                        {s.inherited.jump && <FromFolderNote name={s.inherited.jump.name} />}
+                      </TableCell>
+                      {/* Its own menu: a double-click there doesn't connect. */}
+                      <TableCell onDoubleClick={(e) => e.stopPropagation()}>
+                        <SessionVmLink
+                          session={s}
+                          vms={vms}
+                          candidates={ambiguous.get(s.id) ?? []}
+                          onChanged={reload}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <EnvBadge env={s.environment} />
+                        {s.inherited.environment && <FromFolderNote name={s.inherited.environment.name} />}
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center justify-end gap-0.5">
                           <Tooltip>
                             <TooltipTrigger asChild>
-                              <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label={`Connect to ${s.name}`}
+                                onClick={() => connect(s)}
+                              >
+                                <TerminalIcon />
+                              </Button>
                             </TooltipTrigger>
-                            <TooltipContent>Protected: bulk actions skip this session</TooltipContent>
+                            <TooltipContent>Connect (or double-click the row)</TooltipContent>
                           </Tooltip>
-                        )}
-                        {s.tags.map((t) => (
-                          <Badge key={t} variant="secondary" className="font-normal">
-                            {t}
-                          </Badge>
-                        ))}
-                      </div>
-                      {folderId === null && s.folderId && (
-                        <div className="text-xs text-muted-foreground">{folderPath(folders, s.folderId)}</div>
-                      )}
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">
-                      <span data-mask="address">{address(s)}</span>
-                      {(s.lastHostname || s.lastIp) && (
-                        <div
-                          className="font-sans text-muted-foreground"
-                          title={`What the last connection saw, ${formatWhen(s.lastSeenAt)}`}
-                        >
-                          {[s.lastHostname, s.lastIp].filter(Boolean).join(" · ")}
-                        </div>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {login(s.auth)}
-                      {s.inherited.auth && <FromFolderNote name={s.inherited.auth.name} />}
-                    </TableCell>
-                    <TableCell className="text-sm" title={chainTitle(s.id)}>
-                      {s.jumpSessionId ? (
-                        (sessionName.get(s.jumpSessionId) ?? "—")
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                      {s.inherited.jump && <FromFolderNote name={s.inherited.jump.name} />}
-                    </TableCell>
-                    {/* Its own menu: a double-click there doesn't connect. */}
-                    <TableCell onDoubleClick={(e) => e.stopPropagation()}>
-                      <SessionVmLink session={s} vms={vms} candidates={ambiguous.get(s.id) ?? []} onChanged={reload} />
-                    </TableCell>
-                    <TableCell>
-                      <EnvBadge env={s.environment} />
-                      {s.inherited.environment && <FromFolderNote name={s.inherited.environment.name} />}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center justify-end gap-0.5">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={`Connect to ${s.name}`}
-                              onClick={() => connect(s)}
-                            >
-                              <TerminalIcon />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Connect (or double-click the row)</TooltipContent>
-                        </Tooltip>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${s.name}`}>
-                              <EllipsisIcon />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end" className="w-52">
-                            <DropdownMenuItem onSelect={() => connect(s)}>Connect</DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => setHostDetails({ id: s.id, name: s.name })}>
-                              Host details…
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem onSelect={() => setDialog({ kind: "editSession", session: s })}>
-                              Edit…
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
-                            <DropdownMenuSub>
-                              <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
-                              <DropdownMenuSubContent>
-                                <DropdownMenuItem disabled={s.folderId === null} onSelect={() => void move(s, null)}>
-                                  Top level
-                                </DropdownMenuItem>
-                                {rows.map(({ folder: f }) => (
-                                  <DropdownMenuItem
-                                    key={f.id}
-                                    disabled={s.folderId === f.id}
-                                    onSelect={() => void move(s, f.id)}
-                                  >
-                                    {folderPath(folders, f.id)}
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${s.name}`}>
+                                <EllipsisIcon />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end" className="w-52">
+                              <DropdownMenuItem onSelect={() => connect(s)}>Connect</DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => setHostDetails({ id: s.id, name: s.name })}>
+                                Host details…
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem onSelect={() => setDialog({ kind: "editSession", session: s })}>
+                                Edit…
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
+                              <DropdownMenuSub>
+                                <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
+                                <DropdownMenuSubContent>
+                                  <DropdownMenuItem disabled={s.folderId === null} onSelect={() => void move(s, null)}>
+                                    Top level
                                   </DropdownMenuItem>
-                                ))}
-                              </DropdownMenuSubContent>
-                            </DropdownMenuSub>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              variant="destructive"
-                              onSelect={() => setDialog({ kind: "deleteSession", session: s })}
-                            >
-                              Delete…
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+                                  {rows.map(({ folder: f }) => (
+                                    <DropdownMenuItem
+                                      key={f.id}
+                                      disabled={s.folderId === f.id}
+                                      onSelect={() => void move(s, f.id)}
+                                    >
+                                      {folderPath(folders, f.id)}
+                                    </DropdownMenuItem>
+                                  ))}
+                                </DropdownMenuSubContent>
+                              </DropdownMenuSub>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem
+                                variant="destructive"
+                                onSelect={() => setDialog({ kind: "deleteSession", session: s })}
+                              >
+                                Delete…
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </div>
+
+        <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+        {dialog?.kind === "editSession" && (
+          <SessionDialog
+            vault={vault}
+            session={dialog.session}
+            folderId={folderId}
+            folders={folders}
+            sessions={all}
+            tagSuggestions={tags.map((t) => t.name)}
+            onVaultChanged={onVaultChanged}
+            onSaved={(saved) => {
+              toast.success(dialog.session ? `Saved '${saved.name}'` : `Created '${saved.name}'`);
+              reload();
+            }}
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "deleteSession" && (
+          <ConfirmDialog
+            title={`Delete '${dialog.session.name}'?`}
+            description={
+              all.some((s) => s.jumpSessionId === dialog.session.id)
+                ? "Sessions that use it as their jump host will connect directly afterwards. Its passwords and keys stay in the vault."
+                : "Its passwords and keys stay in the vault."
+            }
+            confirmLabel="Delete"
+            onConfirm={async () => {
+              await api.deleteSession(dialog.session.id);
+              reload();
+            }}
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "newFolder" && (
+          <NameDialog
+            title={dialog.parentId ? `New folder in ${folderPath(folders, dialog.parentId)}` : "New folder"}
+            description="Folders are Remotely's own way to sort sessions, e.g. by customer or site."
+            label="Name"
+            submitLabel="Create"
+            onSubmit={async (name) => {
+              const created = await api.createFolder(name, dialog.parentId);
+              setFolderId(created.id);
+              reload();
+            }}
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "renameFolder" && (
+          <NameDialog
+            title={`Rename ${dialog.folder.name}`}
+            description="Its sessions and folders stay in it."
+            label="Name"
+            submitLabel="Rename"
+            initial={dialog.folder.name}
+            onSubmit={async (name) => {
+              await api.renameFolder(dialog.folder.id, name);
+              reload();
+            }}
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "folderDefaults" && (
+          <FolderDefaultsDialog
+            folder={dialog.folder}
+            folders={folders}
+            sessions={all}
+            onSaved={() => reload()}
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "deleteFolder" && (
+          <ConfirmDialog
+            title={`Delete the folder ${dialog.folder.name}?`}
+            description={`Only the folder goes: its ${plural(
+              all.filter((s) => s.folderId === dialog.folder.id).length,
+              "session",
+            )} and ${plural(
+              folders.filter((f) => f.parentId === dialog.folder.id).length,
+              "folder",
+            )} move to ${dialog.folder.parentId ? folderPath(folders, dialog.folder.parentId) : "the top level"}.`}
+            confirmLabel="Delete folder"
+            onConfirm={async () => {
+              await withVaultPassword((password) => api.deleteFolder(dialog.folder.id, password));
+              if (folderId === dialog.folder.id) setFolderId(dialog.folder.parentId);
+              reload();
+            }}
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "import" && (
+          <ImportDialog
+            folders={folders}
+            folderId={folderId}
+            vault={vault}
+            onVaultChanged={onVaultChanged}
+            onOpenVault={onOpenVault}
+            onImported={reload}
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "export" && (
+          <ExportDialog
+            sessions={all.length}
+            folders={folders.length}
+            vault={vault}
+            onVaultChanged={onVaultChanged}
+            onExported={(report) =>
+              toast.success(
+                `Exported ${plural(report.sessions, "session")}${report.favourites ? ` and ${plural(report.favourites, "favourite command")}` : ""}`,
+                { description: report.path },
+              )
+            }
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "importExport" && (
+          <TransferImportDialog
+            vault={vault}
+            onVaultChanged={onVaultChanged}
+            onImported={reload}
+            onClose={() => setDialog(null)}
+          />
         )}
       </div>
-
-      <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
-      {dialog?.kind === "editSession" && (
-        <SessionDialog
-          vault={vault}
-          session={dialog.session}
-          folderId={folderId}
-          folders={folders}
-          sessions={all}
-          tagSuggestions={tags.map((t) => t.name)}
-          onVaultChanged={onVaultChanged}
-          onSaved={(saved) => {
-            toast.success(dialog.session ? `Saved '${saved.name}'` : `Created '${saved.name}'`);
-            reload();
-          }}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "deleteSession" && (
-        <ConfirmDialog
-          title={`Delete '${dialog.session.name}'?`}
-          description={
-            all.some((s) => s.jumpSessionId === dialog.session.id)
-              ? "Sessions that use it as their jump host will connect directly afterwards. Its passwords and keys stay in the vault."
-              : "Its passwords and keys stay in the vault."
-          }
-          confirmLabel="Delete"
-          onConfirm={async () => {
-            await api.deleteSession(dialog.session.id);
-            reload();
-          }}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "newFolder" && (
-        <NameDialog
-          title={dialog.parentId ? `New folder in ${folderPath(folders, dialog.parentId)}` : "New folder"}
-          description="Folders are Remotely's own way to sort sessions, e.g. by customer or site."
-          label="Name"
-          submitLabel="Create"
-          onSubmit={async (name) => {
-            const created = await api.createFolder(name, dialog.parentId);
-            setFolderId(created.id);
-            reload();
-          }}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "renameFolder" && (
-        <NameDialog
-          title={`Rename ${dialog.folder.name}`}
-          description="Its sessions and folders stay in it."
-          label="Name"
-          submitLabel="Rename"
-          initial={dialog.folder.name}
-          onSubmit={async (name) => {
-            await api.renameFolder(dialog.folder.id, name);
-            reload();
-          }}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "folderDefaults" && (
-        <FolderDefaultsDialog
-          folder={dialog.folder}
-          folders={folders}
-          sessions={all}
-          onSaved={() => reload()}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "deleteFolder" && (
-        <ConfirmDialog
-          title={`Delete the folder ${dialog.folder.name}?`}
-          description={`Only the folder goes: its ${plural(
-            all.filter((s) => s.folderId === dialog.folder.id).length,
-            "session",
-          )} and ${plural(
-            folders.filter((f) => f.parentId === dialog.folder.id).length,
-            "folder",
-          )} move to ${dialog.folder.parentId ? folderPath(folders, dialog.folder.parentId) : "the top level"}.`}
-          confirmLabel="Delete folder"
-          onConfirm={async () => {
-            await withVaultPassword((password) => api.deleteFolder(dialog.folder.id, password));
-            if (folderId === dialog.folder.id) setFolderId(dialog.folder.parentId);
-            reload();
-          }}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "import" && (
-        <ImportDialog
-          folders={folders}
-          folderId={folderId}
-          vault={vault}
-          onVaultChanged={onVaultChanged}
-          onOpenVault={onOpenVault}
-          onImported={reload}
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "export" && (
-        <ExportDialog
-          sessions={all.length}
-          folders={folders.length}
-          vault={vault}
-          onVaultChanged={onVaultChanged}
-          onExported={(report) =>
-            toast.success(
-              `Exported ${plural(report.sessions, "session")}${report.favourites ? ` and ${plural(report.favourites, "favourite command")}` : ""}`,
-              { description: report.path },
-            )
-          }
-          onClose={() => setDialog(null)}
-        />
-      )}
-      {dialog?.kind === "importExport" && (
-        <TransferImportDialog
-          vault={vault}
-          onVaultChanged={onVaultChanged}
-          onImported={reload}
-          onClose={() => setDialog(null)}
-        />
-      )}
     </div>
   );
 }

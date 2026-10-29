@@ -203,7 +203,12 @@ const MOVED_ICONS: Record<Exclude<MovedPage, "snapshots">, LucideIcon> = {
 /** What the palette and the shortcut sheet list: the sidebar's pages, then the tabs that were pages before 0.6.0. */
 const PALETTE_PAGES = [
   ...PAGES.map((p) => ({ id: p.id as string, label: p.label, shortcut: p.shortcut, icon: PAGE_ICONS[p.id] })),
-  ...movedPageEntries().map((m) => ({ id: m.id as string, label: m.label, shortcut: m.shortcut, icon: MOVED_ICONS[m.id as keyof typeof MOVED_ICONS] })),
+  ...movedPageEntries().map((m) => ({
+    id: m.id as string,
+    label: m.label,
+    shortcut: m.shortcut,
+    icon: MOVED_ICONS[m.id as keyof typeof MOVED_ICONS],
+  })),
 ];
 const SHEET_PAGES = pageShortcuts();
 const SIDEBAR = sidebarGroups();
@@ -928,7 +933,12 @@ export default function App() {
             }
           },
         }
-      : { id: "unlock", label: "Unlock the vault", icon: LockOpenIcon, run: () => go({ page: "vault", tab: "secrets" }) },
+      : {
+          id: "unlock",
+          label: "Unlock the vault",
+          icon: LockOpenIcon,
+          run: () => go({ page: "vault", tab: "secrets" }),
+        },
     {
       id: "notifications",
       label: "Notifications",
@@ -1094,7 +1104,9 @@ export default function App() {
                       id={p.id}
                       active={page === p.id}
                       onOpen={setPage}
-                      icon={vault?.status === "unlocked" ? LockOpenIcon : vault?.status === "locked" ? LockIcon : undefined}
+                      icon={
+                        vault?.status === "unlocked" ? LockOpenIcon : vault?.status === "locked" ? LockIcon : undefined
+                      }
                       status={vaultLabel(vault)}
                       badge={vault?.status === "notSetUp" ? "Set up" : undefined}
                     />

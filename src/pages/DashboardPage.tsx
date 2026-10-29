@@ -1032,82 +1032,82 @@ export function DashboardPage({
       />
       {/* Mounted while hidden, as the page itself is: widgets read only while the tab shows (live). */}
       <TabsContent value="metrics" forceMount className="flex flex-none flex-col gap-4 data-[state=inactive]:hidden">
-      {layout && (
-        <LayoutBar
-          draft={draft}
-          readOnly={readOnly}
-          saving={saving}
-          onEdit={() => setDraft(structuredClone(layout))}
-          onAdd={(kind) => setDraft((d) => (d ? addWidget(d, kind) : d))}
-          onReset={() => setConfirmReset(true)}
-          onCancel={() => setDraft(null)}
-          onSave={() => void saveLayout()}
-        />
-      )}
-      {layout && layout.widgets.length === 0 && (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <LayoutDashboardIcon />
-            </EmptyMedia>
-            <EmptyTitle>No widgets</EmptyTitle>
-            <EmptyDescription>
-              {editing
-                ? "Add widgets above, then save."
-                : "Customize the dashboard to add some, or reset it to the default."}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )}
-      {layout && (
-        <DashboardGrid
-          layout={layout}
-          editing={editing}
-          onChange={setDraft}
-          renderWidget={renderWidget}
-          titleOf={titleOf}
-        />
-      )}
+        {layout && (
+          <LayoutBar
+            draft={draft}
+            readOnly={readOnly}
+            saving={saving}
+            onEdit={() => setDraft(structuredClone(layout))}
+            onAdd={(kind) => setDraft((d) => (d ? addWidget(d, kind) : d))}
+            onReset={() => setConfirmReset(true)}
+            onCancel={() => setDraft(null)}
+            onSave={() => void saveLayout()}
+          />
+        )}
+        {layout && layout.widgets.length === 0 && (
+          <Empty className="border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <LayoutDashboardIcon />
+              </EmptyMedia>
+              <EmptyTitle>No widgets</EmptyTitle>
+              <EmptyDescription>
+                {editing
+                  ? "Add widgets above, then save."
+                  : "Customize the dashboard to add some, or reset it to the default."}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
+        {layout && (
+          <DashboardGrid
+            layout={layout}
+            editing={editing}
+            onChange={setDraft}
+            renderWidget={renderWidget}
+            titleOf={titleOf}
+          />
+        )}
 
-      <MetricsDetail
-        row={selectedRow}
-        round={round}
-        live={live}
-        guestIntervalSecs={cost?.guestIntervalSecs || 5}
-        thresholds={thresholds}
-        theme={theme}
-        onClose={() => setSelected(null)}
-        onWatch={(id, on) => void watch(id, on)}
-        onRetry={(id) => {
-          api.backgroundLoginRetry(id).then(
-            () => {
-              toast.success("Logging in again on the next round");
-              load();
-            },
-            (err) => toast.error(errorMessage(err)),
-          );
-        }}
-        onConnect={onConnect}
-        onActions={onActions}
-        onHostDetails={(session) => {
-          setSelected(null);
-          setHostDetails(session);
-        }}
-      />
-      <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
-      {confirmReset && (
-        <ConfirmDialog
-          title="Reset the dashboard?"
-          description="Back to the default widgets: host capacity, this PC's memory, the alerts and the overview grid. Your arrangement and its charts go."
-          confirmLabel="Reset"
-          onConfirm={async () => {
-            setLayoutInfo(await dashboardApi.resetLayout());
-            setDraft(null);
-            toast.success("Dashboard reset to the default");
+        <MetricsDetail
+          row={selectedRow}
+          round={round}
+          live={live}
+          guestIntervalSecs={cost?.guestIntervalSecs || 5}
+          thresholds={thresholds}
+          theme={theme}
+          onClose={() => setSelected(null)}
+          onWatch={(id, on) => void watch(id, on)}
+          onRetry={(id) => {
+            api.backgroundLoginRetry(id).then(
+              () => {
+                toast.success("Logging in again on the next round");
+                load();
+              },
+              (err) => toast.error(errorMessage(err)),
+            );
           }}
-          onClose={() => setConfirmReset(false)}
+          onConnect={onConnect}
+          onActions={onActions}
+          onHostDetails={(session) => {
+            setSelected(null);
+            setHostDetails(session);
+          }}
         />
-      )}
+        <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+        {confirmReset && (
+          <ConfirmDialog
+            title="Reset the dashboard?"
+            description="Back to the default widgets: host capacity, this PC's memory, the alerts and the overview grid. Your arrangement and its charts go."
+            confirmLabel="Reset"
+            onConfirm={async () => {
+              setLayoutInfo(await dashboardApi.resetLayout());
+              setDraft(null);
+              toast.success("Dashboard reset to the default");
+            }}
+            onClose={() => setConfirmReset(false)}
+          />
+        )}
       </TabsContent>
       <TabsContent value="map" forceMount className="min-h-0 data-[state=inactive]:hidden">
         <MapPage active={active && tab === "map"} onOpenLink={onOpenLink} />

@@ -3,13 +3,14 @@
 // show as one card. Read again when a job finishes or a setting changes (refreshKey). A read: not audited.
 
 import { useEffect, useState } from "react";
-import { HistoryIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
+import { HistoryIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TierBadge } from "@/components/Badges";
+import { RefreshButton } from "@/components/RefreshButton";
 import { errorMessage, type Tier, type VmRecord } from "@/lib/api";
 import { formatDuration, formatWhen } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -108,16 +109,7 @@ export function VmTimelineTab({ vm, refreshKey }: { vm: VmRecord; refreshKey: st
     <div className="flex flex-col gap-2">
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         From the audit log and the job journal, newest first.
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          className="ml-auto"
-          aria-label="Read the timeline again"
-          title="Read the timeline again"
-          onClick={() => setReloads((n) => n + 1)}
-        >
-          <RefreshCwIcon />
-        </Button>
+        <RefreshButton className="ml-auto" onClick={() => setReloads((n) => n + 1)} />
       </div>
       <ol className="flex flex-col gap-2">
         {groups.map((group) => {

@@ -22,6 +22,7 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DashboardHistoryCard } from "@/components/DashboardHistoryCard";
 import { DataRetentionCard } from "@/components/DataRetentionCard";
+import { PageHeader } from "@/components/PageHeader";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { ChangeIdCard } from "@/components/ChangeIdCard";
 import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
@@ -272,12 +273,17 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
 
   return (
     <Tabs value={tab} onValueChange={(v) => setTab(v as SettingsTab)} className="max-w-3xl gap-4">
-      <TabsList>
-        <TabsTrigger value="general">General</TabsTrigger>
-        <TabsTrigger value="terminal">Terminal</TabsTrigger>
-        <TabsTrigger value="rules">Approval rules</TabsTrigger>
-        <TabsTrigger value="about">About</TabsTrigger>
-      </TabsList>
+      <PageHeader
+        page="settings"
+        tabs={
+          <TabsList>
+            <TabsTrigger value="general">General</TabsTrigger>
+            <TabsTrigger value="terminal">Terminal</TabsTrigger>
+            <TabsTrigger value="rules">Approval rules</TabsTrigger>
+            <TabsTrigger value="about">About</TabsTrigger>
+          </TabsList>
+        }
+      />
       <TabsContent value="about">
         <Section id="about" lit={lit}>
           <AboutCard />

@@ -6,7 +6,7 @@
 // terminal tab (audited like any terminal).
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { RefreshCwIcon, SquareTerminalIcon, TriangleAlertIcon, XIcon } from "lucide-react";
+import { SquareTerminalIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,6 +41,7 @@ import {
   statsFor,
   type StatsRead,
 } from "@/lib/containers";
+import { RefreshButton } from "@/components/RefreshButton";
 import { formatWhen } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { usePoll } from "@/hooks/use-poll";
@@ -381,9 +382,7 @@ function LogsTab({ host, engine, container, polling }: Props) {
           <Switch checked={timestamps} onCheckedChange={setTimestamps} aria-label="Show timestamps" />
           Timestamps
         </label>
-        <Button size="icon-sm" variant="ghost" aria-label="Read the log again" onClick={() => setReads((r) => r + 1)}>
-          <RefreshCwIcon />
-        </Button>
+        <RefreshButton onClick={() => setReads((r) => r + 1)} />
       </div>
       <div className="flex items-center gap-2">
         <Input

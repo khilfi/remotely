@@ -15,8 +15,7 @@ export const GLOSSARY = {
   // ---- Approvals ----
   tier: {
     term: "Tier",
-    definition:
-      "How risky an action is (Low, Medium, High or Critical); the tier sets the steps before it runs.",
+    definition: "How risky an action is (Low, Medium, High or Critical); the tier sets the steps before it runs.",
     aliases: ["risk", "approval tier"],
   },
   low: { term: "Low", definition: "Runs at once, with only an entry in the audit log." },
@@ -50,8 +49,7 @@ export const GLOSSARY = {
   },
   standingApproval: {
     term: "Standing approval",
-    definition:
-      "The approval a schedule gets when you save it, which its runs use; editing what it does asks again.",
+    definition: "The approval a schedule gets when you save it, which its runs use; editing what it does asks again.",
   },
   safetySnapshot: {
     term: "Safety snapshot",
@@ -79,7 +77,8 @@ export const GLOSSARY = {
   },
   hashChain: {
     term: "Hash chain",
-    definition: "Each audit entry carries a fingerprint of the one before; verifying the chain shows whether any was changed.",
+    definition:
+      "Each audit entry carries a fingerprint of the one before; verifying the chain shows whether any was changed.",
     aliases: ["verify the hash chain"],
   },
   purge: {
@@ -134,7 +133,8 @@ export const GLOSSARY = {
   },
   hostKey: {
     term: "Host key",
-    definition: "The key a host proves itself with; Remotely blocks a host whose key changed until you trust the new one.",
+    definition:
+      "The key a host proves itself with; Remotely blocks a host whose key changed until you trust the new one.",
     aliases: ["known host", "fingerprint"],
   },
 
@@ -179,7 +179,8 @@ export const GLOSSARY = {
   // ---- Everything else ----
   workspace: {
     term: "Workspace",
-    definition: "One engagement or customer: its sessions, VMs, templates, schedules and audit log, kept apart from the others.",
+    definition:
+      "One engagement or customer: its sessions, VMs, templates, schedules and audit log, kept apart from the others.",
     aliases: ["engagement", "customer"],
   },
   unassignedVm: {

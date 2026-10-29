@@ -40,7 +40,6 @@ import {
   NetworkIcon,
   PlayIcon,
   RecycleIcon,
-  RefreshCwIcon,
   RocketIcon,
   ImportIcon,
   PackageIcon,
@@ -119,6 +118,8 @@ import {
 } from "@/lib/api";
 import { useVisibility } from "@/hooks/use-poll";
 import { CloneDialog } from "@/components/CloneDialog";
+import { PageHeader } from "@/components/PageHeader";
+import { RefreshButton } from "@/components/RefreshButton";
 import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { refreshDue } from "@/lib/job-events";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
@@ -978,11 +979,9 @@ export function VmsPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
+      <PageHeader page="vms" />
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="outline" onClick={() => setRefreshes((n) => n + 1)} disabled={loading}>
-          <RefreshCwIcon data-icon="inline-start" className={loading ? "animate-spin" : undefined} />
-          Refresh
-        </Button>
+        <RefreshButton variant="outline" size="icon" busy={loading} onClick={() => setRefreshes((n) => n + 1)} />
         <WhyDisabled reason={readOnly}>
           <Button
             variant="outline"
