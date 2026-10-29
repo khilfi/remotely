@@ -5,11 +5,15 @@
 // MultiExec (SS-10) and Compare output (BX-03) replace the MVP's Bulk run page.
 //
 // FD-01 keyboard: Ctrl+K opens the command palette (Ctrl+Shift+K inside a terminal, where Ctrl+K belongs
-// to the shell), Ctrl+1 to Ctrl+9 open the pages by their own shortcut and Ctrl+, opens Settings. VM-19 to VM-21: the
-// Templates page (sizes, images, launch templates) sits under Virtual machines with Ctrl+9.
+// to the shell), Ctrl+1 to Ctrl+9 open the pages in sidebar order and Ctrl+, opens Settings.
 //
-// QL-14: snapshots are part of the Virtual machines page. The sidebar's third slot is left for Containers (Q6); until
-// then Ctrl+3, Snapshots' old shortcut, opens the snapshot view there (lib/navigation.ts).
+// UX-08 (0.6.0): the sidebar groups the pages (Machines, Remote, Overview, then Vault and Settings), as the page
+// registry in lib/navigation.ts lists them; each page shows its own title in a PageHeader. Image tools is the Templates
+// page's Disk images tab, the Map a Dashboard tab and Known hosts a Vault tab: their old ids, links and free shortcuts
+// still open them there (`go`). The sidebar's status rows show only when something needs attention (no hypervisor
+// found, no vault yet); the status bar keeps the vault's state.
+//
+// QL-14: snapshots are part of the Virtual machines page; the old Snapshots id opens the snapshot view there.
 //
 // FD-03: the top bar's Present button (Presenting menu while on) and the palette start and stop presentation mode,
 // its read-only lock and "Hide terminal output" (Presentation.tsx).
@@ -75,9 +79,11 @@ import {
   SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
+  SidebarGroupLabel,
   SidebarHeader,
   SidebarInset,
   SidebarMenu,
+  SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarProvider,
@@ -116,10 +122,10 @@ import { ShortcutSheet } from "@/components/ShortcutSheet";
 import { StatusBar } from "@/components/StatusBar";
 import { useDensity } from "@/lib/density";
 import { firstRunDismissed, onFirstRunRequest, requestFirstRun, shouldOfferFirstRun } from "@/lib/first-run";
-import type { AppLink } from "@/lib/links";
+import { onLinkRequest, type AppLink } from "@/lib/links";
 import { fromSkipped, fromUpdate } from "@/lib/notifications";
 import { notify } from "@/lib/notifications-store";
-import { opensShortcutSheet } from "@/lib/shortcuts";
+import { opensShortcutSheet, pageShortcuts } from "@/lib/shortcuts";
 import { reportVault } from "@/lib/status-bar";
 import {
   api,
@@ -140,17 +146,26 @@ import { cn } from "@/lib/utils";
 import { ActivityPage } from "@/pages/ActivityPage";
 import { ContainersPage, type ContainerRequest, type ContainerShellRequest } from "@/pages/ContainersPage";
 import { DashboardPage } from "@/pages/DashboardPage";
-import { KnownHostsPage } from "@/pages/KnownHostsPage";
 import { SchedulesPage, type SchedulesRequest } from "@/pages/SchedulesPage";
-import { MapPage } from "@/pages/MapPage";
 import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
-import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage, type VmPageRequest, type VmPanel } from "@/pages/VmsPage";
-import { navTarget, shortcutTarget, type NavTarget } from "@/lib/navigation";
+import {
+  movedPageEntries,
+  navTarget,
+  PAGES,
+  SHORTCUT_KEYS,
+  shortcutTarget,
+  sidebarGroups,
+  type DashboardTab,
+  type MovedPage,
+  type NavTarget,
+  type PageId,
+  type VaultTab,
+} from "@/lib/navigation";
 import {
   changesAppInfo,
   changesContainerHosts,
@@ -165,51 +180,42 @@ import type { VmView } from "@/lib/vm-snapshots";
 import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 
-type PageId =
-  | "vms"
-  | "templates"
-  | "images"
-  | "schedules"
-  | "map"
-  | "dashboard"
-  | "containers"
-  | "sessions"
-  | "terminal"
-  | "knownHosts"
-  | "vault"
-  | "activity"
-  | "settings";
+/** Each page's sidebar icon; the pages themselves, in order, are lib/navigation.ts's PAGES. */
+const PAGE_ICONS: Record<PageId, LucideIcon> = {
+  vms: ServerIcon,
+  templates: LayersIcon,
+  schedules: CalendarClockIcon,
+  sessions: ListTreeIcon,
+  terminal: TerminalIcon,
+  containers: ContainerIcon,
+  dashboard: LayoutDashboardIcon,
+  activity: HistoryIcon,
+  vault: KeyRoundIcon,
+  settings: SettingsIcon,
+};
 
-/** In sidebar order, each with its own shortcut. Ctrl+3 is Containers (Q6); the old Snapshots alias stops. */
-const PAGES: { id: PageId; label: string; title: string; icon: LucideIcon; shortcut: string }[] = [
-  { id: "vms", label: "Virtual machines", title: "Virtual machines", icon: ServerIcon, shortcut: "Ctrl+1" },
-  { id: "templates", label: "Templates", title: "VM templates", icon: LayersIcon, shortcut: "Ctrl+9" },
-  // CV-03: Ctrl+; beside the Schedules page's Ctrl+. (no Ctrl+digit was left).
-  { id: "images", label: "Image tools", title: "Image tools", icon: HardDriveIcon, shortcut: "Ctrl+;" },
-  // VM-14, VM-27: no Ctrl+digit was left.
-  { id: "schedules", label: "Schedules", title: "Schedules", icon: CalendarClockIcon, shortcut: "Ctrl+." },
-  { id: "map", label: "Map", title: "Topology map", icon: NetworkIcon, shortcut: "Ctrl+0" },
-  { id: "dashboard", label: "Dashboard", title: "Dashboard", icon: LayoutDashboardIcon, shortcut: "Ctrl+2" },
-  { id: "containers", label: "Containers", title: "Containers", icon: ContainerIcon, shortcut: "Ctrl+3" },
-  { id: "sessions", label: "Sessions", title: "Sessions", icon: ListTreeIcon, shortcut: "Ctrl+4" },
-  { id: "terminal", label: "Terminal", title: "Terminal", icon: TerminalIcon, shortcut: "Ctrl+5" },
-  { id: "knownHosts", label: "Known hosts", title: "Known hosts", icon: ShieldCheckIcon, shortcut: "Ctrl+6" },
-  { id: "vault", label: "Vault", title: "Vault", icon: KeyRoundIcon, shortcut: "Ctrl+7" },
-  { id: "activity", label: "Activity", title: "Jobs and audit log", icon: HistoryIcon, shortcut: "Ctrl+8" },
-  { id: "settings", label: "Settings", title: "Settings", icon: SettingsIcon, shortcut: "Ctrl+," },
+const MOVED_ICONS: Record<Exclude<MovedPage, "snapshots">, LucideIcon> = {
+  images: HardDriveIcon,
+  map: NetworkIcon,
+  knownHosts: ShieldCheckIcon,
+};
+
+/** What the palette and the shortcut sheet list: the sidebar's pages, then the tabs that were pages before 0.6.0. */
+const PALETTE_PAGES = [
+  ...PAGES.map((p) => ({ id: p.id as string, label: p.label, shortcut: p.shortcut, icon: PAGE_ICONS[p.id] })),
+  ...movedPageEntries().map((m) => ({ id: m.id as string, label: m.label, shortcut: m.shortcut, icon: MOVED_ICONS[m.id as keyof typeof MOVED_ICONS] })),
 ];
+const SHEET_PAGES = pageShortcuts();
+const SIDEBAR = sidebarGroups();
 
 // P6: memoised pages. Each one renders again only when its own props change; App passes them stable callbacks.
 const Vms = memo(VmsPage);
 const Templates = memo(TemplatesPage);
-const ImageTools = memo(ImageToolsPage);
 const Schedules = memo(SchedulesPage);
-const TopologyMap = memo(MapPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
 const Sessions = memo(SessionsPage);
 const Terminal = memo(TerminalPage);
-const KnownHosts = memo(KnownHostsPage);
 const Vault = memo(VaultPage);
 const Activity = memo(ActivityPage);
 const SettingsView = memo(SettingsPage);
@@ -247,6 +253,9 @@ export default function App() {
   const offered = updateCheck?.status === "available" ? updateCheck.update : null;
   // QL-14: a VM (or the snapshot view) to show on the Virtual machines page.
   const [vmRequest, setVmRequest] = useState<VmPageRequest | null>(null);
+  // UX-08: the tabs of the pages that took in another (the Map, Known hosts).
+  const [dashboardTab, setDashboardTab] = useState<DashboardTab>("metrics");
+  const [vaultTab, setVaultTab] = useState<VaultTab>("secrets");
   // VM-19 to VM-21: a tab of the Templates page, or a new item there, asked for from the palette.
   const [templatesRequest, setTemplatesRequest] = useState<{
     tab: TemplatesTab;
@@ -337,12 +346,20 @@ export default function App() {
     setPage("schedules");
   }, []);
 
-  /** A page, or a page from before 0.4.0 that is now part of another (Snapshots). */
+  /** A page, on one of its tabs when a page that moved into it was asked for (lib/navigation.ts). */
   const go = useCallback(
     (target: NavTarget) => {
       if (!target) return;
-      if ("moved" in target) openVms([], "snapshots");
-      else setPage(target.page as PageId);
+      const tab = target.tab;
+      if (target.page === "vms" && tab === "snapshots") {
+        openVms([], "snapshots");
+        return;
+      }
+      if (target.page === "templates" && tab)
+        setTemplatesRequest((prev) => ({ tab: tab as TemplatesTab, n: (prev?.n ?? 0) + 1 }));
+      if (target.page === "dashboard" && tab) setDashboardTab(tab as DashboardTab);
+      if (target.page === "vault" && tab) setVaultTab(tab as VaultTab);
+      setPage(target.page);
     },
     [openVms],
   );
@@ -375,7 +392,7 @@ export default function App() {
         return;
       }
       if (terminal || e.shiftKey || paletteOpen.current) return;
-      const target = /^[0-9,.;]$/.test(e.key) ? shortcutTarget(e.key, PAGES) : null;
+      const target = SHORTCUT_KEYS.test(e.key) ? shortcutTarget(e.key) : null;
       if (target) {
         e.preventDefault();
         go(target);
@@ -611,7 +628,7 @@ export default function App() {
     (link: AppLink) => {
       switch (link.kind) {
         case "page":
-          go(navTarget(link.page, PAGES));
+          go(navTarget(link.page));
           break;
         case "vm":
           openVms([link.vmxPath], link.view ?? "details");
@@ -650,7 +667,7 @@ export default function App() {
           setPage("terminal");
           break;
         case "alerts":
-          setPage("dashboard");
+          go({ page: "dashboard", tab: "metrics" });
           break;
         case "schedule":
           openSchedules({ scheduleId: link.scheduleId });
@@ -664,10 +681,10 @@ export default function App() {
           }
           break;
         case "vault":
-          setPage("vault");
+          go({ page: "vault", tab: "secrets" });
           break;
         case "map":
-          setPage("map");
+          go(navTarget("map"));
           break;
         case "hostNetworks":
           openVmsPanel("networks");
@@ -676,6 +693,9 @@ export default function App() {
     },
     [go, openVms, openSchedules, openVmsPanel],
   );
+
+  // UX-04: links from components without an onOpenLink prop (a HelpTip's "Open the setting").
+  useEffect(() => onLinkRequest(openLink), [openLink]);
 
   // QL-23: the wizard offers itself when there is no vault and no session yet (once the vault is known), and opens
   // again from Settings or the palette.
@@ -698,10 +718,10 @@ export default function App() {
     () => ({
       vms: () => setPage("vms"),
       sessions: () => setPage("sessions"),
-      vault: () => setPage("vault"),
+      vault: () => go({ page: "vault", tab: "secrets" }),
       settings: () => setPage("settings"),
     }),
-    [],
+    [go],
   );
 
   /** What a settings save changed: only what depends on it is read again. */
@@ -777,10 +797,10 @@ export default function App() {
     },
     {
       id: "image-tools",
-      label: "Image tools: inspect, convert or verify a disk image",
+      label: "Disk images: inspect, convert or verify a disk file",
       icon: HardDriveIcon,
-      keywords: "convert vmdk vdi vhd vhdx qcow2 raw qemu-img checksum sha256 disk",
-      run: () => setPage("images"),
+      keywords: "image tools convert vmdk vdi vhd vhdx qcow2 raw qemu-img checksum sha256 disk",
+      run: () => go(navTarget("images")),
     },
     {
       id: "new-template",
@@ -853,7 +873,7 @@ export default function App() {
       label: "Watch hosts on the dashboard",
       icon: GaugeIcon,
       keywords: "metrics monitoring guest",
-      run: () => setPage("dashboard"),
+      run: () => go({ page: "dashboard", tab: "metrics" }),
     },
     {
       id: "new-terminal",
@@ -867,9 +887,9 @@ export default function App() {
     },
     {
       id: "compare",
-      label: "Compare output on several hosts…",
+      label: "Compare hosts: run one command on several hosts…",
       icon: GitCompareArrowsIcon,
-      keywords: "bulk run command script many hosts group diff",
+      keywords: "compare output bulk run command script many hosts group diff",
       run: () => {
         setTerminalCompare((n) => n + 1);
         setPage("terminal");
@@ -877,9 +897,9 @@ export default function App() {
     },
     {
       id: "multiexec",
-      label: "MultiExec: type into several terminals",
+      label: "Type in all tabs: send your typing to several terminals",
       icon: RadioTowerIcon,
-      keywords: "broadcast bulk many tabs at once",
+      keywords: "multiexec broadcast bulk many tabs at once",
       run: () => {
         setTerminalMultiExec((n) => n + 1);
         setPage("terminal");
@@ -908,7 +928,7 @@ export default function App() {
             }
           },
         }
-      : { id: "unlock", label: "Unlock the vault", icon: LockOpenIcon, run: () => setPage("vault") },
+      : { id: "unlock", label: "Unlock the vault", icon: LockOpenIcon, run: () => go({ page: "vault", tab: "secrets" }) },
     {
       id: "notifications",
       label: "Notifications",
@@ -1017,7 +1037,8 @@ export default function App() {
     },
   ];
 
-  const current = PAGES.find((p) => p.id === page) ?? PAGES[0];
+  // UX-08: status rows only when something needs attention. VirtualBox is optional, and either hypervisor is enough.
+  const noHypervisor = info !== null && !info.vmrunPath && !info.vboxmanagePath;
 
   return (
     <TooltipProvider>
@@ -1038,63 +1059,50 @@ export default function App() {
           </SidebarHeader>
 
           <SidebarContent>
-            <SidebarGroup>
-              <SidebarGroupContent>
-                <SidebarMenu>
-                  {PAGES.map((p) => (
-                    <SidebarMenuItem key={p.id}>
-                      <SidebarMenuButton
-                        isActive={page === p.id}
-                        tooltip={p.shortcut ? `${p.label} (${p.shortcut})` : p.label}
-                        aria-keyshortcuts={p.shortcut ? p.shortcut.replace("Ctrl", "Control") : undefined}
-                        onClick={() => setPage(p.id)}
-                      >
-                        <p.icon />
-                        <span>{p.label}</span>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  ))}
-                </SidebarMenu>
-              </SidebarGroupContent>
-            </SidebarGroup>
+            {SIDEBAR.filter((g) => g.group !== null).map(({ group, pages }) => (
+              <SidebarGroup key={group?.id}>
+                <SidebarGroupLabel>{group?.label}</SidebarGroupLabel>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    {pages.map((p) => (
+                      <NavItem key={p.id} id={p.id} active={page === p.id} onOpen={setPage} />
+                    ))}
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            ))}
           </SidebarContent>
 
           <SidebarFooter>
             <SidebarMenu>
-              <SidebarMenuItem>
-                <SidebarMenuButton tooltip={vaultLabel(vault)} onClick={() => setPage("vault")}>
-                  {vault?.status === "unlocked" ? <LockOpenIcon className="text-success" /> : <LockIcon />}
-                  <span>{vaultLabel(vault)}</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  tooltip={info?.vmrunPath ?? "vmrun.exe was not found"}
-                  onClick={() => setPage("settings")}
-                >
-                  <span
-                    className={cn("size-2 shrink-0 rounded-full", info?.vmrunPath ? "bg-success" : "bg-destructive")}
-                    aria-hidden
-                  />
-                  <span>{info?.vmrunPath ? "Workstation found" : "Workstation not found"}</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-              {/* VM-18: optional, so not finding it is grey rather than red. */}
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  tooltip={info?.vboxmanagePath ?? "VBoxManage.exe was not found: no VirtualBox VMs are listed"}
-                  onClick={() => setPage("settings")}
-                >
-                  <span
-                    className={cn(
-                      "size-2 shrink-0 rounded-full",
-                      info?.vboxmanagePath ? "bg-success" : "bg-muted-foreground/40",
-                    )}
-                    aria-hidden
-                  />
-                  <span>{info?.vboxmanagePath ? "VirtualBox found" : "VirtualBox not found"}</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              {noHypervisor && (
+                <SidebarMenuItem>
+                  <SidebarMenuButton
+                    tooltip="Neither vmrun.exe nor VBoxManage.exe was found, so no VMs are listed. Set their paths in Settings."
+                    onClick={() => openLink({ kind: "setting", section: "vmware" })}
+                  >
+                    <span className="size-2 shrink-0 rounded-full bg-destructive" aria-hidden />
+                    <span>No hypervisor found</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              )}
+              {SIDEBAR.filter((g) => g.group === null).flatMap(({ pages }) =>
+                pages.map((p) =>
+                  p.id === "vault" ? (
+                    <NavItem
+                      key={p.id}
+                      id={p.id}
+                      active={page === p.id}
+                      onOpen={setPage}
+                      icon={vault?.status === "unlocked" ? LockOpenIcon : vault?.status === "locked" ? LockIcon : undefined}
+                      status={vaultLabel(vault)}
+                      badge={vault?.status === "notSetUp" ? "Set up" : undefined}
+                    />
+                  ) : (
+                    <NavItem key={p.id} id={p.id} active={page === p.id} onOpen={setPage} />
+                  ),
+                ),
+              )}
             </SidebarMenu>
           </SidebarFooter>
           <SidebarRail />
@@ -1106,8 +1114,6 @@ export default function App() {
             <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
             {/* FD-02: one workspace per engagement, switched here. */}
             <WorkspaceSwitcher onOpenActivity={openActivity} />
-            <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
-            <h1 className="text-sm font-semibold">{current.title}</h1>
             <Button
               variant="outline"
               size="sm"
@@ -1182,17 +1188,9 @@ export default function App() {
                   request={templatesRequest}
                   onDeploy={openDeploy}
                   onSubmitted={submitted}
-                  refreshKey={vmJobs + inventoryVersion}
-                />
-              </ErrorBoundary>
-            </section>
-            <section hidden={page !== "images"}>
-              <ErrorBoundary name="Image tools">
-                <ImageTools
-                  active={page === "images"}
-                  onSubmitted={submitted}
                   onImport={openImport}
                   onOpenSettings={show.settings}
+                  refreshKey={vmJobs + inventoryVersion}
                 />
               </ErrorBoundary>
             </section>
@@ -1206,15 +1204,13 @@ export default function App() {
                 />
               </ErrorBoundary>
             </section>
-            <section hidden={page !== "map"} className="h-full">
-              <ErrorBoundary name="Map">
-                <TopologyMap active={page === "map"} onOpenLink={openLink} />
-              </ErrorBoundary>
-            </section>
-            <section hidden={page !== "dashboard"}>
+            <section hidden={page !== "dashboard"} className="h-full">
               <ErrorBoundary name="Dashboard">
                 <Dashboard
                   active={page === "dashboard"}
+                  tab={dashboardTab}
+                  onTabChange={setDashboardTab}
+                  onOpenLink={openLink}
                   theme={resolved}
                   focus={dashboardFocus}
                   onConnect={openTerminal}
@@ -1266,17 +1262,14 @@ export default function App() {
                 />
               </ErrorBoundary>
             </section>
-            <section hidden={page !== "knownHosts"}>
-              <ErrorBoundary name="Known hosts">
-                <KnownHosts active={page === "knownHosts"} />
-              </ErrorBoundary>
-            </section>
             <section hidden={page !== "vault"}>
               <ErrorBoundary name="Vault">
                 <Vault
                   vault={vault}
                   onVaultChanged={setVault}
                   active={page === "vault"}
+                  tab={vaultTab}
+                  onTabChange={setVaultTab}
                   onSubmitted={submitted}
                   onOpenSessions={show.sessions}
                 />
@@ -1322,7 +1315,7 @@ export default function App() {
           vault={vault}
           onOpenVault={() => {
             setApproval(null);
-            setPage("vault");
+            show.vault();
           }}
           onApproved={approval.onJob}
           onClose={(jobId) => {
@@ -1336,14 +1329,14 @@ export default function App() {
         open={palette.open}
         onOpenChange={(open) => setPalette((p) => ({ ...p, open }))}
         vmFocus={palette.vm}
-        pages={PAGES}
-        onNavigate={(id) => go(navTarget(id, PAGES))}
+        pages={PALETTE_PAGES}
+        onNavigate={(id) => go(navTarget(id))}
         actions={paletteActions}
         onSubmit={submitCommand}
         onConnect={openTerminal}
         onShowMetrics={(key) => {
           setDashboardFocus((prev) => ({ key, n: (prev?.n ?? 0) + 1 }));
-          setPage("dashboard");
+          go({ page: "dashboard", tab: "metrics" });
         }}
         onOpenVm={(vmxPath, view, rename) => openVms([vmxPath], view, rename)}
         onOpenLink={openLink}
@@ -1360,7 +1353,7 @@ export default function App() {
       {/* QL-25: jobs and alerts are kept in the notification centre whatever page shows. */}
       <NotificationSources />
       <NotificationCentre open={centreOpen} onOpenChange={setCentreOpen} onOpenLink={openLink} />
-      <ShortcutSheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} pages={PAGES} />
+      <ShortcutSheet open={shortcutsOpen} onOpenChange={setShortcutsOpen} pages={SHEET_PAGES} />
       <FirstRunWizard
         open={firstRunOpen}
         onOpenChange={setFirstRunOpen}
@@ -1368,11 +1361,49 @@ export default function App() {
         onVaultChanged={setVault}
         onOpenVault={show.vault}
         onSettingsChanged={settingsChanged}
-        onGoTo={(id) => go(navTarget(id, PAGES))}
+        onGoTo={(id) => go(navTarget(id))}
       />
       <Toaster theme={resolved} position="bottom-right" />
       <PresentationLayer />
     </TooltipProvider>
+  );
+}
+
+/** One page in the sidebar: its icon (or a state icon, the vault's lock), name, shortcut in the tooltip, a badge. */
+function NavItem({
+  id,
+  active,
+  onOpen,
+  icon,
+  status,
+  badge,
+}: {
+  id: PageId;
+  active: boolean;
+  onOpen: (id: PageId) => void;
+  icon?: LucideIcon;
+  /** Said after the name in the tooltip ("Vault locked"). */
+  status?: string;
+  badge?: string;
+}) {
+  const info = PAGES.find((p) => p.id === id);
+  const Icon = icon ?? PAGE_ICONS[id];
+  const label = info?.label ?? id;
+  const shortcut = info?.shortcut;
+  const tooltip = [status ?? label, shortcut ? `(${shortcut})` : null].filter(Boolean).join(" ");
+  return (
+    <SidebarMenuItem>
+      <SidebarMenuButton
+        isActive={active}
+        tooltip={tooltip}
+        aria-keyshortcuts={shortcut ? shortcut.replace("Ctrl", "Control") : undefined}
+        onClick={() => onOpen(id)}
+      >
+        <Icon className={cn(id === "vault" && icon === LockOpenIcon && "text-success")} />
+        <span>{label}</span>
+      </SidebarMenuButton>
+      {badge && <SidebarMenuBadge className="text-status-warning">{badge}</SidebarMenuBadge>}
+    </SidebarMenuItem>
   );
 }
 

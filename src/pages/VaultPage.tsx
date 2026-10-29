@@ -1,6 +1,7 @@
 // Vault (SS-04, AP-06): set it up, unlock and lock it, change the vault password, choose whether the
 // Windows login unlocks it, and add, replace, rename or delete secrets. Values are write-only: this page
-// only ever holds labels, kinds and IDs. SS-09's SSH keys live here too (public keys only).
+// only ever holds labels, kinds and IDs. SS-09's SSH keys live here too (public keys only). UX-08: Known hosts (SS-05)
+// is the page's second tab.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -44,7 +45,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SECRET_KIND_LABEL } from "@/components/Badges";
+import { PageHeader } from "@/components/PageHeader";
+import { KnownHostsPage } from "@/pages/KnownHostsPage";
+import type { VaultTab } from "@/lib/navigation";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { NewPasswordField } from "@/components/NewPasswordField";
@@ -64,6 +69,9 @@ interface Props {
   onVaultChanged: (info: VaultInfo) => void;
   /** True while the page is shown, so the list is read again when the user comes back. */
   active: boolean;
+  /** UX-08: Secrets, or Known hosts (a page of its own until 0.6.0). App keeps the tab, so links can open either. */
+  tab: VaultTab;
+  onTabChange: (tab: VaultTab) => void;
   /** SS-09: a key push goes through the app, which opens the approval dialog. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenSessions: () => void;
@@ -83,7 +91,36 @@ const ADD: { kind: SecretKind; label: string }[] = [
   { kind: "passphrase", label: "Key passphrase" },
 ];
 
-export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSessions }: Props) {
+/** The page: its header with the Secrets and Known hosts tabs. Both stay mounted, as pages do while hidden. */
+export function VaultPage({ tab, onTabChange, active, ...props }: Props) {
+  return (
+    <Tabs value={tab} onValueChange={(v) => onTabChange(v as VaultTab)} className="gap-4">
+      <PageHeader
+        page="vault"
+        tabs={
+          <TabsList>
+            <TabsTrigger value="secrets">
+              <KeyRoundIcon />
+              Secrets
+            </TabsTrigger>
+            <TabsTrigger value="knownHosts">
+              <ShieldCheckIcon />
+              Known hosts
+            </TabsTrigger>
+          </TabsList>
+        }
+      />
+      <TabsContent value="secrets" forceMount className="data-[state=inactive]:hidden">
+        <VaultSecrets {...props} active={active && tab === "secrets"} />
+      </TabsContent>
+      <TabsContent value="knownHosts" forceMount className="data-[state=inactive]:hidden">
+        <KnownHostsPage active={active && tab === "knownHosts"} />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+function VaultSecrets({ vault, onVaultChanged, active, onSubmitted, onOpenSessions }: Omit<Props, "tab" | "onTabChange">) {
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [listVersion, setListVersion] = useState(0);
   const [dialog, setDialog] = useState<DialogState>(null);

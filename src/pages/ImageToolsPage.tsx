@@ -1,4 +1,4 @@
-// CV-03: Image tools, which make no VM. Inspect (format, virtual size, size on disk, parent), Convert between VMDK
+// CV-03: Image tools (UX-08: the Templates page's Disk images tab since 0.6.0), which make no VM. Inspect (format, virtual size, size on disk, parent), Convert between VMDK
 // (growable, preallocated, stream-optimized, ESXi's layout), VDI, VHD, VHDX, qcow2 and raw, thin or thick, and Verify
 // (sizes, SHA-256 of every file, and qemu-img's comparison when it is installed). The hypervisors' own tools convert
 // first; qemu-img only what they can't (qcow2, VHDX), and only when the owner installed it: the page says which
@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type SubmitOutcome } from "@/lib/api";
@@ -264,11 +265,10 @@ export function ImageToolsPage({ active, onSubmitted, onImport, onOpenSettings }
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-start gap-3">
-        <p className="max-w-3xl flex-1 text-sm text-muted-foreground">
-          Read and convert other hypervisors&apos; disk images: VMDK, VDI, VHD, VHDX, qcow2 and raw. Nothing here makes
-          a VM, and a source is never changed: a conversion writes a new file beside it (or where you say). To make a VM
-          from a foreign disk or appliance, import it.
+      <div className="flex flex-wrap items-center gap-3">
+        <p className="flex max-w-3xl flex-1 items-center gap-1 text-sm text-muted-foreground">
+          Inspect, convert and verify other hypervisors&apos; disk files; a source is never changed.
+          <HelpTip topic="page.diskImages" />
         </p>
         <WhyDisabled reason={readOnly}>
           <Button variant="outline" disabled={readOnly !== null} onClick={() => onImport()}>

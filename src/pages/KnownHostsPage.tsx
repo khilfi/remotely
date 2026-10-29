@@ -1,4 +1,5 @@
-// Known hosts (SS-05): the SSH host keys trusted so far, one per host, port and key type. Removing a key
+// Known hosts (SS-05; UX-08: the Vault page's second tab since 0.6.0): the SSH host keys trusted so far, one per host,
+// port and key type. Removing a key
 // makes the next connection ask again; it is audited. Trusting and replacing keys happen in the terminal,
 // where the fingerprint is shown before anything is sent.
 
@@ -6,10 +7,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { SearchIcon, ShieldCheckIcon, Trash2Icon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type KnownHost } from "@/lib/api";
@@ -57,10 +59,9 @@ export function KnownHostsPage({ active }: Props) {
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="max-w-3xl text-sm text-muted-foreground">
-        The first connection to a host shows its key fingerprint and asks before trusting it. If a trusted host presents
-        a different key later, the terminal blocks the connection and warns. Remove a key here when a host was rebuilt;
-        the next connection then asks again.
+      <p className="flex max-w-3xl items-center gap-1 text-sm text-muted-foreground">
+        Remove a key when a host was rebuilt; the next connection then asks again.
+        <HelpTip topic="page.knownHosts" />
       </p>
       <div className="relative max-w-sm">
         <SearchIcon className="absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
@@ -73,15 +74,11 @@ export function KnownHostsPage({ active }: Props) {
         />
       </div>
       {loaded && hosts.length === 0 ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <ShieldCheckIcon />
-            </EmptyMedia>
-            <EmptyTitle>No trusted hosts yet</EmptyTitle>
-            <EmptyDescription>Host keys you trust in the terminal are listed here.</EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+        <EmptyState
+          icon={ShieldCheckIcon}
+          title="No trusted hosts yet"
+          description="Host keys you trust in the terminal are listed here."
+        />
       ) : (
         <div className="rounded-lg border">
           <Table>

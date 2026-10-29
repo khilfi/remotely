@@ -1,44 +1,83 @@
 /// <reference types="node" />
-// FD-01 and QL-14: page shortcuts by each page's own shortcut, and the Snapshots page's old id and shortcut. Run with
-// `npm test`.
+// UX-08 (FD-01, QL-14): the page registry, the sidebar's groups, page shortcuts in sidebar order, and the pages that
+// became tabs still reached by their ids and free shortcuts. Run with `npm test`.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { navTarget, shortcutTarget } from "./navigation.ts";
+import {
+  MOVED_PAGES,
+  movedPageEntries,
+  NAV_GROUPS,
+  navTarget,
+  OLD_SHORTCUTS,
+  pageLabel,
+  PAGES,
+  SHORTCUT_KEYS,
+  shortcutTarget,
+  sidebarGroups,
+} from "./navigation.ts";
 
-// The sidebar after QL-14: slot 3 is free until Containers (Q6) takes it.
-const PAGES = [
-  { id: "vms", shortcut: "Ctrl+1" },
-  { id: "dashboard", shortcut: "Ctrl+2" },
-  { id: "sessions", shortcut: "Ctrl+4" },
-  { id: "terminal", shortcut: "Ctrl+5" },
-  { id: "settings", shortcut: "Ctrl+," },
-];
-
-test("each page keeps its own shortcut when another page leaves the sidebar", () => {
-  assert.deepEqual(shortcutTarget("1", PAGES), { page: "vms" });
-  assert.deepEqual(shortcutTarget("4", PAGES), { page: "sessions" });
-  assert.deepEqual(shortcutTarget("5", PAGES), { page: "terminal" });
-  assert.deepEqual(shortcutTarget(",", PAGES), { page: "settings" });
-  assert.equal(shortcutTarget("9", PAGES), null);
+test("the sidebar has Machines, Remote and Overview, then Vault and Settings at the bottom", () => {
+  assert.deepEqual(
+    NAV_GROUPS.map((g) => g.label),
+    ["Machines", "Remote", "Overview"],
+  );
+  const groups = sidebarGroups().map((g) => [g.group?.label ?? "bottom", g.pages.map((p) => p.label)]);
+  assert.deepEqual(groups, [
+    ["Machines", ["Virtual machines", "Templates", "Schedules"]],
+    ["Remote", ["Sessions", "Terminal", "Containers"]],
+    ["Overview", ["Dashboard", "Activity"]],
+    ["bottom", ["Vault", "Settings"]],
+  ]);
 });
 
-test("Ctrl+3 opens the snapshot view until a page takes the slot", () => {
-  assert.deepEqual(shortcutTarget("3", PAGES), { moved: "snapshots" });
-  const withContainers = [...PAGES, { id: "containers", shortcut: "Ctrl+3" }];
-  assert.deepEqual(shortcutTarget("3", withContainers), { page: "containers" });
+test("page shortcuts follow the sidebar's order, Settings keeps Ctrl+,", () => {
+  const order = sidebarGroups().flatMap((g) => g.pages);
+  assert.deepEqual(
+    order.map((p) => p.shortcut),
+    ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,"],
+  );
+  for (const page of PAGES) assert.deepEqual(shortcutTarget(page.shortcut.slice(5)), { page: page.id }, page.id);
+  const all = [
+    ...PAGES.map((p) => p.shortcut),
+    ...movedPageEntries().flatMap((m) => (m.shortcut ? [m.shortcut] : [])),
+    ...Object.keys(OLD_SHORTCUTS),
+  ];
+  assert.equal(new Set(all).size, all.length, "no two places share a shortcut");
+  for (const shortcut of all) assert.ok(SHORTCUT_KEYS.test(shortcut.slice(5)), `App listens for ${shortcut}`);
 });
 
-test("Ctrl+9 opens the Templates page (VM-19 to VM-21)", () => {
-  const withTemplates = [...PAGES, { id: "templates", shortcut: "Ctrl+9" }];
-  assert.deepEqual(shortcutTarget("9", withTemplates), { page: "templates" });
-  assert.deepEqual(navTarget("templates", withTemplates), { page: "templates" });
-  assert.deepEqual(shortcutTarget("1", withTemplates), { page: "vms" }, "the others keep theirs");
+test("the 0.5.0 shortcuts no page took still open what they opened", () => {
+  assert.deepEqual(shortcutTarget("0"), { page: "dashboard", tab: "map" });
+  assert.deepEqual(shortcutTarget(";"), { page: "templates", tab: "disks" });
+  assert.deepEqual(shortcutTarget("."), { page: "schedules" });
+  assert.equal(shortcutTarget("-"), null);
+  assert.equal(shortcutTarget("toString"), null, "only the tables' own keys");
 });
 
-test("the old Snapshots page id still opens something", () => {
-  assert.deepEqual(navTarget("snapshots", PAGES), { moved: "snapshots" });
-  assert.deepEqual(navTarget("dashboard", PAGES), { page: "dashboard" });
-  assert.equal(navTarget("bulk", PAGES), null);
-  assert.equal(navTarget("toString", PAGES), null, "only the table's own keys");
+test("the pages that became tabs are reached by their old ids", () => {
+  assert.deepEqual(navTarget("images"), { page: "templates", tab: "disks" });
+  assert.deepEqual(navTarget("map"), { page: "dashboard", tab: "map" });
+  assert.deepEqual(navTarget("knownHosts"), { page: "vault", tab: "knownHosts" });
+  assert.deepEqual(navTarget("snapshots"), { page: "vms", tab: "snapshots" });
+  assert.deepEqual(navTarget("templates"), { page: "templates" });
+  assert.deepEqual(navTarget("settings"), { page: "settings" });
+  assert.equal(navTarget("bulk"), null);
+  assert.equal(navTarget("toString"), null, "only the tables' own keys");
+  assert.equal(navTarget("constructor"), null);
+});
+
+test("each moved page names its home, and only Disk images and the Map keep a shortcut", () => {
+  assert.deepEqual(movedPageEntries(), [
+    { id: "images", label: "Templates › Disk images", shortcut: "Ctrl+;" },
+    { id: "map", label: "Dashboard › Map", shortcut: "Ctrl+0" },
+    { id: "knownHosts", label: "Vault › Known hosts", shortcut: undefined },
+  ]);
+  for (const moved of Object.values(MOVED_PAGES)) assert.ok(PAGES.some((p) => p.id === moved.home));
+});
+
+test("titles come from the registry", () => {
+  assert.equal(pageLabel("vms"), "Virtual machines");
+  assert.equal(pageLabel("activity"), "Activity");
+  assert.equal(new Set(PAGES.map((p) => p.label)).size, PAGES.length);
 });

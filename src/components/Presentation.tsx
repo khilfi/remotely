@@ -324,10 +324,9 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     blocked: "New sessions, edits, folders, imports, links to VMs and port forwards",
     still: "Connecting and exporting still work.",
   },
-  knownHosts: { blocked: "Removing trusted keys", still: "A new host's key can still be trusted when you connect." },
   vault: {
-    blocked: "Adding, replacing, renaming and deleting secrets, the vault password and SSH keys",
-    still: "Locking and unlocking the vault still work.",
+    blocked: "Adding, replacing, renaming and deleting secrets, the vault password, SSH keys and trusted host keys",
+    still: "Locking and unlocking the vault, and trusting a new host's key when you connect, still work.",
   },
   activity: { blocked: "Retrying and starting jobs", still: "Reading and exporting the audit log still work." },
   settings: {

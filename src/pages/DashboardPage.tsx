@@ -6,6 +6,8 @@
 // read: it goes straight to the core's metrics collector, never through the command bus. Actions open the command
 // palette, which submits to the bus like every other page.
 //
+// UX-08: the Map (QL-21's page until 0.6.0) is the Dashboard's second tab.
+//
 // P8: the page follows the core's rounds only while it shows and the window is visible (shouldPoll): hidden, it reads
 // nothing and renders nothing each round; shown again, it reads once at once and then follows the rounds. Each widget
 // reads only while it is on the dashboard, and none while the layout is being customized.
@@ -19,6 +21,7 @@ import {
   GaugeIcon,
   LayoutDashboardIcon,
   MonitorIcon,
+  NetworkIcon,
   PlusIcon,
   RotateCcwIcon,
   SearchIcon,
@@ -44,6 +47,7 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -57,6 +61,7 @@ import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { MetricCell } from "@/components/MetricBits";
 import { MetricChartWidget } from "@/components/MetricChartWidget";
 import { MetricsDetail } from "@/components/MetricsDetail";
+import { PageHeader } from "@/components/PageHeader";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { ServicesWidget } from "@/components/ServicesWidget";
 import { SortableHead } from "@/components/SortableHead";
@@ -79,6 +84,7 @@ import { addWidget, cannotAdd, WIDGET_CHOICES, widgetTitle, type WidgetKindName 
 import { formatWhen, plural } from "@/lib/format";
 import { specsSummary } from "@/lib/host-details";
 import { hypervisorName } from "@/lib/hypervisors";
+import type { AppLink } from "@/lib/links";
 import {
   compareNullsLast as compare,
   DEFAULT_THRESHOLDS,
@@ -98,12 +104,19 @@ import {
   useThresholds,
   type Thresholds,
 } from "@/lib/metrics";
+import type { DashboardTab } from "@/lib/navigation";
 import { shouldPoll } from "@/lib/polling";
 import type { ResolvedTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { MapPage } from "@/pages/MapPage";
 
 interface Props {
   active: boolean;
+  /** UX-08: Metrics, or the Map (App keeps the tab, so links can open either). */
+  tab: DashboardTab;
+  onTabChange: (tab: DashboardTab) => void;
+  /** The map's nodes open their items. */
+  onOpenLink: (link: AppLink) => void;
   theme: ResolvedTheme;
   /** From the command palette: open this row's drill-down. */
   focus: { key: string; n: number } | null;
@@ -793,7 +806,18 @@ function LayoutBar({
   );
 }
 
-export function DashboardPage({ active, theme, focus, onConnect, onActions, onOpenVms, onOpenSessions }: Props) {
+export function DashboardPage({
+  active,
+  tab,
+  onTabChange,
+  onOpenLink,
+  theme,
+  focus,
+  onConnect,
+  onActions,
+  onOpenVms,
+  onOpenSessions,
+}: Props) {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [capacity, setCapacity] = useState<HostCapacity | null>(null);
   const [round, setRound] = useState(0);
@@ -813,7 +837,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
   // everything reads once at once.
   const visibility = useVisibility();
-  const live = shouldPoll(active, visibility);
+  const live = shouldPoll(active && tab === "metrics", visibility);
   const liveRef = useRef(live);
   useEffect(() => {
     liveRef.current = live;
@@ -985,7 +1009,29 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   }
 
   return (
-    <div className="flex flex-col gap-4">
+    <Tabs
+      value={tab}
+      onValueChange={(v) => onTabChange(v as DashboardTab)}
+      className="flex h-full min-h-0 flex-col gap-4"
+    >
+      <PageHeader
+        page="dashboard"
+        tabs={
+          <TabsList>
+            <TabsTrigger value="metrics">
+              <GaugeIcon />
+              Metrics
+            </TabsTrigger>
+            {/* UX-08: the map, a page of its own until 0.6.0. */}
+            <TabsTrigger value="map">
+              <NetworkIcon />
+              Map
+            </TabsTrigger>
+          </TabsList>
+        }
+      />
+      {/* Mounted while hidden, as the page itself is: widgets read only while the tab shows (live). */}
+      <TabsContent value="metrics" forceMount className="flex flex-none flex-col gap-4 data-[state=inactive]:hidden">
       {layout && (
         <LayoutBar
           draft={draft}
@@ -1062,6 +1108,10 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
           onClose={() => setConfirmReset(false)}
         />
       )}
-    </div>
+      </TabsContent>
+      <TabsContent value="map" forceMount className="min-h-0 data-[state=inactive]:hidden">
+        <MapPage active={active && tab === "map"} onOpenLink={onOpenLink} />
+      </TabsContent>
+    </Tabs>
   );
 }

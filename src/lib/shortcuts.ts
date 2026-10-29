@@ -1,7 +1,17 @@
 // QL-24: every keyboard shortcut in Remotely, for the shortcut sheet (Ctrl+/, ShortcutSheet.tsx). The page shortcuts
-// come from the pages themselves (App.tsx's PAGES, the ones lib/navigation.ts opens), so a new page's shortcut is
-// listed without an edit here; the rest are the keys each part of the app handles. A part that adds a key adds it to
-// its group below. Tested in shortcuts.test.ts.
+// come from the page registry (lib/navigation.ts: the sidebar's pages in order, then the tabs that were pages), so a
+// new page's shortcut is listed without an edit here; the rest are the keys each part of the app handles. A part that
+// adds a key adds it to its group below. Tested in shortcuts.test.ts.
+
+import { movedPageEntries, PAGES } from "./navigation.ts";
+
+/** The page shortcuts for the sheet: the sidebar's pages in order, then the tabs that were pages and kept theirs. */
+export function pageShortcuts(): { label: string; shortcut: string }[] {
+  return [
+    ...PAGES.map((p) => ({ label: p.label, shortcut: p.shortcut })),
+    ...movedPageEntries().flatMap((m) => (m.shortcut ? [{ label: m.label, shortcut: m.shortcut }] : [])),
+  ];
+}
 
 export interface Shortcut {
   /** Keys as shown: "Ctrl+K", "Ctrl+Shift+G", "Up / Down". */
@@ -58,7 +68,7 @@ const TERMINAL: ShortcutGroup = {
     { keys: "Ctrl+C", what: "Copy the selection; without one, Ctrl+C goes to the shell" },
     { keys: "Ctrl+Shift+C / Ctrl+Insert", what: "Copy the selection (secrets scrubbed)" },
     { keys: "Ctrl+V / Ctrl+Shift+V", what: "Paste (several lines ask first)" },
-    { keys: "Ctrl+click / Shift+click", what: "Pick tabs for MultiExec and Compare output" },
+    { keys: "Ctrl+click / Shift+click", what: "Pick tabs for Type in all tabs and Compare hosts" },
   ],
 };
 
@@ -66,7 +76,7 @@ const ELSEWHERE: ShortcutGroup = {
   title: "Dialogs and lists",
   shortcuts: [
     { keys: "Enter", what: "Approve, once every answer the approval asks for is right" },
-    { keys: "Ctrl+Enter", what: "Run Compare output's command" },
+    { keys: "Ctrl+Enter", what: "Run the command in Compare hosts" },
     { keys: "Up / Down, Enter", what: "Move between the dashboard's rows, and open one" },
     {
       keys: "Arrow keys",
@@ -76,23 +86,13 @@ const ELSEWHERE: ShortcutGroup = {
   ],
 };
 
-/** The sheet's groups: anywhere, the pages by their own shortcuts, then each part of the app. */
+/** The sheet's groups: anywhere, the pages in the order given (the sidebar's, UX-08), then each part of the app. */
 export function shortcutGroups(pages: readonly { label: string; shortcut: string }[]): ShortcutGroup[] {
   const byPage: ShortcutGroup = {
     title: "Pages",
-    shortcuts: [...pages]
-      .sort((a, b) => order(a.shortcut) - order(b.shortcut))
-      .map((p) => ({ keys: p.shortcut, what: p.label })),
+    shortcuts: pages.map((p) => ({ keys: p.shortcut, what: p.label })),
   };
   return [ANYWHERE, byPage, PALETTE, TERMINAL, ELSEWHERE];
-}
-
-/** Ctrl+1 to Ctrl+9, then Ctrl+0, then Ctrl+, and anything else. */
-function order(shortcut: string): number {
-  const key = shortcut.replace(/^Ctrl\+/, "");
-  if (/^[1-9]$/.test(key)) return Number(key);
-  if (key === "0") return 10;
-  return 11;
 }
 
 /** Every shortcut, for the sheet's filter: those whose keys or words have the text. */
