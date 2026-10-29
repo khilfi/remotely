@@ -31,6 +31,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { StatusBadge, TierBadge } from "@/components/Badges";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary, type JobTarget } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 import { progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
@@ -373,9 +374,9 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
             <Alert>
               <EraserIcon />
               <AlertTitle>Outputs removed</AlertTitle>
-              <AlertDescription>
-                This job is older than the retention period set in Settings, General, so its outputs and its script or
-                line text were removed. Its targets, results and audit entries are kept.
+              <AlertDescription className="flex items-center gap-1">
+                Older than the retention period: its targets, results and audit entries are kept.
+                <HelpTip topic="retention" />
               </AlertDescription>
             </Alert>
           )}

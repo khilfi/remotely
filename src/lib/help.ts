@@ -223,7 +223,7 @@ export const HELP = {
     link: { label: "Dashboard polling", to: setting("dashboard") },
   },
   qemuImg: {
-    title: "qemu-img",
+    title: "Converting with qemu-img",
     body: [
       "Converting to or from qcow2 and VHDX needs qemu-img from QEMU for Windows, which Remotely doesn't ship. Install QEMU, or set qemu-img.exe's path in Settings.",
       "Workstation's and VirtualBox's own tools handle the other formats.",

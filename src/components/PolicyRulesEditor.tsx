@@ -25,6 +25,7 @@ import {
   type Tier,
   type TierRule,
 } from "@/lib/api";
+import { HelpTip } from "@/components/HelpTip";
 import { withVaultPassword } from "@/lib/reauth-prompt";
 
 const TIERS: Tier[] = ["low", "medium", "high", "critical"];
@@ -180,12 +181,11 @@ export function PolicyRulesEditor() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Approval rules</CardTitle>
-        <CardDescription>
-          Every action that changes something gets a risk tier, and the tier decides the steps before it runs. Low:
-          none, only logged. Medium: one confirm. High: impact preview, safety snapshot, type the number of targets, a
-          reason and a countdown. Critical: all of those, then the vault password again.
-        </CardDescription>
+        <CardTitle className="flex items-center gap-1">
+          Approval rules
+          <HelpTip topic="approvalTiers" />
+        </CardTitle>
+        <CardDescription>The tier each action gets, and so the steps before it runs.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6">
         <div className="rounded-md border">

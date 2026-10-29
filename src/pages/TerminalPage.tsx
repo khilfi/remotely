@@ -81,6 +81,7 @@ import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { ColorDot } from "@/components/Badges";
 import { CommandPanel } from "@/components/CommandPanel";
 import { PageHeader } from "@/components/PageHeader";
+import { Tip } from "@/components/Tip";
 import { ComparePanel, type CompareView } from "@/components/ComparePanel";
 import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
@@ -1799,6 +1800,12 @@ export function TerminalPage({
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
       <PageHeader page="terminal" />
+      {/* UX-09: shown once, when picking several tabs first makes sense. */}
+      {tabs.length >= 2 && (
+        <Tip id="terminal.pickTabs">
+          Ctrl+click tabs to pick several, then use Type in all tabs or Compare hosts on all of them.
+        </Tip>
+      )}
       <div className="min-h-0 flex-1">
         {treeShown || commandsShown ? (
           <ResizablePanelGroup

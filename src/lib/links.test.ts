@@ -3,7 +3,17 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAppLink, linkLabel, type AppLink } from "./links.ts";
+import { isAppLink, linkLabel, onLinkRequest, requestLink, type AppLink } from "./links.ts";
+
+test("UX-04: a link asked for from anywhere reaches App, and only while it listens", () => {
+  assert.equal(requestLink({ kind: "vault" }), false, "nobody listens yet");
+  const seen: AppLink[] = [];
+  const stop = onLinkRequest((link) => seen.push(link));
+  assert.equal(requestLink({ kind: "setting", section: "retention" }), true);
+  stop();
+  assert.equal(requestLink({ kind: "map" }), false);
+  assert.deepEqual(seen, [{ kind: "setting", section: "retention" }]);
+});
 
 const EVERY: AppLink[] = [
   { kind: "page", page: "activity" },

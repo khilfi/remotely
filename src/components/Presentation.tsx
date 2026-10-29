@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage } from "@/lib/api";
 import { READ_ONLY_REASON } from "@/lib/disabled-reasons";
 import { workspacesApi } from "@/lib/workspaces-api";
@@ -194,8 +195,7 @@ export function PresentationButton() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">
         <DropdownMenuLabel className="font-normal text-muted-foreground">
-          Host names, IP addresses, user names and your Windows user name in paths are masked on screen. Copies, saved
-          output, session logs and exports keep the real text; printing (its preview is on screen) is masked.
+          Host names, IP addresses and user names are masked on screen. Copies and exports keep the real text.
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuCheckboxItem
@@ -235,20 +235,18 @@ export function PresentationCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Presentation mode</CardTitle>
-        <CardDescription>
-          For screen shares: masks host names, IP addresses, user names and your Windows user name in paths everywhere
-          on screen, with stand-ins such as host-3 or ip-5 that stay the same until Remotely closes. Remotely starts
-          presenting if it was presenting when it closed. Starting and stopping are in the audit log.
-        </CardDescription>
+        <CardTitle className="flex items-center gap-1">
+          Presentation mode
+          <HelpTip topic="presentationMode" />
+        </CardTitle>
+        <CardDescription>For screen shares: host names, IP addresses and user names show as stand-ins.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
         <div className="flex items-start justify-between gap-4">
           <Label htmlFor="presenting" className="grid gap-1">
             <span>Present</span>
             <span className="text-xs font-normal text-muted-foreground">
-              Copies and saved terminal output, session logs and exports keep the real text; printing is masked, since
-              its preview is on screen. Windows file dialogs show real paths.
+              Windows file dialogs still show real paths.
             </span>
           </Label>
           <Switch
@@ -258,13 +256,15 @@ export function PresentationCard() {
           />
         </div>
         <div className="flex items-start justify-between gap-4">
-          <Label htmlFor="read-only-lock" className="grid gap-1">
-            <span>Read-only lock while presenting</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              Blocks power actions, snapshots, commands, Type in all tabs, uploads, tunnels, key pushes, imports, edits
-              of sessions and settings, and updates. Reading, downloads and typing into one terminal still work.
-            </span>
-          </Label>
+          <div className="flex items-start gap-1">
+            <Label htmlFor="read-only-lock" className="grid gap-1">
+              <span>Read-only lock while presenting</span>
+              <span className="text-xs font-normal text-muted-foreground">
+                Blocks every change; reading and typing into one terminal still work.
+              </span>
+            </Label>
+            <HelpTip topic="readOnlyLock" />
+          </div>
           <Switch id="read-only-lock" checked={view.readOnly} onCheckedChange={(on) => requestReadOnlyLock(on)} />
         </div>
         <div className="flex items-start justify-between gap-4">

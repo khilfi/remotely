@@ -7,8 +7,9 @@
 
 import { useSyncExternalStore, type ReactNode } from "react";
 import { LightbulbIcon, XIcon } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { dismissTip, subscribeTips, tipsSnapshot } from "@/lib/tips";
+import { dismissTip, resetTips, subscribeTips, tipsSnapshot } from "@/lib/tips";
 import { cn } from "@/lib/utils";
 
 export interface TipProps {
@@ -16,6 +17,27 @@ export interface TipProps {
   /** One sentence. */
   children: ReactNode;
   className?: string;
+}
+
+/** Settings › General: shows every dismissed tip again. Off while none was dismissed. */
+export function ShowTipsAgainButton() {
+  const dismissed = useSyncExternalStore(subscribeTips, tipsSnapshot);
+  const none = dismissed.size === 0;
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      disabled={none}
+      title={none ? "No tip was dismissed" : undefined}
+      onClick={() => {
+        resetTips();
+        toast.success("Tips will show again");
+      }}
+    >
+      <LightbulbIcon data-icon="inline-start" />
+      Show tips again
+    </Button>
+  );
 }
 
 export function Tip({ id, children, className }: TipProps) {

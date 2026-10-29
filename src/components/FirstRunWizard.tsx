@@ -22,6 +22,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ImportDialog } from "@/components/ImportDialog";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type SessionFolder, type Settings, type VaultInfo } from "@/lib/api";
 import {
   FIRST_RUN_STEPS,
@@ -276,10 +277,9 @@ function HypervisorsStep({
 }) {
   return (
     <div className="grid grid-cols-1 gap-6">
-      <p className="text-sm text-muted-foreground">
-        Remotely runs every VM action through VMware Workstation&apos;s vmrun.exe and VirtualBox&apos;s VBoxManage.exe.
-        It looks for them the way Settings does: a path saved there, then the registry and the default install folders.
-        Either one is enough; without VirtualBox the list just has no VirtualBox VMs.
+      <p className="flex items-center gap-1 text-sm text-muted-foreground">
+        Either hypervisor is enough. Remotely looks for both by itself.
+        <HelpTip topic="toolPaths" />
       </p>
       <PathField
         id="first-run-vmrun"

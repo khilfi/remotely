@@ -49,6 +49,7 @@ import {
 } from "@/components/ui/command";
 import { Command as CommandRoot } from "@/components/ui/command";
 import { StateBadge, TierBadge } from "@/components/Badges";
+import { glossaryEntry, isTermKey, type TermKey } from "@/lib/glossary";
 import { toolsName } from "@/lib/hypervisors";
 import type { AppLink } from "@/lib/links";
 import { groupRanked, rankItems, type SearchItem } from "@/lib/search";
@@ -102,7 +103,12 @@ interface Props {
   onOpenLink: (link: AppLink) => void;
 }
 
-type View = { kind: "root" } | { kind: "vm"; vmxPath: string } | { kind: "session"; id: string };
+type View =
+  | { kind: "root" }
+  | { kind: "vm"; vmxPath: string }
+  | { kind: "session"; id: string }
+  /** UX-05: a glossary term's definition. */
+  | { kind: "term"; key: TermKey };
 
 interface VmAction {
   id: string;
@@ -298,6 +304,8 @@ export function CommandPalette({
       else onOpenLink(target.open);
     } else if ("drill" in target) {
       goTo(target.drill === "vm" ? { kind: "vm", vmxPath: target.id } : { kind: "session", id: target.id });
+    } else if ("define" in target) {
+      if (isTermKey(target.define)) goTo({ kind: "term", key: target.define });
     } else if (target.action.startsWith("bulk:")) {
       const command = bulk.find((b) => `bulk:${b.id}` === target.action)?.command;
       if (command) void run(command);
@@ -339,7 +347,9 @@ export function CommandPalette({
       ? `Actions for ${vm?.displayName ?? "the VM"}…`
       : view.kind === "session"
         ? `Actions for ${session?.name ?? "the session"}…`
-        : "Search VMs, sessions, containers, templates, commands, settings…";
+        : view.kind === "term"
+          ? "Backspace to go back"
+          : "Search VMs, sessions, containers, templates, commands, settings and terms…";
 
   return (
     <CommandDialog
@@ -552,6 +562,15 @@ export function CommandPalette({
                   <EyeIcon /> Watch its guest metrics (Linux, over SSH)
                 </CommandItem>
               )}
+            </CommandGroup>
+          )}
+
+          {view.kind === "term" && (
+            <CommandGroup heading="Term">
+              <div className="grid gap-1 px-2 py-1.5 text-sm" role="note">
+                <span className="font-medium">{glossaryEntry(view.key).term}</span>
+                <span className="text-muted-foreground">{glossaryEntry(view.key).definition}</span>
+              </div>
             </CommandGroup>
           )}
 

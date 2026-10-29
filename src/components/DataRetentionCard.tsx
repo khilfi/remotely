@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type PurgeReport, type Retention, type RetentionInfo } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { purgeSummary, RETENTION_CHOICES } from "@/lib/retention";
@@ -53,11 +54,12 @@ export function DataRetentionCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Job outputs</CardTitle>
+        <CardTitle className="flex items-center gap-1">
+          Job outputs
+          <HelpTip topic="retention" />
+        </CardTitle>
         <CardDescription>
-          Every job keeps what its hosts printed and the script or line it ran, so Activity and Compare hosts can show
-          them. That is your customers&apos; data, on this PC. After the time below, Remotely removes them; the jobs,
-          their results and the audit log stay. Passwords and tokens typed into a command are never kept.
+          What your hosts printed is your customers&apos; data: Remotely removes it after this time.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-3">

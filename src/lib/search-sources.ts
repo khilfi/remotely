@@ -3,6 +3,7 @@
 
 import type { Favourite, Image, LaunchTemplate, LibraryEntry, SessionRecord, Size, VmRecord } from "./api.ts";
 import type { CachedContainers } from "./container-cache.ts";
+import type { GlossaryEntry } from "./glossary.ts";
 import type { SearchField, SearchItem } from "./search.ts";
 import type { ScheduleView } from "./schedules-api.ts";
 import type { SettingsSection } from "./settings-index.ts";
@@ -202,6 +203,18 @@ export function settingItems(sections: readonly SettingsSection[]): SearchItem[]
     detail: "Settings",
     fields: [...field(s.title, "name"), ...s.keywords.split(/\s+/).flatMap((w) => field(w, "tag"))],
     target: { open: { kind: "setting" as const, section: s.id } },
+  }));
+}
+
+/** UX-05: the glossary's terms, by the term, its other names and its definition; choosing one shows the definition. */
+export function glossaryItems(terms: readonly { key: string; entry: GlossaryEntry }[]): SearchItem[] {
+  return terms.map(({ key, entry }) => ({
+    id: `term:${key}`,
+    provider: "glossary",
+    title: entry.term,
+    detail: entry.definition,
+    fields: [...field(entry.term, "name"), ...tags(entry.aliases ?? []), ...field(entry.definition, "detail")],
+    target: { define: key },
   }));
 }
 

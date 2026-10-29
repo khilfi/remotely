@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { ShieldAlertIcon, ShieldCheckIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type VaultInfo } from "@/lib/api";
 import { useReadOnlyReason } from "./Presentation";
 
@@ -29,9 +30,9 @@ export function WindowsLoginNotice({ vault, onVaultChanged, showWhenOff = false 
       <Alert>
         <ShieldCheckIcon />
         <AlertTitle>Only the vault password unlocks the vault</AlertTitle>
-        <AlertDescription>
-          The Windows login can&apos;t unlock it, so a copy of Remotely&apos;s database is useless without the vault
-          password. You can turn Windows unlock on from the Vault page.
+        <AlertDescription className="flex items-center gap-1">
+          A copy of Remotely&apos;s database is useless without the vault password.
+          <HelpTip topic="windowsUnlock" />
         </AlertDescription>
       </Alert>
     );
@@ -53,10 +54,9 @@ export function WindowsLoginNotice({ vault, onVaultChanged, showWhenOff = false 
     <Alert className="border-amber-500/50">
       <ShieldAlertIcon className="text-amber-600 dark:text-amber-400" />
       <AlertTitle>Your Windows login unlocks this vault</AlertTitle>
-      <AlertDescription>
-        Convenient, but any program running under your Windows account can then open the vault without the vault
-        password, even from a copy of Remotely&apos;s database. On a shared PC or one you don&apos;t manage, turn it
-        off: the vault password will unlock it instead.
+      <AlertDescription className="flex items-center gap-1">
+        On a shared PC or one you don&apos;t manage, turn it off.
+        <HelpTip topic="windowsUnlock" />
       </AlertDescription>
       <AlertAction>
         <Button size="sm" variant="outline" disabled={busy || Boolean(readOnly)} onClick={() => void turnOff()}>

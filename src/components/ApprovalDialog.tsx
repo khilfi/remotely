@@ -438,11 +438,11 @@ export function ApprovalDialog({
                 onCheckedChange={(checked) => setSafetySnapshot(checked === true)}
               />
               <div className="grid gap-1">
-                <Label htmlFor="approval-snapshot">Take a safety snapshot of each VM first</Label>
-                <p className="text-xs text-muted-foreground">
-                  Every VM gets one with the same name, starting &ldquo;Remotely safety&rdquo;, so a single revert
-                  undoes this job. A VM whose safety snapshot fails is left untouched.
-                </p>
+                <span className="flex items-center gap-1">
+                  <Label htmlFor="approval-snapshot">Take a safety snapshot of each VM first</Label>
+                  <HelpTip topic="safetySnapshot" />
+                </span>
+                <p className="text-xs text-muted-foreground">One revert then undoes this job.</p>
               </div>
             </div>
           )}

@@ -44,6 +44,7 @@ import {
   type OutputGroup,
   type SubmitOutcome,
 } from "@/lib/api";
+import { HelpTip } from "@/components/HelpTip";
 import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { diffReason } from "@/lib/disabled-reasons";
@@ -326,9 +327,9 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
       </div>
 
       {job.bodiesRemoved && (
-        <p className="text-sm text-muted-foreground" role="note">
-          This run is older than the retention period set in Settings, General, so its script and the hosts&apos; output
-          were removed. Its results and groups are kept.
+        <p className="flex items-center gap-1 text-sm text-muted-foreground" role="note">
+          Outputs removed: this run is older than the retention period. Its results and groups are kept.
+          <HelpTip topic="retention" />
         </p>
       )}
 

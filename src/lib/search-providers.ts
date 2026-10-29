@@ -5,6 +5,7 @@
 // schedules, stacks); its items come from a pure builder in search-sources.ts, tested there. Pages and the palette's own actions are searched too, from the palette's props.
 
 import {
+  BookOpenIcon,
   BoxIcon,
   CalendarClockIcon,
   ContainerIcon,
@@ -21,8 +22,10 @@ import { api, type LibraryEntry, type SessionRecord, type VmRecord } from "@/lib
 import { cachedContainers } from "@/lib/container-cache";
 import { cachedHostNetworks } from "@/lib/host-networks-cache";
 import type { SearchItem } from "@/lib/search";
+import { glossaryTerms } from "@/lib/glossary";
 import {
   containerItems,
+  glossaryItems,
   hostNetworkItems,
   imageItems,
   scheduleItems,
@@ -99,6 +102,8 @@ export const SEARCH_PROVIDERS: readonly SearchProvider[] = [
     },
   },
   { id: "settings", heading: "Settings", icon: SettingsIcon, load: async () => settingItems(SETTINGS_SECTIONS) },
+  // UX-05: last, so a term shows after the things it names on a tie.
+  { id: "glossary", heading: "Terms", icon: BookOpenIcon, load: async () => glossaryItems(glossaryTerms()) },
 ];
 
 /** Every provider's items; one that fails gives none (the others still show). */

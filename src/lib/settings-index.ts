@@ -25,7 +25,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Presentation mode",
     keywords: "present mask screen share read-only lock hide terminal output",
   },
-  { id: "first-run", tab: "general", title: "Setup guide", keywords: "first run wizard welcome start getting started" },
+  {
+    id: "first-run",
+    tab: "general",
+    title: "Setup guide and tips",
+    keywords: "first run wizard welcome start getting started tips show again hints",
+  },
   {
     id: "vmware",
     tab: "general",
@@ -52,7 +57,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Power actions",
     keywords: "power on limit at once shutdown wait seconds bulk start",
   },
-  { id: "compare", tab: "general", title: "Compare hosts", keywords: "hosts at once parallel bulk run" },
+  { id: "compare", tab: "general", title: "Compare hosts", keywords: "compare output hosts at once parallel bulk run" },
   {
     id: "vault",
     tab: "general",

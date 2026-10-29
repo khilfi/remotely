@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage } from "@/lib/api";
 import { convertApi } from "@/lib/convert-api";
 
@@ -54,12 +55,12 @@ export function QemuImgCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Conversion tools</CardTitle>
+        <CardTitle className="flex items-center gap-1">
+          Conversion tools
+          <HelpTip topic="qemuImg" />
+        </CardTitle>
         <CardDescription>
-          Image tools, Import and Export convert with Workstation&apos;s and VirtualBox&apos;s own tools, and with
-          qemu-img for qcow2 and VHDX when QEMU for Windows is installed. Remotely never ships qemu-img (it is
-          GPL-licensed). Leave the path empty to find it: the REMOTELY_QEMU_IMG variable, then QEMU&apos;s default
-          folder.
+          qemu-img converts qcow2 and VHDX. Leave the path empty to find it automatically.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-2">

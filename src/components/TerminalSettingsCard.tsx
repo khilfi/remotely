@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type NotifyWhen, type ReachabilityMode, type TerminalSettings } from "@/lib/api";
 
 const REACHABILITY: { value: ReachabilityMode; label: string }[] = [
@@ -152,10 +153,9 @@ export function TerminalSettingsCard() {
               Follow the shell&apos;s folder in bash and zsh (prompt hook)
             </Label>
           </div>
-          <p className="pl-12 text-xs text-muted-foreground">
-            Types a one-line hook at the first shell prompt that sets PROMPT_COMMAND (or a zsh precmd hook) and runs id
-            -un, so Files here follows cd. Each one is in the audit log. Off for Prod sessions unless a session turns it
-            on; off here, Files here starts in the home folder.
+          <p className="flex items-center gap-1 pl-12 text-xs text-muted-foreground">
+            Off for Prod sessions unless a session turns it on.
+            <HelpTip topic="promptHook" />
           </p>
         </div>
         <div className="grid gap-4 border-t pt-4 sm:grid-cols-2">

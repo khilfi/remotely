@@ -430,10 +430,13 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
               disabled={!vault.windowsLoginAvailable}
             />
             <div className="grid gap-1">
-              <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
+              <span className="flex items-center gap-1">
+                <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
+                <HelpTip topic="windowsUnlock" />
+              </span>
               <p className="text-sm text-muted-foreground">
                 {vault.windowsLoginAvailable
-                  ? "Off by default. One click would then unlock the vault while you are signed in to Windows (DPAPI), but so could any program running under your Windows account, even from a copy of Remotely's database, without the vault password. Turn it on only on a PC that is yours alone."
+                  ? "Off by default. Turn it on only on a PC that's yours alone."
                   : "Not available on this PC; the vault password unlocks it."}
               </p>
             </div>
@@ -604,10 +607,13 @@ function PasswordCard({
             disabled={!vault.windowsLoginAvailable && !vault.windowsLogin}
           />
           <div className="grid gap-1">
-            <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
+            <span className="flex items-center gap-1">
+              <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
+              <HelpTip topic="windowsUnlock" />
+            </span>
             <p className="text-sm text-muted-foreground">
               {vault.windowsLoginAvailable
-                ? "One click unlocks the vault while you are signed in to this Windows account, and any program running under it could too, without the vault password. Turning it on asks for the vault password; turning it off doesn't."
+                ? "Any program running under your Windows account could unlock it too. Turning it on asks for the vault password."
                 : "Not available on this PC."}
             </p>
           </div>

@@ -42,6 +42,7 @@ import {
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
+import { HelpTip } from "@/components/HelpTip";
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { withVaultPassword } from "@/lib/reauth-prompt";
 import { forwardsProblem, jumpChain, routeText, toInput } from "@/lib/tunnels";
@@ -624,10 +625,9 @@ export function SessionDialog({
                   <SelectItem value="off">Off</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">
-                In bash and zsh, Remotely types a one-line hook at the first prompt so Files here follows the
-                shell&apos;s folder. It sets PROMPT_COMMAND (or a zsh precmd hook) and runs id -un, and is logged in the
-                audit log. Off, Files here starts in the home folder.
+              <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                Lets Files here follow the shell&apos;s folder in bash and zsh.
+                <HelpTip topic="promptHook" />
               </p>
             </div>
 
@@ -670,6 +670,7 @@ export function SessionDialog({
                 {effectiveEnvironment === "prod"
                   ? "Prod raises the approval tier of every action on this session by one."
                   : "Shown on the session's tab. Prod raises the approval tier of actions on it."}
+                <HelpTip topic="prodTier" />
               </p>
             </div>
 
