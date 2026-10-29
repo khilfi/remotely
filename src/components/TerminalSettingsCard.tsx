@@ -245,8 +245,8 @@ export function TerminalSettingsCard() {
           </div>
           <p className="text-xs text-muted-foreground">
             Away means the tab isn&apos;t on screen (another tab or page) or Remotely isn&apos;t the window in front. A
-            line sent with MultiExec notifies once, when all its terminals are done. The bell in the terminal toolbar
-            turns notifications off for one tab.
+            line sent with Type in all tabs notifies once, when all its terminals are done. The bell in the terminal
+            toolbar turns notifications off for one tab.
           </p>
         </div>
         {message && (

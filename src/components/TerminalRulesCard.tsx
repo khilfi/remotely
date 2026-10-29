@@ -65,7 +65,7 @@ function scopeText(scope: RuleScope, sessions: Map<string, SessionRecord>): stri
     case "global":
       return "Every terminal";
     case "environment":
-      return ENVIRONMENTS.find((e) => e.value === scope.environment)?.label ?? "Sessions with a label";
+      return ENVIRONMENTS.find((e) => e.value === scope.environment)?.label ?? "Sessions in an environment";
     case "session":
       return `Session ${sessions.get(scope.sessionId)?.name ?? "(deleted)"}`;
   }

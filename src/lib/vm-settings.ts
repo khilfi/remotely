@@ -176,7 +176,7 @@ export function resizeTargets(vms: VmRecord[]): { targets: VmRecord[]; left: { n
 export function bulkResizeReason(vms: VmRecord[], readOnly: string | null): string | null {
   if (readOnly) return readOnly;
   if (vms.length === 0) return "Select VMs first";
-  return resizeTargets(vms).targets.length === 0 ? "None of the selected VMs is off and unprotected" : null;
+  return resizeTargets(vms).targets.length === 0 ? "None of the selected VMs is off and not Protected" : null;
 }
 
 /** "4 GB", "1.5 GB", "512 MB" (binary, as the hypervisors count). */

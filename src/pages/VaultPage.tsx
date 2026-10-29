@@ -49,6 +49,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SECRET_KIND_LABEL } from "@/components/Badges";
 import { PageHeader } from "@/components/PageHeader";
 import { KnownHostsPage } from "@/pages/KnownHostsPage";
+import { HelpTip } from "@/components/HelpTip";
 import type { VaultTab } from "@/lib/navigation";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
@@ -534,10 +535,12 @@ function PasswordCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Vault password</CardTitle>
+        <CardTitle className="flex items-center gap-1">
+          Vault password
+          <HelpTip topic="vaultReauth" />
+        </CardTitle>
         <CardDescription>
-          Critical actions ask for it again (AP-06), however the vault was unlocked. Changing it needs the current one,
-          so nobody can replace it from an unlocked Windows session.
+          Changing it needs the current one, so nobody can replace it from an unlocked PC.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">

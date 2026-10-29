@@ -144,7 +144,7 @@ test("a bulk resize goes to the VMs that are off and unprotected", () => {
   );
   assert.equal(bulkResizeReason(vms, null), null);
   assert.equal(bulkResizeReason([], null), "Select VMs first");
-  assert.equal(bulkResizeReason([vms[1]], null), "None of the selected VMs is off and unprotected");
+  assert.equal(bulkResizeReason([vms[1]], null), "None of the selected VMs is off and not Protected");
   assert.equal(bulkResizeReason(vms, READ_ONLY_REASON), READ_ONLY_REASON);
 });
 

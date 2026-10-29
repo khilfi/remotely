@@ -46,6 +46,7 @@ import {
   type TargetImpact,
   type VaultInfo,
 } from "@/lib/api";
+import { HelpTip } from "@/components/HelpTip";
 import { containerTargetKey, formatBytes } from "@/lib/containers";
 import { rolloutText } from "@/lib/rollout";
 import { isLoopback } from "@/lib/tunnels";
@@ -304,7 +305,7 @@ export function ApprovalDialog({
                       <TableHead>Now</TableHead>
                     </>
                   )}
-                  <TableHead className="w-20">Label</TableHead>
+                  <TableHead className="w-24">Environment</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -526,10 +527,11 @@ export function ApprovalDialog({
                 onKeyDown={enterApproves}
                 autoFocus={firstField === "password"}
               />
-              <p className="text-xs text-muted-foreground">
+              <p className="flex items-center gap-1 text-xs text-muted-foreground">
                 {request.tier === "critical"
-                  ? "Critical actions ask for it again (AP-06), even when your Windows login unlocked the vault."
+                  ? "Critical actions ask for it again, even when your Windows login unlocked the vault."
                   : "Asked because a vault password would go to hosts that don't get it yet (see above). Once approved, they may use it."}
+                <HelpTip topic="vaultReauth" />
               </p>
             </div>
           )}
@@ -624,7 +626,7 @@ function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exe
     <div className="grid gap-2">
       {exec.multiExec && (
         <p className="text-sm text-muted-foreground">
-          MultiExec: this line is typed into {plural(targets, "terminal")} and waits there. Approving presses{" "}
+          Type in all tabs: this line is typed into {plural(targets, "terminal")} and waits there. Approving presses{" "}
           {exec.runKey ?? "Enter"} in each; cancelling sends Ctrl+C, which clears it.
         </p>
       )}

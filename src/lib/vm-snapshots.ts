@@ -11,7 +11,7 @@ import { slashIsPath } from "./hypervisors.ts";
 export type VmView = "details" | "settings" | "system" | "snapshots" | "log" | "timeline" | "schedules";
 
 /** AP-04: what a protected VM's actions say. */
-export const PROTECTED_REASON = "Protected: actions skip this VM until it is unprotected";
+export const PROTECTED_REASON = "Protected: actions skip this VM";
 
 const BUSY_REASON = "Sending the last action…";
 

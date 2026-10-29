@@ -564,9 +564,9 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         <Section id="compare" lit={lit}>
           <Card>
             <CardHeader>
-              <CardTitle>Compare output</CardTitle>
+              <CardTitle>Compare hosts</CardTitle>
               <CardDescription>
-                Compare output (and a key push) runs a command on this many hosts at a time; the rest wait their turn.
+                Compare hosts (and a key push) runs a command on this many hosts at a time; the rest wait their turn.
                 More at once finishes sooner but opens more SSH connections from this PC.
               </CardDescription>
             </CardHeader>

@@ -137,7 +137,7 @@ function vmActions(vm: VmRecord): VmAction[] {
   }
   actions.push({
     id: "protect",
-    label: vm.protected ? "Unprotect (allow actions again)" : "Protect (do not touch)",
+    label: vm.protected ? "Remove Protected (allow actions again)" : "Mark as Protected",
     icon: vm.protected ? ShieldOffIcon : ShieldIcon,
     command: { type: "vmProtect", targets: [{ kind: "vm", vmxPath: vm.vmxPath }], protected: !vm.protected },
   });
@@ -403,9 +403,7 @@ export function CommandPalette({
                 }
               >
                 {vm.protected && (
-                  <p className="px-2 py-1.5 text-xs text-muted-foreground">
-                    Protected: actions skip it until it is unprotected.
-                  </p>
+                  <p className="px-2 py-1.5 text-xs text-muted-foreground">Protected: bulk actions leave it alone.</p>
                 )}
                 {shownActions.map(actionItem)}
               </CommandGroup>

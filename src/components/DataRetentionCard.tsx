@@ -55,9 +55,9 @@ export function DataRetentionCard() {
       <CardHeader>
         <CardTitle>Job outputs</CardTitle>
         <CardDescription>
-          Every job keeps what its hosts printed and the script or MultiExec line it ran, so Activity and Compare can
-          show them. That is your customers&apos; data, on this PC. After the time below, Remotely removes them; the
-          jobs, their results and the audit log stay. Passwords and tokens typed into a command are never kept.
+          Every job keeps what its hosts printed and the script or line it ran, so Activity and Compare hosts can show
+          them. That is your customers&apos; data, on this PC. After the time below, Remotely removes them; the jobs,
+          their results and the audit log stay. Passwords and tokens typed into a command are never kept.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-3">

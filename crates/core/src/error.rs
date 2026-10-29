@@ -73,7 +73,7 @@ pub enum CoreError {
     #[error("the command has no targets")]
     NoTargets,
 
-    #[error("every target is protected (AP-04); unlock one first")]
+    #[error("every target is Protected; remove Protected from one first")]
     AllTargetsProtected,
 
     #[error("unknown target: {0}")]

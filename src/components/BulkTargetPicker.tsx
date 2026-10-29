@@ -307,7 +307,6 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
           </AlertTitle>
           <AlertDescription>
             Commands reach a VM over SSH, through a session linked to it: edit a session and choose the VM it reaches.
-            Running commands through VMware Tools without SSH comes in a later version (VM-09).
           </AlertDescription>
           <AlertAction>
             <Button size="sm" variant="outline" onClick={onOpenSessions}>

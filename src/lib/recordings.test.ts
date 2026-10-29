@@ -73,7 +73,7 @@ test("the caps say so only when one was hit", () => {
   assert.equal(capsNote(0, limits), null);
   assert.equal(
     capsNote(1, limits),
-    "This MultiExec session keeps its last 200 lines (32 MB of output at most): 1 older line was dropped.",
+    "Typing in all tabs keeps its last 200 lines (32 MB of output at most): 1 older line was dropped.",
   );
   assert.match(capsNote(5, limits) ?? "", /5 older lines were dropped/);
 });
@@ -90,17 +90,17 @@ test("QL-07: long commands, or any command, only while away", () => {
 
 test("QL-07: one notification for a MultiExec line, naming the line and its terminals", () => {
   assert.deepEqual(lineNotification("uptime", 3, 42, "prompt", 0), {
-    title: "MultiExec `uptime` finished in 3 terminals",
+    title: "Typed in all tabs: `uptime` finished in 3 terminals",
     body: "It ran 42 s; the prompt is back in all 3.",
   });
   assert.equal(lineNotification("df -h", 2, 5, "prompt", 0).body, "It ran 5 s; the prompt is back in both.");
   const quiet = lineNotification("apt upgrade", 1, 125, "quiet", 1);
-  assert.equal(quiet.title, "MultiExec `apt upgrade` finished in 1 terminal");
+  assert.equal(quiet.title, "Typed in all tabs: `apt upgrade` finished in 1 terminal");
   assert.match(quiet.body, /2 min; in some terminals the output stopped/);
   assert.match(quiet.body, /1 terminal stopped recording/);
   assert.equal(
     lineNotification("cd /srv\nmake", 2, 1, "prompt", 0).title,
-    "MultiExec `cd /srv …` finished in 2 terminals",
+    "Typed in all tabs: `cd /srv …` finished in 2 terminals",
   );
   assert.match(lineNotification("x".repeat(100), 2, 1, "prompt", 0).title, /x{59}…`/);
 });

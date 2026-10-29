@@ -276,8 +276,8 @@ export function FolderDefaultsDialog({ folder, folders, sessions, onSaved, onClo
               </ToggleGroup>
               <p className="text-xs text-muted-foreground">
                 {label === "prod"
-                  ? "Prod raises the approval tier of actions on every session here that has no label of its own."
-                  : "Sessions with a label of their own keep it."}
+                  ? "Prod raises the approval tier of actions on every session here without an environment of its own."
+                  : "Sessions with an environment of their own keep it."}
               </p>
             </div>
 
@@ -313,8 +313,8 @@ export function FolderDefaultsDialog({ folder, folders, sessions, onSaved, onClo
       </Dialog>
       {lowerProd && (
         <ConfirmDialog
-          title="Remove the Prod label from this folder?"
-          description={`Sessions here without a label of their own will no longer be Prod, so actions on them need fewer approval steps. The change is logged.`}
+          title="Change this folder's environment from Prod?"
+          description={`Sessions here without an environment of their own will no longer be Prod, so actions on them need fewer approval steps. The change is logged.`}
           confirmLabel="Save"
           onConfirm={persist}
           onClose={() => setLowerProd(false)}

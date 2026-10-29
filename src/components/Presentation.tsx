@@ -261,8 +261,8 @@ export function PresentationCard() {
           <Label htmlFor="read-only-lock" className="grid gap-1">
             <span>Read-only lock while presenting</span>
             <span className="text-xs font-normal text-muted-foreground">
-              Blocks power actions, snapshots, commands, MultiExec, uploads, tunnels, key pushes, imports, edits of
-              sessions and settings, and updates. Reading, downloads and typing into one terminal still work.
+              Blocks power actions, snapshots, commands, Type in all tabs, uploads, tunnels, key pushes, imports, edits
+              of sessions and settings, and updates. Reading, downloads and typing into one terminal still work.
             </span>
           </Label>
           <Switch id="read-only-lock" checked={view.readOnly} onCheckedChange={(on) => requestReadOnlyLock(on)} />

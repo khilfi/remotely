@@ -102,7 +102,7 @@ export function applicable(action: ContainerAction, picked: ContainerSummary[]):
 }
 
 /** AP-04 for a container host: a session that reaches a protected VM. */
-export const PROTECTED_HOST_REASON = "Protected: actions skip this host until its VM is unprotected";
+export const PROTECTED_HOST_REASON = "Protected: actions skip this host while its VM is Protected";
 
 /** QL-08: why an action on the selection is off, or null when it can go. */
 export function actionReason(

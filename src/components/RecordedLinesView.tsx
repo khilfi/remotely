@@ -147,11 +147,11 @@ export function RecordedLinesView({ active, multiExecOn }: Props) {
           <EmptyMedia variant="icon">
             <RadioTowerIcon />
           </EmptyMedia>
-          <EmptyTitle>{multiExecOn ? "No line recorded yet" : "MultiExec is off"}</EmptyTitle>
+          <EmptyTitle>{multiExecOn ? "No line recorded yet" : "Type in all tabs is off"}</EmptyTitle>
           <EmptyDescription>
             {multiExecOn
               ? "Type a command in one of the picked terminals. Each terminal's output is recorded until its prompt comes back, and shows here grouped by output."
-              : "Turn MultiExec on and type in a terminal: every line goes to the picked terminals and is recorded here, so you can compare the outputs without typing the command again."}
+              : "Turn on Type in all tabs and type in a terminal: every line goes to the picked terminals and is recorded here, so you can compare the outputs without typing the command again."}
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -199,10 +199,10 @@ export function RecordedLinesView({ active, multiExecOn }: Props) {
           </Alert>
         )}
         <p className="text-xs break-words text-muted-foreground">
-          Lines typed with MultiExec on are recorded in each terminal, from Enter until its prompt comes back (or its
-          output stops for the quiet spell in Settings, or {shortDuration(recordings.limits.lineSecs * 1000)} pass).
-          Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed. Recordings
-          are kept in memory until MultiExec is turned off.
+          Lines typed while Type in all tabs is on are recorded in each terminal, from Enter until its prompt comes back
+          (or its output stops for the quiet spell in Settings, or {shortDuration(recordings.limits.lineSecs * 1000)}{" "}
+          pass). Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed.
+          Recordings are kept in memory until Type in all tabs is turned off.
         </p>
       </div>
       <div className="min-w-0">

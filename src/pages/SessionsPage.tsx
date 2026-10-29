@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { HelpTip } from "@/components/HelpTip";
 import { jumpChain, routeText } from "@/lib/tunnels";
 import {
   EllipsisIcon,
@@ -457,11 +458,11 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                 <EmptyMedia variant="icon">
                   <ListTreeIcon />
                 </EmptyMedia>
-                <EmptyTitle>No sessions yet</EmptyTitle>
-                <EmptyDescription>
-                  Save the SSH hosts you work with: host, user, how to log in, a jump host and a startup command. Sort
-                  them into folders, tag them and label Prod hosts so actions on them need more approval.
-                </EmptyDescription>
+                <EmptyTitle className="flex items-center gap-1">
+                  No sessions yet
+                  <HelpTip topic="page.sessions" />
+                </EmptyTitle>
+                <EmptyDescription>Save the SSH hosts you work with, then connect with one click.</EmptyDescription>
               </EmptyHeader>
               <EmptyContent className="flex-row justify-center">
                 <Button onClick={() => setDialog({ kind: "editSession" })}>
@@ -496,7 +497,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                     <TableHead>Login</TableHead>
                     <TableHead>Via</TableHead>
                     <TableHead>VM</TableHead>
-                    <TableHead className="w-20">Label</TableHead>
+                    <TableHead className="w-24">Environment</TableHead>
                     <TableHead className="w-20">
                       <span className="sr-only">Actions</span>
                     </TableHead>

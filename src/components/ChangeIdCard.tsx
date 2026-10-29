@@ -49,8 +49,8 @@ export function ChangeIdCard() {
           <Label htmlFor="change-id-required" className="grid gap-1">
             <span>Require a change ID for Prod targets</span>
             <span className="font-normal text-muted-foreground">
-              A High or Critical action on a VM or host labelled Prod can&apos;t be approved without one. A schedule
-              approved without one asks again.
+              A High or Critical action on a Prod VM or host can&apos;t be approved without one. A schedule approved
+              without one asks again.
             </span>
           </Label>
           <WhyDisabled reason={readOnly}>

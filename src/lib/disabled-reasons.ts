@@ -33,7 +33,7 @@ export function compareRunReason(input: {
       ? "The picked tabs are quick connections: save them as sessions first"
       : "None of the picks is a saved session it can run on";
   }
-  if (input.hosts.every((h) => h.protected)) return "All selected targets are protected";
+  if (input.hosts.every((h) => h.protected)) return "Every picked tab is Protected";
   if (!input.script.trim()) return "Type a command first";
   if (!input.timeoutOk) return "The time limit must be a whole number of seconds, 1 to 86400 (or empty)";
   if (input.stopAfterOk === false) return "Stop after must be a whole number of failures, 1 to 1000 (or empty)";
@@ -45,17 +45,17 @@ export function compareRunReason(input: {
 export function multiExecReason(input: { tabs: number; on: boolean; readOnly?: boolean }): string | null {
   if (input.on) return null;
   if (input.readOnly) return READ_ONLY_REASON;
-  if (input.tabs === 0) return "Open a terminal first: MultiExec types into open tabs";
+  if (input.tabs === 0) return "Open a terminal first: Type in all tabs needs open tabs";
   return null;
 }
 
-/** SS-10: when MultiExec is on, what the bar says when no picked terminal gets the keys. */
+/** SS-10: when MultiExec (Type in all tabs) is on, what the bar says when no picked terminal gets the keys. */
 export function multiExecIdleReason(targets: { receives: boolean; reason: string | null }[]): string | null {
-  if (targets.length === 0) return "No tab is picked: Ctrl+click tabs, or pick them by folder or label";
+  if (targets.length === 0) return "No tab is picked: Ctrl+click tabs, or pick them by folder or environment";
   if (targets.every((t) => !t.receives)) {
     const reasons = [...new Set(targets.map((t) => t.reason).filter(Boolean))];
     return reasons.length === 1 && reasons[0]?.startsWith("protected")
-      ? "All selected targets are protected"
+      ? "Every picked tab is Protected"
       : `No picked tab receives keys now: ${reasons.join("; ")}`;
   }
   return null;

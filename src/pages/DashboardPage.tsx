@@ -150,7 +150,7 @@ const ENVIRONMENTS: { value: Environment | "all"; label: string }[] = [
   { value: "prod", label: "Prod" },
   { value: "staging", label: "Staging" },
   { value: "lab", label: "Lab" },
-  { value: "none", label: "No label" },
+  { value: "none", label: "None" },
 ];
 
 function sum(a: number | null, b: number | null) {
@@ -449,7 +449,7 @@ function OverviewWidget({
           </ToggleGroupItem>
         </ToggleGroup>
         <Select value={env} onValueChange={(v) => setEnv(v as Environment | "all")}>
-          <SelectTrigger size="sm" className="w-32" aria-label="Environment label">
+          <SelectTrigger size="sm" className="w-32" aria-label="Environment">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

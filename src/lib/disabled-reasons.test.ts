@@ -39,7 +39,7 @@ test("Compare runs only once there is something to run on and something to run",
   );
   assert.equal(
     compareRunReason({ ...ready, hosts: [{ protected: true }, { protected: true }] }),
-    "All selected targets are protected",
+    "Every picked tab is Protected",
   );
   assert.equal(compareRunReason({ ...ready, script: "   " }), "Type a command first");
   assert.match(compareRunReason({ ...ready, timeoutOk: false }) ?? "", /^The time limit must be/);
@@ -49,16 +49,16 @@ test("Compare runs only once there is something to run on and something to run",
 });
 
 test("MultiExec needs an open terminal, and says when no picked one gets the keys", () => {
-  assert.equal(multiExecReason({ tabs: 0, on: false }), "Open a terminal first: MultiExec types into open tabs");
+  assert.equal(multiExecReason({ tabs: 0, on: false }), "Open a terminal first: Type in all tabs needs open tabs");
   assert.equal(multiExecReason({ tabs: 1, on: false }), null);
   assert.equal(multiExecReason({ tabs: 0, on: true }), null, "it can always be turned off");
-  assert.equal(multiExecIdleReason([]), "No tab is picked: Ctrl+click tabs, or pick them by folder or label");
+  assert.equal(multiExecIdleReason([]), "No tab is picked: Ctrl+click tabs, or pick them by folder or environment");
   assert.equal(
     multiExecIdleReason([
-      { receives: false, reason: "protected: MultiExec leaves it out (AP-04)" },
-      { receives: false, reason: "protected: MultiExec leaves it out (AP-04)" },
+      { receives: false, reason: "protected: Type in all tabs leaves it out" },
+      { receives: false, reason: "protected: Type in all tabs leaves it out" },
     ]),
-    "All selected targets are protected",
+    "Every picked tab is Protected",
   );
   assert.equal(
     multiExecIdleReason([

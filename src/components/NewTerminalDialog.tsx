@@ -46,7 +46,7 @@ const NONE = "none";
 type Method = SessionAuth["method"];
 
 const LABELS: { value: Environment; label: string }[] = [
-  { value: "none", label: "No label" },
+  { value: "none", label: "None" },
   { value: "lab", label: "Lab" },
   { value: "staging", label: "Staging" },
   { value: "prod", label: "Prod" },
@@ -389,7 +389,7 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
                     </Select>
                   </div>
                   <div className="grid gap-2">
-                    <Label htmlFor="qc-label">Label</Label>
+                    <Label htmlFor="qc-label">Environment</Label>
                     <Select value={label} onValueChange={(v) => setLabel(v as Environment)}>
                       <SelectTrigger id="qc-label" className="w-full">
                         <SelectValue />

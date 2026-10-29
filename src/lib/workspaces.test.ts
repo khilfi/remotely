@@ -44,7 +44,7 @@ test("FD-02: a switch is refused while jobs started here run, and says what it c
   assert.match(switchRefusal({ ...nothing, openJobs: 3 }) ?? "", /^3 jobs .* cancel them in Activity/);
   assert.deepEqual(switchCloses({ openJobs: 0, terminals: 2, multiexec: true, approvals: 1 }), [
     "2 terminals close, with their tunnels, logs and transfers.",
-    "MultiExec stops.",
+    "Type in all tabs stops.",
     "1 approval waiting for an answer: cancelled.",
   ]);
 });
@@ -57,8 +57,8 @@ test("FD-02: only unprotected, non-Prod VMs leave a workspace, and only when ano
   });
   assert.equal(releaseReason([vm("web")], 2), null);
   assert.match(releaseReason([vm("web")], 1) ?? "", /one workspace/);
-  assert.match(releaseReason([vm("web"), vm("db", true)], 2) ?? "", /'db' is protected/);
-  assert.match(releaseReason([vm("db", false, "prod")], 3) ?? "", /labelled Prod/);
+  assert.match(releaseReason([vm("web"), vm("db", true)], 2) ?? "", /'db' is Protected/);
+  assert.match(releaseReason([vm("db", false, "prod")], 3) ?? "", /is Prod: change its environment/);
   assert.match(releaseReason([], 2) ?? "", /Select/);
   assert.equal(claimReason(2, null), null);
   assert.equal(claimReason(2, "Presenting: read-only"), "Presenting: read-only");

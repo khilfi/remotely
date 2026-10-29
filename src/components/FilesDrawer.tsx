@@ -297,7 +297,7 @@ export function FilesDrawer({
           {note && <p className="text-xs text-muted-foreground">{note}</p>}
           {multiExecTerminals > 1 && (
             <p className="rounded-md bg-muted/60 px-2 py-1 text-xs">
-              MultiExec is on: uploads and downloads go through this terminal only, not all{" "}
+              Type in all tabs is on: uploads and downloads go through this terminal only, not all{" "}
               {plural(multiExecTerminals, "terminal")}.
             </p>
           )}

@@ -298,7 +298,7 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
         />
       ),
     },
-    { label: "Label", value: <EnvBadge env={vm.environment} /> },
+    { label: "Environment", value: <EnvBadge env={vm.environment} /> },
     {
       label: "Protected",
       value: vm.protected ? (
@@ -399,7 +399,7 @@ function SnapshotsTab({
       {vm.protected && (
         <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
           <ShieldIcon className="mt-0.5 size-3.5 shrink-0 text-tier-high" aria-hidden />
-          Protected (do not touch): snapshot actions skip this VM until it is unprotected.
+          Protected: snapshot actions skip this VM.
         </p>
       )}
 

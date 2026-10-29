@@ -97,7 +97,7 @@ function labelName(env: Environment) {
 /** What the confirm says before a Prod session loses the label. */
 function lowerProdText(name: string, environment: Environment) {
   const change =
-    environment === "none" ? "will lose the Prod label" : `will be labelled ${labelName(environment)} instead of Prod`;
+    environment === "none" ? "will no longer be Prod" : `will be ${labelName(environment)} instead of Prod`;
   return `'${name}' ${change}. Actions on it will no longer move up one approval tier, so they need fewer approval steps. The change is logged.`;
 }
 
@@ -662,7 +662,7 @@ export function SessionDialog({
               {inherited?.inherited.environment && (
                 <p className="text-xs text-muted-foreground">
                   {environment === "none"
-                    ? `Labelled ${labelName(inherited.environment)} by folder '${inherited.inherited.environment.name}'.`
+                    ? `${labelName(inherited.environment)}, from folder '${inherited.inherited.environment.name}'.`
                     : `Overrides ${labelName(inherited.environment)} from folder '${inherited.inherited.environment.name}'.`}
                 </p>
               )}
@@ -778,9 +778,9 @@ export function SessionDialog({
       )}
       {lowerProd && session && (
         <ConfirmDialog
-          title="Remove the Prod label?"
+          title="Change the environment from Prod?"
           description={lowerProdText(session.name, environment)}
-          confirmLabel={environment === "none" ? "Remove label" : `Label ${labelName(environment)}`}
+          confirmLabel={`Set to ${environment === "none" ? "None" : labelName(environment)}`}
           onConfirm={persist}
           onClose={() => setLowerProd(false)}
         />

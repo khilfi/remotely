@@ -252,13 +252,13 @@ export function ComparePanel({
   return (
     <div className="flex h-full min-h-0 flex-col rounded-lg border bg-background">
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
-        <h2 className="text-sm font-semibold">Compare output</h2>
+        <h2 className="text-sm font-semibold">Compare hosts</h2>
         <Tabs value={view} onValueChange={(v) => onViewChange(v as CompareView)}>
           <TabsList>
             <TabsTrigger value="run">One-shot run</TabsTrigger>
             <TabsTrigger value="multiExec">
               <RadioTowerIcon />
-              MultiExec
+              Type in all tabs
               {recorded > 0 && (
                 <Badge variant="secondary" className="ml-0.5 h-4 min-w-4 px-1 text-[10px] tabular-nums">
                   {recorded}
@@ -290,11 +290,11 @@ export function ComparePanel({
         ) : (
           <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
             {multiExecOn
-              ? "What MultiExec sends is recorded in each terminal until its prompt comes back."
-              : "MultiExec is off: turning it on starts a new recording."}
+              ? "What Type in all tabs sends is recorded in each terminal until its prompt comes back."
+              : "Type in all tabs is off: turning it on starts a new recording."}
           </span>
         )}
-        <Button variant="ghost" size="icon-sm" aria-label="Close Compare output" onClick={onClose}>
+        <Button variant="ghost" size="icon-sm" aria-label="Close Compare hosts" onClick={onClose}>
           <XIcon />
         </Button>
       </div>
@@ -339,7 +339,7 @@ export function ComparePanel({
                   />
                   <p className="text-xs break-words text-muted-foreground">
                     Each host runs it once in its own login shell (not in the terminals), and the results are grouped by
-                    output. Lines typed with MultiExec are compared in the MultiExec view.
+                    output. Lines typed in all tabs are compared in the Type in all tabs view.
                   </p>
                 </div>
 

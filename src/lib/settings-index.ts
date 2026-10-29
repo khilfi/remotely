@@ -52,7 +52,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Power actions",
     keywords: "power on limit at once shutdown wait seconds bulk start",
   },
-  { id: "compare", tab: "general", title: "Compare output", keywords: "hosts at once parallel bulk run" },
+  { id: "compare", tab: "general", title: "Compare hosts", keywords: "hosts at once parallel bulk run" },
   {
     id: "vault",
     tab: "general",

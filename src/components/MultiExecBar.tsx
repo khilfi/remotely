@@ -40,7 +40,7 @@ export interface MultiExecNote {
   text: string;
 }
 
-const LABELS: Record<Environment, string> = { none: "No label", lab: "Lab", staging: "Staging", prod: "Prod" };
+const LABELS: Record<Environment, string> = { none: "None", lab: "Lab", staging: "Staging", prod: "Prod" };
 
 interface Props {
   tabs: PickableTab[];
@@ -69,11 +69,11 @@ export function MultiExecBar({ tabs, picked, status, note, folders, tile, onTile
     <div
       className="grid gap-1 rounded-md border border-primary/40 bg-primary/5 px-3 py-1.5 text-sm"
       role="status"
-      aria-label="MultiExec"
+      aria-label="Type in all tabs"
     >
       <div className="flex flex-wrap items-center gap-2">
         <RadioTowerIcon className="size-4 text-primary" aria-hidden />
-        <span className="font-medium">MultiExec on:</span>
+        <span className="font-medium">Typing in all tabs:</span>
         <span>
           typing goes to {pickedText(picked, tabs.length)}
           {status && receiving !== status.targets.length && ` (${receiving} of ${status.targets.length} terminals now)`}
@@ -114,8 +114,8 @@ export function MultiExecBar({ tabs, picked, status, note, folders, tile, onTile
             <DropdownMenuSub>
               <DropdownMenuSubTrigger disabled={labels.length === 0}>
                 <span>
-                  By label
-                  <ReasonLine reason={labels.length === 0 ? "No open tab has a Lab, Staging or Prod label" : null} />
+                  By environment
+                  <ReasonLine reason={labels.length === 0 ? "No open tab is Lab, Staging or Prod" : null} />
                 </span>
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
@@ -160,7 +160,7 @@ export function MultiExecBar({ tabs, picked, status, note, folders, tile, onTile
           <TooltipTrigger asChild>
             <Button size="xs" variant="outline" onClick={onCompare}>
               <GitCompareArrowsIcon data-icon="inline-start" />
-              Compare output…
+              Compare hosts…
             </Button>
           </TooltipTrigger>
           <TooltipContent className="max-w-80">
