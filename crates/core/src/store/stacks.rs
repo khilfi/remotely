@@ -1,6 +1,9 @@
 //! VM-08 stack, instance and member rows (migration 0028). Checks and the audit log live in `crate::stacks`.
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::iter::Peekable;
+use std::str::Chars;
 
 use sqlx::Row;
 use uuid::Uuid;
@@ -57,7 +60,7 @@ pub(crate) struct StackMemberRow {
     pub added_at: String,
 }
 
-/// An instance as stored, with its VMs in step order.
+/// An instance as stored, with its VMs in step order, by name within a step (`sort_members`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InstanceRow {
     pub id: Uuid,
@@ -220,6 +223,9 @@ impl Store {
                 out[*i].members.push(member);
             }
         }
+        for instance in &mut out {
+            sort_members(&mut instance.members);
+        }
         Ok(out)
     }
 
@@ -247,6 +253,7 @@ impl Store {
         .fetch_all(&self.pool)
         .await?;
         instance.members = members.iter().map(row_to_member).collect::<Result<_>>()?;
+        sort_members(&mut instance.members);
         Ok(Some(instance))
     }
 
@@ -339,6 +346,53 @@ impl Store {
     }
 }
 
+/// An instance's VMs by step; within a step the deployed ones before those added by hand, each by name ("web-2"
+/// before "web-10"). A step's VMs are made in parallel, so the order they were added in changes from run to run;
+/// their names don't.
+fn sort_members(members: &mut [StackMemberRow]) {
+    let by_hand = |m: &StackMemberRow| m.origin == MemberOrigin::Hand;
+    members.sort_by(|a, b| {
+        a.step
+            .cmp(&b.step)
+            .then_with(|| by_hand(a).cmp(&by_hand(b)))
+            .then_with(|| natural_cmp(&a.vm_name, &b.vm_name))
+    });
+}
+
+/// Names compared as people read them: runs of digits by their value, letters without case, then the exact text
+/// so two names never tie unless they are the same.
+fn natural_cmp(a: &str, b: &str) -> Ordering {
+    let (mut x, mut y) = (a.chars().peekable(), b.chars().peekable());
+    loop {
+        let (p, q) = match (x.peek().copied(), y.peek().copied()) {
+            (None, None) => return a.cmp(b),
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(p), Some(q)) => (p, q),
+        };
+        let order = if p.is_ascii_digit() && q.is_ascii_digit() {
+            let (m, n) = (digits(&mut x), digits(&mut y));
+            let (m, n) = (m.trim_start_matches('0'), n.trim_start_matches('0'));
+            m.len().cmp(&n.len()).then_with(|| m.cmp(n))
+        } else {
+            x.next();
+            y.next();
+            p.to_lowercase().cmp(q.to_lowercase())
+        };
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+}
+
+fn digits(chars: &mut Peekable<Chars<'_>>) -> String {
+    let mut run = String::new();
+    while let Some(c) = chars.next_if(char::is_ascii_digit) {
+        run.push(c);
+    }
+    run
+}
+
 fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow> {
     let id: String = row.try_get("id")?;
     let stack: String = row.try_get("stack_id")?;
@@ -354,4 +408,60 @@ fn row_to_instance(row: &sqlx::sqlite::SqliteRow) -> Result<InstanceRow> {
         created_at: row.try_get("created_at")?,
         members: Vec::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn member(name: &str, step: u32, origin: MemberOrigin, added_at: &str) -> StackMemberRow {
+        StackMemberRow {
+            instance_id: Uuid::nil(),
+            vm_key: format!("C:\\vms\\{name}\\{name}.vmx"),
+            vm_name: name.to_owned(),
+            step,
+            origin,
+            added_at: added_at.to_owned(),
+        }
+    }
+
+    #[test]
+    fn names_compare_as_people_read_them() {
+        let mut names = ["web-10", "web-2", "web-1", "db-1", "web-02", "Web-2", "web", "web-a"];
+        names.sort_by(|a, b| natural_cmp(a, b));
+        // Digits by value, letters without case; names alike that way fall back to their exact text.
+        assert_eq!(
+            names,
+            ["db-1", "web", "web-1", "Web-2", "web-02", "web-2", "web-10", "web-a"]
+        );
+        assert_eq!(natural_cmp("web-2", "web-2"), Ordering::Equal);
+    }
+
+    #[test]
+    fn a_steps_vms_sort_by_name_whatever_order_they_were_added_in() {
+        // VM-08: a step's VMs are made in parallel, so web-2 may be added before web-1. A VM added by hand comes
+        // after the step's deployed ones, whatever its name.
+        use MemberOrigin::{Deploy, Hand};
+        let mut members = vec![
+            member("web-10", 1, Deploy, "2026-10-30T07:00:03Z"),
+            member("tools01", 1, Hand, "2026-10-30T07:05:00Z"),
+            member("web-2", 1, Deploy, "2026-10-30T07:00:01Z"),
+            member("db-1", 0, Deploy, "2026-10-30T07:00:00Z"),
+            member("app-1", 1, Hand, "2026-10-30T07:06:00Z"),
+            member("web-1", 1, Deploy, "2026-10-30T07:00:02Z"),
+        ];
+        sort_members(&mut members);
+        let order: Vec<(&str, u32)> = members.iter().map(|m| (m.vm_name.as_str(), m.step)).collect();
+        assert_eq!(
+            order,
+            [
+                ("db-1", 0),
+                ("web-1", 1),
+                ("web-2", 1),
+                ("web-10", 1),
+                ("app-1", 1),
+                ("tools01", 1)
+            ]
+        );
+    }
 }
