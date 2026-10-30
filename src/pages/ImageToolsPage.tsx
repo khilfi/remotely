@@ -19,7 +19,7 @@ import {
   ShieldCheckIcon,
   XCircleIcon,
 } from "lucide-react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
@@ -138,9 +138,12 @@ function ToolsCard({ tools, onOpenSettings }: { tools: ToolsReport | null; onOpe
       </div>
       {note && (
         <Alert>
-          <AlertTitle>qemu-img isn&apos;t installed</AlertTitle>
           <AlertDescription className="grid gap-2">
-            <span>{note}</span>
+            <span className="flex items-center gap-1">
+              {/* UX-04: the first sentence here; the rest is the "?" (help.ts qemuImg). */}
+              {note.includes(". ") ? note.slice(0, note.indexOf(". ") + 1) : note}
+              <HelpTip topic="qemuImg" />
+            </span>
             <span className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" onClick={() => void convertApi.openQemuSite(tools.downloadPage)}>
                 <ExternalLinkIcon data-icon="inline-start" />
@@ -265,18 +268,10 @@ export function ImageToolsPage({ active, onSubmitted, onImport, onOpenSettings }
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-3">
-        <p className="flex max-w-3xl flex-1 items-center gap-1 text-sm text-muted-foreground">
-          Inspect, convert and verify other hypervisors&apos; disk files; a source is never changed.
-          <HelpTip topic="page.diskImages" />
-        </p>
-        <WhyDisabled reason={readOnly}>
-          <Button variant="outline" disabled={readOnly !== null} onClick={() => onImport()}>
-            <ImportIcon data-icon="inline-start" />
-            Import as a VM…
-          </Button>
-        </WhyDisabled>
-      </div>
+      <p className="flex items-center gap-1 text-sm text-muted-foreground">
+        Inspect, convert and verify other hypervisors&apos; disk files; a source is never changed.
+        <HelpTip topic="page.diskImages" />
+      </p>
       <ToolsCard tools={tools} onOpenSettings={onOpenSettings} />
       {error && (
         <p className="text-sm text-destructive" role="alert">
@@ -415,8 +410,7 @@ export function ImageToolsPage({ active, onSubmitted, onImport, onOpenSettings }
 
         <TabsContent value="verify" className="flex max-w-3xl flex-col gap-3">
           <p className="text-sm text-muted-foreground">
-            One image&apos;s checksums, or two compared: a conversion&apos;s source and the new image, or a copy and its
-            original. With qemu-img, the disks&apos; contents are compared too.
+            One image&apos;s checksums, or two compared (with qemu-img, their contents too).
           </p>
           <div className="grid gap-2">
             {[

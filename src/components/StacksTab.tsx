@@ -1,19 +1,17 @@
 // VM-08: the Templates page's Stacks tab. Stacks (launch templates in boot order, with the waits between steps) with
-// Deploy, Edit, Duplicate and Delete; and the instances on this PC with Start (boot order), Shut down and Suspend
-// (the last step first), Tear down (Critical: the VMs its deploy made, and hand-added ones only when picked), Add a
-// VM, and Forget. Edits are audited in the core; every change to a VM goes through the bus and its approval.
+// Deploy, Edit, Duplicate and Delete; and the instances on this PC with Tear down (Critical: the VMs its deploy made,
+// and hand-added ones only when picked), Add a VM, and Forget. UX-03: an instance's Start (boot order), Shut down and
+// Suspend (the last step first) are on the VMs page, on its group's row; New stack is the page header's primary. Edits
+// are audited in the core; every change to a VM goes through the bus and its approval.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
   CopyIcon,
   LayersIcon,
-  MoreHorizontalIcon,
-  PauseIcon,
+  MonitorIcon,
   PencilIcon,
-  PlayIcon,
   PlusIcon,
-  PowerIcon,
   RocketIcon,
   Trash2Icon,
   UnlinkIcon,
@@ -29,35 +27,25 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { RowMenu } from "@/components/RowMenu";
 import { StackDeployDialog } from "@/components/StackDeployDialog";
 import { StackDialog } from "@/components/StackDialog";
+import { Term } from "@/components/Term";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { EmptyState } from "@/components/EmptyState";
 import { api, errorMessage, type LaunchTemplate, type SubmitOutcome, type VmRecord } from "@/lib/api";
 import { copyName } from "@/lib/catalog";
 import { plural } from "@/lib/format";
-import {
-  betweenText,
-  deployStackReason,
-  handAdded,
-  instancePowerReason,
-  instanceStateText,
-  stepsText,
-  teardownReason,
-} from "@/lib/stacks";
+import { requestLink } from "@/lib/links";
+import { betweenText, deployStackReason, handAdded, instanceStateText, stepsText, teardownReason } from "@/lib/stacks";
 import { stacksApi, type Stack, type StackInput, type StackInstance } from "@/lib/stacks-api";
+import { newStackReason } from "@/lib/templates-page";
 
 interface Props {
   /** True while the tab is shown: it reads again when the user comes back. */
@@ -68,8 +56,11 @@ interface Props {
   onSubmitted: (outcome: SubmitOutcome) => void;
   /** Changes when a VM job finished, so the instances' states are read again. */
   refreshKey?: number;
-  /** The palette asked for a new stack. */
+  /** The palette or the page header asked for a new stack. */
   createRequest?: number;
+  /** UX-07: with no launch template, the empty state's way to make the first one (or the image it needs). */
+  onNewTemplate?: () => void;
+  newTemplateLabel?: string;
 }
 
 type Dialog =
@@ -80,7 +71,16 @@ type Dialog =
   | { kind: "addVm"; instance: StackInstance }
   | { kind: "forget"; instance: StackInstance };
 
-export function StacksTab({ active, templates, readOnly, onSubmitted, refreshKey = 0, createRequest = 0 }: Props) {
+export function StacksTab({
+  active,
+  templates,
+  readOnly,
+  onSubmitted,
+  refreshKey = 0,
+  createRequest = 0,
+  onNewTemplate,
+  newTemplateLabel = "New launch template",
+}: Props) {
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [instances, setInstances] = useState<StackInstance[]>([]);
   const [dialog, setDialog] = useState<Dialog | null>(null);
@@ -105,43 +105,41 @@ export function StacksTab({ active, templates, readOnly, onSubmitted, refreshKey
     if (!readOnly && templates.length) setDialog({ kind: "edit" });
   }
 
-  async function power(instance: StackInstance, op: "start" | "stop" | "suspend") {
-    try {
-      const outcome = await stacksApi.power(
-        instance.id,
-        op === "start" ? { kind: "start" } : op === "suspend" ? { kind: "suspend" } : { kind: "stop", mode: "soft" },
-      );
-      onSubmitted(outcome);
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
-  }
-
   async function teardown(instance: StackInstance, also: string[]) {
     onSubmitted(await stacksApi.teardown(instance.id, also));
   }
 
-  const editReason = readOnly ?? (templates.length === 0 ? "Add a launch template first" : null);
+  const editReason = newStackReason(readOnly, templates.length);
 
   return (
     <div className="grid gap-6">
       <section className="grid gap-3" aria-label="Stacks">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm text-muted-foreground">
-            Launch templates in boot order, deployed as one job and torn down as one.
-          </p>
-          <WhyDisabled reason={editReason}>
-            <Button disabled={editReason !== null} onClick={() => setDialog({ kind: "edit" })}>
-              <PlusIcon data-icon="inline-start" />
-              New stack
-            </Button>
-          </WhyDisabled>
-        </div>
         {stacks.length === 0 ? (
           <EmptyState
             icon={LayersIcon}
             title="No stacks yet"
-            description="A stack deploys several launch templates in boot order, as one."
+            description={
+              <>
+                A <Term id="stack">stack</Term> deploys several launch templates in boot order, as one.
+              </>
+            }
+            action={
+              templates.length === 0 && onNewTemplate ? (
+                <WhyDisabled reason={readOnly}>
+                  <Button disabled={readOnly !== null} onClick={onNewTemplate}>
+                    <PlusIcon data-icon="inline-start" />
+                    {newTemplateLabel}
+                  </Button>
+                </WhyDisabled>
+              ) : (
+                <WhyDisabled reason={editReason}>
+                  <Button disabled={editReason !== null} onClick={() => setDialog({ kind: "edit" })}>
+                    <PlusIcon data-icon="inline-start" />
+                    New stack
+                  </Button>
+                </WhyDisabled>
+              )
+            }
           />
         ) : (
           <div className="overflow-auto rounded-lg border">
@@ -202,50 +200,38 @@ export function StacksTab({ active, templates, readOnly, onSubmitted, refreshKey
                               Deploy
                             </Button>
                           </WhyDisabled>
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button size="icon" variant="ghost" aria-label={`More for ${stack.name}`}>
-                                <MoreHorizontalIcon />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              <DropdownMenuItem
-                                disabled={readOnly !== null}
-                                onSelect={() => setDialog({ kind: "edit", existing: stack })}
-                              >
-                                <PencilIcon />
-                                Edit…
-                              </DropdownMenuItem>
-                              <DropdownMenuItem
-                                disabled={readOnly !== null}
-                                onSelect={() =>
-                                  setDialog({
-                                    kind: "edit",
-                                    initial: {
-                                      name: copyName(
-                                        stack.name,
-                                        stacks.map((s) => s.name),
-                                      ),
-                                      description: stack.description,
-                                      steps: stack.steps,
-                                    },
-                                  })
-                                }
-                              >
-                                <CopyIcon />
-                                Duplicate…
-                              </DropdownMenuItem>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem
-                                variant="destructive"
-                                disabled={readOnly !== null}
-                                onSelect={() => setDialog({ kind: "delete", stack })}
-                              >
-                                <Trash2Icon />
-                                Delete…
-                              </DropdownMenuItem>
-                            </DropdownMenuContent>
-                          </DropdownMenu>
+                          <RowMenu label={stack.name} disabled={readOnly !== null}>
+                            <DropdownMenuItem onSelect={() => setDialog({ kind: "edit", existing: stack })}>
+                              <PencilIcon />
+                              Edit…
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onSelect={() =>
+                                setDialog({
+                                  kind: "edit",
+                                  initial: {
+                                    name: copyName(
+                                      stack.name,
+                                      stacks.map((s) => s.name),
+                                    ),
+                                    description: stack.description,
+                                    steps: stack.steps,
+                                  },
+                                })
+                              }
+                            >
+                              <CopyIcon />
+                              Duplicate…
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              variant="destructive"
+                              onSelect={() => setDialog({ kind: "delete", stack })}
+                            >
+                              <Trash2Icon />
+                              Delete…
+                            </DropdownMenuItem>
+                          </RowMenu>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -257,37 +243,43 @@ export function StacksTab({ active, templates, readOnly, onSubmitted, refreshKey
         )}
       </section>
 
-      <section className="grid gap-3" aria-label="Stack instances">
-        <h2 className="text-sm font-medium">Instances on this PC</h2>
-        {instances.length === 0 ? (
-          <p className="text-sm text-muted-foreground">None: deploy a stack to make one.</p>
-        ) : (
-          <div className="overflow-auto rounded-lg border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Instance</TableHead>
-                  <TableHead>VMs</TableHead>
-                  <TableHead className="w-60" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {instances.map((instance) => (
-                  <InstanceRow
-                    key={instance.id}
-                    instance={instance}
-                    readOnly={readOnly}
-                    onPower={(op) => void power(instance, op)}
-                    onTeardown={() => setDialog({ kind: "teardown", instance })}
-                    onAddVm={() => setDialog({ kind: "addVm", instance })}
-                    onForget={() => setDialog({ kind: "forget", instance })}
-                  />
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
-      </section>
+      {/* UX-03: an instance's power is on the VMs page, on its group's row; its membership and teardown are here. */}
+      {(stacks.length > 0 || instances.length > 0) && (
+        <section className="grid gap-3" aria-label="Stack instances">
+          <h2 className="flex items-center gap-1 text-sm font-medium">
+            <Term id="instance">Instances</Term> on this PC
+          </h2>
+          {instances.length === 0 ? (
+            <p className="text-sm text-muted-foreground">None yet: deploy a stack to make one.</p>
+          ) : (
+            <div className="overflow-auto rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Instance</TableHead>
+                    <TableHead>VMs</TableHead>
+                    <TableHead className="w-12">
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {instances.map((instance) => (
+                    <InstanceRow
+                      key={instance.id}
+                      instance={instance}
+                      readOnly={readOnly}
+                      onTeardown={() => setDialog({ kind: "teardown", instance })}
+                      onAddVm={() => setDialog({ kind: "addVm", instance })}
+                      onForget={() => setDialog({ kind: "forget", instance })}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+        </section>
+      )}
 
       {dialog?.kind === "edit" && (
         <StackDialog
@@ -351,21 +343,16 @@ export function StacksTab({ active, templates, readOnly, onSubmitted, refreshKey
 function InstanceRow({
   instance,
   readOnly,
-  onPower,
   onTeardown,
   onAddVm,
   onForget,
 }: {
   instance: StackInstance;
   readOnly: string | null;
-  onPower: (op: "start" | "stop" | "suspend") => void;
   onTeardown: () => void;
   onAddVm: () => void;
   onForget: () => void;
 }) {
-  const start = instancePowerReason(instance, "start", readOnly);
-  const stop = instancePowerReason(instance, "stop", readOnly);
-  const suspend = instancePowerReason(instance, "suspend", readOnly);
   const tear = teardownReason(instance, readOnly);
   return (
     <TableRow>
@@ -380,46 +367,28 @@ function InstanceRow({
         </div>
       </TableCell>
       <TableCell className="text-right">
-        <div className="flex justify-end gap-1">
-          <WhyDisabled reason={start}>
-            <Button size="sm" variant="outline" disabled={start !== null} onClick={() => onPower("start")}>
-              <PlayIcon data-icon="inline-start" />
-              Start
-            </Button>
+        <RowMenu label={instance.name}>
+          {/* Its power is on the VMs page, on the group's row with its VMs. */}
+          <DropdownMenuItem onSelect={() => requestLink({ kind: "page", page: "vms" })}>
+            <MonitorIcon />
+            Start or stop on the VMs page
+          </DropdownMenuItem>
+          <DropdownMenuItem disabled={readOnly !== null} onSelect={onAddVm}>
+            <PlusIcon />
+            Add a VM…
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem disabled={readOnly !== null} onSelect={onForget}>
+            <UnlinkIcon />
+            Forget the instance…
+          </DropdownMenuItem>
+          <WhyDisabled reason={tear} className="flex w-full">
+            <DropdownMenuItem className="w-full" variant="destructive" disabled={tear !== null} onSelect={onTeardown}>
+              <Trash2Icon />
+              Tear down…
+            </DropdownMenuItem>
           </WhyDisabled>
-          <WhyDisabled reason={stop}>
-            <Button size="sm" variant="outline" disabled={stop !== null} onClick={() => onPower("stop")}>
-              <PowerIcon data-icon="inline-start" />
-              Shut down
-            </Button>
-          </WhyDisabled>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="icon" variant="ghost" aria-label={`More for ${instance.name}`}>
-                <MoreHorizontalIcon />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuItem disabled={suspend !== null} onSelect={() => onPower("suspend")}>
-                <PauseIcon />
-                Suspend
-              </DropdownMenuItem>
-              <DropdownMenuItem disabled={readOnly !== null} onSelect={onAddVm}>
-                <PlusIcon />
-                Add a VM…
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled={readOnly !== null} onSelect={onForget}>
-                <UnlinkIcon />
-                Forget the instance…
-              </DropdownMenuItem>
-              <DropdownMenuItem variant="destructive" disabled={tear !== null} onSelect={onTeardown}>
-                <Trash2Icon />
-                {tear ? `Tear down (${tear})` : "Tear down…"}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        </RowMenu>
       </TableCell>
     </TableRow>
   );

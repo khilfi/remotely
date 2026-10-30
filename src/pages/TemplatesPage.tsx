@@ -1,13 +1,17 @@
-// VM-19 to VM-21: the spec catalogue, like a cloud provider's. Sizes (twelve built-ins, read only, with Duplicate; the
-// owner's own beside them), images (golden VMs' snapshots, cloud images, ISOs, OVA/OVF appliances, each file checked
-// and hashed when added, with links to the official cloud image pages) and launch templates (an image and a size with
-// everything a deploy needs, each saying why it can't deploy when it can't). VM-21: Deploy on a template's row opens
-// the Deploy dialog on it.
+// VM-19 to VM-21: the spec catalogue, like a cloud provider's. Images (golden VMs' snapshots, cloud images, ISOs,
+// OVA/OVF appliances, each file checked and hashed when added, with links to the official cloud image pages), sizes
+// (twelve built-ins, read only, with Duplicate; the owner's own beside them) and launch templates (an image and a size
+// with everything a deploy needs, each saying why it can't deploy when it can't). VM-21: Deploy on a template's row
+// opens the Deploy dialog on it.
+//
+// UX-07 (0.6.0): the tabs follow a first deploy's steps (Images, Sizes, Launch templates, Stacks, then Disk images),
+// the page opens on the first step that isn't done, each tab's one primary action is in the header, and every empty
+// tab offers the action that fills it.
 //
 // Edits are the app's own data: audited in the core with no approval tier, and refused by the read-only lock (FD-03).
 // P6: the page reads nothing while it is hidden.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 import {
   BoxesIcon,
@@ -34,6 +38,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { EnvBadge } from "@/components/Badges";
 import { EmptyState } from "@/components/EmptyState";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { HelpTip } from "@/components/HelpTip";
 import { ImageDialog } from "@/components/ImageDialog";
 import { PageHeader } from "@/components/PageHeader";
 import { RowMenu } from "@/components/RowMenu";
@@ -42,7 +47,7 @@ import { useReadOnlyReason } from "@/components/Presentation";
 import { SizeDialog } from "@/components/SizeDialog";
 import { StacksTab } from "@/components/StacksTab";
 import { TemplateDialog } from "@/components/TemplateDialog";
-import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import {
   api,
@@ -71,10 +76,18 @@ import {
 } from "@/lib/catalog";
 import { plural } from "@/lib/format";
 import { reveal } from "@/lib/reveal";
+import { newStackReason, newTemplateReason, openingTab, TEMPLATE_TABS, type TemplatesTab } from "@/lib/templates-page";
 import { cn } from "@/lib/utils";
 
-/** UX-08: "disks" is Disk images, the Image tools page until 0.6.0. */
-export type TemplatesTab = "sizes" | "images" | "templates" | "stacks" | "disks";
+export type { TemplatesTab } from "@/lib/templates-page";
+
+const TAB_ICON: Record<TemplatesTab, typeof DiscIcon> = {
+  images: DiscIcon,
+  sizes: HardDriveIcon,
+  templates: LayersIcon,
+  stacks: BoxesIcon,
+  disks: FileCogIcon,
+};
 
 interface Props {
   /** True while the page is shown: it reads the catalogue again when the user comes back. */
@@ -104,7 +117,8 @@ type Dialog =
 
 export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport, onOpenSettings, refreshKey }: Props) {
   const readOnly = useReadOnlyReason();
-  const [tab, setTab] = useState<TemplatesTab>("templates");
+  // The tab the user or a link picked; until then, the first step that isn't done (UX-07).
+  const [picked, setPicked] = useState<TemplatesTab | null>(null);
   const submittedHere = useCallback((outcome: SubmitOutcome) => onSubmitted?.(outcome), [onSubmitted]);
   const [stackCreate, setStackCreate] = useState(0);
   const [sizes, setSizes] = useState<Size[]>([]);
@@ -114,6 +128,8 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
   const [sites, setSites] = useState<ImageSite[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [dialog, setDialog] = useState<Dialog | null>(null);
+  const tab: TemplatesTab =
+    picked ?? (loaded ? openingTab({ images: images.length, templates: templates.length }) : "templates");
 
   const load = useCallback(() => {
     Promise.all([
@@ -152,7 +168,7 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
   }, [litShown, lit]);
   if (request && request.n !== handled) {
     setHandled(request.n);
-    setTab(request.tab);
+    setPicked(request.tab);
     setLit(request.id ?? null);
     if (request.create && !readOnly) {
       if (request.tab === "sizes") setDialog({ kind: "size" });
@@ -173,53 +189,197 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
     [templates],
   );
 
-  const newImageReason = readOnly;
-  const newTemplateReason = readOnly ?? (images.length === 0 ? "Add an image first: a template starts from one" : null);
+  const templateOff = newTemplateReason(readOnly, images.length);
+  const stackOff = newStackReason(readOnly, templates.length);
+
+  /** UX-07: a step's action from another tab's empty state: go there and start it. */
+  function addImage() {
+    setPicked("images");
+    setDialog({ kind: "image" });
+  }
+  function newTemplate() {
+    setPicked("templates");
+    setDialog({ kind: "template" });
+  }
+
+  const addImageButton = (
+    <WhyDisabled reason={readOnly}>
+      <Button disabled={readOnly !== null} onClick={addImage}>
+        <PlusIcon data-icon="inline-start" />
+        Add an image
+      </Button>
+    </WhyDisabled>
+  );
+  const newTemplateButton = (
+    <WhyDisabled reason={templateOff}>
+      <Button disabled={templateOff !== null} onClick={newTemplate}>
+        <PlusIcon data-icon="inline-start" />
+        New launch template
+      </Button>
+    </WhyDisabled>
+  );
+
+  // UX-01: each tab's one primary action, in the header. An empty tab offers it in its empty state instead.
+  const primary: Record<TemplatesTab, ReactNode> = {
+    images: loaded && images.length > 0 ? addImageButton : null,
+    sizes: (
+      <WhyDisabled reason={readOnly}>
+        <Button disabled={readOnly !== null} onClick={() => setDialog({ kind: "size" })}>
+          <PlusIcon data-icon="inline-start" />
+          New size
+        </Button>
+      </WhyDisabled>
+    ),
+    templates: loaded && templates.length > 0 ? newTemplateButton : null,
+    stacks: (
+      <WhyDisabled reason={stackOff}>
+        <Button disabled={stackOff !== null} onClick={() => setStackCreate((n) => n + 1)}>
+          <PlusIcon data-icon="inline-start" />
+          New stack
+        </Button>
+      </WhyDisabled>
+    ),
+    disks: null,
+  };
 
   return (
     <div className="flex flex-col gap-4">
-      <Tabs value={tab} onValueChange={(v) => setTab(v as TemplatesTab)} className="gap-4">
+      <Tabs value={tab} onValueChange={(v) => setPicked(v as TemplatesTab)} className="gap-4">
         <PageHeader
           page="templates"
+          primary={primary[tab] ?? undefined}
           tabs={
             <TabsList>
-              <TabsTrigger value="sizes">
-                <HardDriveIcon />
-                Sizes
-              </TabsTrigger>
-              <TabsTrigger value="images">
-                <DiscIcon />
-                Images
-              </TabsTrigger>
-              <TabsTrigger value="templates">
-                <LayersIcon />
-                Launch templates
-              </TabsTrigger>
-              <TabsTrigger value="stacks">
-                <BoxesIcon />
-                Stacks
-              </TabsTrigger>
-              {/* UX-08: Image tools, as a tab here. */}
-              <TabsTrigger value="disks">
-                <FileCogIcon />
-                Disk images
-              </TabsTrigger>
+              {TEMPLATE_TABS.map((t) => {
+                const Icon = TAB_ICON[t.id];
+                return (
+                  <TabsTrigger key={t.id} value={t.id}>
+                    <Icon />
+                    {t.label}
+                  </TabsTrigger>
+                );
+              })}
             </TabsList>
           }
         />
 
+        <TabsContent value="images" className="flex min-w-0 flex-col gap-3">
+          {loaded && images.length === 0 ? (
+            <EmptyState
+              icon={DiscIcon}
+              title="No images yet"
+              description="An image is where a new VM's OS comes from: a VM's snapshot, a cloud image, an ISO or an OVA."
+              action={addImageButton}
+            />
+          ) : (
+            <div className="rounded-lg border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Image</TableHead>
+                    <TableHead>Kind</TableHead>
+                    <TableHead>Where</TableHead>
+                    <TableHead>OS profile</TableHead>
+                    <TableHead>Deploys on</TableHead>
+                    <TableHead className="w-12">
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {images.map((i) => (
+                    <TableRow
+                      key={i.id}
+                      data-catalog-id={i.id}
+                      className={cn("align-top", lit === i.id && "bg-accent")}
+                    >
+                      <TableCell className="font-medium whitespace-normal">
+                        {i.name}
+                        {i.problem && <div className="text-xs font-normal text-destructive">{i.problem}</div>}
+                        {i.notes && (
+                          <div className="line-clamp-2 text-xs font-normal text-muted-foreground">{i.notes}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="whitespace-nowrap">
+                        {i.source.kind === "goldenVm" ? (
+                          <Term id="goldenVm">{IMAGE_KIND_LABEL[i.source.kind]}</Term>
+                        ) : (
+                          IMAGE_KIND_LABEL[i.source.kind]
+                        )}
+                        {imageFormatText(i) && (
+                          <div className="text-xs text-muted-foreground">{imageFormatText(i)}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="max-w-sm whitespace-normal">
+                        <div className="text-xs break-all">{imageWhere(i)}</div>
+                        {i.sha256 && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <code className="font-mono text-xs text-muted-foreground">
+                                SHA-256 {i.sha256.slice(0, 16)}…
+                              </code>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-md font-mono break-all">{i.sha256}</TooltipContent>
+                          </Tooltip>
+                        )}
+                        {i.sizeBytes !== null && (
+                          <span className="text-xs text-muted-foreground"> · {fileSize(i.sizeBytes)}</span>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground">{profileName(i.osProfile)}</TableCell>
+                      <TableCell className="whitespace-nowrap text-muted-foreground">
+                        {hypervisorsText(i.hypervisors)}
+                      </TableCell>
+                      <TableCell>
+                        <RowMenu label={i.name} disabled={readOnly !== null}>
+                          <DropdownMenuItem onSelect={() => setDialog({ kind: "image", existing: i })}>
+                            <PencilIcon />
+                            Edit…
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => setDialog({ kind: "deleteImage", image: i })}
+                          >
+                            <Trash2Icon />
+                            Delete…
+                          </DropdownMenuItem>
+                        </RowMenu>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          )}
+          <section className="grid gap-2 rounded-lg border p-4" aria-label="Get cloud images">
+            <h3 className="flex items-center gap-1 text-sm font-medium">
+              Get cloud images
+              <HelpTip topic="cloudImages" />
+            </h3>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {sites.map((site) => (
+                <Button
+                  key={site.id}
+                  variant="outline"
+                  className="h-auto justify-start py-2 text-left whitespace-normal"
+                  onClick={() => void api.catalogOpenSite(site.url).catch((err) => toast.error(errorMessage(err)))}
+                >
+                  <ExternalLinkIcon data-icon="inline-start" />
+                  <span className="grid gap-0.5">
+                    <span>{site.name}</span>
+                    <span className="text-xs font-normal text-muted-foreground">{site.hint}</span>
+                  </span>
+                </Button>
+              ))}
+            </div>
+          </section>
+        </TabsContent>
+
         <TabsContent value="sizes" className="flex min-w-0 flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <WhyDisabled reason={readOnly}>
-              <Button size="sm" disabled={readOnly !== null} onClick={() => setDialog({ kind: "size" })}>
-                <PlusIcon data-icon="inline-start" />
-                New size
-              </Button>
-            </WhyDisabled>
-            <span className="text-sm text-muted-foreground">
-              Built-in sizes are read only; Duplicate one to make an editable copy.
-            </span>
-          </div>
+          <p className="text-sm text-muted-foreground">
+            Built-in sizes are read only: Duplicate one to make a copy you can edit.
+          </p>
           <div className="rounded-lg border">
             <Table>
               <TableHeader>
@@ -261,9 +421,8 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                     </TableCell>
                     <TableCell className="text-muted-foreground">{s.description}</TableCell>
                     <TableCell>
-                      <RowMenu label={s.name}>
+                      <RowMenu label={s.name} disabled={readOnly !== null}>
                         <DropdownMenuItem
-                          disabled={readOnly !== null}
                           onSelect={() =>
                             setDialog({
                               kind: "size",
@@ -278,28 +437,21 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                           }
                         >
                           <CopyIcon />
-                          <span>
-                            Duplicate
-                            <ReasonLine reason={readOnly} />
-                          </span>
+                          Duplicate…
                         </DropdownMenuItem>
                         {!s.builtIn && (
                           <>
-                            <DropdownMenuItem
-                              disabled={readOnly !== null}
-                              onSelect={() => setDialog({ kind: "size", existing: s })}
-                            >
+                            <DropdownMenuItem onSelect={() => setDialog({ kind: "size", existing: s })}>
                               <PencilIcon />
-                              Edit
+                              Edit…
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               variant="destructive"
-                              disabled={readOnly !== null}
                               onSelect={() => setDialog({ kind: "deleteSize", size: s })}
                             >
                               <Trash2Icon />
-                              Delete
+                              Delete…
                             </DropdownMenuItem>
                           </>
                         )}
@@ -312,149 +464,24 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
           </div>
         </TabsContent>
 
-        <TabsContent value="images" className="flex min-w-0 flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <WhyDisabled reason={newImageReason}>
-              <Button size="sm" disabled={newImageReason !== null} onClick={() => setDialog({ kind: "image" })}>
-                <PlusIcon data-icon="inline-start" />
-                Add an image
-              </Button>
-            </WhyDisabled>
-          </div>
-          {loaded && images.length === 0 ? (
-            <EmptyState
-              icon={DiscIcon}
-              title="No images yet"
-              description="Add a cloud image or ISO you downloaded, an OVA, or a snapshot of one of your VMs."
-            />
-          ) : (
-            <div className="rounded-lg border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Image</TableHead>
-                    <TableHead>Kind</TableHead>
-                    <TableHead>Where</TableHead>
-                    <TableHead>OS profile</TableHead>
-                    <TableHead>Deploys on</TableHead>
-                    <TableHead className="w-12">
-                      <span className="sr-only">Actions</span>
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {images.map((i) => (
-                    <TableRow
-                      key={i.id}
-                      data-catalog-id={i.id}
-                      className={cn("align-top", lit === i.id && "bg-accent")}
-                    >
-                      <TableCell className="font-medium whitespace-normal">
-                        {i.name}
-                        {i.problem && <div className="text-xs font-normal text-destructive">{i.problem}</div>}
-                        {i.notes && (
-                          <div className="line-clamp-2 text-xs font-normal text-muted-foreground">{i.notes}</div>
-                        )}
-                      </TableCell>
-                      <TableCell className="whitespace-nowrap">
-                        {IMAGE_KIND_LABEL[i.source.kind]}
-                        {imageFormatText(i) && (
-                          <div className="text-xs text-muted-foreground">{imageFormatText(i)}</div>
-                        )}
-                      </TableCell>
-                      <TableCell className="max-w-sm whitespace-normal">
-                        <div className="text-xs break-all">{imageWhere(i)}</div>
-                        {i.sha256 && (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <code className="font-mono text-xs text-muted-foreground">
-                                SHA-256 {i.sha256.slice(0, 16)}…
-                              </code>
-                            </TooltipTrigger>
-                            <TooltipContent className="max-w-md font-mono break-all">{i.sha256}</TooltipContent>
-                          </Tooltip>
-                        )}
-                        {i.sizeBytes !== null && (
-                          <span className="text-xs text-muted-foreground"> · {fileSize(i.sizeBytes)}</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-muted-foreground">{profileName(i.osProfile)}</TableCell>
-                      <TableCell className="whitespace-nowrap text-muted-foreground">
-                        {hypervisorsText(i.hypervisors)}
-                      </TableCell>
-                      <TableCell>
-                        <RowMenu label={i.name}>
-                          <DropdownMenuItem
-                            disabled={readOnly !== null}
-                            onSelect={() => setDialog({ kind: "image", existing: i })}
-                          >
-                            <PencilIcon />
-                            <span>
-                              Edit
-                              <ReasonLine reason={readOnly} />
-                            </span>
-                          </DropdownMenuItem>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem
-                            variant="destructive"
-                            disabled={readOnly !== null}
-                            onSelect={() => setDialog({ kind: "deleteImage", image: i })}
-                          >
-                            <Trash2Icon />
-                            Delete
-                          </DropdownMenuItem>
-                        </RowMenu>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-          <section className="grid gap-2 rounded-lg border p-4">
-            <h3 className="text-sm font-medium">Get cloud images</h3>
-            <p className="text-sm text-muted-foreground">
-              The official download pages open in your browser. Remotely downloads nothing itself: save the file, then
-              add it here.
-            </p>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {sites.map((site) => (
-                <Button
-                  key={site.id}
-                  variant="outline"
-                  className="h-auto justify-start py-2 text-left whitespace-normal"
-                  onClick={() => void api.catalogOpenSite(site.url).catch((err) => toast.error(errorMessage(err)))}
-                >
-                  <ExternalLinkIcon data-icon="inline-start" />
-                  <span className="grid gap-0.5">
-                    <span>{site.name}</span>
-                    <span className="text-xs font-normal text-muted-foreground">{site.hint}</span>
-                  </span>
-                </Button>
-              ))}
-            </div>
-          </section>
-        </TabsContent>
-
         <TabsContent value="templates" className="flex min-w-0 flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <WhyDisabled reason={newTemplateReason}>
-              <Button size="sm" disabled={newTemplateReason !== null} onClick={() => setDialog({ kind: "template" })}>
-                <PlusIcon data-icon="inline-start" />
-                New launch template
-              </Button>
-            </WhyDisabled>
-          </div>
           {loaded && templates.length === 0 ? (
             <EmptyState
               icon={FileBoxIcon}
               title="No launch templates yet"
               description={
-                <>
-                  A <Term id="launchTemplate">launch template</Term> is an image and a size with a network, SSH key and
-                  names.{images.length === 0 && " Add an image first."}
-                </>
+                images.length === 0 ? (
+                  <>
+                    A <Term id="launchTemplate">launch template</Term> starts from an image: add one first.
+                  </>
+                ) : (
+                  <>
+                    A <Term id="launchTemplate">launch template</Term> is an image and a size with a network, SSH key
+                    and names.
+                  </>
+                )
               }
+              action={images.length === 0 ? addImageButton : newTemplateButton}
             />
           ) : (
             <div className="rounded-lg border">
@@ -465,7 +492,7 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                     <TableHead>Image and size</TableHead>
                     <TableHead>Hypervisor, network</TableHead>
                     <TableHead>Names</TableHead>
-                    <TableHead>Can deploy</TableHead>
+                    <TableHead>Deploy</TableHead>
                     <TableHead className="w-12">
                       <span className="sr-only">Actions</span>
                     </TableHead>
@@ -504,60 +531,46 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                           <code className="font-mono text-xs">{t.namingPattern}</code>
                           <div className="text-xs text-muted-foreground">{plural(t.defaultCount, "VM")} by default</div>
                         </TableCell>
-                        <TableCell className="max-w-xs whitespace-normal">
+                        <TableCell className="whitespace-nowrap">
                           {why ? (
-                            <>
-                              <Badge variant="outline" className="border-destructive/40 text-destructive">
-                                Can&apos;t deploy
-                              </Badge>
-                              <div className="text-xs text-muted-foreground">{why}</div>
-                              {t.problems.length > 1 && (
-                                <div className="text-xs text-muted-foreground">
-                                  and {plural(t.problems.length - 1, "other problem")}
-                                </div>
-                              )}
-                            </>
-                          ) : (
-                            <span className="flex flex-wrap items-center gap-2">
-                              <Badge variant="outline" className="border-success/40 text-success">
-                                Ready
-                              </Badge>
-                              <WhyDisabled reason={readOnly}>
-                                <Button
-                                  size="sm"
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge
                                   variant="outline"
-                                  disabled={readOnly !== null}
-                                  onClick={() => onDeploy(t.id)}
+                                  tabIndex={0}
+                                  className="cursor-help border-destructive/40 text-destructive"
                                 >
-                                  <RocketIcon data-icon="inline-start" />
-                                  Deploy
-                                </Button>
-                              </WhyDisabled>
-                            </span>
+                                  Can&apos;t deploy
+                                  {t.problems.length > 1 && ` · ${t.problems.length}`}
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-sm">
+                                {why}
+                                {t.problems.length > 1 && ` And ${plural(t.problems.length - 1, "other problem")}.`}
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : (
+                            // UX-03: the row's main action, here only (not in its menu too).
+                            <WhyDisabled reason={readOnly}>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={readOnly !== null}
+                                onClick={() => onDeploy(t.id)}
+                              >
+                                <RocketIcon data-icon="inline-start" />
+                                Deploy…
+                              </Button>
+                            </WhyDisabled>
                           )}
                         </TableCell>
                         <TableCell>
-                          <RowMenu label={t.name}>
-                            <DropdownMenuItem disabled={(readOnly ?? why) !== null} onSelect={() => onDeploy(t.id)}>
-                              <RocketIcon />
-                              <span>
-                                Deploy…
-                                <ReasonLine reason={readOnly ?? why} />
-                              </span>
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              disabled={readOnly !== null}
-                              onSelect={() => setDialog({ kind: "template", existing: t })}
-                            >
+                          <RowMenu label={t.name} disabled={readOnly !== null}>
+                            <DropdownMenuItem onSelect={() => setDialog({ kind: "template", existing: t })}>
                               <PencilIcon />
-                              <span>
-                                Edit
-                                <ReasonLine reason={readOnly} />
-                              </span>
+                              Edit…
                             </DropdownMenuItem>
                             <DropdownMenuItem
-                              disabled={readOnly !== null}
                               onSelect={() =>
                                 setDialog({
                                   kind: "template",
@@ -572,16 +585,15 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                               }
                             >
                               <CopyIcon />
-                              Duplicate
+                              Duplicate…
                             </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               variant="destructive"
-                              disabled={readOnly !== null}
                               onSelect={() => setDialog({ kind: "deleteTemplate", template: t })}
                             >
                               <Trash2Icon />
-                              Delete
+                              Delete…
                             </DropdownMenuItem>
                           </RowMenu>
                         </TableCell>
@@ -603,6 +615,8 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
             onSubmitted={(outcome) => onSubmitted?.(outcome)}
             refreshKey={refreshKey}
             createRequest={stackCreate}
+            onNewTemplate={images.length === 0 ? addImage : newTemplate}
+            newTemplateLabel={images.length === 0 ? "Add an image" : "New launch template"}
           />
         </TabsContent>
 
