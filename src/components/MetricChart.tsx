@@ -12,6 +12,7 @@ import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { latestValue } from "@/lib/host-details";
 import type { ResolvedTheme } from "@/lib/theme";
+import { cn } from "@/lib/utils";
 
 export interface ChartSeries {
   label: string;
@@ -27,6 +28,8 @@ interface Props {
   title: string;
   /** What the series measure, e.g. "Host side and guest". */
   subtitle?: string;
+  /** More about the subtitle, on hover. */
+  subtitleTitle?: string;
   /** Unix time in milliseconds. */
   times: number[];
   series: ChartSeries[];
@@ -73,7 +76,19 @@ function Swatch({ slot, dashed }: { slot: ChartSeries["slot"]; dashed?: boolean 
   );
 }
 
-export function MetricChart({ title, subtitle, times, series, format, max, theme, empty, height, actions }: Props) {
+export function MetricChart({
+  title,
+  subtitle,
+  subtitleTitle,
+  times,
+  series,
+  format,
+  max,
+  theme,
+  empty,
+  height,
+  actions,
+}: Props) {
   const plotHeight = Math.max(60, Math.round(height ?? HEIGHT));
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
@@ -178,14 +193,19 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
         : new Date(times[at] ?? 0).toLocaleTimeString();
 
   return (
-    <div className="rounded-lg border bg-card p-3">
+    // A chart sized by its widget fills the widget, so it lines up with the widget beside it.
+    <div className={cn("rounded-lg border bg-card p-3", height !== undefined && "h-full")}>
       <div className="mb-2">
         {/* The controls share the title's line, so a narrow chart doesn't give them a line of their own. */}
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="min-w-0 truncate text-sm font-medium">{title}</div>
           {actions}
         </div>
-        {subtitle && <div className="text-xs text-muted-foreground">{subtitle}</div>}
+        {subtitle && (
+          <div className="truncate text-xs text-muted-foreground" title={subtitleTitle ?? subtitle}>
+            {subtitle}
+          </div>
+        )}
       </div>
       <div className="relative" style={{ minHeight: plotHeight }}>
         {/* uPlot owns this element's children; React renders nothing inside it. */}

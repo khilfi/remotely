@@ -199,7 +199,9 @@ export function VolumesTab({
               <TableHead>Volume</TableHead>
               <TableHead>Driver</TableHead>
               <TableHead>Project</TableHead>
-              <TableHead>Used by</TableHead>
+              <TableHead title="From each container's mounts as the engine lists them; Podman may leave it empty">
+                Used by
+              </TableHead>
               <TableHead>Where</TableHead>
             </TableRow>
           </TableHeader>
@@ -238,10 +240,6 @@ export function VolumesTab({
           </TableBody>
         </Table>
       </div>
-      <p className="text-xs text-muted-foreground">
-        Used by comes from each container&apos;s mounts as the engine lists them (Docker names volumes there; Podman
-        lists where they are mounted, so it may stay empty).
-      </p>
     </div>
   );
 }

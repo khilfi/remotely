@@ -40,10 +40,7 @@ export function DashboardHistoryCard() {
     <Card>
       <CardHeader>
         <CardTitle>Dashboard history</CardTitle>
-        <CardDescription>
-          The dashboard keeps a 1-minute average of each running VM, watched host and this PC, for the charts&apos; 1
-          hour to 7 day ranges, and the alert list&apos;s history. It stays on this PC: exports never carry it.
-        </CardDescription>
+        <CardDescription>The charts&apos; longer ranges and the alert history; kept on this PC only.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-3">
         <div className="grid gap-2">

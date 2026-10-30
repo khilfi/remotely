@@ -9,20 +9,25 @@
 // is visible, each read timed from when the last one finished (src/hooks/use-poll.ts). Every change (start, stop,
 // restart, pause, remove, pull, prune) is a command for the bus: the policy engine rates it and the approval dialog
 // previews it (AP-02). Marking a host is the app's own data, audited.
+//
+// UX-02, UX-03, UX-07 (0.6.0): the page opens on the first host that answers (lib/containers.ts nextHostToTry: each
+// host tried with the one read a click on it would make, until one answers or all were tried), and an engine that
+// isn't running (Docker Desktop closed) shows quietly, offering to add a container host. The bulk actions show only
+// while containers are selected, in the SelectionBar that takes the search row's place; "Open a shell" lives in a
+// container's details.
 
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import {
   BoxIcon,
   ChevronDownIcon,
+  CirclePauseIcon,
   DownloadIcon,
-  EllipsisIcon,
   PauseIcon,
   PlayIcon,
   PlusIcon,
   RotateCwIcon,
   ShieldIcon,
   SquareIcon,
-  SquareTerminalIcon,
   Trash2Icon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -43,7 +48,6 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -59,6 +63,9 @@ import { NameDialog } from "@/components/NameDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { RowMenu } from "@/components/RowMenu";
+import { SelectionBar } from "@/components/SelectionBar";
+import { Tip } from "@/components/Tip";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
@@ -89,12 +96,14 @@ import {
   hostActionReason,
   hostKey,
   imageReferenceProblem,
+  isNotRunning,
+  nextHostToTry,
+  notRunningTitle,
   portTexts,
   PRUNE_LABEL,
   pruneReason,
   sameHost,
   sentence,
-  shellReason,
   STATS_POLL_MS,
   statsFor,
   type ContainerAction,
@@ -185,11 +194,17 @@ export function ContainersPage({
   const [view, setView] = useState<ContainerView>("overview");
   const [submitting, setSubmitting] = useState(false);
   const [dialog, setDialog] = useState<{ kind: "host"; sessionId: string | null } | { kind: "pull" } | null>(null);
+  /** UX-07: until a host is chosen, the hosts tried so far (by hostKey) on the way to one that answers. */
+  const [auto, setAuto] = useState(true);
+  const [tried, setTried] = useState<ReadonlySet<string>>(new Set());
+  /** Hosts whose engine said it isn't running at its last read, for their card. */
+  const [down, setDown] = useState<ReadonlySet<string>>(new Set());
 
   // R10: a container asked for (the palette's search): its host and engine, the containers tab, its details.
   const [requestHandled, setRequestHandled] = useState(request?.n ?? 0);
   if (request && request.n !== requestHandled) {
     setRequestHandled(request.n);
+    setAuto(false);
     setCurrent({ host: request.host, engine: request.engine });
     setTab("containers");
     setDetail(request.containerId);
@@ -209,8 +224,7 @@ export function ContainersPage({
         setCurrent((cur) => {
           const still = cur && found.find((h) => sameHost(h.host, cur.host));
           if (still && still.engines.some((e) => e.engine === cur.engine)) return cur;
-          const first = found[0];
-          return first ? { host: first.host, engine: first.engines[0]?.engine ?? "docker" } : null;
+          return nextHostToTry(found, new Set());
         });
       },
       (err) => {
@@ -237,9 +251,14 @@ export function ContainersPage({
         const ids = new Set(value.containers.map((c) => c.id));
         setSelected((prev) => new Set([...prev].filter((id) => ids.has(id))));
         setDetail((open) => (open && ids.has(open) ? open : null));
+        setAuto(false);
+        setDown((prev) => without(prev, hostKey(current.host)));
       },
       (err) => {
-        if (!stale) setList({ key, error: { code: errorCode(err), message: errorMessage(err) } });
+        if (stale) return;
+        const code = errorCode(err);
+        setList({ key, error: { code, message: errorMessage(err) } });
+        setDown((prev) => (isNotRunning(code) ? new Set([...prev, hostKey(current.host)]) : prev));
       },
     );
     return () => {
@@ -313,6 +332,18 @@ export function ContainersPage({
     [list, key],
   );
   const listError = list && list.key === key && "error" in list ? list.error : null;
+
+  // UX-07: the host the page opened on didn't answer, and nobody chose it: try the next one (once per failed read).
+  const [handledFailure, setHandledFailure] = useState<string | null>(null);
+  if (auto && listError && current && hosts && handledFailure !== key) {
+    setHandledFailure(key);
+    const next = new Set([...tried, hostKey(current.host)]);
+    setTried(next);
+    const after = nextHostToTry(hosts, next);
+    // Every host was tried: stay on the last one, which says what's wrong.
+    if (after) setCurrent(after);
+    else setAuto(false);
+  }
   const loading = current !== null && (!list || list.key !== key);
   const shown = useMemo(() => filterContainers(containers, text, state), [containers, text, state]);
   const picked = useMemo(() => containers.filter((c) => selected.has(c.id)), [containers, selected]);
@@ -333,6 +364,7 @@ export function ContainersPage({
   }, [detailOpen, detailsPanel, tab]);
 
   const choose = useCallback((next: Current) => {
+    setAuto(false);
     setCurrent(next);
     setSelected(new Set());
     setAnchor(null);
@@ -398,22 +430,21 @@ export function ContainersPage({
 
   const allShownSelected = shown.length > 0 && shown.every((c) => selected.has(c.id));
   const hostReason = hostActionReason(info, { readOnly, submitting });
-  const onePicked = picked.length === 1 ? picked[0] : undefined;
-  const shellOff = shellReason(onePicked, current?.host ?? null);
+  const quiet = listError !== null && isNotRunning(listError.code);
+  const sessionHosts = (hosts ?? []).filter((h) => h.host.kind === "session").length;
+  const addHost = (variant: "default" | "outline") => (
+    <WhyDisabled reason={readOnlyReason}>
+      <Button variant={variant} onClick={() => setDialog({ kind: "host", sessionId: null })} disabled={readOnly}>
+        <PlusIcon data-icon="inline-start" />
+        Add a container host
+      </Button>
+    </WhyDisabled>
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      <PageHeader
-        page="containers"
-        primary={
-          <WhyDisabled reason={readOnlyReason}>
-            <Button onClick={() => setDialog({ kind: "host", sessionId: null })} disabled={readOnly}>
-              <PlusIcon data-icon="inline-start" />
-              Add a host…
-            </Button>
-          </WhyDisabled>
-        }
-      />
+      {/* The empty page's own button is the one to add a host: no second one in the header then. */}
+      <PageHeader page="containers" primary={hosts && hosts.length === 0 ? undefined : addHost("default")} />
 
       {hostsError && (
         <Alert variant="destructive">
@@ -427,20 +458,9 @@ export function ContainersPage({
         <EmptyState
           icon={BoxIcon}
           title="No container hosts yet"
-          description="Mark a saved session as a Docker or Podman host. Docker Desktop on this PC shows here once it's found."
-          action={
-            <>
-              <WhyDisabled reason={readOnlyReason}>
-                <Button onClick={() => setDialog({ kind: "host", sessionId: null })} disabled={readOnly}>
-                  <PlusIcon data-icon="inline-start" />
-                  Add a host…
-                </Button>
-              </WhyDisabled>
-              <Button variant="ghost" onClick={onOpenSettings}>
-                Docker Desktop path…
-              </Button>
-            </>
-          }
+          description="Mark a saved session as a Docker or Podman host; Docker Desktop shows here once it's found."
+          help="page.containers"
+          action={addHost("default")}
         />
       ) : (
         <div className="flex min-h-0 flex-1 gap-4">
@@ -481,45 +501,45 @@ export function ContainersPage({
                     {h.via.length > 0 && (
                       <div className="truncate text-xs text-muted-foreground">via {h.via.join(" → ")}</div>
                     )}
-                    {h.host.kind === "thisPc" && <div className="text-xs text-muted-foreground">Docker Desktop</div>}
+                    {h.host.kind === "thisPc" && (
+                      <div className="text-xs text-muted-foreground">
+                        Docker Desktop{down.has(hostKey(h.host)) && " · not running"}
+                      </div>
+                    )}
+                    {h.host.kind === "session" && down.has(hostKey(h.host)) && (
+                      <div className="text-xs text-muted-foreground">Not running</div>
+                    )}
                   </button>
                   {h.host.kind === "session" && (
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button size="icon-xs" variant="ghost" aria-label={`${h.name}: more`}>
-                          <EllipsisIcon />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
-                          disabled={readOnly}
-                          onSelect={() =>
-                            h.host.kind === "session" && setDialog({ kind: "host", sessionId: h.host.sessionId })
-                          }
-                        >
-                          <div>
-                            Engines and sudo…
-                            <ReasonLine reason={readOnlyReason} />
-                          </div>
-                        </DropdownMenuItem>
-                        <DropdownMenuItem
-                          disabled={readOnly}
-                          onSelect={() => {
-                            if (h.host.kind !== "session") return;
-                            const id = h.host.sessionId;
-                            void api.setContainerMarks(id, []).then(
-                              () => setHostsVersion((v) => v + 1),
-                              (err) => toast.error(errorMessage(err)),
-                            );
-                          }}
-                        >
-                          <div>
-                            Remove from container hosts
-                            <ReasonLine reason={readOnlyReason} />
-                          </div>
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <RowMenu label={h.name}>
+                      <DropdownMenuItem
+                        disabled={readOnly}
+                        onSelect={() =>
+                          h.host.kind === "session" && setDialog({ kind: "host", sessionId: h.host.sessionId })
+                        }
+                      >
+                        <div>
+                          Engines and sudo…
+                          <ReasonLine reason={readOnlyReason} />
+                        </div>
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        disabled={readOnly}
+                        onSelect={() => {
+                          if (h.host.kind !== "session") return;
+                          const id = h.host.sessionId;
+                          void api.setContainerMarks(id, []).then(
+                            () => setHostsVersion((v) => v + 1),
+                            (err) => toast.error(errorMessage(err)),
+                          );
+                        }}
+                      >
+                        <div>
+                          Remove from container hosts
+                          <ReasonLine reason={readOnlyReason} />
+                        </div>
+                      </DropdownMenuItem>
+                    </RowMenu>
                   )}
                 </div>
                 <div className="mt-1.5 flex flex-wrap gap-1">
@@ -550,12 +570,7 @@ export function ContainersPage({
 
           <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-3" aria-label="What runs on the host">
             {!current || !info ? (
-              <Empty className="border">
-                <EmptyHeader>
-                  <EmptyTitle>Choose a host</EmptyTitle>
-                  <EmptyDescription>Its containers, images, volumes and networks show here.</EmptyDescription>
-                </EmptyHeader>
-              </Empty>
+              <EmptyState title="Choose a host" description="Its containers, images, volumes and networks show here." />
             ) : (
               <Tabs value={tab} onValueChange={(v) => setTab(v as Tab)} className="flex min-h-0 flex-1 flex-col gap-3">
                 <div className="flex flex-wrap items-center gap-2">
@@ -566,7 +581,11 @@ export function ContainersPage({
                     <div className="text-xs text-muted-foreground">
                       {ENGINE_LABEL[current.engine]} {engineInfo?.runs ?? ""}
                       {list && list.key === key && "value" in list && (
-                        <> · read {new Date(list.value.readAt).toLocaleTimeString()}</>
+                        <>
+                          {" "}
+                          · read{" "}
+                          {new Date(list.value.readAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                        </>
                       )}
                     </div>
                   </div>
@@ -636,7 +655,17 @@ export function ContainersPage({
                   </DropdownMenu>
                 </div>
 
-                {listError && (
+                {listError && quiet && (
+                  <EmptyState
+                    icon={CirclePauseIcon}
+                    title={notRunningTitle(current.host, hostLabel(info), current.engine)}
+                    description={
+                      current.host.kind === "thisPc" ? "Start it, then refresh." : "Start the service, then refresh."
+                    }
+                    action={sessionHosts === 0 ? addHost("outline") : undefined}
+                  />
+                )}
+                {listError && !quiet && (
                   <Alert variant="destructive">
                     <TriangleAlertIcon />
                     <AlertTitle>Could not read {hostLabel(info)}</AlertTitle>
@@ -686,85 +715,88 @@ export function ContainersPage({
                   </Alert>
                 )}
 
-                <TabsContent value="containers" className="flex min-h-0 flex-1 flex-col gap-3">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Input
-                      value={text}
-                      onChange={(e) => setText(e.target.value)}
-                      placeholder="Find a container, image, project or port"
-                      aria-label="Find containers"
-                      className="w-72"
-                    />
-                    <ToggleGroup
-                      type="single"
-                      variant="outline"
-                      size="sm"
-                      value={state}
-                      onValueChange={(v) => v && setState(v as StateFilter)}
-                      aria-label="Show"
-                    >
-                      <ToggleGroupItem value="all">All</ToggleGroupItem>
-                      <ToggleGroupItem value="running">Running</ToggleGroupItem>
-                      <ToggleGroupItem value="paused">Paused</ToggleGroupItem>
-                      <ToggleGroupItem value="stopped">Stopped</ToggleGroupItem>
-                    </ToggleGroup>
-                    <div className="ml-auto flex flex-wrap items-center gap-1.5">
-                      {picked.length > 0 && (
-                        <span className="text-sm text-muted-foreground">{plural(picked.length, "selected")}</span>
-                      )}
-                      {BUTTONS.map(({ action, icon: Icon }) => {
-                        const reason = actionReason(action, picked, context);
-                        return (
-                          <WhyDisabled key={action} reason={reason}>
-                            <Button size="sm" variant="outline" disabled={reason !== null} onClick={() => act(action)}>
-                              <Icon data-icon="inline-start" />
-                              {ACTIONS[action].label}
-                            </Button>
-                          </WhyDisabled>
-                        );
-                      })}
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button size="sm" variant="outline">
-                            <Trash2Icon data-icon="inline-start" />
-                            Remove
-                            <ChevronDownIcon data-icon="inline-end" />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end" className="w-72">
-                          {(["remove", "forceRemove"] as ContainerAction[]).map((action) => {
+                <TabsContent value="containers" className={cn("flex min-h-0 flex-1 flex-col gap-3", quiet && "hidden")}>
+                  <div className="flex min-h-8 flex-wrap items-center gap-2">
+                    {picked.length > 0 ? (
+                      <SelectionBar count={picked.length} onClear={() => setSelected(new Set())}>
+                        {BUTTONS.filter(({ action }) => readOnly || applicable(action, picked).length > 0).map(
+                          ({ action, icon: Icon }) => {
                             const reason = actionReason(action, picked, context);
                             return (
-                              <DropdownMenuItem
-                                key={action}
-                                disabled={reason !== null}
-                                variant="destructive"
-                                onSelect={() => act(action)}
-                              >
-                                <div>
-                                  {action === "remove"
-                                    ? "Remove stopped containers…"
-                                    : "Force remove (kills running ones)…"}
-                                  <ReasonLine reason={reason} />
-                                </div>
-                              </DropdownMenuItem>
+                              <WhyDisabled key={action} reason={reason}>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  disabled={reason !== null}
+                                  onClick={() => act(action)}
+                                >
+                                  <Icon data-icon="inline-start" />
+                                  {ACTIONS[action].label}
+                                </Button>
+                              </WhyDisabled>
                             );
-                          })}
-                        </DropdownMenuContent>
-                      </DropdownMenu>
-                      <WhyDisabled reason={shellOff}>
-                        <Button
-                          size="sm"
+                          },
+                        )}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="sm" variant="ghost">
+                              <Trash2Icon data-icon="inline-start" />
+                              Remove
+                              <ChevronDownIcon data-icon="inline-end" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="w-72">
+                            {(["remove", "forceRemove"] as ContainerAction[]).map((action) => {
+                              const reason = actionReason(action, picked, context);
+                              return (
+                                <DropdownMenuItem
+                                  key={action}
+                                  disabled={reason !== null}
+                                  variant="destructive"
+                                  onSelect={() => act(action)}
+                                >
+                                  <div>
+                                    {action === "remove"
+                                      ? "Remove stopped containers…"
+                                      : "Force remove (kills running ones)…"}
+                                    <ReasonLine reason={reason} />
+                                  </div>
+                                </DropdownMenuItem>
+                              );
+                            })}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      </SelectionBar>
+                    ) : (
+                      <>
+                        <Input
+                          value={text}
+                          onChange={(e) => setText(e.target.value)}
+                          placeholder="Find a container, image, project or port"
+                          aria-label="Find containers"
+                          className="w-72"
+                        />
+                        <ToggleGroup
+                          type="single"
                           variant="outline"
-                          disabled={shellOff !== null}
-                          onClick={() => onePicked && openShell(onePicked)}
+                          size="sm"
+                          value={state}
+                          onValueChange={(v) => v && setState(v as StateFilter)}
+                          aria-label="Show"
                         >
-                          <SquareTerminalIcon data-icon="inline-start" />
-                          Open a shell
-                        </Button>
-                      </WhyDisabled>
-                    </div>
+                          <ToggleGroupItem value="all">All</ToggleGroupItem>
+                          <ToggleGroupItem value="running">Running</ToggleGroupItem>
+                          <ToggleGroupItem value="paused">Paused</ToggleGroupItem>
+                          <ToggleGroupItem value="stopped">Stopped</ToggleGroupItem>
+                        </ToggleGroup>
+                      </>
+                    )}
                   </div>
+                  {containers.length > 1 && (
+                    <Tip id="containers.select">
+                      Click rows to select several (Shift+click for a range); click a name for its details and a shell.
+                    </Tip>
+                  )}
 
                   <ResizablePanelGroup orientation="horizontal" id="containers-split" className="min-h-0 flex-1">
                     <ResizablePanel id="containers-list" minSize="30%">
@@ -912,13 +944,9 @@ export function ContainersPage({
                       )}
                     </ResizablePanel>
                   </ResizablePanelGroup>
-                  <p className="text-xs text-muted-foreground">
-                    Click a row to select it, Shift+click to select a range; actions leave out containers they
-                    don&apos;t fit. Click a name for its details, logs and stats.
-                  </p>
                 </TabsContent>
 
-                <TabsContent value="images" className="min-h-0 overflow-auto">
+                <TabsContent value="images" className={cn("min-h-0 overflow-auto", quiet && "hidden")}>
                   <Resource loaded={images} key_={key}>
                     {(value) => (
                       <ImagesTab
@@ -938,7 +966,7 @@ export function ContainersPage({
                     )}
                   </Resource>
                 </TabsContent>
-                <TabsContent value="volumes" className="min-h-0 overflow-auto">
+                <TabsContent value="volumes" className={cn("min-h-0 overflow-auto", quiet && "hidden")}>
                   <Resource loaded={volumes} key_={key}>
                     {(value) => (
                       <VolumesTab
@@ -958,7 +986,7 @@ export function ContainersPage({
                     )}
                   </Resource>
                 </TabsContent>
-                <TabsContent value="networks" className="min-h-0 overflow-auto">
+                <TabsContent value="networks" className={cn("min-h-0 overflow-auto", quiet && "hidden")}>
                   <Resource loaded={networks} key_={key}>
                     {(value) => <NetworksTab networks={value} />}
                   </Resource>
@@ -1004,6 +1032,13 @@ export function ContainersPage({
       )}
     </div>
   );
+}
+
+function without(set: ReadonlySet<string>, key: string): ReadonlySet<string> {
+  if (!set.has(key)) return set;
+  const next = new Set(set);
+  next.delete(key);
+  return next;
 }
 
 /** A tab's list once read, its error, or a skeleton while it is read. */

@@ -273,7 +273,7 @@ function Overview({ host, engine, container, refreshKey }: Props) {
       <section aria-label="Environment variables" className="grid gap-1">
         <h3 className="font-medium">Environment variables</h3>
         <p className="text-xs text-muted-foreground">
-          Names only. Their values often hold passwords and tokens, so Remotely never reads them out.
+          Names only: values often hold secrets, so Remotely never reads them.
         </p>
         <div className="flex flex-wrap gap-1">
           {d.envNames.length === 0 ? (
@@ -427,10 +427,7 @@ function LogsTab({ host, engine, container, polling }: Props) {
         ))}
         <div ref={bottom} />
       </div>
-      <p className="text-xs text-muted-foreground">
-        Lines the container wrote to stderr are tinted. Following asks for new lines every {LOG_FOLLOW_MS / 1000} s on
-        the host&apos;s kept connection, while this page shows.
-      </p>
+      <p className="text-xs text-muted-foreground">Lines written to stderr are tinted.</p>
     </div>
   );
 }
@@ -467,8 +464,8 @@ function StatsTab({ container, stats: read }: Props) {
         <Row label="Processes">{stats.pids ?? "—"}</Row>
       </dl>
       <p className="text-xs text-muted-foreground">
-        Read with the list every {STATS_POLL_MS / 1000} s while this page shows (stats --no-stream), last at{" "}
-        {new Date(read.readAt).toLocaleTimeString()}. Network and disk are totals since the container started.
+        Read every {STATS_POLL_MS / 1000} s, last at {new Date(read.readAt).toLocaleTimeString()}. Network and disk are
+        totals since it started.
       </p>
     </div>
   );

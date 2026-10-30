@@ -2,6 +2,7 @@
 // QL-07 long commands, jobs, an update, toasts worth keeping), newest first, grouped by day and by what each is about.
 // Each entry opens what it is about; opening the centre marks nothing read until an entry is opened or "Mark all read"
 // is pressed. The text was redacted by the core, and the window's own masking covers it while presenting (FD-03).
+// UX-04 (0.6.0): one line under the title, the rest in its "?"; the toolbar's buttons are ghost.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -17,10 +18,11 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import type { AppLink } from "@/lib/links";
 import { linkLabel } from "@/lib/links";
 import {
@@ -90,20 +92,15 @@ export function NotificationCentre({ open, onOpenChange, onOpenLink }: Props) {
       <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-md">
         <SheetHeader>
           <SheetTitle>Notifications</SheetTitle>
-          <SheetDescription>
-            What notified since Remotely started: alerts, finished commands and jobs, updates. Kept until Remotely
-            closes; jobs and alerts stay in Activity and on the dashboard.
+          <SheetDescription className="flex items-center gap-1">
+            Since Remotely started.
+            <HelpTip topic="notifications" />
           </SheetDescription>
           <div className="flex flex-wrap items-center gap-2">
-            <Button size="sm" variant="outline" disabled={unread === 0} onClick={() => markNotificationsRead(null)}>
+            <Button size="sm" variant="ghost" disabled={unread === 0} onClick={() => markNotificationsRead(null)}>
               <CheckCheckIcon /> Mark all read
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={entries.length === 0}
-              onClick={() => clearNotifications(null)}
-            >
+            <Button size="sm" variant="ghost" disabled={entries.length === 0} onClick={() => clearNotifications(null)}>
               <Trash2Icon /> Clear
             </Button>
             <div className="ml-auto flex items-center gap-2">
@@ -116,19 +113,16 @@ export function NotificationCentre({ open, onOpenChange, onOpenLink }: Props) {
         </SheetHeader>
         <div className="min-h-0 flex-1 overflow-auto px-4 pb-4">
           {days.length === 0 && (
-            <Empty>
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <BellIcon />
-                </EmptyMedia>
-                <EmptyTitle>{entries.length === 0 ? "Nothing yet" : "Nothing unread"}</EmptyTitle>
-                <EmptyDescription>
-                  {entries.length === 0
-                    ? "Alerts, finished jobs and long commands show here as they happen."
-                    : "Turn off Unread only to see the rest."}
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <EmptyState
+              bordered={false}
+              icon={BellIcon}
+              title={entries.length === 0 ? "No notifications yet" : "Nothing unread"}
+              description={
+                entries.length === 0
+                  ? "Alerts, finished jobs and long commands show here as they happen."
+                  : "Turn off Unread only to see the rest."
+              }
+            />
           )}
           {days.map((day) => (
             <section key={day.label} className="mb-4" aria-label={day.label}>

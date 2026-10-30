@@ -8,6 +8,10 @@
 //
 // UX-08: the Map (QL-21's page until 0.6.0) is the Dashboard's second tab.
 //
+// UX-03, UX-07 (0.6.0): one range for the page's charts (in the header, and in a drill-down, which changes the same
+// one), the round's timing behind "Updated hh:mm", Watch hosts as the one place to watch or stop watching a host,
+// a row's click as the one way to its details, and Customize in the header's "⋯".
+//
 // P8: the page follows the core's rounds only while it shows and the window is visible (shouldPoll): hidden, it reads
 // nothing and renders nothing each round; shown again, it reads once at once and then follows the rounds. Each widget
 // reads only while it is on the dashboard, and none while the layout is being customized.
@@ -15,9 +19,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
   CheckIcon,
-  EllipsisIcon,
-  EyeIcon,
-  EyeOffIcon,
   GaugeIcon,
   LayoutDashboardIcon,
   MonitorIcon,
@@ -38,10 +39,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -56,6 +55,8 @@ import { EnvBadge, StateBadge } from "@/components/Badges";
 import { CapacityPanel } from "@/components/CapacityPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { DashboardGrid } from "@/components/DashboardGrid";
+import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import { GuestStatusBadge } from "@/components/GuestStatusBadge";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { MetricCell } from "@/components/MetricBits";
@@ -63,11 +64,13 @@ import { MetricChartWidget } from "@/components/MetricChartWidget";
 import { MetricsDetail } from "@/components/MetricsDetail";
 import { PageHeader } from "@/components/PageHeader";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { RangePicker } from "@/components/RangePicker";
+import { RowMenu } from "@/components/RowMenu";
 import { ServicesWidget } from "@/components/ServicesWidget";
 import { SortableHead } from "@/components/SortableHead";
 import { ThisPcMemoryChart } from "@/components/ThisPcMemoryChart";
-import { AutoBadge } from "@/components/VmLinkControls";
-import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
+import { Tip } from "@/components/Tip";
+import { ReasonLine } from "@/components/WhyDisabled";
 import { useVisibility } from "@/hooks/use-poll";
 import {
   api,
@@ -79,7 +82,7 @@ import {
   type HostCapacity,
   type SessionRecord,
 } from "@/lib/api";
-import { dashboardApi, type DashboardLayout, type LayoutInfo, type Widget } from "@/lib/dashboard-api";
+import { dashboardApi, type ChartRange, type DashboardLayout, type LayoutInfo, type Widget } from "@/lib/dashboard-api";
 import { addWidget, cannotAdd, WIDGET_CHOICES, widgetTitle, type WidgetKindName } from "@/lib/dashboard-layout";
 import { formatWhen, plural } from "@/lib/format";
 import { specsSummary } from "@/lib/host-details";
@@ -188,30 +191,48 @@ function sortValue(row: DashboardRow, key: SortKey): number | string | null {
   }
 }
 
-function CostLine({ cost }: { cost: CollectorCost | null }) {
-  if (!cost || cost.rounds === 0) {
-    return <span>Collecting the first round…</span>;
-  }
-  return (
-    <span>
-      Every {cost.intervalSecs} s
-      {cost.guestIntervalSecs > 0 && cost.guestIntervalSecs !== cost.intervalSecs
+/** The round's timing, one line each, for the tooltip on "Updated hh:mm". */
+function costLines(cost: CollectorCost | null, rows: DashboardRow[]): string[] {
+  const counts = `${plural(rows.filter((r) => r.kind === "vm").length, "VM")} and ${plural(
+    rows.filter((r) => r.kind === "session").length,
+    "watched host",
+  )}`;
+  if (!cost || cost.rounds === 0) return [counts, "Collecting the first round…"];
+  return [
+    counts,
+    `Read every ${cost.intervalSecs} s${
+      cost.guestIntervalSecs > 0 && cost.guestIntervalSecs !== cost.intervalSecs
         ? ` (watched hosts every ${cost.guestIntervalSecs} s)`
-        : ""}{" "}
-      · last round {Math.round(cost.roundMs)} ms (host side {Math.round(cost.hostMs)} ms
-      {cost.guests > 0 || cost.guestMs > 1 ? `, guests ${Math.round(cost.guestMs)} ms` : ""}) ·{" "}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span tabIndex={0} className="underline decoration-dotted underline-offset-2">
-            Remotely used {cost.appCpuPct === null ? "—" : formatPct(cost.appCpuPct)} of this host's CPU
-          </span>
-        </TooltipTrigger>
-        <TooltipContent className="max-w-xs">
-          The app's core process over the last round, collecting included, as a share of every CPU on this host (the way
-          Task Manager shows processes). The target is under 5% with 50 VMs.
-        </TooltipContent>
-      </Tooltip>
-    </span>
+        : ""
+    }`,
+    `Last round took ${Math.round(cost.roundMs)} ms (this PC ${Math.round(cost.hostMs)} ms${
+      cost.guests > 0 || cost.guestMs > 1 ? `, watched hosts ${Math.round(cost.guestMs)} ms` : ""
+    })`,
+    `Remotely used ${cost.appCpuPct === null ? "—" : formatPct(cost.appCpuPct)} of this PC's CPU`,
+  ];
+}
+
+/** "Updated 2:03 am", with the round's timing on hover. */
+function UpdatedAt({ cost, rows }: { cost: CollectorCost | null; rows: DashboardRow[] }) {
+  const at = cost?.collectedAt ? new Date(cost.collectedAt) : null;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          tabIndex={0}
+          className="text-xs whitespace-nowrap text-muted-foreground underline decoration-dotted underline-offset-2 outline-none focus-visible:rounded-sm focus-visible:ring-3 focus-visible:ring-ring/50"
+        >
+          {at ? `Updated ${at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Collecting…"}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        <ul className="grid gap-0.5">
+          {costLines(cost, rows).map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -272,17 +293,25 @@ function ThresholdsEditor({ value, onChange }: { value: Thresholds; onChange: (t
   );
 }
 
+/**
+ * UX-03: the one place to watch a host, or stop watching it (the palette aside): a session per line, ticked while
+ * watched. A session linked to a running VM names the VM, so a VM's guest is found by the VM's name too.
+ */
 function WatchPicker({
+  open,
+  onOpenChange,
   watched,
-  intervalSecs,
+  vmOf,
   onWatch,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   watched: Set<string>;
-  /** MO-02: seconds between two polls of each watched host (Settings, Dashboard). */
-  intervalSecs: number;
+  /** Session id -> the running VM it is linked to. */
+  vmOf: Map<string, string>;
   onWatch: (id: string, watch: boolean) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const setOpen = onOpenChange;
   const [sessions, setSessions] = useState<SessionRecord[] | null>(null);
   useEffect(() => {
     if (!open) return;
@@ -291,8 +320,8 @@ function WatchPicker({
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button size="sm">
-          <PlusIcon /> Watch hosts
+        <Button>
+          <PlusIcon data-icon="inline-start" /> Watch hosts
         </Button>
       </PopoverTrigger>
       <PopoverContent align="end" className="w-80 p-0">
@@ -306,11 +335,14 @@ function WatchPicker({
                 return (
                   <CommandItem
                     key={s.id}
-                    value={`${s.name} ${s.host} ${s.tags.join(" ")}`}
+                    value={`${s.name} ${s.host} ${s.tags.join(" ")} ${vmOf.get(s.id) ?? ""}`}
                     onSelect={() => onWatch(s.id, !on)}
                   >
                     <CheckIcon className={cn("size-4", on ? "opacity-100" : "opacity-0")} />
                     <span className="truncate">{s.name}</span>
+                    {vmOf.has(s.id) && (
+                      <span className="shrink-0 text-xs text-muted-foreground">VM {vmOf.get(s.id)}</span>
+                    )}
                     <span className="ml-auto truncate text-xs text-muted-foreground" data-mask="host">
                       {s.host}
                     </span>
@@ -320,9 +352,9 @@ function WatchPicker({
             </CommandGroup>
           </CommandList>
         </Command>
-        <p className="border-t px-3 py-2 text-xs text-muted-foreground">
-          Watching logs in once with the session's saved login, then reads /proc every {intervalSecs} seconds (Settings,
-          Dashboard). Nothing on the host changes.
+        <p className="flex items-center gap-1 border-t px-3 py-1.5 text-xs text-muted-foreground">
+          Linux hosts, read over SSH; nothing on them changes.
+          <HelpTip topic="dashboardPolling" side="top" />
         </p>
       </PopoverContent>
     </Popover>
@@ -346,38 +378,31 @@ function RatePairCell({ a, b, labels }: { a: number | null; b: number | null; la
 interface OverviewProps {
   overview: DashboardOverview | null;
   rows: DashboardRow[];
-  cost: CollectorCost | null;
   thresholds: Thresholds;
   setThresholds: (t: Thresholds) => void;
   onSelect: (key: string) => void;
-  onWatch: (sessionId: string, watch: boolean) => void;
   onConnect: (sessionId: string) => void;
   onActions: (vmxPath: string) => void;
-  onOpenVms: () => void;
-  onOpenSessions: () => void;
+  /** Opens Watch hosts, for the empty grid. */
+  onWatchHosts: () => void;
 }
 
-/** MO-03: the overview grid widget: filters, the table of running VMs and watched hosts, and what collecting costs. */
+/** MO-03: the overview grid widget: filters and the table of running VMs and watched hosts. */
 function OverviewWidget({
   overview,
   rows,
-  cost,
   thresholds,
   setThresholds,
   onSelect,
-  onWatch,
   onConnect,
   onActions,
-  onOpenVms,
-  onOpenSessions,
+  onWatchHosts,
 }: OverviewProps) {
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
   const [text, setText] = useState("");
   const [kind, setKind] = useState<Kind>("all");
   const [env, setEnv] = useState<Environment | "all">("all");
   const [alertsOnly, setAlertsOnly] = useState(false);
-
-  const watched = useMemo(() => new Set(rows.flatMap((r) => (r.watchedSession ? [r.watchedSession] : []))), [rows]);
 
   const shown = useMemo(() => {
     const needle = text.trim().toLowerCase();
@@ -465,31 +490,21 @@ function OverviewWidget({
         </Toggle>
         <div className="ml-auto flex items-center gap-2">
           <ThresholdsEditor value={thresholds} onChange={setThresholds} />
-          <WatchPicker watched={watched} intervalSecs={cost?.guestIntervalSecs || 5} onWatch={onWatch} />
         </div>
       </div>
 
       {overview && rows.length === 0 ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <GaugeIcon />
-            </EmptyMedia>
-            <EmptyTitle>Nothing to show yet</EmptyTitle>
-            <EmptyDescription>
-              Running VMs show here on their own, read from Windows with no login. Watch a Linux host to add its own
-              CPU, memory, disks, network and load over SSH.
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent className="flex-row justify-center">
-            <Button variant="outline" onClick={onOpenVms}>
-              Go to VMs
+        <EmptyState
+          icon={GaugeIcon}
+          title="Nothing running or watched"
+          description="Running VMs show here by themselves; watch a Linux host to add it."
+          help="dashboardPolling"
+          action={
+            <Button onClick={onWatchHosts}>
+              <PlusIcon data-icon="inline-start" /> Watch hosts
             </Button>
-            <Button variant="outline" onClick={onOpenSessions}>
-              Go to sessions
-            </Button>
-          </EmptyContent>
-        </Empty>
+          }
+        />
       ) : (
         <div className="rounded-lg border">
           <Table>
@@ -519,7 +534,6 @@ function OverviewWidget({
                   thresholds={thresholds}
                   onSelect={onSelect}
                   onKeys={rowKeys}
-                  onWatch={onWatch}
                   onConnect={onConnect}
                   onActions={onActions}
                 />
@@ -535,13 +549,6 @@ function OverviewWidget({
           </Table>
         </div>
       )}
-
-      <p className="text-xs text-muted-foreground">
-        {plural(rows.filter((r) => r.kind === "vm").length, "VM")} and{" "}
-        {plural(rows.filter((r) => r.kind === "session").length, "host")} ·{" "}
-        {cost?.collectedAt ? `updated at ${new Date(cost.collectedAt).toLocaleTimeString()} · ` : ""}
-        <CostLine cost={cost} /> · live charts keep 30 minutes; longer ranges come from the history on this PC
-      </p>
     </div>
   );
 }
@@ -551,7 +558,6 @@ function OverviewRow({
   thresholds,
   onSelect,
   onKeys,
-  onWatch,
   onConnect,
   onActions,
 }: {
@@ -559,7 +565,6 @@ function OverviewRow({
   thresholds: Thresholds;
   onSelect: (key: string) => void;
   onKeys: (e: KeyboardEvent<HTMLTableRowElement>, row: DashboardRow) => void;
-  onWatch: (sessionId: string, watch: boolean) => void;
   onConnect: (sessionId: string) => void;
   onActions: (vmxPath: string) => void;
 }) {
@@ -675,33 +680,25 @@ function OverviewRow({
           title={used.mount ? `Fullest: ${used.mount}` : undefined}
         />
       </TableCell>
-      <TableCell onClick={(e) => e.stopPropagation()}>
+      <TableCell>
         {row.guestStatus ? (
-          <GuestStatusBadge status={row.guestStatus} />
-        ) : row.sessions.length > 0 ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => onWatch(row.sessions[0].id, true)}
-            title={`Watch the guest through ${row.sessions[0].name}`}
-          >
-            <EyeIcon /> Watch
-          </Button>
+          <GuestStatusBadge status={row.guestStatus} onCheckKey={onConnect} />
         ) : (
-          <span className="text-xs text-muted-foreground">No session</span>
+          <span
+            className="text-xs text-muted-foreground"
+            title={
+              row.sessions.length > 0
+                ? `Watch ${row.sessions[0].name} with Watch hosts to read the guest`
+                : "Link a session to this VM to read the guest"
+            }
+          >
+            Not watched
+          </span>
         )}
       </TableCell>
-      <TableCell onClick={(e) => e.stopPropagation()}>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label={`More for ${row.name}`}>
-              <EllipsisIcon />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={() => onSelect(row.key)}>
-              <GaugeIcon /> Details and charts
-            </DropdownMenuItem>
+      <TableCell>
+        {(row.kind === "vm" || row.watchedSession) && (
+          <RowMenu label={row.name}>
             {row.kind === "vm" && (
               <DropdownMenuItem onSelect={() => onActions(row.key)}>
                 <ZapIcon /> Actions…
@@ -709,69 +706,36 @@ function OverviewRow({
             )}
             {row.watchedSession && (
               <DropdownMenuItem onSelect={() => onConnect(row.watchedSession!)}>
-                <SquareTerminalIcon /> Open terminal
+                <SquareTerminalIcon /> Open a terminal
               </DropdownMenuItem>
             )}
-            <DropdownMenuSeparator />
-            {row.watchedSession ? (
-              <DropdownMenuItem onSelect={() => onWatch(row.watchedSession!, false)}>
-                <EyeOffIcon /> Stop guest metrics
-              </DropdownMenuItem>
-            ) : row.sessions.length > 0 ? (
-              row.sessions.map((s) => (
-                <DropdownMenuItem key={s.id} onSelect={() => onWatch(s.id, true)}>
-                  <EyeIcon /> Watch guest via {s.name}
-                  {s.auto && <AutoBadge />}
-                </DropdownMenuItem>
-              ))
-            ) : (
-              <DropdownMenuItem disabled>Link a session to watch the guest</DropdownMenuItem>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+          </RowMenu>
+        )}
       </TableCell>
     </TableRow>
   );
 }
 
-/** MO-16: the top of the page: Customize, or while customizing, Add widget, Reset, Cancel and Save. */
+/** MO-16: while customizing, Add widget, Reset, Cancel and Save (Customize itself is in the header's "⋯"). */
 function LayoutBar({
   draft,
-  readOnly,
   saving,
-  onEdit,
   onAdd,
   onReset,
   onCancel,
   onSave,
 }: {
-  /** The layout being customized; null when not customizing. */
-  draft: DashboardLayout | null;
-  readOnly: string | null;
+  /** The layout being customized. */
+  draft: DashboardLayout;
   saving: boolean;
-  onEdit: () => void;
   onAdd: (kind: WidgetKindName) => void;
   onReset: () => void;
   onCancel: () => void;
   onSave: () => void;
 }) {
-  if (!draft) {
-    return (
-      <div className="flex justify-end">
-        <WhyDisabled reason={readOnly}>
-          <Button variant="ghost" size="sm" disabled={readOnly !== null} onClick={onEdit}>
-            <LayoutDashboardIcon /> Customize
-          </Button>
-        </WhyDisabled>
-      </div>
-    );
-  }
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border border-dashed bg-muted/40 px-3 py-2">
-      <p className="mr-auto text-xs text-muted-foreground">
-        Drag a widget by its handle or press the arrow keys on it; drag its corner to resize. Nothing is saved until you
-        press Save.
-      </p>
+      <span className="mr-auto text-sm font-medium">Customizing the dashboard</span>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button size="sm" variant="outline">
@@ -793,7 +757,7 @@ function LayoutBar({
           })}
         </DropdownMenuContent>
       </DropdownMenu>
-      <Button size="sm" variant="outline" disabled={saving} onClick={onReset}>
+      <Button size="sm" variant="ghost" disabled={saving} onClick={onReset}>
         <RotateCcwIcon /> Reset to default
       </Button>
       <Button size="sm" variant="ghost" disabled={saving} onClick={onCancel}>
@@ -806,18 +770,7 @@ function LayoutBar({
   );
 }
 
-export function DashboardPage({
-  active,
-  tab,
-  onTabChange,
-  onOpenLink,
-  theme,
-  focus,
-  onConnect,
-  onActions,
-  onOpenVms,
-  onOpenSessions,
-}: Props) {
+export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, focus, onConnect, onActions }: Props) {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [capacity, setCapacity] = useState<HostCapacity | null>(null);
   const [round, setRound] = useState(0);
@@ -832,6 +785,10 @@ export function DashboardPage({
   const [saving, setSaving] = useState(false);
   const [confirmReset, setConfirmReset] = useState(false);
   const [sessionNames, setSessionNames] = useState<Map<string, string>>(new Map());
+  /** UX-07: one range for every chart on the page (and the drill-down's). */
+  const [range, setRange] = useState<ChartRange>("live");
+  /** UX-03: Watch hosts, the one place to watch a host (the empty grid opens it too). */
+  const [watchOpen, setWatchOpen] = useState(false);
   const readOnly = useReadOnlyReason();
 
   // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
@@ -875,7 +832,7 @@ export function DashboardPage({
 
   // Widgets read only while shown: the grid's rows when the overview (or a drill-down) is on the page, capacity when
   // its widget is, the services widgets' host names when there are some.
-  const needOverview = kinds.has("overview") || kinds.has("chart") || selected !== null;
+  const needOverview = kinds.has("overview") || kinds.has("chart") || selected !== null || watchOpen;
   const load = useCallback(() => {
     api.metricsOverview().then(
       (o) => {
@@ -927,6 +884,12 @@ export function DashboardPage({
   );
 
   const rows = useMemo(() => overview?.rows ?? [], [overview]);
+  const watched = useMemo(() => new Set(rows.flatMap((r) => (r.watchedSession ? [r.watchedSession] : []))), [rows]);
+  /** Each session linked to a running VM, by the VM's name, for Watch hosts. */
+  const vmOf = useMemo(
+    () => new Map(rows.flatMap((r) => (r.kind === "vm" ? r.sessions.map((s) => [s.id, r.name] as const) : []))),
+    [rows],
+  );
   // A row by its key, or by the watched session a VM row shows (an alert on a VM's guest). Nothing selected, no row:
   // a VM row nobody watches has a null watched session too.
   const selectedRow =
@@ -968,21 +931,18 @@ export function DashboardPage({
           <OverviewWidget
             overview={overview}
             rows={rows}
-            cost={cost}
             thresholds={thresholds}
             setThresholds={setThresholds}
             onSelect={setSelected}
-            onWatch={(id, on) => void watch(id, on)}
             onConnect={onConnect}
             onActions={onActions}
-            onOpenVms={onOpenVms}
-            onOpenSessions={onOpenSessions}
+            onWatchHosts={() => setWatchOpen(true)}
           />
         );
       case "capacity":
         return <CapacityPanel capacity={capacity} />;
       case "thisPcMemory":
-        return <ThisPcMemoryChart round={round} live={reading} theme={theme} height={height - 150} />;
+        return <ThisPcMemoryChart round={round} range={range} live={reading} theme={theme} height={height - 124} />;
       case "alerts":
         return <AlertsWidget live={reading} onOpenTarget={(target) => setSelected(target.key)} />;
       case "services":
@@ -991,7 +951,6 @@ export function DashboardPage({
             sessionId={widget.sessionId ?? null}
             name={widget.sessionId ? (sessionNames.get(widget.sessionId) ?? null) : null}
             live={reading}
-            onWatch={(id) => void watch(id, true)}
           />
         );
       case "chart":
@@ -1000,9 +959,10 @@ export function DashboardPage({
             widget={widget}
             name={rowName(widget.key)}
             round={round}
+            range={range}
             live={reading}
             theme={theme}
-            height={height - 112}
+            height={height - 104}
           />
         );
     }
@@ -1016,6 +976,28 @@ export function DashboardPage({
     >
       <PageHeader
         page="dashboard"
+        primary={
+          tab === "metrics" && !editing ? (
+            <WatchPicker
+              open={watchOpen}
+              onOpenChange={setWatchOpen}
+              watched={watched}
+              vmOf={vmOf}
+              onWatch={(id, on) => void watch(id, on)}
+            />
+          ) : undefined
+        }
+        tools={
+          tab === "metrics" && layout && !editing ? (
+            <DropdownMenuItem disabled={readOnly !== null} onSelect={() => setDraft(structuredClone(layout))}>
+              <LayoutDashboardIcon />
+              <div>
+                Customize the dashboard
+                <ReasonLine reason={readOnly} />
+              </div>
+            </DropdownMenuItem>
+          ) : undefined
+        }
         tabs={
           <TabsList>
             <TabsTrigger value="metrics">
@@ -1029,35 +1011,45 @@ export function DashboardPage({
             </TabsTrigger>
           </TabsList>
         }
-      />
+      >
+        {tab === "metrics" && (
+          <>
+            <RangePicker value={range} onChange={setRange} label="Charts' range" />
+            <UpdatedAt cost={cost} rows={rows} />
+          </>
+        )}
+      </PageHeader>
       {/* Mounted while hidden, as the page itself is: widgets read only while the tab shows (live). */}
       <TabsContent value="metrics" forceMount className="flex flex-none flex-col gap-4 data-[state=inactive]:hidden">
-        {layout && (
-          <LayoutBar
-            draft={draft}
-            readOnly={readOnly}
-            saving={saving}
-            onEdit={() => setDraft(structuredClone(layout))}
-            onAdd={(kind) => setDraft((d) => (d ? addWidget(d, kind) : d))}
-            onReset={() => setConfirmReset(true)}
-            onCancel={() => setDraft(null)}
-            onSave={() => void saveLayout()}
-          />
+        {draft && (
+          <>
+            <LayoutBar
+              draft={draft}
+              saving={saving}
+              onAdd={(kind) => setDraft((d) => (d ? addWidget(d, kind) : d))}
+              onReset={() => setConfirmReset(true)}
+              onCancel={() => setDraft(null)}
+              onSave={() => void saveLayout()}
+            />
+            <Tip id="dashboard.customize">
+              Drag a widget by its handle to move it, or by its corner to resize it; nothing is kept until you save.
+            </Tip>
+          </>
         )}
         {layout && layout.widgets.length === 0 && (
-          <Empty className="border">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <LayoutDashboardIcon />
-              </EmptyMedia>
-              <EmptyTitle>No widgets</EmptyTitle>
-              <EmptyDescription>
-                {editing
-                  ? "Add widgets above, then save."
-                  : "Customize the dashboard to add some, or reset it to the default."}
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <EmptyState
+            icon={LayoutDashboardIcon}
+            title="No widgets"
+            description={editing ? "Add widgets above, then save." : "Customize the dashboard to add some."}
+            action={
+              editing ? undefined : (
+                <Button disabled={readOnly !== null} onClick={() => setDraft(structuredClone(layout))}>
+                  <LayoutDashboardIcon data-icon="inline-start" />
+                  Customize
+                </Button>
+              )
+            }
+          />
         )}
         {layout && (
           <DashboardGrid
@@ -1074,10 +1066,11 @@ export function DashboardPage({
           round={round}
           live={live}
           guestIntervalSecs={cost?.guestIntervalSecs || 5}
+          range={range}
+          onRangeChange={setRange}
           thresholds={thresholds}
           theme={theme}
           onClose={() => setSelected(null)}
-          onWatch={(id, on) => void watch(id, on)}
           onRetry={(id) => {
             api.backgroundLoginRetry(id).then(
               () => {

@@ -292,6 +292,27 @@ export const HELP = {
       "A VM that fails is removed with what it made; VMs already made stay.",
     ],
   },
+  containerHosts: {
+    title: "Container hosts",
+    body: [
+      "Remotely runs the host's docker or podman command over the session's SSH connection, through its jump hosts, only while you have the host open on the Containers page.",
+      "It logs in with the session's saved login: a session whose password you type in the terminal needs it saved in the vault first. Detect logs in and checks whether docker needs sudo.",
+    ],
+  },
+  alertRules: {
+    title: "Alert rules",
+    body: [
+      "Rules are checked on every metrics round. A rule fires once its condition has held for its duration, and resolves after a minute back under it.",
+      "Alerts and their history are kept on this PC only, as long as the dashboard history.",
+    ],
+  },
+  notifications: {
+    title: "Notifications",
+    body: [
+      "What notified since Remotely started: alerts, finished commands and jobs, updates. They're kept until Remotely closes.",
+      "Jobs stay in Activity, and alerts on the dashboard, after that.",
+    ],
+  },
   auditLog: {
     title: "Audit log",
     body: [
