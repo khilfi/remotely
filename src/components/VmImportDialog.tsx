@@ -266,8 +266,8 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
           <DialogTitle>{progress ? `Import ${name}` : "Import a VM or disk"}</DialogTitle>
           <DialogDescription>
             {progress
-              ? "Cancel stops the job: the VM being made is removed with everything it made. The source stays as it was."
-              : "From another hypervisor or a cloud: an OVA or OVF, a VHD or VHDX, a qcow2 or raw disk, or a KVM or Proxmox VM's own description. It becomes a new VM here, through the same preview and approval as a deploy."}
+              ? "Cancelling removes the VM being made; the source stays as it was."
+              : "An OVA or OVF, a VHD, VHDX, qcow2 or raw disk, or a KVM or Proxmox VM, as a new VM here."}
           </DialogDescription>
         </DialogHeader>
 

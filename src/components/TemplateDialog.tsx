@@ -140,9 +140,7 @@ export function TemplateDialog({ existing, initial, images, sizes, profiles, onS
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>{existing ? `Edit ${existing.name}` : "New launch template"}</DialogTitle>
-          <DialogDescription>
-            An image and a size with everything a deploy needs. Deploy it from its row here, or from the VMs page.
-          </DialogDescription>
+          <DialogDescription>An image and a size with everything a deploy needs.</DialogDescription>
         </DialogHeader>
         <form
           className="grid gap-4"
