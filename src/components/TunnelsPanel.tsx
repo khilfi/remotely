@@ -1,20 +1,19 @@
-// SS-07: the current terminal's tunnels, from the toolbar. The session's saved port forwards, each with its state
-// (stopped, asking, opening, listening where and how busy, waiting for a reconnect, failed and why), started and
-// stopped by hand here. Starting goes through the approval flow: the page shows the dialog when one is needed.
-// Forwards are added and edited with the session (Sessions page).
+// SS-07: the current terminal's tunnels, from the Terminal page's "⋯" menu (UX-03). The session's saved port forwards,
+// each with its state (stopped, asking, opening, listening where and how busy, waiting for a reconnect, failed and
+// why), started and stopped by hand here. Starting goes through the approval flow: the page shows the dialog when one
+// is needed. Forwards are added and edited with the session (Sessions page).
 
 import { useEffect, useState } from "react";
-import { CableIcon, CopyIcon } from "lucide-react";
+import { CopyIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type ApprovalRequest, type TunnelInfo } from "@/lib/api";
 import type { PaneSession, PaneSnapshot } from "@/lib/terminal-session";
-import { forwardText, isLoopback, liveTunnels, tunnelStateText } from "@/lib/tunnels";
+import { forwardText, isLoopback, tunnelStateText } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 
 const STATE_TONE: Record<TunnelInfo["state"]["state"], string> = {
@@ -33,83 +32,53 @@ function startReason(snapshot: PaneSnapshot): string | null {
   return null;
 }
 
-export function TunnelsButton({
+/** QL-08: why the "⋯" menu's Tunnels item is off, or null. */
+export function tunnelsReason(pane: PaneSession | undefined, snapshot: PaneSnapshot): string | null {
+  if (!pane) return "Open a terminal first";
+  if (!snapshot.sessionId) return "Only saved sessions have port forwards: save the connection as a session first";
+  return null;
+}
+
+export function TunnelsDialog({
+  open,
+  onOpenChange,
   pane,
   snapshot,
   name,
   onApproval,
-  openRequest = 0,
 }: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   pane: PaneSession | undefined;
   snapshot: PaneSnapshot;
-  /** How the terminal is named, for the panel's title. */
+  /** How the terminal is named, for the title. */
   name: string;
   /** A tunnel needs the approval dialog. */
   onApproval: (pane: PaneSession, forwardId: string, request: ApprovalRequest) => void;
-  /** QL-22: opens the panel when it changes (the status bar's tunnel list). */
-  openRequest?: number;
 }) {
-  const [open, setOpen] = useState(false);
-  const [openHandled, setOpenHandled] = useState(openRequest);
-  if (openRequest !== openHandled) {
-    setOpenHandled(openRequest);
-    setOpen(true);
-  }
-  const live = liveTunnels(snapshot.tunnels);
-  const label = live > 0 ? `Tunnels: ${live} open on this terminal` : "Tunnels: this session's port forwards";
-  const disabledReason = !pane
-    ? "Open a terminal first."
-    : !snapshot.sessionId
-      ? "Only saved sessions have port forwards. Save the connection as a session first."
-      : null;
-
-  if (disabledReason) {
-    return (
-      <WhyDisabled reason={`Tunnels: ${disabledReason}`} className="mb-1">
-        <Button variant="ghost" size="icon-sm" aria-label="Tunnels" disabled>
-          <CableIcon />
-        </Button>
-      </WhyDisabled>
-    );
-  }
   return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <PopoverTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={label}
-              className={cn("relative mb-1", (open || live > 0) && "bg-accent")}
-            >
-              <CableIcon />
-              {live > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 rounded-full bg-primary px-1 text-[9px] leading-tight text-primary-foreground">
-                  {live}
-                </span>
-              )}
-            </Button>
-          </PopoverTrigger>
-        </TooltipTrigger>
-        <TooltipContent>{label}</TooltipContent>
-      </Tooltip>
-      <PopoverContent align="end" className="w-[30rem] max-w-[90vw] p-0">
-        {open && pane && <TunnelsList pane={pane} snapshot={snapshot} name={name} onApproval={onApproval} />}
-      </PopoverContent>
-    </Popover>
+    <Dialog open={open && pane !== undefined} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Tunnels on {name}</DialogTitle>
+          <DialogDescription>
+            This session&apos;s saved port forwards, on this terminal&apos;s connection. Add or edit them in the
+            session.
+          </DialogDescription>
+        </DialogHeader>
+        {open && pane && <TunnelsList pane={pane} snapshot={snapshot} onApproval={onApproval} />}
+      </DialogContent>
+    </Dialog>
   );
 }
 
 function TunnelsList({
   pane,
   snapshot,
-  name,
   onApproval,
 }: {
   pane: PaneSession;
   snapshot: PaneSnapshot;
-  name: string;
   onApproval: (pane: PaneSession, forwardId: string, request: ApprovalRequest) => void;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -148,21 +117,11 @@ function TunnelsList({
     });
 
   return (
-    <div className="grid gap-2 p-3">
-      <div>
-        <p className="text-sm font-medium">Tunnels on {name}</p>
-        <p className="text-xs text-muted-foreground">
-          The session&apos;s saved port forwards, on this terminal&apos;s connection. Opening one goes through the
-          approval flow and is audited; it opens again after a reconnect and closes with the terminal. Add or edit them
-          in the session (Sessions page).
-        </p>
-      </div>
+    <div className="grid gap-2">
       {tunnels === null ? (
         <p className="text-sm text-muted-foreground">{error ?? "Loading…"}</p>
       ) : tunnels.length === 0 ? (
-        <p className="text-sm text-muted-foreground">
-          This session has no saved port forwards. Edit it on the Sessions page to add one.
-        </p>
+        <p className="text-sm text-muted-foreground">No saved port forwards yet. Edit the session to add one.</p>
       ) : (
         <ul className="grid gap-1.5">
           {tunnels.map((t) => {

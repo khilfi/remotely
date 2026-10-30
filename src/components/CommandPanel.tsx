@@ -21,7 +21,6 @@ import {
   SearchIcon,
   StarIcon,
   Trash2Icon,
-  XIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +33,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RiskBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FavouriteDialog } from "@/components/FavouriteDialog";
@@ -111,12 +111,11 @@ interface Props {
   targetName: string | null;
   /** Pastes into the current terminal (and presses Enter when `enter`). False when it is not connected. */
   onSend: (command: string, enter: boolean) => boolean;
-  onClose: () => void;
   /** QL-20: a command found in the palette: the panel searches for it when this changes. */
   query?: { text: string; n: number } | null;
 }
 
-export function CommandPanel({ active, targetName, onSend, onClose, query = null }: Props) {
+export function CommandPanel({ active, targetName, onSend, query = null }: Props) {
   const [section, setSection] = useState<Section>(() => readJson(SECTION_KEY, "favourites"));
   const [favourites, setFavourites] = useState<Favourite[]>([]);
   const [library, setLibrary] = useState<LibraryEntry[]>([]);
@@ -326,25 +325,20 @@ export function CommandPanel({ active, targetName, onSend, onClose, query = null
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       <div className="flex items-center gap-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-medium">Commands</span>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="New favourite command"
-          title="New favourite command"
-          onClick={() => setEditing({ initial: {} })}
-        >
-          <PlusIcon />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Hide the commands"
-          title="Hide the commands"
-          onClick={onClose}
-        >
-          <XIcon />
-        </Button>
+        <h2 className="min-w-0 flex-1 truncate text-sm font-medium">Commands</h2>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label="New favourite command"
+              onClick={() => setEditing({ initial: {} })}
+            >
+              <PlusIcon />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>New favourite command</TooltipContent>
+        </Tooltip>
       </div>
       <div className="relative">
         <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -395,14 +389,13 @@ export function CommandPanel({ active, targetName, onSend, onClose, query = null
           </ScrollArea>
         </TabsContent>
       </Tabs>
-      <p className="text-xs text-muted-foreground">
+      <p className="truncate text-xs text-muted-foreground" title="Click pastes; Shift+click also presses Enter">
         {targetName ? (
           <>
-            Click pastes into <span className="font-medium text-foreground">{targetName}</span>; Shift+click also
-            presses Enter.
+            Pastes into <span className="font-medium text-foreground">{targetName}</span> · Shift+click runs it
           </>
         ) : (
-          "Open a terminal: a click pastes the command into it, Shift+click also presses Enter."
+          "Open a terminal to paste into it"
         )}
       </p>
       {editing && (

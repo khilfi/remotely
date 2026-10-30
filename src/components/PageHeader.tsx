@@ -40,12 +40,14 @@ export interface PageHeaderProps {
   primary?: ReactNode;
   /** DropdownMenuItems for the "⋯" menu: every other page-wide action. */
   tools?: ReactNode;
+  /** For the "⋯" menu, e.g. a width ("w-72") so long items don't wrap. */
+  toolsClassName?: string;
   /** A TabsList, shown under the title row. */
   tabs?: ReactNode;
   className?: string;
 }
 
-export function PageHeader({ page, help, children, primary, tools, tabs, className }: PageHeaderProps) {
+export function PageHeader({ page, help, children, primary, tools, toolsClassName, tabs, className }: PageHeaderProps) {
   const title = pageLabel(page);
   const own = `page.${page}`;
   const helpKey = help === undefined ? (isHelpKey(own) ? own : null) : help;
@@ -72,7 +74,7 @@ export function PageHeader({ page, help, children, primary, tools, tabs, classNa
                   </TooltipTrigger>
                   <TooltipContent>More actions</TooltipContent>
                 </Tooltip>
-                <DropdownMenuContent align="end" className="min-w-52">
+                <DropdownMenuContent align="end" className={cn("min-w-52", toolsClassName)}>
                   {tools}
                 </DropdownMenuContent>
               </DropdownMenu>

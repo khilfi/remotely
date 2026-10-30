@@ -1,22 +1,16 @@
-// QL-19: the Terminal page's Groups menu, next to the MultiExec switch. Each saved group can be opened (a tab for each
-// of its sessions, reusing tabs already open, then MultiExec on with exactly those tabs picked) or selected (its open
-// tabs picked, MultiExec on). The picked tabs can be saved as a group, and the groups managed. QL-08: disabled items say
-// why under their label.
+// QL-19: the Terminal page's saved groups, a submenu of its "⋯" menu (UX-03). Each saved group can be opened (a tab
+// for each of its sessions, reusing tabs already open, then Type in all tabs on with exactly those tabs picked) or
+// selected (its open tabs picked, Type in all tabs on). The picked tabs can be saved as a group, and the groups
+// managed. QL-08: disabled items say why under their label.
 
 import { LayersIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ReasonLine } from "@/components/WhyDisabled";
 import type { MultiExecGroup } from "@/lib/api";
 import { plural } from "@/lib/format";
@@ -27,7 +21,7 @@ interface Props {
   groups: MultiExecGroup[];
   /** Every open tab, left to right. */
   tabs: GroupTab[];
-  /** Why MultiExec can't be turned on (FD-03 read-only lock), or null. */
+  /** Why Type in all tabs can't be turned on (the read-only lock while presenting), or null. */
   multiExecBlocked: string | null;
   /** Why the picked tabs can't be saved as a group, or null. */
   saveReason: string | null;
@@ -37,12 +31,11 @@ interface Props {
   onSelectGroup: (group: MultiExecGroup) => void;
   onSave: () => void;
   onManage: () => void;
-  /** The menu opened: the groups are read again. */
+  /** The submenu opened: the groups are read again. */
   onShow: () => void;
-  className?: string;
 }
 
-export function MultiExecGroupsMenu({
+export function MultiExecGroupsSubmenu({
   groups,
   tabs,
   multiExecBlocked,
@@ -53,22 +46,14 @@ export function MultiExecGroupsMenu({
   onSave,
   onManage,
   onShow,
-  className,
 }: Props) {
   return (
-    <DropdownMenu onOpenChange={(open) => open && onShow()}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label="Saved groups" className={className}>
-              <LayersIcon />
-            </Button>
-          </DropdownMenuTrigger>
-        </TooltipTrigger>
-        <TooltipContent>Saved groups: open or select a set of sessions</TooltipContent>
-      </Tooltip>
-      <DropdownMenuContent align="end" className="w-72">
-        <DropdownMenuLabel>Saved groups</DropdownMenuLabel>
+    <DropdownMenuSub onOpenChange={(open) => open && onShow()}>
+      <DropdownMenuSubTrigger>
+        <LayersIcon />
+        Saved groups
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-72">
         {groups.length === 0 && (
           <DropdownMenuItem disabled>
             <span>
@@ -130,7 +115,7 @@ export function MultiExecGroupsMenu({
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onManage}>Manage groups…</DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
   );
 }
