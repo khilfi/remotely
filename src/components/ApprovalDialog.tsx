@@ -410,7 +410,8 @@ export function ApprovalDialog({
           <Alert>
             <ShieldAlertIcon />
             <AlertTitle>
-              {plural(request.skipped.length, "target")} will be skipped: <Term id="protected" />
+              {request.skipped.length} <Term id="protected" /> {request.skipped.length === 1 ? "target" : "targets"}{" "}
+              will be skipped
             </AlertTitle>
             <AlertDescription>{request.skipped.map((t) => t.name).join(", ")}</AlertDescription>
           </Alert>

@@ -583,7 +583,7 @@ src/                  React + TypeScript UI
                       drag, keyboard moves, resize; no drag-and-drop library), WidgetSettings, ServicesWidget,
                       MetricChartWidget, DashboardHistoryCard; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
-                      presenting), ReauthDialog (the vault password asked again), WindowsLoginNotice; VM-19 to
+                      presenting), ReauthDialog (the vault password asked again); VM-19 to
                       VM-21: SizeDialog, ImageDialog (hash progress, Stop), TemplateDialog (the core's live check);
                       VM-21, VM-22, VM-10: TemplateFields (the template editor's fields, also the Deploy dialog's
                       Custom), DeployDialog (a template or Custom, count, names, the preview, then the job's step per
@@ -593,8 +593,8 @@ src/                  React + TypeScript UI
                       (an instance's header row on the VMs page), CapacityPlanView (the Deploy, Clone, Import and stack
                       deploy dialogs and the approval; Suspend what it suggests); CV-01 VmImportDialog (a file analysed,
                       then a deploy with DeployPreviewView, CapacityPlanView and DeployProgressView), VM-17
-                      VmExportDialog (each target with its plan or why not), CV-03 QemuImgCard (Settings' Conversion
-                      tools; ImportDialog and ExportDialog are SS-02's and FD-07's);
+                      VmExportDialog (each target with its plan or why not) (ImportDialog and ExportDialog are SS-02's
+                      and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
@@ -603,7 +603,12 @@ src/                  React + TypeScript UI
                       VM-27 ScheduleDialog (the core's preview of next runs and warnings), ScheduleRunsSheet,
                       VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
-                      after a switch), UnassignedVmsSheet; AP-08 ChangeIdCard and the approval dialog's Change ID;
+                      after a switch), UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
+                      approval rules' card) and the approval dialog's one reason or change ID field; UX-10 Settings:
+                      SaveStatus (useSaveStatus, SaveStatus: "Saved" with Undo in a card's header; NumberSetting saves
+                      on Enter or blur), ToolPathsCard (every tool path in one table, Change opens a dialog; qemu-img
+                      too), ApprovalRulesCard (the summary, the change ID rule, PolicyRulesEditor under Advanced with
+                      its sticky Save bar); the Vault page's Unlocking card holds the Windows-login switch and warning;
                       UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
                       RefreshButton)
@@ -693,7 +698,10 @@ src/                  React + TypeScript UI
                       every search result, map node, status bar item and notification), search.ts (QL-20 ranking:
                       every word matches a field, name > address > tag > detail), search-sources.ts (each kind's
                       items), search-providers.ts (SEARCH_PROVIDERS: later packages add theirs), settings-index.ts
-                      (Settings cards by label), container-cache.ts (what the Containers page read last; search
+                      (UX-10 Settings' groups for the side list and its sections by label, for the page's search and
+                      the palette's), settings-summary.ts (UX-10 the tools table's rows and the approval rules'
+                      summary), approval.ts (UX-11 the approval dialog's tier line, type-to-confirm phrase, and the
+                      reason and change ID read from one field), container-cache.ts (what the Containers page read last; search
                       makes no logins), host-networks-cache.ts (VM-11 the host networks the map or the networks view
                       read last, for search), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's
                       host networks: vm-insight.ts topologyHostNetworks keys them alike and links them to the VM
