@@ -83,8 +83,8 @@ export function TerminalSettingsCard() {
         <div className="grid gap-4 sm:grid-cols-3">
           <NumberSetting
             id="keepalive"
-            label="Keep-alive every"
-            suffix="seconds (0 for off)"
+            label="Keep-alive (0 for off)"
+            suffix="seconds"
             min={0}
             max={3600}
             value={s.keepaliveSecs}

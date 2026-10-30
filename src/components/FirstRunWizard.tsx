@@ -92,6 +92,7 @@ export function FirstRunWizard({
   };
 
   const buttons = stepButtons(step);
+  const stepHasAction = (step === "vault" && vault?.status === "notSetUp") || step === "sessions";
 
   function close(how: "done" | "skipped") {
     dismissFirstRun(how);
@@ -190,7 +191,8 @@ export function FirstRunWizard({
             {buttons.finish ? (
               <Button onClick={() => close("done")}>Finish</Button>
             ) : (
-              <Button onClick={() => setStep(nextStep(step))}>
+              // One filled button per view: Next steps back while the step has its own action to take.
+              <Button variant={stepHasAction ? "outline" : "default"} onClick={() => setStep(nextStep(step))}>
                 Next
                 <ArrowRightIcon data-icon="inline-end" />
               </Button>

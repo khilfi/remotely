@@ -114,9 +114,12 @@ export function NewPasswordField({
               />
               <span className="text-xs text-muted-foreground">{view.label}</span>
             </div>
-            <p className={strength.acceptable ? "text-sm text-muted-foreground" : "text-sm text-destructive"}>
-              {strength.hint}
-            </p>
+            {/* UX-04: the core's hint only when it says more than the meter's word ("Strong."). */}
+            {strength.hint.replace(/\.$/, "").toLowerCase() !== view.label.toLowerCase() && (
+              <p className={strength.acceptable ? "text-sm text-muted-foreground" : "text-sm text-destructive"}>
+                {strength.hint}
+              </p>
+            )}
           </>
         ) : (
           !value && description && <p className="text-sm text-muted-foreground">{description}</p>

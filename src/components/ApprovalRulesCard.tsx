@@ -53,7 +53,8 @@ export function ApprovalRulesCard({ openAdvanced = false, lit }: Props) {
   const changed = catalog && rules ? rulesChanged(rules, catalog.defaults) : null;
 
   return (
-    <Card>
+    // Not clipped, so Advanced's Save bar can stick to the bottom of the page while it scrolls.
+    <Card className="overflow-visible">
       <CardHeader>
         <CardTitle className="flex items-center gap-1">
           Approval rules

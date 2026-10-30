@@ -375,7 +375,7 @@ export function PolicyRulesEditor({ catalog, saved, onSaved }: Props) {
       </div>
 
       {(dirty || message) && (
-        <div className="sticky bottom-0 z-10 -mx-6 -mb-6 flex flex-wrap items-center gap-2 rounded-b-xl border-t bg-card px-6 py-3">
+        <div className="sticky bottom-3 z-10 flex flex-wrap items-center gap-2 rounded-lg border bg-card px-4 py-3 shadow-md">
           <p
             className={message && !message.ok ? "text-sm text-destructive" : "text-sm text-muted-foreground"}
             role="status"

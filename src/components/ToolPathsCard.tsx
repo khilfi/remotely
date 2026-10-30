@@ -98,7 +98,7 @@ export function ToolPathsCard({ settings, onSettings, onChanged, lit }: Props) {
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Tool</TableHead>
+                <TableHead className="w-[40%]">Tool</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="w-24">
                   <span className="sr-only">Change</span>

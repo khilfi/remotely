@@ -42,7 +42,9 @@ export function ChangeIdSetting() {
           />
         </WhyDisabled>
         <Label htmlFor="change-id-required">
-          Require a <Term id="changeId">change ID</Term> for Prod targets
+          <span>
+            Require a <Term id="changeId">change ID</Term> for Prod targets
+          </span>
         </Label>
         <HelpTip topic="reasonOrChangeId" />
         <SaveStatus status={status} className="ml-auto" />

@@ -120,11 +120,11 @@ export function KnownHostsPage({ active }: Props) {
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>Host</TableHead>
-              <TableHead>Key</TableHead>
+              <TableHead className="w-48">Host</TableHead>
+              <TableHead className="w-28">Key</TableHead>
               <TableHead>Fingerprint</TableHead>
-              <TableHead>Trusted</TableHead>
-              <TableHead>Last seen</TableHead>
+              <TableHead className="w-44">Trusted</TableHead>
+              <TableHead className="w-44">Last seen</TableHead>
               <TableHead className="w-10">
                 <span className="sr-only">Actions</span>
               </TableHead>

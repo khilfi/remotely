@@ -427,14 +427,14 @@ export function ApprovalDialog({
                       <TableHead>Target</TableHead>
                       {hasVms && (
                         <>
-                          <TableHead>State</TableHead>
-                          <TableHead>
+                          <TableHead className="w-28">State</TableHead>
+                          <TableHead className="w-24">
                             <HeadTip
                               label="Up for"
                               tip="How long each VM has run since it was last started or resumed."
                             />
                           </TableHead>
-                          <TableHead className="text-right">
+                          <TableHead className="w-28 text-right">
                             <HeadTip
                               label="Snapshots"
                               tip="The snapshots each VM has now. A delete that would break a linked clone says so under the VM."
