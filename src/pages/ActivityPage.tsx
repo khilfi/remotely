@@ -218,7 +218,7 @@ export function ActivityPage({
         const redacted = report.redacted
           ? ` ${plural(report.redacted, "row")} had something that looked like a secret, replaced by [redacted].`
           : "";
-        toast.success(`Exported ${plural(report.entries, "entry")}`, {
+        toast.success(`Exported ${entriesText(report.entries)}`, {
           description: `${report.path}.${redacted}`,
           duration: 8000,
         });
@@ -368,8 +368,10 @@ export function ActivityPage({
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-muted-foreground">
             {filtered
-              ? `${plural(shownEntries.length, "entry")} of ${audit.length} match`
-              : `The newest ${plural(audit.length, "entry")}`}
+              ? `${entriesText(shownEntries.length)} of ${audit.length} match`
+              : audit.length >= limits.audit
+                ? `The newest ${entriesText(audit.length)}`
+                : entriesText(audit.length)}
           </span>
           <HelpTip topic="auditLog" />
           <div className="ml-auto flex items-center gap-2">
@@ -463,6 +465,11 @@ export function ActivityPage({
   );
 }
 
+/** "1 entry", "32 entries". */
+function entriesText(n: number) {
+  return n === 1 ? "1 entry" : `${n} entries`;
+}
+
 /** "db-01, web-01 and 3 more". */
 function targetsText(names: string[]) {
   if (names.length <= 3) return names.join(", ");
@@ -489,9 +496,9 @@ function GroupRows({
   const left = job ? secondsLeft(job, now) : null;
   const last = group.entries[group.entries.length - 1];
   const single = group.jobId === null && group.entries.length === 1 ? group.entries[0] : null;
-  // A row with something to unfold: a job's steps, an approval's, or an entry's detail.
-  const foldable =
-    group.entries.length > 1 || (single?.detail ?? "") !== "" || (group.jobId !== null && group.entries.length > 0);
+  // A job's steps (and an approval's) fold under its row; an entry of its own shows its detail on hover.
+  const foldable = group.entries.length > 1 || (group.jobId !== null && group.entries.length > 0);
+  const hover = single?.detail ? plainText(single.detail) : undefined;
   const opens = job !== null;
   const subtitle = [single ? eventLabel(single.event) : null, targetsText(group.targets) || null]
     .filter(Boolean)
@@ -500,6 +507,7 @@ function GroupRows({
   return (
     <>
       <TableRow
+        title={hover}
         className={cn((opens || foldable) && "cursor-pointer")}
         onClick={() => (opens && job ? onOpen(job.id) : foldable && onToggle())}
       >
@@ -509,8 +517,8 @@ function GroupRows({
               variant="ghost"
               size="icon-xs"
               aria-expanded={unfolded}
-              aria-label={`${unfolded ? "Fold" : "Unfold"} ${group.title}: ${single ? "details" : stepsText(group.entries.length)}`}
-              title={single ? "Details" : stepsText(group.entries.length)}
+              aria-label={`${unfolded ? "Fold" : "Unfold"} ${group.title}: ${stepsText(group.entries.length)}`}
+              title={stepsText(group.entries.length)}
               onClick={(e) => {
                 e.stopPropagation();
                 onToggle();
@@ -549,7 +557,7 @@ function GroupRows({
                   starts in {left} s
                 </span>
               )}
-              {job.targetsFailed > 0 && (
+              {job.status === "partially_failed" && (
                 <span className="text-xs text-destructive tabular-nums">
                   {job.targetsFailed} of {job.targetsTotal} failed
                 </span>

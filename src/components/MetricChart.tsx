@@ -12,6 +12,7 @@ import uPlot from "uplot";
 import "uplot/dist/uPlot.min.css";
 import { latestValue } from "@/lib/host-details";
 import type { ResolvedTheme } from "@/lib/theme";
+import { cn } from "@/lib/utils";
 
 export interface ChartSeries {
   label: string;
@@ -192,7 +193,8 @@ export function MetricChart({
         : new Date(times[at] ?? 0).toLocaleTimeString();
 
   return (
-    <div className="rounded-lg border bg-card p-3">
+    // A chart sized by its widget fills the widget, so it lines up with the widget beside it.
+    <div className={cn("rounded-lg border bg-card p-3", height !== undefined && "h-full")}>
       <div className="mb-2">
         {/* The controls share the title's line, so a narrow chart doesn't give them a line of their own. */}
         <div className="flex flex-wrap items-center justify-between gap-2">

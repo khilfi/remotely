@@ -353,7 +353,7 @@ function WatchPicker({
           </CommandList>
         </Command>
         <p className="flex items-center gap-1 border-t px-3 py-1.5 text-xs text-muted-foreground">
-          Linux hosts, over SSH with the saved login. Nothing on the host changes.
+          Linux hosts, read over SSH; nothing on them changes.
           <HelpTip topic="dashboardPolling" side="top" />
         </p>
       </PopoverContent>
