@@ -212,6 +212,12 @@ export const HISTORY_RETENTION_CHOICES: { value: HistoryRetention; label: string
   { value: "days30", label: "30 days" },
 ];
 
+/** UX-10: how many days a choice keeps, to tell a shorter one (which prunes at once, so no Undo) from a longer. */
+export function retentionDays(retention: HistoryRetention): number {
+  const days: Record<HistoryRetention, number> = { day1: 1, days3: 3, days7: 7, days14: 14, days30: 30 };
+  return days[retention];
+}
+
 /** What the history holds, in a line: "4.2 MB for 3 series, since 18 Oct". */
 export function historySizeText(size: HistorySize): string {
   if (size.minutes === 0) return "Nothing kept yet: the first minute is written a minute after Remotely starts.";

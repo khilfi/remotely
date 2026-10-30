@@ -1,7 +1,8 @@
 // MO-06 dashboard history: how long the 1-minute averages of the VMs, watched hosts and this PC are kept (1 to 30 days,
 // 7 by default), what they take, and the last prune. Pruned at start and daily, with the resolved alerts; a shorter time
 // prunes at once. Kept on this PC only: no export carries it. Saved in the core and audited; presentation mode's
-// read-only lock refuses changing it (the daily prune still runs). UX-10: the choice saves at once, with Undo.
+// read-only lock refuses changing it (the daily prune still runs). UX-10: the choice saves at once; a longer time has
+// Undo, a shorter one doesn't, since the core prunes the older minutes at once and Undo couldn't bring them back.
 
 import { useEffect, useState } from "react";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,7 +15,7 @@ import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage } from "@/lib/api";
 import { dashboardApi, type HistoryInfo, type HistoryRetention } from "@/lib/dashboard-api";
 import { formatWhen } from "@/lib/format";
-import { HISTORY_RETENTION_CHOICES, historySizeText, pruneSummary } from "@/lib/history";
+import { HISTORY_RETENTION_CHOICES, historySizeText, pruneSummary, retentionDays } from "@/lib/history";
 
 export function DashboardHistoryCard() {
   const [info, setInfo] = useState<HistoryInfo | null>(null);
@@ -28,9 +29,11 @@ export function DashboardHistoryCard() {
 
   function save(retention: HistoryRetention) {
     const before = info?.retention;
+    const shorter = before !== undefined && retentionDays(retention) < retentionDays(before);
     void status.run(
       async () => setInfo(await dashboardApi.setHistoryRetention(retention)),
-      before ? async () => setInfo(await dashboardApi.setHistoryRetention(before)) : undefined,
+      before && !shorter ? async () => setInfo(await dashboardApi.setHistoryRetention(before)) : undefined,
+      shorter ? "Saved: older history was removed" : undefined,
     );
   }
 

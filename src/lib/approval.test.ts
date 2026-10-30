@@ -143,19 +143,33 @@ test("a name too long or with control characters asks for the count", () => {
   assert.equal(confirmPhrase(request({ steps: [{ step: "confirm" }] }), false), null);
 });
 
-test("a ticket or change number in the text is the change ID", () => {
+test("the change ID is the ticket or change number the text starts with", () => {
   assert.equal(findChangeId("CHG0012345"), "CHG0012345");
-  assert.equal(findChangeId("patch window, CHG0012345."), "CHG0012345");
-  assert.equal(findChangeId("rollback of INC-42 (approved)"), "INC-42");
-  assert.equal(findChangeId("see #1234"), "#1234");
-  assert.equal(findChangeId("ticket 4711823"), "4711823");
-  assert.equal(findChangeId("(RITM_0042)"), "RITM_0042");
-  // Host names, years and short numbers are not.
+  assert.equal(findChangeId("  CHG0012345 restart DB01"), "CHG0012345");
+  assert.equal(findChangeId("INC-42: reboot"), "INC-42");
+  assert.equal(findChangeId("#1234, see the ticket"), "#1234");
+  assert.equal(findChangeId("4711823 patch"), "4711823");
+  assert.equal(findChangeId("(RITM_0042) rollback"), "RITM_0042");
+  // Anywhere else in the text it is part of the reason only.
+  assert.equal(findChangeId("patch window, CHG0012345."), null);
+  assert.equal(findChangeId("rollback of INC-42"), null);
+  // Product and host names are not change IDs.
+  assert.equal(findChangeId("Patch RHEL9 kernel"), null);
+  assert.equal(findChangeId("Upgrade SQL2019"), null);
+  assert.equal(findChangeId("Enable TLS13"), null);
   assert.equal(findChangeId("restart db01 and web-01"), null);
   assert.equal(findChangeId("Q4 2026 rollout"), null);
   assert.equal(findChangeId("patching"), null);
   assert.equal(findChangeId(""), null);
   assert.equal(findChangeId(`CHG${"1".repeat(70)}`), null);
+});
+
+test("a target's name is never the change ID, whatever its case", () => {
+  assert.equal(findChangeId("Restart DB01", ["DB01"]), null);
+  assert.equal(findChangeId("DB01 restart", ["db01"]), null);
+  assert.equal(findChangeId("SRV42 reboot", ["web-01", " srv42 "]), null);
+  assert.equal(findChangeId("CHG0012345 restart DB01", ["DB01"]), "CHG0012345");
+  assert.equal(findChangeId("CHG0012345 restart", ["web-01"]), "CHG0012345");
 });
 
 test("the field's label follows the steps and the workspace's rule", () => {
@@ -168,12 +182,14 @@ test("the field's label follows the steps and the workspace's rule", () => {
   assert.equal(reasonField([{ step: "confirm" }]).shown, false);
 });
 
-test("the whole text is the reason; the ticket number in it is the change ID", () => {
+test("the whole text is the reason; the ticket number it starts with is the change ID", () => {
   assert.deepEqual(reasonAnswers(HIGH, "  CHG0012345 patch window "), {
     reason: "CHG0012345 patch window",
     changeId: "CHG0012345",
   });
   assert.deepEqual(reasonAnswers(HIGH, "disk full on db01"), { reason: "disk full on db01" });
+  assert.deepEqual(reasonAnswers(HIGH, "Patch RHEL9 kernel"), { reason: "Patch RHEL9 kernel" });
+  assert.deepEqual(reasonAnswers(HIGH, "DB01 restart", ["DB01"]), { reason: "DB01 restart" });
   assert.deepEqual(reasonAnswers(HIGH, ""), { reason: "" });
   // Without a reason step the field is the change ID alone.
   assert.deepEqual(reasonAnswers([{ step: "changeId", required: false }], " my-ticket "), { changeId: "my-ticket" });
@@ -196,6 +212,11 @@ test("Approve says what is missing, in the order the dialog asks", () => {
   const strict = { ...base, steps: required(HIGH) };
   assert.match(approvalProblem(strict) ?? "", /needs one for Prod/);
   assert.equal(approvalProblem({ ...strict, text: "CHG0012345 patch" }), null);
+  // A product or host name at the start doesn't satisfy the rule, nor does a ticket number further on.
+  assert.match(approvalProblem({ ...strict, text: "Patch RHEL9 kernel" }) ?? "", /needs one for Prod/);
+  assert.match(approvalProblem({ ...strict, text: "DB01 restart", targetNames: ["DB01"] }) ?? "", /needs one/);
+  assert.match(approvalProblem({ ...strict, text: "restart, CHG0012345" }) ?? "", /needs one for Prod/);
+  assert.equal(approvalProblem({ ...strict, text: "CHG0012345 restart DB01", targetNames: ["DB01"] }), null);
 
   // AP-06: Critical asks for the vault password.
   const critical = { ...base, steps: [...HIGH, { step: "vaultReauth" } as ApprovalStep] };

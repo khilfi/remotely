@@ -277,12 +277,15 @@ export function ApprovalDialog({
   // AP-01: the approval waited too long and is gone in the core; only Cancel is left.
   const [expired, setExpired] = useState(false);
   const vaultMissing = reauth && (noVault || vault?.status === "notSetUp");
+  // AP-08: a target's name ("DB01") is never taken as the change ID.
+  const targetNames = request.targets.map((t) => t.name);
 
   const notReady = expired
     ? "This approval expired: start the action again"
-    : approvalProblem({ steps, phrase, typed, text, password, busy });
+    : approvalProblem({ steps, phrase, typed, text, password, busy, targetNames });
   const ready = notReady === null;
-  const changeId = field.shown && find(steps, "reason") && find(steps, "changeId") ? findChangeId(text) : null;
+  const changeId =
+    field.shown && find(steps, "reason") && find(steps, "changeId") ? findChangeId(text, targetNames) : null;
   // FD-01: the first answer to type gets the focus, and Enter in any of them approves once all are
   // right (the same as pressing Approve).
   const firstField = phrase ? "confirm" : field.shown ? "reason" : reauth ? "password" : null;
@@ -301,7 +304,7 @@ export function ApprovalDialog({
         // Pressing the approve button is the confirmation (AP-03).
         confirmed: true,
         typedTargetCount: phrase ? typedCount(phrase, typed) : undefined,
-        ...reasonAnswers(steps, text),
+        ...reasonAnswers(steps, text, targetNames),
         safetySnapshot: snapshot ? safetySnapshot : undefined,
         vaultPassword: reauth ? password : undefined,
       };
@@ -607,7 +610,9 @@ export function ApprovalDialog({
                 </p>
               ) : (
                 field.changeIdRequired && (
-                  <p className="text-xs text-muted-foreground">This workspace needs a change ID for Prod.</p>
+                  <p className="text-xs text-muted-foreground">
+                    This workspace needs a change ID for Prod: start with it.
+                  </p>
                 )
               )}
             </div>

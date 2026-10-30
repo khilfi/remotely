@@ -5,9 +5,10 @@
 // - Type to confirm: a lone target's name rather than the number 1; several targets keep the count. While presenting,
 //   names may be masked on screen, so the count is asked then too. The core checks the count either way: the dialog
 //   sends it once the name matches.
-// - One field for the reason and the change ID: the whole text is the reason, and its first word that looks like a
-//   ticket or change number (CHG0012345, INC-42, #1234, 12345) is the change ID. When the workspace requires a change
-//   ID for Prod, Approve waits until the field has one; the core enforces that rule again.
+// - One field for the reason and the change ID: the whole text is the reason, and its first word is the change ID
+//   when it reads as a ticket or change number (CHG0012345, INC-42, #1234, 12345) and isn't a target's name. Only the
+//   first word: "Patch RHEL9 kernel" or "Restart DB01" must not record RHEL9 or DB01 (AP-08). When the workspace
+//   requires a change ID for Prod, Approve waits until the field starts with one; the core enforces that rule again.
 
 import type { ApprovalRequest, ApprovalStep, Target, Tier } from "./api.ts";
 import { MAX_CHANGE_ID } from "./disabled-reasons.ts";
@@ -115,13 +116,18 @@ export function typedCount(phrase: ConfirmPhrase, typed: string): number | undef
 /** A word that reads as a ticket or change number: CHG0012345, INC-42, RITM_7, #1234 or a number of 5 digits or more. */
 const CHANGE_ID_WORD = /^(?:#\d+|\d{5,}|[A-Z]{2,}[A-Z0-9]*[-_]?\d+)$/;
 
-/** The first ticket or change number in the text, or null. */
-export function findChangeId(text: string): string | null {
-  for (const raw of text.split(/\s+/)) {
-    const word = raw.replace(/^[("'[]+|[)"'\],.;:!?]+$/g, "");
-    if ([...word].length <= MAX_CHANGE_ID && CHANGE_ID_WORD.test(word)) return word;
-  }
-  return null;
+/**
+ * The change ID the text starts with, or null: its first word, without the punctuation around it, when that reads as
+ * a ticket or change number and isn't one of `targetNames` (any case). A ticket number later in the text is part of
+ * the reason only.
+ */
+export function findChangeId(text: string, targetNames: readonly string[] = []): string | null {
+  const first = text.trim().split(/\s+/)[0] ?? "";
+  const word = first.replace(/^[("'[]+|[)"'\],.;:!?]+$/g, "");
+  if ([...word].length > MAX_CHANGE_ID || !CHANGE_ID_WORD.test(word)) return null;
+  const lower = word.toLocaleLowerCase();
+  if (targetNames.some((name) => name.trim().toLocaleLowerCase() === lower)) return null;
+  return word;
 }
 
 /** What the field holds for these steps. */
@@ -149,7 +155,7 @@ export function reasonField(steps: readonly ApprovalStep[]): ReasonField {
       : {
           shown: true,
           label: "Reason or change ID",
-          placeholder: "Why, or a ticket such as CHG0012345",
+          placeholder: "Why, or a ticket first: CHG0012345 restart",
           changeIdRequired: false,
         };
   }
@@ -165,8 +171,12 @@ export function reasonField(steps: readonly ApprovalStep[]): ReasonField {
   return { shown: false, label: "", placeholder: "", changeIdRequired: false };
 }
 
-/** The answers the field gives: the reason is the whole text; the change ID is the ticket number in it. */
-export function reasonAnswers(steps: readonly ApprovalStep[], text: string): { reason?: string; changeId?: string } {
+/** The answers the field gives: the reason is the whole text; the change ID is the ticket number it starts with. */
+export function reasonAnswers(
+  steps: readonly ApprovalStep[],
+  text: string,
+  targetNames: readonly string[] = [],
+): { reason?: string; changeId?: string } {
   const trimmed = text.trim();
   const reason = Boolean(step(steps, "reason"));
   const changeId = Boolean(step(steps, "changeId"));
@@ -174,7 +184,7 @@ export function reasonAnswers(steps: readonly ApprovalStep[], text: string): { r
   if (reason) answers.reason = trimmed;
   if (changeId) {
     // Without a reason step the field is the change ID alone.
-    const id = reason ? findChangeId(trimmed) : trimmed || null;
+    const id = reason ? findChangeId(trimmed, targetNames) : trimmed || null;
     if (id) answers.changeId = id;
   }
   return answers;
@@ -189,6 +199,8 @@ export function approvalProblem(input: {
   text: string;
   password: string;
   busy: boolean;
+  /** The targets' names, which are never taken as the change ID. */
+  targetNames?: readonly string[];
 }): string | null {
   const { steps, phrase } = input;
   if (phrase && !confirmMatches(phrase, input.typed)) {
@@ -197,12 +209,12 @@ export function approvalProblem(input: {
       : `Type the number of targets (${phrase.expected}) first`;
   }
   const field = reasonField(steps);
-  const answers = reasonAnswers(steps, input.text);
+  const answers = reasonAnswers(steps, input.text, input.targetNames);
   if (step(steps, "reason") && !answers.reason) {
     return step(steps, "changeId") ? "Give a reason or change ID first" : "Give a reason first";
   }
   if (field.changeIdRequired && !answers.changeId) {
-    return "Add a change ID such as CHG0012345: this workspace needs one for Prod";
+    return "Start with a change ID such as CHG0012345: this workspace needs one for Prod";
   }
   if (answers.changeId && [...answers.changeId].length > MAX_CHANGE_ID) {
     return `A change ID is at most ${MAX_CHANGE_ID} characters`;

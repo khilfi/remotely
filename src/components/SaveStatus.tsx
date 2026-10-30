@@ -19,7 +19,7 @@ import { cn } from "@/lib/utils";
 type State =
   | { kind: "idle" }
   | { kind: "saving" }
-  | { kind: "saved"; undo?: () => Promise<unknown>; undone?: boolean }
+  | { kind: "saved"; undo?: () => Promise<unknown>; undone?: boolean; note?: string }
   | { kind: "error"; text: string };
 
 /** How long "Saved" shows, and with an Undo. */
@@ -28,8 +28,11 @@ const UNDO_MS = 8000;
 
 export interface SaveStatusHandle {
   state: State;
-  /** Saves; on success says "Saved" (with Undo when `undo` is given). Resolves false when the core refused it. */
-  run: (work: () => Promise<unknown>, undo?: () => Promise<unknown>) => Promise<boolean>;
+  /**
+   * Saves; on success says "Saved" (with Undo when `undo` is given), or `note` when the save did more than that (a
+   * shorter history removes older minutes at once, which no Undo brings back). Resolves false when the core refused it.
+   */
+  run: (work: () => Promise<unknown>, undo?: () => Promise<unknown>, note?: string) => Promise<boolean>;
   /** Undoes the last save, when it offered Undo. */
   undo: () => void;
   /** Forgets the last result (a new edit starts). */
@@ -41,15 +44,15 @@ export function useSaveStatus(): SaveStatusHandle {
 
   useEffect(() => {
     if (state.kind !== "saved") return;
-    const timer = window.setTimeout(() => setState({ kind: "idle" }), state.undo ? UNDO_MS : SAVED_MS);
+    const timer = window.setTimeout(() => setState({ kind: "idle" }), state.undo || state.note ? UNDO_MS : SAVED_MS);
     return () => window.clearTimeout(timer);
   }, [state]);
 
-  const run = useCallback(async (work: () => Promise<unknown>, undo?: () => Promise<unknown>) => {
+  const run = useCallback(async (work: () => Promise<unknown>, undo?: () => Promise<unknown>, note?: string) => {
     setState({ kind: "saving" });
     try {
       await work();
-      setState({ kind: "saved", undo });
+      setState({ kind: "saved", undo, note });
       return true;
     } catch (err) {
       setState({ kind: "error", text: errorMessage(err) });
@@ -80,7 +83,7 @@ export function SaveStatus({ status, className }: { status: SaveStatusHandle; cl
       {state.kind === "saved" && (
         <>
           <CheckIcon className="size-3.5 text-success" aria-hidden />
-          <span className="text-muted-foreground">{state.undone ? "Undone" : "Saved"}</span>
+          <span className="text-muted-foreground">{state.note ?? (state.undone ? "Undone" : "Saved")}</span>
           {state.undo && (
             <Button type="button" variant="ghost" size="sm" className="h-7 px-2" onClick={status.undo}>
               Undo

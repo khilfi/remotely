@@ -208,7 +208,7 @@ export const HELP = {
   reasonOrChangeId: {
     title: "Reason and change ID",
     body: [
-      "A few words on why you run it, kept in the audit log. A ticket or change number in them, such as CHG0012345, INC-42 or #1234, is kept as the change ID too, with the job and in the exports.",
+      "A few words on why you run it, kept in the audit log. Start with a ticket or change number, such as CHG0012345, INC-42 or #1234, and it is kept as the change ID too, with the job and in the exports.",
       "A workspace can require a change ID for High and Critical actions on Prod targets.",
     ],
     link: { label: "Approval settings", to: setting("change-ids") },
