@@ -77,6 +77,26 @@ export function isAppLink(value: unknown): value is AppLink {
   return true;
 }
 
+type LinkHandler = (link: AppLink) => void;
+const linkHandlers = new Set<LinkHandler>();
+
+/**
+ * UX-04: opens a link from anywhere, without an `onOpenLink` prop (HelpTip's "Open the setting", say). App listens
+ * with `onLinkRequest` and opens it with `openLink`. Returns false when nothing listens (a test, say).
+ */
+export function requestLink(link: AppLink): boolean {
+  for (const handler of linkHandlers) handler(link);
+  return linkHandlers.size > 0;
+}
+
+/** App's side of `requestLink`; returns the unsubscribe. */
+export function onLinkRequest(handler: LinkHandler): () => void {
+  linkHandlers.add(handler);
+  return () => {
+    linkHandlers.delete(handler);
+  };
+}
+
 /** What a button that opens the link says. */
 export function linkLabel(link: AppLink): string {
   switch (link.kind) {

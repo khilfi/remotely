@@ -40,7 +40,6 @@ import {
   NetworkIcon,
   PlayIcon,
   RecycleIcon,
-  RefreshCwIcon,
   RocketIcon,
   ImportIcon,
   PackageIcon,
@@ -119,6 +118,8 @@ import {
 } from "@/lib/api";
 import { useVisibility } from "@/hooks/use-poll";
 import { CloneDialog } from "@/components/CloneDialog";
+import { PageHeader } from "@/components/PageHeader";
+import { RefreshButton } from "@/components/RefreshButton";
 import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { refreshDue } from "@/lib/job-events";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
@@ -282,7 +283,7 @@ function lowerProdText(prodNames: string[], environment: Environment) {
   const shown = prodNames.slice(0, 5).join(", ") + (prodNames.length > 5 ? ", …" : "");
   const who = prodNames.length === 1 ? prodNames[0] : `${prodNames.length} VMs (${shown})`;
   const change =
-    environment === "none" ? "will lose the Prod label" : `will be labelled ${labelName(environment)} instead of Prod`;
+    environment === "none" ? "will no longer be Prod" : `will be ${labelName(environment)} instead of Prod`;
   const them = prodNames.length === 1 ? "it" : "them";
   return `${who} ${change}. Actions on ${them} will no longer move up one approval tier, so they need fewer approval steps. The change is logged.`;
 }
@@ -972,17 +973,15 @@ export function VmsPage({
       ownClicks: true,
       cell: (vm) => <VmSessionLinks vm={vm} sessions={sessions} onChanged={linksChanged} />,
     },
-    { id: "label", head: sortHead("label", "Label"), cell: (vm) => <EnvBadge env={vm.environment} /> },
+    { id: "label", head: sortHead("label", "Environment"), cell: (vm) => <EnvBadge env={vm.environment} /> },
   ];
   const shownColumns = detailOpen ? columns.filter((c) => !c.wide) : columns;
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
+      <PageHeader page="vms" />
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="outline" onClick={() => setRefreshes((n) => n + 1)} disabled={loading}>
-          <RefreshCwIcon data-icon="inline-start" className={loading ? "animate-spin" : undefined} />
-          Refresh
-        </Button>
+        <RefreshButton variant="outline" size="icon" busy={loading} onClick={() => setRefreshes((n) => n + 1)} />
         <WhyDisabled reason={readOnly}>
           <Button
             variant="outline"
@@ -1325,7 +1324,7 @@ export function VmsPage({
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <FlagIcon />
-                Label
+                Environment
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent className="w-44">
                 <DropdownMenuRadioGroup value={sharedLabel} onValueChange={(v) => chooseLabel(v as Environment)}>
@@ -1349,13 +1348,12 @@ export function VmsPage({
               </div>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuLabel>Do not touch (AP-04)</DropdownMenuLabel>
             <DropdownMenuItem
               disabled={toProtect.length === 0}
               onSelect={() => void submit({ type: "vmProtect", targets: refs(toProtect), protected: true })}
             >
               <ShieldIcon />
-              Protect
+              Mark as Protected
               <DropdownMenuShortcut>{toProtect.length || ""}</DropdownMenuShortcut>
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -1363,7 +1361,7 @@ export function VmsPage({
               onSelect={() => void submit({ type: "vmProtect", targets: refs(toUnprotect), protected: false })}
             >
               <ShieldOffIcon />
-              Unprotect
+              Remove Protected
               <DropdownMenuShortcut>{toUnprotect.length || ""}</DropdownMenuShortcut>
             </DropdownMenuItem>
           </DropdownMenuContent>
@@ -1678,9 +1676,9 @@ export function VmsPage({
       )}
       {dialog?.kind === "lowerProd" && (
         <ConfirmDialog
-          title="Remove the Prod label?"
+          title="Change the environment from Prod?"
           description={lowerProdText(dialog.prodNames, dialog.environment)}
-          confirmLabel={dialog.environment === "none" ? "Remove label" : `Label ${labelName(dialog.environment)}`}
+          confirmLabel={`Set to ${dialog.environment === "none" ? "None" : labelName(dialog.environment)}`}
           onConfirm={() => applyLabel(dialog.vmxPaths, dialog.environment)}
           onClose={() => setDialog(null)}
         />

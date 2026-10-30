@@ -1,6 +1,7 @@
 // Vault (SS-04, AP-06): set it up, unlock and lock it, change the vault password, choose whether the
 // Windows login unlocks it, and add, replace, rename or delete secrets. Values are write-only: this page
-// only ever holds labels, kinds and IDs. SS-09's SSH keys live here too (public keys only).
+// only ever holds labels, kinds and IDs. SS-09's SSH keys live here too (public keys only). UX-08: Known hosts (SS-05)
+// is the page's second tab.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -39,12 +40,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { SECRET_KIND_LABEL } from "@/components/Badges";
+import { PageHeader } from "@/components/PageHeader";
+import { KnownHostsPage } from "@/pages/KnownHostsPage";
+import { HelpTip } from "@/components/HelpTip";
+import { EmptyState } from "@/components/EmptyState";
+import type { VaultTab } from "@/lib/navigation";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { NewPasswordField } from "@/components/NewPasswordField";
@@ -64,6 +70,9 @@ interface Props {
   onVaultChanged: (info: VaultInfo) => void;
   /** True while the page is shown, so the list is read again when the user comes back. */
   active: boolean;
+  /** UX-08: Secrets, or Known hosts (a page of its own until 0.6.0). App keeps the tab, so links can open either. */
+  tab: VaultTab;
+  onTabChange: (tab: VaultTab) => void;
   /** SS-09: a key push goes through the app, which opens the approval dialog. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenSessions: () => void;
@@ -83,7 +92,42 @@ const ADD: { kind: SecretKind; label: string }[] = [
   { kind: "passphrase", label: "Key passphrase" },
 ];
 
-export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSessions }: Props) {
+/** The page: its header with the Secrets and Known hosts tabs. Both stay mounted, as pages do while hidden. */
+export function VaultPage({ tab, onTabChange, active, ...props }: Props) {
+  return (
+    <Tabs value={tab} onValueChange={(v) => onTabChange(v as VaultTab)} className="gap-4">
+      <PageHeader
+        page="vault"
+        tabs={
+          <TabsList>
+            <TabsTrigger value="secrets">
+              <KeyRoundIcon />
+              Secrets
+            </TabsTrigger>
+            <TabsTrigger value="knownHosts">
+              <ShieldCheckIcon />
+              Known hosts
+            </TabsTrigger>
+          </TabsList>
+        }
+      />
+      <TabsContent value="secrets" forceMount className="data-[state=inactive]:hidden">
+        <VaultSecrets {...props} active={active && tab === "secrets"} />
+      </TabsContent>
+      <TabsContent value="knownHosts" forceMount className="data-[state=inactive]:hidden">
+        <KnownHostsPage active={active && tab === "knownHosts"} />
+      </TabsContent>
+    </Tabs>
+  );
+}
+
+function VaultSecrets({
+  vault,
+  onVaultChanged,
+  active,
+  onSubmitted,
+  onOpenSessions,
+}: Omit<Props, "tab" | "onTabChange">) {
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [listVersion, setListVersion] = useState(0);
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -139,17 +183,11 @@ export function VaultPage({ vault, onVaultChanged, active, onSubmitted, onOpenSe
         </CardHeader>
         <CardContent>
           {secrets.length === 0 ? (
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <KeyRoundIcon />
-                </EmptyMedia>
-                <EmptyTitle>No secrets yet</EmptyTitle>
-                <EmptyDescription>
-                  Add them here, or from the session editor when you choose how a session logs in.
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <EmptyState
+              icon={KeyRoundIcon}
+              title="No secrets yet"
+              description="Add them here, or from the session editor when you choose how a session logs in."
+            />
           ) : (
             <div className="rounded-lg border">
               <Table>
@@ -386,10 +424,13 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
               disabled={!vault.windowsLoginAvailable}
             />
             <div className="grid gap-1">
-              <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
+              <span className="flex items-center gap-1">
+                <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
+                <HelpTip topic="windowsUnlock" />
+              </span>
               <p className="text-sm text-muted-foreground">
                 {vault.windowsLoginAvailable
-                  ? "Off by default. One click would then unlock the vault while you are signed in to Windows (DPAPI), but so could any program running under your Windows account, even from a copy of Remotely's database, without the vault password. Turn it on only on a PC that is yours alone."
+                  ? "Off by default. Turn it on only on a PC that's yours alone."
                   : "Not available on this PC; the vault password unlocks it."}
               </p>
             </div>
@@ -491,10 +532,12 @@ function PasswordCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Vault password</CardTitle>
+        <CardTitle className="flex items-center gap-1">
+          Vault password
+          <HelpTip topic="vaultReauth" />
+        </CardTitle>
         <CardDescription>
-          Critical actions ask for it again (AP-06), however the vault was unlocked. Changing it needs the current one,
-          so nobody can replace it from an unlocked Windows session.
+          Changing it needs the current one, so nobody can replace it from an unlocked PC.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -558,10 +601,13 @@ function PasswordCard({
             disabled={!vault.windowsLoginAvailable && !vault.windowsLogin}
           />
           <div className="grid gap-1">
-            <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
+            <span className="flex items-center gap-1">
+              <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
+              <HelpTip topic="windowsUnlock" />
+            </span>
             <p className="text-sm text-muted-foreground">
               {vault.windowsLoginAvailable
-                ? "One click unlocks the vault while you are signed in to this Windows account, and any program running under it could too, without the vault password. Turning it on asks for the vault password; turning it off doesn't."
+                ? "Any program running under your Windows account could unlock it too. Turning it on asks for the vault password."
                 : "Not available on this PC."}
             </p>
           </div>

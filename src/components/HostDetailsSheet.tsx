@@ -15,7 +15,6 @@ import {
   EllipsisIcon,
   HardDriveIcon,
   PackageIcon,
-  RefreshCwIcon,
   ServerIcon,
   ShieldAlertIcon,
 } from "lucide-react";
@@ -44,6 +43,7 @@ import {
   type SessionSpecs,
   type UpdatesCheck,
 } from "@/lib/api";
+import { RefreshButton } from "@/components/RefreshButton";
 import { formatDuration, formatWhen, plural } from "@/lib/format";
 import {
   collectedByText,
@@ -306,12 +306,7 @@ function SystemTab({ sessionId, thresholds }: { sessionId: string; thresholds: T
   };
 
   const current = read?.for === sessionId ? read.value : undefined;
-  const refreshButton = (
-    <Button variant="outline" size="sm" disabled={busy} onClick={refresh}>
-      <RefreshCwIcon data-icon="inline-start" className={busy ? "animate-spin" : undefined} />
-      Refresh
-    </Button>
-  );
+  const refreshButton = <RefreshButton variant="outline" busy={busy} onClick={refresh} />;
 
   return (
     <div className="flex flex-col gap-4">
@@ -590,10 +585,7 @@ function AdminTab({ sessionId }: { sessionId: string }) {
         ) : (
           <span>{failed ? "" : "Reading services, ports, users and processes…"}</span>
         )}
-        <Button className="ml-auto" variant="outline" size="sm" disabled={busy} onClick={() => void read(sessionId)}>
-          <RefreshCwIcon data-icon="inline-start" className={busy ? "animate-spin" : undefined} />
-          Refresh
-        </Button>
+        <RefreshButton className="ml-auto" variant="outline" busy={busy} onClick={() => void read(sessionId)} />
       </div>
       {failed && (
         <Alert variant="destructive">

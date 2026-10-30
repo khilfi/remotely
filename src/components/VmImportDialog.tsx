@@ -444,7 +444,7 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
                   </div>
                 )}
                 <div className="grid gap-2">
-                  <Label htmlFor="import-env">Label</Label>
+                  <Label htmlFor="import-env">Environment</Label>
                   <Select value={environment} onValueChange={(v) => setEnvironment(v as Environment)}>
                     <SelectTrigger id="import-env" className="w-full">
                       <SelectValue />

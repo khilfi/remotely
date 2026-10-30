@@ -19,7 +19,6 @@ import {
   PauseIcon,
   PlayIcon,
   PlusIcon,
-  RefreshCwIcon,
   RotateCwIcon,
   ShieldIcon,
   SquareIcon,
@@ -44,7 +43,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -57,6 +56,8 @@ import { ContainerDetailsPanel, type ContainerView } from "@/components/Containe
 import { ContainerHostDialog } from "@/components/ContainerHostDialog";
 import { ImagesTab, NetworksTab, VolumesTab } from "@/components/ContainerResources";
 import { NameDialog } from "@/components/NameDialog";
+import { EmptyState } from "@/components/EmptyState";
+import { PageHeader } from "@/components/PageHeader";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
@@ -100,6 +101,7 @@ import {
   type StateFilter,
   type StatsRead,
 } from "@/lib/containers";
+import { RefreshButton } from "@/components/RefreshButton";
 import { plural } from "@/lib/format";
 import { shouldPoll } from "@/lib/polling";
 import { usePoll, useVisibility } from "@/hooks/use-poll";
@@ -401,20 +403,17 @@ export function ContainersPage({
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="min-w-0 flex-1">
-          <h2 className="text-lg font-semibold">Containers</h2>
-          <p className="text-sm text-muted-foreground">
-            Docker and Podman on the sessions you mark as container hosts, and Docker Desktop on this PC.
-          </p>
-        </div>
-        <WhyDisabled reason={readOnlyReason}>
-          <Button variant="outline" onClick={() => setDialog({ kind: "host", sessionId: null })} disabled={readOnly}>
-            <PlusIcon data-icon="inline-start" />
-            Add a host…
-          </Button>
-        </WhyDisabled>
-      </div>
+      <PageHeader
+        page="containers"
+        primary={
+          <WhyDisabled reason={readOnlyReason}>
+            <Button onClick={() => setDialog({ kind: "host", sessionId: null })} disabled={readOnly}>
+              <PlusIcon data-icon="inline-start" />
+              Add a host…
+            </Button>
+          </WhyDisabled>
+        }
+      />
 
       {hostsError && (
         <Alert variant="destructive">
@@ -425,29 +424,24 @@ export function ContainersPage({
       )}
 
       {hosts && hosts.length === 0 ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <BoxIcon />
-            </EmptyMedia>
-            <EmptyTitle>No container hosts yet</EmptyTitle>
-            <EmptyDescription>
-              Mark a saved session as a Docker or Podman host, or let Remotely detect what the host has. Docker Desktop
-              on this PC shows here when it is installed (or its docker.exe is set in Settings).
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent className="flex-row justify-center">
-            <WhyDisabled reason={readOnlyReason}>
-              <Button onClick={() => setDialog({ kind: "host", sessionId: null })} disabled={readOnly}>
-                <PlusIcon data-icon="inline-start" />
-                Add a host…
+        <EmptyState
+          icon={BoxIcon}
+          title="No container hosts yet"
+          description="Mark a saved session as a Docker or Podman host. Docker Desktop on this PC shows here once it's found."
+          action={
+            <>
+              <WhyDisabled reason={readOnlyReason}>
+                <Button onClick={() => setDialog({ kind: "host", sessionId: null })} disabled={readOnly}>
+                  <PlusIcon data-icon="inline-start" />
+                  Add a host…
+                </Button>
+              </WhyDisabled>
+              <Button variant="ghost" onClick={onOpenSettings}>
+                Docker Desktop path…
               </Button>
-            </WhyDisabled>
-            <Button variant="outline" onClick={onOpenSettings}>
-              Docker Desktop path…
-            </Button>
-          </EmptyContent>
-        </Empty>
+            </>
+          }
+        />
       ) : (
         <div className="flex min-h-0 flex-1 gap-4">
           <nav aria-label="Container hosts" className="flex w-60 shrink-0 flex-col gap-1 overflow-auto">
@@ -589,15 +583,7 @@ export function ContainersPage({
                     <TabsTrigger value="volumes">Volumes</TabsTrigger>
                     <TabsTrigger value="networks">Networks</TabsTrigger>
                   </TabsList>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    aria-label="Read the host again"
-                    onClick={() => setReads((r) => r + 1)}
-                    disabled={loading}
-                  >
-                    <RefreshCwIcon className={cn(loading && "animate-spin")} />
-                  </Button>
+                  <RefreshButton variant="outline" size="icon" busy={loading} onClick={() => setReads((r) => r + 1)} />
                   <DropdownMenu>
                     <DropdownMenuTrigger asChild>
                       <Button variant="outline">

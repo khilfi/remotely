@@ -98,7 +98,7 @@ export function switchCloses(p: SwitchCounts): string[] {
   if (p.terminals > 0) {
     out.push(`${plural(p.terminals, "terminal closes", "terminals close")}, with their tunnels, logs and transfers.`);
   }
-  if (p.multiexec) out.push("MultiExec stops.");
+  if (p.multiexec) out.push("Type in all tabs stops.");
   if (p.approvals > 0) out.push(`${plural(p.approvals, "approval", "approvals")} waiting for an answer: cancelled.`);
   return out;
 }
@@ -115,9 +115,9 @@ export function releaseReason(
   if (vms.length === 0) return "Select the VMs to take out first.";
   if (activeWorkspaces < 2) return "With one workspace, every VM is in it. Make another workspace first.";
   const locked = vms.find((v) => v.protected);
-  if (locked) return `'${locked.displayName}' is protected: unprotect it first.`;
+  if (locked) return `'${locked.displayName}' is Protected: remove Protected first.`;
   const prod = vms.find((v) => v.environment === "prod");
-  if (prod) return `'${prod.displayName}' is labelled Prod: change its label first.`;
+  if (prod) return `'${prod.displayName}' is Prod: change its environment first.`;
   return null;
 }
 

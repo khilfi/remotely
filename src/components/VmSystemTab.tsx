@@ -5,12 +5,13 @@
 // (VmSettingsTab).
 
 import { useEffect, useState } from "react";
-import { CircleAlertIcon, HardDriveIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
+import { CircleAlertIcon, HardDriveIcon, ServerIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FactList, SystemFacts } from "@/components/HostDetailsSheet";
+import { RefreshButton } from "@/components/RefreshButton";
 import { api, errorMessage, type VmRecord, type VmSpecs } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { collectedByText } from "@/lib/host-details";
@@ -67,19 +68,15 @@ export function VmSystemTab({ vm, thresholds, onHostDetails }: Props) {
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         {specs && <span>Read from the VM&apos;s files {formatWhen(specs.collectedAt)}</span>}
-        <Button
+        <RefreshButton
           className="ml-auto"
           variant="outline"
-          size="sm"
-          disabled={busy}
+          busy={busy}
           onClick={() => {
             setBusy(true);
             void load(key).finally(() => setBusy(false));
           }}
-        >
-          <RefreshCwIcon data-icon="inline-start" className={busy ? "animate-spin" : undefined} />
-          Refresh
-        </Button>
+        />
       </div>
 
       {failed && (

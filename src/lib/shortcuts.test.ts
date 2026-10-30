@@ -6,21 +6,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { DENSITIES, parseDensity } from "./density.ts";
+import { navTarget, shortcutTarget } from "./navigation.ts";
 import {
   filterShortcuts,
   opensShortcutSheet,
+  pageShortcuts,
   SHEET_KEYS,
   SHEET_KEYS_IN_TERMINAL,
   shortcutGroups,
 } from "./shortcuts.ts";
 
-const PAGES = [
-  { label: "Settings", shortcut: "Ctrl+," },
-  { label: "Map", shortcut: "Ctrl+0" },
-  { label: "Virtual machines", shortcut: "Ctrl+1" },
-  { label: "Templates", shortcut: "Ctrl+9" },
-  { label: "Dashboard", shortcut: "Ctrl+2" },
-];
+const PAGES = pageShortcuts();
 
 function press(
   key: string,
@@ -29,27 +25,38 @@ function press(
   return { key, code: "", ctrlKey: true, shiftKey: false, altKey: false, metaKey: false, ...extra };
 }
 
-test("every page's own shortcut is listed, in key order", () => {
+test("the pages are listed in sidebar order, then the tabs that kept their shortcut (UX-08)", () => {
   const pages = shortcutGroups(PAGES).find((g) => g.title === "Pages");
   assert.deepEqual(
-    pages?.shortcuts.map((s) => s.keys),
-    ["Ctrl+1", "Ctrl+2", "Ctrl+9", "Ctrl+0", "Ctrl+,"],
+    pages?.shortcuts.map((s) => `${s.keys} ${s.what}`),
+    [
+      "Ctrl+1 Virtual machines",
+      "Ctrl+2 Templates",
+      "Ctrl+3 Schedules",
+      "Ctrl+4 Sessions",
+      "Ctrl+5 Terminal",
+      "Ctrl+6 Containers",
+      "Ctrl+7 Dashboard",
+      "Ctrl+8 Activity",
+      "Ctrl+9 Vault",
+      "Ctrl+, Settings",
+      "Ctrl+; Templates › Disk images",
+      "Ctrl+0 Dashboard › Map",
+    ],
   );
 });
 
-test("App's pages each have their own shortcut, and every one is on the sheet", () => {
-  // The PAGES list in App.tsx, read as text: a page added there without a shortcut, or with one another page has,
-  // fails here.
+test("every page shortcut on the sheet opens what it says, and none is listed twice", () => {
+  const keys = PAGES.map((p) => p.shortcut);
+  assert.equal(new Set(keys).size, keys.length);
+  for (const p of PAGES) assert.ok(shortcutTarget(p.shortcut.slice(5)), p.shortcut);
+  assert.deepEqual(shortcutTarget("0"), navTarget("map"));
+});
+
+test("App takes its pages from the registry, not a list of its own", () => {
   const app = readFileSync(new URL("../App.tsx", import.meta.url), "utf8");
-  const block = app.slice(app.indexOf("const PAGES"), app.indexOf("];", app.indexOf("const PAGES")));
-  const shortcuts = [...block.matchAll(/shortcut: "([^"]+)"/g)].map((m) => m[1]);
-  const labels = [...block.matchAll(/label: "([^"]+)"/g)].map((m) => m[1]);
-  assert.ok(shortcuts.length >= 11, "the pages are found");
-  assert.equal(shortcuts.length, labels.length, "every page has a shortcut");
-  assert.equal(new Set(shortcuts).size, shortcuts.length, "no two pages share one");
-  const sheet = shortcutGroups(labels.map((label, i) => ({ label, shortcut: shortcuts[i] })));
-  const listed = sheet.flatMap((g) => g.shortcuts.map((s) => s.keys));
-  for (const key of shortcuts) assert.ok(listed.includes(key), key);
+  assert.ok(!/const PAGES\b/.test(app), "App.tsx has no PAGES table of its own");
+  assert.ok(app.includes("pageShortcuts()"), "the sheet's pages come from pageShortcuts");
 });
 
 test("the sheet lists the keys each part of the app handles", () => {
@@ -83,7 +90,7 @@ test("the filter finds shortcuts by their keys or words, and drops empty groups"
   const scroll = filterShortcuts(groups, "scrollback");
   assert.ok(scroll.length >= 1 && scroll.every((g) => g.shortcuts.length > 0));
   assert.ok(scroll.flatMap((g) => g.shortcuts).every((s) => /scrollback/i.test(s.what)));
-  assert.equal(filterShortcuts(groups, "ctrl+0")[0].shortcuts[0].what, "Map");
+  assert.equal(filterShortcuts(groups, "ctrl+0")[0].shortcuts[0].what, "Dashboard › Map");
   assert.equal(filterShortcuts(groups, "").length, groups.length);
   assert.equal(filterShortcuts(groups, "no such key").length, 0);
 });

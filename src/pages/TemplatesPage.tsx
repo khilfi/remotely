@@ -16,10 +16,10 @@ import {
   DiscIcon,
   ExternalLinkIcon,
   FileBoxIcon,
+  FileCogIcon,
   HardDriveIcon,
   LayersIcon,
   LockIcon,
-  MoreHorizontalIcon,
   PencilIcon,
   PlusIcon,
   ServerIcon,
@@ -27,25 +27,23 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EnvBadge } from "@/components/Badges";
+import { EmptyState } from "@/components/EmptyState";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ImageDialog } from "@/components/ImageDialog";
+import { PageHeader } from "@/components/PageHeader";
+import { RowMenu } from "@/components/RowMenu";
+import { Term } from "@/components/Term";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { SizeDialog } from "@/components/SizeDialog";
 import { StacksTab } from "@/components/StacksTab";
 import { TemplateDialog } from "@/components/TemplateDialog";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
+import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import {
   api,
   errorMessage,
@@ -75,7 +73,8 @@ import { plural } from "@/lib/format";
 import { reveal } from "@/lib/reveal";
 import { cn } from "@/lib/utils";
 
-export type TemplatesTab = "sizes" | "images" | "templates" | "stacks";
+/** UX-08: "disks" is Disk images, the Image tools page until 0.6.0. */
+export type TemplatesTab = "sizes" | "images" | "templates" | "stacks" | "disks";
 
 interface Props {
   /** True while the page is shown: it reads the catalogue again when the user comes back. */
@@ -87,6 +86,10 @@ interface Props {
   onDeploy: (templateId: string) => void;
   /** VM-08: the approval dialog for a stack's deploy, an instance's power or a teardown. */
   onSubmitted?: (outcome: SubmitOutcome) => void;
+  /** CV-01: the Import dialog (Disk images' Import as a VM), on a file when one is given. */
+  onImport: (path?: string) => void;
+  /** Disk images: Settings, for qemu-img's path. */
+  onOpenSettings: () => void;
   /** VM-08: changes when a VM job finished, so the instances' states are read again. */
   refreshKey?: number;
 }
@@ -99,9 +102,10 @@ type Dialog =
   | { kind: "deleteImage"; image: Image }
   | { kind: "deleteTemplate"; template: LaunchTemplate };
 
-export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshKey }: Props) {
+export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport, onOpenSettings, refreshKey }: Props) {
   const readOnly = useReadOnlyReason();
   const [tab, setTab] = useState<TemplatesTab>("templates");
+  const submittedHere = useCallback((outcome: SubmitOutcome) => onSubmitted?.(outcome), [onSubmitted]);
   const [stackCreate, setStackCreate] = useState(0);
   const [sizes, setSizes] = useState<Size[]>([]);
   const [images, setImages] = useState<Image[]>([]);
@@ -174,32 +178,35 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshK
 
   return (
     <div className="flex flex-col gap-4">
-      <p className="max-w-3xl text-sm text-muted-foreground">
-        Describe VMs like a cloud provider does: a <span className="font-medium text-foreground">size</span> (CPU, RAM
-        and disks), an <span className="font-medium text-foreground">image</span> (where the OS comes from) and a{" "}
-        <span className="font-medium text-foreground">launch template</span> that puts them together with the network,
-        SSH key, names and what happens after deploy. A <span className="font-medium text-foreground">stack</span>{" "}
-        deploys several launch templates in boot order, as one.
-      </p>
-      <Tabs value={tab} onValueChange={(v) => setTab(v as TemplatesTab)}>
-        <TabsList>
-          <TabsTrigger value="sizes">
-            <HardDriveIcon />
-            Sizes
-          </TabsTrigger>
-          <TabsTrigger value="images">
-            <DiscIcon />
-            Images
-          </TabsTrigger>
-          <TabsTrigger value="templates">
-            <LayersIcon />
-            Launch templates
-          </TabsTrigger>
-          <TabsTrigger value="stacks">
-            <BoxesIcon />
-            Stacks
-          </TabsTrigger>
-        </TabsList>
+      <Tabs value={tab} onValueChange={(v) => setTab(v as TemplatesTab)} className="gap-4">
+        <PageHeader
+          page="templates"
+          tabs={
+            <TabsList>
+              <TabsTrigger value="sizes">
+                <HardDriveIcon />
+                Sizes
+              </TabsTrigger>
+              <TabsTrigger value="images">
+                <DiscIcon />
+                Images
+              </TabsTrigger>
+              <TabsTrigger value="templates">
+                <LayersIcon />
+                Launch templates
+              </TabsTrigger>
+              <TabsTrigger value="stacks">
+                <BoxesIcon />
+                Stacks
+              </TabsTrigger>
+              {/* UX-08: Image tools, as a tab here. */}
+              <TabsTrigger value="disks">
+                <FileCogIcon />
+                Disk images
+              </TabsTrigger>
+            </TabsList>
+          }
+        />
 
         <TabsContent value="sizes" className="flex min-w-0 flex-col gap-3">
           <div className="flex items-center gap-2">
@@ -315,17 +322,11 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshK
             </WhyDisabled>
           </div>
           {loaded && images.length === 0 ? (
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <DiscIcon />
-                </EmptyMedia>
-                <EmptyTitle>No images yet</EmptyTitle>
-                <EmptyDescription>
-                  Add a cloud image or ISO you downloaded, an OVA, or a snapshot of one of your VMs.
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <EmptyState
+              icon={DiscIcon}
+              title="No images yet"
+              description="Add a cloud image or ISO you downloaded, an OVA, or a snapshot of one of your VMs."
+            />
           ) : (
             <div className="rounded-lg border">
               <Table>
@@ -445,18 +446,16 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshK
             </WhyDisabled>
           </div>
           {loaded && templates.length === 0 ? (
-            <Empty className="border">
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <FileBoxIcon />
-                </EmptyMedia>
-                <EmptyTitle>No launch templates yet</EmptyTitle>
-                <EmptyDescription>
-                  A template is an image and a size with a network, SSH key, naming pattern and after-deploy steps.
-                  {images.length === 0 && " Add an image first."}
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <EmptyState
+              icon={FileBoxIcon}
+              title="No launch templates yet"
+              description={
+                <>
+                  A <Term id="launchTemplate">launch template</Term> is an image and a size with a network, SSH key and
+                  names.{images.length === 0 && " Add an image first."}
+                </>
+              }
+            />
           ) : (
             <div className="rounded-lg border">
               <Table>
@@ -606,6 +605,15 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshK
             createRequest={stackCreate}
           />
         </TabsContent>
+
+        <TabsContent value="disks" className="flex min-w-0 flex-col gap-3">
+          <ImageToolsPage
+            active={active && tab === "disks"}
+            onSubmitted={submittedHere}
+            onImport={onImport}
+            onOpenSettings={onOpenSettings}
+          />
+        </TabsContent>
       </Tabs>
 
       {dialog?.kind === "size" && (
@@ -682,19 +690,6 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshK
         />
       )}
     </div>
-  );
-}
-
-function RowMenu({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${label}`}>
-          <MoreHorizontalIcon />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end">{children}</DropdownMenuContent>
-    </DropdownMenu>
   );
 }
 

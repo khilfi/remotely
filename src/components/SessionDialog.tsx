@@ -42,6 +42,7 @@ import {
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
+import { HelpTip } from "@/components/HelpTip";
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { withVaultPassword } from "@/lib/reauth-prompt";
 import { forwardsProblem, jumpChain, routeText, toInput } from "@/lib/tunnels";
@@ -97,7 +98,7 @@ function labelName(env: Environment) {
 /** What the confirm says before a Prod session loses the label. */
 function lowerProdText(name: string, environment: Environment) {
   const change =
-    environment === "none" ? "will lose the Prod label" : `will be labelled ${labelName(environment)} instead of Prod`;
+    environment === "none" ? "will no longer be Prod" : `will be ${labelName(environment)} instead of Prod`;
   return `'${name}' ${change}. Actions on it will no longer move up one approval tier, so they need fewer approval steps. The change is logged.`;
 }
 
@@ -624,10 +625,9 @@ export function SessionDialog({
                   <SelectItem value="off">Off</SelectItem>
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">
-                In bash and zsh, Remotely types a one-line hook at the first prompt so Files here follows the
-                shell&apos;s folder. It sets PROMPT_COMMAND (or a zsh precmd hook) and runs id -un, and is logged in the
-                audit log. Off, Files here starts in the home folder.
+              <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                Lets Files here follow the shell&apos;s folder in bash and zsh.
+                <HelpTip topic="promptHook" />
               </p>
             </div>
 
@@ -662,7 +662,7 @@ export function SessionDialog({
               {inherited?.inherited.environment && (
                 <p className="text-xs text-muted-foreground">
                   {environment === "none"
-                    ? `Labelled ${labelName(inherited.environment)} by folder '${inherited.inherited.environment.name}'.`
+                    ? `${labelName(inherited.environment)}, from folder '${inherited.inherited.environment.name}'.`
                     : `Overrides ${labelName(inherited.environment)} from folder '${inherited.inherited.environment.name}'.`}
                 </p>
               )}
@@ -670,6 +670,7 @@ export function SessionDialog({
                 {effectiveEnvironment === "prod"
                   ? "Prod raises the approval tier of every action on this session by one."
                   : "Shown on the session's tab. Prod raises the approval tier of actions on it."}
+                <HelpTip topic="prodTier" />
               </p>
             </div>
 
@@ -778,9 +779,9 @@ export function SessionDialog({
       )}
       {lowerProd && session && (
         <ConfirmDialog
-          title="Remove the Prod label?"
+          title="Change the environment from Prod?"
           description={lowerProdText(session.name, environment)}
-          confirmLabel={environment === "none" ? "Remove label" : `Label ${labelName(environment)}`}
+          confirmLabel={`Set to ${environment === "none" ? "None" : labelName(environment)}`}
           onConfirm={persist}
           onClose={() => setLowerProd(false)}
         />

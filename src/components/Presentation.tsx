@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage } from "@/lib/api";
 import { READ_ONLY_REASON } from "@/lib/disabled-reasons";
 import { workspacesApi } from "@/lib/workspaces-api";
@@ -194,8 +195,7 @@ export function PresentationButton() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">
         <DropdownMenuLabel className="font-normal text-muted-foreground">
-          Host names, IP addresses, user names and your Windows user name in paths are masked on screen. Copies, saved
-          output, session logs and exports keep the real text; printing (its preview is on screen) is masked.
+          Host names, IP addresses and user names are masked on screen. Copies and exports keep the real text.
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuCheckboxItem
@@ -235,20 +235,18 @@ export function PresentationCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Presentation mode</CardTitle>
-        <CardDescription>
-          For screen shares: masks host names, IP addresses, user names and your Windows user name in paths everywhere
-          on screen, with stand-ins such as host-3 or ip-5 that stay the same until Remotely closes. Remotely starts
-          presenting if it was presenting when it closed. Starting and stopping are in the audit log.
-        </CardDescription>
+        <CardTitle className="flex items-center gap-1">
+          Presentation mode
+          <HelpTip topic="presentationMode" />
+        </CardTitle>
+        <CardDescription>For screen shares: host names, IP addresses and user names show as stand-ins.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
         <div className="flex items-start justify-between gap-4">
           <Label htmlFor="presenting" className="grid gap-1">
             <span>Present</span>
             <span className="text-xs font-normal text-muted-foreground">
-              Copies and saved terminal output, session logs and exports keep the real text; printing is masked, since
-              its preview is on screen. Windows file dialogs show real paths.
+              Windows file dialogs still show real paths.
             </span>
           </Label>
           <Switch
@@ -258,13 +256,15 @@ export function PresentationCard() {
           />
         </div>
         <div className="flex items-start justify-between gap-4">
-          <Label htmlFor="read-only-lock" className="grid gap-1">
-            <span>Read-only lock while presenting</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              Blocks power actions, snapshots, commands, MultiExec, uploads, tunnels, key pushes, imports, edits of
-              sessions and settings, and updates. Reading, downloads and typing into one terminal still work.
-            </span>
-          </Label>
+          <div className="flex items-start gap-1">
+            <Label htmlFor="read-only-lock" className="grid gap-1">
+              <span>Read-only lock while presenting</span>
+              <span className="text-xs font-normal text-muted-foreground">
+                Blocks every change; reading and typing into one terminal still work.
+              </span>
+            </Label>
+            <HelpTip topic="readOnlyLock" />
+          </div>
           <Switch id="read-only-lock" checked={view.readOnly} onCheckedChange={(on) => requestReadOnlyLock(on)} />
         </div>
         <div className="flex items-start justify-between gap-4">
@@ -303,7 +303,8 @@ export function ReadOnlyNotice({ blocked, still }: { blocked: string; still?: st
 /** What the read-only lock blocks on each page, for its notice (the Terminal page says it in its toolbar). */
 export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }> = {
   vms: {
-    blocked: "Power actions, snapshots (taking, reverting and deleting), protection, tags, labels and saved filters",
+    blocked:
+      "Power actions, snapshots (taking, reverting and deleting), Protected, tags, environments and saved filters",
     still: "Refreshing, reading the list and each VM's details and snapshots still work.",
   },
   templates: {
@@ -324,10 +325,9 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     blocked: "New sessions, edits, folders, imports, links to VMs and port forwards",
     still: "Connecting and exporting still work.",
   },
-  knownHosts: { blocked: "Removing trusted keys", still: "A new host's key can still be trusted when you connect." },
   vault: {
-    blocked: "Adding, replacing, renaming and deleting secrets, the vault password and SSH keys",
-    still: "Locking and unlocking the vault still work.",
+    blocked: "Adding, replacing, renaming and deleting secrets, the vault password, SSH keys and trusted host keys",
+    still: "Locking and unlocking the vault, and trusting a new host's key when you connect, still work.",
   },
   activity: { blocked: "Retrying and starting jobs", still: "Reading and exporting the audit log still work." },
   settings: {

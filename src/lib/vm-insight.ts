@@ -179,7 +179,7 @@ const EVENT_LABELS: Record<string, string> = {
   job_finished: "Finished",
   job_cancelled: "Cancelled",
   canary_go_on: "Went on after the first host",
-  vm_label_changed: "Label changed",
+  vm_label_changed: "Environment changed",
   vm_console_opened: "Console opened",
 };
 

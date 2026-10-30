@@ -370,7 +370,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                       <TableHead>Address</TableHead>
                       <TableHead>Folder</TableHead>
                       <TableHead>Login</TableHead>
-                      <TableHead>Label</TableHead>
+                      <TableHead>Environment</TableHead>
                       <TableHead>Status</TableHead>
                     </TableRow>
                   </TableHeader>

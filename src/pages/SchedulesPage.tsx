@@ -21,7 +21,6 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -30,6 +29,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { TierBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { EmptyState } from "@/components/EmptyState";
+import { PageHeader } from "@/components/PageHeader";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { ScheduleDialog } from "@/components/ScheduleDialog";
 import { OutcomeBadge, ScheduleRunsSheet } from "@/components/ScheduleRunsSheet";
@@ -177,45 +178,37 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
 
   return (
     <div className="grid gap-4">
-      <div className="flex items-start gap-4">
-        <p className="flex-1 text-sm text-muted-foreground">
-          Snapshots and power on a timetable, and suspending idle VMs. Each schedule is approved when it is saved; each
-          run goes through the same checks under that approval and is audited as one of its runs.
-        </p>
-        {/* The empty list has its own button. */}
-        {schedules && schedules.length > 0 && (
-          <WhyDisabled reason={readOnly}>
-            <Button size="sm" disabled={readOnly !== null} onClick={() => void openEditor({})}>
-              <PlusIcon data-icon="inline-start" />
-              New schedule
-            </Button>
-          </WhyDisabled>
-        )}
-      </div>
-
-      {error && <p className="text-sm text-destructive">{error}</p>}
-      {!schedules && !error && <Skeleton className="h-32 w-full" />}
-      {schedules?.length === 0 && (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <CalendarClockIcon />
-            </EmptyMedia>
-            <EmptyTitle>No schedules yet</EmptyTitle>
-            <EmptyDescription>
-              Take nightly snapshots and keep the last few, start a lab at 08:00 and suspend it at 19:00, or suspend VMs
-              that sit idle.
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
+      <PageHeader
+        page="schedules"
+        primary={
+          // The empty list has its own button.
+          schedules && schedules.length > 0 ? (
             <WhyDisabled reason={readOnly}>
-              <Button size="sm" disabled={readOnly !== null} onClick={() => void openEditor({})}>
+              <Button disabled={readOnly !== null} onClick={() => void openEditor({})}>
                 <PlusIcon data-icon="inline-start" />
                 New schedule
               </Button>
             </WhyDisabled>
-          </EmptyContent>
-        </Empty>
+          ) : undefined
+        }
+      />
+
+      {error && <p className="text-sm text-destructive">{error}</p>}
+      {!schedules && !error && <Skeleton className="h-32 w-full" />}
+      {schedules?.length === 0 && (
+        <EmptyState
+          icon={CalendarClockIcon}
+          title="No schedules yet"
+          description="Take nightly snapshots, start a lab at 08:00 and suspend it at 19:00, or suspend idle VMs."
+          action={
+            <WhyDisabled reason={readOnly}>
+              <Button disabled={readOnly !== null} onClick={() => void openEditor({})}>
+                <PlusIcon data-icon="inline-start" />
+                New schedule
+              </Button>
+            </WhyDisabled>
+          }
+        />
       )}
       {schedules && schedules.length > 0 && (
         <div className="overflow-auto rounded-md border">

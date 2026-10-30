@@ -2,7 +2,7 @@
 
 A Windows desktop app for forward deployed engineers and IT admins: bulk control of VMware Workstation Pro VMs (and, from 0.4.0, Oracle VirtualBox VMs), a performance dashboard, a PuTTY/MobaXterm-style SSH session manager, and bulk command execution with grouped output, with multi-step approvals on every high-impact action.
 
-The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work after the MVP (0.2.1 and 0.3.0), which moves some v2/v3 items into scope and replaces the Bulk run page with MultiExec and Compare in the Terminal page, `docs/plan-0.4.md` for 0.4.0 (VirtualBox, containers, host details, MultiExec recording and terminal fixes), and `docs/plan-0.5.md` for 0.5.0 (VM sizes, images and launch templates with deploy, full VM settings and lifecycle, VM and disk conversion, stacks, schedules, dashboard history and alerts, navigation, customer workspaces), and `docs/plan-0.6.md` for 0.6.0 (decluttering the UI so it reads without a manual) and 0.7.0 (toolbox and health checks, Windows and network gear, notes and favourites, handover and reports). Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx, QL-xx for post-MVP quality-of-life items, CT-xx for containers, CV-xx for conversion, and UX-xx for the 0.6.0 declutter); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
+The source of truth is `docs/PRD.md`, plus `docs/post-mvp-plan.md` for the work after the MVP (0.2.1 and 0.3.0), which moves some v2/v3 items into scope and replaces the Bulk run page with MultiExec and Compare in the Terminal page, `docs/plan-0.4.md` for 0.4.0 (VirtualBox, containers, host details, MultiExec recording and terminal fixes), and `docs/plan-0.5.md` for 0.5.0 (VM sizes, images and launch templates with deploy, full VM settings and lifecycle, VM and disk conversion, stacks, schedules, dashboard history and alerts, navigation, customer workspaces), and `docs/plan-0.6.md` for 0.6.0 (decluttering the UI so it reads without a manual; the UI rules under Conventions) and 0.7.0 (toolbox and health checks, Windows and network gear, notes and favourites, handover and reports). Requirements have IDs (VM-xx, SS-xx, BX-xx, AP-xx, MO-xx, FD-xx, QL-xx for post-MVP quality-of-life items, CT-xx for containers, CV-xx for conversion, and UX-xx for the 0.6.0 declutter); refer to them in code comments, tests and commit messages. The PRD uses the working title "VM & SSH Manager"; the product name is **Remotely** (app identifier `com.remotely.desktop`).
 
 ## Locked decisions
 
@@ -603,16 +603,25 @@ src/                  React + TypeScript UI
                       VM-27 ScheduleDialog (the core's preview of next runs and warnings), ScheduleRunsSheet,
                       VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
-                      after a switch), UnassignedVmsSheet; AP-08 ChangeIdCard and the approval dialog's Change ID)
-  pages/              one file per page (bulk execution is in TerminalPage: MultiExec and Compare output; QL-14 VmsPage
+                      after a switch), UnassignedVmsSheet; AP-08 ChangeIdCard and the approval dialog's Change ID;
+                      UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
+                      PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
+                      RefreshButton)
+  pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
+                      hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
-                      ContainersPage at Ctrl+3; TemplatesPage at Ctrl+9: VM-19 to VM-21 sizes, images and launch
+                      UX-08 the sidebar's order and shortcuts are lib/navigation.ts's: Machines (VMs Ctrl+1, Templates
+                      Ctrl+2, Schedules Ctrl+3), Remote (Sessions Ctrl+4, Terminal Ctrl+5, Containers Ctrl+6),
+                      Overview (Dashboard Ctrl+7, Activity Ctrl+8), then Vault Ctrl+9 and Settings Ctrl+,;
+                      TemplatesPage: VM-19 to VM-21 sizes, images and launch
                       templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
                       VM-21 and VM-10, Import... and the selection's Export..., CV-01 and VM-17; ImageToolsPage
-                      at Ctrl+; after Templates: CV-03 Inspect, Convert, Verify, the tools found and
-                      QEMU's link; MapPage at Ctrl+0: QL-21 HTML nodes over an SVG of lines only, so FD-03's
-                      DOM masking covers it; SchedulesPage at Ctrl+. (VM-14, VM-27; no Ctrl+digit was left), also from the palette and a
-                      VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
+                      (UX-08: the Templates page's Disk images tab, Ctrl+; still opens it): CV-03 Inspect, Convert,
+                      Verify, the tools found and QEMU's link; MapPage (UX-08: the Dashboard's Map tab, Ctrl+0 still
+                      opens it): QL-21 HTML nodes over an SVG of lines only, so FD-03's DOM masking covers it;
+                      KnownHostsPage (UX-08: the Vault page's Known hosts tab); App keeps the Dashboard's and Vault's
+                      tab so links open either; SchedulesPage (VM-14, VM-27; Ctrl+. still opens it), also from the
+                      palette and a VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
                       take a request to show one item (Sessions `focus`, Activity `focusJob`, Settings `focus` by
                       settings-index.ts, Containers `request`, Terminal `focusRequest` and `snippetRequest`,
                       Templates `request.id`). P6: App memoises every page and passes
@@ -647,8 +656,13 @@ src/                  React + TypeScript UI
                       polled less often keeps its line on a VM's charts), terminal-render.ts (SS-03 WebGL for panes on
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
-                      navigation.ts (page shortcuts by page; the old Snapshots id opens the VM page's snapshot view;
-                      Containers has Ctrl+3, Templates Ctrl+9, Map Ctrl+0, Image tools Ctrl+;), catalog.ts (VM-19
+                      navigation.ts (UX-08 the page registry: ids, sidebar names (the headers' titles), groups and
+                      shortcuts in sidebar order; MOVED_PAGES: the old Snapshots, Image tools, Map and Known hosts ids
+                      open their home page's view or tab, and OLD_SHORTCUTS the 0.5.0 shortcuts no page took),
+                      help.ts (UX-04 the help registry: every explanation longer than a line, by key, for HelpTip and
+                      the headers' "?"), glossary.ts (UX-05 one sentence per term, for Term and the palette's Terms),
+                      tips.ts (UX-09 dismissed tips in local storage), requirement-ids.test.ts (UX-06 no requirement
+                      ID in any UI string), links.ts's requestLink (a link opened without an onOpenLink prop), catalog.ts (VM-19
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
                       wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
@@ -1055,3 +1069,35 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   data never lands in a Git working tree. Free text kept in the journal or the audit log goes through
   `export::redact_secrets` (the audit store and `Command::for_journal` already do it).
 - Commit messages start with the requirement ID where one applies, e.g. `VM-02: bulk suspend and resume`.
+
+### UI rules (0.6.0, UX-01 to UX-13; `docs/plan-0.6.md`)
+
+Every page and dialog follows these; a change that can't says why in its PR.
+
+- **Header.** A page opens with `PageHeader` (`src/components/PageHeader.tsx`): the title from the page registry
+  (`src/lib/navigation.ts`, so it matches the sidebar), its "?" (`help`, `page.<id>` by default), search and filters as
+  `children`, at most one `primary` button, everything else page-wide in `tools` (the "⋯" menu), and tabs as a `TabsList`
+  in `tabs`. A new page goes in the registry, in its sidebar group, and gets a `page.<id>` help entry.
+- **One primary per view.** One filled (default variant) button per page, dialog or empty state. Buttons use three
+  variants (default for the primary, `outline` for secondary, `ghost` for toolbars, rows and menus; `destructive` only
+  for a delete's confirm) and two sizes (`default`, `sm`, with `icon`/`icon-sm` for icon buttons). Icon buttons have an
+  `aria-label` and a tooltip; refreshing is always `RefreshButton` (the tooltip "Refresh").
+- **Selection bar.** Bulk actions show only while rows are selected, in `SelectionBar` ("N selected", ghost `sm`
+  actions, ✕ and Esc to clear), which replaces the page's search row. Never a bulk bar that sits there disabled.
+- **Row menu.** Every list's row actions are one `RowMenu` (the "⋯", `ghost` `icon-sm`, "Actions for <name>"). A row's
+  main action may also be its click or a hover icon, never a third copy; each action has one home plus the palette.
+- **Help budget.** At most one line of help shows by default per card, dialog, alert or empty state. More goes in a
+  `HelpTip` (`src/components/HelpTip.tsx`) whose text is one entry of `src/lib/help.ts`, written once and referenced by
+  key; an explanation needed in two places is one key. A term of the app's own gets a `Term` (`src/components/Term.tsx`,
+  `src/lib/glossary.ts`, one sentence each) where it first shows. Shortcut lists live in the shortcut sheet (Ctrl+/),
+  not in footers.
+- **Empty states.** `EmptyState` (`src/components/EmptyState.tsx`): a title naming the space ("No images yet"), one
+  line on what it is for, and the one action that fills it. A disabled control says why next to it (`WhyDisabled`).
+- **Tips.** A first use that needs a sentence of guidance gets a one-time `Tip` (`src/components/Tip.tsx`, id
+  `<page>.<what>`); Settings › General's "Show tips again" resets them. Never a tour.
+- **Copy.** Sentence case everywhere (titles, buttons, menu items, tabs); buttons start with a verb ("Add an image",
+  "Deploy"); one name per concept: **Protected**, **Environment**, **Compare hosts**, **Type in all tabs** (code keeps
+  `multiExec`), page names as in the sidebar. No requirement IDs in anything shown (`src/lib/requirement-ids.test.ts`
+  fails the build on one in a string or JSX text; comments keep them), no "please" or "successfully", no internal names
+  (`AP-04`, `DPAPI`, `AES-256-GCM`) where a plain word does, and status in words ("2 snapshots · OK"), with rules in a
+  tooltip.

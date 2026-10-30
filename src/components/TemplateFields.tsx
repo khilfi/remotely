@@ -373,7 +373,7 @@ export function TemplateFields({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-xs text-muted-foreground">Only its public half goes to the VMs (SS-09).</p>
+          <p className="text-xs text-muted-foreground">Only its public half goes to the VMs.</p>
         </div>
       </div>
 
@@ -397,7 +397,7 @@ export function TemplateFields({
 
       <div className="grid grid-cols-2 gap-3">
         <div className="grid gap-2">
-          <Label>Environment label</Label>
+          <Label>Environment</Label>
           <ToggleGroup
             type="single"
             variant="outline"
@@ -412,7 +412,7 @@ export function TemplateFields({
             ))}
           </ToggleGroup>
           {value.environment === "prod" && (
-            <p className="text-xs text-muted-foreground">Deploying VMs labelled Prod needs a High approval.</p>
+            <p className="text-xs text-muted-foreground">Deploying Prod VMs needs a High approval.</p>
           )}
         </div>
         <div className="grid gap-2">

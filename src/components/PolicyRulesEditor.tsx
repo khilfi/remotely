@@ -25,18 +25,19 @@ import {
   type Tier,
   type TierRule,
 } from "@/lib/api";
+import { HelpTip } from "@/components/HelpTip";
 import { withVaultPassword } from "@/lib/reauth-prompt";
 
 const TIERS: Tier[] = ["low", "medium", "high", "critical"];
 
-// `exec`: the bulk tier applies from the threshold for commands on hosts (Compare and MultiExec, BX-06).
+// `exec`: the bulk tier applies from the threshold for commands on hosts (Compare hosts and Type in all tabs, BX-06).
 const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean; deploy?: boolean }[] = [
   {
     title: "VM power",
     kinds: ["vmStart", "vmUnpause", "vmPause", "vmSuspend", "vmResetSoft", "vmStopSoft", "vmResetHard", "vmStopHard"],
   },
   { title: "Snapshots", kinds: ["snapshotTake", "snapshotRevert", "snapshotDelete"] },
-  { title: "Do not touch", kinds: ["vmProtect", "vmUnprotect"] },
+  { title: "Protected", kinds: ["vmProtect", "vmUnprotect"] },
   {
     title: "VM settings and lifecycle",
     kinds: [
@@ -180,12 +181,11 @@ export function PolicyRulesEditor() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Approval rules</CardTitle>
-        <CardDescription>
-          Every action that changes something gets a risk tier, and the tier decides the steps before it runs. Low:
-          none, only logged. Medium: one confirm. High: impact preview, safety snapshot, type the number of targets, a
-          reason and a countdown. Critical: all of those, then the vault password again.
-        </CardDescription>
+        <CardTitle className="flex items-center gap-1">
+          Approval rules
+          <HelpTip topic="approvalTiers" />
+        </CardTitle>
+        <CardDescription>The tier each action gets, and so the steps before it runs.</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-6">
         <div className="rounded-md border">
@@ -264,7 +264,7 @@ export function PolicyRulesEditor() {
                 value={draft.execBulkThreshold}
                 onChange={(e) => update({ execBulkThreshold: Number(e.currentTarget.value) })}
               />
-              <span className="text-sm text-muted-foreground">hosts (Compare and MultiExec)</span>
+              <span className="text-sm text-muted-foreground">hosts (Compare hosts and Type in all tabs)</span>
             </div>
           </div>
           <div className="grid gap-2">
@@ -303,7 +303,7 @@ export function PolicyRulesEditor() {
               checked={draft.prodBump}
               onCheckedChange={(checked) => update({ prodBump: checked })}
             />
-            <Label htmlFor="prod-bump">A target labelled Prod raises the tier by one</Label>
+            <Label htmlFor="prod-bump">A Prod target raises the tier by one</Label>
           </div>
           <div className="flex items-center gap-3">
             <Switch

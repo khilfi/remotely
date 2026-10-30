@@ -22,7 +22,6 @@ import {
   EllipsisIcon,
   FolderIcon,
   FolderOpenIcon,
-  RefreshCwIcon,
   SearchIcon,
   TagIcon,
 } from "lucide-react";
@@ -37,6 +36,7 @@ import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ColorDot } from "@/components/Badges";
+import { RefreshButton } from "@/components/RefreshButton";
 import { jumpChain, routeText, viaText, type JumpLink } from "@/lib/tunnels";
 import {
   api,
@@ -60,7 +60,7 @@ const OPEN_BY_DEFAULT_UP_TO = 40;
 const GROUPINGS: { value: TreeGrouping; label: string }[] = [
   { value: "folder", label: "Folders" },
   { value: "tag", label: "Tags" },
-  { value: "label", label: "Labels" },
+  { value: "label", label: "Environments" },
 ];
 
 const ENV_TEXT: Record<Environment, string> = {
@@ -240,7 +240,7 @@ export function SessionTree({
           className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-md pr-2 text-left text-sm hover:bg-accent [&_svg]:size-3.5 [&_svg]:shrink-0"
           style={{ paddingLeft: `${0.25 + depth * 0.75}rem` }}
           aria-expanded={expanded}
-          title="Ctrl+click picks all its sessions for Compare output"
+          title="Ctrl+click picks all its sessions for Compare hosts"
           onClick={(e) => (e.ctrlKey || e.metaKey ? togglePicks(sessionsUnder(node)) : toggle(node.key))}
         >
           <ChevronRightIcon className={cn("text-muted-foreground transition-transform", expanded && "rotate-90")} />
@@ -276,15 +276,7 @@ export function SessionTree({
             onKeyDown={(e) => e.key === "Escape" && setText("")}
           />
         </div>
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          aria-label="Reload the sessions"
-          title="Reload the sessions"
-          onClick={() => setReloads((n) => n + 1)}
-        >
-          <RefreshCwIcon />
-        </Button>
+        <RefreshButton onClick={() => setReloads((n) => n + 1)} />
       </div>
       <ToggleGroup
         type="single"
@@ -353,7 +345,7 @@ export function SessionTree({
           </span>
           <Button size="xs" variant="outline" className="ml-auto" onClick={onCompare}>
             <GitCompareArrowsIcon data-icon="inline-start" />
-            Compare output…
+            Compare hosts…
           </Button>
           <Button size="xs" variant="ghost" onClick={() => onPicksChange([])}>
             Clear
@@ -452,8 +444,8 @@ function SessionRow({
     via.length > 0 && `Through ${routeText(via)}`,
     seen && `Last seen as ${seen}, ${formatWhen(session.lastSeenAt)}`,
     reachText(reach),
-    checked && "Picked for Compare output",
-    "Double-click to open; Ctrl+click to pick for Compare output",
+    checked && "Picked for Compare hosts",
+    "Double-click to open; Ctrl+click to pick for Compare hosts",
   ]
     .filter(Boolean)
     .join("\n");
@@ -477,7 +469,7 @@ function SessionRow({
       }}
     >
       {checked ? (
-        <CheckIcon className="size-3 shrink-0 text-primary" aria-label="Picked for Compare output" />
+        <CheckIcon className="size-3 shrink-0 text-primary" aria-label="Picked for Compare hosts" />
       ) : (
         <ReachDot reach={reach} />
       )}
@@ -506,7 +498,7 @@ function SessionRow({
         <DropdownMenuContent align="start">
           <DropdownMenuItem onSelect={onOpen}>Open in a new tab</DropdownMenuItem>
           <DropdownMenuItem onSelect={onToggleCheck}>
-            {checked ? "Unpick for Compare output" : "Pick for Compare output"}
+            {checked ? "Unpick for Compare hosts" : "Pick for Compare hosts"}
           </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() => void navigator.clipboard?.writeText(sessionAddress(session)).catch(() => undefined)}

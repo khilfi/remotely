@@ -6,6 +6,8 @@
 // read: it goes straight to the core's metrics collector, never through the command bus. Actions open the command
 // palette, which submits to the bus like every other page.
 //
+// UX-08: the Map (QL-21's page until 0.6.0) is the Dashboard's second tab.
+//
 // P8: the page follows the core's rounds only while it shows and the window is visible (shouldPoll): hidden, it reads
 // nothing and renders nothing each round; shown again, it reads once at once and then follows the rounds. Each widget
 // reads only while it is on the dashboard, and none while the layout is being customized.
@@ -19,6 +21,7 @@ import {
   GaugeIcon,
   LayoutDashboardIcon,
   MonitorIcon,
+  NetworkIcon,
   PlusIcon,
   RotateCcwIcon,
   SearchIcon,
@@ -44,6 +47,7 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -57,6 +61,7 @@ import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { MetricCell } from "@/components/MetricBits";
 import { MetricChartWidget } from "@/components/MetricChartWidget";
 import { MetricsDetail } from "@/components/MetricsDetail";
+import { PageHeader } from "@/components/PageHeader";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { ServicesWidget } from "@/components/ServicesWidget";
 import { SortableHead } from "@/components/SortableHead";
@@ -79,6 +84,7 @@ import { addWidget, cannotAdd, WIDGET_CHOICES, widgetTitle, type WidgetKindName 
 import { formatWhen, plural } from "@/lib/format";
 import { specsSummary } from "@/lib/host-details";
 import { hypervisorName } from "@/lib/hypervisors";
+import type { AppLink } from "@/lib/links";
 import {
   compareNullsLast as compare,
   DEFAULT_THRESHOLDS,
@@ -98,12 +104,19 @@ import {
   useThresholds,
   type Thresholds,
 } from "@/lib/metrics";
+import type { DashboardTab } from "@/lib/navigation";
 import { shouldPoll } from "@/lib/polling";
 import type { ResolvedTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { MapPage } from "@/pages/MapPage";
 
 interface Props {
   active: boolean;
+  /** UX-08: Metrics, or the Map (App keeps the tab, so links can open either). */
+  tab: DashboardTab;
+  onTabChange: (tab: DashboardTab) => void;
+  /** The map's nodes open their items. */
+  onOpenLink: (link: AppLink) => void;
   theme: ResolvedTheme;
   /** From the command palette: open this row's drill-down. */
   focus: { key: string; n: number } | null;
@@ -133,11 +146,11 @@ const COLUMNS: { key: SortKey; label: string; className?: string; hint?: string 
 ];
 
 const ENVIRONMENTS: { value: Environment | "all"; label: string }[] = [
-  { value: "all", label: "All labels" },
+  { value: "all", label: "All environments" },
   { value: "prod", label: "Prod" },
   { value: "staging", label: "Staging" },
   { value: "lab", label: "Lab" },
-  { value: "none", label: "No label" },
+  { value: "none", label: "None" },
 ];
 
 function sum(a: number | null, b: number | null) {
@@ -436,7 +449,7 @@ function OverviewWidget({
           </ToggleGroupItem>
         </ToggleGroup>
         <Select value={env} onValueChange={(v) => setEnv(v as Environment | "all")}>
-          <SelectTrigger size="sm" className="w-32" aria-label="Environment label">
+          <SelectTrigger size="sm" className="w-40" aria-label="Environment">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -793,7 +806,18 @@ function LayoutBar({
   );
 }
 
-export function DashboardPage({ active, theme, focus, onConnect, onActions, onOpenVms, onOpenSessions }: Props) {
+export function DashboardPage({
+  active,
+  tab,
+  onTabChange,
+  onOpenLink,
+  theme,
+  focus,
+  onConnect,
+  onActions,
+  onOpenVms,
+  onOpenSessions,
+}: Props) {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [capacity, setCapacity] = useState<HostCapacity | null>(null);
   const [round, setRound] = useState(0);
@@ -813,7 +837,7 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
   // everything reads once at once.
   const visibility = useVisibility();
-  const live = shouldPoll(active, visibility);
+  const live = shouldPoll(active && tab === "metrics", visibility);
   const liveRef = useRef(live);
   useEffect(() => {
     liveRef.current = live;
@@ -985,83 +1009,109 @@ export function DashboardPage({ active, theme, focus, onConnect, onActions, onOp
   }
 
   return (
-    <div className="flex flex-col gap-4">
-      {layout && (
-        <LayoutBar
-          draft={draft}
-          readOnly={readOnly}
-          saving={saving}
-          onEdit={() => setDraft(structuredClone(layout))}
-          onAdd={(kind) => setDraft((d) => (d ? addWidget(d, kind) : d))}
-          onReset={() => setConfirmReset(true)}
-          onCancel={() => setDraft(null)}
-          onSave={() => void saveLayout()}
-        />
-      )}
-      {layout && layout.widgets.length === 0 && (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <LayoutDashboardIcon />
-            </EmptyMedia>
-            <EmptyTitle>No widgets</EmptyTitle>
-            <EmptyDescription>
-              {editing
-                ? "Add widgets above, then save."
-                : "Customize the dashboard to add some, or reset it to the default."}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )}
-      {layout && (
-        <DashboardGrid
-          layout={layout}
-          editing={editing}
-          onChange={setDraft}
-          renderWidget={renderWidget}
-          titleOf={titleOf}
-        />
-      )}
-
-      <MetricsDetail
-        row={selectedRow}
-        round={round}
-        live={live}
-        guestIntervalSecs={cost?.guestIntervalSecs || 5}
-        thresholds={thresholds}
-        theme={theme}
-        onClose={() => setSelected(null)}
-        onWatch={(id, on) => void watch(id, on)}
-        onRetry={(id) => {
-          api.backgroundLoginRetry(id).then(
-            () => {
-              toast.success("Logging in again on the next round");
-              load();
-            },
-            (err) => toast.error(errorMessage(err)),
-          );
-        }}
-        onConnect={onConnect}
-        onActions={onActions}
-        onHostDetails={(session) => {
-          setSelected(null);
-          setHostDetails(session);
-        }}
+    <Tabs
+      value={tab}
+      onValueChange={(v) => onTabChange(v as DashboardTab)}
+      className="flex h-full min-h-0 flex-col gap-4"
+    >
+      <PageHeader
+        page="dashboard"
+        tabs={
+          <TabsList>
+            <TabsTrigger value="metrics">
+              <GaugeIcon />
+              Metrics
+            </TabsTrigger>
+            {/* UX-08: the map, a page of its own until 0.6.0. */}
+            <TabsTrigger value="map">
+              <NetworkIcon />
+              Map
+            </TabsTrigger>
+          </TabsList>
+        }
       />
-      <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
-      {confirmReset && (
-        <ConfirmDialog
-          title="Reset the dashboard?"
-          description="Back to the default widgets: host capacity, this PC's memory, the alerts and the overview grid. Your arrangement and its charts go."
-          confirmLabel="Reset"
-          onConfirm={async () => {
-            setLayoutInfo(await dashboardApi.resetLayout());
-            setDraft(null);
-            toast.success("Dashboard reset to the default");
+      {/* Mounted while hidden, as the page itself is: widgets read only while the tab shows (live). */}
+      <TabsContent value="metrics" forceMount className="flex flex-none flex-col gap-4 data-[state=inactive]:hidden">
+        {layout && (
+          <LayoutBar
+            draft={draft}
+            readOnly={readOnly}
+            saving={saving}
+            onEdit={() => setDraft(structuredClone(layout))}
+            onAdd={(kind) => setDraft((d) => (d ? addWidget(d, kind) : d))}
+            onReset={() => setConfirmReset(true)}
+            onCancel={() => setDraft(null)}
+            onSave={() => void saveLayout()}
+          />
+        )}
+        {layout && layout.widgets.length === 0 && (
+          <Empty className="border">
+            <EmptyHeader>
+              <EmptyMedia variant="icon">
+                <LayoutDashboardIcon />
+              </EmptyMedia>
+              <EmptyTitle>No widgets</EmptyTitle>
+              <EmptyDescription>
+                {editing
+                  ? "Add widgets above, then save."
+                  : "Customize the dashboard to add some, or reset it to the default."}
+              </EmptyDescription>
+            </EmptyHeader>
+          </Empty>
+        )}
+        {layout && (
+          <DashboardGrid
+            layout={layout}
+            editing={editing}
+            onChange={setDraft}
+            renderWidget={renderWidget}
+            titleOf={titleOf}
+          />
+        )}
+
+        <MetricsDetail
+          row={selectedRow}
+          round={round}
+          live={live}
+          guestIntervalSecs={cost?.guestIntervalSecs || 5}
+          thresholds={thresholds}
+          theme={theme}
+          onClose={() => setSelected(null)}
+          onWatch={(id, on) => void watch(id, on)}
+          onRetry={(id) => {
+            api.backgroundLoginRetry(id).then(
+              () => {
+                toast.success("Logging in again on the next round");
+                load();
+              },
+              (err) => toast.error(errorMessage(err)),
+            );
           }}
-          onClose={() => setConfirmReset(false)}
+          onConnect={onConnect}
+          onActions={onActions}
+          onHostDetails={(session) => {
+            setSelected(null);
+            setHostDetails(session);
+          }}
         />
-      )}
-    </div>
+        <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+        {confirmReset && (
+          <ConfirmDialog
+            title="Reset the dashboard?"
+            description="Back to the default widgets: host capacity, this PC's memory, the alerts and the overview grid. Your arrangement and its charts go."
+            confirmLabel="Reset"
+            onConfirm={async () => {
+              setLayoutInfo(await dashboardApi.resetLayout());
+              setDraft(null);
+              toast.success("Dashboard reset to the default");
+            }}
+            onClose={() => setConfirmReset(false)}
+          />
+        )}
+      </TabsContent>
+      <TabsContent value="map" forceMount className="min-h-0 data-[state=inactive]:hidden">
+        <MapPage active={active && tab === "map"} onOpenLink={onOpenLink} />
+      </TabsContent>
+    </Tabs>
   );
 }

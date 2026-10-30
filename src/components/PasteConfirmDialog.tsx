@@ -34,7 +34,7 @@ export function PasteConfirmDialog({ preview, bracketed, multiExecTerminals, onA
           <AlertDialogTitle>Paste {plural(lines, "line")}?</AlertDialogTitle>
           <AlertDialogDescription>
             {multiExecTerminals !== null && (
-              <>MultiExec is on: this goes to {plural(multiExecTerminals, "terminal")}. </>
+              <>Type in all tabs is on: this goes to {plural(multiExecTerminals, "terminal")}. </>
             )}
             {bracketed
               ? "The shell asked for bracketed paste, so it should wait for Enter before it runs anything."

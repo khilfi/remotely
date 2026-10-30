@@ -80,6 +80,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { ColorDot } from "@/components/Badges";
 import { CommandPanel } from "@/components/CommandPanel";
+import { PageHeader } from "@/components/PageHeader";
+import { Tip } from "@/components/Tip";
 import { ComparePanel, type CompareView } from "@/components/ComparePanel";
 import { FilesDrawer } from "@/components/FilesDrawer";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
@@ -840,7 +842,7 @@ export function TerminalPage({
   useEffect(() => {
     senderRef.current = new MultiExecSender(
       (outcome) => outcomeRef.current(outcome),
-      (err) => toast.error(`MultiExec: ${errorMessage(err)}`),
+      (err) => toast.error(`Type in all tabs: ${errorMessage(err)}`),
     );
   }, []);
 
@@ -1594,7 +1596,7 @@ export function TerminalPage({
             <IconButton
               label={
                 multiExec && pickedPanes.length > 1
-                  ? "Upload files into this terminal's folder (this terminal only, not every MultiExec terminal)"
+                  ? "Upload files into this terminal's folder (this terminal only, not every picked terminal)"
                   : "Upload files into this terminal's folder"
               }
               onClick={() => void pickAndUpload(currentPane, null)}
@@ -1639,7 +1641,7 @@ export function TerminalPage({
         {readOnlyLocked(presentation) && (
           <span
             className="mb-1 inline-flex shrink-0 items-center gap-1 px-1.5 text-xs font-medium text-presenting"
-            title="Read-only while presenting: MultiExec, Compare runs, uploads, tunnels and saving sessions are blocked. Typing into one terminal still works: it is your own shell."
+            title="Read-only while presenting: Type in all tabs, Compare hosts, uploads, tunnels and saving sessions are blocked. Typing into one terminal still works: it is your own shell."
           >
             <LockKeyholeIcon className="size-3.5" />
             Read-only
@@ -1648,8 +1650,8 @@ export function TerminalPage({
         <IconButton
           label={
             multiExec
-              ? "MultiExec is on: typing goes to every picked tab (click to turn off)"
-              : "MultiExec: type into several tabs at once"
+              ? "Type in all tabs is on: typing goes to every picked tab (click to turn off)"
+              : "Type in all tabs: send your typing to several tabs at once"
           }
           onClick={() => (multiExec ? stopMultiExec() : startMultiExec())}
           className={cn("mb-1", multiExec && "bg-primary/15 text-primary")}
@@ -1672,7 +1674,7 @@ export function TerminalPage({
           onShow={loadGroups}
         />
         <IconButton
-          label={compareOpen ? "Hide Compare output" : "Compare output: one command on several hosts, grouped answers"}
+          label={compareOpen ? "Hide Compare hosts" : "Compare hosts: one command on several hosts, grouped answers"}
           onClick={() => setCompareOpen((v) => !v)}
           className={cn("mb-1", compareOpen && "bg-accent")}
           pressed={compareOpen}
@@ -1758,7 +1760,7 @@ export function TerminalPage({
             Print…
           </Button>
           <Button size="xs" variant="outline" onClick={() => setCompareOpen(true)}>
-            Compare output…
+            Compare hosts…
           </Button>
           <Button
             size="xs"
@@ -1786,70 +1788,79 @@ export function TerminalPage({
       <p className="text-xs text-muted-foreground">
         {options.copyOnSelect ? "Selecting text copies it. " : "Ctrl+Shift+C copies a selection. "}
         Ctrl+Shift+V or right-click pastes{options.confirmMultilinePaste ? " (text with line breaks asks first)" : ""},
-        Ctrl+Shift+F searches, Ctrl+Shift+G searches every terminal. Ctrl+click tabs to pick several for Output,
-        MultiExec and Compare. Typing into one terminal is not audited; each line MultiExec sends is (the command, the
-        sessions, the tier), and so are opening and closing a terminal, saving its output, typing a vault password and
-        every file uploaded or downloaded (its name, size and SHA-256).
+        Ctrl+Shift+F searches, Ctrl+Shift+G searches every terminal. Ctrl+click tabs to pick several for Output, Type in
+        all tabs and Compare hosts. Typing into one terminal is not audited; each line Type in all tabs sends is (the
+        command, the sessions, the tier), and so are opening and closing a terminal, saving its output, typing a vault
+        password and every file uploaded or downloaded (its name, size and SHA-256).
       </p>
     </div>
   );
 
   const mainSize = 100 - (treeShown ? 20 : 0) - (commandsShown ? 22 : 0);
   return (
-    <>
-      {treeShown || commandsShown ? (
-        <ResizablePanelGroup
-          orientation="horizontal"
-          id={`terminal-workspace-${treeShown ? "tree" : "no-tree"}-${commandsShown ? "commands" : "no-commands"}`}
-        >
-          {treeShown && (
-            <>
-              <ResizablePanel id="terminal-tree" defaultSize="20%" minSize="12%" maxSize="40%">
-                <div className="h-full pr-3">
-                  <SessionTree
-                    active={active}
-                    version={version}
-                    openSessions={openSessions}
-                    onOpen={openSession}
-                    picks={treePicks}
-                    onPicksChange={setTreePicks}
-                    onCompare={() => setCompareOpen(true)}
-                    onHostDetails={(s) => setHostDetails({ id: s.id, name: s.name })}
-                  />
-                </div>
-              </ResizablePanel>
-              <ResizableHandle />
-            </>
-          )}
-          <ResizablePanel id="terminal-main" defaultSize={`${mainSize}%`}>
-            <div className={cn("h-full", treeShown && "pl-3", commandsShown && "pr-3")}>{workspace}</div>
-          </ResizablePanel>
-          {commandsShown && (
-            <>
-              <ResizableHandle />
-              <ResizablePanel id="terminal-commands" defaultSize="22%" minSize="14%" maxSize="45%">
-                <div className="h-full pl-3">
-                  <CommandPanel
-                    active={active}
-                    targetName={
-                      multiExec
-                        ? `${plural(pickedPanes.length, "terminal")} (MultiExec)`
-                        : currentPane
-                          ? nameOf(currentPane)
-                          : null
-                    }
-                    onSend={sendToCurrent}
-                    onClose={() => showCommands(false)}
-                    query={panelQuery}
-                  />
-                </div>
-              </ResizablePanel>
-            </>
-          )}
-        </ResizablePanelGroup>
-      ) : (
-        workspace
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      <PageHeader page="terminal" />
+      {/* UX-09: shown once, when picking several tabs first makes sense. */}
+      {tabs.length >= 2 && (
+        <Tip id="terminal.pickTabs">
+          Ctrl+click tabs to pick several, then use Type in all tabs or Compare hosts on all of them.
+        </Tip>
       )}
+      <div className="min-h-0 flex-1">
+        {treeShown || commandsShown ? (
+          <ResizablePanelGroup
+            orientation="horizontal"
+            id={`terminal-workspace-${treeShown ? "tree" : "no-tree"}-${commandsShown ? "commands" : "no-commands"}`}
+          >
+            {treeShown && (
+              <>
+                <ResizablePanel id="terminal-tree" defaultSize="20%" minSize="12%" maxSize="40%">
+                  <div className="h-full pr-3">
+                    <SessionTree
+                      active={active}
+                      version={version}
+                      openSessions={openSessions}
+                      onOpen={openSession}
+                      picks={treePicks}
+                      onPicksChange={setTreePicks}
+                      onCompare={() => setCompareOpen(true)}
+                      onHostDetails={(s) => setHostDetails({ id: s.id, name: s.name })}
+                    />
+                  </div>
+                </ResizablePanel>
+                <ResizableHandle />
+              </>
+            )}
+            <ResizablePanel id="terminal-main" defaultSize={`${mainSize}%`}>
+              <div className={cn("h-full", treeShown && "pl-3", commandsShown && "pr-3")}>{workspace}</div>
+            </ResizablePanel>
+            {commandsShown && (
+              <>
+                <ResizableHandle />
+                <ResizablePanel id="terminal-commands" defaultSize="22%" minSize="14%" maxSize="45%">
+                  <div className="h-full pl-3">
+                    <CommandPanel
+                      active={active}
+                      targetName={
+                        multiExec
+                          ? `${plural(pickedPanes.length, "terminal")} (all tabs)`
+                          : currentPane
+                            ? nameOf(currentPane)
+                            : null
+                      }
+                      onSend={sendToCurrent}
+                      onClose={() => showCommands(false)}
+                      query={panelQuery}
+                    />
+                  </div>
+                </ResizablePanel>
+              </>
+            )}
+          </ResizablePanelGroup>
+        ) : (
+          workspace
+        )}
+      </div>
       <NewTerminalDialog
         open={newOpen}
         onOpenChange={setNewOpen}
@@ -1951,7 +1962,7 @@ export function TerminalPage({
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 
@@ -2085,12 +2096,12 @@ function TabButton({
     snapshot.logPath && `Logging to ${snapshot.logPath}`,
     attention && "A long command finished, or an alert rule matched, here",
     !tab.notify && "No notifications from this tab",
-    multiExec === "receives" && "MultiExec: what you type goes here",
-    multiExec === "off" && "MultiExec: not picked, so typing elsewhere does not reach it (Ctrl+click to add it)",
+    multiExec === "receives" && "Type in all tabs: what you type goes here",
+    multiExec === "off" && "Type in all tabs: not picked, so typing elsewhere does not reach it (Ctrl+click to add it)",
     multiExec &&
       multiExec !== "receives" &&
       multiExec !== "off" &&
-      (multiExecOk ? `MultiExec: ${multiExec}` : `MultiExec: picked, but gets no keys now: ${multiExec}`),
+      (multiExecOk ? `Type in all tabs: ${multiExec}` : `Type in all tabs: picked, but gets no keys now: ${multiExec}`),
     "Ctrl+click or Shift+click to pick several tabs",
   ]
     .filter(Boolean)
@@ -2116,7 +2127,7 @@ function TabButton({
       {multiExec && multiExec !== "off" ? (
         <RadioTowerIcon
           className={cn("size-3.5 shrink-0", multiExecOk ? "text-primary" : "text-tier-medium")}
-          aria-label={multiExec === "receives" ? "MultiExec: receives typing" : `MultiExec: ${multiExec}`}
+          aria-label={multiExec === "receives" ? "Type in all tabs: receives typing" : `Type in all tabs: ${multiExec}`}
         />
       ) : (
         <StatusDot snapshot={snapshot} />

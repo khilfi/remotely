@@ -60,15 +60,15 @@ export function MultiExecGroupsMenu({
       <Tooltip>
         <TooltipTrigger asChild>
           <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon-sm" aria-label="Saved MultiExec groups" className={className}>
+            <Button variant="ghost" size="icon-sm" aria-label="Saved groups" className={className}>
               <LayersIcon />
             </Button>
           </DropdownMenuTrigger>
         </TooltipTrigger>
-        <TooltipContent>Saved MultiExec groups: open or select a set of sessions</TooltipContent>
+        <TooltipContent>Saved groups: open or select a set of sessions</TooltipContent>
       </Tooltip>
       <DropdownMenuContent align="end" className="w-72">
-        <DropdownMenuLabel>Saved MultiExec groups</DropdownMenuLabel>
+        <DropdownMenuLabel>Saved groups</DropdownMenuLabel>
         {groups.length === 0 && (
           <DropdownMenuItem disabled>
             <span>
@@ -101,8 +101,8 @@ export function MultiExecGroupsMenu({
                       Open group
                       <span className={cn("block text-xs text-muted-foreground", openReason && "hidden")}>
                         {toOpen === 0
-                          ? `Every session is open: MultiExec on for its ${plural(picked.keys.length, "tab")}`
-                          : `Opens ${plural(toOpen, "tab")}${picked.keys.length > 0 ? `, uses ${picked.keys.length} open already` : ""}, then MultiExec on for them`}
+                          ? `Every session is open: types in all its ${plural(picked.keys.length, "tab")}`
+                          : `Opens ${plural(toOpen, "tab")}${picked.keys.length > 0 ? `, uses ${picked.keys.length} open already` : ""}, then types in all of them`}
                       </span>
                       <ReasonLine reason={openReason} />
                     </span>
@@ -111,7 +111,7 @@ export function MultiExecGroupsMenu({
                     <span>
                       Select group
                       <span className={cn("block text-xs text-muted-foreground", selectReason && "hidden")}>
-                        MultiExec on for its {plural(picked.keys.length, "open tab")}
+                        Types in all its {plural(picked.keys.length, "open tab")}
                         {toOpen > 0 ? ` (${toOpen} not open)` : ""}
                       </span>
                       <ReasonLine reason={selectReason} />

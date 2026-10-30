@@ -36,7 +36,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -45,6 +44,7 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { StackDeployDialog } from "@/components/StackDeployDialog";
 import { StackDialog } from "@/components/StackDialog";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { EmptyState } from "@/components/EmptyState";
 import { api, errorMessage, type LaunchTemplate, type SubmitOutcome, type VmRecord } from "@/lib/api";
 import { copyName } from "@/lib/catalog";
 import { plural } from "@/lib/format";
@@ -138,18 +138,11 @@ export function StacksTab({ active, templates, readOnly, onSubmitted, refreshKey
           </WhyDisabled>
         </div>
         {stacks.length === 0 ? (
-          <Empty className="border">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <LayersIcon />
-              </EmptyMedia>
-              <EmptyTitle>No stacks yet</EmptyTitle>
-              <EmptyDescription>
-                A stack deploys several launch templates in order: a database first, then the app servers once it
-                answers.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <EmptyState
+            icon={LayersIcon}
+            title="No stacks yet"
+            description="A stack deploys several launch templates in boot order, as one."
+          />
         ) : (
           <div className="overflow-auto rounded-lg border">
             <Table>

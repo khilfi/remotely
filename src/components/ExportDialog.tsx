@@ -98,8 +98,8 @@ export function ExportDialog({ sessions, folders, vault, onVaultChanged, onExpor
               Export to another laptop
             </DialogTitle>
             <DialogDescription>
-              Writes {plural(sessions, "session")} and {plural(folders, "folder")}, with their tags, labels, colours,
-              jump hosts and port forwards, your favourite commands, your saved MultiExec groups, and your VM sizes,
+              Writes {plural(sessions, "session")} and {plural(folders, "folder")}, with their tags, environments,
+              colours, jump hosts and port forwards, your favourite commands, your saved groups, and your VM sizes,
               images (by path: copy the files yourself) and launch templates to one encrypted file. Import it on the
               other laptop with the passphrase you choose here.
             </DialogDescription>

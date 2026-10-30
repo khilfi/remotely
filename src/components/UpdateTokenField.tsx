@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { VaultUnlock } from "@/components/VaultUnlock";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type Settings, type TokenReport, type VaultInfo } from "@/lib/api";
 
 interface Props {
@@ -183,11 +184,9 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
             <Badge variant="outline">Optional</Badge>
           )}
         </div>
-        <p className="text-sm text-muted-foreground">
-          Remotely&apos;s releases are public, so updates work without a token. A token still helps when many machines
-          share one internet address (GitHub allows 60 checks an hour without one) or if the repository goes private
-          again: a fine-grained token for that repository only, with Contents: Read-only and an expiry date (the README
-          says how to make one). It is kept in the vault and never shown again.
+        <p className="flex items-center gap-1 text-sm text-muted-foreground">
+          Updates work without a token; one helps when many PCs share an internet address.
+          <HelpTip topic="updateToken" />
         </p>
         {token?.stored ? (
           <p className="text-sm text-muted-foreground">

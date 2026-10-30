@@ -52,7 +52,7 @@ export function DeployPreviewView({ preview, showWarnings = true }: Props) {
             </dd>
           </>
         )}
-        <dt className="text-muted-foreground">Label</dt>
+        <dt className="text-muted-foreground">Environment</dt>
         <dd className="flex flex-wrap items-center gap-2">
           <EnvBadge env={preview.environment} />
           {preview.tags.length > 0 && <span className="text-muted-foreground">tags {preview.tags.join(", ")}</span>}

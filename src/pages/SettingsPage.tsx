@@ -22,6 +22,8 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DashboardHistoryCard } from "@/components/DashboardHistoryCard";
 import { DataRetentionCard } from "@/components/DataRetentionCard";
+import { PageHeader } from "@/components/PageHeader";
+import { ShowTipsAgainButton } from "@/components/Tip";
 import { PolicyRulesEditor } from "@/components/PolicyRulesEditor";
 import { ChangeIdCard } from "@/components/ChangeIdCard";
 import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
@@ -29,6 +31,7 @@ import { PresentationCard } from "@/components/Presentation";
 import { TerminalRulesCard } from "@/components/TerminalRulesCard";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type AppInfo, type LogsInfo, type Settings, type VaultInfo } from "@/lib/api";
 import type { SettingsChange } from "@/lib/job-events";
 import { useTheme } from "@/lib/theme";
@@ -272,12 +275,17 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
 
   return (
     <Tabs value={tab} onValueChange={(v) => setTab(v as SettingsTab)} className="max-w-3xl gap-4">
-      <TabsList>
-        <TabsTrigger value="general">General</TabsTrigger>
-        <TabsTrigger value="terminal">Terminal</TabsTrigger>
-        <TabsTrigger value="rules">Approval rules</TabsTrigger>
-        <TabsTrigger value="about">About</TabsTrigger>
-      </TabsList>
+      <PageHeader
+        page="settings"
+        tabs={
+          <TabsList>
+            <TabsTrigger value="general">General</TabsTrigger>
+            <TabsTrigger value="terminal">Terminal</TabsTrigger>
+            <TabsTrigger value="rules">Approval rules</TabsTrigger>
+            <TabsTrigger value="about">About</TabsTrigger>
+          </TabsList>
+        }
+      />
       <TabsContent value="about">
         <Section id="about" lit={lit}>
           <AboutCard />
@@ -310,28 +318,27 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         <Section id="first-run" lit={lit}>
           <Card>
             <CardHeader>
-              <CardTitle>Setup guide</CardTitle>
+              <CardTitle>Setup guide and tips</CardTitle>
               <CardDescription>
-                The steps Remotely offers on a new PC: find Workstation and VirtualBox, create the vault, pick VM
-                folders and import sessions. Each one saves what it does as this page and the Vault and Sessions pages
-                would.
+                The steps Remotely offers on a new PC, and the one-time tips you dismissed.
               </CardDescription>
             </CardHeader>
-            <CardFooter>
+            <CardFooter className="gap-2">
               <Button variant="outline" onClick={() => requestFirstRun()}>
                 <CompassIcon /> Open the setup guide
               </Button>
+              <ShowTipsAgainButton />
             </CardFooter>
           </Card>
         </Section>
         <Section id="vmware" lit={lit}>
           <Card>
             <CardHeader>
-              <CardTitle>VMware Workstation</CardTitle>
-              <CardDescription>
-                Every VM action runs through vmrun.exe. Leave the path empty to find it automatically: the registry
-                first, then the default install folders.
-              </CardDescription>
+              <CardTitle className="flex items-center gap-1">
+                VMware Workstation
+                <HelpTip topic="toolPaths" />
+              </CardTitle>
+              <CardDescription>Leave the path empty to find vmrun.exe automatically.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2">
               <Label htmlFor="vmrun-path">vmrun.exe path</Label>
@@ -381,11 +388,12 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         <Section id="virtualbox" lit={lit}>
           <Card>
             <CardHeader>
-              <CardTitle>Oracle VirtualBox</CardTitle>
+              <CardTitle className="flex items-center gap-1">
+                Oracle VirtualBox
+                <HelpTip topic="toolPaths" />
+              </CardTitle>
               <CardDescription>
-                Remotely lists the VMs registered in VirtualBox (7.0 or later) and runs every action on them through
-                VBoxManage.exe. Leave the path empty to find it automatically: the REMOTELY_VBOXMANAGE variable, the
-                registry, then the default install folder. Without VirtualBox, the list just has no VirtualBox VMs.
+                VirtualBox 7.0 or later. Leave the path empty to find VBoxManage.exe automatically.
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2">
@@ -558,9 +566,9 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         <Section id="compare" lit={lit}>
           <Card>
             <CardHeader>
-              <CardTitle>Compare output</CardTitle>
+              <CardTitle>Compare hosts</CardTitle>
               <CardDescription>
-                Compare output (and a key push) runs a command on this many hosts at a time; the rest wait their turn.
+                Compare hosts (and a key push) runs a command on this many hosts at a time; the rest wait their turn.
                 More at once finishes sooner but opens more SSH connections from this PC.
               </CardDescription>
             </CardHeader>
@@ -617,12 +625,11 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         <Section id="dashboard" lit={lit}>
           <Card>
             <CardHeader>
-              <CardTitle>Dashboard</CardTitle>
-              <CardDescription>
-                Watching a host on the dashboard keeps one SSH connection to it, and each poll runs a short read of
-                /proc there: a few processes, which security tools that log every program a host runs will see. Polling
-                less often is gentler on the hosts and their logs; the charts then move in bigger steps.
-              </CardDescription>
+              <CardTitle className="flex items-center gap-1">
+                Dashboard
+                <HelpTip topic="dashboardPolling" />
+              </CardTitle>
+              <CardDescription>How often watched hosts are read. Less often is gentler on them.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-2">
               <Label htmlFor="guest-poll">Poll each watched host every</Label>
@@ -650,12 +657,11 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         <Section id="updates" lit={lit}>
           <Card>
             <CardHeader>
-              <CardTitle>Updates</CardTitle>
-              <CardDescription>
-                Remotely checks GitHub Releases at start and every 24 hours, without a token while the repository is
-                public. Every update is signature-checked, and installing always asks first. Turn checks off at
-                air-gapped sites.
-              </CardDescription>
+              <CardTitle className="flex items-center gap-1">
+                Updates
+                <HelpTip topic="updateChecks" />
+              </CardTitle>
+              <CardDescription>Checked at start and every 24 hours; installing always asks first.</CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
               <div className="flex items-center gap-3">

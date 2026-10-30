@@ -1054,7 +1054,7 @@ impl MultiExec {
             let seen = self.seen(*id).await;
             let reason = match &seen {
                 None => Some("closed".to_owned()),
-                Some(s) if s.protected => Some("protected: MultiExec leaves it out (AP-04)".to_owned()),
+                Some(s) if s.protected => Some("protected: Type in all tabs leaves it out".to_owned()),
                 Some(s) if !s.connected => Some("not connected".to_owned()),
                 Some(_) => None,
             };
@@ -1250,7 +1250,7 @@ impl MultiExec {
                 continue;
             };
             let reason = if seen.protected {
-                Some("protected (AP-04)")
+                Some("protected")
             } else if !seen.connected {
                 Some("not connected")
             } else {

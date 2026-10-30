@@ -15,7 +15,6 @@ import {
   HistoryIcon,
   InfoIcon,
   MonitorIcon,
-  RefreshCwIcon,
   ShieldIcon,
   TriangleAlertIcon,
   XIcon,
@@ -50,6 +49,7 @@ import {
   type VmRecord,
   type VmSnapshots,
 } from "@/lib/api";
+import { RefreshButton } from "@/components/RefreshButton";
 import { formatWhen, plural } from "@/lib/format";
 import { HYPERVISORS, toolsName, vmLocation } from "@/lib/hypervisors";
 import { formatPct, HOST_SHARE_HINT, type Thresholds } from "@/lib/metrics";
@@ -298,7 +298,7 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
         />
       ),
     },
-    { label: "Label", value: <EnvBadge env={vm.environment} /> },
+    { label: "Environment", value: <EnvBadge env={vm.environment} /> },
     {
       label: "Protected",
       value: vm.protected ? (
@@ -381,16 +381,7 @@ function SnapshotsTab({
             <TooltipContent className="max-w-72">{hints.take ?? "Take a snapshot of this VM"}</TooltipContent>
           </Tooltip>
         )}
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          aria-label="Read the snapshots again"
-          title="Read the snapshots again"
-          disabled={loading}
-          onClick={onReadTree}
-        >
-          <RefreshCwIcon className={loading ? "animate-spin" : undefined} />
-        </Button>
+        <RefreshButton busy={loading} onClick={onReadTree} />
         {tree && tree.snapshots.length > 0 && (
           <span className="ml-auto text-xs text-muted-foreground">
             {plural(tree.snapshots.length, "snapshot")}
@@ -408,7 +399,7 @@ function SnapshotsTab({
       {vm.protected && (
         <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
           <ShieldIcon className="mt-0.5 size-3.5 shrink-0 text-tier-high" aria-hidden />
-          Protected (do not touch): snapshot actions skip this VM until it is unprotected.
+          Protected: snapshot actions skip this VM.
         </p>
       )}
 

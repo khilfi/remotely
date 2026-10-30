@@ -13,8 +13,12 @@ export interface SearchField {
   kind: FieldKind;
 }
 
-/** What choosing an item does: open a link, show a VM's or session's own actions in the palette, or run an action. */
-export type SearchTarget = { open: AppLink } | { drill: "vm" | "session"; id: string } | { action: string };
+/**
+ * What choosing an item does: open a link, show a VM's or session's own actions in the palette, run an action, or
+ * (UX-05) show a glossary term's definition in the palette.
+ */
+export type SearchTarget =
+  { open: AppLink } | { drill: "vm" | "session"; id: string } | { action: string } | { define: string };
 
 /** FD-03: what the item's detail holds, so it is masked as one value while presenting (`data-mask`). */
 export type DetailMask = "host" | "ip" | "user" | "address";

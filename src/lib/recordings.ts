@@ -52,7 +52,7 @@ export function shownLine(lines: RecordedLine[], picked: string | null): Recorde
 /** What the session caps did, or null when none was hit. */
 export function capsNote(dropped: number, limits: RecordLimits) {
   if (dropped === 0) return null;
-  return `This MultiExec session keeps its last ${limits.maxLines} lines (${Math.round(
+  return `Typing in all tabs keeps its last ${limits.maxLines} lines (${Math.round(
     limits.maxSessionBytes / 1024 / 1024,
   )} MB of output at most): ${plural(dropped, "older line")} ${dropped === 1 ? "was" : "were"} dropped.`;
 }
@@ -96,5 +96,5 @@ export function lineNotification(
       ? `It ran ${ran}; the prompt is back in ${terminals === 1 ? "it" : terminals === 2 ? "both" : `all ${terminals}`}.`
       : `It ran ${ran}; in some terminals the output stopped: finished, or waiting for an answer.`;
   if (unfinished > 0) body += ` ${plural(unfinished, "terminal")} stopped recording before its prompt came back.`;
-  return { title: `MultiExec \`${shortLine(line)}\` finished in ${where}`, body };
+  return { title: `Typed in all tabs: \`${shortLine(line)}\` finished in ${where}`, body };
 }

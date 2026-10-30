@@ -112,7 +112,7 @@ export function MultiExecGroupsDialog({ groups, sessions, start, onChanged, onCl
     try {
       const input = { name: draft.name.trim(), sessionIds: draft.sessionIds };
       const group = draft.id ? await api.updateMultiExecGroup(draft.id, input) : await api.createMultiExecGroup(input);
-      toast.success(`Saved the MultiExec group '${group.name}'`);
+      toast.success(`Saved the group '${group.name}'`);
       setDraft(draftOf(group));
       onChanged();
     } catch (err) {
@@ -129,11 +129,12 @@ export function MultiExecGroupsDialog({ groups, sessions, start, onChanged, onCl
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <LayersIcon className="size-4" aria-hidden />
-              MultiExec groups
+              Saved groups
             </DialogTitle>
             <DialogDescription>
               A group names saved sessions, like &ldquo;all web servers&rdquo;. Open group opens a tab for each and
-              turns MultiExec on for them; Select group picks the ones already open. Each line still asks as usual.
+              turns Type in all tabs on for them; Select group picks the ones already open. Each line still asks as
+              usual.
             </DialogDescription>
           </DialogHeader>
           <div className="grid min-h-0 gap-4 sm:grid-cols-[13rem_minmax(0,1fr)]">
@@ -336,11 +337,11 @@ export function MultiExecGroupsDialog({ groups, sessions, start, onChanged, onCl
       {deleting && (
         <ConfirmDialog
           title={`Delete the group '${deleting.name}'?`}
-          description="Its sessions stay; only the group goes. Open tabs and MultiExec are not changed."
+          description="Its sessions stay; only the group goes. Open tabs and Type in all tabs are not changed."
           confirmLabel="Delete group"
           onConfirm={async () => {
             await api.deleteMultiExecGroup(deleting.id);
-            toast.success(`Deleted the MultiExec group '${deleting.name}'`);
+            toast.success(`Deleted the group '${deleting.name}'`);
             onChanged();
             pick(groups.find((g) => g.id !== deleting.id));
           }}

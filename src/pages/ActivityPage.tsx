@@ -26,10 +26,12 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StatusBadge, TierBadge } from "@/components/Badges";
+import { EmptyState } from "@/components/EmptyState";
+import { PageHeader } from "@/components/PageHeader";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary, type JobTarget } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 import { progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
@@ -167,6 +169,7 @@ export function ActivityPage({
 
   return (
     <div className="flex flex-col gap-6">
+      <PageHeader page="activity" />
       {error && (
         <Alert variant="destructive">
           <AlertTitle>Could not load activity</AlertTitle>
@@ -183,15 +186,12 @@ export function ActivityPage({
         </CardHeader>
         <CardContent>
           {jobs.length === 0 ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <ListChecksIcon />
-                </EmptyMedia>
-                <EmptyTitle>No jobs yet</EmptyTitle>
-                <EmptyDescription>Actions you run on VMs and hosts show up here.</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <EmptyState
+              bordered={false}
+              icon={ListChecksIcon}
+              title="No jobs yet"
+              description="Actions you run on VMs and hosts show up here."
+            />
           ) : (
             <Table>
               <TableHeader>
@@ -288,17 +288,13 @@ export function ActivityPage({
             </Alert>
           )}
           {audit.length === 0 ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyMedia variant="icon">
-                  <ScrollTextIcon />
-                </EmptyMedia>
-                <EmptyTitle>The audit log is empty</EmptyTitle>
-                <EmptyDescription>
-                  Every state-changing action is logged when it starts and when it ends.
-                </EmptyDescription>
-              </EmptyHeader>
-            </Empty>
+            <EmptyState
+              bordered={false}
+              icon={ScrollTextIcon}
+              title="The audit log is empty"
+              description="Every change is logged when it starts and when it ends."
+              help="auditLog"
+            />
           ) : (
             <Table>
               <TableHeader>
@@ -378,9 +374,9 @@ function JobResults({ job, version, onClose }: { job: JobSummary; version: numbe
             <Alert>
               <EraserIcon />
               <AlertTitle>Outputs removed</AlertTitle>
-              <AlertDescription>
-                This job is older than the retention period set in Settings, General, so its outputs and its script or
-                line text were removed. Its targets, results and audit entries are kept.
+              <AlertDescription className="flex items-center gap-1">
+                Older than the retention period: its targets, results and audit entries are kept.
+                <HelpTip topic="retention" />
               </AlertDescription>
             </Alert>
           )}

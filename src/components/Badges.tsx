@@ -186,17 +186,17 @@ const RISK: Record<CommandRisk["action"], { label: string; className: string; hi
   execReadOnly: {
     label: "Read-only",
     className: "text-muted-foreground",
-    hint: "Every part only reads, by the read-only list in Settings. MultiExec and Compare send it without asking.",
+    hint: "Every part only reads, by the read-only list in Settings. Type in all tabs and Compare hosts send it without asking.",
   },
   execOther: {
     label: "Changes",
     className: "border-tier-medium/40 text-tier-medium",
-    hint: "Not on the read-only list, so it may change the host. MultiExec and Compare ask for a confirm first, and for the full approval on many hosts at once (5 or more by default).",
+    hint: "Not on the read-only list, so it may change the host. Type in all tabs and Compare hosts ask for a confirm first, and for the full approval on many hosts at once (5 or more by default).",
   },
   execDangerous: {
     label: "Dangerous",
     className: "border-tier-high/50 bg-tier-high/10 text-tier-high",
-    hint: "Matches a dangerous-command rule. MultiExec and Compare need the full approval.",
+    hint: "Matches a dangerous-command rule. Type in all tabs and Compare hosts need the full approval.",
   },
 };
 
