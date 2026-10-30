@@ -121,6 +121,8 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
   const [picked, setPicked] = useState<TemplatesTab | null>(null);
   const submittedHere = useCallback((outcome: SubmitOutcome) => onSubmitted?.(outcome), [onSubmitted]);
   const [stackCreate, setStackCreate] = useState(0);
+  // The Stacks tab's count, once read (null before): its empty state carries New stack.
+  const [stackCount, setStackCount] = useState<number | null>(null);
   const [sizes, setSizes] = useState<Size[]>([]);
   const [images, setImages] = useState<Image[]>([]);
   const [templates, setTemplates] = useState<LaunchTemplate[]>([]);
@@ -231,14 +233,14 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
       </WhyDisabled>
     ),
     templates: loaded && templates.length > 0 ? newTemplateButton : null,
-    stacks: (
+    stacks: stackCount ? (
       <WhyDisabled reason={stackOff}>
         <Button disabled={stackOff !== null} onClick={() => setStackCreate((n) => n + 1)}>
           <PlusIcon data-icon="inline-start" />
           New stack
         </Button>
       </WhyDisabled>
-    ),
+    ) : null,
     disks: null,
   };
 
@@ -617,6 +619,7 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
             createRequest={stackCreate}
             onNewTemplate={images.length === 0 ? addImage : newTemplate}
             newTemplateLabel={images.length === 0 ? "Add an image" : "New launch template"}
+            onCount={setStackCount}
           />
         </TabsContent>
 

@@ -61,6 +61,8 @@ interface Props {
   /** UX-07: with no launch template, the empty state's way to make the first one (or the image it needs). */
   onNewTemplate?: () => void;
   newTemplateLabel?: string;
+  /** How many stacks there are, once read: the page header shows New stack only when the empty state doesn't. */
+  onCount?: (stacks: number) => void;
 }
 
 type Dialog =
@@ -80,6 +82,7 @@ export function StacksTab({
   createRequest = 0,
   onNewTemplate,
   newTemplateLabel = "New launch template",
+  onCount,
 }: Props) {
   const [stacks, setStacks] = useState<Stack[]>([]);
   const [instances, setInstances] = useState<StackInstance[]>([]);
@@ -90,10 +93,11 @@ export function StacksTab({
       ([s, i]) => {
         setStacks(s);
         setInstances(i);
+        onCount?.(s.length);
       },
       (err) => toast.error(errorMessage(err)),
     );
-  }, []);
+  }, [onCount]);
 
   useEffect(() => {
     if (active) load();

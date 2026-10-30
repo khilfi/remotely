@@ -34,7 +34,13 @@ export function chainStatus(chain: ChainInfo, limits: ChainLimits): { text: stri
   const rules = `Warns past ${limits.maxDepth} deep or ${limits.maxSizeGb} GB.`;
   if (chain.error) return { text: "Chain not read", ok: true, detail: `${chain.error} ${rules}` };
   const count =
-    chain.snapshots === null ? "Snapshots" : chain.snapshots === 1 ? "1 snapshot" : `${chain.snapshots} snapshots`;
+    chain.snapshots === null
+      ? "Snapshots"
+      : chain.snapshots === 0
+        ? "No snapshots"
+        : chain.snapshots === 1
+          ? "1 snapshot"
+          : `${chain.snapshots} snapshots`;
   const facts = [
     chain.depth !== null ? `${chain.depth} deep` : null,
     chain.sizeBytes !== null ? `${gb(chain.sizeBytes)} on this PC` : null,

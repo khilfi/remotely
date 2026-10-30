@@ -71,6 +71,7 @@ test("a snapshot chain reads as a plain status line, with the rules in its detai
   assert.ok(ok.ok);
   assert.equal(ok.detail, "2 deep, 3 GB on this PC. Warns past 5 deep or 100 GB.");
   assert.equal(chainStatus(chain({ snapshots: 1, depth: 1 }), limits).text, "1 snapshot · OK");
+  assert.equal(chainStatus(chain({ snapshots: 0, depth: 0 }), limits).text, "No snapshots · OK");
   const deep = chainStatus(chain({ snapshots: 7, depth: 7, warnings: ["7 deep: past 5."] }), limits);
   assert.equal(deep.text, "7 snapshots · 7 deep: past the limit");
   assert.ok(!deep.ok);

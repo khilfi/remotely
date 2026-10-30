@@ -1200,8 +1200,7 @@ export function VmsPage({
     },
     {
       id: "hostCpu",
-      head: sortHead("hostCpu", "Host CPU", "text-right", HOST_SHARE_HINT.cpu),
-      className: "text-right",
+      head: sortHead("hostCpu", "Host CPU", undefined, HOST_SHARE_HINT.cpu),
       cell: (vm) => {
         const pct = usageOf(vm)?.hostCpuPct ?? null;
         return (
@@ -1217,8 +1216,7 @@ export function VmsPage({
     },
     {
       id: "hostMem",
-      head: sortHead("hostMem", "Host RAM", "text-right", HOST_SHARE_HINT.memory),
-      className: "text-right",
+      head: sortHead("hostMem", "Host RAM", undefined, HOST_SHARE_HINT.memory),
       cell: (vm) => {
         const pct = usageOf(vm)?.hostMemPct ?? null;
         return (

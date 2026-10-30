@@ -70,23 +70,27 @@ export function VmSchedulesTab({ vm, refreshKey, readOnly, onSchedules }: Props)
         <h3 className="flex items-center gap-1.5 text-sm font-medium">
           <CalendarClockIcon className="size-4 text-muted-foreground" aria-hidden /> Schedules
         </h3>
-        <WhyDisabled reason={readOnly} className="ml-auto">
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={readOnly !== null}
-            onClick={() => onSchedules({ create: true, vms: [vm.vmxPath] })}
-          >
-            <PlusIcon data-icon="inline-start" />
-            New schedule…
-          </Button>
-        </WhyDisabled>
+        <span className="ml-auto">
+          <WhyDisabled reason={readOnly}>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={readOnly !== null}
+              onClick={() => onSchedules({ create: true, vms: [vm.vmxPath] })}
+            >
+              <PlusIcon data-icon="inline-start" />
+              New schedule…
+            </Button>
+          </WhyDisabled>
+        </span>
       </div>
 
       {chain && (
         <p className={cn("flex items-center gap-1.5 text-xs", chain.ok ? "text-muted-foreground" : "text-tier-medium")}>
           {!chain.ok && <TriangleAlertIcon className="size-3.5" aria-hidden />}
-          <Term id="snapshotChain">Snapshot chain</Term>:
+          <span>
+            <Term id="snapshotChain">Snapshot chain</Term>:
+          </span>
           <Tooltip>
             <TooltipTrigger asChild>
               <span tabIndex={0} className="cursor-help outline-none focus-visible:underline">
