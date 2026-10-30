@@ -2,12 +2,17 @@
 // image and a size, with the hypervisor, VM folder (picked in a dialog the core opens; the hypervisor's own folder
 // when none), network, SSH key (its public half goes to the VMs), naming pattern, environment label, tags,
 // after-deploy steps, cloud-init's guest user and packages, and how a golden VM is cloned. The parent keeps the
-// form; `effectiveInput` gives what the core gets.
+// form; `effectiveInput` gives what the core gets. UX-04: the basics first (name, image, size, hypervisor, network,
+// environment and the count), the rest under a folded Advanced.
 
-import { useMemo } from "react";
-import { FolderOpenIcon, XIcon } from "lucide-react";
+import { useMemo, useState } from "react";
+import { ChevronRightIcon, FolderOpenIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { HelpTip } from "@/components/HelpTip";
+import { Term } from "@/components/Term";
+import { cn } from "@/lib/utils";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -147,10 +152,12 @@ interface Props {
   keys: SshKey[];
   /** For the template editor: an image or size that was deleted is still named. */
   deletedImageId?: string;
-  /** Shown beside the naming pattern: the template editor's default count, the Deploy dialog's count. */
+  /** Shown beside the environment: the template editor's default count, the Deploy dialog's count. */
   count: React.ReactNode;
   idPrefix: string;
   onError: (message: string) => void;
+  /** UX-07: with no image yet, where to add one (the Deploy dialog's Custom). */
+  onAddImage?: () => void;
 }
 
 export function TemplateFields({
@@ -164,7 +171,9 @@ export function TemplateFields({
   count,
   idPrefix,
   onError,
+  onAddImage,
 }: Props) {
+  const [advanced, setAdvanced] = useState(false);
   const value = form.input;
   const set = (change: Partial<TemplateInput>) => onChange({ ...form, input: { ...value, ...change } });
   const image = images.find((i) => i.id === value.imageId);
@@ -206,28 +215,44 @@ export function TemplateFields({
           />
         </div>
         <div className="grid gap-2">
-          <Label htmlFor={id("image")}>Image</Label>
-          <Select value={value.imageId} onValueChange={(v) => set({ imageId: v })}>
-            <SelectTrigger id={id("image")} className="w-full">
-              <SelectValue placeholder={images.length ? "Pick an image" : "Add an image first"} />
-            </SelectTrigger>
-            <SelectContent>
-              {images.map((i) => (
-                <SelectItem key={i.id} value={i.id}>
-                  {i.name}
-                  {i.problem ? " (can't deploy now)" : ""}
-                </SelectItem>
-              ))}
-              {deletedImageId && !image && (
-                <SelectItem value={deletedImageId} disabled>
-                  (deleted image)
-                </SelectItem>
+          <Label htmlFor={id("image")}>
+            <Term id="image">Image</Term>
+          </Label>
+          {images.length === 0 && !deletedImageId ? (
+            // UX-07: no dead end; the Templates page's Images tab adds one.
+            <div className="flex min-h-9 items-center gap-2 text-sm text-muted-foreground">
+              No image yet.
+              {onAddImage && (
+                <Button type="button" variant="link" size="sm" className="h-auto p-0" onClick={onAddImage}>
+                  Add an image
+                </Button>
               )}
-            </SelectContent>
-          </Select>
+            </div>
+          ) : (
+            <Select value={value.imageId} onValueChange={(v) => set({ imageId: v })}>
+              <SelectTrigger id={id("image")} className="w-full">
+                <SelectValue placeholder="Pick an image" />
+              </SelectTrigger>
+              <SelectContent>
+                {images.map((i) => (
+                  <SelectItem key={i.id} value={i.id}>
+                    {i.name}
+                    {i.problem ? " (can't deploy now)" : ""}
+                  </SelectItem>
+                ))}
+                {deletedImageId && !image && (
+                  <SelectItem value={deletedImageId} disabled>
+                    (deleted image)
+                  </SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+          )}
         </div>
         <div className="grid gap-2">
-          <Label htmlFor={id("size")}>Size</Label>
+          <Label htmlFor={id("size")}>
+            <Term id="size">Size</Term>
+          </Label>
           <Select value={value.sizeId} onValueChange={(v) => set({ sizeId: v })}>
             <SelectTrigger id={id("size")} className="w-full">
               <SelectValue />
@@ -285,34 +310,6 @@ export function TemplateFields({
             </SelectContent>
           </Select>
         </div>
-      </div>
-
-      <div className="grid gap-2">
-        <Label>VM folder</Label>
-        <div className="flex min-w-0 items-center gap-2">
-          <Button type="button" variant="outline" size="sm" onClick={() => void pickFolder()}>
-            <FolderOpenIcon data-icon="inline-start" />
-            Choose…
-          </Button>
-          <span className="min-w-0 truncate text-sm text-muted-foreground" title={value.vmFolder ?? undefined}>
-            {value.vmFolder ?? `${HYPERVISOR_LABEL[hypervisor]}'s default folder`}
-          </span>
-          {value.vmFolder && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Use the hypervisor's default folder"
-              onClick={() => set({ vmFolder: null })}
-            >
-              <XIcon />
-            </Button>
-          )}
-        </div>
-        <p className="text-xs text-muted-foreground">Each VM gets its own folder in it, named like the VM.</p>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
         <div className="grid gap-2">
           <Label htmlFor={id("network")}>Network</Label>
           <div className="flex gap-2">
@@ -357,157 +354,201 @@ export function TemplateFields({
             )}
           </div>
         </div>
-        <div className="grid gap-2">
-          <Label htmlFor={id("key")}>SSH key</Label>
-          <Select value={value.sshKeyId ?? NONE} onValueChange={(v) => set({ sshKeyId: v === NONE ? null : v })}>
-            <SelectTrigger id={id("key")} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE}>None</SelectItem>
-              {keyChoices.map((k) => (
-                <SelectItem key={k.id} value={k.id}>
-                  {k.label}
-                  {k.public ? ` (${k.public.algorithm})` : " (public half not read yet)"}
-                </SelectItem>
+        <div className="grid grid-cols-[1fr_8rem] gap-3">
+          <div className="grid gap-2">
+            <Label>
+              <Term id="environment" />
+            </Label>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={value.environment}
+              onValueChange={(v) => v && set({ environment: v as Environment })}
+            >
+              {ENVIRONMENTS.map((e) => (
+                <ToggleGroupItem key={e.value} value={e.value} className={e.className}>
+                  {e.label}
+                </ToggleGroupItem>
               ))}
-            </SelectContent>
-          </Select>
-          <p className="text-xs text-muted-foreground">Only its public half goes to the VMs.</p>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-[1fr_8rem] gap-3">
-        <div className="grid gap-2">
-          <Label htmlFor={id("pattern")}>Naming pattern</Label>
-          <Input
-            id={id("pattern")}
-            className="font-mono"
-            value={value.namingPattern}
-            maxLength={80}
-            onChange={(e) => set({ namingPattern: e.currentTarget.value })}
-          />
-          <p className="text-xs text-muted-foreground">
-            <code>{"{n}"}</code> the VM&apos;s number, <code>{"{template}"}</code> the template&apos;s name,{" "}
-            <code>{"{date}"}</code> today (YYYYMMDD).
-          </p>
-        </div>
-        {count}
-      </div>
-
-      <div className="grid grid-cols-2 gap-3">
-        <div className="grid gap-2">
-          <Label>Environment</Label>
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            size="sm"
-            value={value.environment}
-            onValueChange={(v) => v && set({ environment: v as Environment })}
-          >
-            {ENVIRONMENTS.map((e) => (
-              <ToggleGroupItem key={e.value} value={e.value} className={e.className}>
-                {e.label}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          {value.environment === "prod" && (
-            <p className="text-xs text-muted-foreground">Deploying Prod VMs needs a High approval.</p>
-          )}
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor={id("tags")}>Tags</Label>
-          <Input
-            id={id("tags")}
-            value={form.tags}
-            placeholder="web, frontend"
-            onChange={(e) => onChange({ ...form, tags: e.currentTarget.value })}
-          />
-          <p className="text-xs text-muted-foreground">Separated by commas; the VMs get them.</p>
-        </div>
-      </div>
-
-      <fieldset className="grid gap-2">
-        <legend className="mb-2 text-sm font-medium">First boot (cloud-init)</legend>
-        <div className="grid grid-cols-2 gap-3">
-          <div className="grid gap-2">
-            <Label htmlFor={id("user")}>Guest user</Label>
-            <Input
-              id={id("user")}
-              className="font-mono"
-              value={value.guestUser ?? ""}
-              maxLength={32}
-              placeholder="the image's default user"
-              disabled={!cloudInit}
-              onChange={(e) => set({ guestUser: e.currentTarget.value })}
-            />
+            </ToggleGroup>
           </div>
-          <div className="grid gap-2">
-            <Label htmlFor={id("packages")}>Packages</Label>
-            <Input
-              id={id("packages")}
-              className="font-mono"
-              value={form.packages}
-              placeholder="nginx, htop"
-              disabled={!cloudInit}
-              onChange={(e) => onChange({ ...form, packages: e.currentTarget.value })}
-            />
-          </div>
+          {count}
         </div>
-        <p className="text-xs text-muted-foreground">
-          {cloudInit
-            ? "cloud-init sets the hostname, makes the user with sudo and the SSH key, and installs the packages on first boot. No password is set or stored."
-            : profile?.family === "windows"
-              ? "Windows guests get no cloud-init setup."
-              : "An ISO install has no OS yet, so nothing is set up on first boot."}
-        </p>
-      </fieldset>
-
-      {golden && (
-        <div className="grid gap-2">
-          <Label>Golden VM clones</Label>
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            size="sm"
-            value={value.cloneMode}
-            onValueChange={(v) => v && set({ cloneMode: v as CloneMode })}
-          >
-            <ToggleGroupItem value="full">Full clone</ToggleGroupItem>
-            <ToggleGroupItem value="linked">Linked clone</ToggleGroupItem>
-          </ToggleGroup>
-          <p className="text-xs text-muted-foreground">
-            {value.cloneMode === "linked"
-              ? "Quick and small, but each clone needs the golden VM and its snapshot, and its disk can't grow to the size's."
-              : "A copy that stands alone; its boot disk grows to the size's."}
-          </p>
-        </div>
+      </div>
+      {value.environment === "prod" && (
+        <p className="text-xs text-muted-foreground">Deploying Prod VMs needs a High approval.</p>
       )}
 
-      <fieldset className="grid gap-2">
-        <legend className="mb-2 text-sm font-medium">After each VM is deployed</legend>
-        <div className="grid grid-cols-2 gap-2">
-          {STEPS.map((step) => (
-            <Label key={step.key} className="flex items-start gap-2 font-normal">
-              <Checkbox
-                className="mt-0.5"
-                checked={value.afterDeploy[step.key]}
-                disabled={step.key === "linkSession" && !value.afterDeploy.createSession}
-                onCheckedChange={(v) => {
-                  const on = v === true;
-                  const next = { ...value.afterDeploy, [step.key]: on };
-                  if (step.key === "createSession" && !on) next.linkSession = false;
-                  set({ afterDeploy: next });
-                }}
-              />
-              <span className="grid gap-0.5">
-                {step.label}
-                <span className="text-xs text-muted-foreground">{step.hint}</span>
+      {/* UX-04: the basics above; everything with a sensible default below, folded. */}
+      <Collapsible open={advanced} onOpenChange={setAdvanced} className="grid gap-4">
+        <CollapsibleTrigger asChild>
+          <Button type="button" variant="ghost" size="sm" className="justify-self-start">
+            <ChevronRightIcon
+              data-icon="inline-start"
+              className={cn("transition-transform", advanced && "rotate-90")}
+            />
+            Advanced
+            <span className="font-normal text-muted-foreground">
+              folder, SSH key, names, tags, first boot, after deploy
+            </span>
+          </Button>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="grid gap-4">
+          <div className="grid gap-2">
+            <Label>VM folder</Label>
+            <div className="flex min-w-0 items-center gap-2">
+              <Button type="button" variant="outline" size="sm" onClick={() => void pickFolder()}>
+                <FolderOpenIcon data-icon="inline-start" />
+                Choose…
+              </Button>
+              <span className="min-w-0 truncate text-sm text-muted-foreground" title={value.vmFolder ?? undefined}>
+                {value.vmFolder ?? `${HYPERVISOR_LABEL[hypervisor]}'s default folder`}
               </span>
+              {value.vmFolder && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Use the hypervisor's default folder"
+                  onClick={() => set({ vmFolder: null })}
+                >
+                  <XIcon />
+                </Button>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">Each VM gets its own folder in it, named like the VM.</p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="grid gap-2">
+              <Label htmlFor={id("key")}>SSH key</Label>
+              <Select value={value.sshKeyId ?? NONE} onValueChange={(v) => set({ sshKeyId: v === NONE ? null : v })}>
+                <SelectTrigger id={id("key")} className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={NONE}>None</SelectItem>
+                  {keyChoices.map((k) => (
+                    <SelectItem key={k.id} value={k.id}>
+                      {k.label}
+                      {k.public ? ` (${k.public.algorithm})` : " (public half not read yet)"}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">Only its public half goes to the VMs.</p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={id("tags")}>Tags</Label>
+              <Input
+                id={id("tags")}
+                value={form.tags}
+                placeholder="web, frontend"
+                title="Separated by commas; the VMs get them"
+                onChange={(e) => onChange({ ...form, tags: e.currentTarget.value })}
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-2">
+            <Label htmlFor={id("pattern")} className="flex items-center gap-1">
+              Naming pattern
+              <HelpTip topic="namingPattern" />
             </Label>
-          ))}
-        </div>
-      </fieldset>
+            <Input
+              id={id("pattern")}
+              className="font-mono"
+              value={value.namingPattern}
+              maxLength={80}
+              onChange={(e) => set({ namingPattern: e.currentTarget.value })}
+            />
+          </div>
+
+          <fieldset className="grid gap-2">
+            <legend className="mb-2 text-sm font-medium">First boot (cloud-init)</legend>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="grid gap-2">
+                <Label htmlFor={id("user")}>Guest user</Label>
+                <Input
+                  id={id("user")}
+                  className="font-mono"
+                  value={value.guestUser ?? ""}
+                  maxLength={32}
+                  placeholder="the image's default user"
+                  disabled={!cloudInit}
+                  onChange={(e) => set({ guestUser: e.currentTarget.value })}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor={id("packages")}>Packages</Label>
+                <Input
+                  id={id("packages")}
+                  className="font-mono"
+                  value={form.packages}
+                  placeholder="nginx, htop"
+                  disabled={!cloudInit}
+                  onChange={(e) => onChange({ ...form, packages: e.currentTarget.value })}
+                />
+              </div>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {cloudInit
+                ? "Sets the hostname, the user with sudo and the SSH key, and the packages; no password is set."
+                : profile?.family === "windows"
+                  ? "Windows guests get no cloud-init setup."
+                  : "An ISO install has no OS yet, so nothing is set up on first boot."}
+            </p>
+          </fieldset>
+
+          {golden && (
+            <div className="grid gap-2">
+              <Label>
+                <Term id="goldenVm">Golden VM</Term> clones
+              </Label>
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                size="sm"
+                value={value.cloneMode}
+                onValueChange={(v) => v && set({ cloneMode: v as CloneMode })}
+              >
+                <ToggleGroupItem value="full">Full clone</ToggleGroupItem>
+                <ToggleGroupItem value="linked">
+                  <Term id="linkedClone">Linked clone</Term>
+                </ToggleGroupItem>
+              </ToggleGroup>
+              <p className="text-xs text-muted-foreground">
+                {value.cloneMode === "linked"
+                  ? "Quick and small, but needs the golden VM's snapshot, and its disk can't grow."
+                  : "A copy that stands alone; its boot disk grows to the size's."}
+              </p>
+            </div>
+          )}
+
+          <fieldset className="grid gap-2">
+            <legend className="mb-2 text-sm font-medium">After each VM is deployed</legend>
+            <div className="grid grid-cols-2 gap-2">
+              {STEPS.map((step) => (
+                <Label key={step.key} className="flex items-start gap-2 font-normal" title={step.hint}>
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={value.afterDeploy[step.key]}
+                    disabled={step.key === "linkSession" && !value.afterDeploy.createSession}
+                    onCheckedChange={(v) => {
+                      const on = v === true;
+                      const next = { ...value.afterDeploy, [step.key]: on };
+                      if (step.key === "createSession" && !on) next.linkSession = false;
+                      set({ afterDeploy: next });
+                    }}
+                  />
+                  {step.label}
+                </Label>
+              ))}
+            </div>
+          </fieldset>
+        </CollapsibleContent>
+      </Collapsible>
     </>
   );
 }

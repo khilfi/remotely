@@ -133,8 +133,7 @@ export function StackDialog({ existing, initial, templates, onSaved, onClose }: 
         <DialogHeader>
           <DialogTitle>{existing ? `Edit ${existing.name}` : "New stack"}</DialogTitle>
           <DialogDescription>
-            Launch templates in boot order. A deploy makes them as one job, step by step, waiting between steps for what
-            you choose.
+            Launch templates in boot order, deployed as one job with the waits you choose between steps.
           </DialogDescription>
         </DialogHeader>
         <form

@@ -428,8 +428,7 @@ function TeardownDialog({
         <DialogHeader>
           <DialogTitle>Tear down {instance.name}?</DialogTitle>
           <DialogDescription>
-            Deletes the VMs its deploy made, with their files. The approval that follows lists every file that goes and
-            asks for the vault password. Protected VMs are left alone.
+            Deletes the VMs its deploy made, with their files; the approval lists every file. Protected VMs stay.
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-3 text-sm">

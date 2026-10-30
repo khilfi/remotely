@@ -438,8 +438,8 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
           title={`Delete schedule '${deleting.name}'?`}
           description={
             deleting.spec.action.kind === "snapshot"
-              ? "Its approval is withdrawn and it never runs again. The snapshots it took stay on the VMs, named starting with 'Remotely schedule'."
-              : "Its approval is withdrawn and it never runs again."
+              ? "It never runs again; the snapshots it took stay on the VMs."
+              : "It never runs again."
           }
           confirmLabel="Delete"
           onConfirm={async () => {

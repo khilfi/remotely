@@ -9,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { HypervisorLabel, StateBadge } from "@/components/Badges";
+import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage } from "@/lib/api";
 import { claimReason } from "@/lib/workspaces";
@@ -60,8 +61,7 @@ export function UnassignedVmsSheet({ open, vms, readOnly, onOpenChange, onAdded 
         <SheetHeader>
           <SheetTitle>Unassigned VMs</SheetTitle>
           <SheetDescription>
-            VMs on this PC that no workspace has yet. Add the ones this engagement uses: from then on only this
-            workspace lists them and can act on them. Another workspace's VMs never show here.
+            VMs on this PC no workspace has yet: add the ones this workspace uses. <HelpTip topic="workspaces" />
           </SheetDescription>
         </SheetHeader>
         <div className="min-h-0 flex-1 overflow-auto px-4">

@@ -234,8 +234,8 @@ function PickDialog({ action, onSubmit, onClose }: Props) {
         <p className="flex items-start gap-1.5 text-sm text-muted-foreground">
           <InfoIcon className="mt-0.5 size-4 shrink-0" aria-hidden />
           {revert
-            ? "Reverting loses what changed since the snapshot. The next step asks for approval and offers a safety snapshot of each VM first."
-            : "Deleting keeps the snapshot's children and the VM's current state. The next step asks for approval; no safety snapshot is taken, since it would not hold the deleted snapshot."}
+            ? "Reverting loses what changed since the snapshot; the approval offers a safety snapshot first."
+            : "Deleting keeps its children and the VM's current state."}
         </p>
         <DialogFooter>
           <Button variant="outline" onClick={onClose} disabled={busy}>
