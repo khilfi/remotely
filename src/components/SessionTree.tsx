@@ -17,11 +17,29 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
-import { CheckIcon, ChevronRightIcon, ClockIcon, FolderIcon, FolderOpenIcon, SearchIcon, TagIcon } from "lucide-react";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import {
+  CheckIcon,
+  ChevronRightIcon,
+  ClockIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  ListTreeIcon,
+  SearchIcon,
+  TagIcon,
+} from "lucide-react";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ColorDot } from "@/components/Badges";
 import { RefreshButton } from "@/components/RefreshButton";
 import { RowMenu } from "@/components/RowMenu";
@@ -48,9 +66,9 @@ const OPEN_KEY = "remotely.terminal.treeOpen";
 const OPEN_BY_DEFAULT_UP_TO = 40;
 
 const GROUPINGS: { value: TreeGrouping; label: string }[] = [
-  { value: "folder", label: "Folders" },
-  { value: "tag", label: "Tags" },
-  { value: "label", label: "Environments" },
+  { value: "folder", label: "Folder" },
+  { value: "tag", label: "Tag" },
+  { value: "label", label: "Environment" },
 ];
 
 const ENV_TEXT: Record<Environment, string> = {
@@ -267,23 +285,30 @@ export function SessionTree({
             onKeyDown={(e) => e.key === "Escape" && setText("")}
           />
         </div>
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label="Group sessions by">
+                  <ListTreeIcon />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent>Group by {GROUPINGS.find((g) => g.value === grouping)?.label.toLowerCase()}</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuLabel>Group by</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={grouping} onValueChange={(v) => setGrouping(v as TreeGrouping)}>
+              {GROUPINGS.map((g) => (
+                <DropdownMenuRadioItem key={g.value} value={g.value}>
+                  {g.label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <RefreshButton onClick={() => setReloads((n) => n + 1)} />
       </div>
-      <ToggleGroup
-        type="single"
-        variant="outline"
-        size="sm"
-        className="w-full"
-        aria-label="Group sessions by"
-        value={grouping}
-        onValueChange={(v) => v && setGrouping(v as TreeGrouping)}
-      >
-        {GROUPINGS.map((g) => (
-          <ToggleGroupItem key={g.value} value={g.value} className="flex-1 text-xs">
-            {g.label}
-          </ToggleGroupItem>
-        ))}
-      </ToggleGroup>
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-0.5 pr-2 pb-2" role="tree" aria-label="Sessions">
           {!searching && recent.length > 0 && (

@@ -392,7 +392,7 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
       <p className="truncate text-xs text-muted-foreground" title="Click pastes; Shift+click also presses Enter">
         {targetName ? (
           <>
-            Pastes into <span className="font-medium text-foreground">{targetName}</span> · Shift+click runs it
+            Pastes into <span className="font-medium text-foreground">{targetName}</span>
           </>
         ) : (
           "Open a terminal to paste into it"

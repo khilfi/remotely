@@ -492,7 +492,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Name</TableHead>
+                    <TableHead className="min-w-56">Name</TableHead>
                     <TableHead>Address</TableHead>
                     <TableHead>Login</TableHead>
                     <TableHead>Via</TableHead>

@@ -121,7 +121,7 @@ function TunnelsList({
       {tunnels === null ? (
         <p className="text-sm text-muted-foreground">{error ?? "Loading…"}</p>
       ) : tunnels.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No saved port forwards yet. Edit the session to add one.</p>
+        <p className="text-sm text-muted-foreground">No saved port forwards yet.</p>
       ) : (
         <ul className="grid gap-1.5">
           {tunnels.map((t) => {

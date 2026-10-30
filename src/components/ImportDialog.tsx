@@ -83,7 +83,7 @@ const SOURCES: {
   {
     source: "mobaxterm",
     title: "MobaXterm export",
-    detail: "A .mxtsessions file (Settings, Export all sessions); folders are kept.",
+    detail: "A .mxtsessions file from Export all sessions; folders are kept.",
     icon: TerminalSquareIcon,
     format: true,
   },
@@ -105,7 +105,7 @@ const SOURCES: {
   {
     source: "csv",
     title: "CSV file",
-    detail: "A header row with host and the other columns the guide lists.",
+    detail: "A header row with host and other columns; the guide lists them.",
     icon: FileSpreadsheetIcon,
     format: true,
   },
@@ -310,7 +310,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                   </span>
                 </button>
                 {s.format && (
-                  <div className="flex shrink-0 flex-col justify-center gap-1 border-l px-1.5">
+                  <div className="flex w-28 shrink-0 flex-col justify-center gap-1 border-l px-1.5">
                     <Button
                       variant="ghost"
                       size="xs"

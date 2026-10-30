@@ -182,6 +182,13 @@ export const HELP = {
       "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
     ],
   },
+  recordedLines: {
+    title: "Recorded lines",
+    body: [
+      "While Type in all tabs is on, each line you send is recorded in every terminal, from Enter until its prompt comes back, its output goes quiet, or a time limit passes.",
+      "Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed. Recordings stay in memory until Type in all tabs is turned off.",
+    ],
+  },
   vmLink: {
     title: "VM it reaches",
     body: [

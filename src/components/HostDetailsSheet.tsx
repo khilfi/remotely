@@ -340,8 +340,7 @@ function SystemTab({ sessionId, thresholds }: { sessionId: string; thresholds: T
             </EmptyMedia>
             <EmptyTitle>Not read yet</EmptyTitle>
             <EmptyDescription>
-              Remotely reads a host&apos;s OS and specs when a terminal to it connects, or while the dashboard watches
-              it. Refresh reads them now; with no open connection it logs in once with the saved login.
+              Read when a terminal to it connects; Refresh reads them now, logging in once if no connection is open.
             </EmptyDescription>
           </EmptyHeader>
           <EmptyContent>{refreshButton}</EmptyContent>

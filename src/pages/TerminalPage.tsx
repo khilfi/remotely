@@ -276,6 +276,14 @@ function allPanes(layout: Layout): PaneSession[] {
   return layout.kind === "pane" ? [layout.pane] : layout.children.flatMap(allPanes);
 }
 
+/**
+ * The saved session a tab shows: its current pane's, or another pane's (a pane split "like" another doesn't know its
+ * session, and every pane of a tab reaches the same one), so the tab keeps its name, colour and environment.
+ */
+function tabSessionId(tab: Tab, current: string | null): string | null {
+  return current ?? allPanes(tab.layout).find((p) => p.sessionId)?.sessionId ?? null;
+}
+
 function findPane(layout: Layout, key: string): PaneSession | undefined {
   return allPanes(layout).find((p) => p.key === key);
 }
@@ -1007,13 +1015,14 @@ export function TerminalPage({
 
   const pickable: PickableTab[] = tabs.map((t) => {
     const pane = findPane(t.layout, t.activePane);
-    const session = pane?.sessionId ? sessionById.get(pane.sessionId) : undefined;
+    const sessionId = tabSessionId(t, pane?.sessionId ?? null);
+    const session = sessionId ? sessionById.get(sessionId) : undefined;
     return {
       key: t.key,
       folderId: session?.folderId ?? null,
       // UX-12: "By environment" picks by the environment that applies.
       environment: session ? appliedEnvironment(session, vmById).environment : null,
-      unsaved: !pane?.sessionId,
+      unsaved: !sessionId,
     };
   });
 
@@ -1574,9 +1583,17 @@ export function TerminalPage({
   const tunnelsBlocked = tunnelsReason(currentPane, currentSnapshot);
   const isSplit = current?.layout.kind === "split";
 
+  /** An action that moves the focus (a search box) runs once its menu has closed, which holds the focus till then. */
+  const afterMenu = useRef<(() => void) | null>(null);
   /** A toolbar menu closed: the focus goes back to the terminal, not the button, unless the action moved it. */
   function backToTerminal(e: Event) {
     e.preventDefault();
+    const then = afterMenu.current;
+    afterMenu.current = null;
+    if (then) {
+      then();
+      return;
+    }
     const pane = currentPane;
     window.requestAnimationFrame(() => {
       if (!document.activeElement || document.activeElement === document.body) pane?.focus();
@@ -1600,12 +1617,12 @@ export function TerminalPage({
         {current && currentPane && (
           <>
             <DropdownMenuLabel className="truncate font-normal text-muted-foreground">{currentName}</DropdownMenuLabel>
-            <DropdownMenuItem onSelect={() => currentPane.openSearch()}>
+            <DropdownMenuItem onSelect={() => (afterMenu.current = () => currentPane.openSearch())}>
               <SearchIcon />
               Search this terminal
               <DropdownMenuShortcut>Ctrl+Shift+F</DropdownMenuShortcut>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={openSearchAll}>
+            <DropdownMenuItem onSelect={() => (afterMenu.current = openSearchAll)}>
               <TextSearchIcon />
               Search all terminals
               <DropdownMenuShortcut>Ctrl+Shift+G</DropdownMenuShortcut>
@@ -2146,7 +2163,8 @@ function TabButton({
   onClose: () => void;
 }) {
   const snapshot = usePane(pane);
-  const session = snapshot.sessionId ? sessions.get(snapshot.sessionId) : undefined;
+  const sessionId = tabSessionId(tab, snapshot.sessionId);
+  const session = sessionId ? sessions.get(sessionId) : undefined;
   const applied: AppliedEnvironment | null = session ? appliedEnvironment(session, vms) : null;
   const env = applied?.environment ?? "none";
   // CT-01: a container's shell is named after the container.

@@ -72,6 +72,7 @@ const TERMINAL: ShortcutGroup = {
     { keys: "Ctrl+click / Shift+click", what: "Pick tabs for Type in all tabs and Compare hosts" },
     { keys: "Ctrl+click", what: "Pick sessions in the session tree for Compare hosts" },
     { keys: "Middle-click", what: "Close a tab" },
+    { keys: "Shift+click", what: "Run a command from Commands: paste it and press Enter" },
     { keys: "Esc", what: "Turn off Type in all tabs, or clear the picked tabs, from their bar" },
   ],
 };
