@@ -198,6 +198,23 @@ export const HELP = {
       "A VM whose safety snapshot fails is left untouched.",
     ],
   },
+  // ---- U4: approvals, Settings and the Vault ----
+  reasonOrChangeId: {
+    title: "Reason and change ID",
+    body: [
+      "A few words on why you run it, kept in the audit log. A ticket or change number in them, such as CHG0012345, INC-42 or #1234, is kept as the change ID too, with the job and in the exports.",
+      "A workspace can require a change ID for High and Critical actions on Prod targets.",
+    ],
+    link: { label: "Approval settings", to: setting("change-ids") },
+  },
+  standingApproval: {
+    title: "Standing approval",
+    body: [
+      "A schedule is approved once, when you save it, and each run goes ahead under that approval until you edit or delete the schedule.",
+      "If a target becomes Prod or Protected, a new VM gets its tag or the approval rules change, the schedule pauses and asks again. A run missed while Remotely was closed is reported, not caught up.",
+    ],
+    link: { label: "Open Schedules", to: { kind: "page", page: "schedules" } },
+  },
   updateChecks: {
     title: "Update checks",
     body: [

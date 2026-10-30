@@ -6,6 +6,11 @@
 // the countdown, which can be cancelled until it ends. The core checks every answer again; these
 // fields only help the user get them right first time.
 //
+// UX-11: summary first (the action, its targets, the tier with one plain reason and a "Why?" popover with the core's
+// reasons), then the warnings and the impact table, folded when long, then the steps. One target asks for its name to
+// confirm, several for their count (AP-03); one field takes the reason and the change ID (AP-03, AP-08): see
+// lib/approval.ts.
+//
 // SS-10: a MultiExec line comes here too, held at Enter (or another key that runs it, `exec.runKey`): it shows the
 // line and the terminals it is typed into, and the caller answers it through MultiExec (`approve`, `cancel`), which
 // sends that key, or Ctrl+C to clear the line.
@@ -13,8 +18,8 @@
 // SS-07: a tunnel shows where it listens, where it leads and who can use it (a network address is called out).
 // QL-08: a disabled button says why.
 
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { InfoIcon, KeyRoundIcon, OctagonAlertIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { KeyRoundIcon, OctagonAlertIcon, ShieldAlertIcon, TimerIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,11 +34,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
 import { StackDetailsView } from "@/components/StackDetailsView";
+import { usePresentation } from "@/components/Presentation";
 import {
   api,
   changedRequest,
@@ -47,10 +55,23 @@ import {
   type VaultInfo,
 } from "@/lib/api";
 import { HelpTip } from "@/components/HelpTip";
+import { Term } from "@/components/Term";
+import {
+  approvalProblem,
+  confirmLabel,
+  confirmPhrase,
+  findChangeId,
+  plainReason,
+  reasonAnswers,
+  reasonField,
+  targetsLine,
+  tierLine,
+  typedCount,
+} from "@/lib/approval";
 import { containerTargetKey, formatBytes } from "@/lib/containers";
+import { glossaryEntry } from "@/lib/glossary";
 import { rolloutText } from "@/lib/rollout";
 import { isLoopback } from "@/lib/tunnels";
-import { approveReason, MAX_CHANGE_ID } from "@/lib/disabled-reasons";
 import { formatDuration, plural } from "@/lib/format";
 import { targetLocation } from "@/lib/hypervisors";
 import { formatSize } from "@/lib/transfers";
@@ -73,6 +94,10 @@ interface Props {
   /** SS-10: cancels it (the terminals get Ctrl+C). */
   cancel?: () => Promise<void>;
 }
+
+/** Rows of the impact table and warnings shown before "Show all". */
+const FOLD_ROWS = 6;
+const FOLD_WARNINGS = 3;
 
 function find<S extends ApprovalStep["step"]>(steps: ApprovalStep[], step: S) {
   return steps.find((s) => s.step === step) as Extract<ApprovalStep, { step: S }> | undefined;
@@ -113,8 +138,8 @@ function ContainerImpactLines({ impact }: { impact: ContainerImpact }) {
   );
 }
 
-/** After approval: the job waits until `until` and can be cancelled meanwhile (AP-03). */
-type Countdown = { jobId: string; until: number; seconds: number };
+/** After approval: the job waits this many seconds and can be cancelled meanwhile (AP-03). */
+type Countdown = { jobId: string; seconds: number };
 
 /** VM-08: a stack instance's VMs together (in the request's order within each), other targets after them. A stack
  * command's own targets keep their order: it is the order they run in. */
@@ -136,6 +161,83 @@ function groupedTargets(request: ApprovalRequest): ApprovalRequest["targets"] {
     .map(({ t }) => t);
 }
 
+/** A column heading with its explanation on hover or focus. */
+function HeadTip({ label, tip }: { label: string; tip: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          tabIndex={0}
+          className="cursor-help underline decoration-muted-foreground/60 decoration-dotted underline-offset-4 outline-none focus-visible:rounded-sm focus-visible:ring-3 focus-visible:ring-ring/50"
+        >
+          {label}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">{tip}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** "Why?": the core's reasons for the tier, in plain words, and what the tier asks. */
+function WhyTier({ request }: { request: ApprovalRequest }) {
+  const tier = glossaryEntry(request.tier);
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button type="button" variant="link" size="sm" className="h-auto p-0 text-sm">
+          Why?
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-96 gap-2 p-3" aria-label={`Why ${tier.term}`}>
+        <p className="font-medium">Why {tier.term}</p>
+        <ul className="list-disc space-y-0.5 pl-4 text-muted-foreground">
+          {request.reasons.map((r) => (
+            <li key={r}>{plainReason(r)}</li>
+          ))}
+        </ul>
+        <p className="text-xs text-muted-foreground">
+          {tier.term}: {tier.definition}
+        </p>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** A list that shows its first `limit` items and a button for the rest. */
+function Folded<T>({
+  items,
+  limit,
+  noun,
+  children,
+}: {
+  items: readonly T[];
+  limit: number;
+  noun: string;
+  children: (shown: readonly T[]) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  // Fold only when it saves more than one line.
+  const folds = items.length > limit + 1;
+  const shown = folds && !open ? items.slice(0, limit) : items;
+  return (
+    <>
+      {children(shown)}
+      {folds && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="justify-self-start"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+        >
+          {open ? `Show fewer ${noun}s` : `Show all ${plural(items.length, noun)}`}
+        </Button>
+      )}
+    </>
+  );
+}
+
 export function ApprovalDialog({
   request: asked,
   vault,
@@ -150,11 +252,12 @@ export function ApprovalDialog({
   const [askedAgain, setRequest] = useState<ApprovalRequest | null>(null);
   const request = askedAgain?.id === asked.id ? askedAgain : asked;
   const { steps, tier } = request;
+  const { presenting } = usePresentation();
   const snapshot = find(steps, "safetySnapshot");
-  const typeCount = find(steps, "typeTargetCount");
-  const needsReason = Boolean(find(steps, "reason"));
-  // AP-08: optional, unless this workspace requires one for Prod targets.
-  const changeIdStep = find(steps, "changeId");
+  // AP-03: a lone target's name, or the count; FD-03: the count while presenting (names may be masked on screen).
+  const phrase = confirmPhrase(request, presenting);
+  // AP-03, AP-08: one field for the reason and the change ID.
+  const field = reasonField(steps);
   const countdownStep = find(steps, "countdown");
   const reauth = Boolean(find(steps, "vaultReauth"));
   const risky = tier === "high" || tier === "critical";
@@ -165,8 +268,7 @@ export function ApprovalDialog({
 
   const [safetySnapshot, setSafetySnapshot] = useState(snapshot?.defaultOn ?? false);
   const [typed, setTyped] = useState("");
-  const [reason, setReason] = useState("");
-  const [changeId, setChangeId] = useState("");
+  const [text, setText] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [noVault, setNoVault] = useState(false);
@@ -176,20 +278,16 @@ export function ApprovalDialog({
   const [expired, setExpired] = useState(false);
   const vaultMissing = reauth && (noVault || vault?.status === "notSetUp");
 
-  const ready =
-    (!typeCount || Number(typed) === typeCount.expected) &&
-    (!needsReason || reason.trim() !== "") &&
-    (!changeIdStep?.required || changeId.trim() !== "") &&
-    [...changeId.trim()].length <= MAX_CHANGE_ID &&
-    (!reauth || password !== "");
   const notReady = expired
     ? "This approval expired: start the action again"
-    : approveReason({ steps, typedCount: typed, reason, password, busy, changeId });
+    : approvalProblem({ steps, phrase, typed, text, password, busy });
+  const ready = notReady === null;
+  const changeId = field.shown && find(steps, "reason") && find(steps, "changeId") ? findChangeId(text) : null;
   // FD-01: the first answer to type gets the focus, and Enter in any of them approves once all are
   // right (the same as pressing Approve).
-  const firstField = typeCount ? "count" : needsReason ? "reason" : reauth ? "password" : null;
+  const firstField = phrase ? "confirm" : field.shown ? "reason" : reauth ? "password" : null;
   const enterApproves = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && ready && !busy && !expired) {
+    if (e.key === "Enter" && ready) {
       e.preventDefault();
       void approve();
     }
@@ -202,18 +300,17 @@ export function ApprovalDialog({
       const answers: ApprovalAnswers = {
         // Pressing the approve button is the confirmation (AP-03).
         confirmed: true,
-        typedTargetCount: typeCount ? Number(typed) : undefined,
-        reason: needsReason ? reason : undefined,
+        typedTargetCount: phrase ? typedCount(phrase, typed) : undefined,
+        ...reasonAnswers(steps, text),
         safetySnapshot: snapshot ? safetySnapshot : undefined,
         vaultPassword: reauth ? password : undefined,
-        changeId: changeIdStep && changeId.trim() !== "" ? changeId.trim() : undefined,
       };
       const jobId = approveWith ? await approveWith(answers) : await api.approve(request.id, answers);
       setPassword("");
       onApproved?.(jobId);
       if (countdownStep && countdownStep.seconds > 0) {
         const seconds = countdownStep.seconds;
-        setCountdown({ jobId, seconds, until: Date.now() + seconds * 1000 });
+        setCountdown({ jobId, seconds });
       } else {
         onClose(jobId);
       }
@@ -225,8 +322,7 @@ export function ApprovalDialog({
         // Asked again under the same id: the answers start over, for what the action would do now.
         setRequest(again);
         setTyped("");
-        setReason("");
-        setChangeId("");
+        setText("");
         setSafetySnapshot(find(again.steps, "safetySnapshot")?.defaultOn ?? false);
       }
       setExpired(errorCode(err) === "approval_expired");
@@ -257,6 +353,9 @@ export function ApprovalDialog({
     return <CountdownView countdown={countdown} summary={request.summary} onClose={() => onClose(countdown.jobId)} />;
   }
 
+  const targetsText = targetsLine(request.targets);
+  const rows = groupedTargets(request);
+
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && void cancel()}>
       {/* VM-24: a long list of files to delete must not push Approve and Cancel off a small window. */}
@@ -266,12 +365,15 @@ export function ApprovalDialog({
             <TierBadge tier={tier} />
             <DialogTitle>{request.summary}</DialogTitle>
           </div>
-          <DialogDescription asChild>
-            <ul className="list-disc space-y-0.5 pl-5">
-              {request.reasons.map((r) => (
-                <li key={r}>{r}</li>
-              ))}
-            </ul>
+          <DialogDescription className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+            {targetsText && (
+              <>
+                <span className="font-medium text-foreground">{targetsText}</span>
+                <span aria-hidden>·</span>
+              </>
+            )}
+            <span>{tierLine(request)}</span>
+            <WhyTier request={request} />
           </DialogDescription>
         </DialogHeader>
 
@@ -286,137 +388,20 @@ export function ApprovalDialog({
         {request.capacity && <CapacityPlanView capacity={request.capacity} />}
         {request.standing && <StandingSummary standing={request.standing} />}
 
-        <div className="grid gap-1.5" hidden={request.deploy !== null || request.stack?.action === "deploy"}>
-          <div className="max-h-64 overflow-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Target</TableHead>
-                  {hasVms && (
-                    <>
-                      <TableHead>State</TableHead>
-                      <TableHead>Up for</TableHead>
-                      <TableHead className="text-right">Snapshots</TableHead>
-                    </>
-                  )}
-                  {hasContainers && (
-                    <>
-                      <TableHead>State</TableHead>
-                      <TableHead>Now</TableHead>
-                    </>
-                  )}
-                  <TableHead className="w-24">Environment</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {groupedTargets(request).map((t) => {
-                  const key = targetKey(t.target);
-                  const now = impact.get(key);
-                  return (
-                    <TableRow key={key}>
-                      <TableCell className="whitespace-normal">
-                        <div className="font-medium">{t.name}</div>
-                        {t.target.kind === "vm" && (
-                          <div className="font-mono text-xs break-all text-muted-foreground">
-                            {targetLocation(t.target.vmxPath)}
-                          </div>
-                        )}
-                        {now?.stack && (
-                          <div className="text-xs text-muted-foreground">
-                            Stack instance {now.stack.instanceName}, step {now.stack.step} of {now.stack.steps}
-                            {now.stack.byHand && " (added by hand)"}
-                          </div>
-                        )}
-                        {now?.container && <ContainerImpactLines impact={now.container} />}
-                        {now?.notes.map((note) => (
-                          <div key={note} className="text-xs text-tier-medium">
-                            {note}
-                          </div>
-                        ))}
-                        {now?.linkedClones.map((s) => (
-                          <div key={s.uid} className="text-xs text-destructive">
-                            Not deleted: {plural(s.clones.length, "linked clone")} made from its snapshot &apos;
-                            {s.snapshot}&apos; ({cloneNames(s.clones)})
-                          </div>
-                        ))}
-                      </TableCell>
-                      {hasContainers && (
-                        <>
-                          <TableCell>
-                            {now?.container?.state ? (
-                              <ContainerStateBadge state={now.container.state} />
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-sm whitespace-normal text-muted-foreground">
-                            {now?.container?.status ??
-                              (now?.container?.sizeBytes != null ? formatBytes(now.container.sizeBytes) : "—")}
-                          </TableCell>
-                        </>
-                      )}
-                      {hasVms && (
-                        <>
-                          <TableCell>
-                            {now ? (
-                              <StateBadge state={now.powerState} />
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell
-                            className="tabular-nums"
-                            title={
-                              now?.runningSince ? `Since ${new Date(now.runningSince).toLocaleString()}` : undefined
-                            }
-                          >
-                            {now?.uptimeSecs != null ? (
-                              formatDuration(now.uptimeSecs)
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-right tabular-nums">
-                            {now?.snapshotCount != null ? now.snapshotCount : "—"}
-                            {(now?.oldSnapshotCount ?? 0) > 0 && (
-                              <Badge variant="outline" className="ml-1.5 border-tier-medium/40 text-tier-medium">
-                                {now?.oldSnapshotCount} old
-                              </Badge>
-                            )}
-                          </TableCell>
-                        </>
-                      )}
-                      <TableCell>
-                        <EnvBadge env={t.environment} />
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
-          </div>
-          {hasVms && (
-            <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
-              <InfoIcon className="mt-px size-3.5 shrink-0" aria-hidden />
-              <span>
-                Up for is how long each VM has run since it was last powered on or resumed; a VM in a stack instance
-                says which one and its step. Linked clones made from a VM's snapshots show under it when a delete would
-                break them. Not shown yet: users logged in to each guest (that needs a guest login).
-              </span>
-            </p>
-          )}
-        </div>
-
         {request.warnings.length > 0 && (
           <Alert className="border-tier-medium/40">
             <TriangleAlertIcon className="text-tier-medium" />
             <AlertTitle>Read this before you go on</AlertTitle>
-            <AlertDescription>
-              <ul className="list-disc pl-5">
-                {request.warnings.map((w) => (
-                  <li key={w}>{w}</li>
-                ))}
-              </ul>
+            <AlertDescription className="grid">
+              <Folded items={request.warnings} limit={FOLD_WARNINGS} noun="warning">
+                {(shown) => (
+                  <ul className="list-disc pl-5">
+                    {shown.map((w) => (
+                      <li key={w}>{w}</li>
+                    ))}
+                  </ul>
+                )}
+              </Folded>
             </AlertDescription>
           </Alert>
         )}
@@ -424,78 +409,206 @@ export function ApprovalDialog({
         {request.skipped.length > 0 && (
           <Alert>
             <ShieldAlertIcon />
-            <AlertTitle>{plural(request.skipped.length, "protected target")} will be skipped</AlertTitle>
+            <AlertTitle>
+              {plural(request.skipped.length, "target")} will be skipped: <Term id="protected" />
+            </AlertTitle>
             <AlertDescription>{request.skipped.map((t) => t.name).join(", ")}</AlertDescription>
           </Alert>
         )}
 
+        <div className="grid gap-1.5" hidden={request.deploy !== null || request.stack?.action === "deploy"}>
+          <Folded items={rows} limit={FOLD_ROWS - 1} noun="target">
+            {(shown) => (
+              <div className="max-h-64 overflow-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Target</TableHead>
+                      {hasVms && (
+                        <>
+                          <TableHead>State</TableHead>
+                          <TableHead>
+                            <HeadTip
+                              label="Up for"
+                              tip="How long each VM has run since it was last started or resumed."
+                            />
+                          </TableHead>
+                          <TableHead className="text-right">
+                            <HeadTip
+                              label="Snapshots"
+                              tip="The snapshots each VM has now. A delete that would break a linked clone says so under the VM."
+                            />
+                          </TableHead>
+                        </>
+                      )}
+                      {hasContainers && (
+                        <>
+                          <TableHead>State</TableHead>
+                          <TableHead>Now</TableHead>
+                        </>
+                      )}
+                      <TableHead className="w-24">
+                        <Term id="environment" />
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {shown.map((t) => {
+                      const key = targetKey(t.target);
+                      const now = impact.get(key);
+                      return (
+                        <TableRow key={key}>
+                          <TableCell className="max-w-0 whitespace-normal">
+                            <div className="font-medium">{t.name}</div>
+                            {t.target.kind === "vm" && (
+                              <div
+                                className="truncate font-mono text-xs text-muted-foreground"
+                                title={targetLocation(t.target.vmxPath)}
+                              >
+                                {targetLocation(t.target.vmxPath)}
+                              </div>
+                            )}
+                            {now?.stack && (
+                              <div className="text-xs text-muted-foreground">
+                                Stack instance {now.stack.instanceName}, step {now.stack.step} of {now.stack.steps}
+                                {now.stack.byHand && " (added by hand)"}
+                              </div>
+                            )}
+                            {now?.container && <ContainerImpactLines impact={now.container} />}
+                            {now?.notes.map((note) => (
+                              <div key={note} className="text-xs text-tier-medium">
+                                {note}
+                              </div>
+                            ))}
+                            {now?.linkedClones.map((s) => (
+                              <div key={s.uid} className="text-xs text-destructive">
+                                Not deleted: {plural(s.clones.length, "linked clone")} made from its snapshot &apos;
+                                {s.snapshot}&apos; ({cloneNames(s.clones)})
+                              </div>
+                            ))}
+                          </TableCell>
+                          {hasContainers && (
+                            <>
+                              <TableCell>
+                                {now?.container?.state ? (
+                                  <ContainerStateBadge state={now.container.state} />
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-sm whitespace-normal text-muted-foreground">
+                                {now?.container?.status ??
+                                  (now?.container?.sizeBytes != null ? formatBytes(now.container.sizeBytes) : "—")}
+                              </TableCell>
+                            </>
+                          )}
+                          {hasVms && (
+                            <>
+                              <TableCell>
+                                {now ? (
+                                  <StateBadge state={now.powerState} />
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
+                              <TableCell
+                                className="tabular-nums"
+                                title={
+                                  now?.runningSince ? `Since ${new Date(now.runningSince).toLocaleString()}` : undefined
+                                }
+                              >
+                                {now?.uptimeSecs != null ? (
+                                  formatDuration(now.uptimeSecs)
+                                ) : (
+                                  <span className="text-muted-foreground">—</span>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-right tabular-nums">
+                                {now?.snapshotCount != null ? now.snapshotCount : "—"}
+                                {(now?.oldSnapshotCount ?? 0) > 0 && (
+                                  <Badge variant="outline" className="ml-1.5 border-tier-medium/40 text-tier-medium">
+                                    {now?.oldSnapshotCount} old
+                                  </Badge>
+                                )}
+                              </TableCell>
+                            </>
+                          )}
+                          <TableCell>
+                            <EnvBadge env={t.environment} />
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </div>
+            )}
+          </Folded>
+        </div>
+
         <div className="grid gap-4">
           {snapshot && (
-            <div className="flex items-start gap-2">
+            <div className="flex items-center gap-2">
               <Checkbox
                 id="approval-snapshot"
                 checked={safetySnapshot}
                 onCheckedChange={(checked) => setSafetySnapshot(checked === true)}
               />
-              <div className="grid gap-1">
-                <span className="flex items-center gap-1">
-                  <Label htmlFor="approval-snapshot">Take a safety snapshot of each VM first</Label>
-                  <HelpTip topic="safetySnapshot" />
-                </span>
-                <p className="text-xs text-muted-foreground">One revert then undoes this job.</p>
-              </div>
+              <Label htmlFor="approval-snapshot">Take a safety snapshot of each VM first</Label>
+              <HelpTip topic="safetySnapshot" />
             </div>
           )}
 
-          {typeCount && (
+          {phrase && (
             <div className="grid gap-2">
-              <Label htmlFor="approval-count">Type the number of targets ({typeCount.expected}) to confirm</Label>
+              <Label htmlFor="approval-confirm">
+                {phrase.kind === "name" ? (
+                  <span>
+                    Type <span className="font-mono font-semibold">{phrase.expected}</span> to confirm
+                  </span>
+                ) : (
+                  confirmLabel(phrase)
+                )}
+              </Label>
               <Input
-                id="approval-count"
-                className="w-32"
-                inputMode="numeric"
+                id="approval-confirm"
+                className={phrase.kind === "name" ? "max-w-sm" : "w-32"}
+                inputMode={phrase.kind === "count" ? "numeric" : undefined}
                 autoComplete="off"
+                autoCapitalize="off"
+                spellCheck={false}
                 value={typed}
                 onChange={(e) => setTyped(e.currentTarget.value)}
                 onKeyDown={enterApproves}
-                autoFocus={firstField === "count"}
+                autoFocus={firstField === "confirm"}
               />
             </div>
           )}
 
-          {needsReason && (
+          {field.shown && (
             <div className="grid gap-2">
-              <Label htmlFor="approval-reason">Reason or ticket number</Label>
+              <span className="flex items-center gap-1">
+                <Label htmlFor="approval-reason">{field.label}</Label>
+                <HelpTip topic="reasonOrChangeId" />
+              </span>
               <Input
                 id="approval-reason"
-                value={reason}
-                onChange={(e) => setReason(e.currentTarget.value)}
+                autoComplete="off"
+                placeholder={field.placeholder}
+                value={text}
+                onChange={(e) => setText(e.currentTarget.value)}
                 onKeyDown={enterApproves}
                 autoFocus={firstField === "reason"}
               />
-            </div>
-          )}
-
-          {changeIdStep && (
-            <div className="grid gap-2">
-              <Label htmlFor="approval-change-id">
-                Change ID or ticket{changeIdStep.required ? "" : " (optional)"}
-              </Label>
-              <Input
-                id="approval-change-id"
-                className="w-64"
-                autoComplete="off"
-                maxLength={MAX_CHANGE_ID}
-                placeholder="CHG0012345"
-                value={changeId}
-                onChange={(e) => setChangeId(e.currentTarget.value)}
-                onKeyDown={enterApproves}
-              />
-              <p className="text-xs text-muted-foreground">
-                {changeIdStep.required
-                  ? "This workspace needs one for High and Critical actions on Prod targets (Settings, Approvals)."
-                  : "Kept with the approval: in the job, the audit log and the exports."}
-              </p>
+              {changeId ? (
+                <p className="text-xs text-muted-foreground">
+                  <Term id="changeId" />: <span className="font-mono">{changeId}</span>
+                </p>
+              ) : (
+                field.changeIdRequired && (
+                  <p className="text-xs text-muted-foreground">This workspace needs a change ID for Prod.</p>
+                )
+              )}
             </div>
           )}
 
@@ -503,9 +616,9 @@ export function ApprovalDialog({
             <Alert>
               <KeyRoundIcon />
               <AlertTitle>Set up the vault first</AlertTitle>
-              <AlertDescription>
-                Critical actions ask for the vault password again, and there is no vault yet. Setting it up takes a
-                minute; then start this action again.
+              <AlertDescription className="flex items-center gap-1">
+                There is no vault yet, so there is no vault password to ask for. Set it up, then start again.
+                <HelpTip topic="vaultReauth" />
               </AlertDescription>
               <AlertAction>
                 <Button size="sm" variant="outline" onClick={() => void openVault()}>
@@ -517,7 +630,10 @@ export function ApprovalDialog({
 
           {reauth && !vaultMissing && (
             <div className="grid gap-2">
-              <Label htmlFor="approval-password">Vault password</Label>
+              <span className="flex items-center gap-1">
+                <Label htmlFor="approval-password">Vault password</Label>
+                <HelpTip topic="vaultReauth" />
+              </span>
               <Input
                 id="approval-password"
                 type="password"
@@ -527,19 +643,17 @@ export function ApprovalDialog({
                 onKeyDown={enterApproves}
                 autoFocus={firstField === "password"}
               />
-              <p className="flex items-center gap-1 text-xs text-muted-foreground">
+              <p className="text-xs text-muted-foreground">
                 {request.tier === "critical"
-                  ? "Critical actions ask for it again, even when your Windows login unlocked the vault."
-                  : "Asked because a vault password would go to hosts that don't get it yet (see above). Once approved, they may use it."}
-                <HelpTip topic="vaultReauth" />
+                  ? "Critical actions ask for it again, however the vault was unlocked."
+                  : "A vault password would go to hosts that don't get it yet."}
               </p>
             </div>
           )}
 
           {countdownStep && countdownStep.seconds > 0 && (
             <p className="text-sm text-muted-foreground">
-              After you approve, the action waits {countdownStep.seconds} seconds and can be cancelled until then, here
-              or in Activity.
+              Waits {countdownStep.seconds} seconds after you approve; you can cancel it until then.
             </p>
           )}
 
@@ -560,7 +674,7 @@ export function ApprovalDialog({
             <Button
               variant={risky ? "destructive" : "default"}
               onClick={() => void approve()}
-              disabled={!ready || busy || expired}
+              disabled={!ready}
               autoFocus={tier === "medium"}
             >
               {request.exec?.multiExec
@@ -583,28 +697,42 @@ function StandingSummary({ standing }: { standing: NonNullable<ApprovalRequest["
   return (
     <Alert>
       <TimerIcon />
-      <AlertTitle>A standing approval: {standing.when}</AlertTitle>
+      <AlertTitle className="flex items-center gap-1">
+        <span>
+          <Term id="standingApproval" /> for &lsquo;{standing.name}&rsquo;: {standing.when}
+        </span>
+        <HelpTip topic="standingApproval" />
+      </AlertTitle>
       <AlertDescription>
-        <p>
-          Each run of &lsquo;{standing.name}&rsquo; runs under this approval, until the schedule is edited or deleted.
-          If a VM becomes Prod or protected, a new VM gets its tag, or the approval rules change, it pauses and asks
-          again instead of running. A run missed while Remotely was closed or the PC asleep is reported, not caught up.
-        </p>
-        {standing.nextRuns.length > 0 && <p>Next runs: {standing.nextRuns.join("; ")}</p>}
-        {standing.resolves.length > 0 && <p>Targets: {standing.resolves.join("; ")}</p>}
-        {standing.snapshotName && (
-          <p>
-            Snapshots are named &lsquo;{standing.snapshotName}&rsquo;
-            {standing.keep !== null &&
-              `; each run then deletes this schedule's own older ones beyond the last ${standing.keep} (never others)`}
-            .
-          </p>
-        )}
-        {standing.countdownSeconds !== null && (
-          <p>
-            Each run waits {standing.countdownSeconds} seconds before it starts and can be cancelled in Activity then.
-          </p>
-        )}
+        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+          {standing.nextRuns.length > 0 && (
+            <>
+              <dt className="text-muted-foreground">Next runs</dt>
+              <dd>{standing.nextRuns.join("; ")}</dd>
+            </>
+          )}
+          {standing.resolves.length > 0 && (
+            <>
+              <dt className="text-muted-foreground">Targets</dt>
+              <dd>{standing.resolves.join("; ")}</dd>
+            </>
+          )}
+          {standing.snapshotName && (
+            <>
+              <dt className="text-muted-foreground">Snapshots</dt>
+              <dd>
+                &lsquo;{standing.snapshotName}&rsquo;
+                {standing.keep !== null && `, keeping this schedule's last ${standing.keep}`}
+              </dd>
+            </>
+          )}
+          {standing.countdownSeconds !== null && (
+            <>
+              <dt className="text-muted-foreground">Countdown</dt>
+              <dd>{standing.countdownSeconds} seconds before each run, cancellable in Activity</dd>
+            </>
+          )}
+        </dl>
       </AlertDescription>
     </Alert>
   );
@@ -765,8 +893,7 @@ function TunnelSummary({ tunnel }: { tunnel: NonNullable<ApprovalRequest["tunnel
       </dl>
       <p className={shared ? "text-tier-medium" : "text-muted-foreground"}>{tunnel.exposes}</p>
       <p className="text-xs text-muted-foreground">
-        It stays open until you stop it or close the terminal, and opens again by itself after a reconnect. Opening and
-        closing are audited, never what goes through.
+        Stays open until you stop it or close the terminal, and opens again after a reconnect.
       </p>
     </div>
   );
@@ -785,7 +912,9 @@ function CountdownView({
   const [now, setNow] = useState(() => Date.now());
   const [cancelling, setCancelling] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const left = Math.max(0, Math.ceil((countdown.until - now) / 1000));
+  // From when this view shows, which is when the approval was answered.
+  const [until] = useState(() => Date.now() + countdown.seconds * 1000);
+  const left = Math.max(0, Math.ceil((until - now) / 1000));
   // The parent passes a new function on every render; the listener below must not resubscribe for it.
   const close = useRef(onClose);
   useEffect(() => {
@@ -796,10 +925,10 @@ function CountdownView({
     const timer = window.setInterval(() => {
       setNow(Date.now());
       // The start event should close this first; this covers one that was missed.
-      if (Date.now() > countdown.until + 3000) close.current();
+      if (Date.now() > until + 3000) close.current();
     }, 250);
     return () => window.clearInterval(timer);
-  }, [countdown.until]);
+  }, [until]);
 
   // The job has started (or was cancelled from Activity): nothing left to cancel here.
   useEffect(() => {
@@ -831,8 +960,7 @@ function CountdownView({
             <DialogTitle>Starts in {left} s</DialogTitle>
           </div>
           <DialogDescription>
-            {summary}. Nothing has been done yet; cancel now and no target is touched. You can also cancel it from
-            Activity until the countdown ends.
+            {summary}. Nothing has run yet: cancel now, here or in Activity, and no target is touched.
           </DialogDescription>
         </DialogHeader>
         <Progress
