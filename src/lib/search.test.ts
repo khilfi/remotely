@@ -32,7 +32,7 @@ import {
   templateItems,
   vmItems,
 } from "./search-sources.ts";
-import { SETTINGS_SECTIONS, settingsCardId, settingsSection } from "./settings-index.ts";
+import { SETTINGS_GROUPS, SETTINGS_SECTIONS, settingsCardId, settingsSection } from "./settings-index.ts";
 
 function vm(name: string, extra: Partial<VmRecord> = {}): VmRecord {
   return {
@@ -268,11 +268,14 @@ test("settings are found by their cards' labels and the words they cover", () =>
   assert.deepEqual(items.find((i) => i.title === "Updates")?.target, { open: { kind: "setting", section: "updates" } });
 });
 
-test("every settings section has a unique id, a known tab and a card id", () => {
+test("every settings section has a unique id, a known group and a card id", () => {
   const ids = SETTINGS_SECTIONS.map((s) => s.id);
   assert.equal(new Set(ids).size, ids.length);
   for (const s of SETTINGS_SECTIONS) {
-    assert.ok(["general", "terminal", "rules", "about"].includes(s.tab), s.id);
+    assert.ok(
+      SETTINGS_GROUPS.some((g) => g.id === s.group),
+      s.id,
+    );
     assert.equal(settingsCardId(s.id), `settings-${s.id}`);
     assert.equal(settingsSection(s.id), s);
   }

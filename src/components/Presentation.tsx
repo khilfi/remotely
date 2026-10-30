@@ -195,7 +195,7 @@ export function PresentationButton() {
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-80">
         <DropdownMenuLabel className="font-normal text-muted-foreground">
-          Host names, IP addresses and user names are masked on screen. Copies and exports keep the real text.
+          Host names, IP addresses and user names are masked on screen.
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuCheckboxItem
@@ -205,9 +205,7 @@ export function PresentationButton() {
         >
           <div className="grid">
             <span>Read-only lock</span>
-            <span className="text-xs text-muted-foreground">
-              Blocks every change. Typing into one terminal still works: it is your own shell.
-            </span>
+            <span className="text-xs text-muted-foreground">Blocks every change</span>
           </div>
         </DropdownMenuCheckboxItem>
         <DropdownMenuCheckboxItem
@@ -217,9 +215,7 @@ export function PresentationButton() {
         >
           <div className="grid">
             <span>Hide terminal output</span>
-            <span className="text-xs text-muted-foreground">
-              Blurs the terminals, for what masking can't catch (full-screen programs such as top or vim).
-            </span>
+            <span className="text-xs text-muted-foreground">Blurs the terminals</span>
           </div>
         </DropdownMenuCheckboxItem>
         <DropdownMenuSeparator />
@@ -229,7 +225,7 @@ export function PresentationButton() {
   );
 }
 
-/** Settings → General. */
+/** Settings › Privacy and data. Each switch applies at once, as the top bar's menu does. */
 export function PresentationCard() {
   const view = usePresentation();
   return (
@@ -241,41 +237,24 @@ export function PresentationCard() {
         </CardTitle>
         <CardDescription>For screen shares: host names, IP addresses and user names show as stand-ins.</CardDescription>
       </CardHeader>
-      <CardContent className="grid gap-4">
-        <div className="flex items-start justify-between gap-4">
-          <Label htmlFor="presenting" className="grid gap-1">
-            <span>Present</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              Windows file dialogs still show real paths.
-            </span>
-          </Label>
+      <CardContent className="grid gap-3">
+        <div className="flex items-center gap-3">
           <Switch
             id="presenting"
             checked={view.presenting}
             onCheckedChange={(on) => (on ? void startPresenting() : requestStopPresenting())}
           />
+          <Label htmlFor="presenting">Present</Label>
         </div>
-        <div className="flex items-start justify-between gap-4">
-          <div className="flex items-start gap-1">
-            <Label htmlFor="read-only-lock" className="grid gap-1">
-              <span>Read-only lock while presenting</span>
-              <span className="text-xs font-normal text-muted-foreground">
-                Blocks every change; reading and typing into one terminal still work.
-              </span>
-            </Label>
-            <HelpTip topic="readOnlyLock" />
-          </div>
+        <div className="flex items-center gap-3">
           <Switch id="read-only-lock" checked={view.readOnly} onCheckedChange={(on) => requestReadOnlyLock(on)} />
+          <Label htmlFor="read-only-lock">Read-only lock while presenting</Label>
+          <HelpTip topic="readOnlyLock" />
         </div>
-        <div className="flex items-start justify-between gap-4">
-          <Label htmlFor="hide-terminals" className="grid gap-1">
-            <span>Hide terminal output while presenting</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              Terminal output is masked as it arrives, but a full-screen program that redraws part of a name can show
-              that part. This blurs the terminals instead.
-            </span>
-          </Label>
+        <div className="flex items-center gap-3">
           <Switch id="hide-terminals" checked={view.hideTerminals} onCheckedChange={(on) => setHideTerminals(on)} />
+          <Label htmlFor="hide-terminals">Hide terminal output while presenting</Label>
+          <HelpTip topic="hideTerminals" />
         </div>
       </CardContent>
     </Card>

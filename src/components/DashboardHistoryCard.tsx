@@ -1,49 +1,51 @@
 // MO-06 dashboard history: how long the 1-minute averages of the VMs, watched hosts and this PC are kept (1 to 30 days,
 // 7 by default), what they take, and the last prune. Pruned at start and daily, with the resolved alerts; a shorter time
 // prunes at once. Kept on this PC only: no export carries it. Saved in the core and audited; presentation mode's
-// read-only lock refuses changing it (the daily prune still runs).
+// read-only lock refuses changing it (the daily prune still runs). UX-10: the choice saves at once, with Undo.
 
 import { useEffect, useState } from "react";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { SaveStatus, useSaveStatus } from "@/components/SaveStatus";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage } from "@/lib/api";
 import { dashboardApi, type HistoryInfo, type HistoryRetention } from "@/lib/dashboard-api";
 import { formatWhen } from "@/lib/format";
 import { HISTORY_RETENTION_CHOICES, historySizeText, pruneSummary } from "@/lib/history";
 
-type Message = { ok: boolean; text: string } | null;
-
 export function DashboardHistoryCard() {
   const [info, setInfo] = useState<HistoryInfo | null>(null);
-  const [message, setMessage] = useState<Message>(null);
+  const [error, setError] = useState<string | null>(null);
+  const status = useSaveStatus();
   const readOnly = useReadOnlyReason();
 
   useEffect(() => {
-    dashboardApi.historyInfo().then(setInfo, (err) => setMessage({ ok: false, text: errorMessage(err) }));
+    dashboardApi.historyInfo().then(setInfo, (err) => setError(errorMessage(err)));
   }, []);
 
-  async function save(retention: HistoryRetention) {
-    try {
-      const next = await dashboardApi.setHistoryRetention(retention);
-      setInfo(next);
-      setMessage({ ok: true, text: "Saved. Older history and resolved alerts are removed now and daily." });
-    } catch (err) {
-      setMessage({ ok: false, text: errorMessage(err) });
-    }
+  function save(retention: HistoryRetention) {
+    const before = info?.retention;
+    void status.run(
+      async () => setInfo(await dashboardApi.setHistoryRetention(retention)),
+      before ? async () => setInfo(await dashboardApi.setHistoryRetention(before)) : undefined,
+    );
   }
 
   const last = info?.lastPrune ?? null;
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Dashboard history</CardTitle>
-        <CardDescription>
-          The dashboard keeps a 1-minute average of each running VM, watched host and this PC, for the charts&apos; 1
-          hour to 7 day ranges, and the alert list&apos;s history. It stays on this PC: exports never carry it.
-        </CardDescription>
+        <CardTitle className="flex items-center gap-1">
+          Dashboard history
+          <HelpTip topic="dashboardHistory" />
+        </CardTitle>
+        <CardDescription>For the charts&apos; longer ranges and the alert list. It stays on this PC.</CardDescription>
+        <CardAction>
+          <SaveStatus status={status} />
+        </CardAction>
       </CardHeader>
       <CardContent className="grid gap-3">
         <div className="grid gap-2">
@@ -53,7 +55,7 @@ export function DashboardHistoryCard() {
               // Controlled from the start: "" shows the placeholder until the setting is read.
               value={info?.retention ?? ""}
               disabled={!info || readOnly !== null}
-              onValueChange={(value) => value && void save(value as HistoryRetention)}
+              onValueChange={(value) => value && save(value as HistoryRetention)}
             >
               <SelectTrigger id="history-retention" className="w-48">
                 <SelectValue placeholder="…" />
@@ -68,17 +70,13 @@ export function DashboardHistoryCard() {
             </Select>
           </WhyDisabled>
         </div>
-        {info && <p className="text-xs text-muted-foreground">{historySizeText(info.size)}</p>}
-        {last && (
-          <p className="text-xs text-muted-foreground">
-            Last pruned {formatWhen(last.at)}: {pruneSummary(last)}
-          </p>
-        )}
-        {message && (
-          <p className={message.ok ? "text-xs text-muted-foreground" : "text-xs text-destructive"} role="status">
-            {message.text}
-          </p>
-        )}
+        {/* One line; the last prune is in its tooltip. */}
+        <p
+          className={error ? "text-sm text-destructive" : "text-sm text-muted-foreground"}
+          title={last ? `Last pruned ${formatWhen(last.at)}: ${pruneSummary(last)}` : undefined}
+        >
+          {error ?? (info ? historySizeText(info.size) : "")}
+        </p>
       </CardContent>
     </Card>
   );
