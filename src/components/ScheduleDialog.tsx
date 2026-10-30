@@ -21,6 +21,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { HelpTip } from "@/components/HelpTip";
+import { Term } from "@/components/Term";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type Tag, type VmRecord } from "@/lib/api";
 import {
@@ -114,6 +116,8 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
   }, [input]);
 
   const shownVms = vms.filter((vm) => vm.displayName.toLowerCase().includes(filter.trim().toLowerCase()));
+  // Tags are shared with sessions: only the ones on VMs, and any the schedule already uses.
+  const vmTags = tags.filter((t) => t.vmCount > 0 || form.tags.includes(t.name));
   const action = ACTION_CHOICES.find((a) => a.value === form.action);
 
   async function save() {
@@ -138,8 +142,8 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
         <DialogHeader>
           <DialogTitle>{existing ? `Edit schedule '${existing.name}'` : "New schedule"}</DialogTitle>
           <DialogDescription>
-            Saving asks for its approval, with the same steps as running it now. Each run then runs under that approval;
-            a change to what it does, its VMs or its times asks again.
+            Saving asks for its <Term id="standingApproval">approval</Term> once; changing what it does, its VMs or its
+            times asks again.
           </DialogDescription>
         </DialogHeader>
 
@@ -191,10 +195,7 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
                     onChange={(e) => set({ keep: e.currentTarget.value })}
                   />
                   <span>snapshots it took (1 to {MAX_KEEP})</span>
-                  <p className="w-full text-xs text-muted-foreground">
-                    Retention deletes only snapshots this schedule took, oldest first. Deleting snapshots is High, so
-                    the approval asks for a reason and the number of VMs.
-                  </p>
+                  <HelpTip topic="scheduleRetention" />
                 </div>
               )}
             </div>
@@ -274,10 +275,7 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
                     onChange={(e) => set({ cpuBelow: e.currentTarget.value })}
                   />
                   <span>%</span>
-                  <p className="w-full text-xs text-muted-foreground">
-                    Measured from the dashboard&apos;s history and its live readings of the VM&apos;s own CPU. A VM
-                    Remotely didn&apos;t watch for the whole time (closed, asleep, just started) waits until it has.
-                  </p>
+                  <HelpTip topic="idleSuspend" />
                 </div>
               )}
               {form.timing !== "idle" && (
@@ -289,9 +287,9 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
 
             <div className="grid gap-2">
               <Label>On</Label>
-              {tags.length > 0 && (
+              {vmTags.length > 0 && (
                 <div className="flex flex-wrap gap-3">
-                  {tags.map((tag) => (
+                  {vmTags.map((tag) => (
                     <label key={tag.id} className="flex items-center gap-1.5 text-sm">
                       <Checkbox
                         checked={form.tags.includes(tag.name)}

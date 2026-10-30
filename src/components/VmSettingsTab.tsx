@@ -274,8 +274,7 @@ export function VmSettingsTab({
       )}
       {off && running && specs && (
         <p className="text-xs text-muted-foreground">
-          Settings and disks change only while the VM is off. An ISO, a network cable and the guest tools change while
-          it runs.
+          Shut the VM down to change its settings; ISOs, cables and guest tools change while it runs.
         </p>
       )}
 

@@ -3,8 +3,9 @@
 // of them together (thin disks at their full size), the drive's free space, the network, cloud-init's setup and the
 // after-deploy steps, then what to know, what may go wrong and why it can't run.
 
-import { AlertTriangleIcon, BanIcon, InfoIcon } from "lucide-react";
+import { AlertTriangleIcon, BanIcon, ChevronRightIcon, InfoIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { EnvBadge } from "@/components/Badges";
 import type { DeployPreview } from "@/lib/api";
@@ -144,15 +145,22 @@ export function DeployPreviewView({ preview, showWarnings = true }: Props) {
           </AlertDescription>
         </Alert>
       )}
+      {/* UX-04: notes are good to know, not warnings (those show above): folded under one line. */}
       {preview.notes.length > 0 && (
-        <div className="flex items-start gap-1.5 text-xs text-muted-foreground">
-          <InfoIcon className="mt-px size-3.5 shrink-0" aria-hidden />
-          <ul className="grid gap-1">
-            {preview.notes.map((n) => (
-              <li key={n}>{n}</li>
-            ))}
-          </ul>
-        </div>
+        <Collapsible className="grid gap-1 text-xs text-muted-foreground">
+          <CollapsibleTrigger className="group flex items-center gap-1.5 justify-self-start rounded-sm hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+            <InfoIcon className="size-3.5 shrink-0" aria-hidden />
+            {preview.notes.length === 1 ? "1 note on what it makes" : `${preview.notes.length} notes on what it makes`}
+            <ChevronRightIcon className="size-3.5 transition-transform group-data-[state=open]:rotate-90" aria-hidden />
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <ul className="grid gap-1 pl-5">
+              {preview.notes.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          </CollapsibleContent>
+        </Collapsible>
       )}
     </div>
   );

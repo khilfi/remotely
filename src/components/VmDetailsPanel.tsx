@@ -1,35 +1,31 @@
-// QL-14: one VM's panel beside the list on the Virtual machines page, with two tabs. Details: what the inventory knows
-// (VM-01), its share of this host (MO-01), its label (SS-06), protection (AP-04), tags and linked sessions (QL-01).
-// Snapshots: its tree from the .vmsd (VM-04), read when the panel opens, with take, revert and delete on it. Every
-// action is a command for the bus; the tiers shown come from the policy engine's preview, and the approval dialog
-// (AP-02 impact preview, VM-05 safety snapshot) follows the submit as from anywhere else.
+// QL-14: one VM's panel beside the list on the Virtual machines page. UX-03 (0.6.0): five tabs, each action in one
+// place. Overview: what the inventory knows (VM-01), its share of this host (MO-01), its environment (SS-06),
+// protection (AP-04), tags and linked sessions (QL-01), with the system facts from its files and its guest (MO-13).
+// Snapshots: its tree from the .vmsd (VM-04), read when the panel opens, with take, revert and delete. Settings: the
+// virtual hardware and its edits (VM-23), the guest tools and resize included. Log: its own logs (VM-25). Activity:
+// the schedules that act on it (VM-14, VM-27) and what Remotely did to it (VM-25's timeline). Power and protection for
+// this one VM are in the actions palette (FD-01, with their tiers); the page's selection bar acts on several. Every
+// action is a command for the bus; the approval dialog (AP-02 impact preview, VM-05 safety snapshot) follows the submit
+// as from anywhere else.
 //
-// VM-18: the hypervisor comes first in `detailRows`, then its own facts (a VirtualBox VM's UUID), and the guest tools
-// row is named for it ("VMware Tools" or "Guest Additions").
-// MO-13: the System tab (VmSystemTab) shows the VM's virtual hardware and its guest's own facts.
-// VM-25: the Log tab (VmLogTab) reads the VM's own logs, and the Timeline tab (VmTimelineTab) what Remotely did to it.
+// VM-18: the hypervisor comes first in the Overview's rows, then its own facts (a VirtualBox VM's UUID), and the
+// guest tools row is named for it ("VMware Tools" or "Guest Additions").
 
 import { useEffect, useState, type ReactNode } from "react";
-import {
-  CameraIcon,
-  HistoryIcon,
-  InfoIcon,
-  MonitorIcon,
-  ShieldIcon,
-  TriangleAlertIcon,
-  XIcon,
-  ZapIcon,
-} from "lucide-react";
+import { CameraIcon, HistoryIcon, MonitorIcon, ShieldIcon, TriangleAlertIcon, XIcon, ZapIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EnvBadge, StateBadge, ToolsLabel } from "@/components/Badges";
+import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import { MetricCell } from "@/components/MetricBits";
 import { SnapshotTree } from "@/components/SnapshotTree";
+import { Term } from "@/components/Term";
 import { VmSessionLinks } from "@/components/VmLinkControls";
 import { VmSystemTab } from "@/components/VmSystemTab";
 import { WhyDisabled } from "@/components/WhyDisabled";
@@ -53,10 +49,12 @@ import { RefreshButton } from "@/components/RefreshButton";
 import { formatWhen, plural } from "@/lib/format";
 import { HYPERVISORS, toolsName, vmLocation } from "@/lib/hypervisors";
 import { formatPct, HOST_SHARE_HINT, type Thresholds } from "@/lib/metrics";
+import { viewOfTab, VM_TABS, vmTabOf, type VmTab } from "@/lib/vm-page";
 import { approvalHint, PROTECTED_REASON, takeReason, type VmView } from "@/lib/vm-snapshots";
 
 interface Props {
   vm: VmRecord;
+  /** The view asked for; each opens the tab that holds it (lib/vm-page.ts vmTabOf). */
   view: VmView;
   onViewChange: (view: VmView) => void;
   onClose: () => void;
@@ -107,9 +105,43 @@ function formatRam(mb: number | null) {
 
 const dash = <span className="text-muted-foreground">—</span>;
 
+/** An icon button with its name in a tooltip (UX-13). */
+function IconAction({
+  label,
+  icon,
+  onClick,
+  disabledReason,
+}: {
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+  disabledReason?: string | null;
+}) {
+  if (disabledReason) {
+    return (
+      <WhyDisabled reason={disabledReason}>
+        <Button variant="ghost" size="icon-sm" aria-label={label} disabled>
+          {icon}
+        </Button>
+      </WhyDisabled>
+    );
+  }
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button variant="ghost" size="icon-sm" aria-label={label} onClick={onClick}>
+          {icon}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 export function VmDetailsPanel(props: Props) {
   const { vm, view, onViewChange, onClose, refreshKey, onActions, tree } = props;
   const hints = useHints(vm, tree, refreshKey);
+  const tab = vmTabOf(view);
 
   return (
     <aside
@@ -118,79 +150,64 @@ export function VmDetailsPanel(props: Props) {
       aria-label={`${vm.displayName}: details and snapshots`}
       className="flex h-full min-h-0 flex-col rounded-lg border"
     >
-      <div className="flex items-start gap-2 border-b p-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <h2 className="font-semibold break-words">{vm.displayName}</h2>
-            {vm.protected && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
-                </TooltipTrigger>
-                <TooltipContent>{PROTECTED_REASON}</TooltipContent>
-              </Tooltip>
-            )}
-            {vm.environment !== "none" && <EnvBadge env={vm.environment} />}
-            <StateBadge state={vm.powerState} />
-          </div>
-          <div className="font-mono text-xs break-all text-muted-foreground">{vmLocation(vm)}</div>
+      <div className="flex items-center gap-1 border-b py-2 pr-2 pl-3">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">
+          <h2 className="font-semibold break-words">{vm.displayName}</h2>
+          {vm.protected && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
+              </TooltipTrigger>
+              <TooltipContent>{PROTECTED_REASON}</TooltipContent>
+            </Tooltip>
+          )}
+          {vm.environment !== "none" && <EnvBadge env={vm.environment} />}
+          <StateBadge state={vm.powerState} />
         </div>
-        <Button size="icon-sm" variant="ghost" aria-label="Close the details" onClick={onClose}>
-          <XIcon />
-        </Button>
+        <IconAction
+          label={vm.hypervisor === "virtualbox" ? "Open its VirtualBox window" : "Open it in Workstation"}
+          icon={<MonitorIcon />}
+          disabledReason={props.readOnly}
+          onClick={props.onOpenConsole}
+        />
+        <IconAction label="Actions: power and protection" icon={<ZapIcon />} onClick={onActions} />
+        <IconAction label="Close the details" icon={<XIcon />} onClick={onClose} />
       </div>
 
       <Tabs
-        value={view}
-        onValueChange={(v) => onViewChange(v as VmView)}
+        value={tab}
+        onValueChange={(v) => onViewChange(viewOfTab(v as VmTab))}
         className="min-h-0 flex-1 gap-0"
         aria-label={`${vm.displayName}'s details`}
       >
-        <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2">
-          {/* Six tabs wrap in a narrow panel rather than widen it. */}
+        <div className="border-b px-3 py-2">
           <TabsList className="h-auto! max-w-full flex-wrap justify-start *:flex-none">
-            <TabsTrigger value="details">Details</TabsTrigger>
-            <TabsTrigger value="settings">Settings</TabsTrigger>
-            <TabsTrigger value="system">System</TabsTrigger>
-            <TabsTrigger value="snapshots">
-              Snapshots
-              {tree && (
-                <Badge variant="secondary" className="h-4 min-w-4 px-1 tabular-nums">
-                  {tree.snapshots.length}
-                </Badge>
-              )}
-            </TabsTrigger>
-            <TabsTrigger value="log">Log</TabsTrigger>
-            <TabsTrigger value="timeline">Timeline</TabsTrigger>
-            <TabsTrigger value="schedules">Schedules</TabsTrigger>
+            {VM_TABS.map((t) => (
+              <TabsTrigger key={t.id} value={t.id}>
+                {t.label}
+                {t.id === "snapshots" && tree && tree.snapshots.length > 0 && (
+                  <Badge variant="secondary" className="h-4 min-w-4 px-1 tabular-nums">
+                    {tree.snapshots.length}
+                  </Badge>
+                )}
+              </TabsTrigger>
+            ))}
           </TabsList>
-          <WhyDisabled reason={props.readOnly} className="ml-auto">
-            <Button
-              variant="outline"
-              size="sm"
-              className={props.readOnly ? undefined : "ml-auto"}
-              disabled={props.readOnly !== null}
-              title={
-                vm.hypervisor === "virtualbox"
-                  ? "VirtualBox's own window; a VM that is off starts with it"
-                  : "Workstation's own window, in a tab, without powering the VM on"
-              }
-              onClick={props.onOpenConsole}
-            >
-              <MonitorIcon data-icon="inline-start" />
-              Console
-            </Button>
-          </WhyDisabled>
-          <Button variant="outline" size="sm" onClick={onActions}>
-            <ZapIcon data-icon="inline-start" />
-            Actions…
-          </Button>
         </div>
-        <TabsContent value="details" className="min-h-0 overflow-auto p-3">
-          <DetailsTab {...props} />
+        <TabsContent value="overview" className="min-h-0 overflow-auto p-3">
+          {tab === "overview" && (
+            <div className="flex flex-col gap-4">
+              <OverviewRows {...props} />
+              <Separator />
+              <VmSystemTab vm={vm} thresholds={props.thresholds} onHostDetails={props.onHostDetails} />
+            </div>
+          )}
+        </TabsContent>
+        <TabsContent value="snapshots" className="min-h-0 overflow-auto p-3">
+          <SnapshotsTab {...props} hints={hints} />
         </TabsContent>
         <TabsContent value="settings" className="min-h-0 overflow-auto p-3">
-          {view === "settings" && (
+          {tab === "settings" && (
             <VmSettingsTab
               vm={vm}
               readOnly={props.readOnly}
@@ -205,29 +222,22 @@ export function VmDetailsPanel(props: Props) {
             />
           )}
         </TabsContent>
-        <TabsContent value="system" className="min-h-0 overflow-auto p-3">
-          {view === "system" && (
-            <VmSystemTab vm={vm} thresholds={props.thresholds} onHostDetails={props.onHostDetails} />
-          )}
-        </TabsContent>
-        <TabsContent value="snapshots" className="min-h-0 overflow-auto p-3">
-          <SnapshotsTab {...props} hints={hints} />
-        </TabsContent>
         {/* VM-25: mounted only while shown, so a followed log stops being read when the tab is left. */}
         <TabsContent value="log" className="flex min-h-0 flex-col p-3">
-          {view === "log" && <VmLogTab key={vm.vmxPath} vm={vm} />}
+          {tab === "log" && <VmLogTab key={vm.vmxPath} vm={vm} />}
         </TabsContent>
-        <TabsContent value="timeline" className="min-h-0 overflow-auto p-3">
-          {view === "timeline" && <VmTimelineTab key={vm.vmxPath} vm={vm} refreshKey={refreshKey} />}
-        </TabsContent>
-        <TabsContent value="schedules" className="min-h-0 overflow-auto p-3">
-          {view === "schedules" && (
-            <VmSchedulesTab
-              vm={vm}
-              refreshKey={refreshKey}
-              readOnly={props.readOnly}
-              onSchedules={(ask) => props.onSchedules?.(ask)}
-            />
+        <TabsContent value="activity" className="min-h-0 overflow-auto p-3">
+          {tab === "activity" && (
+            <div className="flex flex-col gap-4">
+              <VmSchedulesTab
+                vm={vm}
+                refreshKey={refreshKey}
+                readOnly={props.readOnly}
+                onSchedules={(ask) => props.onSchedules?.(ask)}
+              />
+              <Separator />
+              <VmTimelineTab key={vm.vmxPath} vm={vm} refreshKey={refreshKey} />
+            </div>
           )}
         </TabsContent>
       </Tabs>
@@ -235,33 +245,44 @@ export function VmDetailsPanel(props: Props) {
   );
 }
 
-/** One row of the Details tab. */
+/** One row of the Overview. */
 interface DetailRow {
-  label: string;
+  label: ReactNode;
+  key: string;
   value: ReactNode;
   hint?: string;
 }
 
-/** The Details tab's rows, in order: the hypervisor and its own facts first (VM-18). */
+/** The Overview's rows, in order: the hypervisor and its own facts first (VM-18). */
 function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props): DetailRow[] {
   const hostCpu = usage?.hostCpuPct ?? null;
   const hostMem = usage?.hostMemPct ?? null;
-  const hypervisor: DetailRow[] = [
-    { label: "Hypervisor", value: HYPERVISORS.find((h) => h.value === vm.hypervisor)?.label ?? vm.hypervisor },
+  const rows: DetailRow[] = [
+    {
+      key: "hypervisor",
+      label: "Hypervisor",
+      value: HYPERVISORS.find((h) => h.value === vm.hypervisor)?.label ?? vm.hypervisor,
+    },
+    {
+      key: "file",
+      label: vm.hypervisor === "virtualbox" ? "Settings file" : "File",
+      value: <span className="font-mono text-xs break-all">{vmLocation(vm)}</span>,
+    },
   ];
   if (vm.hypervisor === "virtualbox") {
-    hypervisor.push({
+    rows.push({
+      key: "uuid",
       label: "UUID",
       hint: "VirtualBox's id for the VM; it stays the same when the VM is renamed or moved",
       value: <span className="font-mono text-xs break-all">{vm.vmxPath}</span>,
     });
   }
-  const rows: DetailRow[] = [
-    ...hypervisor,
-    { label: "Guest OS", value: vm.guestOsName ?? vm.guestOs ?? dash },
-    { label: "vCPUs", value: vm.numVcpus ?? dash },
-    { label: "RAM", value: formatRam(vm.memsizeMb) },
+  rows.push(
+    { key: "os", label: "Guest OS", value: vm.guestOsName ?? vm.guestOs ?? dash },
+    { key: "cpu", label: "vCPUs", value: vm.numVcpus ?? dash },
+    { key: "ram", label: "RAM", value: formatRam(vm.memsizeMb) },
     {
+      key: "ip",
       label: "IP address",
       value: vm.ipAddress ? (
         <span className="font-mono text-xs" data-mask="ip">
@@ -271,9 +292,10 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
         dash
       ),
     },
-    { label: toolsName(vm.hypervisor), value: <ToolsLabel state={vm.toolsState} /> },
+    { key: "tools", label: toolsName(vm.hypervisor), value: <ToolsLabel state={vm.toolsState} /> },
     {
-      label: "% of host CPU",
+      key: "hostCpu",
+      label: "Host CPU",
       hint: HOST_SHARE_HINT.cpu,
       value: (
         <MetricCell
@@ -286,7 +308,8 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
       ),
     },
     {
-      label: "% of host RAM",
+      key: "hostMem",
+      label: "Host RAM",
       hint: HOST_SHARE_HINT.memory,
       value: (
         <MetricCell
@@ -298,9 +321,26 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
         />
       ),
     },
-    { label: "Environment", value: <EnvBadge env={vm.environment} /> },
+    // UX-12: a VM's environment is its own (nothing passes one on to a VM), and Prod moves its actions up a tier.
     {
-      label: "Protected",
+      key: "environment",
+      label: <Term id="environment" />,
+      value:
+        vm.environment === "prod" ? (
+          <span className="flex flex-wrap items-center gap-1.5">
+            <EnvBadge env="prod" />
+            <span className="text-xs text-muted-foreground">actions ask one tier higher</span>
+            <HelpTip topic="prodTier" />
+          </span>
+        ) : vm.environment === "none" ? (
+          <span className="text-muted-foreground">None</span>
+        ) : (
+          <EnvBadge env={vm.environment} />
+        ),
+    },
+    {
+      key: "protected",
+      label: <Term id="protected" />,
       value: vm.protected ? (
         <span className="flex items-center gap-1.5">
           <ShieldIcon className="size-3.5 text-tier-high" aria-hidden />
@@ -311,6 +351,7 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
       ),
     },
     {
+      key: "tags",
       label: "Tags",
       value:
         vm.tags.length === 0 ? (
@@ -325,17 +366,21 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
           </span>
         ),
     },
-    { label: "Sessions", value: <VmSessionLinks vm={vm} sessions={sessions} onChanged={onLinksChanged} /> },
-    { label: "Last seen", value: formatWhen(vm.lastSeenAt) },
-  ];
+    {
+      key: "sessions",
+      label: "Sessions",
+      value: <VmSessionLinks vm={vm} sessions={sessions} onChanged={onLinksChanged} />,
+    },
+    { key: "seen", label: "Last seen", value: formatWhen(vm.lastSeenAt) },
+  );
   return rows;
 }
 
-function DetailsTab(props: Props) {
+function OverviewRows(props: Props) {
   return (
-    <dl className="grid grid-cols-[minmax(7rem,auto)_1fr] items-center gap-x-4 gap-y-2.5">
+    <dl className="grid grid-cols-[minmax(7rem,auto)_1fr] items-center gap-x-4 gap-y-2.5 text-sm">
       {detailRows(props).map((row) => (
-        <div key={row.label} className="contents">
+        <div key={row.key} className="contents">
           <dt className="text-muted-foreground" title={row.hint}>
             {row.label}
           </dt>
@@ -363,38 +408,50 @@ function SnapshotsTab({
   const takeOff = takeReason({ readOnly, protected: vm.protected, loading, busy });
   const oldAfterDays = limits?.oldAfterDays ?? 30;
   const error = treeError ?? tree?.error ?? null;
-  const takeButton = (
-    <Button variant="outline" size="sm" disabled={takeOff !== null} onClick={onTake}>
+  const takeButton = (variant: "outline" | "default") => (
+    <Button variant={variant} size="sm" disabled={takeOff !== null} onClick={onTake}>
       <CameraIcon data-icon="inline-start" />
-      Take snapshot…
+      Take a snapshot…
     </Button>
   );
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        {takeOff ? (
-          <WhyDisabled reason={takeOff}>{takeButton}</WhyDisabled>
-        ) : (
-          <Tooltip>
-            <TooltipTrigger asChild>{takeButton}</TooltipTrigger>
-            <TooltipContent className="max-w-72">{hints.take ?? "Take a snapshot of this VM"}</TooltipContent>
-          </Tooltip>
-        )}
-        <RefreshButton busy={loading} onClick={onReadTree} />
-        {tree && tree.snapshots.length > 0 && (
-          <span className="ml-auto text-xs text-muted-foreground">
-            {plural(tree.snapshots.length, "snapshot")}
-            {tree.oldCount > 0 && (
-              <span className="text-tier-medium">
-                {" "}
-                · {tree.oldCount} older than {oldAfterDays} days
+      {!loading && (
+        <div className="flex flex-wrap items-center gap-2">
+          {tree && tree.snapshots.length > 0 && (
+            <>
+              {takeOff ? (
+                <WhyDisabled reason={takeOff}>{takeButton("outline")}</WhyDisabled>
+              ) : (
+                <Tooltip>
+                  <TooltipTrigger asChild>{takeButton("outline")}</TooltipTrigger>
+                  <TooltipContent className="max-w-72">{hints.take ?? "Take a snapshot of this VM"}</TooltipContent>
+                </Tooltip>
+              )}
+              <span className="text-xs text-muted-foreground">
+                {plural(tree.snapshots.length, "snapshot")}
+                {tree.oldCount > 0 && (
+                  <span className="text-tier-medium">
+                    {" "}
+                    · {tree.oldCount} older than {oldAfterDays} days
+                  </span>
+                )}
+                {tree.safetyCount > 0 && (
+                  <>
+                    {" "}
+                    · {tree.safetyCount} <Term id="safetySnapshot">safety</Term>
+                  </>
+                )}
               </span>
-            )}
-            {tree.safetyCount > 0 && <> · {tree.safetyCount} safety</>}
+            </>
+          )}
+          <span className="ml-auto flex items-center">
+            {tree && tree.snapshots.length > 0 && <HelpTip topic="snapshotActions" align="end" />}
+            <RefreshButton busy={loading} onClick={onReadTree} />
           </span>
-        )}
-      </div>
+        </div>
+      )}
 
       {vm.protected && (
         <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
@@ -410,7 +467,6 @@ function SnapshotsTab({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-
       {loading && (
         <div className="flex flex-col gap-2" aria-label="Reading the snapshots">
           <Skeleton className="h-9 w-full" />
@@ -420,21 +476,14 @@ function SnapshotsTab({
       )}
 
       {tree && !tree.error && tree.snapshots.length === 0 && (
-        <Empty className="border py-8">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <HistoryIcon />
-            </EmptyMedia>
-            <EmptyTitle>No snapshots</EmptyTitle>
-            <EmptyDescription>
-              Take one before a risky change. Remotely also takes a safety snapshot before high-risk actions when the
-              approval dialog has it ticked.
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent>
-            <WhyDisabled reason={takeOff}>{takeButton}</WhyDisabled>
-          </EmptyContent>
-        </Empty>
+        <EmptyState
+          className="py-8"
+          icon={HistoryIcon}
+          title="No snapshots"
+          description="Take one before a risky change."
+          help="safetySnapshot"
+          action={<WhyDisabled reason={takeOff}>{takeButton("default")}</WhyDisabled>}
+        />
       )}
 
       {tree && tree.snapshots.length > 0 && (
@@ -447,17 +496,6 @@ function SnapshotsTab({
           onRevert={onRevert}
           onDelete={onDelete}
         />
-      )}
-
-      {tree && tree.snapshots.length > 0 && (
-        <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
-          <InfoIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-          <span>
-            Reverting loses what changed since the snapshot{hints.revert ? ` (${hints.revert})` : ""}. Deleting keeps
-            the snapshot&apos;s children and the VM&apos;s current state, and takes no safety snapshot
-            {hints.delete ? ` (${hints.delete})` : ""}.
-          </span>
-        </p>
       )}
     </div>
   );

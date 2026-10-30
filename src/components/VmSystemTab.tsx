@@ -1,11 +1,11 @@
-// MO-13: a VM's System tab in its details panel: the guest's OS, kernel, vCPUs and memory as the hypervisor's files
-// say, read when the tab opens and on Refresh, and what was read before when the files can't be read now. "From the
-// guest" shows a linked session's own facts (OS, kernel, filesystems), with a way into that session's host details.
-// VM-23: the VM's virtual hardware in full (disks, adapters, firmware, devices) and its edits are on the Settings tab
-// (VmSettingsTab).
+// MO-13: the system part of a VM's Overview tab (UX-03: Details and System are one tab since 0.6.0): what the
+// hypervisor's files add to the inventory's rows (the guest type it was set up as, the guest kernel, the CPU layout),
+// read when the tab opens and on Refresh, and what was read before when the files can't be read now. "From the guest"
+// shows a linked session's own facts (OS, kernel, filesystems), with a way into that session's host details. VM-23: the
+// VM's virtual hardware in full (disks, adapters, firmware, devices) and its edits are on the Settings tab.
 
 import { useEffect, useState } from "react";
-import { CircleAlertIcon, HardDriveIcon, ServerIcon } from "lucide-react";
+import { CircleAlertIcon, ServerIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,7 @@ import { RefreshButton } from "@/components/RefreshButton";
 import { api, errorMessage, type VmRecord, type VmSpecs } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { collectedByText } from "@/lib/host-details";
-import { formatBytes, type Thresholds } from "@/lib/metrics";
+import { type Thresholds } from "@/lib/metrics";
 
 interface Props {
   vm: VmRecord;
@@ -24,14 +24,11 @@ interface Props {
   onHostDetails: (session: { id: string; name: string }) => void;
 }
 
-function vcpuText(specs: VmSpecs): string | null {
+function layoutText(specs: VmSpecs): string | null {
   const h = specs.hardware;
-  if (!h.vcpus) return null;
-  const layout =
-    h.coresPerSocket && h.vcpus % h.coresPerSocket === 0
-      ? ` (${h.vcpus / h.coresPerSocket} × ${h.coresPerSocket} cores)`
-      : "";
-  return `${h.vcpus}${layout}`;
+  if (!h.vcpus || !h.coresPerSocket || h.vcpus % h.coresPerSocket !== 0) return null;
+  const sockets = h.vcpus / h.coresPerSocket;
+  return `${sockets} socket${sockets === 1 ? "" : "s"} × ${h.coresPerSocket} cores`;
 }
 
 export function VmSystemTab({ vm, thresholds, onHostDetails }: Props) {
@@ -63,14 +60,26 @@ export function VmSystemTab({ vm, thresholds, onHostDetails }: Props) {
   const specs = read?.for === key ? read.specs : null;
   const failed = error?.for === key ? error.message : null;
   const h = specs?.hardware;
+  // Only what the rows above don't say already.
+  const rows = h
+    ? [
+        ...(h.guestOsName && h.guestOs ? [{ label: "Set up as", value: h.guestOs }] : []),
+        ...(h.guestKernel
+          ? [{ label: "Guest kernel", value: <span className="font-mono text-xs">{h.guestKernel}</span> }]
+          : []),
+        ...(specs && layoutText(specs) ? [{ label: "CPU layout", value: layoutText(specs) }] : []),
+      ]
+    : [];
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        {specs && <span>Read from the VM&apos;s files {formatWhen(specs.collectedAt)}</span>}
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <h3 className="flex items-center gap-1.5 text-sm font-medium">
+          <ServerIcon className="size-4 text-muted-foreground" aria-hidden /> System
+        </h3>
+        {specs && <span className="truncate text-xs text-muted-foreground">read {formatWhen(specs.collectedAt)}</span>}
         <RefreshButton
           className="ml-auto"
-          variant="outline"
           busy={busy}
           onClick={() => {
             setBusy(true);
@@ -97,39 +106,15 @@ export function VmSystemTab({ vm, thresholds, onHostDetails }: Props) {
         <div className="flex flex-col gap-2" aria-label="Reading the VM's files">
           <Skeleton className="h-5 w-2/3" />
           <Skeleton className="h-5 w-1/2" />
-          <Skeleton className="h-20 w-full" />
         </div>
       )}
 
       {specs && h && (
         <>
-          <FactList
-            rows={[
-              {
-                label: "Guest OS",
-                value: h.guestOsName ?? h.guestOs,
-                hint: "What the guest tools report, else what the VM was set up for",
-              },
-              ...(h.guestOsName && h.guestOs ? [{ label: "Set up as", value: h.guestOs }] : []),
-              {
-                label: "Guest kernel",
-                value: h.guestKernel ? <span className="font-mono text-xs">{h.guestKernel}</span> : null,
-              },
-              { label: "vCPUs", value: vcpuText(specs) },
-              { label: "Memory", value: h.memoryMb ? formatBytes(h.memoryMb * 1024 * 1024) : null },
-            ]}
-          />
-          <p className="flex items-start gap-1.5 text-xs text-muted-foreground">
-            <HardDriveIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-            The VM&apos;s disks, network adapters, firmware and other devices, and changing them, are on the Settings
-            tab.
-          </p>
-
+          {rows.length > 0 && <FactList rows={rows} />}
           <section className="flex flex-col gap-2">
             <div className="flex items-center gap-2">
-              <h3 className="flex items-center gap-1.5 text-sm font-medium">
-                <ServerIcon className="size-4 text-muted-foreground" /> From the guest
-              </h3>
+              <h4 className="text-sm text-muted-foreground">From the guest</h4>
               {specs.guest && specs.guestSessionName && (
                 <Button
                   className="ml-auto"
@@ -154,8 +139,8 @@ export function VmSystemTab({ vm, thresholds, onHostDetails }: Props) {
             ) : (
               <p className="text-xs text-muted-foreground">
                 {vm.ipAddress
-                  ? "Open a terminal to a session linked to this VM (or watch it on the dashboard) to read the guest's own OS, disks and filesystems."
-                  : "Link a session to this VM on the Sessions page, then open a terminal to it, to read the guest's own OS, disks and filesystems."}
+                  ? "Open a terminal to a linked session to read the guest's own OS and filesystems."
+                  : "Link a session to this VM, then open a terminal to it, to read the guest's own OS and filesystems."}
               </p>
             )}
           </section>

@@ -7,9 +7,10 @@ import { HistoryIcon, TriangleAlertIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TierBadge } from "@/components/Badges";
+import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import { RefreshButton } from "@/components/RefreshButton";
 import { errorMessage, type Tier, type VmRecord } from "@/lib/api";
 import { formatDuration, formatWhen } from "@/lib/format";
@@ -89,26 +90,24 @@ export function VmTimelineTab({ vm, refreshKey }: { vm: VmRecord; refreshKey: st
   }
   if (entries.length === 0) {
     return (
-      <Empty className="border py-8">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <HistoryIcon />
-          </EmptyMedia>
-          <EmptyTitle>Nothing yet</EmptyTitle>
-          <EmptyDescription>
-            What Remotely does to this VM (power, snapshots, settings, environment, approvals) shows here, from the
-            audit log.
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <EmptyState
+        className="py-8"
+        icon={HistoryIcon}
+        title="Nothing done to this VM yet"
+        description="Power, snapshots, settings and approvals show here."
+        help="auditLog"
+      />
     );
   }
 
   const groups = groupTimeline(entries);
   return (
     <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        From the audit log and the job journal, newest first.
+      <div className="flex items-center gap-2">
+        <h3 className="flex items-center gap-1.5 text-sm font-medium">
+          <HistoryIcon className="size-4 text-muted-foreground" aria-hidden /> Timeline
+        </h3>
+        <HelpTip topic="auditLog" />
         <RefreshButton className="ml-auto" onClick={() => setReloads((n) => n + 1)} />
       </div>
       <ol className="flex flex-col gap-2">

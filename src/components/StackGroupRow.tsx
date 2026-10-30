@@ -1,22 +1,17 @@
-// VM-08: the header row of a stack instance's VMs on the VMs page: its name, stack and state, with Start (boot order),
-// Shut down and Suspend (the last step first) and Tear down (Critical, the approval lists every file). Each goes
-// through the bus and the approval dialog; VMs added by hand are kept by a teardown from here (pick them on the
-// Templates page's Stacks tab).
+// VM-08: the header row of a stack instance's VMs on the VMs page: its name, stack and state, and one row menu with
+// Start (boot order), Shut down and Suspend (the last step first). UX-03: this is the one home of an instance's power;
+// Add a VM, Forget and Tear down are on the Templates page's Stacks tab. Each goes through the bus and the approval
+// dialog.
 
 import { toast } from "sonner";
-import { BoxesIcon, MoreHorizontalIcon, PauseIcon, PlayIcon, PowerIcon, Trash2Icon } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { BoxesIcon, PauseIcon, PlayIcon, SquareIcon } from "lucide-react";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { TableCell, TableRow } from "@/components/ui/table";
-import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
+import { RowMenu } from "@/components/RowMenu";
+import { Term } from "@/components/Term";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type PowerOp, type SubmitOutcome } from "@/lib/api";
-import { instancePowerReason, instanceStateText, teardownReason } from "@/lib/stacks";
+import { instancePowerReason, instanceStateText } from "@/lib/stacks";
 import { stacksApi, type StackInstance } from "@/lib/stacks-api";
 
 interface Props {
@@ -27,85 +22,56 @@ interface Props {
 }
 
 export function StackGroupRow({ instance, colSpan, readOnly, onSubmitted }: Props) {
-  async function run(submit: () => Promise<SubmitOutcome>) {
+  async function power(op: PowerOp) {
     try {
-      onSubmitted(await submit());
+      onSubmitted(await stacksApi.power(instance.id, op));
     } catch (err) {
       toast.error(errorMessage(err));
     }
   }
-  const power = (op: PowerOp) => run(() => stacksApi.power(instance.id, op));
   const start = instancePowerReason(instance, "start", readOnly);
   const stop = instancePowerReason(instance, "stop", readOnly);
   const suspend = instancePowerReason(instance, "suspend", readOnly);
-  const tear = teardownReason(instance, readOnly);
   const steps = instance.steps.length;
+  const items = [
+    { key: "start", label: "Start in boot order", icon: PlayIcon, off: start, op: { kind: "start" } as PowerOp },
+    {
+      key: "stop",
+      label: "Shut down, last step first",
+      icon: SquareIcon,
+      off: stop,
+      op: { kind: "stop", mode: "soft" } as PowerOp,
+    },
+    {
+      key: "suspend",
+      label: "Suspend, last step first",
+      icon: PauseIcon,
+      off: suspend,
+      op: { kind: "suspend" } as PowerOp,
+    },
+  ];
   return (
     <TableRow className="bg-muted/40 hover:bg-muted/40" data-stack-instance={instance.id}>
-      <TableCell colSpan={colSpan} className="py-1.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2 text-sm">
+      <TableCell colSpan={colSpan} className="py-1">
+        <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2 text-sm">
             <BoxesIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
             <span className="font-medium">{instance.name}</span>
             <span className="truncate text-xs text-muted-foreground">
-              stack {instance.stackName}
+              <Term id="stack">stack</Term> {instance.stackName}
               {steps > 1 && ` · ${steps} steps`} · {instanceStateText(instance)}
             </span>
           </div>
-          <div className="flex items-center gap-1">
-            <WhyDisabled reason={start}>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={start !== null}
-                onClick={() => void power({ kind: "start" })}
-                aria-label={`Start ${instance.name} in boot order`}
-              >
-                <PlayIcon data-icon="inline-start" />
-                Start
-              </Button>
-            </WhyDisabled>
-            <WhyDisabled reason={stop}>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={stop !== null}
-                onClick={() => void power({ kind: "stop", mode: "soft" })}
-                aria-label={`Shut down ${instance.name}, the last step first`}
-              >
-                <PowerIcon data-icon="inline-start" />
-                Shut down
-              </Button>
-            </WhyDisabled>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button size="icon" variant="ghost" aria-label={`More for ${instance.name}`}>
-                  <MoreHorizontalIcon />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuItem disabled={suspend !== null} onSelect={() => void power({ kind: "suspend" })}>
-                  <PauseIcon />
-                  <span>
-                    Suspend
-                    <ReasonLine reason={suspend} />
-                  </span>
+          <RowMenu label={instance.name} disabled={readOnly !== null}>
+            {items.map(({ key, label, icon: Icon, off, op }) => (
+              <WhyDisabled key={key} reason={off} className="flex w-full">
+                <DropdownMenuItem className="w-full" disabled={off !== null} onSelect={() => void power(op)}>
+                  <Icon />
+                  {label}
                 </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  variant="destructive"
-                  disabled={tear !== null}
-                  onSelect={() => void run(() => stacksApi.teardown(instance.id, []))}
-                >
-                  <Trash2Icon />
-                  <span>
-                    Tear down…
-                    <ReasonLine reason={tear} />
-                  </span>
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
+              </WhyDisabled>
+            ))}
+          </RowMenu>
         </div>
       </TableCell>
     </TableRow>

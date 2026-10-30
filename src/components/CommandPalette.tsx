@@ -16,13 +16,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeftIcon,
-  CalendarClockIcon,
-  CameraIcon,
   EyeIcon,
   EyeOffIcon,
-  FileTextIcon,
   GaugeIcon,
-  HistoryIcon,
   InfoIcon,
   MonitorIcon,
   PauseIcon,
@@ -33,7 +29,6 @@ import {
   ServerIcon,
   ShieldIcon,
   ShieldOffIcon,
-  SlidersHorizontalIcon,
   SquareIcon,
   SquareTerminalIcon,
   Trash2Icon,
@@ -456,60 +451,18 @@ export function CommandPalette({
                     <GaugeIcon /> Show its metrics
                   </CommandItem>
                 )}
-                <CommandItem
-                  value="details info guest os ip sessions"
-                  onSelect={() => {
-                    close();
-                    onOpenVm(vm.vmxPath, "details");
-                  }}
-                >
-                  <InfoIcon /> Show its details
-                </CommandItem>
-                <CommandItem
-                  value="snapshots take revert delete"
-                  onSelect={() => {
-                    close();
-                    onOpenVm(vm.vmxPath, "snapshots");
-                  }}
-                >
-                  <CameraIcon /> Snapshots…
-                </CommandItem>
-                <CommandItem
-                  value="log vmware.log vbox.log errors"
-                  onSelect={() => {
-                    close();
-                    onOpenVm(vm.vmxPath, "log");
-                  }}
-                >
-                  <FileTextIcon /> Its log
-                </CommandItem>
-                <CommandItem
-                  value="timeline history audit what happened"
-                  onSelect={() => {
-                    close();
-                    onOpenVm(vm.vmxPath, "timeline");
-                  }}
-                >
-                  <HistoryIcon /> Its timeline
-                </CommandItem>
-                <CommandItem
-                  value="settings hardware cpu memory disks network firmware resize"
-                  onSelect={() => {
-                    close();
-                    onOpenVm(vm.vmxPath, "settings");
-                  }}
-                >
-                  <SlidersHorizontalIcon /> Settings…
-                </CommandItem>
-                <CommandItem
-                  value="schedules snapshot power timetable nightly suspend idle"
-                  onSelect={() => {
-                    close();
-                    onOpenVm(vm.vmxPath, "schedules");
-                  }}
-                >
-                  <CalendarClockIcon /> Schedules…
-                </CommandItem>
+                {/* UX-03: opened from a VM's details, the palette lists actions only; its tabs are right there. */}
+                {vmFocus !== vm.vmxPath && (
+                  <CommandItem
+                    value="details info guest os ip sessions snapshots log settings schedules"
+                    onSelect={() => {
+                      close();
+                      onOpenVm(vm.vmxPath, "details");
+                    }}
+                  >
+                    <InfoIcon /> Show its details
+                  </CommandItem>
+                )}
                 <CommandItem
                   value="rename name"
                   onSelect={() => {
