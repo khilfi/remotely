@@ -3,11 +3,13 @@
 // guest series from a watched session (MO-02). Each chart has one axis and one unit. MO-15: the memory chart
 // draws what there is (a VM's configured RAM, a host's total) dashed next to what is in use, and Linux swap has a
 // chart of its own. MO-13: "Host details…" opens the session's host details. MO-02: a guest polled less often than
-// the host side (Settings, Dashboard) keeps its line on a VM's charts (chart-gaps.ts). MO-06: a range picker shows the
-// last hour to the last week from the history on disk, carried on with the live rounds.
+// the host side (Settings, Dashboard) keeps its line on a VM's charts (chart-gaps.ts). MO-06: the dashboard's one range
+// (UX-07), which the sheet's picker changes for the whole page, shows the last hour to the last week from the history on
+// disk, carried on with the live rounds. UX-03: watching a host has one home, the page's Watch hosts; the sheet says
+// how a VM's guest gets watched, and a host whose key isn't trusted opens a terminal that asks about it.
 
 import { useEffect, useState } from "react";
-import { EyeIcon, HardDriveIcon, RotateCwIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
+import { HardDriveIcon, RotateCwIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -21,7 +23,7 @@ import { chartPoints, useHistory } from "@/hooks/use-chart-points";
 import { api, type DashboardRow, type MetricPoint } from "@/lib/api";
 import { guestGapMs, joinShortGaps } from "@/lib/chart-gaps";
 import type { ChartRange } from "@/lib/dashboard-api";
-import { isHistoryRange } from "@/lib/history";
+import { isHistoryRange, rangeLabel } from "@/lib/history";
 import { formatDuration } from "@/lib/format";
 import { formatBytes, formatPct, formatRate, level, rowCpu, rowMemory, type Thresholds } from "@/lib/metrics";
 import type { ResolvedTheme } from "@/lib/theme";
@@ -34,10 +36,12 @@ interface Props {
   live: boolean;
   /** MO-02: seconds between two polls of a watched host. */
   guestIntervalSecs: number;
+  /** The dashboard's one range, and changing it (for the whole page). */
+  range: ChartRange;
+  onRangeChange: (range: ChartRange) => void;
   thresholds: Thresholds;
   theme: ResolvedTheme;
   onClose: () => void;
-  onWatch: (sessionId: string, watch: boolean) => void;
   /** MO-02: logs in to a parked or waiting host again. */
   onRetry: (sessionId: string) => void;
   onConnect: (sessionId: string) => void;
@@ -72,10 +76,11 @@ export function MetricsDetail({
   round,
   live,
   guestIntervalSecs,
+  range,
+  onRangeChange,
   thresholds,
   theme,
   onClose,
-  onWatch,
   onRetry,
   onConnect,
   onActions,
@@ -105,7 +110,6 @@ export function MetricsDetail({
     };
   }, [rowKey, hostKey, guestKey, round]);
 
-  const [range, setRange] = useState<ChartRange>("live");
   const open = row !== null && live;
   const hostHistory = useHistory(hostKey ? { source: "host", key: hostKey } : null, range, open);
   const guestHistory = useHistory(guestKey ? { source: "guest", key: guestKey } : null, range, open);
@@ -168,7 +172,7 @@ export function MetricsDetail({
               <Badge variant="secondary">{row.kind === "vm" ? "VM" : "Host"}</Badge>
               {row.powerState && <StateBadge state={row.powerState} />}
               <EnvBadge env={row.environment} />
-              {row.guestStatus && <GuestStatusBadge status={row.guestStatus} />}
+              {row.guestStatus && <GuestStatusBadge status={row.guestStatus} onCheckKey={onConnect} />}
             </div>
             <SheetTitle>{row.name}</SheetTitle>
             <SheetDescription>
@@ -197,25 +201,8 @@ export function MetricsDetail({
                   <HardDriveIcon /> Host details…
                 </Button>
               )}
-              {guestKey ? (
-                <Button size="sm" variant="ghost" onClick={() => onWatch(guestKey, false)}>
-                  Stop guest metrics
-                </Button>
-              ) : (
-                linked.map((s) => (
-                  <Button
-                    key={s.id}
-                    size="sm"
-                    variant="outline"
-                    title={s.auto ? "Linked automatically: the session's host is this VM's IP address" : undefined}
-                    onClick={() => onWatch(s.id, true)}
-                  >
-                    <EyeIcon /> Watch guest via {s.name}
-                  </Button>
-                ))
-              )}
             </div>
-            {row.guestStatus?.message && (
+            {row.guestStatus?.message && row.guestStatus.state !== "hostKey" && (
               <p className="text-xs text-muted-foreground">
                 {row.guestStatus.message}
                 {row.guestStatus.retryInSecs != null && ` Next try in ${row.guestStatus.retryInSecs} s.`}
@@ -232,12 +219,8 @@ export function MetricsDetail({
 
           <div className="flex flex-col gap-4 overflow-auto px-4 pb-4">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <span className="text-xs text-muted-foreground">
-                {isHistoryRange(range)
-                  ? "From the history on this PC (1-minute averages), then the live rounds"
-                  : "The last 30 minutes, every round"}
-              </span>
-              <RangePicker value={range} onChange={setRange} label={`Charts of ${row.name}: range`} />
+              <span className="text-xs text-muted-foreground">{rangeLabel(range)}</span>
+              <RangePicker value={range} onChange={onRangeChange} label="The dashboard's range" />
             </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <Stat
@@ -390,8 +373,8 @@ export function MetricsDetail({
             {!hasGuest && row.kind === "vm" && (
               <p className="text-xs text-muted-foreground">
                 {linked.length > 0
-                  ? "Watch the guest through a linked session to add its own CPU, memory, disks, network and load."
-                  : "Link a session to this VM on the Sessions page to read the guest's own CPU, memory, disks, network and load over SSH."}
+                  ? `Watch ${linked[0].name} with Watch hosts to add the guest's own CPU, memory, disks and load.`
+                  : "Link a session to this VM to add the guest's own CPU, memory, disks and load."}
               </p>
             )}
           </div>

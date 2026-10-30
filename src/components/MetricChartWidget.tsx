@@ -1,12 +1,9 @@
-// MO-16: one metric of a VM (its host side), a watched host (its guest) or this PC, as a dashboard widget. Its range
-// starts as the layout says and can be changed for the moment from the chart (Customize saves another default). Live
-// reads the collector's last 30 minutes each round; a longer range reads the history on disk (MO-06) and carries on
+// MO-16: one metric of a VM (its host side), a watched host (its guest) or this PC, as a dashboard widget. It shows the
+// dashboard's one range (UX-07; the range a layout saved for it from 0.5.0 is kept but no longer used). Live reads the collector's last 30 minutes each round; a longer range reads the history on disk (MO-06) and carries on
 // with the live rounds. Reads only while the dashboard shows and the window is visible.
 
-import { useState } from "react";
 import { LineChartIcon } from "lucide-react";
 import { MetricChart, type ChartSeries } from "@/components/MetricChart";
-import { RangePicker } from "@/components/RangePicker";
 import { useChartPoints } from "@/hooks/use-chart-points";
 import type { ChartMetric, ChartRange, HistorySource, Widget } from "@/lib/dashboard-api";
 import { CHART_METRIC_LABEL } from "@/lib/dashboard-layout";
@@ -105,6 +102,7 @@ export function MetricChartWidget({
   widget,
   name,
   round,
+  range,
   live,
   theme,
   height,
@@ -113,18 +111,13 @@ export function MetricChartWidget({
   /** The VM's or host's name now, when the dashboard knows it. */
   name: string | null;
   round: number;
+  /** The dashboard's range. */
+  range: ChartRange;
   live: boolean;
   theme: ResolvedTheme;
   /** The plot's height in pixels. */
   height: number;
 }) {
-  const [range, setRange] = useState<ChartRange>(widget.range);
-  // The saved default changed (Customize): follow it.
-  const [savedRange, setSavedRange] = useState(widget.range);
-  if (widget.range !== savedRange) {
-    setSavedRange(widget.range);
-    setRange(widget.range);
-  }
   const source = widget.source ?? null;
   const key = widget.key ?? null;
   const target = source && key ? { source, key } : null;
@@ -151,7 +144,6 @@ export function MetricChartWidget({
       max={max}
       theme={theme}
       height={height}
-      actions={<RangePicker value={range} onChange={setRange} label={`${title}: range`} />}
       empty={
         long
           ? loaded

@@ -171,7 +171,6 @@ export function AlertsWidget({
         <div className="ml-auto flex items-center gap-1">
           <Toggle
             size="sm"
-            variant="outline"
             pressed={history}
             onPressedChange={setHistory}
             aria-label="Show resolved alerts too"
@@ -182,7 +181,7 @@ export function AlertsWidget({
           <WhyDisabled reason={fresh.length === 0 ? null : readOnly}>
             <Button
               size="sm"
-              variant="outline"
+              variant="ghost"
               disabled={fresh.length === 0 || readOnly !== null}
               onClick={() => void acknowledge([])}
               title="Acknowledge every open alert"
@@ -190,7 +189,7 @@ export function AlertsWidget({
               <CheckCheckIcon /> All
             </Button>
           </WhyDisabled>
-          <Button size="sm" variant="outline" onClick={() => setRulesOpen(true)}>
+          <Button size="sm" variant="ghost" onClick={() => setRulesOpen(true)}>
             <ListChecksIcon /> Rules
           </Button>
         </div>
@@ -199,9 +198,8 @@ export function AlertsWidget({
         {list === null ? (
           <p className="px-2 text-xs text-muted-foreground">Reading the alerts…</p>
         ) : alerts.length === 0 ? (
-          <p className="px-2 py-4 text-center text-xs text-muted-foreground">
-            {history ? "No alerts yet." : "Nothing is firing."} Rules watch every round; Windows notifies you when one
-            fires.
+          <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+            {history ? "No alerts yet." : "Nothing is firing."}
           </p>
         ) : (
           <ul className="flex flex-col gap-1">

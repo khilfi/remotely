@@ -27,6 +27,8 @@ interface Props {
   title: string;
   /** What the series measure, e.g. "Host side and guest". */
   subtitle?: string;
+  /** More about the subtitle, on hover. */
+  subtitleTitle?: string;
   /** Unix time in milliseconds. */
   times: number[];
   series: ChartSeries[];
@@ -73,7 +75,19 @@ function Swatch({ slot, dashed }: { slot: ChartSeries["slot"]; dashed?: boolean 
   );
 }
 
-export function MetricChart({ title, subtitle, times, series, format, max, theme, empty, height, actions }: Props) {
+export function MetricChart({
+  title,
+  subtitle,
+  subtitleTitle,
+  times,
+  series,
+  format,
+  max,
+  theme,
+  empty,
+  height,
+  actions,
+}: Props) {
   const plotHeight = Math.max(60, Math.round(height ?? HEIGHT));
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
@@ -185,7 +199,11 @@ export function MetricChart({ title, subtitle, times, series, format, max, theme
           <div className="min-w-0 truncate text-sm font-medium">{title}</div>
           {actions}
         </div>
-        {subtitle && <div className="text-xs text-muted-foreground">{subtitle}</div>}
+        {subtitle && (
+          <div className="truncate text-xs text-muted-foreground" title={subtitleTitle ?? subtitle}>
+            {subtitle}
+          </div>
+        )}
       </div>
       <div className="relative" style={{ minHeight: plotHeight }}>
         {/* uPlot owns this element's children; React renders nothing inside it. */}

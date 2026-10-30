@@ -10,12 +10,16 @@
 // the VMs never read; Refresh reads every VM again) and R4's host networks alone (VM-11: vmrun listHostNetworks and
 // VBoxManage's two lists, no VM read again), joined to the adapters by network name; what was listed is kept for the
 // palette's search. Tunnels come from the panes' own events.
+//
+// UX-04, UX-06 (0.6.0): one row of controls (what to show, then "Read hh:mm" and the one Refresh), the legend under the
+// map, and the explanation in the "?" and on hover; a line shows only when some VM couldn't be read.
 
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { CableIcon, LaptopIcon, MonitorIcon, NetworkIcon, ServerIcon, type LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { RefreshButton } from "@/components/RefreshButton";
 import { EmptyState } from "@/components/EmptyState";
 import { api, errorMessage, type SessionRecord, type VmRecord } from "@/lib/api";
@@ -125,7 +129,6 @@ export function MapPage({ active, onOpenLink }: Props) {
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-        <RefreshButton variant="outline" busy={reading} onClick={readAgain} />
         <div className="flex items-center gap-2">
           <Switch id="map-all-sessions" checked={allSessions} onCheckedChange={setAllSessions} />
           <Label htmlFor="map-all-sessions" className="font-normal">
@@ -138,15 +141,31 @@ export function MapPage({ active, onOpenLink }: Props) {
             VMs that are off
           </Label>
         </div>
-        <Legend />
+        <div className="ml-auto flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span
+                tabIndex={0}
+                className="text-xs whitespace-nowrap text-muted-foreground underline decoration-dotted underline-offset-2 outline-none focus-visible:rounded-sm focus-visible:ring-3 focus-visible:ring-ring/50"
+              >
+                {readAt
+                  ? `Read ${new Date(readAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                  : "Not read yet"}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-xs">
+              Networks as each VM&apos;s settings say and Workstation and VirtualBox list them
+              {readAt ? `, read ${new Date(readAt).toLocaleString()}` : ""}. Click a node to open it.
+            </TooltipContent>
+          </Tooltip>
+          <RefreshButton busy={reading} onClick={readAgain} />
+        </div>
       </div>
-      <p className="text-xs text-muted-foreground" role="status">
-        Networks as each VM&apos;s settings say and Workstation and VirtualBox list them
-        {readAt ? `, read ${new Date(readAt).toLocaleString()}` : ""}.
-        {unread > 0 &&
-          ` ${unread === 1 ? "One VM" : `${unread} VMs`} could not be read now: what was read before shows.`}{" "}
-        Read only: click a node to open it.
-      </p>
+      {unread > 0 && (
+        <p className="text-xs text-muted-foreground" role="status">
+          {unread === 1 ? "One VM" : `${unread} VMs`} couldn&apos;t be read now: the map shows what was read before.
+        </p>
+      )}
       {nothing ? (
         <EmptyState
           icon={NetworkIcon}
@@ -197,6 +216,7 @@ export function MapPage({ active, onOpenLink }: Props) {
           </div>
         </div>
       )}
+      {!nothing && <Legend />}
     </div>
   );
 }
@@ -258,7 +278,7 @@ function Legend() {
     </span>
   );
   return (
-    <div className="ml-auto flex flex-wrap items-center gap-3 text-xs text-muted-foreground" aria-label="Legend">
+    <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground" aria-label="Legend">
       {line(EDGE_CLASS.nic, "on the network")}
       {line(EDGE_CLASS.reaches, "session reaches the VM")}
       {line(EDGE_CLASS.jump, "through a jump host")}

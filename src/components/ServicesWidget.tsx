@@ -1,10 +1,10 @@
 // MO-16, MO-14: a watched SSH host's services on the dashboard: failed ones first, then the running ones. Read once a
 // minute while the dashboard shows and the window is visible (usePoll), on the dashboard's kept connection to the host
-// only: it never logs in on its own, so a host that is not watched reads nothing and says how to watch it.
+// only: it never logs in on its own, so a host that is not watched reads nothing and says to watch it (UX-03: with the
+// page's Watch hosts, the one place to watch a host).
 
 import { useState } from "react";
-import { EyeIcon, ServerCogIcon } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ServerCogIcon } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { usePoll } from "@/hooks/use-poll";
 import { errorMessage } from "@/lib/api";
@@ -20,14 +20,11 @@ export function ServicesWidget({
   sessionId,
   name,
   live,
-  onWatch,
 }: {
   /** The host, or null until one is chosen (Customize). */
   sessionId: string | null;
   name: string | null;
   live: boolean;
-  /** MO-02: starts guest metrics for the host, which opens the dashboard's connection. */
-  onWatch: (sessionId: string) => void;
 }) {
   const [read, setRead] = useState<{ id: string; read: ServicesRead } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,15 +59,9 @@ export function ServicesWidget({
           Waiting for the dashboard&apos;s connection to {name ?? "the host"}. The services show once it answers.
         </p>
       ) : (
-        <div className="flex flex-col items-start gap-2 text-xs text-muted-foreground">
-          <p>
-            Watch {name ?? "the host"} on the dashboard to read its services here. This widget reads on the
-            dashboard&apos;s connection and never logs in on its own.
-          </p>
-          <Button size="sm" variant="outline" onClick={() => onWatch(sessionId)}>
-            <EyeIcon /> Watch
-          </Button>
-        </div>
+        <p className="text-xs text-muted-foreground">
+          Not watched: watch {name ?? "the host"} with Watch hosts to see its services.
+        </p>
       );
     }
     const { report } = current;

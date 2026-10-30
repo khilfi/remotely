@@ -4,6 +4,11 @@
 // or host, metric and range; a services widget's host) and Remove. The widgets underneath are inert then. Dragging is
 // done with pointer events, not HTML5 drag and drop: the window's own file drop (SS-08) takes those over on Windows, and
 // it needs no library.
+//
+// UX-07: outside Customize the rows take the height of what is in them: a chart keeps its size, while the capacity
+// cards, the alert list, a services list and the overview grid take their content's height up to their size (and
+// scroll past it), so a short widget leaves no empty band. While customizing, every row is 120 pixels again, so the
+// sizes picked are the sizes seen. Customize's bar names a widget only when its content has no title of its own.
 
 import {
   useEffect,
@@ -30,6 +35,7 @@ import { WidgetSettings } from "@/components/WidgetSettings";
 import type { DashboardLayout, Widget } from "@/lib/dashboard-api";
 import {
   dropIndex,
+  fitsContent,
   GAP_PX,
   GRID_COLUMNS,
   heightPx,
@@ -38,6 +44,7 @@ import {
   moveWidgetTo,
   removeWidget,
   resizeWidget,
+  showsOwnTitle,
   sizeFromDrag,
   updateWidget,
 } from "@/lib/dashboard-layout";
@@ -129,7 +136,7 @@ export function DashboardGrid({ layout, editing, onChange, renderWidget, titleOf
   return (
     <div
       ref={grid}
-      className="grid auto-rows-[120px] grid-cols-1 gap-4 md:grid-cols-4"
+      className={cn("grid grid-cols-1 gap-4 md:grid-cols-4", editing ? "auto-rows-[120px]" : "auto-rows-auto")}
       onPointerMove={(e) => {
         dragMove(e);
         if (resizing) {
@@ -153,6 +160,12 @@ export function DashboardGrid({ layout, editing, onChange, renderWidget, titleOf
         const title = titleOf(widget);
         const contentHeight = heightPx(widget.h) - (editing ? BAR_PX : 0);
         const target = drag && drag.over === widget.id;
+        // Outside Customize: a chart is its size; anything else its content's height, at most its size.
+        const size: CSSProperties = editing
+          ? {}
+          : fitsContent(widget.kind)
+            ? { maxHeight: heightPx(widget.h) }
+            : { height: heightPx(widget.h) };
         return (
           <section
             key={widget.id}
@@ -164,7 +177,7 @@ export function DashboardGrid({ layout, editing, onChange, renderWidget, titleOf
               drag?.id === widget.id && "opacity-50",
               target && (drag.before ? "shadow-[-4px_0_0_0_var(--primary)]" : "shadow-[4px_0_0_0_var(--primary)]"),
             )}
-            style={{ "--w": widget.w, "--h": widget.h } as CSSProperties}
+            style={{ "--w": widget.w, "--h": widget.h, ...size } as CSSProperties}
           >
             {editing && (
               <div className="flex h-9 shrink-0 items-center gap-1 px-1" style={{ height: BAR_PX }}>
@@ -185,7 +198,15 @@ export function DashboardGrid({ layout, editing, onChange, renderWidget, titleOf
                 >
                   <GripVerticalIcon className="size-4" />
                 </button>
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">{title}</span>
+                {/* A widget whose content has its own title isn't named twice. */}
+                <span
+                  className={cn(
+                    "min-w-0 flex-1 truncate text-sm font-medium",
+                    showsOwnTitle(widget.kind) && "text-muted-foreground",
+                  )}
+                >
+                  {showsOwnTitle(widget.kind) ? <span className="sr-only">{title}</span> : title}
+                </span>
                 {/* A one-column widget's bar keeps its room for the title; the size menu says the size. */}
                 {widget.w > 1 && (
                   <span className="text-xs text-muted-foreground tabular-nums">
