@@ -568,7 +568,7 @@ function DashboardPollingCard({ settings, onSettings }: SettingsCardProps) {
             );
           }}
         >
-          <SelectTrigger id="guest-poll" className="w-40">
+          <SelectTrigger id="guest-poll" className="w-48">
             <SelectValue placeholder="5 seconds" />
           </SelectTrigger>
           <SelectContent>
