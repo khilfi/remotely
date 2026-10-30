@@ -132,9 +132,8 @@ export function MultiExecGroupsDialog({ groups, sessions, start, onChanged, onCl
               Saved groups
             </DialogTitle>
             <DialogDescription>
-              A group names saved sessions, like &ldquo;all web servers&rdquo;. Open group opens a tab for each and
-              turns Type in all tabs on for them; Select group picks the ones already open. Each line still asks as
-              usual.
+              Named sets of saved sessions, like &ldquo;all web servers&rdquo;, opened or picked together to type in all
+              their tabs.
             </DialogDescription>
           </DialogHeader>
           <div className="grid min-h-0 gap-4 sm:grid-cols-[13rem_minmax(0,1fr)]">

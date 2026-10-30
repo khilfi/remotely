@@ -181,6 +181,27 @@ export const HELP = {
     ],
     link: { label: "Retention settings", to: setting("retention") },
   },
+  compareHosts: {
+    title: "Compare hosts",
+    body: [
+      "Runs one command once on each picked host, in its own login shell rather than in your terminals, and groups the hosts whose output is the same.",
+      "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
+    ],
+  },
+  recordedLines: {
+    title: "Recorded lines",
+    body: [
+      "While Type in all tabs is on, each line you send is recorded in every terminal, from Enter until its prompt comes back, its output goes quiet, or a time limit passes.",
+      "Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed. Recordings stay in memory until Type in all tabs is turned off.",
+    ],
+  },
+  vmLink: {
+    title: "VM it reaches",
+    body: [
+      "Linking a session to its VM lets Compare hosts pick the VM and the dashboard show the guest's own metrics.",
+      "A Prod or protected VM makes the session Prod or protected too. Left at None, a session links itself when its host is a running VM's IP address.",
+    ],
+  },
   prodTier: {
     title: "Prod raises the tier",
     body: [

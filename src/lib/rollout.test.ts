@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { canaryPrompt, parseStopAfter, retryChoices, rolloutText, timeLeft } from "./rollout.ts";
+import { canaryPrompt, compareOptionsSummary, parseStopAfter, retryChoices, rolloutText, timeLeft } from "./rollout.ts";
 
 test("stop after takes a whole number of failures, or nothing", () => {
   assert.deepEqual(parseStopAfter(""), { ok: true, value: null });
@@ -34,4 +34,21 @@ test("a retry leaves hosts whose outcome is unknown out unless picked on purpose
   assert.deepEqual(retryChoices({ failed: 2, unknown: 0 }), { failed: 2, withUnknown: null });
   assert.deepEqual(retryChoices({ failed: 2, unknown: 3 }), { failed: 2, withUnknown: 5 });
   assert.deepEqual(retryChoices({ failed: 0, unknown: 1 }), { failed: 0, withUnknown: 1 });
+});
+
+test("the folded options say what differs from a plain run, in one line", () => {
+  const plain = {
+    sudo: false,
+    trustNewKeys: false,
+    timeoutSecs: 600,
+    defaultTimeoutSecs: 600,
+    canary: false,
+    stopAfter: null,
+  };
+  assert.equal(compareOptionsSummary(plain), "No sudo · 600 s limit per host");
+  assert.equal(
+    compareOptionsSummary({ ...plain, sudo: true, trustNewKeys: true, timeoutSecs: 120, canary: true, stopAfter: 3 }),
+    "sudo · trust new keys · 120 s limit · one host first · stop after 3",
+  );
+  assert.equal(compareOptionsSummary({ ...plain, timeoutSecs: null }), "no time limit");
 });

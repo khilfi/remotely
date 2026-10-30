@@ -3,6 +3,7 @@
 // before anything is saved. Stored passwords are never imported; key files can go into the vault.
 // QL-10: each file format has a short guide (made in the core from its parser's tables) and a sample file, saved
 // through a Rust save dialog; samples hold made-up example sessions only.
+// UX-04: one line per source; the OpenSSH card holds its own "Other file…" next to its guide and sample.
 
 import { useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -13,6 +14,7 @@ import {
   DownloadIcon,
   FileSpreadsheetIcon,
   FileTextIcon,
+  FolderOpenIcon,
   InfoIcon,
   LoaderCircleIcon,
   MonitorIcon,
@@ -67,42 +69,43 @@ const SOURCES: {
   title: string;
   detail: string;
   icon: typeof MonitorIcon;
-  chooseFile?: boolean;
+  /** A config file somewhere else can be picked too (OpenSSH). */
+  otherFile?: boolean;
   /** QL-10: a file format, with a guide and a sample file. */
   format?: boolean;
 }[] = [
   {
     source: "putty",
     title: "PuTTY on this computer",
-    detail: "The sessions PuTTY saved for your Windows user (registry).",
+    detail: "The sessions PuTTY saved for your Windows user.",
     icon: MonitorIcon,
   },
   {
     source: "mobaxterm",
     title: "MobaXterm export",
-    detail: "A .mxtsessions file (MobaXterm: Settings, Export all sessions). Folders are kept.",
+    detail: "A .mxtsessions file from Export all sessions; folders are kept.",
     icon: TerminalSquareIcon,
     format: true,
   },
   {
     source: "openssh",
     title: "OpenSSH config",
-    detail: "~/.ssh/config: each Host becomes a session, with its user, port, key file and wildcard settings.",
+    detail: "~/.ssh/config: each Host becomes a session.",
     icon: FileTextIcon,
+    otherFile: true,
     format: true,
   },
   {
     source: "puttyFile",
     title: "PuTTY export from another computer",
-    detail: "A .reg file of PuTTY's sessions (regedit, export HKCU\\Software\\SimonTatham\\PuTTY\\Sessions).",
+    detail: "A .reg file of PuTTY's sessions, exported with regedit.",
     icon: FileTextIcon,
     format: true,
   },
   {
     source: "csv",
     title: "CSV file",
-    detail:
-      "A header row with host (required) and any of name, port, user, folder, tags, environment, key_file; the guide lists every column.",
+    detail: "A header row with host and other columns; the guide lists them.",
     icon: FileSpreadsheetIcon,
     format: true,
   },
@@ -280,7 +283,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                 ? "What Remotely reads from this format, and a sample file to start from. The sample holds made-up example sessions only."
                 : preview
                   ? `${plural(preview.rows.length, "session")} found in ${preview.file ?? SOURCE_NAME[preview.source]}: ${counts.fresh} new, ${plural(counts.duplicates, "duplicate")}, ${plural(counts.conflicts, "name")} already taken. Nothing is saved until you import.`
-                  : "Pick where your sessions are. You'll see what was found, with duplicates and name conflicts, before anything is saved. Saved passwords are never imported."}
+                  : "You see what was found before anything is saved. Passwords are never imported."}
           </DialogDescription>
         </DialogHeader>
 
@@ -307,7 +310,7 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                   </span>
                 </button>
                 {s.format && (
-                  <div className="flex shrink-0 flex-col justify-center gap-1 border-l px-1.5">
+                  <div className="flex w-28 shrink-0 flex-col justify-center gap-1 border-l px-1.5">
                     <Button
                       variant="ghost"
                       size="xs"
@@ -329,18 +332,23 @@ export function ImportDialog({ folders, folderId, vault, onVaultChanged, onOpenV
                       <DownloadIcon />
                       Sample…
                     </Button>
+                    {s.otherFile && (
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="justify-start"
+                        disabled={busy !== null}
+                        title="Choose a config file other than ~/.ssh/config"
+                        onClick={() => void read(s.source, true)}
+                      >
+                        <FolderOpenIcon />
+                        Other file…
+                      </Button>
+                    )}
                   </div>
                 )}
               </div>
             ))}
-            <Button
-              variant="link"
-              className="h-auto justify-self-start p-0 text-sm"
-              disabled={busy !== null}
-              onClick={() => void read("openssh", true)}
-            >
-              Choose another OpenSSH config file…
-            </Button>
           </div>
         )}
 

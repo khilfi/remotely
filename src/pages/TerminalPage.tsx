@@ -29,17 +29,25 @@
 // comes from here: the shell opens the dialogs and catches drops.
 //
 // 0.5.0: QL-18 searches every open terminal's scrollback from a panel under the terminals (Ctrl+Shift+G), results
-// grouped by tab, a click showing the match in its pane. QL-19's Groups menu, next to the MultiExec switch, opens or
-// selects a saved group of sessions for MultiExec, saves the picked tabs as one, and manages them.
+// grouped by tab, a click showing the match in its pane. QL-19's saved groups open or select a saved group of sessions
+// for MultiExec, save the picked tabs as one, and manage them.
+//
+// 0.6.0 (UX-02, UX-03, UX-04, UX-12): the toolbar sits in the page header with a few controls: Split, Type in all tabs,
+// the switch of the one right-hand panel (Files here, Compare hosts, Commands: one view at a time, and the only way into
+// each), and "⋯" for everything else, each in one place (search, Type a vault password, Tunnels, Output, Saved groups,
+// notify, Reconnect, Close pane). The tabs have their own full-width row with + at its end; one slim bar under them
+// serves Type in all tabs and the picked tabs (with their Output menu); the session tree folds while terminals are
+// open. Shortcuts are in the shortcut sheet (Ctrl+/), not in a footer. A tab's environment is the one that applies (a
+// Prod VM the session reaches makes it Prod), and its tooltip says where it comes from.
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { toast } from "sonner";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
-  BellIcon,
   BellOffIcon,
   BellRingIcon,
+  CableIcon,
   CaseSensitiveIcon,
   Columns2Icon,
   FileTextIcon,
@@ -47,6 +55,7 @@ import {
   GitCompareArrowsIcon,
   LoaderCircleIcon,
   LockKeyholeIcon,
+  MoreHorizontalIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PlusIcon,
@@ -59,27 +68,32 @@ import {
   SquareChevronRightIcon,
   SquareTerminalIcon,
   TextSearchIcon,
-  UploadIcon,
   XIcon,
 } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
+import { Separator } from "@/components/ui/separator";
 import { Toggle } from "@/components/ui/toggle";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { ColorDot } from "@/components/Badges";
 import { CommandPanel } from "@/components/CommandPanel";
+import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { Tip } from "@/components/Tip";
 import { ComparePanel, type CompareView } from "@/components/ComparePanel";
@@ -88,14 +102,14 @@ import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { MultiExecGroupsDialog, type GroupsDialogStart } from "@/components/MultiExecGroupsDialog";
-import { MultiExecGroupsMenu } from "@/components/MultiExecGroupsMenu";
+import { MultiExecGroupsSubmenu } from "@/components/MultiExecGroupsMenu";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
 import { usePresentation } from "@/components/Presentation";
 import { ScrollbackSearchPanel, type SearchPane } from "@/components/ScrollbackSearchPanel";
 import { SessionTree } from "@/components/SessionTree";
-import { TunnelsButton } from "@/components/TunnelsPanel";
-import { TypeSecretMenu } from "@/components/TypeSecretMenu";
+import { TunnelsDialog, tunnelsReason } from "@/components/TunnelsPanel";
+import { useTypeSecret } from "@/components/TypeSecretMenu";
 import { UploadConflictDialog } from "@/components/UploadConflictDialog";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
@@ -121,6 +135,7 @@ import {
   type TransferInfo,
   type UploadStart,
   type VaultInfo,
+  type VmRecord,
 } from "@/lib/api";
 import { rulesForPane } from "@/lib/highlight-rules";
 import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
@@ -128,6 +143,24 @@ import { fromCommandFinished, fromTerminalAlert } from "@/lib/notifications";
 import { notify as keepNotification } from "@/lib/notifications-store";
 import { sendCommand } from "@/lib/command-send";
 import { connectedReason, multiExecReason, READ_ONLY_REASON, splitReason, uploadReason } from "@/lib/disabled-reasons";
+import {
+  appliedEnvironment,
+  environmentText,
+  vmsById,
+  type AppliedEnvironment,
+  type EnvironmentOfVm,
+} from "@/lib/session-environment";
+import {
+  initialSidePanel,
+  OUTPUT_LABELS,
+  SIDE_PANEL_KEY,
+  SIDE_PANEL_SIZE,
+  SIDE_PANELS,
+  storedSidePanel,
+  toggleSidePanel,
+  treeShown as treeShownFor,
+  type SidePanel,
+} from "@/lib/terminal-layout";
 import { formatDuration, plural } from "@/lib/format";
 import { useThresholds } from "@/lib/metrics";
 import { MultiExecSender } from "@/lib/multiexec";
@@ -153,7 +186,7 @@ import { maskedOutside, readOnlyLocked } from "@/lib/presentation-state";
 import type { ResolvedTheme } from "@/lib/theme";
 import { formatSize } from "@/lib/transfers";
 import { transferStore } from "@/lib/transfers-store";
-import { routeText, viaText } from "@/lib/tunnels";
+import { liveTunnels, routeText, viaText } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 
 /** A tab's panes: one pane, or a split of several side by side or stacked. */
@@ -172,11 +205,31 @@ interface Tab {
 
 /** More would make each pane too small to read. */
 const MAX_PANES = 6;
+/** UX-03: the session tree while no terminal is open (shown by default), and while some are (folded by default). */
 const TREE_KEY = "remotely.terminal.treeShown";
-const COMMANDS_KEY = "remotely.terminal.commandsShown";
-const FILES_KEY = "remotely.terminal.filesShown";
-/** BX-08: below this width the command panel starts hidden, so the tabs keep their room (the toolbar shows it). */
-const COMMANDS_SHOWN_FROM = 1440;
+const TREE_WITH_TABS_KEY = "remotely.terminal.treeWithTabs";
+
+const SIDE_ICONS: Record<SidePanel, typeof FolderOpenIcon> = {
+  files: FolderOpenIcon,
+  compare: GitCompareArrowsIcon,
+  commands: SquareChevronRightIcon,
+};
+
+function readKey(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function keep(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Not kept; the default shows next time.
+  }
+}
 
 /** CT-01 "Open a shell" in a container on a session's host. */
 interface ContainerShellOpen {
@@ -221,6 +274,14 @@ function newKey() {
 
 function allPanes(layout: Layout): PaneSession[] {
   return layout.kind === "pane" ? [layout.pane] : layout.children.flatMap(allPanes);
+}
+
+/**
+ * The saved session a tab shows: its current pane's, or another pane's (a pane split "like" another doesn't know its
+ * session, and every pane of a tab reaches the same one), so the tab keeps its name, colour and environment.
+ */
+function tabSessionId(tab: Tab, current: string | null): string | null {
+  return current ?? allPanes(tab.layout).find((p) => p.sessionId)?.sessionId ?? null;
 }
 
 function findPane(layout: Layout, key: string): PaneSession | undefined {
@@ -338,10 +399,13 @@ export function TerminalPage({
   const [selection, setSelection] = useState<TabSelection>(NO_SELECTION);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [options, setOptions] = useState<PaneOptions>(DEFAULT_PANE_OPTIONS);
-  const [treeShown, setTreeShown] = useState(() => readShown(TREE_KEY, true));
-  const [commandsShown, setCommandsShown] = useState(() =>
-    readShown(COMMANDS_KEY, window.innerWidth >= COMMANDS_SHOWN_FROM),
-  );
+  /** UX-03: the tree shows while no terminal is open, and folds while some are, unless the user shows it again. */
+  const [treeEmpty, setTreeEmpty] = useState(() => readShown(TREE_KEY, true));
+  const [treeWithTabs, setTreeWithTabs] = useState(() => readShown(TREE_WITH_TABS_KEY, false));
+  /** UX-03: the one right-hand panel: Files here, Compare hosts or Commands, or none. */
+  const [side, setSide] = useState<SidePanel | null>(() => initialSidePanel(readKey, window.innerWidth));
+  /** UX-12: the VMs sessions reach, for the environment that applies to each. */
+  const [vms, setVms] = useState<VmRecord[]>([]);
   /** QL-07: what Settings say about notifications (on, long commands or any while away, how long). */
   const [notify, setNotify] = useState<NotifyChoice>({ on: true, when: "long", afterSecs: 30 });
   const notifyOn = notify.on;
@@ -363,8 +427,8 @@ export function TerminalPage({
   >([]);
   /** SS-10: the picked tabs side by side while MultiExec is on. */
   const [tile, setTile] = useState(true);
-  /** BX-03: the Compare output panel, and the sessions Ctrl+clicked in the tree for it. */
-  const [compareOpen, setCompareOpen] = useState(false);
+  /** BX-03: Compare hosts is the side panel's view. */
+  const compareOpen = side === "compare";
   /** MO-13, MO-14: a session's host details, from the session tree. */
   const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
   const [thresholds] = useThresholds();
@@ -375,10 +439,12 @@ export function TerminalPage({
   /** Bumped when a pane's state changes, so what depends on terminal ids and statuses is recomputed. */
   const [paneTick, setPaneTick] = useState(0);
   /**
-   * SS-08: the "Files here" drawer. P6: the transfers themselves are in the transfers store (src/lib/transfers-store.ts),
-   * which the drawer and its panel read, so a transfer's progress doesn't re-render this page.
+   * SS-08: "Files here" is the side panel's view. P6: the transfers themselves are in the transfers store
+   * (src/lib/transfers-store.ts), which the panel reads, so a transfer's progress doesn't re-render this page.
    */
-  const [filesShown, setFilesShown] = useState(() => readShown(FILES_KEY, false));
+  const filesShown = side === "files";
+  /** SS-07: the current terminal's tunnels, from the "⋯" menu (or a link to them). */
+  const [tunnelsOpen, setTunnelsOpen] = useState(false);
   /** SS-08: files picked or dropped for upload that are in the folder already. */
   const [conflict, setConflict] = useState<{
     pane: PaneSession;
@@ -409,6 +475,8 @@ export function TerminalPage({
   const loadSessions = useCallback(() => {
     api.sessions().then(setSessions, (err) => toast.error(errorMessage(err)));
     api.sessionFolders().then(setFolders, () => undefined);
+    // UX-12: a stored read (no hypervisor is asked), so the tabs and the tree say when a VM makes a session Prod.
+    api.vmList().then(setVms, () => setVms([]));
     // QL-17: Settings edits the rules, so they are read again each time the page shows.
     api.terminalRules().then(setHighlightRules, () => undefined);
     api.terminalSettings().then(
@@ -440,28 +508,28 @@ export function TerminalPage({
     }
   }, [tabs, options, theme]);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(TREE_KEY, String(treeShown));
-    } catch {
-      // Not kept; the tree shows next time.
+  /** UX-03: the toolbar's tree switch; what it chose is kept for its own case (terminals open or not). */
+  function toggleTree() {
+    if (tabs.length === 0) {
+      setTreeEmpty(!treeEmpty);
+      keep(TREE_KEY, String(!treeEmpty));
+    } else {
+      setTreeWithTabs(!treeWithTabs);
+      keep(TREE_WITH_TABS_KEY, String(!treeWithTabs));
     }
-  }, [treeShown]);
+  }
 
-  /** BX-08: only the user's own choice is kept; until then the window's width decides. */
-  function showCommands(shown: boolean) {
-    setCommandsShown(shown);
-    try {
-      localStorage.setItem(COMMANDS_KEY, String(shown));
-    } catch {
-      // Not kept.
-    }
+  /** UX-03: the toolbar's panel switch. Only the user's own choice is kept; until then the window's width decides. */
+  function chooseSide(next: SidePanel | null) {
+    setSide(next);
+    keep(SIDE_PANEL_KEY, storedSidePanel(next));
   }
 
   // Closing the app closes every connection; the core audits each close.
   useEffect(() => () => tabsRef.current.forEach((t) => allPanes(t.layout).forEach((p) => p.close())), []);
 
   const sessionById = useMemo(() => new Map(sessions.map((s) => [s.id, s])), [sessions]);
+  const vmById = useMemo(() => vmsById(vms), [vms]);
 
   // QL-17: each pane highlights with the enabled rules for its scope: its saved session, and that session's label
   // (none for a quick connection that was not saved). The same rules again change nothing in a pane.
@@ -634,7 +702,6 @@ export function TerminalPage({
   const current = tabs.find((t) => t.key === activeTab) ?? null;
   const currentPane = current ? findPane(current.layout, current.activePane) : undefined;
   const currentSnapshot = usePane(currentPane);
-  const currentConnected = Boolean(currentPane?.terminalId) && currentSnapshot.status.state === "connected";
 
   // QL-07: looking at a tab clears its "finished in the background" mark.
   const viewing = active ? activeTab : null;
@@ -917,11 +984,17 @@ export function TerminalPage({
   // Leaving the page for good (the app closing) turns it off.
   useEffect(() => () => void api.multiExecStop().catch(() => undefined), []);
 
+  /** Turns MultiExec on; Compare hosts then opens on the lines it records (one way into Compare hosts, UX-03). */
+  function typingOn() {
+    setMultiExec(true);
+    setCompareView("multiExec");
+  }
+
   function startMultiExec() {
     // The tabs picked already, or every tab.
     if (selection.keys.length < 2) setSelection({ keys: tabs.map((t) => t.key), anchor: activeTab });
     setMxNote(null);
-    setMultiExec(true);
+    typingOn();
   }
 
   function stopMultiExec() {
@@ -942,12 +1015,14 @@ export function TerminalPage({
 
   const pickable: PickableTab[] = tabs.map((t) => {
     const pane = findPane(t.layout, t.activePane);
-    const session = pane?.sessionId ? sessionById.get(pane.sessionId) : undefined;
+    const sessionId = tabSessionId(t, pane?.sessionId ?? null);
+    const session = sessionId ? sessionById.get(sessionId) : undefined;
     return {
       key: t.key,
       folderId: session?.folderId ?? null,
-      environment: session?.environment ?? null,
-      unsaved: !pane?.sessionId,
+      // UX-12: "By environment" picks by the environment that applies.
+      environment: session ? appliedEnvironment(session, vmById).environment : null,
+      unsaved: !sessionId,
     };
   });
 
@@ -986,7 +1061,7 @@ export function TerminalPage({
           ? `Group '${group.name}': opened ${plural(missing.length, "tab")}${keys.length > 0 ? `, used ${keys.length} open already` : ""}`
           : `Group '${group.name}': its ${plural(keys.length, "tab")} picked`,
     });
-    setMultiExec(true);
+    typingOn();
     if (opened.length > 0) window.setTimeout(() => setVersion((v) => v + 1), 500);
   }
 
@@ -1003,7 +1078,7 @@ export function TerminalPage({
         ? { tone: "warn", text: `Group '${group.name}': not open, so left out: ${memberNames(missing)}` }
         : { tone: "info", text: `Group '${group.name}': its ${plural(keys.length, "tab")} picked` },
     );
-    setMultiExec(true);
+    typingOn();
   }
 
   /** "Save picked tabs as a group": MultiExec's tabs, or the Ctrl+clicked ones, or the current one. */
@@ -1038,7 +1113,12 @@ export function TerminalPage({
   const [compareHandled, setCompareHandled] = useState(compareRequest);
   if (compareRequest !== compareHandled) {
     setCompareHandled(compareRequest);
-    setCompareOpen(true);
+    setSide("compare");
+  }
+  /** Sessions Ctrl+clicked in the tree are only for Compare hosts, so the first one opens it. */
+  function pickInTree(ids: string[]) {
+    if (treePicks.length === 0 && ids.length > 0) setSide("compare");
+    setTreePicks(ids);
   }
   /** The tabs Compare runs on: MultiExec's, or the picked ones, or the current one. */
   const compareTabs = multiExec
@@ -1077,7 +1157,6 @@ export function TerminalPage({
   }
   // R10: a link to one terminal (a notification, the map, the status bar's tunnels): its tab and pane in front.
   const [focusHandled, setFocusHandled] = useState(focusRequest?.n ?? 0);
-  const [tunnelsOpen, setTunnelsOpen] = useState(0);
   if (focusRequest && focusRequest.n !== focusHandled) {
     setFocusHandled(focusRequest.n);
     const tab = tabs.find((t) => allPanes(t.layout).some((p) => p.terminalId === focusRequest.terminalId));
@@ -1085,7 +1164,7 @@ export function TerminalPage({
     if (tab && pane) {
       setActiveTab(tab.key);
       setTabs((prev) => prev.map((t) => (t.key === tab.key ? { ...t, activePane: pane.key } : t)));
-      if (focusRequest.tunnels) setTunnelsOpen((n) => n + 1);
+      if (focusRequest.tunnels) setTunnelsOpen(true);
     } else {
       toast.info("That terminal has closed");
     }
@@ -1096,8 +1175,8 @@ export function TerminalPage({
   if (snippetRequest && snippetRequest.n !== snippetHandled) {
     setSnippetHandled(snippetRequest.n);
     setPanelQuery({ text: snippetRequest.command, n: snippetRequest.n });
-    // Shown for now; whether it shows next time stays the user's own choice.
-    if (!commandsShown) setCommandsShown(true);
+    // Shown for now; what the panel shows next time stays the user's own choice.
+    setSide("commands");
   }
   // Ctrl+Shift+G, caught before a focused terminal sees it (Ctrl+Shift+F searches that terminal alone).
   const hasTabs = tabs.length > 0;
@@ -1162,14 +1241,6 @@ export function TerminalPage({
 
   // ---- SS-08 file transfer --------------------------------------------------------------------------
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(FILES_KEY, String(filesShown));
-    } catch {
-      // Not kept.
-    }
-  }, [filesShown]);
-
   // Every transfer, then each change as it comes, into the transfers store (no state here). A transfer that ends
   // while the drawer is hidden says so.
   const endedRef = useRef<(transfer: TransferInfo) => void>(() => undefined);
@@ -1192,7 +1263,7 @@ export function TerminalPage({
   useEffect(() => {
     endedRef.current = (t) => {
       if (filesShown && active) return;
-      const show = { label: "Show", onClick: () => setFilesShown(true) };
+      const show = { label: "Show", onClick: () => setSide("files") };
       if (t.state === "failed") {
         const what = t.direction === "upload" ? "Upload" : "Download";
         toast.error(`${what} of ${t.name} failed: ${t.message ?? ""}`, { action: show });
@@ -1259,7 +1330,7 @@ export function TerminalPage({
       const queued = await api.filesDownload(id, paths, to);
       if (queued && !filesShown) {
         const what = queued.length === 1 ? queued[0].name : plural(queued.length, "file");
-        toast.info(`Downloading ${what}…`, { action: { label: "Show", onClick: () => setFilesShown(true) } });
+        toast.info(`Downloading ${what}…`, { action: { label: "Show", onClick: () => setSide("files") } });
       }
     } catch (err) {
       toast.error(`Download failed: ${errorMessage(err)}`);
@@ -1357,11 +1428,6 @@ export function TerminalPage({
     };
   });
 
-  const uploadBlocked = uploadReason({
-    open: Boolean(currentPane),
-    connected: currentConnected,
-    readOnly: readOnlyLocked(presentation),
-  });
   const drawer = (
     <FilesDrawer
       terminalId={currentPane?.terminalId ?? null}
@@ -1373,7 +1439,6 @@ export function TerminalPage({
         if (currentPane) void download(currentPane, paths, to);
       }}
       onRetry={(t) => void retryTransfer(t)}
-      onClose={() => setFilesShown(false)}
     />
   );
 
@@ -1384,13 +1449,18 @@ export function TerminalPage({
       : currentSession?.auth.method === "key"
         ? currentSession.auth.passphraseId
         : null;
+  const currentName = currentPane ? nameOf(currentPane) : "the terminal";
+  // QL-06: the "⋯" menu's submenu, and its confirm outside the menu.
+  const typeSecret = useTypeSecret({ pane: currentPane, loginSecretId, terminalName: currentName, onOpenVault });
 
   const multi = isMulti(selection);
   const selectedTabs = tabs.filter((t) => selection.keys.includes(t.key));
-  /** SS-11: what the Output menu acts on: the picked tabs' panes, or the current pane. */
-  const outputPanes: NamedPane[] = (
-    multi ? selectedTabs.flatMap((t) => allPanes(t.layout)) : currentPane ? [currentPane] : []
-  ).map((pane) => ({ pane, title: nameOf(pane) }));
+  /** SS-11: the picked tabs' terminals, for the slim bar's Output menu. */
+  const pickedOutput: NamedPane[] = selectedTabs
+    .flatMap((t) => allPanes(t.layout))
+    .map((pane) => ({ pane, title: nameOf(pane) }));
+  /** SS-11: the current terminal, for the "⋯" menu's Output. */
+  const currentOutput: NamedPane[] = currentPane ? [{ pane: currentPane, title: nameOf(currentPane) }] : [];
 
   async function run(what: string, action: () => Promise<unknown>) {
     try {
@@ -1408,18 +1478,14 @@ export function TerminalPage({
     return ids;
   }, [tabs]);
 
-  /** The terminals (and Compare output under them), or the empty state. */
+  /** The terminals (and Search all terminals under them), or the empty state. */
   const stack = current ? (
     <ResizablePanelGroup
       orientation="vertical"
       className="min-h-0 flex-1"
-      id={`terminal-stack-${compareOpen ? "compare" : "plain"}${searchAll ? "-search" : ""}`}
+      id={`terminal-stack-${searchAll ? "search" : "plain"}`}
     >
-      <ResizablePanel
-        id="terminal-panes"
-        defaultSize={compareOpen && searchAll ? "45%" : compareOpen || searchAll ? "55%" : "100%"}
-        minSize="20%"
-      >
+      <ResizablePanel id="terminal-panes" defaultSize={searchAll ? "55%" : "100%"} minSize="20%">
         {multiExec && tile && pickedTabs.length > 1 ? (
           <TileView
             tabs={pickedTabs}
@@ -1455,7 +1521,7 @@ export function TerminalPage({
       {searchAll && (
         <>
           <ResizableHandle withHandle className="my-1" />
-          <ResizablePanel id="terminal-search" defaultSize={compareOpen ? "25%" : "45%"} minSize="15%">
+          <ResizablePanel id="terminal-search" defaultSize="45%" minSize="15%">
             <ScrollbackSearchPanel
               panes={searchPanes}
               focus={searchFocus}
@@ -1465,203 +1531,145 @@ export function TerminalPage({
           </ResizablePanel>
         </>
       )}
-      {compareOpen && (
-        <>
-          <ResizableHandle withHandle className="my-1" />
-          <ResizablePanel id="terminal-compare" defaultSize={searchAll ? "30%" : "45%"} minSize="20%">
-            <ComparePanel
-              active={active}
-              vault={vault}
-              view={compareView}
-              onViewChange={setCompareView}
-              multiExecOn={multiExec}
-              terminalIds={compareTerminals}
-              sessionIds={treePicks}
-              unsavedTabs={unsavedTabs}
-              savedSessions={sessions.length}
-              onClearTree={() => setTreePicks([])}
-              onSubmit={onSubmitted}
-              onOpenVault={onOpenVault}
-              onClose={() => setCompareOpen(false)}
-            />
-          </ResizablePanel>
-        </>
-      )}
     </ResizablePanelGroup>
-  ) : compareOpen ? (
-    <div className="min-h-0 flex-1">
+  ) : (
+    <EmptyState
+      icon={SquareTerminalIcon}
+      title="No terminal open"
+      description="Double-click a session in the tree, or connect to any host."
+      action={
+        <Button onClick={() => setNewOpen(true)}>
+          <PlusIcon data-icon="inline-start" />
+          New terminal
+        </Button>
+      }
+      className="min-h-0 flex-1"
+    />
+  );
+
+  /** UX-03: Files here, Compare hosts or Commands, one at a time. */
+  const sidePanel =
+    side === "files" ? (
+      drawer
+    ) : side === "compare" ? (
       <ComparePanel
         active={active}
         vault={vault}
         view={compareView}
         onViewChange={setCompareView}
         multiExecOn={multiExec}
-        terminalIds={[]}
+        terminalIds={compareTerminals}
         sessionIds={treePicks}
-        unsavedTabs={0}
+        unsavedTabs={unsavedTabs}
         savedSessions={sessions.length}
         onClearTree={() => setTreePicks([])}
         onSubmit={onSubmitted}
         onOpenVault={onOpenVault}
-        onClose={() => setCompareOpen(false)}
       />
-    </div>
-  ) : (
-    <Empty className="min-h-0 flex-1 border">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <SquareTerminalIcon />
-        </EmptyMedia>
-        <EmptyTitle>No terminal open</EmptyTitle>
-        <EmptyDescription>
-          Double-click a session in the tree, or connect to any host with New terminal. Each tab can be split into
-          panes, and a dropped connection reconnects by itself.
-        </EmptyDescription>
-      </EmptyHeader>
-      <EmptyContent>
-        <Button onClick={() => setNewOpen(true)}>
-          <PlusIcon />
-          New terminal
-        </Button>
-      </EmptyContent>
-    </Empty>
-  );
+    ) : side === "commands" ? (
+      <CommandPanel
+        active={active}
+        targetName={
+          multiExec ? `${plural(pickedPanes.length, "terminal")} (all tabs)` : currentPane ? currentName : null
+        }
+        onSend={sendToCurrent}
+        query={panelQuery}
+      />
+    ) : null;
 
-  const workspace = (
-    <div className="flex h-full min-h-0 flex-col gap-2">
-      <div className="flex items-end gap-1 border-b">
-        <IconButton
-          label={treeShown ? "Hide the sessions" : "Show the sessions"}
-          onClick={() => setTreeShown((v) => !v)}
-          className="mb-1"
-        >
-          {treeShown ? <PanelLeftCloseIcon /> : <PanelLeftOpenIcon />}
-        </IconButton>
-        <div
-          className="flex min-w-0 flex-1 items-end gap-1 overflow-x-auto [scrollbar-width:thin]"
-          role="tablist"
-          aria-label="Terminals"
-        >
-          {tabs.map((tab) => {
-            const pane = findPane(tab.layout, tab.activePane);
-            const target = mxStatus?.targets.find((t) => t.terminalId === pane?.terminalId);
-            return (
-              <TabButton
-                key={tab.key}
-                tab={tab}
-                sessions={sessionById}
-                pane={pane}
-                current={tab.key === activeTab}
-                picked={(multi || multiExec) && selection.keys.includes(tab.key)}
-                multiExec={
-                  multiExec
-                    ? selection.keys.includes(tab.key)
-                      ? (target?.reason ?? target?.note ?? "receives")
-                      : "off"
-                    : null
-                }
-                multiExecOk={target ? target.receives : true}
-                attention={attention.includes(tab.key)}
-                onSelect={(modifiers) => pickTab(tab.key, modifiers)}
-                onClose={() => closeTab(tab)}
-              />
-            );
-          })}
-          <IconButton label="New terminal" onClick={() => setNewOpen(true)} className="mb-1">
-            <PlusIcon />
-          </IconButton>
-        </div>
-        {current && (
-          <div className="flex shrink-0 items-center gap-0.5 pb-1">
-            <IconButton label="Search (Ctrl+Shift+F)" onClick={() => currentPane?.openSearch()}>
+  const treeVisible = treeShownFor({ tabs: tabs.length, shownEmpty: treeEmpty, shownWithTabs: treeWithTabs });
+  const readOnly = readOnlyLocked(presentation);
+  const live = liveTunnels(currentSnapshot.tunnels);
+  const tunnelsBlocked = tunnelsReason(currentPane, currentSnapshot);
+  const isSplit = current?.layout.kind === "split";
+
+  /** An action that moves the focus (a search box) runs once its menu has closed, which holds the focus till then. */
+  const afterMenu = useRef<(() => void) | null>(null);
+  /** A toolbar menu closed: the focus goes back to the terminal, not the button, unless the action moved it. */
+  function backToTerminal(e: Event) {
+    e.preventDefault();
+    const then = afterMenu.current;
+    afterMenu.current = null;
+    if (then) {
+      then();
+      return;
+    }
+    const pane = currentPane;
+    window.requestAnimationFrame(() => {
+      if (!document.activeElement || document.activeElement === document.body) pane?.focus();
+    });
+  }
+
+  /** UX-03: everything the toolbar doesn't show, each in one place. */
+  const moreMenu = (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" size="icon" aria-label="More actions on Terminal">
+              <MoreHorizontalIcon />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>More actions</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="end" className="w-72" onCloseAutoFocus={backToTerminal}>
+        {current && currentPane && (
+          <>
+            <DropdownMenuLabel className="truncate font-normal text-muted-foreground">{currentName}</DropdownMenuLabel>
+            <DropdownMenuItem onSelect={() => (afterMenu.current = () => currentPane.openSearch())}>
               <SearchIcon />
-            </IconButton>
-            <IconButton
-              label={searchAll ? "Hide Search all terminals" : "Search all terminals (Ctrl+Shift+G)"}
-              onClick={() => (searchAll ? closeSearchAll() : openSearchAll())}
-              className={cn(searchAll && "bg-accent")}
-              pressed={searchAll}
-            >
+              Search this terminal
+              <DropdownMenuShortcut>Ctrl+Shift+F</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={() => (afterMenu.current = openSearchAll)}>
               <TextSearchIcon />
-            </IconButton>
-            <IconButton label="Split right" onClick={() => split("horizontal")} disabledReason={splitBlocked}>
-              <Columns2Icon />
-            </IconButton>
-            <IconButton label="Split down" onClick={() => split("vertical")} disabledReason={splitBlocked}>
-              <Rows2Icon />
-            </IconButton>
-            <IconButton label="Reconnect this pane" onClick={() => currentPane?.reconnect()}>
+              Search all terminals
+              <DropdownMenuShortcut>Ctrl+Shift+G</DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            {typeSecret.menu}
+            <DropdownMenuItem disabled={tunnelsBlocked !== null} onSelect={() => setTunnelsOpen(true)}>
+              <CableIcon />
+              <span>
+                {live > 0 ? `Tunnels (${live} open)…` : "Tunnels…"}
+                <ReasonLine reason={tunnelsBlocked} />
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <FileTextIcon />
+                {OUTPUT_LABELS.menu}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-60">
+                <OutputItems panes={currentOutput} current={currentPane} run={run} titleOf={nameOf} />
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
+            <DropdownMenuSeparator />
+            <DropdownMenuCheckboxItem
+              checked={current.notify && notifyOn}
+              disabled={!notifyOn}
+              onCheckedChange={(on) => setTabNotify(current.key, on)}
+            >
+              <span>
+                Notifications from this tab
+                <ReasonLine reason={notifyOn ? null : "Turned off in Settings › Terminal"} />
+              </span>
+            </DropdownMenuCheckboxItem>
+            <DropdownMenuItem onSelect={() => currentPane.reconnect()}>
               <RefreshCwIcon />
-            </IconButton>
-            <IconButton
-              label={
-                multiExec && pickedPanes.length > 1
-                  ? "Upload files into this terminal's folder (this terminal only, not every picked terminal)"
-                  : "Upload files into this terminal's folder"
-              }
-              onClick={() => void pickAndUpload(currentPane, null)}
-              disabledReason={uploadBlocked}
-            >
-              <UploadIcon />
-            </IconButton>
-            <TypeSecretMenu
-              pane={currentPane}
-              loginSecretId={loginSecretId}
-              terminalName={currentPane ? nameOf(currentPane) : "the terminal"}
-              onOpenVault={onOpenVault}
-            />
-            <IconButton
-              label={
-                !notifyOn
-                  ? "Notifications are off in Settings (Terminal)"
-                  : current.notify
-                    ? "Notify when a command finishes in this tab while you're away (on; click to turn off)"
-                    : "No notifications from this tab (click to turn on)"
-              }
-              onClick={() => setTabNotify(current.key, !current.notify)}
-            >
-              {current.notify && notifyOn ? <BellIcon /> : <BellOffIcon />}
-            </IconButton>
-            <OutputMenu
-              panes={outputPanes}
-              multi={multi}
-              tabCount={selectedTabs.length}
-              current={currentPane}
-              onSelectAll={() => setSelection({ keys: tabs.map((t) => t.key), anchor: activeTab })}
-              onClearSelection={() => setSelection({ keys: [], anchor: activeTab })}
-              allTabs={tabs.length}
-              run={run}
-              titleOf={nameOf}
-            />
-            <IconButton label="Close this pane" onClick={() => closePane(current.key, current.activePane)}>
-              <XIcon />
-            </IconButton>
-          </div>
+              Reconnect
+            </DropdownMenuItem>
+            {isSplit && (
+              <DropdownMenuItem onSelect={() => closePane(current.key, current.activePane)}>
+                <XIcon />
+                Close this pane
+              </DropdownMenuItem>
+            )}
+            <DropdownMenuSeparator />
+          </>
         )}
-        {readOnlyLocked(presentation) && (
-          <span
-            className="mb-1 inline-flex shrink-0 items-center gap-1 px-1.5 text-xs font-medium text-presenting"
-            title="Read-only while presenting: Type in all tabs, Compare hosts, uploads, tunnels and saving sessions are blocked. Typing into one terminal still works: it is your own shell."
-          >
-            <LockKeyholeIcon className="size-3.5" />
-            Read-only
-          </span>
-        )}
-        <IconButton
-          label={
-            multiExec
-              ? "Type in all tabs is on: typing goes to every picked tab (click to turn off)"
-              : "Type in all tabs: send your typing to several tabs at once"
-          }
-          onClick={() => (multiExec ? stopMultiExec() : startMultiExec())}
-          className={cn("mb-1", multiExec && "bg-primary/15 text-primary")}
-          disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec, readOnly: readOnlyLocked(presentation) })}
-          pressed={multiExec}
-        >
-          <RadioTowerIcon />
-        </IconButton>
-        <MultiExecGroupsMenu
-          className="mb-1"
+        <MultiExecGroupsSubmenu
           groups={groups}
           tabs={groupTabList}
           multiExecBlocked={groupsBlocked}
@@ -1673,148 +1681,170 @@ export function TerminalPage({
           onManage={() => setGroupsDialog({ kind: "manage" })}
           onShow={loadGroups}
         />
-        <IconButton
-          label={compareOpen ? "Hide Compare hosts" : "Compare hosts: one command on several hosts, grouped answers"}
-          onClick={() => setCompareOpen((v) => !v)}
-          className={cn("mb-1", compareOpen && "bg-accent")}
-          pressed={compareOpen}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  /** UX-03: about five controls: Split, Type in all tabs, the side panel's switch, and "⋯". */
+  const toolbar = (
+    <div className="ml-auto flex items-center gap-1">
+      {readOnly && (
+        <span
+          className="mr-1 inline-flex shrink-0 items-center gap-1 text-xs font-medium text-presenting"
+          title="Read-only while presenting: Type in all tabs, Compare hosts, uploads, tunnels and saving sessions are blocked. Typing into one terminal still works."
         >
-          <GitCompareArrowsIcon />
-        </IconButton>
-        <TunnelsButton
-          pane={currentPane}
-          snapshot={currentSnapshot}
-          name={currentPane ? nameOf(currentPane) : ""}
-          onApproval={askTunnel}
-          openRequest={tunnelsOpen}
-        />
-        <IconButton
-          label={filesShown ? "Hide the files" : "Files here: the terminal's folder, downloads and uploads"}
-          onClick={() => setFilesShown((v) => !v)}
-          className={cn("mb-1", filesShown && "bg-accent")}
-          pressed={filesShown}
-        >
-          <FolderOpenIcon />
-        </IconButton>
-        <IconButton
-          label={commandsShown ? "Hide the commands" : "Show the commands (favourites and library)"}
-          onClick={() => showCommands(!commandsShown)}
-          className={cn("mb-1", commandsShown && "bg-accent")}
-        >
-          <SquareChevronRightIcon />
-        </IconButton>
+          <LockKeyholeIcon className="size-3.5" />
+          Read-only
+        </span>
+      )}
+      <SplitMenu reason={current ? splitBlocked : "Open a terminal first"} onSplit={split} onClosed={backToTerminal} />
+      <IconButton
+        size="icon"
+        label={
+          multiExec
+            ? "Type in all tabs is on: typing goes to every picked tab (click to turn off)"
+            : multi
+              ? `Type in all tabs: send your typing to the ${selectedTabs.length} picked tabs`
+              : "Type in all tabs: send your typing to several tabs at once"
+        }
+        onClick={() => (multiExec ? stopMultiExec() : startMultiExec())}
+        className={cn(multiExec && "bg-primary/15 text-primary")}
+        disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec, readOnly })}
+        pressed={multiExec}
+      >
+        <RadioTowerIcon />
+      </IconButton>
+      <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-5" />
+      <div role="group" aria-label="Side panel" className="flex items-center gap-0.5">
+        {SIDE_PANELS.map(({ id, label }) => {
+          const Icon = SIDE_ICONS[id];
+          return (
+            <Tooltip key={id}>
+              <TooltipTrigger asChild>
+                <Toggle
+                  aria-label={label}
+                  className="w-8 px-0"
+                  pressed={side === id}
+                  onPressedChange={() => chooseSide(toggleSidePanel(side, id))}
+                >
+                  <Icon />
+                </Toggle>
+              </TooltipTrigger>
+              <TooltipContent>{side === id ? `Hide ${label}` : label}</TooltipContent>
+            </Tooltip>
+          );
+        })}
       </div>
-      {multiExec && (
-        <MultiExecBar
-          tabs={pickable}
-          picked={pickedTabs.length}
-          status={mxStatus}
-          note={mxNote}
-          folders={folders}
-          tile={tile}
-          onTile={setTile}
-          onPick={(keys) => setSelection({ keys, anchor: activeTab })}
-          onCompare={() => {
-            setCompareView("multiExec");
-            setCompareOpen(true);
-          }}
-          onOff={stopMultiExec}
-        />
-      )}
-      {multi && !multiExec && (
-        <div
-          className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/50 px-3 py-1.5 text-sm"
-          role="status"
-        >
-          <span className="font-medium">
-            {plural(selectedTabs.length, "tab")} picked ({plural(outputPanes.length, "terminal")})
-          </span>
-          <Button size="xs" variant="outline" onClick={() => void run("Copying", () => copyOutput(outputPanes))}>
-            Copy output
-          </Button>
-          <Button
-            size="xs"
-            variant="outline"
-            onClick={() =>
-              void run("Saving", async () => {
-                const saved = await saveOutput(outputPanes, "oneFile");
-                if (saved) toast.success(`Saved ${plural(saved.terminals, "terminal")} to ${saved.files[0]}`);
-              })
-            }
-          >
-            Save to one file…
-          </Button>
-          <Button
-            size="xs"
-            variant="outline"
-            onClick={() =>
-              void run("Saving", async () => {
-                const saved = await saveOutput(outputPanes, "filePerTerminal");
-                if (saved) toast.success(`Saved ${plural(saved.files.length, "file")}`);
-              })
-            }
-          >
-            A file each…
-          </Button>
-          <Button size="xs" variant="outline" onClick={() => void run("Printing", () => printOutput(outputPanes))}>
-            Print…
-          </Button>
-          <Button size="xs" variant="outline" onClick={() => setCompareOpen(true)}>
-            Compare hosts…
-          </Button>
-          <Button
-            size="xs"
-            variant="ghost"
-            className="ml-auto"
-            onClick={() => setSelection({ keys: [], anchor: activeTab })}
-          >
-            Clear
-          </Button>
-        </div>
-      )}
-      {filesShown ? (
-        <ResizablePanelGroup orientation="horizontal" className="min-h-0 flex-1" id="terminal-files">
-          <ResizablePanel id="terminal-files-main" defaultSize="62%" minSize="30%">
-            <div className="flex h-full min-h-0 flex-col">{stack}</div>
-          </ResizablePanel>
-          <ResizableHandle className="mx-1" />
-          <ResizablePanel id="terminal-files-drawer" defaultSize="38%" minSize="20%" maxSize="60%">
-            {drawer}
-          </ResizablePanel>
-        </ResizablePanelGroup>
-      ) : (
-        stack
-      )}
-      <p className="text-xs text-muted-foreground">
-        {options.copyOnSelect ? "Selecting text copies it. " : "Ctrl+Shift+C copies a selection. "}
-        Ctrl+Shift+V or right-click pastes{options.confirmMultilinePaste ? " (text with line breaks asks first)" : ""},
-        Ctrl+Shift+F searches, Ctrl+Shift+G searches every terminal. Ctrl+click tabs to pick several for Output, Type in
-        all tabs and Compare hosts. Typing into one terminal is not audited; each line Type in all tabs sends is (the
-        command, the sessions, the tier), and so are opening and closing a terminal, saving its output, typing a vault
-        password and every file uploaded or downloaded (its name, size and SHA-256).
-      </p>
+      <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-5" />
+      {moreMenu}
     </div>
   );
 
-  const mainSize = 100 - (treeShown ? 20 : 0) - (commandsShown ? 22 : 0);
+  /** UX-03: the tabs on a row of their own, never squeezed: past the width they scroll. */
+  const tabRow = (
+    <div className="flex items-end gap-1 border-b">
+      <IconButton label={treeVisible ? "Hide the sessions" : "Show the sessions"} onClick={toggleTree} className="mb-1">
+        {treeVisible ? <PanelLeftCloseIcon /> : <PanelLeftOpenIcon />}
+      </IconButton>
+      <div
+        className="flex min-w-0 flex-1 items-end gap-1 overflow-x-auto [scrollbar-width:thin]"
+        role="tablist"
+        aria-label="Terminals"
+      >
+        {tabs.map((tab) => {
+          const pane = findPane(tab.layout, tab.activePane);
+          const target = mxStatus?.targets.find((t) => t.terminalId === pane?.terminalId);
+          return (
+            <TabButton
+              key={tab.key}
+              tab={tab}
+              sessions={sessionById}
+              vms={vmById}
+              pane={pane}
+              current={tab.key === activeTab}
+              picked={(multi || multiExec) && selection.keys.includes(tab.key)}
+              multiExec={
+                multiExec
+                  ? selection.keys.includes(tab.key)
+                    ? (target?.reason ?? target?.note ?? "receives")
+                    : "off"
+                  : null
+              }
+              multiExecOk={target ? target.receives : true}
+              attention={attention.includes(tab.key)}
+              onSelect={(modifiers) => pickTab(tab.key, modifiers)}
+              onClose={() => closeTab(tab)}
+            />
+          );
+        })}
+        <IconButton label="New terminal" onClick={() => setNewOpen(true)} className="mb-1 shrink-0">
+          <PlusIcon />
+        </IconButton>
+      </div>
+    </div>
+  );
+
+  /** UX-02: one slim bar for Type in all tabs and the picked tabs. */
+  const bar = (multiExec || multi) && (
+    <MultiExecBar
+      on={multiExec}
+      tabs={pickable}
+      picked={multiExec ? pickedTabs.length : selectedTabs.length}
+      terminals={pickedOutput.length}
+      status={mxStatus}
+      note={mxNote}
+      folders={folders}
+      tile={tile}
+      onTile={setTile}
+      onPick={(keys) => setSelection({ keys, anchor: activeTab })}
+      onClose={multiExec ? stopMultiExec : () => setSelection({ keys: [], anchor: activeTab })}
+      output={
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button size="sm" variant="ghost">
+              <FileTextIcon data-icon="inline-start" />
+              {OUTPUT_LABELS.menu}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-60">
+            <DropdownMenuLabel className="font-normal text-muted-foreground">
+              {plural(selectedTabs.length, "picked tab")}, {plural(pickedOutput.length, "terminal")}
+            </DropdownMenuLabel>
+            <OutputItems panes={pickedOutput} current={undefined} run={run} titleOf={nameOf} />
+          </DropdownMenuContent>
+        </DropdownMenu>
+      }
+    />
+  );
+
+  const workspace = (
+    <div className="flex h-full min-h-0 flex-col gap-2">
+      {tabRow}
+      {bar}
+      {stack}
+    </div>
+  );
+
+  const sideSize = side ? SIDE_PANEL_SIZE[side] : 0;
+  const treeSize = 20;
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      <PageHeader page="terminal" />
+      <PageHeader page="terminal">{toolbar}</PageHeader>
       {/* UX-09: shown once, when picking several tabs first makes sense. */}
       {tabs.length >= 2 && (
         <Tip id="terminal.pickTabs">
-          Ctrl+click tabs to pick several, then use Type in all tabs or Compare hosts on all of them.
+          Ctrl+click tabs to pick several; Type in all tabs and Compare hosts then use them.
         </Tip>
       )}
       <div className="min-h-0 flex-1">
-        {treeShown || commandsShown ? (
+        {treeVisible || side ? (
           <ResizablePanelGroup
             orientation="horizontal"
-            id={`terminal-workspace-${treeShown ? "tree" : "no-tree"}-${commandsShown ? "commands" : "no-commands"}`}
+            id={`terminal-workspace-${treeVisible ? "tree" : "no-tree"}-${side ?? "no-side"}`}
           >
-            {treeShown && (
+            {treeVisible && (
               <>
-                <ResizablePanel id="terminal-tree" defaultSize="20%" minSize="12%" maxSize="40%">
+                <ResizablePanel id="terminal-tree" defaultSize={`${treeSize}%`} minSize="12%" maxSize="40%">
                   <div className="h-full pr-3">
                     <SessionTree
                       active={active}
@@ -1822,37 +1852,27 @@ export function TerminalPage({
                       openSessions={openSessions}
                       onOpen={openSession}
                       picks={treePicks}
-                      onPicksChange={setTreePicks}
-                      onCompare={() => setCompareOpen(true)}
+                      onPicksChange={pickInTree}
                       onHostDetails={(s) => setHostDetails({ id: s.id, name: s.name })}
+                      vms={vmById}
                     />
                   </div>
                 </ResizablePanel>
                 <ResizableHandle />
               </>
             )}
-            <ResizablePanel id="terminal-main" defaultSize={`${mainSize}%`}>
-              <div className={cn("h-full", treeShown && "pl-3", commandsShown && "pr-3")}>{workspace}</div>
+            <ResizablePanel
+              id="terminal-main"
+              defaultSize={`${100 - (treeVisible ? treeSize : 0) - sideSize}%`}
+              minSize="30%"
+            >
+              <div className={cn("h-full", treeVisible && "pl-3", side && "pr-3")}>{workspace}</div>
             </ResizablePanel>
-            {commandsShown && (
+            {side && (
               <>
                 <ResizableHandle />
-                <ResizablePanel id="terminal-commands" defaultSize="22%" minSize="14%" maxSize="45%">
-                  <div className="h-full pl-3">
-                    <CommandPanel
-                      active={active}
-                      targetName={
-                        multiExec
-                          ? `${plural(pickedPanes.length, "terminal")} (all tabs)`
-                          : currentPane
-                            ? nameOf(currentPane)
-                            : null
-                      }
-                      onSend={sendToCurrent}
-                      onClose={() => showCommands(false)}
-                      query={panelQuery}
-                    />
-                  </div>
+                <ResizablePanel id="terminal-side" defaultSize={`${sideSize}%`} minSize="16%" maxSize="60%">
+                  <div className="h-full min-h-0 pl-3">{sidePanel}</div>
                 </ResizablePanel>
               </>
             )}
@@ -1868,6 +1888,19 @@ export function TerminalPage({
         onOpenSession={(s) => openSession(s)}
       />
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+      <TunnelsDialog
+        open={tunnelsOpen}
+        onOpenChange={setTunnelsOpen}
+        pane={currentPane}
+        snapshot={currentSnapshot}
+        name={currentName}
+        onApproval={(pane, forwardId, request) => {
+          // The approval dialog takes over; the list opens again from the "⋯" menu.
+          setTunnelsOpen(false);
+          askTunnel(pane, forwardId, request);
+        }}
+      />
+      {typeSecret.confirm}
       {groupsDialog && (
         <MultiExecGroupsDialog
           groups={groups}
@@ -1972,6 +2005,7 @@ function IconButton({
   className,
   disabledReason,
   pressed,
+  size = "icon-sm",
   children,
 }: {
   label: string;
@@ -1981,12 +2015,14 @@ function IconButton({
   disabledReason?: string | null;
   /** A switch that is on. */
   pressed?: boolean;
+  /** "icon" in the page header's toolbar, "icon-sm" on the tab row. */
+  size?: "icon" | "icon-sm";
   children: React.ReactNode;
 }) {
   if (disabledReason) {
     return (
       <WhyDisabled reason={`${label}: ${disabledReason}`} className={className}>
-        <Button variant="ghost" size="icon-sm" aria-label={label} disabled>
+        <Button variant="ghost" size={size} aria-label={label} disabled>
           {children}
         </Button>
       </WhyDisabled>
@@ -1997,7 +2033,7 @@ function IconButton({
       <TooltipTrigger asChild>
         <Button
           variant="ghost"
-          size="icon-sm"
+          size={size}
           aria-label={label}
           aria-pressed={pressed}
           onClick={onClick}
@@ -2008,6 +2044,52 @@ function IconButton({
       </TooltipTrigger>
       <TooltipContent>{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+/** The toolbar's Split: right or down, for the current tab. */
+function SplitMenu({
+  reason,
+  onSplit,
+  onClosed,
+}: {
+  /** QL-08: why it can't split now, or null. */
+  reason: string | null;
+  onSplit: (orientation: "horizontal" | "vertical") => void;
+  onClosed: (e: Event) => void;
+}) {
+  if (reason) {
+    return (
+      <WhyDisabled reason={`Split: ${reason}`}>
+        <Button variant="ghost" size="icon" aria-label="Split" disabled>
+          <Columns2Icon />
+        </Button>
+      </WhyDisabled>
+    );
+  }
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon" aria-label="Split">
+              <Columns2Icon />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Split this terminal</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="end" className="w-44" onCloseAutoFocus={onClosed}>
+        <DropdownMenuItem onSelect={() => onSplit("horizontal")}>
+          <Columns2Icon />
+          Split right
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onSplit("vertical")}>
+          <Rows2Icon />
+          Split down
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -2051,6 +2133,7 @@ function StatusDot({ snapshot }: { snapshot: PaneSnapshot }) {
 function TabButton({
   tab,
   sessions,
+  vms,
   pane,
   current,
   picked,
@@ -2062,6 +2145,8 @@ function TabButton({
 }: {
   tab: Tab;
   sessions: Map<string, SessionRecord>;
+  /** UX-12: a Prod VM the session reaches makes the tab Prod. */
+  vms: ReadonlyMap<string, EnvironmentOfVm>;
   pane: PaneSession | undefined;
   current: boolean;
   picked: boolean;
@@ -2078,8 +2163,10 @@ function TabButton({
   onClose: () => void;
 }) {
   const snapshot = usePane(pane);
-  const session = snapshot.sessionId ? sessions.get(snapshot.sessionId) : undefined;
-  const env = session?.environment ?? "none";
+  const sessionId = tabSessionId(tab, snapshot.sessionId);
+  const session = sessionId ? sessions.get(sessionId) : undefined;
+  const applied: AppliedEnvironment | null = session ? appliedEnvironment(session, vms) : null;
+  const env = applied?.environment ?? "none";
   // CT-01: a container's shell is named after the container.
   const name = pane?.fixedTitle ? pane.label : (session?.name ?? pane?.label ?? "Terminal");
   const seen = factsTitle(snapshot.facts);
@@ -2090,6 +2177,7 @@ function TabButton({
     session
       ? `${pane?.fixedTitle ? `${name}: a shell in a container on ` : ""}${session.name} (${sessionAddress(session)})`
       : name,
+    applied && env !== "none" && `Environment: ${environmentText(applied)}`,
     seen && `Host: ${seen}`,
     via.length > 0 && `Through ${routeText(via)}`,
     session ? null : "Not saved as a session",
@@ -2116,7 +2204,7 @@ function TabButton({
       onAuxClick={(e) => e.button === 1 && onClose()}
       title={tooltip}
       className={cn(
-        "group flex h-10 max-w-64 min-w-36 shrink cursor-pointer items-center gap-2 rounded-t-md border border-b-0 border-t-[3px] px-2.5 text-sm select-none",
+        "group flex h-10 max-w-64 min-w-40 shrink-0 cursor-pointer items-center gap-2 rounded-t-md border border-b-0 border-t-[3px] px-2.5 text-sm select-none",
         session?.color ? COLOR_TAB[session.color] : ENV_TAB[env],
         env === "prod" && "bg-env-prod/10",
         current ? "bg-background font-medium" : "text-muted-foreground hover:bg-muted/60",
@@ -2137,7 +2225,17 @@ function TabButton({
         <span className="truncate">{name}</span>
         {(env !== "none" || (seen && seen !== name) || via.length > 0) && (
           <span className="truncate text-[11px] font-normal text-muted-foreground">
-            {env !== "none" && <span className={cn("font-semibold uppercase", ENV_TEXT[env])}>{env} </span>}
+            {env !== "none" && (
+              <span
+                className={cn(
+                  "font-semibold uppercase",
+                  ENV_TEXT[env],
+                  applied?.from && "underline decoration-dotted underline-offset-2",
+                )}
+              >
+                {env}{" "}
+              </span>
+            )}
             {seen !== name && seen}
             {via.length > 0 && <span className="text-muted-foreground/80"> {viaText(via)}</span>}
           </span>
@@ -2164,124 +2262,85 @@ function TabButton({
   );
 }
 
-/** SS-11: copy, save, print and log, for the current pane or every picked tab. */
-function OutputMenu({
+/**
+ * SS-11, UX-03: copy, save, print and log, with one set of labels (OUTPUT_LABELS) wherever they show: the "⋯" menu's
+ * Output for the current terminal (`current`: logging too), and the slim bar's Output for the picked tabs.
+ */
+function OutputItems({
   panes,
-  multi,
-  tabCount,
   current,
-  allTabs,
-  onSelectAll,
-  onClearSelection,
   run,
   titleOf,
 }: {
   panes: NamedPane[];
-  multi: boolean;
-  tabCount: number;
+  /** The current terminal, for its log; none for the picked tabs. */
   current: PaneSession | undefined;
-  allTabs: number;
-  onSelectAll: () => void;
-  onClearSelection: () => void;
   run: (what: string, action: () => Promise<unknown>) => Promise<void>;
   titleOf: (pane: PaneSession) => string;
 }) {
   const snapshot = usePane(current);
-  const terminals = plural(panes.length, "terminal");
+  const several = panes.length > 1;
   const noPanes = panes.length === 0 ? "No terminal is open" : null;
   return (
-    <DropdownMenu>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="sm" aria-label="Output: copy, save, print or log">
-              <FileTextIcon />
-              Output
-            </Button>
-          </DropdownMenuTrigger>
-        </TooltipTrigger>
-        <TooltipContent>Copy, save, print or log the output</TooltipContent>
-      </Tooltip>
-      <DropdownMenuContent align="end" className="w-64">
-        <DropdownMenuLabel>
-          {multi ? `${plural(tabCount, "picked tab")}, ${terminals}` : "This pane's whole scrollback"}
-        </DropdownMenuLabel>
-        <DropdownMenuItem disabled={panes.length === 0} onSelect={() => void run("Copying", () => copyOutput(panes))}>
-          <span>
-            {multi ? `Copy the output of ${terminals}` : "Copy all output"}
-            <ReasonLine reason={noPanes} />
-          </span>
-        </DropdownMenuItem>
+    <>
+      <DropdownMenuItem disabled={noPanes !== null} onSelect={() => void run("Copying", () => copyOutput(panes))}>
+        <span>
+          {OUTPUT_LABELS.copy}
+          <ReasonLine reason={noPanes} />
+        </span>
+      </DropdownMenuItem>
+      <DropdownMenuItem
+        disabled={noPanes !== null}
+        onSelect={() =>
+          void run("Saving", async () => {
+            const saved = await saveOutput(panes, "oneFile");
+            if (saved) toast.success(`Saved ${plural(saved.terminals, "terminal")} to ${saved.files[0]}`);
+          })
+        }
+      >
+        {OUTPUT_LABELS.save}
+      </DropdownMenuItem>
+      {several && (
         <DropdownMenuItem
-          disabled={panes.length === 0}
           onSelect={() =>
             void run("Saving", async () => {
-              const saved = await saveOutput(panes, "oneFile");
-              if (saved) toast.success(`Saved to ${saved.files[0]}`);
+              const saved = await saveOutput(panes, "filePerTerminal");
+              if (saved) toast.success(`Saved ${plural(saved.files.length, "file")}`);
             })
           }
         >
-          <span>
-            {multi ? "Save to one file, a header each…" : "Save to a .txt file…"}
-            <ReasonLine reason={noPanes} />
-          </span>
+          {OUTPUT_LABELS.saveEach}
         </DropdownMenuItem>
-        {multi && (
-          <DropdownMenuItem
-            onSelect={() =>
-              void run("Saving", async () => {
-                const saved = await saveOutput(panes, "filePerTerminal");
-                if (saved) toast.success(`Saved ${plural(saved.files.length, "file")}`);
-              })
-            }
-          >
-            Save a file for each…
-          </DropdownMenuItem>
-        )}
-        <DropdownMenuItem disabled={panes.length === 0} onSelect={() => void run("Printing", () => printOutput(panes))}>
-          <span>
-            {multi ? `Print ${terminals}…` : "Print…"}
-            <ReasonLine reason={noPanes} />
-          </span>
-        </DropdownMenuItem>
-        {!multi && current && (
-          <>
-            <DropdownMenuSeparator />
-            {snapshot.logPath ? (
-              <DropdownMenuItem onSelect={() => void run("Stopping the log", () => current.stopLog())}>
-                Stop logging to a file
-              </DropdownMenuItem>
-            ) : (
-              <DropdownMenuItem
-                disabled={!current.terminalId}
-                onSelect={() =>
-                  void run("Logging", async () => {
-                    const path = await current.startLog(titleOf(current));
-                    if (path) toast.success(`Logging this terminal to ${path}`);
-                  })
-                }
-              >
-                <span>
-                  Log this session to a file…
-                  <ReasonLine reason={connectedReason({ open: true, connected: Boolean(current.terminalId) })} />
-                </span>
-              </DropdownMenuItem>
-            )}
-          </>
-        )}
-        <DropdownMenuSeparator />
-        {multi ? (
-          <DropdownMenuItem onSelect={onClearSelection}>Clear the picked tabs</DropdownMenuItem>
-        ) : (
-          <DropdownMenuItem disabled={allTabs < 2} onSelect={onSelectAll}>
-            <span>
-              Pick all {allTabs} tabs
-              <ReasonLine reason={allTabs < 2 ? "Open two or more tabs to pick them" : null} />
-            </span>
-          </DropdownMenuItem>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+      )}
+      <DropdownMenuItem disabled={noPanes !== null} onSelect={() => void run("Printing", () => printOutput(panes))}>
+        {OUTPUT_LABELS.print}
+      </DropdownMenuItem>
+      {current && (
+        <>
+          <DropdownMenuSeparator />
+          {snapshot.logPath ? (
+            <DropdownMenuItem onSelect={() => void run("Stopping the log", () => current.stopLog())}>
+              {OUTPUT_LABELS.stopLog}
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem
+              disabled={!current.terminalId}
+              onSelect={() =>
+                void run("Logging", async () => {
+                  const path = await current.startLog(titleOf(current));
+                  if (path) toast.success(`Logging this terminal to ${path}`);
+                })
+              }
+            >
+              <span>
+                {OUTPUT_LABELS.log}
+                <ReasonLine reason={connectedReason({ open: true, connected: Boolean(current.terminalId) })} />
+              </span>
+            </DropdownMenuItem>
+          )}
+        </>
+      )}
+    </>
   );
 }
 

@@ -36,6 +36,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { TierBadge } from "@/components/Badges";
 import { GroupCard, HostOutputDialog } from "@/components/BulkResultsView";
+import { HelpTip } from "@/components/HelpTip";
 import { OutputDiffDialog } from "@/components/OutputDiffDialog";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import {
@@ -162,7 +163,10 @@ export function RecordedLinesView({ active, multiExecOn }: Props) {
     <div className="grid grid-cols-1 gap-4 @5xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
       <div className="grid min-w-0 grid-cols-1 content-start gap-3">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <h3 className="text-sm font-medium">{plural(lines.length, "recorded line")}</h3>
+          <h3 className="flex items-center gap-1 text-sm font-medium">
+            {plural(lines.length, "recorded line")}
+            <HelpTip topic="recordedLines" />
+          </h3>
           {picked && (
             <Button size="xs" variant="ghost" onClick={() => setPicked(null)}>
               Show the newest
@@ -198,12 +202,6 @@ export function RecordedLinesView({ active, multiExecOn }: Props) {
             <AlertDescription className="text-xs">{caps}</AlertDescription>
           </Alert>
         )}
-        <p className="text-xs break-words text-muted-foreground">
-          Lines typed while Type in all tabs is on are recorded in each terminal, from Enter until its prompt comes back
-          (or its output stops for the quiet spell in Settings, or {shortDuration(recordings.limits.lineSecs * 1000)}{" "}
-          pass). Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed.
-          Recordings are kept in memory until Type in all tabs is turned off.
-        </p>
       </div>
       <div className="min-w-0">
         {shown && <RecordedLineResults key={shown.id} line={shown} version={version} active={active} />}

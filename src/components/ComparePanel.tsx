@@ -13,11 +13,19 @@
 // scrolls natively (Radix ScrollArea sizes its content like a table, which let it grow past the panel).
 
 import { useEffect, useMemo, useState } from "react";
-import { KeyRoundIcon, OctagonAlertIcon, PlayIcon, RadioTowerIcon, SquareTerminalIcon, XIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  KeyRoundIcon,
+  OctagonAlertIcon,
+  PlayIcon,
+  RadioTowerIcon,
+  SquareTerminalIcon,
+} from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -26,6 +34,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { TierBadge } from "@/components/Badges";
 import { BulkResultsView } from "@/components/BulkResultsView";
+import { HelpTip } from "@/components/HelpTip";
 import { RecordedLinesView } from "@/components/RecordedLinesView";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { usePresentation } from "@/components/Presentation";
@@ -46,7 +55,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { compareRunReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
 import { readOnlyLocked } from "@/lib/presentation-state";
-import { parseStopAfter } from "@/lib/rollout";
+import { compareOptionsSummary, parseStopAfter } from "@/lib/rollout";
+import { cn } from "@/lib/utils";
 
 /** QL-12: a one-shot run here, or the lines MultiExec recorded in the terminals. */
 export type CompareView = "run" | "multiExec";
@@ -70,7 +80,6 @@ interface Props {
   /** Goes through the app, which opens the approval dialog; `onJob` gets the job id once queued. */
   onSubmit: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenVault: () => void;
-  onClose: () => void;
 }
 
 /** sudo gets each session's own login password. */
@@ -99,7 +108,6 @@ export function ComparePanel({
   onClearTree,
   onSubmit,
   onOpenVault,
-  onClose,
 }: Props) {
   // FD-03: Run says why it is off while the read-only lock applies.
   const presentation = usePresentation();
@@ -112,6 +120,8 @@ export function ComparePanel({
   // H9: blast radius. Both off by default: a non-zero exit is normal for read-only checks (grep, test).
   const [canary, setCanary] = useState(false);
   const [stopAfter, setStopAfter] = useState("");
+  /** UX-04: the options fold into one line until opened. */
+  const [optionsOpen, setOptionsOpen] = useState(false);
   const [preview, setPreview] = useState<{ key: string; preview: CommandPreview } | null>(null);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [parallel, setParallel] = useState<number | null>(null);
@@ -138,6 +148,14 @@ export function ComparePanel({
     timeoutSecs: timeoutOk ? timeoutSecs : null,
     rollout: { canary, stopAfterFailures: stopAfterParsed.value },
   };
+  const optionsSummary = compareOptionsSummary({
+    sudo,
+    trustNewKeys: trustNew,
+    timeoutSecs: timeoutOk ? timeoutSecs : Number(DEFAULT_TIMEOUT),
+    defaultTimeoutSecs: Number(DEFAULT_TIMEOUT),
+    canary,
+    stopAfter: stopAfterParsed.value,
+  });
   const commandKey = JSON.stringify(command);
   const shownPreview = script.trim() && preview?.key === commandKey ? preview.preview : null;
   const notReady = compareRunReason({
@@ -249,54 +267,59 @@ export function ComparePanel({
       ? `${names.slice(0, NAMES_SHOWN).join(", ")} and ${names.length - NAMES_SHOWN} more`
       : names.join(", ");
 
+  /** Where the hosts come from: "2 tabs and 3 sessions from the tree". */
+  const sources = [
+    terminalIds.length > 0 && plural(terminalIds.length, "tab"),
+    sessionIds.length > 0 && `${plural(sessionIds.length, "session")} from the tree`,
+  ]
+    .filter(Boolean)
+    .join(" and ");
+
   return (
     <div className="flex h-full min-h-0 flex-col rounded-lg border bg-background">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
-        <h2 className="text-sm font-semibold">Compare hosts</h2>
-        <Tabs value={view} onValueChange={(v) => onViewChange(v as CompareView)}>
-          <TabsList>
-            <TabsTrigger value="run">One-shot run</TabsTrigger>
-            <TabsTrigger value="multiExec">
-              <RadioTowerIcon />
-              Type in all tabs
-              {recorded > 0 && (
-                <Badge variant="secondary" className="ml-0.5 h-4 min-w-4 px-1 text-[10px] tabular-nums">
-                  {recorded}
-                </Badge>
-              )}
-            </TabsTrigger>
-          </TabsList>
-        </Tabs>
+      <div className="grid shrink-0 gap-2 border-b px-3 py-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="flex items-center gap-1 text-sm font-semibold">
+            Compare hosts
+            <HelpTip topic="compareHosts" />
+          </h2>
+          <Tabs value={view} onValueChange={(v) => onViewChange(v as CompareView)} className="ml-auto">
+            <TabsList>
+              <TabsTrigger value="run">One-shot run</TabsTrigger>
+              <TabsTrigger value="multiExec">
+                <RadioTowerIcon />
+                Type in all tabs
+                {recorded > 0 && (
+                  <Badge variant="secondary" className="ml-0.5 h-4 min-w-4 px-1 text-[10px] tabular-nums">
+                    {recorded}
+                  </Badge>
+                )}
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
         {view === "run" ? (
-          <>
-            <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground" title={names.join(", ")}>
+          <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
+            <span className="min-w-0 flex-1 truncate" title={names.join(", ")}>
               {hosts.length === 0
-                ? "Pick tabs (Ctrl+click), or sessions in the tree (Ctrl+click), to run on."
+                ? "Ctrl+click tabs, or sessions in the tree, to run on them."
                 : `Runs once on ${plural(runCount, "host")}: ${shownNames}`}
               {protectedCount > 0 && ` (${protectedCount} protected, skipped)`}
+              {sources && hosts.length > 0 && <span className="text-xs"> · {sources}</span>}
             </span>
-            <Badge variant="outline" className="font-normal">
-              {plural(terminalIds.length, "tab")}
-            </Badge>
-            <Badge variant="outline" className="font-normal">
-              {plural(sessionIds.length, "tree session")}
-            </Badge>
             {sessionIds.length > 0 && (
-              <Button size="xs" variant="ghost" onClick={onClearTree}>
+              <Button size="sm" variant="ghost" onClick={onClearTree}>
                 Clear the tree picks
               </Button>
             )}
-          </>
+          </div>
         ) : (
-          <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">
+          <p className="truncate text-sm text-muted-foreground">
             {multiExecOn
-              ? "What Type in all tabs sends is recorded in each terminal until its prompt comes back."
+              ? "Each line typed in all tabs, with what each terminal answered."
               : "Type in all tabs is off: turning it on starts a new recording."}
-          </span>
+          </p>
         )}
-        <Button variant="ghost" size="icon-sm" aria-label="Close Compare hosts" onClick={onClose}>
-          <XIcon />
-        </Button>
       </div>
       <div className="@container min-h-0 flex-1 overflow-y-auto">
         <div className="p-3">
@@ -319,8 +342,8 @@ export function ComparePanel({
                   </Alert>
                 )}
                 <div className="grid gap-1.5">
-                  <Label htmlFor="compare-script">
-                    Command or script{parallel ? `, on up to ${parallel} hosts at once` : ""} (Ctrl+Enter runs it)
+                  <Label htmlFor="compare-script" title="Ctrl+Enter runs it">
+                    Command or script{parallel ? `, on up to ${parallel} hosts at once` : ""}
                   </Label>
                   <Textarea
                     id="compare-script"
@@ -337,10 +360,6 @@ export function ComparePanel({
                       }
                     }}
                   />
-                  <p className="text-xs break-words text-muted-foreground">
-                    Each host runs it once in its own login shell (not in the terminals), and the results are grouped by
-                    output. Lines typed in all tabs are compared in the Type in all tabs view.
-                  </p>
                 </div>
 
                 {shownPreview && (
@@ -369,106 +388,117 @@ export function ComparePanel({
                   </div>
                 )}
 
-                <div className="grid gap-3 rounded-md border p-3">
-                  <div className="flex items-center gap-3">
-                    <Switch id="compare-sudo" checked={sudo} onCheckedChange={setSudo} />
-                    <Label htmlFor="compare-sudo" className="font-normal">
-                      Run with sudo
-                    </Label>
-                  </div>
-                  {sudo && (
-                    <div className="grid min-w-0 gap-1.5 pl-12">
-                      <Label htmlFor="compare-sudo-password" className="font-normal text-muted-foreground">
-                        Password for sudo, from the vault
+                <Collapsible open={optionsOpen} onOpenChange={setOptionsOpen} className="rounded-md border">
+                  <CollapsibleTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex w-full min-w-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/60"
+                    >
+                      <ChevronRightIcon
+                        className={cn("size-4 shrink-0 transition-transform", optionsOpen && "rotate-90")}
+                        aria-hidden
+                      />
+                      <span className="font-medium">Options</span>
+                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{optionsSummary}</span>
+                    </button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="grid gap-3 border-t p-3">
+                    <div className="flex items-center gap-3">
+                      <Switch id="compare-sudo" checked={sudo} onCheckedChange={setSudo} />
+                      <Label htmlFor="compare-sudo" className="font-normal">
+                        Run with sudo
                       </Label>
-                      <Select value={sudoPassword} onValueChange={setSudoPassword}>
-                        <SelectTrigger id="compare-sudo-password" className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value={LOGIN}>Each session&apos;s login password</SelectItem>
-                          {secrets.length > 0 && <SelectSeparator />}
-                          {secrets.map((s) => (
-                            <SelectItem key={s.id} value={s.id}>
-                              {s.label}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <p className="text-xs break-words text-muted-foreground">
-                        Given to sudo on its input, never typed or shown. A host that refuses it is reported on its own.
-                      </p>
                     </div>
-                  )}
-                  <div className="flex items-start gap-3">
-                    <Checkbox
-                      id="compare-trust"
-                      className="mt-0.5"
-                      checked={trustNew}
-                      onCheckedChange={(v) => setTrustNew(v === true)}
-                    />
-                    <div className="grid min-w-0 gap-0.5">
-                      <Label htmlFor="compare-trust" className="font-normal">
-                        Trust new host keys
-                      </Label>
-                      <p className="text-xs break-words text-muted-foreground">
-                        A run can&apos;t ask, so a host whose key is not trusted yet fails unless this is on. Each key
-                        it trusts is logged. A changed key always blocks the host.
-                      </p>
+                    {sudo && (
+                      <div className="grid min-w-0 gap-1.5 pl-12">
+                        <Label htmlFor="compare-sudo-password" className="font-normal text-muted-foreground">
+                          Password for sudo, from the vault
+                        </Label>
+                        <Select value={sudoPassword} onValueChange={setSudoPassword}>
+                          <SelectTrigger id="compare-sudo-password" className="w-full">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={LOGIN}>Each session&apos;s login password</SelectItem>
+                            {secrets.length > 0 && <SelectSeparator />}
+                            {secrets.map((s) => (
+                              <SelectItem key={s.id} value={s.id}>
+                                {s.label}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs break-words text-muted-foreground">
+                          Given to sudo, never typed or shown.
+                        </p>
+                      </div>
+                    )}
+                    <div className="flex items-start gap-3">
+                      <Checkbox
+                        id="compare-trust"
+                        className="mt-0.5"
+                        checked={trustNew}
+                        onCheckedChange={(v) => setTrustNew(v === true)}
+                      />
+                      <div className="grid min-w-0 gap-0.5">
+                        <Label htmlFor="compare-trust" className="font-normal">
+                          Trust new host keys
+                        </Label>
+                        <p className="text-xs break-words text-muted-foreground">
+                          Else a host with a key not trusted yet fails. A changed key always blocks.
+                        </p>
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <Label htmlFor="compare-timeout" className="font-normal">
-                      Time limit per host
-                    </Label>
-                    <Input
-                      id="compare-timeout"
-                      className="w-24"
-                      inputMode="numeric"
-                      value={timeout}
-                      onChange={(e) => setTimeoutText(e.currentTarget.value)}
-                      aria-invalid={!timeoutOk || undefined}
-                    />
-                    <span className="text-sm text-muted-foreground">seconds (empty: none)</span>
-                  </div>
-                  <div className="flex items-start gap-3">
-                    <Checkbox
-                      id="compare-canary"
-                      className="mt-0.5"
-                      checked={canary}
-                      onCheckedChange={(v) => setCanary(v === true)}
-                    />
-                    <div className="grid min-w-0 gap-0.5">
-                      <Label htmlFor="compare-canary" className="font-normal">
-                        Run on one host first
-                      </Label>
-                      <p className="text-xs break-words text-muted-foreground">
-                        The first host runs alone. You see its result and choose whether the others run; if it fails,
-                        they don&apos;t.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="grid gap-0.5">
                     <div className="flex flex-wrap items-center gap-3">
-                      <Label htmlFor="compare-stop-after" className="font-normal">
-                        Stop after
+                      <Label htmlFor="compare-timeout" className="font-normal">
+                        Time limit per host
                       </Label>
                       <Input
-                        id="compare-stop-after"
-                        className="w-20"
+                        id="compare-timeout"
+                        className="w-24"
                         inputMode="numeric"
-                        placeholder="never"
-                        value={stopAfter}
-                        onChange={(e) => setStopAfter(e.currentTarget.value)}
-                        aria-invalid={!stopAfterParsed.ok || undefined}
+                        value={timeout}
+                        onChange={(e) => setTimeoutText(e.currentTarget.value)}
+                        aria-invalid={!timeoutOk || undefined}
                       />
-                      <span className="text-sm text-muted-foreground">failures (empty: never)</span>
+                      <span className="text-sm text-muted-foreground">seconds (empty: none)</span>
                     </div>
-                    <p className="text-xs break-words text-muted-foreground">
-                      No more hosts start once that many failed or timed out; hosts already running finish.
-                    </p>
-                  </div>
-                </div>
+                    <div className="flex items-start gap-3">
+                      <Checkbox
+                        id="compare-canary"
+                        className="mt-0.5"
+                        checked={canary}
+                        onCheckedChange={(v) => setCanary(v === true)}
+                      />
+                      <div className="grid min-w-0 gap-0.5">
+                        <Label htmlFor="compare-canary" className="font-normal">
+                          Run on one host first
+                        </Label>
+                        <p className="text-xs break-words text-muted-foreground">
+                          You see its result before the others run.
+                        </p>
+                      </div>
+                    </div>
+                    <div className="grid gap-0.5">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Label htmlFor="compare-stop-after" className="font-normal">
+                          Stop after
+                        </Label>
+                        <Input
+                          id="compare-stop-after"
+                          className="w-20"
+                          inputMode="numeric"
+                          placeholder="never"
+                          value={stopAfter}
+                          onChange={(e) => setStopAfter(e.currentTarget.value)}
+                          aria-invalid={!stopAfterParsed.ok || undefined}
+                        />
+                        <span className="text-sm text-muted-foreground">failures (empty: never)</span>
+                      </div>
+                      <p className="text-xs break-words text-muted-foreground">Hosts already running finish.</p>
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
 
                 {vaultLocked && (
                   <Alert>

@@ -5,13 +5,17 @@
 // Prod label off asks first, since it lowers the tier of later actions on the session.
 // QL-16: the user, login, jump host, label and tags a session leaves empty come from its folders; the editor shows
 // each as "from folder X" (asked from the core for the folder chosen), and setting a value overrides it.
+// UX-04, UX-12: the basics first (name, host, port, user, login, folder, environment), the rest under Advanced (its
+// folded line says what is set inside); under Environment, one line says which environment applies and where from (a
+// Prod VM the session reaches makes it Prod). Taking Prod away, by the environment or by unlinking a Prod VM, asks first.
 
 import { useEffect, useMemo, useState } from "react";
-import { PlusIcon } from "lucide-react";
+import { ChevronRightIcon, PlusIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Dialog,
   DialogContent,
@@ -43,8 +47,11 @@ import {
   type VmRecord,
 } from "@/lib/api";
 import { HelpTip } from "@/components/HelpTip";
+import { Term } from "@/components/Term";
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { withVaultPassword } from "@/lib/reauth-prompt";
+import { advancedSummary, environmentNote } from "@/lib/session-editor";
+import { appliedEnvironment, vmsById } from "@/lib/session-environment";
 import { forwardsProblem, jumpChain, routeText, toInput } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
 import { ColorDot, SESSION_COLORS, StartupRatingBadges } from "./Badges";
@@ -149,6 +156,8 @@ export function SessionDialog({
   const [adding, setAdding] = useState<SecretKind | null>(null);
   /** Taking the Prod label off lowers the tier of later actions on the session, so saving asks first. */
   const [lowerProd, setLowerProd] = useState(false);
+  /** UX-04: Advanced is folded until opened. */
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -243,6 +252,34 @@ export function SessionDialog({
   );
   const forwardsIssue = forwards ? forwardsProblem(forwards) : null;
 
+  // UX-12: the environment that will apply, and where it comes from: its own, its folders', or a Prod VM it reaches.
+  const vmMap = useMemo(() => vmsById(vms), [vms]);
+  const applied = appliedEnvironment(
+    {
+      environment: effectiveEnvironment,
+      inherited: { environment: environment === "none" ? (inherited?.inherited.environment ?? null) : null },
+      vmId: vm === NONE ? null : vm,
+    },
+    vmMap,
+  );
+  const overrides =
+    environment !== "none" && inherited?.inherited.environment
+      ? { environment: inherited.environment, folder: inherited.inherited.environment.name }
+      : null;
+  /** What applied when the editor opened (a saved session's own, folders' and VM's). */
+  const wasProd = session ? appliedEnvironment(session, vmMap).environment === "prod" : false;
+  const summary = advancedSummary({
+    jumpHost: chain ? (chain.names[chain.names.length - 1] ?? null) : null,
+    vm: vm === NONE ? null : (vms.find((v) => v.id === vm)?.displayName ?? "not listed"),
+    startupCommand: startup.trim() !== "",
+    promptHook: hook === NONE ? null : hook === "on",
+    portForwards: forwards?.length ?? 0,
+    colour: color !== null,
+    tags: tagList.length,
+  });
+  /** Advanced opens by itself when something in it needs fixing. */
+  const showAdvanced = advancedOpen || forwardsIssue !== null || Boolean(chain?.loops);
+
   function auth(): SessionAuth {
     const pick = (v: string) => (v === NONE ? null : v);
     if (method === "password") return { method, passwordId: pick(password) };
@@ -254,14 +291,14 @@ export function SessionDialog({
   /** QL-01: how the VM choice will be kept. */
   function linkNote() {
     if (session?.vmLink === "auto" && vm === session.vmId) {
-      return "Linked automatically because the host is this VM's IP address; choosing another makes the choice yours.";
+      return "Linked automatically by its IP address; choosing another makes the choice yours.";
     }
     if (vm !== NONE) return "";
     const decided = session && (session.vmId !== null || session.vmLink === "manual");
     if (decided && host.trim().toLowerCase() === session.host.toLowerCase()) {
-      return "Saved without a VM, it stays unlinked until its host changes.";
+      return "Stays unlinked until its host changes.";
     }
-    return "Left at None, it links on its own when the host is a running VM's IP address.";
+    return "";
   }
 
   /** Throws, so the Prod confirm can show the error. */
@@ -313,9 +350,9 @@ export function SessionDialog({
     }
   }
 
-  /** SS-06: saves at once, unless the edit takes the Prod label off (QL-16: the label that applies). */
+  /** SS-06: saves at once, unless the edit takes Prod away (QL-16, UX-12: the environment that applies). */
   function submit() {
-    if (session?.environment === "prod" && effectiveEnvironment !== "prod") {
+    if (wasProd && applied.environment !== "prod") {
       setLowerProd(true);
       return;
     }
@@ -373,10 +410,21 @@ export function SessionDialog({
             <DialogHeader>
               <DialogTitle>{session ? `Edit '${session.name}'` : "New session"}</DialogTitle>
               <DialogDescription>
-                Connect opens it in a terminal tab. Passwords and keys stay in the vault: the session points to them,
-                and a password left out is asked in the terminal.
+                Passwords and keys stay in the vault; one left out is asked when connecting.
               </DialogDescription>
             </DialogHeader>
+
+            <div className="grid gap-2">
+              <Label htmlFor="session-name">Name</Label>
+              <Input
+                id="session-name"
+                autoComplete="off"
+                maxLength={100}
+                placeholder={host.trim() || "The host, if left empty"}
+                value={name}
+                onChange={(e) => setName(e.currentTarget.value)}
+              />
+            </div>
 
             <div className="grid gap-4 sm:grid-cols-[1fr_8rem]">
               <div className="grid gap-2">
@@ -406,7 +454,7 @@ export function SessionDialog({
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-2">
+              <div className="grid content-start gap-2">
                 <Label htmlFor="session-user">User</Label>
                 <Input
                   id="session-user"
@@ -420,21 +468,26 @@ export function SessionDialog({
                 {inherited?.username && inherited.inherited.username && (
                   <p className="text-xs text-muted-foreground">
                     {username.trim() ? "Overrides " : "Empty: "}
-                    <span data-mask="user">{inherited.username}</span> from folder &apos;
-                    {inherited.inherited.username.name}&apos;
+                    <span data-mask="user">{inherited.username}</span> from folder {inherited.inherited.username.name}
                   </p>
                 )}
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="session-name">Name</Label>
-                <Input
-                  id="session-name"
-                  autoComplete="off"
-                  maxLength={100}
-                  placeholder={host.trim() || "The host, if left empty"}
-                  value={name}
-                  onChange={(e) => setName(e.currentTarget.value)}
-                />
+              <div className="grid content-start gap-2">
+                <Label htmlFor="session-folder">Folder</Label>
+                <Select value={folder} onValueChange={setFolder}>
+                  <SelectTrigger id="session-folder" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NONE}>Top level</SelectItem>
+                    {folders.length > 0 && <SelectSeparator />}
+                    {flattenFolders(folders).map(({ folder: f }) => (
+                      <SelectItem key={f.id} value={f.id}>
+                        {folderPath(folders, f.id)}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 
@@ -457,8 +510,8 @@ export function SessionDialog({
               {method === "folder" && (
                 <p className="text-sm text-muted-foreground">
                   {inherited?.inherited.auth
-                    ? `Logs in with ${loginText(inherited.auth)}, as folder '${inherited.inherited.auth.name}' says. Choosing a login here overrides it.`
-                    : "No folder above sets a login yet: a password is asked when connecting, until one does."}
+                    ? `Logs in with ${loginText(inherited.auth)}, from folder ${inherited.inherited.auth.name}.`
+                    : "No folder above sets a login yet, so a password is asked when connecting."}
                 </p>
               )}
               {method === "password" && (
@@ -487,165 +540,15 @@ export function SessionDialog({
               )}
               {method === "agent" && (
                 <p className="text-sm text-muted-foreground">
-                  Uses the keys loaded in a running OpenSSH agent or Pageant. Nothing is stored here.
+                  Uses the keys in a running OpenSSH agent or Pageant. Nothing is stored here.
                 </p>
               )}
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label htmlFor="session-jump">Jump host</Label>
-                <Select value={jump} onValueChange={setJump}>
-                  <SelectTrigger id="session-jump" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NONE}>
-                      {inherited?.inherited.jump
-                        ? inherited.jumpSessionId
-                          ? `From folder '${inherited.inherited.jump.name}': ${sessions.find((x) => x.id === inherited.jumpSessionId)?.name ?? "a session"}`
-                          : `From folder '${inherited.inherited.jump.name}': connect directly`
-                        : "None: connect directly"}
-                    </SelectItem>
-                    {(inherited?.jumpSessionId || jump === DIRECT) && (
-                      <SelectItem value={DIRECT}>No jump host (overrides the folder)</SelectItem>
-                    )}
-                    {jumpChoices.length > 0 && <SelectSeparator />}
-                    {jumpChoices.map((s) => (
-                      <SelectItem key={s.id} value={s.id}>
-                        {s.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {chain && (
-                  <p className={cn("text-xs", chain.loops ? "text-destructive" : "text-muted-foreground")}>
-                    {chain.loops
-                      ? "That jump host leads back to this session through its own jump hosts, so it can't be saved."
-                      : `Connects through ${routeText(chain.names)}. Each hop checks its host key and logs in with its own session's login; tunnels start from this host.`}
-                  </p>
-                )}
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="session-folder">Folder</Label>
-                <Select value={folder} onValueChange={setFolder}>
-                  <SelectTrigger id="session-folder" className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value={NONE}>Top level</SelectItem>
-                    {folders.length > 0 && <SelectSeparator />}
-                    {flattenFolders(folders).map(({ folder: f }) => (
-                      <SelectItem key={f.id} value={f.id}>
-                        {folderPath(folders, f.id)}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-
             <div className="grid gap-2">
-              <Label htmlFor="session-vm">VM it reaches</Label>
-              <Select value={vm} onValueChange={setVm}>
-                <SelectTrigger id="session-vm" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NONE}>None</SelectItem>
-                  {vms.length > 0 && <SelectSeparator />}
-                  {vms.map((v) => (
-                    <SelectItem key={v.id} value={v.id}>
-                      {v.displayName}
-                    </SelectItem>
-                  ))}
-                  {vm !== NONE && !vms.some((v) => v.id === vm) && (
-                    <SelectItem value={vm} disabled>
-                      Not in the VM list now
-                    </SelectItem>
-                  )}
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Lets a bulk run pick this VM and run commands on it through this session, and the dashboard show the
-                guest&apos;s own metrics. A Prod or protected VM makes the session count as Prod or protected too.{" "}
-                {linkNote()}
-              </p>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="session-startup">Startup command</Label>
-              <Textarea
-                id="session-startup"
-                rows={2}
-                spellCheck={false}
-                className="font-mono text-xs"
-                placeholder="Runs after login, e.g. cd /srv/app"
-                value={startup}
-                onChange={(e) => setStartup(e.currentTarget.value)}
-              />
-              {startupRating && (
-                <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                  <StartupRatingBadges rating={startupRating} />
-                  <span>
-                    {startupRating.action === "execReadOnly"
-                      ? "Only reads, as a command on this session."
-                      : "Typed without asking: as a command on this session it would need this approval."}
-                  </span>
-                </div>
-              )}
-              <p className="text-xs text-muted-foreground">
-                Typed at the first shell prompt of each connection you open, without asking. Kept in the session, not
-                the vault: don&apos;t put passwords here.
-              </p>
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="session-startup-again"
-                  checked={startupAgain}
-                  disabled={!startup.trim()}
-                  onCheckedChange={(v) => setStartupAgain(v === true)}
-                />
-                <Label htmlFor="session-startup-again" className="font-normal">
-                  Type it again when the terminal reconnects by itself
-                </Label>
-              </div>
-            </div>
-
-            <div className="grid gap-2">
-              <Label htmlFor="session-hook">Folder tracking (prompt hook)</Label>
-              <Select value={hook} onValueChange={setHook}>
-                <SelectTrigger id="session-hook" className="w-full sm:w-80">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={NONE}>
-                    As in Settings{effectiveEnvironment === "prod" ? " (off for Prod)" : ""}
-                  </SelectItem>
-                  <SelectItem value="on">On</SelectItem>
-                  <SelectItem value="off">Off</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                Lets Files here follow the shell&apos;s folder in bash and zsh.
-                <HelpTip topic="promptHook" />
-              </p>
-            </div>
-
-            <div className="grid gap-2">
-              <Label>Port forwards</Label>
-              {forwards ? (
-                <ForwardsEditor forwards={forwards} onChange={setForwards} disabled={busy} />
-              ) : (
-                <p className="text-sm text-muted-foreground">{forwardsError ?? "Loading…"}</p>
-              )}
-              <p className="text-xs text-muted-foreground">
-                They open on this session&apos;s terminal connection, through the approval flow (a Prod host asks
-                first), and are stopped or started from the terminal&apos;s Tunnels button.
-              </p>
-            </div>
-
-            <div className="grid gap-2">
-              <Label>Environment</Label>
+              <Label>
+                <Term id="environment" />
+              </Label>
               <ToggleGroup
                 type="single"
                 variant="outline"
@@ -659,82 +562,229 @@ export function SessionDialog({
                   </ToggleGroupItem>
                 ))}
               </ToggleGroup>
-              {inherited?.inherited.environment && (
-                <p className="text-xs text-muted-foreground">
-                  {environment === "none"
-                    ? `${labelName(inherited.environment)}, from folder '${inherited.inherited.environment.name}'.`
-                    : `Overrides ${labelName(inherited.environment)} from folder '${inherited.inherited.environment.name}'.`}
-                </p>
-              )}
-              <p className="text-xs text-muted-foreground">
-                {effectiveEnvironment === "prod"
-                  ? "Prod raises the approval tier of every action on this session by one."
-                  : "Shown on the session's tab. Prod raises the approval tier of actions on it."}
+              <p className="flex items-center gap-1 text-xs text-muted-foreground" data-environment-note>
+                {environmentNote(applied, overrides)}
                 <HelpTip topic="prodTier" />
               </p>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-2">
-                <Label>Colour</Label>
-                <ToggleGroup
-                  type="single"
-                  variant="outline"
-                  size="sm"
-                  className="flex-wrap justify-self-start"
-                  value={color ?? NONE}
-                  onValueChange={(v) => v && setColor(v === NONE ? null : (v as SessionColor))}
+            <Collapsible open={showAdvanced} onOpenChange={setAdvancedOpen} className="rounded-lg border">
+              <CollapsibleTrigger asChild>
+                <button
+                  type="button"
+                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-muted/60"
                 >
-                  <ToggleGroupItem value={NONE} aria-label="No colour" className="text-xs">
-                    None
-                  </ToggleGroupItem>
-                  {SESSION_COLORS.map((c) => (
-                    <ToggleGroupItem key={c} value={c} aria-label={c} title={c}>
-                      <ColorDot color={c} className="size-3" />
-                    </ToggleGroupItem>
-                  ))}
-                </ToggleGroup>
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="session-tags">Tags</Label>
-                <Input
-                  id="session-tags"
-                  autoComplete="off"
-                  placeholder="Separate with commas"
-                  value={tags}
-                  onChange={(e) => setTags(e.currentTarget.value)}
-                />
-                {folderTags.length > 0 && (
-                  <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
-                    <span>Also from its folders:</span>
-                    {folderTags.map((t) => (
-                      <Badge
-                        key={t.tag}
-                        variant="secondary"
-                        className="font-normal"
-                        title={`From folder '${t.folder.name}'`}
-                      >
-                        {t.tag}
-                      </Badge>
-                    ))}
-                  </div>
-                )}
-                {tagSuggestions.filter((t) => !tagList.some((x) => x.toLowerCase() === t.toLowerCase())).length > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {tagSuggestions
-                      .filter((t) => !tagList.some((x) => x.toLowerCase() === t.toLowerCase()))
-                      .slice(0, 12)
-                      .map((t) => (
-                        <Badge key={t} asChild variant="outline" className="font-normal">
-                          <button type="button" onClick={() => setTags([...tagList, t].join(", "))}>
-                            {t}
-                          </button>
-                        </Badge>
+                  <ChevronRightIcon
+                    className={cn("size-4 shrink-0 transition-transform", showAdvanced && "rotate-90")}
+                    aria-hidden
+                  />
+                  <span className="font-medium">Advanced</span>
+                  <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{summary}</span>
+                </button>
+              </CollapsibleTrigger>
+              <CollapsibleContent className="grid gap-4 border-t p-3">
+                <div className="grid gap-2">
+                  <Label htmlFor="session-jump">
+                    <Term id="jumpHost" />
+                  </Label>
+                  <Select value={jump} onValueChange={setJump}>
+                    <SelectTrigger id="session-jump" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE}>
+                        {inherited?.inherited.jump
+                          ? inherited.jumpSessionId
+                            ? `From folder ${inherited.inherited.jump.name}: ${sessions.find((x) => x.id === inherited.jumpSessionId)?.name ?? "a session"}`
+                            : `From folder ${inherited.inherited.jump.name}: connect directly`
+                          : "None: connect directly"}
+                      </SelectItem>
+                      {(inherited?.jumpSessionId || jump === DIRECT) && (
+                        <SelectItem value={DIRECT}>No jump host (overrides the folder)</SelectItem>
+                      )}
+                      {jumpChoices.length > 0 && <SelectSeparator />}
+                      {jumpChoices.map((s) => (
+                        <SelectItem key={s.id} value={s.id}>
+                          {s.name}
+                        </SelectItem>
                       ))}
+                    </SelectContent>
+                  </Select>
+                  {chain && (
+                    <p
+                      className={cn("text-xs", chain.loops ? "text-destructive" : "text-muted-foreground")}
+                      title={
+                        chain.loops
+                          ? undefined
+                          : "Each hop checks its host key and logs in with its own session's login; tunnels start from this host."
+                      }
+                    >
+                      {chain.loops
+                        ? "That jump host leads back to this session through its own jump hosts, so it can't be saved."
+                        : `Connects through ${routeText(chain.names)}.`}
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="session-vm" className="flex items-center gap-1">
+                    VM it reaches
+                    <HelpTip topic="vmLink" />
+                  </Label>
+                  <Select value={vm} onValueChange={setVm}>
+                    <SelectTrigger id="session-vm" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE}>None</SelectItem>
+                      {vms.length > 0 && <SelectSeparator />}
+                      {vms.map((v) => (
+                        <SelectItem key={v.id} value={v.id}>
+                          {v.displayName}
+                        </SelectItem>
+                      ))}
+                      {vm !== NONE && !vms.some((v) => v.id === vm) && (
+                        <SelectItem value={vm} disabled>
+                          Not in the VM list now
+                        </SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {linkNote() && <p className="text-xs text-muted-foreground">{linkNote()}</p>}
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="session-startup">Startup command</Label>
+                  <Textarea
+                    id="session-startup"
+                    rows={2}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="Runs after login, e.g. cd /srv/app"
+                    value={startup}
+                    onChange={(e) => setStartup(e.currentTarget.value)}
+                  />
+                  {startupRating && (
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      <StartupRatingBadges rating={startupRating} />
+                      <span>
+                        {startupRating.action === "execReadOnly"
+                          ? "Only reads, as a command on this session."
+                          : "Typed without asking: as a command on this session it would need this approval."}
+                      </span>
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Typed at the first prompt of each connection. Don&apos;t put passwords here.
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="session-startup-again"
+                      checked={startupAgain}
+                      disabled={!startup.trim()}
+                      onCheckedChange={(v) => setStartupAgain(v === true)}
+                    />
+                    <Label htmlFor="session-startup-again" className="font-normal">
+                      Type it again when the terminal reconnects by itself
+                    </Label>
                   </div>
-                )}
-              </div>
-            </div>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label htmlFor="session-hook" className="flex items-center gap-1">
+                    Folder tracking (prompt hook)
+                    <HelpTip topic="promptHook" />
+                  </Label>
+                  <Select value={hook} onValueChange={setHook}>
+                    <SelectTrigger id="session-hook" className="w-full sm:w-80">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE}>
+                        As in Settings{applied.environment === "prod" ? " (off for Prod)" : ""}
+                      </SelectItem>
+                      <SelectItem value="on">On</SelectItem>
+                      <SelectItem value="off">Off</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="grid gap-2">
+                  <Label>Port forwards</Label>
+                  {forwards ? (
+                    <ForwardsEditor forwards={forwards} onChange={setForwards} disabled={busy} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">{forwardsError ?? "Loading…"}</p>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Start and stop them from the terminal&apos;s ⋯ menu, Tunnels.
+                  </p>
+                </div>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="grid content-start gap-2">
+                    <Label>Colour</Label>
+                    <ToggleGroup
+                      type="single"
+                      variant="outline"
+                      size="sm"
+                      className="flex-wrap justify-self-start"
+                      value={color ?? NONE}
+                      onValueChange={(v) => v && setColor(v === NONE ? null : (v as SessionColor))}
+                    >
+                      <ToggleGroupItem value={NONE} aria-label="No colour" className="text-xs">
+                        None
+                      </ToggleGroupItem>
+                      {SESSION_COLORS.map((c) => (
+                        <ToggleGroupItem key={c} value={c} aria-label={c} title={c}>
+                          <ColorDot color={c} className="size-3" />
+                        </ToggleGroupItem>
+                      ))}
+                    </ToggleGroup>
+                  </div>
+                  <div className="grid content-start gap-2">
+                    <Label htmlFor="session-tags">Tags</Label>
+                    <Input
+                      id="session-tags"
+                      autoComplete="off"
+                      placeholder="Separate with commas"
+                      value={tags}
+                      onChange={(e) => setTags(e.currentTarget.value)}
+                    />
+                    {folderTags.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                        <span>Also from its folders:</span>
+                        {folderTags.map((t) => (
+                          <Badge
+                            key={t.tag}
+                            variant="secondary"
+                            className="font-normal"
+                            title={`From folder ${t.folder.name}`}
+                          >
+                            {t.tag}
+                          </Badge>
+                        ))}
+                      </div>
+                    )}
+                    {tagSuggestions.filter((t) => !tagList.some((x) => x.toLowerCase() === t.toLowerCase())).length >
+                      0 && (
+                      <div className="flex flex-wrap gap-1">
+                        {tagSuggestions
+                          .filter((t) => !tagList.some((x) => x.toLowerCase() === t.toLowerCase()))
+                          .slice(0, 12)
+                          .map((t) => (
+                            <Badge key={t} asChild variant="outline" className="font-normal">
+                              <button type="button" onClick={() => setTags([...tagList, t].join(", "))}>
+                                {t}
+                              </button>
+                            </Badge>
+                          ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
 
             {error && (
               <p className="text-sm text-destructive" role="alert">
@@ -780,8 +830,8 @@ export function SessionDialog({
       {lowerProd && session && (
         <ConfirmDialog
           title="Change the environment from Prod?"
-          description={lowerProdText(session.name, environment)}
-          confirmLabel={`Set to ${environment === "none" ? "None" : labelName(environment)}`}
+          description={lowerProdText(session.name, applied.environment)}
+          confirmLabel={`Save as ${labelName(applied.environment)}`}
           onConfirm={persist}
           onClose={() => setLowerProd(false)}
         />

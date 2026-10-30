@@ -26,7 +26,6 @@ import {
   RefreshCwIcon,
   UploadIcon,
   UserIcon,
-  XIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -35,6 +34,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SortableHead } from "@/components/SortableHead";
 import { usePresentation } from "@/components/Presentation";
+import { Tip } from "@/components/Tip";
 import { TransfersList } from "@/components/TransfersList";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { useUploadsDone } from "@/hooks/use-transfers";
@@ -64,7 +64,6 @@ interface Props {
   onUpload: (folder: string) => void;
   onDownload: (paths: string[], to: "downloads" | "choose") => void;
   onRetry: (transfer: TransferInfo) => void;
-  onClose: () => void;
 }
 
 /** A folder opened by hand: a path (absolute, `~`, or relative to `from`, the folder shown when it was typed). */
@@ -157,16 +156,7 @@ function TransfersAs({ user }: { user: ShellUsers | undefined }) {
   );
 }
 
-export function FilesDrawer({
-  terminalId,
-  snapshot,
-  name,
-  multiExecTerminals,
-  onUpload,
-  onDownload,
-  onRetry,
-  onClose,
-}: Props) {
+export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, onUpload, onDownload, onRetry }: Props) {
   // Grows when an upload into this terminal finished, so the listing shows the new file.
   const refresh = useUploadsDone(terminalId);
   // FD-03: uploads say why they are off while the read-only lock applies.
@@ -282,9 +272,6 @@ export function FilesDrawer({
         <span className="truncate text-xs text-muted-foreground" title={name}>
           {name}
         </span>
-        <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label="Close the files" onClick={onClose}>
-          <XIcon />
-        </Button>
       </div>
 
       {!terminalId ? (
@@ -532,10 +519,9 @@ export function FilesDrawer({
               </Button>
             </WhyDisabled>
           </div>
-          <p className="text-[11px] text-muted-foreground">
-            Drop files on the terminal to upload them; right-click a file name in it to download. As the logged-in user,
-            never with sudo.
-          </p>
+          <Tip id="terminal.filesDrop">
+            Drop files on a terminal to upload them; right-click a file name in it to download.
+          </Tip>
         </>
       )}
       <div className="flex max-h-[35%] min-h-0 shrink-0 flex-col overflow-hidden">

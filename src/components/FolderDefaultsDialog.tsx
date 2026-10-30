@@ -3,6 +3,7 @@
 // default; the core resolves it everywhere a session is used. Saving is audited like a session edit and refused by the
 // read-only lock; a login that would send a vault password to hosts that never got it asks for the vault password
 // (SS-04), as editing those sessions would. Taking a Prod label off asks first, as in the session editor.
+// UX-04: one line of help per field at most; the rest is in the "?" next to Environment and on hover.
 
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -35,6 +36,8 @@ import { plural } from "@/lib/format";
 import { withVaultPassword } from "@/lib/reauth-prompt";
 import { cn } from "@/lib/utils";
 import { ConfirmDialog } from "./ConfirmDialog";
+import { HelpTip } from "./HelpTip";
+import { Term } from "./Term";
 import { useReadOnlyReason } from "./Presentation";
 import { WhyDisabled } from "./WhyDisabled";
 
@@ -185,8 +188,8 @@ export function FolderDefaultsDialog({ folder, folders, sessions, onSaved, onClo
             <DialogHeader>
               <DialogTitle>Defaults of {folderPath(folders, folder.id)}</DialogTitle>
               <DialogDescription>
-                {plural(reached.length, "session")} in this folder and its subfolders use these unless they set their
-                own. Values left not set come from the folder above.
+                Used by its {plural(reached.length, "session")} (subfolders too) that don&apos;t set their own; what is
+                not set comes from the folder above.
               </DialogDescription>
             </DialogHeader>
 
@@ -230,15 +233,18 @@ export function FolderDefaultsDialog({ folder, folders, sessions, onSaved, onClo
               )}
               {login === "password" && password !== ASK && (
                 <p className="text-xs text-muted-foreground">
-                  Sessions here send this password to their hosts. A host that never got it asks for the vault password
-                  first.
+                  A host that never got this password asks for the vault password first.
                 </p>
               )}
-              <p className="text-xs text-muted-foreground">Add passwords and keys on the Vault page.</p>
             </div>
 
             <div className="grid gap-2">
-              <Label htmlFor="folder-jump">Jump host</Label>
+              <Label
+                htmlFor="folder-jump"
+                title="The jump host itself, when it is in this folder, connects as the folders above say."
+              >
+                <Term id="jumpHost" />
+              </Label>
               <Select value={jump} onValueChange={setJump}>
                 <SelectTrigger id="folder-jump" className="w-full">
                   <SelectValue />
@@ -254,13 +260,12 @@ export function FolderDefaultsDialog({ folder, folders, sessions, onSaved, onClo
                   ))}
                 </SelectContent>
               </Select>
-              <p className="text-xs text-muted-foreground">
-                The jump host itself, when it is in this folder, connects as the folders above say.
-              </p>
             </div>
 
             <div className="grid gap-2">
-              <Label>Environment</Label>
+              <Label>
+                <Term id="environment" />
+              </Label>
               <ToggleGroup
                 type="single"
                 variant="outline"
@@ -274,10 +279,11 @@ export function FolderDefaultsDialog({ folder, folders, sessions, onSaved, onClo
                   </ToggleGroupItem>
                 ))}
               </ToggleGroup>
-              <p className="text-xs text-muted-foreground">
+              <p className="flex items-center gap-1 text-xs text-muted-foreground">
                 {label === "prod"
-                  ? "Prod raises the approval tier of actions on every session here without an environment of its own."
+                  ? "Sessions here without their own become Prod: their actions move up one approval tier."
                   : "Sessions with an environment of their own keep it."}
+                <HelpTip topic="prodTier" />
               </p>
             </div>
 

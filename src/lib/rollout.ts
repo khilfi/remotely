@@ -16,6 +16,30 @@ export function parseStopAfter(text: string): { ok: boolean; value: number | nul
   return n >= 1 && n <= MAX_STOP_AFTER ? { ok: true, value: n } : { ok: false, value: null };
 }
 
+/**
+ * UX-04: the Compare panel's folded Options, said in one line: what differs from a plain run ("sudo · trust new keys ·
+ * 120 s limit · one host first · stop after 3"), or what a plain run does.
+ */
+export function compareOptionsSummary(options: {
+  sudo: boolean;
+  trustNewKeys: boolean;
+  /** Seconds per host; null for no limit. */
+  timeoutSecs: number | null;
+  /** The usual limit, said only when it changed. */
+  defaultTimeoutSecs: number;
+  canary: boolean;
+  stopAfter: number | null;
+}): string {
+  const parts: string[] = [];
+  if (options.sudo) parts.push("sudo");
+  if (options.trustNewKeys) parts.push("trust new keys");
+  if (options.timeoutSecs === null) parts.push("no time limit");
+  else if (options.timeoutSecs !== options.defaultTimeoutSecs) parts.push(`${options.timeoutSecs} s limit`);
+  if (options.canary) parts.push("one host first");
+  if (options.stopAfter !== null) parts.push(`stop after ${options.stopAfter}`);
+  return parts.length > 0 ? parts.join(" · ") : `No sudo · ${options.defaultTimeoutSecs} s limit per host`;
+}
+
 /** What the run will do about its blast radius, for the approval dialog; null when both are off. */
 export function rolloutText(rollout: Rollout | null | undefined, hosts: number): string | null {
   if (!rollout) return null;

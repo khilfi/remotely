@@ -69,6 +69,9 @@ test("the sheet lists the keys each part of the app handles", () => {
     "Ctrl+Shift+F",
     "Ctrl+Shift+G",
     "Ctrl+Enter",
+    // UX-04: the Terminal page's footer is gone, so its keys and clicks are here.
+    "Right-click",
+    "Middle-click",
   ])
     assert.ok(keys.includes(key), key);
   const pairs = shortcutGroups(PAGES).flatMap((g) => g.shortcuts.map((s) => `${g.title}|${s.keys}|${s.what}`));

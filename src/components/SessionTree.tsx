@@ -10,7 +10,10 @@
 // first jump host's check (the one this PC dials), since the session itself is not reachable from here.
 //
 // BX-03 Compare (post-MVP P6): Ctrl+click picks sessions to run a command on without opening tabs (Ctrl+click a
-// group picks every session in it, for large runs); the footer opens Compare output with them.
+// group picks every session in it, for large runs); the Compare hosts panel shows and runs on them (UX-03: the page
+// opens it on the first pick, so the tree has no button of its own).
+// UX-12: each row shows the environment that applies (a Prod VM it reaches makes it Prod), and its tooltip says
+// where it comes from.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -18,10 +21,9 @@ import {
   CheckIcon,
   ChevronRightIcon,
   ClockIcon,
-  GitCompareArrowsIcon,
-  EllipsisIcon,
   FolderIcon,
   FolderOpenIcon,
+  ListTreeIcon,
   SearchIcon,
   TagIcon,
 } from "lucide-react";
@@ -30,13 +32,19 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ColorDot } from "@/components/Badges";
 import { RefreshButton } from "@/components/RefreshButton";
+import { RowMenu } from "@/components/RowMenu";
+import { Tip } from "@/components/Tip";
+import { appliedEnvironment, environmentText, type EnvironmentOfVm } from "@/lib/session-environment";
 import { jumpChain, routeText, viaText, type JumpLink } from "@/lib/tunnels";
 import {
   api,
@@ -58,9 +66,9 @@ const OPEN_KEY = "remotely.terminal.treeOpen";
 const OPEN_BY_DEFAULT_UP_TO = 40;
 
 const GROUPINGS: { value: TreeGrouping; label: string }[] = [
-  { value: "folder", label: "Folders" },
-  { value: "tag", label: "Tags" },
-  { value: "label", label: "Environments" },
+  { value: "folder", label: "Folder" },
+  { value: "tag", label: "Tag" },
+  { value: "label", label: "Environment" },
 ];
 
 const ENV_TEXT: Record<Environment, string> = {
@@ -87,13 +95,13 @@ interface Props {
   /** Sessions with a tab open, marked in the tree. */
   openSessions: Set<string>;
   onOpen: (session: SessionRecord) => void;
-  /** BX-03: sessions picked for Compare output (Ctrl+click). */
+  /** BX-03: sessions picked for Compare hosts (Ctrl+click). */
   picks: string[];
   onPicksChange: (ids: string[]) => void;
-  /** Opens Compare output with the picks. */
-  onCompare: () => void;
   /** MO-13, MO-14: the session's host details. */
   onHostDetails?: (session: SessionRecord) => void;
+  /** UX-12: the VMs, so a session that reaches a Prod VM shows as Prod. */
+  vms: ReadonlyMap<string, EnvironmentOfVm>;
 }
 
 /** Every session in a group and the groups under it. */
@@ -108,8 +116,8 @@ export function SessionTree({
   onOpen,
   picks,
   onPicksChange,
-  onCompare,
   onHostDetails,
+  vms,
 }: Props) {
   const [grouping, setGrouping] = useState<TreeGrouping>(() => readJson(GROUPING_KEY, "folder"));
   const [text, setText] = useState("");
@@ -226,6 +234,7 @@ export function SessionTree({
         onToggleCheck={() => togglePicks([id])}
         onOpen={() => onOpen(s)}
         onHostDetails={onHostDetails && (() => onHostDetails(s))}
+        vms={vms}
       />
     );
   };
@@ -276,23 +285,30 @@ export function SessionTree({
             onKeyDown={(e) => e.key === "Escape" && setText("")}
           />
         </div>
+        <DropdownMenu>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon-sm" aria-label="Group sessions by">
+                  <ListTreeIcon />
+                </Button>
+              </DropdownMenuTrigger>
+            </TooltipTrigger>
+            <TooltipContent>Group by {GROUPINGS.find((g) => g.value === grouping)?.label.toLowerCase()}</TooltipContent>
+          </Tooltip>
+          <DropdownMenuContent align="end" className="w-44">
+            <DropdownMenuLabel>Group by</DropdownMenuLabel>
+            <DropdownMenuRadioGroup value={grouping} onValueChange={(v) => setGrouping(v as TreeGrouping)}>
+              {GROUPINGS.map((g) => (
+                <DropdownMenuRadioItem key={g.value} value={g.value}>
+                  {g.label}
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <RefreshButton onClick={() => setReloads((n) => n + 1)} />
       </div>
-      <ToggleGroup
-        type="single"
-        variant="outline"
-        size="sm"
-        className="w-full"
-        aria-label="Group sessions by"
-        value={grouping}
-        onValueChange={(v) => v && setGrouping(v as TreeGrouping)}
-      >
-        {GROUPINGS.map((g) => (
-          <ToggleGroupItem key={g.value} value={g.value} className="flex-1 text-xs">
-            {g.label}
-          </ToggleGroupItem>
-        ))}
-      </ToggleGroup>
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-0.5 pr-2 pb-2" role="tree" aria-label="Sessions">
           {!searching && recent.length > 0 && (
@@ -322,6 +338,7 @@ export function SessionTree({
                     onToggleCheck={() => togglePicks([s.id])}
                     onOpen={() => onOpen(s)}
                     onHostDetails={onHostDetails && (() => onHostDetails(s))}
+                    vms={vms}
                   />
                 ))}
             </div>
@@ -338,24 +355,9 @@ export function SessionTree({
       {!reach.enabled && tree && tree.records.length > 0 && (
         <p className="text-xs text-muted-foreground">Reachability checks are off (Settings, Terminal).</p>
       )}
-      {picks.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-1 rounded-md border bg-muted/50 p-1.5 text-xs" role="status">
-          <span className="px-1 font-medium">
-            {picks.length === 1 ? "1 session" : `${picks.length} sessions`} picked
-          </span>
-          <Button size="xs" variant="outline" className="ml-auto" onClick={onCompare}>
-            <GitCompareArrowsIcon data-icon="inline-start" />
-            Compare hosts…
-          </Button>
-          <Button size="xs" variant="ghost" onClick={() => onPicksChange([])}>
-            Clear
-          </Button>
-        </div>
-      ) : (
-        tree &&
-        tree.records.length > 1 && (
-          <p className="text-xs text-muted-foreground">Ctrl+click sessions or a group to run one command on them.</p>
-        )
+      {/* UX-09: shown once; the picks show in Compare hosts. */}
+      {tree && tree.records.length > 1 && picks.length === 0 && (
+        <Tip id="terminal.treePicks">Ctrl+click sessions or a folder to run one command on them.</Tip>
       )}
     </div>
   );
@@ -420,10 +422,12 @@ function SessionRow({
   onToggleCheck,
   onOpen,
   onHostDetails,
+  vms,
 }: {
   session: SessionRecord;
   /** SS-07: the jump hosts on the way, first one first. */
   via: string[];
+  vms: ReadonlyMap<string, EnvironmentOfVm>;
   depth: number;
   picked: boolean;
   /** BX-03: picked for Compare output. */
@@ -439,8 +443,11 @@ function SessionRow({
   const ref = useRef<HTMLDivElement>(null);
   const seen =
     session.lastHostname || session.lastIp ? [session.lastHostname, session.lastIp].filter(Boolean).join(" · ") : null;
+  const applied = appliedEnvironment(session, vms);
+  const env = applied.environment;
   const tooltip = [
     `${session.name} (${sessionAddress(session)})`,
+    env !== "none" && `Environment: ${environmentText(applied)}`,
     via.length > 0 && `Through ${routeText(via)}`,
     seen && `Last seen as ${seen}, ${formatWhen(session.lastSeenAt)}`,
     reachText(reach),
@@ -478,36 +485,33 @@ function SessionRow({
       {via.length > 0 && (
         <span className="max-w-24 shrink truncate text-[11px] text-muted-foreground">{viaText(via)}</span>
       )}
-      {session.environment !== "none" && (
-        <span className={cn("shrink-0 text-[10px] font-semibold uppercase", ENV_TEXT[session.environment])}>
-          {session.environment}
+      {env !== "none" && (
+        <span
+          className={cn(
+            "shrink-0 text-[10px] font-semibold uppercase",
+            ENV_TEXT[env],
+            applied.from && "underline decoration-dotted underline-offset-2",
+          )}
+        >
+          {env}
         </span>
       )}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            className="ml-auto opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
-            aria-label={`Actions for ${session.name}`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <EllipsisIcon />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuItem onSelect={onOpen}>Open in a new tab</DropdownMenuItem>
-          <DropdownMenuItem onSelect={onToggleCheck}>
-            {checked ? "Unpick for Compare hosts" : "Pick for Compare hosts"}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            onSelect={() => void navigator.clipboard?.writeText(sessionAddress(session)).catch(() => undefined)}
-          >
-            Copy the address
-          </DropdownMenuItem>
-          {onHostDetails && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
-        </DropdownMenuContent>
-      </DropdownMenu>
+      <RowMenu
+        label={session.name}
+        align="start"
+        className="ml-auto size-6 opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
+      >
+        <DropdownMenuItem onSelect={onOpen}>Open in a new tab</DropdownMenuItem>
+        <DropdownMenuItem onSelect={onToggleCheck}>
+          {checked ? "Unpick for Compare hosts" : "Pick for Compare hosts"}
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() => void navigator.clipboard?.writeText(sessionAddress(session)).catch(() => undefined)}
+        >
+          Copy the address
+        </DropdownMenuItem>
+        {onHostDetails && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
+      </RowMenu>
     </div>
   );
 }
