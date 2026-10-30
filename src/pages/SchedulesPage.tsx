@@ -1,11 +1,12 @@
 // VM-14, VM-27: the Schedules page. Every schedule with what it does, on which VMs and tags, when (the next run in local
 // time, with what daylight saving does to it), its last run and its state: active, paused, or waiting for approval
 // (new, edited, or something changed since: a VM became Prod or protected, a new VM got the tag, the approval rules
-// changed), with the reason. Run history, pause and resume, edit and delete per row; New schedule; the snapshot chain
-// warnings' limits. Saving opens the approval dialog with the schedule's details (a standing approval: each run is a
-// run of it). Reads the list when it shows and on each scheduler event.
+// changed), with the reason. UX-02: each row's main action (Review approval, Resume, or Runs) and one row menu with
+// Runs, Pause, Edit and Delete; New schedule in the header, the snapshot chain warnings' limits in its ⋯ menu. Saving
+// opens the approval dialog with the schedule's details (a standing approval: each run is a run of it). Reads the list
+// when it shows and on each scheduler event.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { toast } from "sonner";
 import {
   CalendarClockIcon,
@@ -20,7 +21,15 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -30,7 +39,9 @@ import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { TierBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import { PageHeader } from "@/components/PageHeader";
+import { RowMenu } from "@/components/RowMenu";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { ScheduleDialog } from "@/components/ScheduleDialog";
 import { OutcomeBadge, ScheduleRunsSheet } from "@/components/ScheduleRunsSheet";
@@ -88,6 +99,7 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
   const [runsOf, setRunsOf] = useState<ScheduleView | null>(null);
   const [deleting, setDeleting] = useState<ScheduleView | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [limitsOpen, setLimitsOpen] = useState(false);
   const readOnly = useReadOnlyReason();
   const reload = useCallback(() => setVersion((v) => v + 1), []);
 
@@ -180,6 +192,12 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
     <div className="grid gap-4">
       <PageHeader
         page="schedules"
+        tools={
+          <DropdownMenuItem onSelect={() => setLimitsOpen(true)}>
+            <TriangleAlertIcon />
+            Snapshot chain warnings…
+          </DropdownMenuItem>
+        }
         primary={
           // The empty list has its own button.
           schedules && schedules.length > 0 ? (
@@ -283,11 +301,8 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
                       )}
                     </TableCell>
                     <TableCell className="align-top">
-                      <div className="flex flex-wrap justify-end gap-1">
-                        <Button variant="ghost" size="sm" onClick={() => setRunsOf(s)}>
-                          <HistoryIcon data-icon="inline-start" />
-                          Runs
-                        </Button>
+                      {/* UX-02: the row's main action, then one row menu with the rest. */}
+                      <div className="flex justify-end gap-1">
                         {s.state === "needsApproval" ? (
                           <WhyDisabled reason={reasons.approve}>
                             <Button
@@ -323,44 +338,54 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
                             </Button>
                           </WhyDisabled>
                         ) : (
-                          <WhyDisabled reason={reasons.pause}>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={reasons.pause !== null}
-                              onClick={() =>
-                                void act(s.id, async () => {
-                                  await schedulesApi.pause(s.id);
-                                })
-                              }
-                            >
-                              <PauseIcon data-icon="inline-start" />
-                              Pause
-                            </Button>
-                          </WhyDisabled>
+                          <Button variant="ghost" size="sm" onClick={() => setRunsOf(s)}>
+                            <HistoryIcon data-icon="inline-start" />
+                            Runs
+                          </Button>
                         )}
-                        <WhyDisabled reason={reasons.edit}>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            aria-label={`Edit ${s.name}`}
-                            disabled={reasons.edit !== null}
-                            onClick={() => void openEditor({ existing: s })}
-                          >
-                            <PencilIcon />
-                          </Button>
-                        </WhyDisabled>
-                        <WhyDisabled reason={reasons.remove}>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            aria-label={`Delete ${s.name}`}
-                            disabled={reasons.remove !== null}
-                            onClick={() => setDeleting(s)}
-                          >
-                            <Trash2Icon />
-                          </Button>
-                        </WhyDisabled>
+                        <RowMenu label={s.name}>
+                          {s.state !== "active" && (
+                            <DropdownMenuItem onSelect={() => setRunsOf(s)}>
+                              <HistoryIcon />
+                              Runs
+                            </DropdownMenuItem>
+                          )}
+                          {s.state === "active" && (
+                            <MenuItemWhy reason={reasons.pause}>
+                              <DropdownMenuItem
+                                disabled={reasons.pause !== null}
+                                onSelect={() =>
+                                  void act(s.id, async () => {
+                                    await schedulesApi.pause(s.id);
+                                  })
+                                }
+                              >
+                                <PauseIcon />
+                                Pause
+                              </DropdownMenuItem>
+                            </MenuItemWhy>
+                          )}
+                          <MenuItemWhy reason={reasons.edit}>
+                            <DropdownMenuItem
+                              disabled={reasons.edit !== null}
+                              onSelect={() => void openEditor({ existing: s })}
+                            >
+                              <PencilIcon />
+                              Edit…
+                            </DropdownMenuItem>
+                          </MenuItemWhy>
+                          <DropdownMenuSeparator />
+                          <MenuItemWhy reason={reasons.remove}>
+                            <DropdownMenuItem
+                              variant="destructive"
+                              disabled={reasons.remove !== null}
+                              onSelect={() => setDeleting(s)}
+                            >
+                              <Trash2Icon />
+                              Delete…
+                            </DropdownMenuItem>
+                          </MenuItemWhy>
+                        </RowMenu>
                       </div>
                     </TableCell>
                   </TableRow>
@@ -371,7 +396,7 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
         </div>
       )}
 
-      <ChainLimitsCard active={active} readOnly={readOnly} onSaved={reload} />
+      {limitsOpen && <ChainLimitsDialog readOnly={readOnly} onSaved={reload} onClose={() => setLimitsOpen(false)} />}
 
       {editor && (
         <ScheduleDialog
@@ -428,15 +453,24 @@ export function SchedulesPage({ active, vault, onOpenVault, request }: Props) {
   );
 }
 
-/** VM-27: when snapshot chains warn, on VMs and in this list. Audited. */
-function ChainLimitsCard({
-  active,
+/** UX-02: a disabled menu item says why in a tooltip (a disabled item gets no pointer events itself). */
+function MenuItemWhy({ reason, children }: { reason: string | null; children: ReactElement }) {
+  return (
+    <WhyDisabled reason={reason} className="flex w-full *:w-full">
+      {children}
+    </WhyDisabled>
+  );
+}
+
+/** VM-27: when snapshot chains warn, on VMs and in this list (the header's ⋯ menu opens it). Audited. */
+function ChainLimitsDialog({
   readOnly,
   onSaved,
+  onClose,
 }: {
-  active: boolean;
   readOnly: string | null;
   onSaved: () => void;
+  onClose: () => void;
 }) {
   const [limits, setLimits] = useState<ChainLimits | null>(null);
   const [depth, setDepth] = useState("");
@@ -444,7 +478,6 @@ function ChainLimitsCard({
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (!active) return;
     schedulesApi.chainLimits().then(
       (l) => {
         setLimits(l);
@@ -453,7 +486,7 @@ function ChainLimitsCard({
       },
       () => {},
     );
-  }, [active]);
+  }, []);
 
   const next = { maxDepth: Number(depth), maxSizeGb: Number(size) };
   const valid =
@@ -472,6 +505,7 @@ function ChainLimitsCard({
       setLimits(await schedulesApi.setChainLimits(next));
       toast.success("Saved the snapshot chain warnings");
       onSaved();
+      onClose();
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
@@ -480,41 +514,48 @@ function ChainLimitsCard({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Snapshot chain warnings</CardTitle>
-        <CardDescription>
-          Each snapshot adds a level to a VM&apos;s disk chain, which slows the disk, and its files only grow until
-          snapshots are deleted. VMs past these limits are flagged here and in their Schedules tab.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="flex flex-wrap items-end gap-3">
-        <div className="grid gap-1.5">
-          <Label htmlFor="chain-depth">Deeper than (snapshots)</Label>
-          <Input
-            id="chain-depth"
-            className="w-28"
-            inputMode="numeric"
-            value={depth}
-            onChange={(e) => setDepth(e.currentTarget.value)}
-          />
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-1">
+            Snapshot chain warnings
+            <HelpTip topic="chainLimits" />
+          </DialogTitle>
+          <DialogDescription>Flag a VM whose snapshot chain gets longer or bigger than this.</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="grid gap-1.5">
+            <Label htmlFor="chain-depth">Deeper than (snapshots)</Label>
+            <Input
+              id="chain-depth"
+              className="w-28"
+              inputMode="numeric"
+              value={depth}
+              onChange={(e) => setDepth(e.currentTarget.value)}
+            />
+          </div>
+          <div className="grid gap-1.5">
+            <Label htmlFor="chain-size">Larger than (GB)</Label>
+            <Input
+              id="chain-size"
+              className="w-28"
+              inputMode="numeric"
+              value={size}
+              onChange={(e) => setSize(e.currentTarget.value)}
+            />
+          </div>
         </div>
-        <div className="grid gap-1.5">
-          <Label htmlFor="chain-size">Larger than (GB)</Label>
-          <Input
-            id="chain-size"
-            className="w-28"
-            inputMode="numeric"
-            value={size}
-            onChange={(e) => setSize(e.currentTarget.value)}
-          />
-        </div>
-        <WhyDisabled reason={busy ? "Saving…" : reason}>
-          <Button variant="outline" disabled={busy || reason !== null} onClick={() => void save()}>
-            Save
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose} disabled={busy}>
+            Cancel
           </Button>
-        </WhyDisabled>
-      </CardContent>
-    </Card>
+          <WhyDisabled reason={busy ? "Saving…" : reason}>
+            <Button disabled={busy || reason !== null} onClick={() => void save()}>
+              Save
+            </Button>
+          </WhyDisabled>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

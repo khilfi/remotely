@@ -245,6 +245,20 @@ export const HELP = {
       "VMs past these limits are flagged on the Schedules page and in their Activity tab.",
     ],
   },
+  scheduleRetention: {
+    title: "Keeping the last snapshots",
+    body: [
+      "Retention deletes only the snapshots this schedule took, oldest first; others on the VM stay.",
+      "Deleting snapshots is High, so the schedule's approval asks for a reason and the number of VMs.",
+    ],
+  },
+  idleSuspend: {
+    title: "When a VM counts as idle",
+    body: [
+      "Measured from the dashboard's history and its live readings of the VM's own CPU.",
+      "A VM Remotely didn't watch for the whole time (closed, asleep, just started) waits until it has.",
+    ],
+  },
   namingPattern: {
     title: "Naming pattern",
     body: [
