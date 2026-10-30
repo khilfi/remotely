@@ -492,7 +492,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="min-w-56">Name</TableHead>
+                    <TableHead>Name</TableHead>
                     <TableHead>Address</TableHead>
                     <TableHead>Login</TableHead>
                     <TableHead>Via</TableHead>
@@ -580,7 +580,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                             onChanged={reload}
                           />
                         </TableCell>
-                        <TableCell title={environmentText(applied)}>
+                        <TableCell className="whitespace-normal" title={environmentText(applied)}>
                           <EnvBadge env={applied.environment} />
                           {applied.from && <FromNote text={sourceText(applied.from)} />}
                         </TableCell>
