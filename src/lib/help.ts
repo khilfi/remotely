@@ -139,9 +139,15 @@ export const HELP = {
     title: "Presentation mode",
     body: [
       "For screen shares: host names, IP addresses, user names and your Windows user name are replaced on screen by stand-ins such as host-3 or ip-5.",
-      "Copies, saved output, session logs and exports keep the real text. Printing is masked, since its preview is on screen.",
+      "Copies, saved output, session logs and exports keep the real text. Printing is masked, since its preview is on screen; Windows file dialogs show real paths.",
     ],
     link: { label: "Presentation settings", to: setting("presentation") },
+  },
+  hideTerminals: {
+    title: "Hide terminal output",
+    body: [
+      "Terminal output is masked as it arrives, but a full-screen program such as top or vim that redraws part of a name can show that part. This blurs the terminals while you present instead.",
+    ],
   },
   readOnlyLock: {
     title: "Read-only lock",
@@ -162,8 +168,8 @@ export const HELP = {
   toolPaths: {
     title: "How Remotely finds its tools",
     body: [
-      "VM actions run through Workstation's vmrun.exe and VirtualBox's VBoxManage.exe. Remotely uses the path saved in Settings, then the registry, then the default install folders.",
-      "Either hypervisor is enough. Without VirtualBox, the list simply has no VirtualBox VMs.",
+      "VM actions run through Workstation's vmrun.exe and VirtualBox's VBoxManage.exe; either is enough. Without VirtualBox, the list simply has no VirtualBox VMs.",
+      "Each tool is found in this order: the path set in Settings, its variable (REMOTELY_VMRUN, REMOTELY_VBOXMANAGE, REMOTELY_OVFTOOL, REMOTELY_QEMU_IMG, REMOTELY_DOCKER), the registry, then the default install folder.",
     ],
     link: { label: "Tool settings", to: setting("vmware") },
   },
@@ -219,6 +225,118 @@ export const HELP = {
       "A VM whose safety snapshot fails is left untouched.",
     ],
   },
+  // ---- U4: approvals, Settings and the Vault ----
+  reasonOrChangeId: {
+    title: "Reason and change ID",
+    body: [
+      "A few words on why you run it, kept in the audit log. Start with a ticket or change number, such as CHG0012345, INC-42 or #1234, and it is kept as the change ID too, with the job and in the exports.",
+      "A workspace can require a change ID for High and Critical actions on Prod targets.",
+    ],
+    link: { label: "Approval settings", to: setting("change-ids") },
+  },
+  standingApproval: {
+    title: "Standing approval",
+    body: [
+      "A schedule is approved once, when you save it, and each run goes ahead under that approval until you edit or delete the schedule.",
+      "If a target becomes Prod or Protected, a new VM gets its tag or the approval rules change, the schedule pauses and asks again. A run missed while Remotely was closed is reported, not caught up.",
+    ],
+    link: { label: "Open Schedules", to: { kind: "page", page: "schedules" } },
+  },
+  bulkTier: {
+    title: "In bulk",
+    body: [
+      "The tier an action gets when it runs on several targets at once, from the numbers set under the table. One mistake in bulk reaches every target, so most actions ask more.",
+    ],
+  },
+  dangerousCommands: {
+    title: "Dangerous commands",
+    body: [
+      "A command that matches one of these regular expressions is High. Each is tested against the command as typed and against each command the shell would run in it: quotes removed, sudo and env dropped, sh -c scripts read too.",
+      "A pattern that matches every command is refused. Patterns added in an update reach your rules only when you add them or reset to the defaults.",
+    ],
+  },
+  readOnlyCommands: {
+    title: "Read-only commands",
+    body: [
+      "A command whose every part starts with one of these, and that writes no file, is Low. Entries can't hold shell operators such as ; | > or $.",
+      "Forms that change something, such as ip link set or date -s, are never read-only. Nor is a command set up with an environment variable other than the locale, time zone, terminal or colours.",
+    ],
+  },
+  pasteConfirm: {
+    title: "Pasting several lines",
+    body: [
+      "Each line break in a paste presses Enter, so a shell without bracketed paste runs every line as it arrives. Either way a paste loses its control characters, tabs and line breaks aside.",
+    ],
+  },
+  reachabilityChecks: {
+    title: "Reachability dots",
+    body: [
+      "Remotely opens a TCP connection to each shown session's SSH port, or its first jump host, and closes it at once: no login. Hosts you're connected to aren't checked, and a host that's down is checked less often.",
+      "Each check shows in the host's sshd log as a connection closed before login, and strict fail2ban rules may count it. On such sites, turn the dots off or check less often.",
+    ],
+  },
+  notifyAway: {
+    title: "Notifications when you're away",
+    body: [
+      "Away means the tab isn't on screen or Remotely isn't the window in front. A line typed in all tabs notifies once, when all its terminals are done.",
+      "A command that goes quiet for the time set counts as finished, for prompts Remotely doesn't recognise. The bell in a terminal's toolbar turns notifications off for that tab.",
+    ],
+  },
+  terminalRules: {
+    title: "Highlight and alert rules",
+    body: [
+      "A rule colours what its pattern matches in terminals. With its alert on, a matching line also notifies you while its tab is in the background: once per burst, then not again for a minute.",
+      "Where two rules match the same text, the higher one wins. Full-screen programs, password prompts and what you type never alert.",
+    ],
+  },
+  powerActions: {
+    title: "Power actions",
+    body: [
+      "Bulk starts power on a few VMs at a time, since many at once can saturate this PC's disk and CPU.",
+      "Shut down asks each guest to stop, then waits. A VM still running after the wait is reported and left running; forcing it off needs its own approval.",
+    ],
+  },
+  dashboardHistory: {
+    title: "Dashboard history",
+    body: [
+      "A 1-minute average of each running VM, watched host and this PC, for the charts' longer ranges and the alert list. It stays on this PC: exports never carry it.",
+    ],
+  },
+  vaultEncryption: {
+    title: "How secrets are kept",
+    body: [
+      "Each value is encrypted on this PC with AES-256-GCM, under a key that only the vault password unlocks (Argon2id), or your Windows login if you turn that on.",
+      "A value can be replaced but never shown again. Remotely hands it only to the connection that needs it.",
+    ],
+  },
+  sshKeys: {
+    title: "SSH keys",
+    body: [
+      "Keys are made straight into the vault: Ed25519, or RSA 4096 for older hosts and appliances. The private half never leaves the vault except to log in.",
+      "Push a public key to hosts' ~/.ssh/authorized_keys with the approval its tier needs, then let sessions log in with it.",
+    ],
+  },
+  workspaceArchive: {
+    title: "Archived workspaces",
+    body: [
+      "An archived workspace keeps its data and audit log, but can't be opened and runs no schedules until you restore it.",
+      "Workspaces are never deleted, so their audit logs are kept for good.",
+    ],
+  },
+  transferExport: {
+    title: "What the file holds",
+    body: [
+      "Your sessions and folders with their tags, environments, jump hosts and port forwards; your favourite commands and saved groups; and your VM sizes, images and launch templates. Image files aren't in it: copy them yourself.",
+      "Without the vault secrets, sessions on the other laptop use the secrets with the same labels there, or ask when connecting. The passphrase can't be recovered.",
+    ],
+  },
+  transferExtras: {
+    title: "Startup commands and port forwards",
+    body: [
+      "A startup command is typed into the shell at every connection without asking, and a port forward opens a way into a network.",
+      "They are left out unless you tick them; a session that replaces one here keeps its own.",
+    ],
+  },
   updateChecks: {
     title: "Update checks",
     body: [
@@ -251,6 +369,89 @@ export const HELP = {
     ],
     link: { label: "Conversion tools", to: setting("qemu-img") },
   },
+  // ---- U2: Machines (VMs, Templates, Schedules) ----
+  snapshotActions: {
+    title: "Revert and delete",
+    body: [
+      "Reverting puts the VM back as it was at the snapshot and loses what changed since; the approval offers a safety snapshot first.",
+      "Deleting a snapshot keeps its children and the VM's current state. Hover a button to see the approval it needs.",
+    ],
+  },
+  chainLimits: {
+    title: "Snapshot chain warnings",
+    body: [
+      "Each snapshot adds a level to a VM's disk chain, which slows the disk, and its files only grow until snapshots are deleted.",
+      "VMs past these limits are flagged on the Schedules page and in their Activity tab.",
+    ],
+  },
+  scheduleRetention: {
+    title: "Keeping the last snapshots",
+    body: [
+      "Retention deletes only the snapshots this schedule took, oldest first; others on the VM stay.",
+      "Deleting snapshots is High, so the schedule's approval asks for a reason and the number of VMs.",
+    ],
+  },
+  idleSuspend: {
+    title: "When a VM counts as idle",
+    body: [
+      "Measured from the dashboard's history and its live readings of the VM's own CPU.",
+      "A VM Remotely didn't watch for the whole time (closed, asleep, just started) waits until it has.",
+    ],
+  },
+  hostNetworks: {
+    title: "Host networks",
+    body: [
+      "Workstation's and VirtualBox's networks on this PC, the VMs on each, and their NAT port forwards.",
+      "Adding or removing a forward asks for approval (High): it reaches every VM on the network, and a Prod VM on it moves it up a tier.",
+    ],
+  },
+  natForwardsAdmin: {
+    title: "Forwards need administrator rights",
+    body: [
+      "Workstation keeps its NAT port forwards in a file only administrators can change, and Remotely never asks to run as administrator.",
+      "Change them in Workstation's Virtual Network Editor (Edit, Virtual Network Editor, Change Settings), or start Remotely with Run as administrator.",
+    ],
+  },
+  namingPattern: {
+    title: "Naming pattern",
+    body: [
+      "{n} is a number that skips names already taken, {template} the template's (or VM's) name and {date} today as YYYYMMDD.",
+    ],
+  },
+  cloudImages: {
+    title: "Cloud images",
+    body: [
+      "The official download pages open in your browser. Remotely downloads nothing itself: save the file, then add it as an image.",
+    ],
+  },
+  deployPreview: {
+    title: "What a deploy makes",
+    body: [
+      "Before anything is made you see each VM's name, folder, size and disk space, with this PC's room after it, and approve the deploy.",
+      "A VM that fails is removed with what it made; VMs already made stay.",
+    ],
+  },
+  containerHosts: {
+    title: "Container hosts",
+    body: [
+      "Remotely runs the host's docker or podman command over the session's SSH connection, through its jump hosts, only while you have the host open on the Containers page.",
+      "It logs in with the session's saved login: a session whose password you type in the terminal needs it saved in the vault first. Detect logs in and checks whether docker needs sudo.",
+    ],
+  },
+  alertRules: {
+    title: "Alert rules",
+    body: [
+      "Rules are checked on every metrics round. A rule fires once its condition has held for its duration, and resolves after a minute back under it.",
+      "Alerts and their history are kept on this PC only, as long as the dashboard history.",
+    ],
+  },
+  notifications: {
+    title: "Notifications",
+    body: [
+      "What notified since Remotely started: alerts, finished commands and jobs, updates. They're kept until Remotely closes.",
+      "Jobs stay in Activity, and alerts on the dashboard, after that.",
+    ],
+  },
   auditLog: {
     title: "Audit log",
     body: [
@@ -263,6 +464,7 @@ export const HELP = {
     title: "Workspaces",
     body: [
       "One workspace per engagement or customer. Sessions, VMs, templates, schedules and the audit log belong to the workspace shown; the others stay out of sight.",
+      "A new workspace starts empty. VMs join it from the VMs page's Unassigned list, or when it deploys them.",
     ],
   },
 } as const satisfies Record<string, HelpEntry>;

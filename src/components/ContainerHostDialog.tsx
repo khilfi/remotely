@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
@@ -172,10 +173,9 @@ export function ContainerHostDialog({ sessionId, readOnly, onSaved, onClose }: P
           <DialogTitle>
             {editing ? `Container engines of ${session?.name ?? "the host"}` : "Add a container host"}
           </DialogTitle>
-          <DialogDescription>
-            Remotely runs the host&apos;s docker or podman command over the session&apos;s SSH connection (through its
-            jump hosts), only when you open the host here. Saved logins only: a session whose password is typed in the
-            terminal needs it saved in the vault first.
+          <DialogDescription className="flex items-center gap-1">
+            Docker or Podman on a saved session, over its SSH connection.
+            <HelpTip topic="containerHosts" />
           </DialogDescription>
         </DialogHeader>
 
@@ -209,7 +209,7 @@ export function ContainerHostDialog({ sessionId, readOnly, onSaved, onClose }: P
               </Button>
             </WhyDisabled>
             <span className="text-xs text-muted-foreground">
-              Logs in and looks for docker and podman, and whether docker needs sudo. Nothing is changed.
+              Looks for docker and podman on the host. Nothing is changed.
             </span>
           </div>
 

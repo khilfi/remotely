@@ -1,6 +1,7 @@
 // SS-04, AP-06: the vault password, asked again for a step that needs it (see lib/reauth.ts): a vault password sent
 // to a host where no saved session sends it yet, one typed with no prompt showing, looser approval rules, an import
-// that uses passwords already in the vault. App renders it once; call sites use `withVaultPassword`.
+// that uses passwords already in the vault. App renders it once; call sites use `withVaultPassword`. UX-04: why it is
+// asked, and the 5 minutes an answer covers, are behind the title's "?".
 
 import { useEffect, useState } from "react";
 import { ShieldAlertIcon } from "lucide-react";
@@ -15,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { HelpTip } from "@/components/HelpTip";
 import { setReauthHost, type ReauthPrompt } from "@/lib/reauth-prompt";
 
 export function ReauthDialog() {
@@ -53,13 +55,10 @@ export function ReauthDialog() {
             <DialogTitle className="flex items-center gap-2">
               <ShieldAlertIcon className="size-5 text-amber-600 dark:text-amber-400" aria-hidden />
               Enter the vault password
+              <HelpTip topic="vaultReauth" />
             </DialogTitle>
             <DialogDescription>{prompt?.reason}</DialogDescription>
           </DialogHeader>
-          <p className="text-sm text-muted-foreground">
-            The vault password confirms it is you, however the vault was unlocked. It also covers the next 5 minutes,
-            and for a saved session the answer counts from then on.
-          </p>
           <div className="grid gap-2">
             <Label htmlFor="reauth-password">Vault password</Label>
             <Input

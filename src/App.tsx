@@ -113,7 +113,8 @@ import {
   usePresentation,
   useReadOnlyReason,
 } from "@/components/Presentation";
-import { UpdateBanner, UpdateNotice } from "@/components/UpdateBanner";
+import { UpdateNotice } from "@/components/UpdateBanner";
+import { updateNotice } from "@/lib/update-notice";
 import { AlertNotifier } from "@/components/AlertNotifier";
 import { FirstRunWizard } from "@/components/FirstRunWizard";
 import { NotificationCentre } from "@/components/NotificationCentre";
@@ -256,6 +257,7 @@ export default function App() {
   const lastUpdateStatus = useRef<UpdateCheck["status"] | null>(null);
   const updateRetry = useRef<number | undefined>(undefined);
   const offered = updateCheck?.status === "available" ? updateCheck.update : null;
+  const notice = updateNotice(updateCheck, updateProblem, laterFor);
   // QL-14: a VM (or the snapshot view) to show on the Virtual machines page.
   const [vmRequest, setVmRequest] = useState<VmPageRequest | null>(null);
   // UX-08: the tabs of the pages that took in another (the Map, Known hosts).
@@ -1159,29 +1161,14 @@ export default function App() {
           </header>
           <div ref={contentRef} className="min-h-0 flex-1 overflow-auto p-6">
             {READ_ONLY_PAGES[page] && <ReadOnlyNotice {...READ_ONLY_PAGES[page]} />}
-            {offered && laterFor !== offered.version && (
-              <UpdateBanner
-                update={offered}
-                disabledReason={readOnlyReason}
-                onInstall={() => void installUpdate(offered.version)}
-                onLater={() => setLaterFor(offered.version)}
-              />
-            )}
-            {!offered && updateProblem && laterFor !== updateProblem.code && (
+            {/* FD-14, UX-04: one quiet notice: a newer release, a failed check, or a token needed. */}
+            {notice && (
               <UpdateNotice
-                destructive
-                title="Remotely can't check for updates"
-                description={sentence(updateProblem.message)}
-                onOpenSettings={() => setPage("settings")}
-                onLater={() => setLaterFor(updateProblem.code)}
-              />
-            )}
-            {!offered && !updateProblem && updateCheck?.status === "tokenNeeded" && laterFor !== "tokenNeeded" && (
-              <UpdateNotice
-                title="Updates need a GitHub update token"
-                description={`GitHub doesn't show the releases of ${updateCheck.repository} without a token, so the repository may be private again. Add a read-only token in Settings, under Updates, to get new versions, or turn update checks off there.`}
-                onOpenSettings={() => setPage("settings")}
-                onLater={() => setLaterFor("tokenNeeded")}
+                notice={notice}
+                installReason={readOnlyReason}
+                onInstall={(version) => void installUpdate(version)}
+                onOpenSettings={() => openLink({ kind: "setting", section: "updates" })}
+                onLater={() => setLaterFor(notice.key)}
               />
             )}
             <section hidden={page !== "vms"} className="h-full">
@@ -1424,12 +1411,6 @@ function NavItem({
       {badge && <SidebarMenuBadge className="text-status-warning">{badge}</SidebarMenuBadge>}
     </SidebarMenuItem>
   );
-}
-
-/** Core messages start in lower case and end without a full stop, so they read well after a prefix. */
-function sentence(text: string) {
-  const capital = text.charAt(0).toUpperCase() + text.slice(1);
-  return /[.!?]$/.test(capital) ? capital : `${capital}.`;
 }
 
 function vaultLabel(vault: VaultInfo | null) {

@@ -216,7 +216,7 @@ export function ImageDialog({ existing, profiles, onSaved, onClose }: Props) {
           <DialogDescription>
             {existing
               ? `${IMAGE_KIND_LABEL[existing.source.kind]}: ${imageWhere(existing)}. To use another file or VM, add another image.`
-              : "Where a new VM's OS comes from. Remotely reads the file once to take its checksum; it downloads nothing."}
+              : "Where a new VM's OS comes from; a file is read once for its checksum."}
           </DialogDescription>
         </DialogHeader>
         <form

@@ -5,6 +5,9 @@
 //
 // Workspace names may be customer names: every element that shows one is `data-mask="workspace"`, so presentation
 // mode (FD-03) shows `workspace-1` instead, and the masker learns them for any other text.
+//
+// UX-04: one line of help per dialog, the rest behind "?"; UX-02: the manage list's rows open on a click and keep
+// their other actions in one row menu.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -17,7 +20,9 @@ import {
   PlusIcon,
   SettingsIcon,
 } from "lucide-react";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { RowMenu } from "@/components/RowMenu";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { Button } from "@/components/ui/button";
 import {
@@ -117,9 +122,7 @@ export function WorkspaceSwitcher({ onOpenActivity }: Props) {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-72">
-          <DropdownMenuLabel className="font-normal text-muted-foreground">
-            One workspace per engagement: its own sessions, VMs, vault items, jobs and audit log.
-          </DropdownMenuLabel>
+          <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Workspaces</DropdownMenuLabel>
           <DropdownMenuSeparator />
           {list.map((w) => (
             <DropdownMenuItem
@@ -327,10 +330,11 @@ export function WorkspaceEditDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{workspace ? "Rename or recolour" : "New workspace"}</DialogTitle>
-          <DialogDescription>
+          <DialogDescription className="flex items-center gap-1">
             {workspace
-              ? "The audit log of this workspace keeps the change."
-              : "An empty workspace for another engagement: its own sessions, vault items, VMs, templates, schedules, jobs and audit log. VMs join it from the VMs page's Unassigned list, or when it deploys them."}
+              ? "Its name and colour in the top bar."
+              : "An empty workspace for another engagement or customer."}
+            {!workspace && <HelpTip topic="workspaces" />}
           </DialogDescription>
         </DialogHeader>
         <form
@@ -431,67 +435,72 @@ function ManageWorkspacesDialog({
         ? "At least one workspace stays active."
         : null);
 
-  const row = (w: Workspace) => (
-    <li key={w.id} className="flex items-center gap-2 py-1.5">
-      <WorkspaceDot color={w.color} />
-      <span className="min-w-0 flex-1 truncate" data-mask="workspace">
-        {w.name}
-      </span>
-      {w.current && <span className="text-xs text-muted-foreground">open now</span>}
-      {!w.archived && !w.current && (
-        <Button size="sm" variant="ghost" onClick={() => onSwitch(w)}>
-          Open
-        </Button>
-      )}
-      {!w.archived && (
-        <WhyDisabled reason={readOnly}>
+  const row = (w: Workspace) => {
+    const archiveWhy = archiveReason(w);
+    return (
+      <li key={w.id} className="flex items-center gap-2 py-1">
+        <WorkspaceDot color={w.color} />
+        {!w.archived && !w.current ? (
           <Button
-            size="sm"
             variant="ghost"
-            aria-label="Rename or recolour"
-            disabled={!!readOnly}
-            onClick={() => onEdit(w)}
-          >
-            <PencilIcon />
-          </Button>
-        </WhyDisabled>
-      )}
-      {w.archived ? (
-        <WhyDisabled reason={readOnly}>
-          <Button
             size="sm"
-            variant="ghost"
-            disabled={!!readOnly || busy === w.id}
-            onClick={() => void run(w.id, () => workspacesApi.restore(w.id), "Restored the workspace")}
+            className="min-w-0 flex-1 justify-start px-1 font-normal"
+            onClick={() => onSwitch(w)}
           >
-            <ArchiveRestoreIcon />
-            Restore
+            <span className="truncate" data-mask="workspace">
+              {w.name}
+            </span>
           </Button>
-        </WhyDisabled>
-      ) : (
-        <WhyDisabled reason={archiveReason(w)}>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={!!archiveReason(w) || busy === w.id}
-            onClick={() => void run(w.id, () => workspacesApi.archive(w.id), "Archived the workspace")}
-          >
-            <ArchiveIcon />
-            Archive
-          </Button>
-        </WhyDisabled>
-      )}
-    </li>
-  );
+        ) : (
+          <span className="min-w-0 flex-1 truncate px-1 text-sm" data-mask="workspace">
+            {w.name}
+          </span>
+        )}
+        {w.current && <span className="text-xs text-muted-foreground">Open now</span>}
+        <RowMenu label={w.name} disabled={busy === w.id}>
+          {!w.archived && !w.current && <DropdownMenuItem onSelect={() => onSwitch(w)}>Open</DropdownMenuItem>}
+          {!w.archived && (
+            <DropdownMenuItem disabled={!!readOnly} onSelect={() => onEdit(w)}>
+              <PencilIcon />
+              Rename or recolour…
+            </DropdownMenuItem>
+          )}
+          {w.archived ? (
+            <DropdownMenuItem
+              disabled={!!readOnly}
+              onSelect={() => void run(w.id, () => workspacesApi.restore(w.id), "Restored the workspace")}
+            >
+              <ArchiveRestoreIcon />
+              Restore
+            </DropdownMenuItem>
+          ) : (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                disabled={!!archiveWhy}
+                onSelect={() => void run(w.id, () => workspacesApi.archive(w.id), "Archived the workspace")}
+              >
+                <ArchiveIcon />
+                <span className="grid">
+                  Archive
+                  {archiveWhy && <span className="text-xs text-muted-foreground">{archiveWhy}</span>}
+                </span>
+              </DropdownMenuItem>
+            </>
+          )}
+        </RowMenu>
+      </li>
+    );
+  };
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Workspaces</DialogTitle>
-          <DialogDescription>
-            An archived workspace keeps its data and audit log, can't be opened and runs no schedules until it is
-            restored. Workspaces are never deleted: their audit logs are kept for good.
+          <DialogDescription className="flex items-center gap-1">
+            Open one, rename it, or archive the ones you&apos;re done with.
+            <HelpTip topic="workspaceArchive" />
           </DialogDescription>
         </DialogHeader>
         <ul className="divide-y">{active.map(row)}</ul>

@@ -1,7 +1,8 @@
-// VM-02: narrows the VM list by text, tag, power state and (VM-18) hypervisor, and keeps named filters. The core does
-// the matching (`vm_list` with a filter), so the CLI and bulk-run target picker (BX-01) match the same way.
+// VM-02: narrows the VM list by text, tag, power state, (VM-18) hypervisor and environment, and keeps named filters.
+// The core does the matching (`vm_list` with a filter), so the CLI and bulk-run target picker (BX-01) match the same
+// way. UX-02: one search box and one Filter menu, with the saved filters inside it, instead of four buttons.
 
-import { BookmarkIcon, ChevronDownIcon, LayersIcon, SearchIcon, TagIcon, XIcon, ZapIcon } from "lucide-react";
+import { BookmarkIcon, FilterIcon, SearchIcon, Trash2Icon, XIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,8 +19,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import type { PowerState, SavedFilter, Tag, VmFilter } from "@/lib/api";
+import type { Environment, PowerState, SavedFilter, Tag, VmFilter } from "@/lib/api";
 import { HYPERVISORS } from "@/lib/hypervisors";
+import { activeFilterCount } from "@/lib/vm-page";
 
 export const POWER_STATES: { value: PowerState; label: string }[] = [
   { value: "running", label: "Running" },
@@ -29,15 +31,15 @@ export const POWER_STATES: { value: PowerState; label: string }[] = [
   { value: "unknown", label: "Unknown" },
 ];
 
+const ENVIRONMENTS: { value: Environment; label: string }[] = [
+  { value: "prod", label: "Prod" },
+  { value: "staging", label: "Staging" },
+  { value: "lab", label: "Lab" },
+  { value: "none", label: "None" },
+];
+
 export function isEmptyFilter(f: VmFilter) {
-  return (
-    !f.text?.trim() &&
-    !f.tags?.length &&
-    !f.powerStates?.length &&
-    !f.environments?.length &&
-    !f.hypervisors?.length &&
-    (f.protected === undefined || f.protected === null)
-  );
+  return !f.text?.trim() && activeFilterCount(f) === 0;
 }
 
 function toggle<T>(list: T[] | undefined, value: T): T[] {
@@ -65,17 +67,17 @@ export function VmFilterBar({
   onSaveCurrent,
   onDeleteSaved,
 }: Props) {
-  const tagCount = filter.tags?.length ?? 0;
-  const stateCount = filter.powerStates?.length ?? 0;
-  const hypervisorCount = filter.hypervisors?.length ?? 0;
+  const count = activeFilterCount(filter);
+  const keepOpen = (e: Event) => e.preventDefault();
 
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="relative w-64">
+    <>
+      <div className="relative w-56 min-w-40">
         <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           aria-label="Search VMs"
-          placeholder="Name, path, OS, IP or tag"
+          placeholder="Search VMs"
+          title="Name, path, OS, IP address or tag"
           className="pl-8"
           spellCheck={false}
           value={filter.text ?? ""}
@@ -85,99 +87,112 @@ export function VmFilterBar({
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="outline">
-            <TagIcon data-icon="inline-start" />
-            Tags
-            {tagCount > 0 && <Badge variant="secondary">{tagCount}</Badge>}
-            <ChevronDownIcon data-icon="inline-end" />
+          <Button variant="outline" aria-label={count > 0 ? `Filter, ${count} on` : "Filter"}>
+            <FilterIcon data-icon="inline-start" />
+            Filter
+            {count > 0 && <Badge variant="secondary">{count}</Badge>}
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-56">
-          <DropdownMenuLabel>Show VMs with any of</DropdownMenuLabel>
-          {tags.length === 0 && <DropdownMenuItem disabled>No tags yet</DropdownMenuItem>}
-          {tags.map((t) => (
-            <DropdownMenuCheckboxItem
-              key={t.id}
-              checked={filter.tags?.some((x) => x.toLowerCase() === t.name.toLowerCase()) ?? false}
-              onCheckedChange={() => onChange({ ...filter, tags: toggle(filter.tags, t.name) })}
-              onSelect={(e) => e.preventDefault()}
-            >
-              {t.name}
-              <DropdownMenuShortcut>{t.vmCount}</DropdownMenuShortcut>
-            </DropdownMenuCheckboxItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              State
+              {(filter.powerStates?.length ?? 0) > 0 && (
+                <DropdownMenuShortcut>{filter.powerStates?.length}</DropdownMenuShortcut>
+              )}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-44">
+              {POWER_STATES.map((s) => (
+                <DropdownMenuCheckboxItem
+                  key={s.value}
+                  checked={filter.powerStates?.includes(s.value) ?? false}
+                  onCheckedChange={() => onChange({ ...filter, powerStates: toggle(filter.powerStates, s.value) })}
+                  onSelect={keepOpen}
+                >
+                  {s.label}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              Tags
+              {(filter.tags?.length ?? 0) > 0 && <DropdownMenuShortcut>{filter.tags?.length}</DropdownMenuShortcut>}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-56">
+              {tags.length === 0 && <DropdownMenuItem disabled>No tags yet</DropdownMenuItem>}
+              {tags.map((t) => (
+                <DropdownMenuCheckboxItem
+                  key={t.id}
+                  checked={filter.tags?.some((x) => x.toLowerCase() === t.name.toLowerCase()) ?? false}
+                  onCheckedChange={() => onChange({ ...filter, tags: toggle(filter.tags, t.name) })}
+                  onSelect={keepOpen}
+                >
+                  {t.name}
+                  <DropdownMenuShortcut>{t.vmCount}</DropdownMenuShortcut>
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              Environment
+              {(filter.environments?.length ?? 0) > 0 && (
+                <DropdownMenuShortcut>{filter.environments?.length}</DropdownMenuShortcut>
+              )}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-44">
+              {ENVIRONMENTS.map((env) => (
+                <DropdownMenuCheckboxItem
+                  key={env.value}
+                  checked={filter.environments?.includes(env.value) ?? false}
+                  onCheckedChange={() => onChange({ ...filter, environments: toggle(filter.environments, env.value) })}
+                  onSelect={keepOpen}
+                >
+                  {env.label}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              Hypervisor
+              {(filter.hypervisors?.length ?? 0) > 0 && (
+                <DropdownMenuShortcut>{filter.hypervisors?.length}</DropdownMenuShortcut>
+              )}
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-52">
+              {HYPERVISORS.map((h) => (
+                <DropdownMenuCheckboxItem
+                  key={h.value}
+                  checked={filter.hypervisors?.includes(h.value) ?? false}
+                  onCheckedChange={() => onChange({ ...filter, hypervisors: toggle(filter.hypervisors, h.value) })}
+                  onSelect={keepOpen}
+                >
+                  {h.label}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="outline">
-            <ZapIcon data-icon="inline-start" />
-            State
-            {stateCount > 0 && <Badge variant="secondary">{stateCount}</Badge>}
-            <ChevronDownIcon data-icon="inline-end" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-44">
-          {POWER_STATES.map((s) => (
-            <DropdownMenuCheckboxItem
-              key={s.value}
-              checked={filter.powerStates?.includes(s.value) ?? false}
-              onCheckedChange={() => onChange({ ...filter, powerStates: toggle(filter.powerStates, s.value) })}
-              onSelect={(e) => e.preventDefault()}
-            >
-              {s.label}
-            </DropdownMenuCheckboxItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="outline">
-            <LayersIcon data-icon="inline-start" />
-            Hypervisor
-            {hypervisorCount > 0 && <Badge variant="secondary">{hypervisorCount}</Badge>}
-            <ChevronDownIcon data-icon="inline-end" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-52">
-          {HYPERVISORS.map((h) => (
-            <DropdownMenuCheckboxItem
-              key={h.value}
-              checked={filter.hypervisors?.includes(h.value) ?? false}
-              onCheckedChange={() => onChange({ ...filter, hypervisors: toggle(filter.hypervisors, h.value) })}
-              onSelect={(e) => e.preventDefault()}
-            >
-              {h.label}
-            </DropdownMenuCheckboxItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="outline">
-            <BookmarkIcon data-icon="inline-start" />
-            Saved filters
-            <ChevronDownIcon data-icon="inline-end" />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-60">
-          <DropdownMenuLabel>Show and select</DropdownMenuLabel>
-          {savedFilters.length === 0 && <DropdownMenuItem disabled>No saved filters yet</DropdownMenuItem>}
+          <DropdownMenuSeparator />
+          <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Saved filters</DropdownMenuLabel>
           {savedFilters.map((f) => (
-            <DropdownMenuItem key={f.id} onSelect={() => onApplySaved(f)}>
+            <DropdownMenuItem key={f.id} onSelect={() => onApplySaved(f)} title="Show and select its VMs">
+              <BookmarkIcon />
               {f.name}
             </DropdownMenuItem>
           ))}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem disabled={isEmptyFilter(filter)} onSelect={onSaveCurrent}>
-            Save the current filter…
-          </DropdownMenuItem>
+          {!isEmptyFilter(filter) && <DropdownMenuItem onSelect={onSaveCurrent}>Save this filter…</DropdownMenuItem>}
+          {savedFilters.length === 0 && isEmptyFilter(filter) && (
+            <DropdownMenuItem disabled>Set a filter to save it</DropdownMenuItem>
+          )}
           {savedFilters.length > 0 && (
             <DropdownMenuSub>
-              <DropdownMenuSubTrigger>Delete</DropdownMenuSubTrigger>
+              <DropdownMenuSubTrigger>
+                <Trash2Icon />
+                Delete a saved filter
+              </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
                 {savedFilters.map((f) => (
                   <DropdownMenuItem key={f.id} variant="destructive" onSelect={() => onDeleteSaved(f)}>
@@ -191,11 +206,11 @@ export function VmFilterBar({
       </DropdownMenu>
 
       {!isEmptyFilter(filter) && (
-        <Button variant="ghost" onClick={() => onChange({})}>
+        <Button variant="ghost" size="sm" onClick={() => onChange({})}>
           <XIcon data-icon="inline-start" />
-          Clear filter
+          Clear
         </Button>
       )}
-    </div>
+    </>
   );
 }

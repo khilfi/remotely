@@ -4,7 +4,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  approveReason,
   compareRunReason,
   connectedReason,
   diffReason,
@@ -86,38 +85,6 @@ test("splitting says why it can't", () => {
     splitReason({ panes: 1, maxPanes: 6, connectedOnce: false }),
     "This terminal never connected, so there is nothing to split",
   );
-});
-
-test("Approve names the first answer still missing", () => {
-  const steps = [
-    { step: "impactPreview" as const },
-    { step: "typeTargetCount" as const, expected: 3 },
-    { step: "reason" as const },
-    { step: "vaultReauth" as const },
-  ];
-  const answers = { steps, typedCount: "3", reason: "CHG-1", password: "x", busy: false };
-  assert.equal(approveReason(answers), null);
-  assert.equal(approveReason({ ...answers, typedCount: "2" }), "Type the number of targets (3) first");
-  assert.equal(approveReason({ ...answers, reason: " " }), "Give a reason or ticket number first");
-  assert.equal(approveReason({ ...answers, password: "" }), "Type the vault password first");
-  assert.equal(approveReason({ ...answers, busy: true }), "Checking the answers…");
-  assert.equal(
-    approveReason({ steps: [{ step: "confirm" }], typedCount: "", reason: "", password: "", busy: false }),
-    null,
-  );
-});
-
-test("AP-08: a change ID is optional, unless the workspace requires one for Prod; at most 64 characters", () => {
-  const base = { typedCount: "", reason: "", password: "", busy: false };
-  const optional = [{ step: "changeId" as const, required: false }];
-  const required = [{ step: "changeId" as const, required: true }];
-  assert.equal(approveReason({ ...base, steps: optional }), null);
-  assert.equal(
-    approveReason({ ...base, steps: optional, changeId: "x".repeat(65) }),
-    "A change ID is at most 64 characters",
-  );
-  assert.match(approveReason({ ...base, steps: required, changeId: "  " }) ?? "", /needs a change ID/);
-  assert.equal(approveReason({ ...base, steps: required, changeId: "CHG0012345" }), null);
 });
 
 test("comparing groups and connection actions say why they wait", () => {

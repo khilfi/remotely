@@ -234,8 +234,8 @@ export function ResourcesDialog({
       title={one ? `CPU and memory of ${one.displayName}` : `Resize ${vms.length} VMs`}
       description={
         one
-          ? "The VM must be off. Workstation's settings are written to its .vmx after a backup copy; VirtualBox's through VBoxManage."
-          : "One approval for every VM listed; empty fields keep what each VM has. Each VM must be off."
+          ? "Takes effect at the next power-on."
+          : "One approval for every VM listed; an empty field keeps what each VM has."
       }
       submitLabel={one ? "Save" : `Resize ${vms.length} VMs`}
       problem={problem}
@@ -325,7 +325,7 @@ export function FirmwareDialog({
     <EditDialog
       vms={[vm]}
       title={`Firmware of ${vm.displayName}`}
-      description="The VM must be off. A guest installed with BIOS usually doesn't boot with UEFI, and the other way round."
+      description="A guest installed with BIOS usually won't boot with UEFI, and the other way round."
       submitLabel="Save"
       problem={problem}
       onSubmit={() =>
@@ -403,7 +403,7 @@ export function GuestOsDialog({
     <EditDialog
       vms={[vm]}
       title={`Guest OS type of ${vm.displayName}`}
-      description="What the VM is set up for: it decides the defaults the hypervisor uses (devices, drivers). It changes nothing in the guest. The VM must be off."
+      description="What the VM is set up for; the hypervisor picks its devices by it. The guest doesn't change."
       submitLabel="Save"
       problem={error ?? (!types ? "Reading the types…" : !value || value === currentId ? "Choose another type" : null)}
       onSubmit={() => onSubmit({ type: "vmConfig", targets: [target(vm)], edit: { kind: "guestOs", osType: value } })}
@@ -589,7 +589,7 @@ export function DiskAddDialog({
     <EditDialog
       vms={[vm]}
       title={`Add a disk to ${vm.displayName}`}
-      description="A new disk file in the VM's folder. The VM must be off; the guest still has to partition and format it."
+      description="A new disk file in the VM's folder; partition and format it in the guest."
       submitLabel="Add disk"
       problem={problem}
       onSubmit={() =>
@@ -659,7 +659,7 @@ export function DiskExpandDialog({
     <EditDialog
       vms={[vm]}
       title={`Expand disk ${disk.slot} of ${vm.displayName}`}
-      description="The disk grows; it can't be shrunk back. The guest's partition and filesystem have to be grown in the guest afterwards. The VM must be off and have no snapshots."
+      description="It can't shrink back; grow its partition in the guest afterwards."
       submitLabel="Expand"
       problem={problem}
       onSubmit={() =>
@@ -697,7 +697,7 @@ export function SharedFolderDialog({
     <EditDialog
       vms={[vm]}
       title={`Share a folder with ${vm.displayName}`}
-      description="The guest can read (and with write access, change) everything in the folder you choose next. The VM must be off."
+      description="The guest can read (and with write access, change) everything in the folder you pick next."
       submitLabel="Choose the folder…"
       problem={shareNameProblem(name) ?? error}
       onSubmit={async () => {

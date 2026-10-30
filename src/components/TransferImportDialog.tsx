@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { HelpTip } from "@/components/HelpTip";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { StartupRatingBadges } from "@/components/Badges";
@@ -343,10 +344,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
                 <AlertTitle>
                   {plural(report.withoutCredentials, "session")} came without the password or key they used
                 </AlertTitle>
-                <AlertDescription>
-                  Their secrets were not in the file or were skipped. They ask for a password when connecting; edit them
-                  to choose a key from the vault.
-                </AlertDescription>
+                <AlertDescription>They ask for a password when connecting; edit them to pick a key.</AlertDescription>
               </Alert>
             )}
             {report.problems.length > 0 && (
@@ -479,13 +477,11 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
             {extras.length > 0 && (
               <Alert>
                 <AlertTriangleIcon />
-                <AlertTitle>Startup commands and port forwards</AlertTitle>
+                <AlertTitle className="flex items-center gap-1">
+                  Startup commands and port forwards come in only when ticked
+                  <HelpTip topic="transferExtras" />
+                </AlertTitle>
                 <AlertDescription className="grid gap-3">
-                  <p>
-                    A startup command is typed into the shell at every connection without asking, and a port forward
-                    opens a way into a network. They are left out unless you tick them; a replaced session keeps its
-                    own.
-                  </p>
                   <ul className="grid gap-3">
                     {extras.map((s) => (
                       <li key={s.index} className="grid min-w-0 gap-1.5">

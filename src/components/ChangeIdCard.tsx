@@ -1,68 +1,57 @@
-// AP-08: Settings → Approval rules: whether this workspace needs a change ID (a ticket or change number) for High and
+// AP-08: Settings › Approvals: whether this workspace needs a change ID (a ticket or change number) for High and
 // Critical actions on Prod targets. A setting of the workspace (FD-02), so each engagement decides; the change is
-// audited in it and refused by the read-only lock.
+// audited in it and refused by the read-only lock. UX-10: a row of the approval rules' card, saved at once.
 
 import { useEffect, useState } from "react";
-import { toast } from "sonner";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { HelpTip } from "@/components/HelpTip";
+import { SaveStatus, useSaveStatus } from "@/components/SaveStatus";
+import { Term } from "@/components/Term";
 import { WhyDisabled } from "@/components/WhyDisabled";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { errorMessage } from "@/lib/api";
 import { workspacesApi, type ChangeIdRules } from "@/lib/workspaces-api";
 
-export function ChangeIdCard() {
+export function ChangeIdSetting() {
   const [rules, setRules] = useState<ChangeIdRules | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const status = useSaveStatus();
   const readOnly = useReadOnlyReason();
 
   useEffect(() => {
     workspacesApi
       .changeIdRules()
       .then(setRules)
-      .catch((err) => toast.error(`Could not read the change ID rule: ${errorMessage(err)}`));
+      .catch((err) => setError(`Could not read the change ID rule: ${errorMessage(err)}`));
   }, []);
 
-  async function set(requiredForProd: boolean) {
-    setBusy(true);
-    try {
-      setRules(await workspacesApi.setChangeIdRules({ requiredForProd }));
-    } catch (err) {
-      toast.error(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
+  function set(requiredForProd: boolean) {
+    void status.run(async () => setRules(await workspacesApi.setChangeIdRules({ requiredForProd })));
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Change IDs</CardTitle>
-        <CardDescription>
-          High and Critical approvals, a schedule&apos;s too, take a ticket or change number. It is kept in the job, the
-          audit log and the exports. This is a setting of this workspace: each engagement has its own.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-start justify-between gap-4">
-          <Label htmlFor="change-id-required" className="grid gap-1">
-            <span>Require a change ID for Prod targets</span>
-            <span className="font-normal text-muted-foreground">
-              A High or Critical action on a Prod VM or host can&apos;t be approved without one. A schedule approved
-              without one asks again.
-            </span>
-          </Label>
-          <WhyDisabled reason={readOnly}>
-            <Switch
-              id="change-id-required"
-              checked={rules?.requiredForProd ?? false}
-              disabled={!rules || busy || !!readOnly}
-              onCheckedChange={(on) => void set(on)}
-            />
-          </WhyDisabled>
-        </div>
-      </CardContent>
-    </Card>
+    <div className="grid gap-1">
+      <div className="flex items-center gap-3">
+        <WhyDisabled reason={readOnly}>
+          <Switch
+            id="change-id-required"
+            checked={rules?.requiredForProd ?? false}
+            disabled={!rules || status.state.kind === "saving" || !!readOnly}
+            onCheckedChange={set}
+          />
+        </WhyDisabled>
+        <Label htmlFor="change-id-required">
+          <span>
+            Require a <Term id="changeId">change ID</Term> for Prod targets
+          </span>
+        </Label>
+        <HelpTip topic="reasonOrChangeId" />
+        <SaveStatus status={status} className="ml-auto" />
+      </div>
+      <p className="pl-12 text-sm text-muted-foreground">
+        {error ?? "A setting of this workspace, for High and Critical actions."}
+      </p>
+    </div>
   );
 }

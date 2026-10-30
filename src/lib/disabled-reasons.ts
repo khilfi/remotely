@@ -2,8 +2,6 @@
 // as pure functions (tested in disabled-reasons.test.ts); `null` means the action is available. Shown in a tooltip
 // on the button (WhyDisabled.tsx) or under a disabled menu item.
 
-import type { ApprovalStep } from "./api.ts";
-
 /** FD-03: an action that changes something, while presenting with the read-only lock on (the core refuses it too). */
 export const READ_ONLY_REASON = "Read-only while presenting: turn the read-only lock off first (Presenting menu)";
 
@@ -71,31 +69,6 @@ export function splitReason(input: { panes: number; maxPanes: number; connectedO
 
 /** AP-08: the longest change ID the core keeps (`MAX_CHANGE_ID_CHARS`). */
 export const MAX_CHANGE_ID = 64;
-
-/** AP-03, AP-06, AP-08: the approval dialog's Approve button, from the steps the policy engine asked for. */
-export function approveReason(input: {
-  steps: ApprovalStep[];
-  typedCount: string;
-  reason: string;
-  password: string;
-  busy: boolean;
-  /** AP-08: the change ID typed so far. */
-  changeId?: string;
-}): string | null {
-  const changeId = (input.changeId ?? "").trim();
-  for (const step of input.steps) {
-    if (step.step === "typeTargetCount" && Number(input.typedCount) !== step.expected)
-      return `Type the number of targets (${step.expected}) first`;
-    if (step.step === "reason" && input.reason.trim() === "") return "Give a reason or ticket number first";
-    if (step.step === "changeId" && step.required && changeId === "")
-      return "This workspace needs a change ID for actions on Prod targets";
-    if (step.step === "changeId" && [...changeId].length > MAX_CHANGE_ID)
-      return `A change ID is at most ${MAX_CHANGE_ID} characters`;
-    if (step.step === "vaultReauth" && input.password === "") return "Type the vault password first";
-  }
-  if (input.busy) return "Checking the answers…";
-  return null;
-}
 
 /** BX-03: comparing two groups' outputs. */
 export function diffReason(groups: number): string | null {

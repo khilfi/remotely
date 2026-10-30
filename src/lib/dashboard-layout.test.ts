@@ -9,6 +9,7 @@ import {
   cannotAdd,
   clampSize,
   dropIndex,
+  fitsContent,
   heightPx,
   MAX_WIDGETS,
   metricFor,
@@ -18,6 +19,7 @@ import {
   removeWidget,
   resizeWidget,
   sameLayout,
+  showsOwnTitle,
   sizeFromDrag,
   updateWidget,
   widgetTitle,
@@ -118,4 +120,18 @@ test("a widget's settings change, never its id or kind", () => {
   assert.equal(metricFor("guest", "load"), "load");
   assert.equal(sameLayout(layout, structuredClone(layout)), true);
   assert.equal(sameLayout(layout, changed), false);
+});
+
+test("cards and lists take their content's height, charts their size; titles show once while customizing", () => {
+  assert.equal(fitsContent("capacity"), true);
+  assert.equal(fitsContent("overview"), true);
+  assert.equal(fitsContent("alerts"), true);
+  assert.equal(fitsContent("services"), true);
+  assert.equal(fitsContent("chart"), false);
+  assert.equal(fitsContent("thisPcMemory"), false);
+  assert.equal(showsOwnTitle("capacity"), false, "the bar names the capacity cards");
+  assert.equal(showsOwnTitle("overview"), false, "and the overview grid");
+  assert.equal(showsOwnTitle("thisPcMemory"), true);
+  assert.equal(showsOwnTitle("alerts"), true);
+  assert.equal(showsOwnTitle("chart"), true);
 });

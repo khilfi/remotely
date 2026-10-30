@@ -6,7 +6,7 @@
 // was being made is removed with everything it made.
 
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2Icon, CircleDashedIcon, Loader2Icon, XCircleIcon } from "lucide-react";
+import { CheckCircle2Icon, CircleDashedIcon, FileBoxIcon, Loader2Icon, PlusIcon, XCircleIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -22,7 +22,10 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
+import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { Term } from "@/components/Term";
 import { blankTemplate, effectiveInput, formOf, TemplateFields, type TemplateForm } from "@/components/TemplateFields";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { useDebounced } from "@/hooks/use-debounced";
@@ -40,6 +43,7 @@ import {
   type SubmitOutcome,
 } from "@/lib/api";
 import { HYPERVISOR_LABEL, templateReason } from "@/lib/catalog";
+import { requestLink } from "@/lib/links";
 import {
   applyJobEvent,
   applyJobTargets,
@@ -299,15 +303,24 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
 
   const running = progress !== null && progress.finished === null;
 
+  /** UX-07: the Templates page on the step that's missing; the dialog closes. */
+  function openTemplates(tab: "images" | "templates") {
+    onClose();
+    requestLink({ kind: "catalog", tab });
+  }
+
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className="sm:max-w-4xl">
         <DialogHeader>
-          <DialogTitle>{progress ? (current?.preview?.summary ?? "Deploy") : "Deploy VMs"}</DialogTitle>
+          <DialogTitle className="flex items-center gap-1">
+            {progress ? (current?.preview?.summary ?? "Deploy") : "Deploy VMs"}
+            {!progress && <HelpTip topic="deployPreview" />}
+          </DialogTitle>
           <DialogDescription>
             {progress
-              ? "One step per VM. Cancel stops the job: the VM being made is removed with everything it made, and VMs already made stay."
-              : "From a launch template, or Custom with every value chosen here. You see what it makes, and approve it, before anything is made."}
+              ? "One step per VM; cancelling removes only the VM being made."
+              : "From a launch template, or Custom with every value chosen here."}
           </DialogDescription>
         </DialogHeader>
 
@@ -317,12 +330,32 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
           <div className="-mx-1 grid max-h-[65vh] gap-4 overflow-x-hidden overflow-y-auto px-1">
             <Tabs value={mode} onValueChange={(v) => setMode(v as Mode)}>
               <TabsList>
-                <TabsTrigger value="template">Launch template</TabsTrigger>
+                <TabsTrigger value="template">
+                  <Term id="launchTemplate">Launch template</Term>
+                </TabsTrigger>
                 <TabsTrigger value="custom">Custom</TabsTrigger>
               </TabsList>
             </Tabs>
 
-            {mode === "template" ? (
+            {mode === "template" && templates?.length === 0 ? (
+              // UX-07: no dead end. The Templates page opens where the first template (or its image) is made.
+              <EmptyState
+                icon={FileBoxIcon}
+                title="No launch templates yet"
+                description="Make one to deploy the same VM again, or use Custom for a one-off."
+                action={
+                  <>
+                    <Button onClick={() => openTemplates(images.length === 0 ? "images" : "templates")}>
+                      <PlusIcon data-icon="inline-start" />
+                      {images.length === 0 ? "Add an image first" : "Make a launch template"}
+                    </Button>
+                    <Button variant="outline" onClick={() => setMode("custom")}>
+                      Use Custom
+                    </Button>
+                  </>
+                }
+              />
+            ) : mode === "template" ? (
               <div className="grid grid-cols-[1fr_1fr_8rem] gap-3">
                 <div className="grid gap-2">
                   <Label htmlFor="deploy-template">Launch template</Label>
@@ -379,6 +412,7 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
                   keys={keys}
                   idPrefix="deploy-custom"
                   onError={setError}
+                  onAddImage={() => openTemplates("images")}
                   count={
                     <div className="grid gap-2">
                       <Label htmlFor="deploy-custom-count">Count</Label>

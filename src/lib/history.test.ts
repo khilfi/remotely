@@ -18,6 +18,7 @@ import {
   pruneSummary,
   RANGE_BUCKET_MS,
   RANGE_SPAN_MS,
+  retentionDays,
   rangeStart,
   withGaps,
 } from "./history.ts";
@@ -191,4 +192,10 @@ test("Settings says how long the history is kept, what it holds and what a prune
     pruneSummary({ ...report, removed: { minutes: 0, series: 0, alerts: 0 } }),
     "Nothing was old enough to remove.",
   );
+});
+
+test("UX-10: each retention choice's days, so a shorter one is told apart (it prunes at once: no Undo)", () => {
+  const days = HISTORY_RETENTION_CHOICES.map((c) => retentionDays(c.value));
+  assert.deepEqual(days, [1, 3, 7, 14, 30]);
+  assert.ok(retentionDays("days3") < retentionDays("days7"));
 });
