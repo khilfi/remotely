@@ -230,6 +230,20 @@ export const HELP = {
     ],
     link: { label: "Conversion tools", to: setting("qemu-img") },
   },
+  containerHosts: {
+    title: "Container hosts",
+    body: [
+      "Remotely runs the host's docker or podman command over the session's SSH connection, through its jump hosts, only while you have the host open on the Containers page.",
+      "It logs in with the session's saved login: a session whose password you type in the terminal needs it saved in the vault first. Detect logs in and checks whether docker needs sudo.",
+    ],
+  },
+  notifications: {
+    title: "Notifications",
+    body: [
+      "What notified since Remotely started: alerts, finished commands and jobs, updates. They're kept until Remotely closes.",
+      "Jobs stay in Activity, and alerts on the dashboard, after that.",
+    ],
+  },
   auditLog: {
     title: "Audit log",
     body: [

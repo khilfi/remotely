@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { ContainerState, ContainerSummary, LogLine } from "./api.ts";
+import type { ContainerHostInfo, ContainerState, ContainerSummary, LogLine } from "./api.ts";
 import {
   actionReason,
   appendLogs,
@@ -14,6 +14,9 @@ import {
   formatBytes,
   hostActionReason,
   imageReferenceProblem,
+  isNotRunning,
+  nextHostToTry,
+  notRunningTitle,
   lastLogTime,
   portTexts,
   PROTECTED_HOST_REASON,
@@ -172,4 +175,37 @@ test("image references follow the grammar the core checks", () => {
   for (const bad of ["", "Nginx", "nginx;reboot", "-q", "nginx latest", "$(id)", "nginx:"]) {
     assert.notEqual(imageReferenceProblem(bad), null, bad);
   }
+});
+
+test("the page opens on the first host not tried yet, and stops when every host was tried", () => {
+  const host = (name: string, sessionId: string | null, engine: "docker" | "podman" = "docker"): ContainerHostInfo => ({
+    host: sessionId ? { kind: "session", sessionId } : { kind: "thisPc" },
+    name,
+    hostname: null,
+    username: null,
+    port: null,
+    environment: "none",
+    protected: false,
+    engines: [{ engine, sudo: { kind: "off" }, runs: "as the login user" }],
+    via: [],
+    cliPath: null,
+  });
+  const hosts = [host("dev-host-01", "s1", "podman"), host("dev-host-02", "s2"), host("This PC", null)];
+  assert.deepEqual(nextHostToTry(hosts, new Set()), { host: { kind: "session", sessionId: "s1" }, engine: "podman" });
+  assert.deepEqual(nextHostToTry(hosts, new Set(["s1"])), {
+    host: { kind: "session", sessionId: "s2" },
+    engine: "docker",
+  });
+  assert.deepEqual(nextHostToTry(hosts, new Set(["s1", "s2"])), { host: { kind: "thisPc" }, engine: "docker" });
+  assert.equal(nextHostToTry(hosts, new Set(["s1", "s2", "this-pc"])), null);
+  assert.equal(nextHostToTry([], new Set()), null);
+});
+
+test("an engine that isn't running is a quiet state; other failures stay errors", () => {
+  assert.equal(isNotRunning("container_daemon_down"), true);
+  assert.equal(isNotRunning("container_cli_missing"), false);
+  assert.equal(isNotRunning("login_parked"), false);
+  assert.equal(isNotRunning(undefined), false);
+  assert.equal(notRunningTitle({ kind: "thisPc" }, "This PC", "docker"), "Docker Desktop isn't running");
+  assert.equal(notRunningTitle({ kind: "session", sessionId: "s1" }, "db01", "podman"), "Podman isn't running on db01");
 });

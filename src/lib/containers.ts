@@ -59,6 +59,39 @@ export function sameHost(a: ContainerHost | null, b: ContainerHost | null): bool
   return hostKey(a) === hostKey(b);
 }
 
+// ---- UX-07: the host the page opens on ----
+
+/**
+ * The next host to open on while nobody has chosen one: the first in the list (marked sessions, then this PC) not tried
+ * yet. The page tries them in turn until one answers, each with the one read a click on it would make, so it never
+ * opens on an error when another host answers; null once every host was tried.
+ */
+export function nextHostToTry(
+  hosts: readonly ContainerHostInfo[],
+  tried: ReadonlySet<string>,
+): { host: ContainerHost; engine: EngineKind } | null {
+  for (const h of hosts) {
+    if (tried.has(hostKey(h.host))) continue;
+    return { host: h.host, engine: h.engines[0]?.engine ?? "docker" };
+  }
+  return null;
+}
+
+/**
+ * An engine that isn't running (Docker Desktop closed, a stopped daemon) is a state, not an error: the page says so
+ * quietly. Any other failure (a refused login, a missing CLI, sudo) shows as an error with its way out.
+ */
+export function isNotRunning(code: string | undefined): boolean {
+  return code === "container_daemon_down";
+}
+
+/** "Docker Desktop isn't running", "Docker isn't running on db01": the quiet state's title. */
+export function notRunningTitle(host: ContainerHost, hostName: string, engine: EngineKind): string {
+  return host.kind === "thisPc"
+    ? "Docker Desktop isn't running"
+    : `${ENGINE_LABEL[engine]} isn't running on ${hostName}`;
+}
+
 // ---- Actions on the selection --------------------------------------------------------------------
 
 export type ContainerAction = "start" | "stop" | "restart" | "pause" | "unpause" | "remove" | "forceRemove";
