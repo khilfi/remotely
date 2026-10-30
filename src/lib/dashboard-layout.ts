@@ -168,6 +168,23 @@ export function resizeWidget(layout: DashboardLayout, id: string, w: number, h: 
   };
 }
 
+/**
+ * UX-07: widgets that take the height of what they show, up to their size, so the dashboard has no empty band under a
+ * short one (the capacity cards, an alert list with nothing firing). Charts keep their size: their plot fills it.
+ * While customizing, every widget shows at its full size, so the sizes picked are the ones seen.
+ */
+export function fitsContent(kind: WidgetKindName): boolean {
+  return kind === "overview" || kind === "capacity" || kind === "alerts" || kind === "services";
+}
+
+/**
+ * Widgets whose content opens with its own title (a chart, the alert list), so Customize's bar doesn't show the title a
+ * second time; the capacity cards and the overview grid have none, so the bar names them.
+ */
+export function showsOwnTitle(kind: WidgetKindName): boolean {
+  return kind === "thisPcMemory" || kind === "alerts" || kind === "services" || kind === "chart";
+}
+
 /** A widget's height in pixels for `h` rows. */
 export function heightPx(h: number): number {
   return h * ROW_PX + (h - 1) * GAP_PX;

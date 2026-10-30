@@ -33,11 +33,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EnvBadge, StateBadge } from "@/components/Badges";
+import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { RefreshButton } from "@/components/RefreshButton";
 import { api, errorMessage, type SubmitOutcome } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { rememberHostNetworks } from "@/lib/host-networks-cache";
+import { networkEnvironment } from "@/lib/vm-page";
 import {
   insightApi,
   type ForwardProtocol,
@@ -144,8 +146,7 @@ function NetworksBody({ readOnly, onSubmitted }: Pick<Props, "readOnly" | "onSub
           <NetworkIcon className="size-4" /> Host networks
         </SheetTitle>
         <SheetDescription>
-          Workstation&apos;s and VirtualBox&apos;s networks, the VMs on each, and their NAT port forwards. Adding or
-          removing a forward asks for approval (High): it reaches every VM on the network.
+          The VMs on each network, and their NAT port forwards. <HelpTip topic="hostNetworks" />
         </SheetDescription>
       </SheetHeader>
       <div className="flex items-center gap-2 border-b px-4 pb-2 text-xs text-muted-foreground">
@@ -220,6 +221,17 @@ function Card({ title, badges, children }: { title: ReactNode; badges?: ReactNod
       </div>
       {children}
     </section>
+  );
+}
+
+/** UX-12: a network is Prod when a VM on it is, so its forwards ask one tier higher; this says so, and why. */
+function InheritedEnv({ vms }: { vms: NetworkVm[] }) {
+  const text = networkEnvironment(vms);
+  if (!text) return null;
+  return (
+    <Badge variant="outline" className="border-env-prod/50 bg-env-prod/10 font-normal text-env-prod">
+      {text}
+    </Badge>
   );
 }
 
@@ -331,8 +343,16 @@ function WorkstationSide({ report, readOnly, busy, onAdd, onRemove }: SideProps)
       {side.forwardsRefused && (
         <Alert>
           <ShieldIcon />
-          <AlertTitle>Port forwards need administrator rights</AlertTitle>
-          <AlertDescription>{side.forwardsRefused}</AlertDescription>
+          <AlertTitle className="flex items-center gap-1">
+            Port forwards need administrator rights
+            <HelpTip topic="natForwardsAdmin" />
+          </AlertTitle>
+          {/* UX-04: the core's first sentence; the rest is the "?". */}
+          <AlertDescription>
+            {side.forwardsRefused.includes(". ")
+              ? side.forwardsRefused.slice(0, side.forwardsRefused.indexOf(". ") + 1)
+              : side.forwardsRefused}
+          </AlertDescription>
         </Alert>
       )}
       {side.networks.map((view) => {
@@ -345,6 +365,7 @@ function WorkstationSide({ report, readOnly, busy, onAdd, onRemove }: SideProps)
             badges={
               <>
                 <Badge variant="secondary">{vmnetKindLabel(view.network.kind)}</Badge>
+                <InheritedEnv vms={view.vms} />
                 {view.network.subnet && (
                   <span className="font-mono text-xs text-muted-foreground">
                     {view.network.subnet}
@@ -425,6 +446,7 @@ function VirtualBoxSide({ report, readOnly, busy, onAdd, onRemove }: SideProps) 
             badges={
               <>
                 <Badge variant="secondary">NAT network</Badge>
+                <InheritedEnv vms={vms} />
                 {network.network && <span className="font-mono text-xs text-muted-foreground">{network.network}</span>}
                 {network.enabled === false && <Badge variant="outline">Off</Badge>}
                 <span className="ml-auto">

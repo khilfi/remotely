@@ -21,7 +21,7 @@
 //   </Tabs>
 
 import type { ReactNode } from "react";
-import { MoreHorizontalIcon } from "lucide-react";
+import { ChevronDownIcon, MoreHorizontalIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -40,12 +40,14 @@ export interface PageHeaderProps {
   primary?: ReactNode;
   /** DropdownMenuItems for the "⋯" menu: every other page-wide action. */
   tools?: ReactNode;
+  /** U2: names the tools menu ("Tools ▾") instead of the "⋯" icon, for a page whose tools are a set of views. */
+  toolsLabel?: string;
   /** A TabsList, shown under the title row. */
   tabs?: ReactNode;
   className?: string;
 }
 
-export function PageHeader({ page, help, children, primary, tools, tabs, className }: PageHeaderProps) {
+export function PageHeader({ page, help, children, primary, tools, toolsLabel, tabs, className }: PageHeaderProps) {
   const title = pageLabel(page);
   const own = `page.${page}`;
   const helpKey = help === undefined ? (isHelpKey(own) ? own : null) : help;
@@ -60,7 +62,20 @@ export function PageHeader({ page, help, children, primary, tools, tabs, classNa
         {(primary || tools) && (
           <div className="ml-auto flex shrink-0 items-center gap-2">
             {primary}
-            {tools && (
+            {tools && toolsLabel && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button type="button" variant="outline">
+                    {toolsLabel}
+                    <ChevronDownIcon data-icon="inline-end" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-52">
+                  {tools}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+            {tools && !toolsLabel && (
               <DropdownMenu>
                 <Tooltip>
                   <TooltipTrigger asChild>

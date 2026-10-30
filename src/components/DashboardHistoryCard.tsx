@@ -45,7 +45,7 @@ export function DashboardHistoryCard() {
           Dashboard history
           <HelpTip topic="dashboardHistory" />
         </CardTitle>
-        <CardDescription>For the charts&apos; longer ranges and the alert list. It stays on this PC.</CardDescription>
+        <CardDescription>The charts&apos; longer ranges and the alert history; kept on this PC only.</CardDescription>
         <CardAction>
           <SaveStatus status={status} />
         </CardAction>

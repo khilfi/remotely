@@ -69,14 +69,14 @@ export function vaultText(info: VaultInfo | null, secsLeft: number | null): Stat
         return { label: "Vault unlocked", title: "The vault is unlocked. Open the Vault page.", tone: "good" };
       return {
         label: `Vault locks in ${formatCountdown(secsLeft)}`,
-        title: `The vault locks itself after ${minutes} minutes without you typing or clicking in Remotely. Typing or clicking starts the count again. Open the Vault page.`,
+        title: `Locks after ${minutes} minutes without typing or clicking in Remotely. Open the Vault page.`,
         tone: secsLeft <= LOCK_WARNING_SECS ? "warning" : "good",
       };
     }
     case "locked":
       return {
         label: "Vault locked",
-        title: "Sessions that log in with a vault password or key ask to unlock it first. Open the Vault page.",
+        title: "Sessions that log in with it ask to unlock it first. Open the Vault page.",
         tone: "muted",
       };
     case "notSetUp":

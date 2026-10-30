@@ -77,8 +77,7 @@ export function SizeDialog({ existing, initial, onSaved, onClose }: Props) {
         <DialogHeader>
           <DialogTitle>{existing ? `Edit ${existing.name}` : "New size"}</DialogTitle>
           <DialogDescription>
-            What a VM gets, like a cloud instance type. Disks are thin (they take only what the guest writes) unless you
-            make them thick. The OS profile picks the disk controller unless a disk names its own.
+            What a VM gets, like a cloud instance type. Disks are thin unless you make them thick.
           </DialogDescription>
         </DialogHeader>
         <form

@@ -1,14 +1,13 @@
-// MO-16: a widget's settings while customizing: a chart's VM, watched host or this PC, its metric and the range it
-// opens with; a services widget's host. The choices come from the dashboard's rows (read once when the settings open)
+// MO-16: a widget's settings while customizing: a chart's VM, watched host or this PC, and its metric (UX-07: the range
+// is the dashboard's, one for the page); a services widget's host. The choices come from the dashboard's rows (read once when the settings open)
 // and the saved sessions. Saved with the layout.
 
 import { useEffect, useMemo, useState } from "react";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { api, type DashboardRow, type SessionRecord } from "@/lib/api";
-import type { ChartMetric, ChartRange, HistorySource, Widget } from "@/lib/dashboard-api";
+import type { ChartMetric, HistorySource, Widget } from "@/lib/dashboard-api";
 import { CHART_METRIC_LABEL, CHART_METRICS, metricFor } from "@/lib/dashboard-layout";
-import { CHART_RANGES } from "@/lib/history";
 
 interface TargetChoice {
   value: string;
@@ -98,9 +97,7 @@ export function WidgetSettings({ widget, onChange }: { widget: Widget; onChange:
             ))}
           </SelectContent>
         </Select>
-        <p className="text-xs text-muted-foreground">
-          Read every minute on the dashboard&apos;s connection to the host, so only a watched host shows its services.
-        </p>
+        <p className="text-xs text-muted-foreground">Only a watched host shows its services.</p>
       </div>
     );
   }
@@ -147,37 +144,20 @@ export function WidgetSettings({ widget, onChange }: { widget: Widget; onChange:
           </SelectContent>
         </Select>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="grid gap-1.5">
-          <Label htmlFor={`${widget.id}-metric`}>Metric</Label>
-          <Select value={widget.metric} onValueChange={(v) => onChange({ metric: v as ChartMetric })}>
-            <SelectTrigger id={`${widget.id}-metric`} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CHART_METRICS[source].map((m) => (
-                <SelectItem key={m} value={m}>
-                  {CHART_METRIC_LABEL[m]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="grid gap-1.5">
-          <Label htmlFor={`${widget.id}-range`}>Opens with</Label>
-          <Select value={widget.range} onValueChange={(v) => onChange({ range: v as ChartRange })}>
-            <SelectTrigger id={`${widget.id}-range`} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {CHART_RANGES.map((r) => (
-                <SelectItem key={r.value} value={r.value}>
-                  {r.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
+      <div className="grid gap-1.5">
+        <Label htmlFor={`${widget.id}-metric`}>Metric</Label>
+        <Select value={widget.metric} onValueChange={(v) => onChange({ metric: v as ChartMetric })}>
+          <SelectTrigger id={`${widget.id}-metric`} className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {CHART_METRICS[source].map((m) => (
+              <SelectItem key={m} value={m}>
+                {CHART_METRIC_LABEL[m]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
       </div>
     </div>
   );

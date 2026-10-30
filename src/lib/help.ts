@@ -348,6 +348,89 @@ export const HELP = {
     ],
     link: { label: "Conversion tools", to: setting("qemu-img") },
   },
+  // ---- U2: Machines (VMs, Templates, Schedules) ----
+  snapshotActions: {
+    title: "Revert and delete",
+    body: [
+      "Reverting puts the VM back as it was at the snapshot and loses what changed since; the approval offers a safety snapshot first.",
+      "Deleting a snapshot keeps its children and the VM's current state. Hover a button to see the approval it needs.",
+    ],
+  },
+  chainLimits: {
+    title: "Snapshot chain warnings",
+    body: [
+      "Each snapshot adds a level to a VM's disk chain, which slows the disk, and its files only grow until snapshots are deleted.",
+      "VMs past these limits are flagged on the Schedules page and in their Activity tab.",
+    ],
+  },
+  scheduleRetention: {
+    title: "Keeping the last snapshots",
+    body: [
+      "Retention deletes only the snapshots this schedule took, oldest first; others on the VM stay.",
+      "Deleting snapshots is High, so the schedule's approval asks for a reason and the number of VMs.",
+    ],
+  },
+  idleSuspend: {
+    title: "When a VM counts as idle",
+    body: [
+      "Measured from the dashboard's history and its live readings of the VM's own CPU.",
+      "A VM Remotely didn't watch for the whole time (closed, asleep, just started) waits until it has.",
+    ],
+  },
+  hostNetworks: {
+    title: "Host networks",
+    body: [
+      "Workstation's and VirtualBox's networks on this PC, the VMs on each, and their NAT port forwards.",
+      "Adding or removing a forward asks for approval (High): it reaches every VM on the network, and a Prod VM on it moves it up a tier.",
+    ],
+  },
+  natForwardsAdmin: {
+    title: "Forwards need administrator rights",
+    body: [
+      "Workstation keeps its NAT port forwards in a file only administrators can change, and Remotely never asks to run as administrator.",
+      "Change them in Workstation's Virtual Network Editor (Edit, Virtual Network Editor, Change Settings), or start Remotely with Run as administrator.",
+    ],
+  },
+  namingPattern: {
+    title: "Naming pattern",
+    body: [
+      "{n} is a number that skips names already taken, {template} the template's (or VM's) name and {date} today as YYYYMMDD.",
+    ],
+  },
+  cloudImages: {
+    title: "Cloud images",
+    body: [
+      "The official download pages open in your browser. Remotely downloads nothing itself: save the file, then add it as an image.",
+    ],
+  },
+  deployPreview: {
+    title: "What a deploy makes",
+    body: [
+      "Before anything is made you see each VM's name, folder, size and disk space, with this PC's room after it, and approve the deploy.",
+      "A VM that fails is removed with what it made; VMs already made stay.",
+    ],
+  },
+  containerHosts: {
+    title: "Container hosts",
+    body: [
+      "Remotely runs the host's docker or podman command over the session's SSH connection, through its jump hosts, only while you have the host open on the Containers page.",
+      "It logs in with the session's saved login: a session whose password you type in the terminal needs it saved in the vault first. Detect logs in and checks whether docker needs sudo.",
+    ],
+  },
+  alertRules: {
+    title: "Alert rules",
+    body: [
+      "Rules are checked on every metrics round. A rule fires once its condition has held for its duration, and resolves after a minute back under it.",
+      "Alerts and their history are kept on this PC only, as long as the dashboard history.",
+    ],
+  },
+  notifications: {
+    title: "Notifications",
+    body: [
+      "What notified since Remotely started: alerts, finished commands and jobs, updates. They're kept until Remotely closes.",
+      "Jobs stay in Activity, and alerts on the dashboard, after that.",
+    ],
+  },
   auditLog: {
     title: "Audit log",
     body: [

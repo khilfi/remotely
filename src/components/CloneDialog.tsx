@@ -16,6 +16,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DeployProgressView, useDeployProgress } from "@/components/DeployDialog";
 import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
@@ -26,13 +27,19 @@ import { api, errorMessage, type CloneRequest, type DeployCheck, type SubmitOutc
 import { cloneReason, DEFAULT_CLONE_PATTERN, deployReason, newVmKey, startProgress } from "@/lib/deploy";
 
 interface Props {
+  /** The VMs to clone; none: one is picked here from `choices`. */
   vms: VmRecord[];
+  /** UX-07: the VMs that can be cloned (off), when the dialog opens without any. */
+  choices?: VmRecord[];
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onClose: () => void;
 }
 
-export function CloneDialog({ vms, onSubmitted, onClose }: Props) {
+export function CloneDialog({ vms: given, choices = [], onSubmitted, onClose }: Props) {
   const readOnly = useReadOnlyReason();
+  const picking = given.length === 0;
+  const [source, setSource] = useState<string>(choices[0]?.vmxPath ?? "");
+  const vms = picking ? choices.filter((v) => v.vmxPath === source) : given;
   const [pattern, setPattern] = useState(DEFAULT_CLONE_PATTERN);
   const [folder, setFolder] = useState<string | null>(null);
   const [check, setCheck] = useState<{ key: string; check: DeployCheck } | null>(null);
@@ -112,11 +119,13 @@ export function CloneDialog({ vms, onSubmitted, onClose }: Props) {
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>{vms.length === 1 ? `Clone ${vms[0].displayName}` : `Clone ${vms.length} VMs`}</DialogTitle>
+          <DialogTitle>
+            {picking ? "Clone a VM" : vms.length === 1 ? `Clone ${vms[0].displayName}` : `Clone ${vms.length} VMs`}
+          </DialogTitle>
           <DialogDescription>
             {progress
-              ? "One step per clone. Cancel stops the job: the clone being made is removed, and clones already made stay."
-              : "A full clone of each VM as it is now, with its own CPU, memory, disks and network. Each VM must be shut down."}
+              ? "One step per clone; cancelling removes only the clone being made."
+              : "A full copy of each VM as it is now. Each VM must be shut down."}
           </DialogDescription>
         </DialogHeader>
 
@@ -124,6 +133,27 @@ export function CloneDialog({ vms, onSubmitted, onClose }: Props) {
           <DeployProgressView progress={progress} />
         ) : (
           <div className="-mx-1 grid max-h-[65vh] gap-4 overflow-x-hidden overflow-y-auto px-1">
+            {picking && (
+              <div className="grid gap-2">
+                <Label htmlFor="clone-source">VM to clone</Label>
+                {choices.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No VM is off: shut one down to clone it.</p>
+                ) : (
+                  <Select value={source} onValueChange={setSource}>
+                    <SelectTrigger id="clone-source" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {choices.map((v) => (
+                        <SelectItem key={v.vmxPath} value={v.vmxPath}>
+                          {v.displayName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+              </div>
+            )}
             <div className="grid gap-2">
               <Label htmlFor="clone-pattern">Names</Label>
               <Input
@@ -134,8 +164,8 @@ export function CloneDialog({ vms, onSubmitted, onClose }: Props) {
                 onChange={(e) => setPattern(e.currentTarget.value)}
               />
               <p className="text-xs text-muted-foreground">
-                <code>{"{template}"}</code> is each VM&apos;s name, <code>{"{n}"}</code> a number that skips names
-                already taken, <code>{"{date}"}</code> today.
+                <code>{"{template}"}</code> the VM&apos;s name, <code>{"{n}"}</code> a free number,{" "}
+                <code>{"{date}"}</code> today.
               </p>
             </div>
             <div className="grid gap-2">

@@ -28,27 +28,34 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type Mouse
 import {
   CameraIcon,
   ChevronDownIcon,
+  Columns3Icon,
   CopyIcon,
   CpuIcon,
   EllipsisIcon,
   FilePlusIcon,
   FlagIcon,
   FolderPlusIcon,
+  FolderSearchIcon,
   InfoIcon,
-  ListChecksIcon,
   MonitorOffIcon,
   NetworkIcon,
+  PauseIcon,
   PlayIcon,
+  PlusIcon,
+  PowerIcon,
   RecycleIcon,
   RocketIcon,
+  RotateCcwIcon,
   ImportIcon,
   PackageIcon,
   ShieldIcon,
   ShieldOffIcon,
+  SquareIcon,
   TagIcon,
   Trash2Icon,
   TriangleAlertIcon,
   Undo2Icon,
+  UsersIcon,
   WrenchIcon,
   XIcon,
 } from "lucide-react";
@@ -57,10 +64,10 @@ import { toast } from "sonner";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ButtonGroup } from "@/components/ui/button-group";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
@@ -73,11 +80,13 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { EnvBadge, HypervisorLabel, StateBadge, ToolsLabel } from "@/components/Badges";
+import { EnvBadge, HypervisorLabel, StateBadge } from "@/components/Badges";
+import { EmptyState } from "@/components/EmptyState";
+import { SelectionBar } from "@/components/SelectionBar";
+import { Tip } from "@/components/Tip";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostNetworksSheet } from "@/components/HostNetworksSheet";
@@ -93,7 +102,7 @@ import { ResourcesDialog } from "@/components/VmSettingsDialogs";
 import { isEmptyFilter, VmFilterBar } from "@/components/VmFilterBar";
 import { VmSessionLinks } from "@/components/VmLinkControls";
 import { useReadOnlyReason } from "@/components/Presentation";
-import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
   errorCode,
@@ -132,12 +141,23 @@ import {
   noMatchText,
   PROTECTED_REASON,
   snapshotArg,
-  summarize,
   vmsMatching,
   type SnapshotMatch,
   type VmView,
 } from "@/lib/vm-snapshots";
-import { bulkResizeReason, resizeTargets } from "@/lib/vm-settings";
+import { resizeTargets } from "@/lib/vm-settings";
+import {
+  moreGroups,
+  parseColumns,
+  powerTargets,
+  selectionPowerReason,
+  serialiseColumns,
+  stateDetail,
+  visibleColumns,
+  VM_COLUMNS,
+  type MoreItemId,
+  type VmColumnId,
+} from "@/lib/vm-page";
 import { UnassignedVmsSheet } from "@/components/UnassignedVmsSheet";
 import { noVmsHere, releaseReason } from "@/lib/workspaces";
 import { workspacesApi, type UnassignedVm } from "@/lib/workspaces-api";
@@ -188,14 +208,39 @@ interface Action {
 const ON: PowerState[] = ["running", "paused"];
 const STARTABLE: PowerState[] = ["not_running", "suspended"];
 
-const SHUT_DOWN: Action = { label: "Shut down", op: { kind: "stop", mode: "soft" }, appliesTo: ["running"] };
-const SUSPEND: Action = { label: "Suspend", op: { kind: "suspend" }, appliesTo: ["running"] };
-const POWER_OFF: Action = { label: "Power off", op: { kind: "stop", mode: "hard" }, appliesTo: ON };
-const MORE: Action[] = [
-  { label: "Pause", op: { kind: "pause" }, appliesTo: ["running"] },
-  { label: "Unpause", op: { kind: "unpause" }, appliesTo: ["paused"] },
-  { label: "Restart", op: { kind: "reset", mode: "soft" }, appliesTo: ON },
-];
+/** UX-02: the power actions of the selection bar and its More menu, by the menu's item id. */
+const POWER: Partial<Record<MoreItemId, Action & { icon: typeof PlayIcon }>> = {
+  startGui: {
+    label: "Start with a console window",
+    op: { kind: "start", gui: true },
+    appliesTo: STARTABLE,
+    icon: PlayIcon,
+  },
+  suspend: { label: "Suspend", op: { kind: "suspend" }, appliesTo: ["running"], icon: PauseIcon },
+  restart: { label: "Restart", op: { kind: "reset", mode: "soft" }, appliesTo: ON, icon: RotateCcwIcon },
+  pause: { label: "Pause", op: { kind: "pause" }, appliesTo: ["running"], icon: PauseIcon },
+  unpause: { label: "Unpause", op: { kind: "unpause" }, appliesTo: ["paused"], icon: PlayIcon },
+  powerOff: { label: "Power off", op: { kind: "stop", mode: "hard" }, appliesTo: ON, icon: PowerIcon },
+};
+
+/** UX-02: the column picker's choice, kept in this window's local storage (a per-user convenience). */
+const COLUMNS_KEY = "remotely.vms.columns";
+
+function readColumns(): Set<VmColumnId> {
+  try {
+    return parseColumns(localStorage.getItem(COLUMNS_KEY));
+  } catch {
+    return parseColumns(null);
+  }
+}
+
+function storeColumns(shown: Set<VmColumnId>) {
+  try {
+    localStorage.setItem(COLUMNS_KEY, serialiseColumns(shown));
+  } catch {
+    // Not remembered: the choice holds until the window closes.
+  }
+}
 
 /** SS-06 labels, in the order the Label menu lists them. */
 const LABELS: { value: Environment; label: string }[] = [
@@ -259,8 +304,8 @@ type Dialog =
   | { kind: "lowerProd"; vmxPaths: string[]; environment: Environment; prodNames: string[] }
   /** VM-04: selects the shown VMs that have a snapshot with this name. */
   | { kind: "snapshotName" }
-  /** VM-10: clones the selected VMs. */
-  | { kind: "clone" }
+  /** VM-10: clones these VMs (the selection's that are off), or one picked in the dialog when there are none. */
+  | { kind: "clone"; vms: VmRecord[] }
   /** VM-12: CPU and memory of the selected VMs that are off, one approval. */
   | { kind: "resize" }
   | null;
@@ -278,14 +323,14 @@ function labelName(env: Environment) {
   return LABELS.find((l) => l.value === env)?.label ?? env;
 }
 
-/** What the confirm says before Prod VMs lose the label. */
+/** What the confirm says before Prod VMs lose the label (the "?" says what Prod does). */
 function lowerProdText(prodNames: string[], environment: Environment) {
   const shown = prodNames.slice(0, 5).join(", ") + (prodNames.length > 5 ? ", …" : "");
   const who = prodNames.length === 1 ? prodNames[0] : `${prodNames.length} VMs (${shown})`;
   const change =
     environment === "none" ? "will no longer be Prod" : `will be ${labelName(environment)} instead of Prod`;
   const them = prodNames.length === 1 ? "it" : "them";
-  return `${who} ${change}. Actions on ${them} will no longer move up one approval tier, so they need fewer approval steps. The change is logged.`;
+  return `${who} ${change}: actions on ${them} will need fewer approval steps.`;
 }
 
 /** .vmx paths are matched without regard to case, as Windows does. */
@@ -293,9 +338,7 @@ const keyOf = (vmxPath: string) => vmxPath.toLowerCase();
 
 /** One column of the VM list. */
 interface Column {
-  id: string;
-  /** Left out while a VM's details are open beside the list; the details panel shows it. */
-  wide?: boolean;
+  id: "name" | VmColumnId;
   head: ReactNode;
   cell: (vm: VmRecord) => ReactNode;
   className?: string;
@@ -363,6 +406,17 @@ export function VmsPage({
   const [snapshotDialog, setSnapshotDialog] = useState<SnapshotAction | null>(null);
   // VM-08: the stack instances on this PC, read with the list.
   const [instances, setInstances] = useState<StackInstance[]>([]);
+  // UX-02: the columns the picker shows.
+  const [shownColumnIds, setShownColumnIds] = useState<Set<VmColumnId>>(readColumns);
+  function toggleColumn(id: VmColumnId) {
+    setShownColumnIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      storeColumns(next);
+      return next;
+    });
+  }
 
   useEffect(() => {
     if (!active) return;
@@ -590,7 +644,7 @@ export function VmsPage({
         setNotice(
           wanted.size > 0
             ? "That VM is no longer in the list. Refresh to ask Workstation and VirtualBox again."
-            : "Snapshots are in each VM's details: click a VM's name. To work on several VMs, select them and use the Snapshots button.",
+            : "Snapshots are on each VM's Snapshots tab: click a VM's name. For several VMs, tick them and use Snapshot.",
         );
     }
   }
@@ -683,14 +737,6 @@ export function VmsPage({
     } finally {
       setSubmitting(false);
     }
-  }
-
-  function power(action: Action) {
-    const targets = targetsFor(action.appliesTo);
-    return {
-      count: targets.length,
-      run: () => void submit({ type: "vmPower", targets: refs(targets), op: action.op }),
-    };
   }
 
   /** VM-24: a VM's own window; a stopped VirtualBox VM starts with it (a power command, shown like any other). */
@@ -791,15 +837,13 @@ export function VmsPage({
     }
   }
 
-  // VM-04: the selection's trees, read when its Snapshots menu opens; null until every one is read.
+  // VM-04: the selection's trees, read when its More menu opens or Snapshot is clicked; null until every one is read.
   const selectionTrees = selectedVms.every((v) => trees.map.has(keyOf(v.vmxPath)))
     ? selectedVms.flatMap((v) => trees.map.get(keyOf(v.vmxPath)) ?? [])
     : null;
-  const selectionSummary = selectionTrees ? summarize(selectionTrees) : null;
   const snapshotReasons = selectionError
     ? { take: selectionError, revert: selectionError, delete: selectionError }
     : bulkSnapshotReasons({ readOnly, selected: selectedVms, trees: selectionTrees, busy: submitting });
-  const snapshotMenuReason = readOnly ?? (selected.size === 0 ? "Select VMs first" : null);
   const withSnapshots = (selectionTrees ?? []).filter((t) => t.snapshots.length > 0);
 
   function readSelection() {
@@ -814,10 +858,29 @@ export function VmsPage({
     setSnapshotDialog({ kind, vms: kind === "take" ? selectionTrees : withSnapshots });
   }
 
+  /** Snapshot in the selection bar: the take dialog, once the selection's trees are read (it checks the name). */
+  async function takeSelected() {
+    setSelectionError(null);
+    try {
+      setSnapshotDialog({ kind: "take", vms: await ensureTrees(selectedVms.map((v) => v.vmxPath)) });
+    } catch (err) {
+      toast.error(`Could not read the snapshots: ${errorMessage(err)}`);
+    }
+  }
+
   const start = targetsFor(STARTABLE);
-  const shutDown = power(SHUT_DOWN);
-  const suspend = power(SUSPEND);
-  const powerOff = power(POWER_OFF);
+  const shutDown = targetsFor(["running"]);
+  const startOff = readOnly ?? selectionPowerReason(selectedVms, "start");
+  const shutDownOff = readOnly ?? selectionPowerReason(selectedVms, "shutDown");
+  const takeOff =
+    readOnly ??
+    (selectedVms.length > 0 && selectedVms.every((v) => v.protected)
+      ? selectedVms.length === 1
+        ? PROTECTED_REASON
+        : "All selected VMs are protected"
+      : submitting
+        ? "Sending the last action…"
+        : null);
   // FD-02: taking VMs out of this workspace, into Unassigned.
   const releaseOff = readOnly ?? releaseReason(selectedVms, activeWorkspaces);
   const noVms = noVmsHere(activeWorkspaces, unassigned.length);
@@ -836,16 +899,186 @@ export function VmsPage({
   const toUnprotect = selectedVms.filter((v) => v.protected);
   // VM-12, VM-15, VM-24: what the selection's settings and lifecycle actions go to.
   const resize = resizeTargets(selectedVms);
-  const resizeOff = bulkResizeReason(selectedVms, readOnly);
   const toolsTargets = selectedVms.filter((v) => v.powerState === "running" && !v.protected);
   const deletable = selectedVms.filter((v) => !v.protected && v.powerState !== "running" && v.powerState !== "paused");
+  const cloneable = selectedVms.filter((v) => v.powerState === "not_running");
   const selectedLabels = new Set(selectedVms.map((v) => v.environment));
-  // Ticked in the Label menu when every selected VM has it.
+  // Ticked in the Environment menu when every selected VM has it.
   const sharedLabel = selectedLabels.size === 1 ? [...selectedLabels][0] : "";
   const missingWorkstation = warnings.some((w) => w.code === "vmrun_not_found");
   const virtualboxTrouble = warnings.some((w) => w.code.startsWith("vboxmanage"));
   const filtered = !isEmptyFilter(filter);
   const oldAfterDays = limits?.oldAfterDays ?? 30;
+  // UX-02: More shows only what applies to the selection.
+  const more = moreGroups(selectedVms, {
+    snapshots: selectionTrees === null ? null : snapshotReasons.revert === null ? withSnapshots.length : 0,
+    canRelease: releaseOff === null,
+    canExport: onExport !== undefined && selectedVms.length === 1,
+  });
+
+  /** One item of the More menu. The count says how many of the selected VMs it goes to, when not all of them. */
+  function moreItem(id: MoreItemId, count: number): ReactNode {
+    const n = count > 0 && count < selectedVms.length ? <DropdownMenuShortcut>{count}</DropdownMenuShortcut> : null;
+    const action = POWER[id];
+    if (action) {
+      const Icon = action.icon;
+      return (
+        <DropdownMenuItem
+          key={id}
+          variant={id === "powerOff" ? "destructive" : undefined}
+          onSelect={() =>
+            void submit({
+              type: "vmPower",
+              targets: refs(powerTargets(selectedVms, action.appliesTo)),
+              op: action.op,
+            })
+          }
+        >
+          <Icon />
+          {action.label}
+          {n}
+        </DropdownMenuItem>
+      );
+    }
+    switch (id) {
+      case "revert":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => openBulk("revert")}>
+            <Undo2Icon />
+            Revert to a snapshot…
+            {n}
+          </DropdownMenuItem>
+        );
+      case "deleteSnapshot":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => openBulk("delete")}>
+            <Trash2Icon />
+            Delete a snapshot…
+            {n}
+          </DropdownMenuItem>
+        );
+      case "resize":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => setDialog({ kind: "resize" })}>
+            <CpuIcon />
+            Resize CPU and memory…
+            {n}
+          </DropdownMenuItem>
+        );
+      case "tools":
+        return (
+          <DropdownMenuItem
+            key={id}
+            onSelect={() =>
+              void submit({ type: "vmDevice", targets: refs(toolsTargets), op: { kind: "installTools" } })
+            }
+          >
+            <WrenchIcon />
+            Install or upgrade guest tools
+            {n}
+          </DropdownMenuItem>
+        );
+      case "clone":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => setDialog({ kind: "clone", vms: cloneable })}>
+            <CopyIcon />
+            Clone…
+            {n}
+          </DropdownMenuItem>
+        );
+      case "export":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => selectedVms[0] && onExport?.(selectedVms[0].vmxPath)}>
+            <PackageIcon />
+            Export…
+          </DropdownMenuItem>
+        );
+      case "delete":
+        return (
+          <DropdownMenuItem
+            key={id}
+            variant="destructive"
+            onSelect={() => void submit({ type: "vmLifecycle", targets: refs(deletable), op: { kind: "delete" } })}
+          >
+            <Trash2Icon />
+            Delete with their files…
+            {n}
+          </DropdownMenuItem>
+        );
+      case "addTag":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => setDialog({ kind: "addTag" })}>
+            <TagIcon />
+            Add a tag…
+          </DropdownMenuItem>
+        );
+      case "removeTag":
+        return (
+          <DropdownMenuSub key={id}>
+            <DropdownMenuSubTrigger>
+              <TagIcon />
+              Remove a tag
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {selectedTags.map((t) => (
+                <DropdownMenuItem key={t} onSelect={() => void untag(t)}>
+                  {t}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        );
+      case "environment":
+        return (
+          <DropdownMenuSub key={id}>
+            <DropdownMenuSubTrigger>
+              <FlagIcon />
+              Environment
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-44">
+              <DropdownMenuRadioGroup value={sharedLabel} onValueChange={(v) => chooseLabel(v as Environment)}>
+                {LABELS.map((l) => (
+                  <DropdownMenuRadioItem key={l.value} value={l.value}>
+                    {l.label}
+                  </DropdownMenuRadioItem>
+                ))}
+              </DropdownMenuRadioGroup>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        );
+      case "protect":
+        return (
+          <DropdownMenuItem
+            key={id}
+            onSelect={() => void submit({ type: "vmProtect", targets: refs(toProtect), protected: true })}
+          >
+            <ShieldIcon />
+            Mark as Protected
+            {n}
+          </DropdownMenuItem>
+        );
+      case "unprotect":
+        return (
+          <DropdownMenuItem
+            key={id}
+            onSelect={() => void submit({ type: "vmProtect", targets: refs(toUnprotect), protected: false })}
+          >
+            <ShieldOffIcon />
+            Remove Protected
+            {n}
+          </DropdownMenuItem>
+        );
+      case "release":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => void release()}>
+            <UsersIcon />
+            Take out of this workspace
+          </DropdownMenuItem>
+        );
+      default:
+        return null;
+    }
+  }
 
   const sortHead = (key: SortKey, label: string, className?: string, hint?: string) => (
     <SortableHead
@@ -858,43 +1091,49 @@ export function VmsPage({
     />
   );
 
-  // The list's columns, in order.
-  const columns: Column[] = [
+  // The list's columns, in order: Name, then the ones the picker shows (UX-02).
+  const allColumns: Column[] = [
     {
       id: "name",
-      head: sortHead("name", "Name", "min-w-48"),
+      head: sortHead("name", "Name", "min-w-40"),
       cell: (vm) => (
-        <>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <button
-              type="button"
-              className="rounded-sm text-left font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-              title="Show its details and snapshots"
-              aria-expanded={detail === vm.vmxPath}
-              aria-controls={detail === vm.vmxPath ? "vm-details" : undefined}
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleDetails(vm.vmxPath);
-              }}
-            >
-              {vm.displayName}
-            </button>
-            {vm.protected && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
-                </TooltipTrigger>
-                <TooltipContent>{PROTECTED_REASON}</TooltipContent>
-              </Tooltip>
-            )}
-            {vm.tags.map((t) => (
-              <Badge key={t} variant="secondary" className="font-normal">
-                {t}
-              </Badge>
-            ))}
-          </div>
-          <div className="font-mono text-xs break-all whitespace-normal text-muted-foreground">{vmLocation(vm)}</div>
-        </>
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className="rounded-sm text-left font-medium underline-offset-4 hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                aria-expanded={detail === vm.vmxPath}
+                aria-controls={detail === vm.vmxPath ? "vm-details" : undefined}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  toggleDetails(vm.vmxPath);
+                }}
+              >
+                {vm.displayName}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent className="max-w-md font-mono text-xs break-all">{vmLocation(vm)}</TooltipContent>
+          </Tooltip>
+          {vm.protected && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <ShieldIcon className="size-3.5 text-tier-high" aria-label="Protected" />
+              </TooltipTrigger>
+              <TooltipContent>{PROTECTED_REASON}</TooltipContent>
+            </Tooltip>
+          )}
+          {vm.tags.slice(0, 2).map((t) => (
+            <Badge key={t} variant="secondary" className="font-normal">
+              {t}
+            </Badge>
+          ))}
+          {vm.tags.length > 2 && (
+            <Badge variant="secondary" className="font-normal" title={vm.tags.join(", ")}>
+              +{vm.tags.length - 2}
+            </Badge>
+          )}
+        </div>
       ),
     },
     {
@@ -904,20 +1143,26 @@ export function VmsPage({
     },
     {
       id: "guestOs",
-      wide: true,
       head: <TableHead>Guest OS</TableHead>,
-      cell: (vm) => vm.guestOsName ?? vm.guestOs ?? <span className="text-muted-foreground">—</span>,
+      cell: (vm) => {
+        const os = vm.guestOsName ?? vm.guestOs;
+        return os ? (
+          <span className="block max-w-44 truncate" title={os}>
+            {os}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        );
+      },
     },
     {
       id: "vcpus",
-      wide: true,
       head: sortHead("vcpus", "vCPU", "text-right"),
       className: "text-right tabular-nums",
       cell: (vm) => vm.numVcpus ?? "—",
     },
     {
       id: "ram",
-      wide: true,
       head: sortHead("ram", "RAM", "text-right"),
       className: "text-right tabular-nums",
       cell: (vm) => formatRam(vm.memsizeMb),
@@ -933,11 +1178,29 @@ export function VmsPage({
           <span className="font-sans text-muted-foreground">—</span>
         ),
     },
-    { id: "tools", wide: true, head: <TableHead>Tools</TableHead>, cell: (vm) => <ToolsLabel state={vm.toolsState} /> },
-    { id: "state", head: sortHead("state", "State"), cell: (vm) => <StateBadge state={vm.powerState} /> },
+    {
+      id: "state",
+      head: sortHead("state", "State"),
+      cell: (vm) => {
+        const state = stateDetail(vm);
+        return (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="inline-flex items-center gap-1">
+                <StateBadge state={vm.powerState} />
+                {state.toolsWarning && (
+                  <TriangleAlertIcon className="size-3.5 text-tier-medium" role="img" aria-label={state.text} />
+                )}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>{state.text}</TooltipContent>
+          </Tooltip>
+        );
+      },
+    },
     {
       id: "hostCpu",
-      head: sortHead("hostCpu", "% of host CPU", "w-24 whitespace-normal", HOST_SHARE_HINT.cpu),
+      head: sortHead("hostCpu", "Host CPU", undefined, HOST_SHARE_HINT.cpu),
       cell: (vm) => {
         const pct = usageOf(vm)?.hostCpuPct ?? null;
         return (
@@ -953,7 +1216,7 @@ export function VmsPage({
     },
     {
       id: "hostMem",
-      head: sortHead("hostMem", "% of host RAM", "w-24 whitespace-normal", HOST_SHARE_HINT.memory),
+      head: sortHead("hostMem", "Host RAM", undefined, HOST_SHARE_HINT.memory),
       cell: (vm) => {
         const pct = usageOf(vm)?.hostMemPct ?? null;
         return (
@@ -973,400 +1236,164 @@ export function VmsPage({
       ownClicks: true,
       cell: (vm) => <VmSessionLinks vm={vm} sessions={sessions} onChanged={linksChanged} />,
     },
-    { id: "label", head: sortHead("label", "Environment"), cell: (vm) => <EnvBadge env={vm.environment} /> },
+    { id: "environment", head: sortHead("label", "Environment"), cell: (vm) => <EnvBadge env={vm.environment} /> },
   ];
-  const shownColumns = detailOpen ? columns.filter((c) => !c.wide) : columns;
+  const columns: Column[] = [
+    allColumns[0],
+    ...visibleColumns(shownColumnIds, detailOpen).flatMap((id) => allColumns.filter((c) => c.id === id)),
+  ];
+  const shownColumns = columns;
 
-  return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
-      <PageHeader page="vms" />
-      <div className="flex flex-wrap items-center gap-2">
-        <RefreshButton variant="outline" size="icon" busy={loading} onClick={() => setRefreshes((n) => n + 1)} />
-        <WhyDisabled reason={readOnly}>
-          <Button
-            variant="outline"
-            disabled={readOnly !== null}
-            title="A Workstation .vmx or a VirtualBox .vbox already on this PC"
-            onClick={() => void addExisting()}
-          >
-            <FilePlusIcon data-icon="inline-start" />
-            Add VM…
+  /** UX-02: the primary, New VM ▾: every way to make or add a VM. */
+  const newVm = (
+    <DropdownMenu>
+      <WhyDisabled reason={readOnly}>
+        <DropdownMenuTrigger asChild>
+          <Button disabled={readOnly !== null}>
+            <PlusIcon data-icon="inline-start" />
+            New VM
+            <ChevronDownIcon data-icon="inline-end" />
           </Button>
-        </WhyDisabled>
-        {/* VM-21: new VMs from a launch template or Custom (the Deploy dialog). */}
-        <WhyDisabled reason={readOnly}>
-          <Button variant="outline" disabled={readOnly !== null} onClick={onDeploy}>
-            <RocketIcon data-icon="inline-start" />
-            Deploy
-          </Button>
-        </WhyDisabled>
+        </DropdownMenuTrigger>
+      </WhyDisabled>
+      <DropdownMenuContent align="end" className="w-60">
+        {/* VM-21: from a launch template or Custom. */}
+        <DropdownMenuItem onSelect={onDeploy}>
+          <RocketIcon />
+          Deploy…
+        </DropdownMenuItem>
+        {/* VM-10: a full clone of a VM that is off. */}
+        <DropdownMenuItem onSelect={() => setDialog({ kind: "clone", vms: cloneable })}>
+          <CopyIcon />
+          Clone…
+        </DropdownMenuItem>
         {/* CV-01: a foreign VM or disk (OVA, VHD/VHDX, qcow2, raw, libvirt, Proxmox) as a new VM. */}
         {onImport && (
-          <WhyDisabled reason={readOnly}>
-            <Button variant="outline" disabled={readOnly !== null} onClick={() => onImport()}>
-              <ImportIcon data-icon="inline-start" />
-              Import…
-            </Button>
-          </WhyDisabled>
+          <DropdownMenuItem onSelect={() => onImport()}>
+            <ImportIcon />
+            Import…
+          </DropdownMenuItem>
         )}
-        {/* FD-02: VMs no workspace has yet; adding them is this page's own action. */}
-        {unassigned.length > 0 && (
-          <Button variant="outline" onClick={() => setUnassignedOpen(true)}>
-            Unassigned
-            <span className="text-muted-foreground">{unassigned.length}</span>
-          </Button>
-        )}
-        {/* VM-11, VM-16: reads; their actions go through the bus. */}
-        <Button
-          variant="outline"
-          title="Workstation's and VirtualBox's networks and NAT port forwards"
-          onClick={() => setPanel("networks")}
-        >
-          <NetworkIcon data-icon="inline-start" />
-          Networks
-        </Button>
-        <Button
-          variant="outline"
-          title="Idle and suspended VMs, long snapshot chains, VM files no VM uses"
-          onClick={() => setPanel("waste")}
-        >
-          <RecycleIcon data-icon="inline-start" />
-          Waste finder
-        </Button>
-        <VmFilterBar
-          filter={filter}
-          onChange={setFilter}
-          tags={tags}
-          savedFilters={savedFilters}
-          onApplySaved={(saved) => void selectMatching(saved.filter)}
-          onSaveCurrent={() => setDialog({ kind: "saveFilter" })}
-          onDeleteSaved={(saved) => void deleteSaved(saved)}
-        />
-        <span className="ml-auto text-sm text-muted-foreground">
-          {filtered ? `${vms.length} of ${plural(total.vms, "VM")}` : plural(total.vms, "VM")} · {total.running} running
-        </span>
-      </div>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => void addExisting()}>
+          <FilePlusIcon />
+          Add an existing VM…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 
-      <div className="flex flex-wrap items-center gap-2">
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline">
-              <ListChecksIcon data-icon="inline-start" />
-              Select
-              <ChevronDownIcon data-icon="inline-end" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-64">
-            <DropdownMenuItem
-              disabled={vms.length === 0}
-              onSelect={() => setSelected(new Set(vms.map((v) => v.vmxPath)))}
-            >
-              All shown
-              <DropdownMenuShortcut>{vms.length}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuItem disabled={selected.size === 0} onSelect={() => setSelected(new Set())}>
-              None
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={tags.length === 0}>By tag</DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {tags.map((t) => (
-                  <DropdownMenuItem key={t.id} onSelect={() => void selectMatching({ tags: [t.name] })}>
-                    {t.name}
-                    <DropdownMenuShortcut>{t.vmCount}</DropdownMenuShortcut>
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={savedFilters.length === 0}>By saved filter</DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {savedFilters.map((f) => (
-                  <DropdownMenuItem key={f.id} onSelect={() => void selectMatching(f.filter)}>
-                    {f.name}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={vms.length === 0}>By snapshots</DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-64">
-                <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
-                  Reads the snapshots of the VMs shown
-                </DropdownMenuLabel>
-                <DropdownMenuItem onSelect={() => pickBySnapshots({ kind: "old" })}>
-                  With snapshots older than {oldAfterDays} days
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => pickBySnapshots({ kind: "safety" })}>
-                  With safety snapshots
-                </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => setDialog({ kind: "snapshotName" })}>
-                  With a snapshot named…
-                </DropdownMenuItem>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <span className="mr-2 text-sm text-muted-foreground">{selected.size} selected</span>
+  /** UX-01: Tools ▾, the page's views (VM-11, VM-16, FD-02); their actions go through the bus. */
+  const tools = (
+    <>
+      <DropdownMenuItem onSelect={() => setPanel("networks")}>
+        <NetworkIcon />
+        Networks
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => setPanel("waste")}>
+        <RecycleIcon />
+        Waste finder
+      </DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => setUnassignedOpen(true)}>
+        <UsersIcon />
+        Unassigned VMs
+        {unassigned.length > 0 && <DropdownMenuShortcut>{unassigned.length}</DropdownMenuShortcut>}
+      </DropdownMenuItem>
+      <DropdownMenuSeparator />
+      <DropdownMenuItem onSelect={onOpenSettings}>
+        <FolderSearchIcon />
+        Where VMs are found…
+      </DropdownMenuItem>
+    </>
+  );
 
-        <WhyDisabled reason={readOnly}>
-          <ButtonGroup>
-            <Button
-              variant="outline"
-              disabled={start.length === 0 || submitting || readOnly !== null}
-              onClick={() => void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: false } })}
-            >
-              <PlayIcon data-icon="inline-start" />
-              Start
-            </Button>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="outline"
-                  size="icon"
-                  aria-label="More ways to start"
-                  disabled={start.length === 0 || submitting || readOnly !== null}
-                >
-                  <ChevronDownIcon />
-                </Button>
-              </DropdownMenuTrigger>
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-3">
+      <PageHeader page="vms" primary={newVm} tools={tools} toolsLabel="Tools">
+        {selectedVms.length > 0 ? (
+          <SelectionBar count={selectedVms.length} onClear={() => setSelected(new Set())}>
+            <WhyDisabled reason={startOff}>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={startOff !== null || submitting}
+                onClick={() =>
+                  void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: false } })
+                }
+              >
+                <PlayIcon data-icon="inline-start" />
+                Start
+              </Button>
+            </WhyDisabled>
+            <WhyDisabled reason={shutDownOff}>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={shutDownOff !== null || submitting}
+                onClick={() =>
+                  void submit({ type: "vmPower", targets: refs(shutDown), op: { kind: "stop", mode: "soft" } })
+                }
+              >
+                <SquareIcon data-icon="inline-start" />
+                Shut down
+              </Button>
+            </WhyDisabled>
+            {/* VM-04: a snapshot of each selected VM; revert and delete are under More. */}
+            <WhyDisabled reason={takeOff}>
+              <Button variant="ghost" size="sm" disabled={takeOff !== null} onClick={() => void takeSelected()}>
+                <CameraIcon data-icon="inline-start" />
+                Snapshot
+              </Button>
+            </WhyDisabled>
+            <DropdownMenu onOpenChange={(open) => open && readSelection()}>
+              <WhyDisabled reason={readOnly}>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="sm" disabled={readOnly !== null || submitting}>
+                    <EllipsisIcon data-icon="inline-start" />
+                    More
+                  </Button>
+                </DropdownMenuTrigger>
+              </WhyDisabled>
               <DropdownMenuContent align="start" className="w-64">
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: false } })
-                  }
-                >
-                  Start in the background
-                  <DropdownMenuShortcut>{start.length}</DropdownMenuShortcut>
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void submit({ type: "vmPower", targets: refs(start), op: { kind: "start", gui: true } })
-                  }
-                >
-                  Start with a console window
-                  <DropdownMenuShortcut>{start.length}</DropdownMenuShortcut>
-                </DropdownMenuItem>
+                {more.map((group, g) => (
+                  <Fragment key={group.label}>
+                    {g > 0 && <DropdownMenuSeparator />}
+                    <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                      {group.label}
+                    </DropdownMenuLabel>
+                    {group.items.map((item) => moreItem(item.id, item.count))}
+                    {group.label === "Power" && selectionTrees === null && (
+                      <>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+                          {selectionError ?? "Reading their snapshots…"}
+                        </DropdownMenuLabel>
+                      </>
+                    )}
+                  </Fragment>
+                ))}
               </DropdownMenuContent>
             </DropdownMenu>
-          </ButtonGroup>
-        </WhyDisabled>
-        <WhyDisabled reason={readOnly}>
-          <Button
-            variant="outline"
-            disabled={shutDown.count === 0 || submitting || readOnly !== null}
-            onClick={shutDown.run}
-          >
-            {SHUT_DOWN.label}
-          </Button>
-        </WhyDisabled>
-        <WhyDisabled reason={readOnly}>
-          <Button
-            variant="outline"
-            disabled={suspend.count === 0 || submitting || readOnly !== null}
-            onClick={suspend.run}
-          >
-            {SUSPEND.label}
-          </Button>
-        </WhyDisabled>
-        <WhyDisabled reason={readOnly}>
-          <Button
-            variant="destructive"
-            disabled={powerOff.count === 0 || submitting || readOnly !== null}
-            onClick={powerOff.run}
-          >
-            {POWER_OFF.label}
-          </Button>
-        </WhyDisabled>
-
-        {/* VM-04: snapshots of the selection. The trees are read when the menu opens. */}
-        <DropdownMenu onOpenChange={(open) => open && readSelection()}>
-          <WhyDisabled reason={snapshotMenuReason}>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" disabled={snapshotMenuReason !== null}>
-                <CameraIcon data-icon="inline-start" />
-                Snapshots
-                <ChevronDownIcon data-icon="inline-end" />
-              </Button>
-            </DropdownMenuTrigger>
-          </WhyDisabled>
-          <DropdownMenuContent align="start" className="w-72">
-            <DropdownMenuLabel>
-              Snapshots of {plural(selectedVms.length, "selected VM")}
-              <span className="block text-xs font-normal text-muted-foreground">
-                {selectionError ??
-                  (selectionSummary
-                    ? `${plural(selectionSummary.snapshots, "snapshot")}` +
-                      (selectionSummary.old > 0 ? ` · ${selectionSummary.old} older than ${oldAfterDays} days` : "") +
-                      (selectionSummary.safety > 0 ? ` · ${selectionSummary.safety} safety` : "")
-                    : "Reading their snapshots…")}
-              </span>
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={snapshotReasons.take !== null} onSelect={() => openBulk("take")}>
-              <CameraIcon />
-              <span>
-                Take a snapshot…
-                <ReasonLine reason={snapshotReasons.take} />
-              </span>
-              <DropdownMenuShortcut>{selectedVms.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuItem disabled={snapshotReasons.revert !== null} onSelect={() => openBulk("revert")}>
-              <Undo2Icon />
-              <span>
-                Revert to a snapshot…
-                <ReasonLine reason={snapshotReasons.revert} />
-              </span>
-              <DropdownMenuShortcut>{withSnapshots.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuItem disabled={snapshotReasons.delete !== null} onSelect={() => openBulk("delete")}>
-              <Trash2Icon />
-              <span>
-                Delete a snapshot…
-                <ReasonLine reason={snapshotReasons.delete} />
-              </span>
-              <DropdownMenuShortcut>{withSnapshots.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" disabled={selected.size === 0 || submitting || readOnly !== null}>
-              <EllipsisIcon data-icon="inline-start" />
-              More
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-56">
-            {MORE.map((a) => {
-              const { count, run } = power(a);
-              return (
-                <DropdownMenuItem key={a.label} disabled={count === 0} onSelect={run}>
-                  {a.label}
-                  <DropdownMenuShortcut>{count || ""}</DropdownMenuShortcut>
-                </DropdownMenuItem>
-              );
-            })}
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Settings</DropdownMenuLabel>
-            <DropdownMenuItem disabled={resizeOff !== null} onSelect={() => setDialog({ kind: "resize" })}>
-              <CpuIcon />
-              <div>
-                Resize CPU and memory…
-                <ReasonLine reason={resizeOff} />
-              </div>
-              <DropdownMenuShortcut>{resize.targets.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={toolsTargets.length === 0}
-              onSelect={() =>
-                void submit({ type: "vmDevice", targets: refs(toolsTargets), op: { kind: "installTools" } })
-              }
-            >
-              <WrenchIcon />
-              <div>
-                Install or upgrade guest tools
-                <ReasonLine reason={toolsTargets.length === 0 ? "None of the selected VMs is running" : null} />
-              </div>
-              <DropdownMenuShortcut>{toolsTargets.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              variant="destructive"
-              disabled={deletable.length === 0}
-              onSelect={() => void submit({ type: "vmLifecycle", targets: refs(deletable), op: { kind: "delete" } })}
-            >
-              <Trash2Icon />
-              <div>
-                Delete with their files…
-                <ReasonLine
-                  reason={deletable.length === 0 ? "Shut the VMs down first; protected VMs are left alone" : null}
-                />
-              </div>
-              <DropdownMenuShortcut>{deletable.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            {/* VM-10: a full clone of each selected VM, as one job. */}
-            <DropdownMenuItem onSelect={() => setDialog({ kind: "clone" })}>
-              <CopyIcon />
-              Clone…
-              <DropdownMenuShortcut>{selectedVms.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            {/* VM-17, CV-02: one VM exported for another hypervisor or a cloud. */}
-            {onExport && (
-              <DropdownMenuItem
-                disabled={selectedVms.length !== 1}
-                onSelect={() => selectedVms[0] && onExport(selectedVms[0].vmxPath)}
-              >
-                <PackageIcon />
-                <div>
-                  Export…
-                  <ReasonLine reason={selectedVms.length !== 1 ? "Select one VM to export" : null} />
-                </div>
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuSeparator />
-            <DropdownMenuLabel>Tags</DropdownMenuLabel>
-            <DropdownMenuItem onSelect={() => setDialog({ kind: "addTag" })}>
-              <TagIcon />
-              Add a tag…
-            </DropdownMenuItem>
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={selectedTags.length === 0}>Remove a tag</DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {selectedTags.map((t) => (
-                  <DropdownMenuItem key={t} onSelect={() => void untag(t)}>
-                    {t}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-            <DropdownMenuSeparator />
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger>
-                <FlagIcon />
-                Environment
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent className="w-44">
-                <DropdownMenuRadioGroup value={sharedLabel} onValueChange={(v) => chooseLabel(v as Environment)}>
-                  {LABELS.map((l) => {
-                    const changes = selectedVms.filter((v) => v.environment !== l.value).length;
-                    return (
-                      <DropdownMenuRadioItem key={l.value} value={l.value}>
-                        {l.label}
-                        <DropdownMenuShortcut>{changes || ""}</DropdownMenuShortcut>
-                      </DropdownMenuRadioItem>
-                    );
-                  })}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={releaseOff !== null} onSelect={() => void release()}>
-              <div className="grid">
-                Take out of this workspace
-                <ReasonLine reason={releaseOff} />
-              </div>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              disabled={toProtect.length === 0}
-              onSelect={() => void submit({ type: "vmProtect", targets: refs(toProtect), protected: true })}
-            >
-              <ShieldIcon />
-              Mark as Protected
-              <DropdownMenuShortcut>{toProtect.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={toUnprotect.length === 0}
-              onSelect={() => void submit({ type: "vmProtect", targets: refs(toUnprotect), protected: false })}
-            >
-              <ShieldOffIcon />
-              Remove Protected
-              <DropdownMenuShortcut>{toUnprotect.length || ""}</DropdownMenuShortcut>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
+          </SelectionBar>
+        ) : (
+          <>
+            <VmFilterBar
+              filter={filter}
+              onChange={setFilter}
+              tags={tags}
+              savedFilters={savedFilters}
+              onApplySaved={(saved) => void selectMatching(saved.filter)}
+              onSaveCurrent={() => setDialog({ kind: "saveFilter" })}
+              onDeleteSaved={(saved) => void deleteSaved(saved)}
+            />
+            <span className="ml-auto text-sm whitespace-nowrap text-muted-foreground">
+              {filtered ? `${vms.length} of ${plural(total.vms, "VM")}` : plural(total.vms, "VM")} · {total.running}{" "}
+              running
+            </span>
+            <RefreshButton busy={loading} onClick={() => setRefreshes((n) => n + 1)} />
+          </>
+        )}
+      </PageHeader>
 
       {notice && (
         <Alert>
@@ -1414,34 +1441,45 @@ export function VmsPage({
       )}
 
       {!error && !loading && total.vms === 0 && (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <MonitorOffIcon />
-            </EmptyMedia>
-            <EmptyTitle>{noVms?.title ?? "No VMs found"}</EmptyTitle>
-            <EmptyDescription>
-              {noVms?.description ?? (
-                <>
-                  Remotely lists the VMs in VMware Workstation&apos;s library and in folders you choose, and the VMs
-                  registered in Oracle VirtualBox. Open a VM in Workstation once, add the folder that holds your VMs, or
-                  register the VM in VirtualBox.
-                </>
-              )}
-            </EmptyDescription>
-          </EmptyHeader>
-          <EmptyContent className="flex-row justify-center">
-            {unassigned.length > 0 && <Button onClick={() => setUnassignedOpen(true)}>Unassigned VMs</Button>}
-            <Button variant="outline" onClick={onOpenSettings}>
-              <FolderPlusIcon data-icon="inline-start" />
-              Add a VM folder
-            </Button>
-          </EmptyContent>
-        </Empty>
+        <EmptyState
+          icon={MonitorOffIcon}
+          title={noVms?.title ?? "No VMs found"}
+          description={
+            noVms?.description ?? "Remotely lists Workstation's library, the folders you add, and VirtualBox's VMs."
+          }
+          help="page.vms"
+          action={
+            unassigned.length > 0 ? (
+              <Button onClick={() => setUnassignedOpen(true)}>
+                <UsersIcon data-icon="inline-start" />
+                Show unassigned VMs
+              </Button>
+            ) : (
+              <Button onClick={onOpenSettings}>
+                <FolderPlusIcon data-icon="inline-start" />
+                Add a VM folder
+              </Button>
+            )
+          }
+        />
       )}
 
       {total.vms > 0 && vms.length === 0 && filtered && (
-        <p className="text-sm text-muted-foreground">No VMs match the filter.</p>
+        <EmptyState
+          title="No VMs match the filter"
+          action={
+            <Button variant="outline" onClick={() => setFilter({})}>
+              <XIcon data-icon="inline-start" />
+              Clear the filter
+            </Button>
+          }
+        />
+      )}
+
+      {hasRows && (
+        <Tip id="vms.selection">
+          Tick VMs to act on several at once, Shift+click for a range; click a VM&apos;s name for its details.
+        </Tip>
       )}
 
       {hasRows && (
@@ -1451,18 +1489,31 @@ export function VmsPage({
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead className="w-10">
-                      <Checkbox
-                        aria-label="Select all shown VMs"
-                        checked={allSelected ? true : selected.size > 0 ? "indeterminate" : false}
-                        onCheckedChange={() =>
-                          setSelected(allSelected ? new Set() : new Set(vms.map((v) => v.vmxPath)))
-                        }
-                      />
+                    <TableHead className="w-14">
+                      <span className="flex items-center">
+                        <Checkbox
+                          aria-label="Select all shown VMs"
+                          checked={allSelected ? true : selected.size > 0 ? "indeterminate" : false}
+                          onCheckedChange={() =>
+                            setSelected(allSelected ? new Set() : new Set(vms.map((v) => v.vmxPath)))
+                          }
+                        />
+                        <SelectMenu
+                          vms={vms.length}
+                          tags={tags}
+                          oldAfterDays={oldAfterDays}
+                          onSelectTag={(tag) => void selectMatching({ tags: [tag] })}
+                          onSnapshots={pickBySnapshots}
+                          onNamed={() => setDialog({ kind: "snapshotName" })}
+                        />
+                      </span>
                     </TableHead>
                     {shownColumns.map((c) => (
                       <Fragment key={c.id}>{c.head}</Fragment>
                     ))}
+                    <TableHead className="w-10 text-right">
+                      <ColumnPicker shown={shownColumnIds} onToggle={toggleColumn} />
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -1474,14 +1525,14 @@ export function VmsPage({
                         {group.instance && (
                           <StackGroupRow
                             instance={group.instance}
-                            colSpan={shownColumns.length + 1}
+                            colSpan={shownColumns.length + 2}
                             readOnly={readOnly}
                             onSubmitted={onSubmitted}
                           />
                         )}
                         {!group.instance && groups.length > 1 && (
                           <TableRow className="hover:bg-transparent">
-                            <TableCell colSpan={shownColumns.length + 1} className="py-1 text-xs text-muted-foreground">
+                            <TableCell colSpan={shownColumns.length + 2} className="py-1 text-xs text-muted-foreground">
                               Not in a stack
                             </TableCell>
                           </TableRow>
@@ -1512,6 +1563,7 @@ export function VmsPage({
                                   {c.cell(vm)}
                                 </TableCell>
                               ))}
+                              <TableCell />
                             </TableRow>
                           );
                         })}
@@ -1579,13 +1631,6 @@ export function VmsPage({
         </ResizablePanelGroup>
       )}
 
-      {hasRows && (
-        <p className="text-xs text-muted-foreground">
-          Click a row to select it, Shift+click to select a range. Click a VM&apos;s name for its details and snapshots;
-          the Snapshots button works on the selection.
-        </p>
-      )}
-
       <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
       <UnassignedVmsSheet
         open={unassignedOpen}
@@ -1623,7 +1668,7 @@ export function VmsPage({
       {dialog?.kind === "addTag" && (
         <NameDialog
           title={`Tag ${plural(selectedVms.length, "VM")}`}
-          description="Tags are Remotely's own labels for picking VMs. They do not change the VMs."
+          description="Remotely's own labels for finding and picking VMs; the VMs don't change."
           label="Tag"
           submitLabel="Add tag"
           suggestions={tags.map((t) => t.name)}
@@ -1639,8 +1684,8 @@ export function VmsPage({
       )}
       {dialog?.kind === "saveFilter" && (
         <NameDialog
-          title="Save the current filter"
-          description="Pick it later from Saved filters to show and select the VMs it matches. Saving under an existing name replaces that filter."
+          title="Save this filter"
+          description="It shows in the Filter menu; a name in use replaces that filter."
           label="Name"
           submitLabel="Save"
           suggestions={savedFilters.map((f) => f.name)}
@@ -1654,7 +1699,7 @@ export function VmsPage({
       {dialog?.kind === "snapshotName" && (
         <NameDialog
           title="Select VMs by snapshot name"
-          description={`Of the ${plural(vms.length, "VM")} shown, selects the ones with a snapshot whose name contains this text, in any letter case. Their snapshot lists are read first.`}
+          description="Selects the VMs shown that have a snapshot whose name contains this text."
           label="Snapshot name, or part of it"
           submitLabel="Select"
           maxLength={limits?.maxNameLength ?? 80}
@@ -1672,7 +1717,12 @@ export function VmsPage({
         />
       )}
       {dialog?.kind === "clone" && (
-        <CloneDialog vms={selectedVms} onSubmitted={onSubmitted} onClose={() => setDialog(null)} />
+        <CloneDialog
+          vms={dialog.vms}
+          choices={listed.filter((v) => v.powerState === "not_running")}
+          onSubmitted={onSubmitted}
+          onClose={() => setDialog(null)}
+        />
       )}
       {dialog?.kind === "lowerProd" && (
         <ConfirmDialog
@@ -1684,5 +1734,98 @@ export function VmsPage({
         />
       )}
     </div>
+  );
+}
+
+/** UX-02: beside the select-all box, ways to select by tag or by snapshots (VM-02, VM-04). */
+function SelectMenu({
+  vms,
+  tags,
+  oldAfterDays,
+  onSelectTag,
+  onSnapshots,
+  onNamed,
+}: {
+  vms: number;
+  tags: { id: string; name: string; vmCount: number }[];
+  oldAfterDays: number;
+  onSelectTag: (tag: string) => void;
+  onSnapshots: (match: SnapshotMatch) => void;
+  onNamed: () => void;
+}) {
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-xs" aria-label="Select by…" disabled={vms === 0}>
+              <ChevronDownIcon />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Select by tag or snapshots</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="start" className="w-64">
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger disabled={tags.length === 0}>
+            <TagIcon />
+            With a tag
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            {tags.map((t) => (
+              <DropdownMenuItem key={t.id} onSelect={() => onSelectTag(t.name)}>
+                {t.name}
+                <DropdownMenuShortcut>{t.vmCount}</DropdownMenuShortcut>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Of the VMs shown</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => onSnapshots({ kind: "old" })}>
+          <CameraIcon />
+          With snapshots older than {oldAfterDays} days
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onSnapshots({ kind: "safety" })}>
+          <CameraIcon />
+          With safety snapshots
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onNamed}>
+          <CameraIcon />
+          With a snapshot named…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** UX-02: which columns the list shows; Name always does. */
+function ColumnPicker({ shown, onToggle }: { shown: Set<VmColumnId>; onToggle: (id: VmColumnId) => void }) {
+  return (
+    <DropdownMenu>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <DropdownMenuTrigger asChild>
+            <Button variant="ghost" size="icon-xs" aria-label="Columns">
+              <Columns3Icon />
+            </Button>
+          </DropdownMenuTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Columns</TooltipContent>
+      </Tooltip>
+      <DropdownMenuContent align="end" className="w-48">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">Columns</DropdownMenuLabel>
+        {VM_COLUMNS.map((c) => (
+          <DropdownMenuCheckboxItem
+            key={c.id}
+            checked={shown.has(c.id)}
+            onCheckedChange={() => onToggle(c.id)}
+            onSelect={(e) => e.preventDefault()}
+          >
+            {c.label}
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
