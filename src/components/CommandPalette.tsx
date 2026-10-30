@@ -8,6 +8,10 @@
 // templates, sizes, images, commands and settings), with the pages and actions here, by name, IP or tag. Results are
 // ranked (lib/search.ts) and grouped, the best group first, so Enter takes the best match. Each provider reads what
 // the app already has, once per opening.
+//
+// UX-03, UX-07 (0.6.0): opened, it lists the pages, then what makes something new, then the other actions, VMs and
+// sessions (lib/palette.ts). The actions on every running VM at once show only when the search asks for them
+// (typedForBulk), never at the top of an empty search. A term found by the search shows its definition in the list.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -54,6 +58,7 @@ import { toolsName } from "@/lib/hypervisors";
 import type { AppLink } from "@/lib/links";
 import { groupRanked, rankItems, type SearchItem } from "@/lib/search";
 import { SEARCH_PROVIDERS, loadSearchItems } from "@/lib/search-providers";
+import { splitActions, typedForBulk } from "@/lib/palette";
 import { actionItems, pageItems } from "@/lib/search-sources";
 import type { VmView } from "@/lib/vm-snapshots";
 import {
@@ -235,17 +240,22 @@ export function CommandPalette({
           ],
     [running],
   );
-  const shownActions = useMemo(() => (vm ? vmActions(vm) : view.kind === "root" ? bulk : []), [vm, view.kind, bulk]);
-
   // QL-20: everything searchable from the root, with the pages and actions here.
   const query = view.kind === "root" ? search.trim() : "";
+  // UX-07: the bulk actions only for a search that asks for them.
+  const bulkShown = useMemo(() => (query ? bulk.filter((b) => typedForBulk(query, b.label)) : []), [query, bulk]);
+  const shownActions = useMemo(
+    () => (vm ? vmActions(vm) : view.kind === "root" ? bulkShown : []),
+    [vm, view.kind, bulkShown],
+  );
+  const { create, other } = useMemo(() => splitActions(actions), [actions]);
   const searchable = useMemo(
     () => [
       ...pageItems(pages),
-      ...actionItems([...bulk.map((b) => ({ id: `bulk:${b.id}`, label: b.label })), ...actions]),
+      ...actionItems([...bulkShown.map((b) => ({ id: `bulk:${b.id}`, label: b.label })), ...actions]),
       ...found,
     ],
-    [pages, bulk, actions, found],
+    [pages, bulkShown, actions, found],
   );
   const results = useMemo(
     () =>
@@ -383,12 +393,27 @@ export function CommandPalette({
                   return (
                     <CommandItem key={item.id} value={item.id} onSelect={() => choose(item)}>
                       <Icon />
-                      {/* The title keeps its room; the detail gives way. */}
-                      <span className="max-w-[70%] shrink-0 truncate">{item.title}</span>
-                      {item.detail && (
-                        <span className="min-w-0 truncate text-xs text-muted-foreground" data-mask={item.detailMask}>
-                          {item.detail}
+                      {item.provider === "glossary" ? (
+                        // UX-05: a term shows its definition right in the list.
+                        <span className="grid min-w-0">
+                          <span className="truncate">{item.title}</span>
+                          <span className="line-clamp-2 text-xs whitespace-normal text-muted-foreground">
+                            {item.detail}
+                          </span>
                         </span>
+                      ) : (
+                        <>
+                          {/* The title keeps its room; the detail gives way. */}
+                          <span className="max-w-[70%] shrink-0 truncate">{item.title}</span>
+                          {item.detail && (
+                            <span
+                              className="min-w-0 truncate text-xs text-muted-foreground"
+                              data-mask={item.detailMask}
+                            >
+                              {item.detail}
+                            </span>
+                          )}
+                        </>
                       )}
                       <CommandShortcut className="tracking-normal">
                         {tier ? <TierBadge tier={tier} /> : item.badge}
@@ -587,7 +612,7 @@ export function CommandPalette({
 
           {view.kind === "root" && !query && (
             <>
-              <CommandGroup heading="Pages">
+              <CommandGroup heading="Go to">
                 {pages.map((p) => (
                   <CommandItem
                     key={p.id}
@@ -603,22 +628,29 @@ export function CommandPalette({
                   </CommandItem>
                 ))}
               </CommandGroup>
-              <CommandGroup heading="Actions">
-                {bulk.map(actionItem)}
-                {actions.map((a) => (
-                  <CommandItem
-                    key={a.id}
-                    value={`${a.label} ${a.keywords ?? ""}`}
-                    onSelect={() => {
-                      close();
-                      void a.run();
-                    }}
-                  >
-                    <a.icon />
-                    <span>{a.label}</span>
-                  </CommandItem>
-                ))}
-              </CommandGroup>
+              {[
+                { heading: "New", list: create },
+                { heading: "Actions", list: other },
+              ].map(
+                ({ heading, list }) =>
+                  list.length > 0 && (
+                    <CommandGroup key={heading} heading={heading}>
+                      {list.map((a) => (
+                        <CommandItem
+                          key={a.id}
+                          value={`${a.label} ${a.keywords ?? ""}`}
+                          onSelect={() => {
+                            close();
+                            void a.run();
+                          }}
+                        >
+                          <a.icon />
+                          <span>{a.label}</span>
+                        </CommandItem>
+                      ))}
+                    </CommandGroup>
+                  ),
+              )}
               {vms.length > 0 && (
                 <CommandGroup heading="Virtual machines">
                   {vms.map((v) => (
@@ -659,8 +691,7 @@ export function CommandPalette({
         <div className="flex items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
           <span className="whitespace-nowrap">Enter to choose</span>
           <span className="whitespace-nowrap">Esc to close</span>
-          <span className="whitespace-nowrap">Ctrl+/ shortcuts</span>
-          <span className="ml-auto">Actions go through the approval rules; the tier shows first.</span>
+          <span className="ml-auto whitespace-nowrap">Ctrl+/ for every shortcut</span>
         </div>
       </CommandRoot>
     </CommandDialog>

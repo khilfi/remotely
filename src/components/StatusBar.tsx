@@ -3,6 +3,7 @@
 // (QL-25). Each opens what it is about. It reads only what the app already has: the vault's answers (App's activity
 // pings carry the countdown), job events after one read of the recent jobs, the panes' tunnel events, and the alert
 // list's counts after each alert event. Nothing polls; the countdown ticks on its own between the vault's answers.
+// UX-04, UX-13 (0.6.0): each item's one or two sentences show in a tooltip, like every icon button's.
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, type SessionRecord, type UpdateCheck, type VaultInfo } from "@/lib/api";
 import { dashboardApi } from "@/lib/dashboard-api";
 import type { AppLink } from "@/lib/links";
@@ -169,21 +171,25 @@ export function StatusBar({ vault, updateCheck, updateProblem, onOpenLink, onOpe
             }
           />
         )}
-        <Button
-          variant="ghost"
-          size="xs"
-          className="relative"
-          aria-label={badge ? `Notifications, ${unread} unread` : "Notifications"}
-          title="Notifications"
-          onClick={onOpenNotifications}
-        >
-          {badge ? <BellDotIcon /> : <BellIcon />}
-          {badge && (
-            <span className="rounded-full bg-primary px-1.5 text-[0.65rem] leading-4 font-medium text-primary-foreground">
-              {badge}
-            </span>
-          )}
-        </Button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="ghost"
+              size="xs"
+              className="relative"
+              aria-label={badge ? `Notifications, ${unread} unread` : "Notifications"}
+              onClick={onOpenNotifications}
+            >
+              {badge ? <BellDotIcon /> : <BellIcon />}
+              {badge && (
+                <span className="rounded-full bg-primary px-1.5 text-[0.65rem] leading-4 font-medium text-primary-foreground">
+                  {badge}
+                </span>
+              )}
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Notifications</TooltipContent>
+        </Tooltip>
       </div>
     </footer>
   );
@@ -196,7 +202,7 @@ function StatusButton({
   ...props
 }: { icon: LucideIcon; status: StatusText; mono?: boolean } & React.ComponentProps<"button">) {
   return (
-    <Button variant="ghost" size="xs" title={status.title} className={cn("font-normal", TONE[status.tone])} {...props}>
+    <Button variant="ghost" size="xs" className={cn("font-normal", TONE[status.tone])} {...props}>
       <Icon />
       <span className={cn(mono && "tabular-nums")}>{status.label}</span>
     </Button>
@@ -214,7 +220,14 @@ function Item({
   onClick: () => void;
   mono?: boolean;
 }) {
-  return <StatusButton icon={icon} status={status} mono={mono} onClick={onClick} />;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <StatusButton icon={icon} status={status} mono={mono} onClick={onClick} />
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs whitespace-pre-line">{status.title}</TooltipContent>
+    </Tooltip>
+  );
 }
 
 /** The open jobs: one read of the recent ones, then their events. */
