@@ -237,6 +237,13 @@ export const HELP = {
       "It logs in with the session's saved login: a session whose password you type in the terminal needs it saved in the vault first. Detect logs in and checks whether docker needs sudo.",
     ],
   },
+  alertRules: {
+    title: "Alert rules",
+    body: [
+      "Rules are checked on every metrics round. A rule fires once its condition has held for its duration, and resolves after a minute back under it.",
+      "Alerts and their history are kept on this PC only, as long as the dashboard history.",
+    ],
+  },
   notifications: {
     title: "Notifications",
     body: [

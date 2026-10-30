@@ -28,6 +28,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Switch } from "@/components/ui/switch";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type SessionRecord, type Tag, type VmRecord } from "@/lib/api";
@@ -358,9 +359,9 @@ export function AlertRulesSheet({ open, onClose }: { open: boolean; onClose: () 
       <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-xl">
         <SheetHeader>
           <SheetTitle>Alert rules</SheetTitle>
-          <SheetDescription>
-            Checked on every metrics round. A rule fires once its condition has held for its duration, and resolves
-            after a minute back under it. Alerts and the history are kept on this PC only.
+          <SheetDescription className="flex items-center gap-1">
+            Checked every round; Windows notifies you when one fires.
+            <HelpTip topic="alertRules" />
           </SheetDescription>
           <div>
             <WhyDisabled reason={readOnly}>

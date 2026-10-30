@@ -662,7 +662,10 @@ src/                  React + TypeScript UI
                       help.ts (UX-04 the help registry: every explanation longer than a line, by key, for HelpTip and
                       the headers' "?"), glossary.ts (UX-05 one sentence per term, for Term and the palette's Terms),
                       tips.ts (UX-09 dismissed tips in local storage), requirement-ids.test.ts (UX-06 no requirement
-                      ID in any UI string), links.ts's requestLink (a link opened without an onOpenLink prop), catalog.ts (VM-19
+                      ID in any UI string), links.ts's requestLink (a link opened without an onOpenLink prop),
+                      activity.ts (UX-02, UX-06 Activity: jobs with their audit entries and approvals folded, plain
+                      event names, filters), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
+                      update-notice.ts (FD-14 the one update notice), catalog.ts (VM-19
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
                       wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
