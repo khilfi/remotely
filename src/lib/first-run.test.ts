@@ -6,6 +6,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   FIRST_RUN_STEPS,
+  SETUP_STEPS,
+  stepButtons,
+  stepsIntro,
   nextStep,
   onFirstRunRequest,
   previousStep,
@@ -60,4 +63,13 @@ test("Settings and the palette open it again", () => {
   stop();
   requestFirstRun();
   assert.equal(opened, 1);
+});
+
+test("UX-07: the intro counts the steps it lists, and the last one shows only Finish", () => {
+  assert.equal(SETUP_STEPS.length, FIRST_RUN_STEPS.length - 1);
+  assert.ok(!SETUP_STEPS.some((s) => s.id === "done"));
+  assert.match(stepsIntro(), /^Four steps/);
+  assert.deepEqual(stepButtons("done"), { skip: false, back: false, next: false, finish: true });
+  assert.deepEqual(stepButtons("hypervisors"), { skip: true, back: false, next: true, finish: false });
+  assert.deepEqual(stepButtons("vault"), { skip: true, back: true, next: true, finish: false });
 });

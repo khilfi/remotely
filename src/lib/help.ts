@@ -306,7 +306,7 @@ export const HELP = {
     title: "What the file holds",
     body: [
       "Your sessions and folders with their tags, environments, jump hosts and port forwards; your favourite commands and saved groups; and your VM sizes, images and launch templates. Image files aren't in it: copy them yourself.",
-      "It is encrypted with the passphrase you choose here, which can't be recovered.",
+      "Without the vault secrets, sessions on the other laptop use the secrets with the same labels there, or ask when connecting. The passphrase can't be recovered.",
     ],
   },
   transferExtras: {
@@ -360,6 +360,7 @@ export const HELP = {
     title: "Workspaces",
     body: [
       "One workspace per engagement or customer. Sessions, VMs, templates, schedules and the audit log belong to the workspace shown; the others stay out of sight.",
+      "A new workspace starts empty. VMs join it from the VMs page's Unassigned list, or when it deploys them.",
     ],
   },
 } as const satisfies Record<string, HelpEntry>;

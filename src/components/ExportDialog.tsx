@@ -2,7 +2,8 @@
 // where to save (Documents by default, never a Git repository), encrypts the file with the passphrase
 // typed or generated here (Argon2id, AES-256-GCM) and audits the export. The passphrase must be hard to guess
 // (SS-04's strength check, shown as a meter) and not the vault password. Vault secrets go along only when ticked,
-// and that needs the vault password. Passphrase and password are sent once, then cleared.
+// and that needs the vault password. Passphrase and password are sent once, then cleared. UX-04: one line of help;
+// what the file holds is behind "?".
 
 import { useState } from "react";
 import { FileLockIcon, TriangleAlertIcon } from "lucide-react";
@@ -19,6 +20,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage, type ExportReport, type VaultInfo } from "@/lib/api";
 import { plural } from "@/lib/format";
 import { usePasswordStrength } from "@/hooks/use-password-strength";
@@ -97,42 +99,30 @@ export function ExportDialog({ sessions, folders, vault, onVaultChanged, onExpor
               <FileLockIcon className="size-4" aria-hidden />
               Export to another laptop
             </DialogTitle>
-            <DialogDescription>
-              Writes {plural(sessions, "session")} and {plural(folders, "folder")}, with their tags, environments,
-              colours, jump hosts and port forwards, your favourite commands, your saved groups, and your VM sizes,
-              images (by path: copy the files yourself) and launch templates to one encrypted file. Import it on the
-              other laptop with the passphrase you choose here.
+            <DialogDescription className="flex items-center gap-1">
+              {plural(sessions, "session")} and {plural(folders, "folder")}, with your templates and saved commands, in
+              one encrypted file.
+              <HelpTip topic="transferExport" />
             </DialogDescription>
           </DialogHeader>
 
           <div className="grid gap-3">
-            <div className="flex items-start gap-3">
+            <div className="flex items-center gap-3">
               <Checkbox
                 id="export-known-hosts"
                 checked={knownHosts}
                 onCheckedChange={(v) => setKnownHosts(v === true)}
               />
-              <div className="grid gap-1">
-                <Label htmlFor="export-known-hosts">Trusted host keys</Label>
-                <p className="text-sm text-muted-foreground">
-                  So the other laptop doesn&apos;t ask about each host again.
-                </p>
-              </div>
+              <Label htmlFor="export-known-hosts">Trusted host keys</Label>
             </div>
-            <div className="flex items-start gap-3">
+            <div className="flex items-center gap-3">
               <Checkbox
                 id="export-secrets"
                 checked={secrets}
                 onCheckedChange={(v) => setSecrets(v === true)}
                 disabled={vault?.status === "notSetUp"}
               />
-              <div className="grid gap-1">
-                <Label htmlFor="export-secrets">Vault secrets (passwords, keys, passphrases)</Label>
-                <p className="text-sm text-muted-foreground">
-                  Without them, sessions on the other laptop use the secrets with the same labels in its vault, or ask
-                  when connecting.
-                </p>
-              </div>
+              <Label htmlFor="export-secrets">Vault secrets (passwords, keys, passphrases)</Label>
             </div>
           </div>
 
@@ -147,10 +137,7 @@ export function ExportDialog({ sessions, folders, vault, onVaultChanged, onExpor
               <Alert>
                 <TriangleAlertIcon />
                 <AlertTitle>Anyone with the file and its passphrase gets these secrets</AlertTitle>
-                <AlertDescription>
-                  Keep the file somewhere private and delete it once it is imported. The vault password confirms that it
-                  is you exporting them.
-                </AlertDescription>
+                <AlertDescription>Keep the file private and delete it once it is imported.</AlertDescription>
               </Alert>
               <div className="grid gap-2">
                 <Label htmlFor="export-vault-password">Vault password</Label>
@@ -173,7 +160,7 @@ export function ExportDialog({ sessions, folders, vault, onVaultChanged, onExpor
             onChange={setPassphrase}
             onGenerated={setRepeat}
             strength={strength}
-            description={`At least ${MIN_PASSPHRASE} characters, hard to guess and not your vault password. A few unrelated words make a good one. It can't be recovered.`}
+            description={`At least ${MIN_PASSPHRASE} characters, and not your vault password. It can't be recovered.`}
           />
           <div className="grid gap-2">
             <Label htmlFor="export-repeat">Type it again</Label>
