@@ -259,6 +259,20 @@ export const HELP = {
       "A VM Remotely didn't watch for the whole time (closed, asleep, just started) waits until it has.",
     ],
   },
+  hostNetworks: {
+    title: "Host networks",
+    body: [
+      "Workstation's and VirtualBox's networks on this PC, the VMs on each, and their NAT port forwards.",
+      "Adding or removing a forward asks for approval (High): it reaches every VM on the network, and a Prod VM on it moves it up a tier.",
+    ],
+  },
+  natForwardsAdmin: {
+    title: "Forwards need administrator rights",
+    body: [
+      "Workstation keeps its NAT port forwards in a file only administrators can change, and Remotely never asks to run as administrator.",
+      "Change them in Workstation's Virtual Network Editor (Edit, Virtual Network Editor, Change Settings), or start Remotely with Run as administrator.",
+    ],
+  },
   namingPattern: {
     title: "Naming pattern",
     body: [
