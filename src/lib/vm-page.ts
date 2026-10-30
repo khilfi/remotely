@@ -6,6 +6,18 @@ import type { Environment, Hypervisor, PowerState, ToolsState, VmFilter } from "
 import type { ChainInfo, ChainLimits } from "./schedules-api.ts";
 import type { VmView } from "./vm-snapshots.ts";
 
+// ---- The environment that applies (UX-12) ----
+
+/**
+ * A host network's environment: Prod when a VM on it is (the approval rules rate its forwards so), with where that
+ * comes from ("Prod · from VM db-01"). A VM's own environment is its own: nothing passes one on to a VM.
+ */
+export function networkEnvironment(vms: readonly { name: string; environment: Environment }[]): string | null {
+  const prod = [...new Set(vms.filter((v) => v.environment === "prod").map((v) => v.name))];
+  if (prod.length === 0) return null;
+  return prod.length === 1 ? `Prod · from VM ${prod[0]}` : `Prod · from ${prod.length} VMs (${prod[0]}, …)`;
+}
+
 // ---- Plain status lines (UX-06) ----
 
 /** "1.5 GB", for a chain's size on this PC. */

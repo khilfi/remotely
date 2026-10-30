@@ -9,6 +9,7 @@ import {
   chainStatus,
   defaultColumns,
   moreGroups,
+  networkEnvironment,
   parseColumns,
   powerTargets,
   selectionPowerReason,
@@ -25,6 +26,33 @@ import {
 function vm(extra: Partial<SelectedVm> = {}): SelectedVm {
   return { powerState: "not_running", protected: false, environment: "none", tags: [], ...extra };
 }
+
+test("a network shows the environment that applies to it, and where it comes from", () => {
+  assert.equal(networkEnvironment([]), null);
+  assert.equal(networkEnvironment([{ name: "web-01", environment: "lab" }]), null);
+  assert.equal(
+    networkEnvironment([
+      { name: "web-01", environment: "lab" },
+      { name: "db-01", environment: "prod" },
+    ]),
+    "Prod · from VM db-01",
+  );
+  assert.equal(
+    networkEnvironment([
+      { name: "db-01", environment: "prod" },
+      { name: "db-01", environment: "prod" },
+    ]),
+    "Prod · from VM db-01",
+    "a VM with two adapters on it counts once",
+  );
+  assert.equal(
+    networkEnvironment([
+      { name: "db-01", environment: "prod" },
+      { name: "db-02", environment: "prod" },
+    ]),
+    "Prod · from 2 VMs (db-01, …)",
+  );
+});
 
 test("a snapshot chain reads as a plain status line, with the rules in its detail", () => {
   const limits = { maxDepth: 5, maxSizeGb: 100 };

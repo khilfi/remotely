@@ -38,6 +38,7 @@ import { RefreshButton } from "@/components/RefreshButton";
 import { api, errorMessage, type SubmitOutcome } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { rememberHostNetworks } from "@/lib/host-networks-cache";
+import { networkEnvironment } from "@/lib/vm-page";
 import {
   insightApi,
   type ForwardProtocol,
@@ -223,6 +224,17 @@ function Card({ title, badges, children }: { title: ReactNode; badges?: ReactNod
   );
 }
 
+/** UX-12: a network is Prod when a VM on it is, so its forwards ask one tier higher; this says so, and why. */
+function InheritedEnv({ vms }: { vms: NetworkVm[] }) {
+  const text = networkEnvironment(vms);
+  if (!text) return null;
+  return (
+    <Badge variant="outline" className="border-env-prod/50 bg-env-prod/10 font-normal text-env-prod">
+      {text}
+    </Badge>
+  );
+}
+
 function VmList({ vms }: { vms: NetworkVm[] }) {
   if (vms.length === 0) return <p className="text-xs text-muted-foreground">No VM in the list is on it.</p>;
   return (
@@ -345,6 +357,7 @@ function WorkstationSide({ report, readOnly, busy, onAdd, onRemove }: SideProps)
             badges={
               <>
                 <Badge variant="secondary">{vmnetKindLabel(view.network.kind)}</Badge>
+                <InheritedEnv vms={view.vms} />
                 {view.network.subnet && (
                   <span className="font-mono text-xs text-muted-foreground">
                     {view.network.subnet}
@@ -425,6 +438,7 @@ function VirtualBoxSide({ report, readOnly, busy, onAdd, onRemove }: SideProps) 
             badges={
               <>
                 <Badge variant="secondary">NAT network</Badge>
+                <InheritedEnv vms={vms} />
                 {network.network && <span className="font-mono text-xs text-muted-foreground">{network.network}</span>}
                 {network.enabled === false && <Badge variant="outline">Off</Badge>}
                 <span className="ml-auto">
