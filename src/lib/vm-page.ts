@@ -3,7 +3,42 @@
 // command for the bus, and the reasons here only say why a control is off or left out.
 
 import type { Environment, Hypervisor, PowerState, ToolsState, VmFilter } from "./api.ts";
+import type { ChainInfo, ChainLimits } from "./schedules-api.ts";
 import type { VmView } from "./vm-snapshots.ts";
+
+// ---- Plain status lines (UX-06) ----
+
+/** "1.5 GB", for a chain's size on this PC. */
+function gb(bytes: number) {
+  const value = bytes / 1024 ** 3;
+  return `${value >= 10 ? Math.round(value) : Math.round(value * 10) / 10} GB`;
+}
+
+/**
+ * VM-27: a VM's snapshot chain as a status line ("2 snapshots · OK", "7 snapshots · 7 deep, past 5"), with the rules
+ * and the details for a tooltip.
+ */
+export function chainStatus(chain: ChainInfo, limits: ChainLimits): { text: string; ok: boolean; detail: string } {
+  const rules = `Warns past ${limits.maxDepth} deep or ${limits.maxSizeGb} GB.`;
+  if (chain.error) return { text: "Chain not read", ok: true, detail: `${chain.error} ${rules}` };
+  const count =
+    chain.snapshots === null ? "Snapshots" : chain.snapshots === 1 ? "1 snapshot" : `${chain.snapshots} snapshots`;
+  const facts = [
+    chain.depth !== null ? `${chain.depth} deep` : null,
+    chain.sizeBytes !== null ? `${gb(chain.sizeBytes)} on this PC` : null,
+  ].filter((f): f is string => f !== null);
+  const detail = `${facts.length > 0 ? `${facts.join(", ")}. ` : ""}${rules}`;
+  if (chain.warnings.length === 0) return { text: `${count} · OK`, ok: true, detail };
+  const past = [
+    chain.depth !== null && chain.depth > limits.maxDepth ? `${chain.depth} deep` : null,
+    chain.sizeBytes !== null && chain.sizeBytes > limits.maxSizeGb * 1024 ** 3 ? gb(chain.sizeBytes) : null,
+  ].filter((f): f is string => f !== null);
+  return {
+    text: `${count} · ${past.length > 0 ? `${past.join(", ")}: past the limit` : "check the chain"}`,
+    ok: false,
+    detail: `${chain.warnings.join(" ")} ${rules}`,
+  };
+}
 
 // ---- The details panel's tabs ----
 

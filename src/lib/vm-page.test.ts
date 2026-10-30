@@ -3,8 +3,10 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { ChainInfo } from "./schedules-api.ts";
 import {
   activeFilterCount,
+  chainStatus,
   defaultColumns,
   moreGroups,
   parseColumns,
@@ -23,6 +25,33 @@ import {
 function vm(extra: Partial<SelectedVm> = {}): SelectedVm {
   return { powerState: "not_running", protected: false, environment: "none", tags: [], ...extra };
 }
+
+test("a snapshot chain reads as a plain status line, with the rules in its detail", () => {
+  const limits = { maxDepth: 5, maxSizeGb: 100 };
+  const chain = (extra: Partial<ChainInfo>): ChainInfo => ({
+    vmKey: "k",
+    name: "web-01",
+    depth: 2,
+    sizeBytes: 3 * 1024 ** 3,
+    snapshots: 2,
+    warnings: [],
+    error: null,
+    ...extra,
+  });
+  const ok = chainStatus(chain({}), limits);
+  assert.equal(ok.text, "2 snapshots · OK");
+  assert.ok(ok.ok);
+  assert.equal(ok.detail, "2 deep, 3 GB on this PC. Warns past 5 deep or 100 GB.");
+  assert.equal(chainStatus(chain({ snapshots: 1, depth: 1 }), limits).text, "1 snapshot · OK");
+  const deep = chainStatus(chain({ snapshots: 7, depth: 7, warnings: ["7 deep: past 5."] }), limits);
+  assert.equal(deep.text, "7 snapshots · 7 deep: past the limit");
+  assert.ok(!deep.ok);
+  assert.match(deep.detail, /^7 deep: past 5\. Warns past 5 deep/);
+  const big = chainStatus(chain({ sizeBytes: 150 * 1024 ** 3, warnings: ["150 GB"] }), limits);
+  assert.equal(big.text, "2 snapshots · 150 GB: past the limit");
+  assert.equal(chainStatus(chain({ error: "No .vmsd." }), limits).text, "Chain not read");
+  assert.doesNotMatch(ok.text, /chain 0 deep|warns past/, "no spec-like wording in the line itself");
+});
 
 test("the details panel has five tabs, and the 0.5.0 views open the tab that holds them", () => {
   assert.deepEqual(
