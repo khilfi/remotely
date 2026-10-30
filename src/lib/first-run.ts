@@ -14,6 +14,23 @@ export const FIRST_RUN_STEPS: { id: FirstRunStep; title: string; hint: string }[
   { id: "done", title: "Done", hint: "Where to go next" },
 ];
 
+/** UX-07: the steps that do something; Done is where it ends, not a step to count. */
+export const SETUP_STEPS = FIRST_RUN_STEPS.filter((s) => s.id !== "done");
+
+const COUNT_WORDS = ["No", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine"];
+
+/** The wizard's one line, with the number of steps it lists. */
+export function stepsIntro(): string {
+  const n = SETUP_STEPS.length;
+  return `${COUNT_WORDS[n] ?? n} steps, each one optional. Settings opens this again.`;
+}
+
+/** The button row: every step has Back and Next (and Skip); the last one only Finish. */
+export function stepButtons(step: FirstRunStep): { skip: boolean; back: boolean; next: boolean; finish: boolean } {
+  const last = step === FIRST_RUN_STEPS[FIRST_RUN_STEPS.length - 1].id;
+  return { skip: !last, back: !last && step !== FIRST_RUN_STEPS[0].id, next: !last, finish: last };
+}
+
 export interface FirstRunFacts {
   vaultStatus: "notSetUp" | "locked" | "unlocked" | null;
   sessionCount: number | null;

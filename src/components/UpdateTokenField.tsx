@@ -64,11 +64,17 @@ function works(report: TokenReport) {
 export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVaultChanged, onOpenVault }: Props) {
   const [value, setValue] = useState("");
   const [replacing, setReplacing] = useState(false);
+  // UX-10: without a token the form stays folded until "Add a token…".
+  const [adding, setAdding] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<Message>(null);
   const token = settings?.updateToken;
-  const editing = !token?.stored || replacing;
+  const editing = token?.stored ? replacing : adding;
+  const stopEditing = () => {
+    setReplacing(false);
+    setAdding(false);
+  };
 
   async function refresh() {
     onSettings(await api.settings());
@@ -92,7 +98,7 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
     try {
       onSettings(await api.setUpdateToken(value));
       setValue("");
-      setReplacing(false);
+      stopEditing();
       onChanged();
       await test("Saved in the vault. ");
     } catch (err) {
@@ -124,11 +130,9 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
       <div className="grid gap-2 rounded-md border p-3">
         <p className="text-sm text-muted-foreground">Unlock the vault to save the token there.</p>
         <VaultUnlock info={vault} onUnlocked={onVaultChanged} idPrefix="update-token-unlock" />
-        {replacing && (
-          <Button className="justify-self-start" variant="ghost" onClick={() => setReplacing(false)}>
-            Cancel
-          </Button>
-        )}
+        <Button className="justify-self-start" variant="ghost" onClick={stopEditing}>
+          Cancel
+        </Button>
       </div>
     );
   } else if (editing) {
@@ -154,18 +158,16 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
         <Button type="submit" disabled={busy || !value.trim()}>
           {busy ? "Saving…" : "Save"}
         </Button>
-        {replacing && (
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => {
-              setValue("");
-              setReplacing(false);
-            }}
-          >
-            Cancel
-          </Button>
-        )}
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={() => {
+            setValue("");
+            stopEditing();
+          }}
+        >
+          Cancel
+        </Button>
       </form>
     );
   }
@@ -173,8 +175,9 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
   return (
     <div className="grid gap-3 border-t pt-4">
       <div className="grid gap-1">
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Label htmlFor="update-token">GitHub update token</Label>
+          <HelpTip topic="updateToken" />
           {token?.stored ? (
             <Badge variant="secondary">
               <KeyRoundIcon />
@@ -183,18 +186,22 @@ export function UpdateTokenField({ settings, vault, onSettings, onChanged, onVau
           ) : (
             <Badge variant="outline">Optional</Badge>
           )}
+          {!token?.stored && !adding && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto"
+              disabled={!settings}
+              onClick={() => setAdding(true)}
+            >
+              Add a token…
+            </Button>
+          )}
         </div>
-        <p className="flex items-center gap-1 text-sm text-muted-foreground">
-          Updates work without a token; one helps when many PCs share an internet address.
-          <HelpTip topic="updateToken" />
-        </p>
-        {token?.stored ? (
+        {token?.stored && (
           <p className="text-sm text-muted-foreground">
-            <Expiry expiresOn={token.expiresOn} /> Checks use it while the vault is unlocked, and go without it while
-            the vault is locked.
+            <Expiry expiresOn={token.expiresOn} /> Used while the vault is unlocked.
           </p>
-        ) : (
-          <p className="text-sm text-muted-foreground">No token: Remotely checks GitHub without one.</p>
         )}
       </div>
       {form}

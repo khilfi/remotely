@@ -18,6 +18,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
+import { HelpTip } from "@/components/HelpTip";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -35,6 +36,8 @@ import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { ColorDot, SESSION_COLORS } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { RowMenu } from "@/components/RowMenu";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import {
@@ -134,12 +137,12 @@ export function TerminalRulesCard() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Highlight and alert rules</CardTitle>
+        <CardTitle className="flex items-center gap-1">
+          Highlight and alert rules
+          <HelpTip topic="terminalRules" />
+        </CardTitle>
         <CardDescription>
-          A rule colours what its pattern (a regular expression) matches in terminals. With its alert on, a line that
-          matches also notifies you when its tab is in the background: once for a burst of matching lines, then that
-          rule waits a minute in that terminal. A terminal uses the rules for every terminal, for its session&apos;s
-          label and for its session. Full-screen programs, password prompts and the commands you type never alert.
+          Colour what a pattern matches in terminals, and be told about it while you&apos;re away.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -176,18 +179,12 @@ export function TerminalRulesCard() {
                       Alert
                     </Label>
                   </WhyDisabled>
-                  <WhyDisabled reason={readOnly}>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      aria-label={`Duplicate ${rule.name} to change it`}
-                      title="Duplicate, to change it"
-                      disabled={readOnly !== null}
-                      onClick={() => duplicate(rule)}
-                    >
+                  <RowMenu label={rule.name} disabled={readOnly !== null}>
+                    <DropdownMenuItem onSelect={() => duplicate(rule)}>
                       <CopyIcon />
-                    </Button>
-                  </WhyDisabled>
+                      Duplicate to change it…
+                    </DropdownMenuItem>
+                  </RowMenu>
                 </div>
               </li>
             ))}
@@ -204,59 +201,31 @@ export function TerminalRulesCard() {
               {own.map((rule, index) => (
                 <li key={rule.id} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2">
                   <RuleSummary rule={rule} scope={scopeText(rule.scope, sessionById)} />
-                  <div className="ml-auto flex items-center gap-1">
-                    <WhyDisabled reason={readOnly}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={`Move ${rule.name} up`}
-                        disabled={readOnly !== null || index === 0}
-                        onClick={() => move(index, -1)}
-                      >
-                        <ArrowUpIcon />
-                      </Button>
-                    </WhyDisabled>
-                    <WhyDisabled reason={readOnly}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={`Move ${rule.name} down`}
-                        disabled={readOnly !== null || index === own.length - 1}
-                        onClick={() => move(index, 1)}
-                      >
-                        <ArrowDownIcon />
-                      </Button>
-                    </WhyDisabled>
-                    <WhyDisabled reason={readOnly}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={`Edit ${rule.name}`}
-                        disabled={readOnly !== null}
-                        onClick={() => setEditing({ rule, initial: null })}
-                      >
+                  <div className="ml-auto">
+                    <RowMenu label={rule.name} disabled={readOnly !== null}>
+                      <DropdownMenuItem onSelect={() => setEditing({ rule, initial: null })}>
                         <PencilIcon />
-                      </Button>
-                    </WhyDisabled>
-                    <WhyDisabled reason={readOnly}>
-                      <Button
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label={`Delete ${rule.name}`}
-                        disabled={readOnly !== null}
-                        onClick={() => setDeleting(rule)}
-                      >
+                        Edit…
+                      </DropdownMenuItem>
+                      <DropdownMenuItem disabled={index === 0} onSelect={() => move(index, -1)}>
+                        <ArrowUpIcon />
+                        Move up
+                      </DropdownMenuItem>
+                      <DropdownMenuItem disabled={index === own.length - 1} onSelect={() => move(index, 1)}>
+                        <ArrowDownIcon />
+                        Move down
+                      </DropdownMenuItem>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem variant="destructive" onSelect={() => setDeleting(rule)}>
                         <Trash2Icon />
-                      </Button>
-                    </WhyDisabled>
+                        Delete…
+                      </DropdownMenuItem>
+                    </RowMenu>
                   </div>
                 </li>
               ))}
             </ul>
           )}
-          <p className="text-xs text-muted-foreground">
-            Where two rules match the same text, the one higher in the list colours it. Built-in rules come first.
-          </p>
         </div>
         {message && (
           <p className={message.ok ? "text-sm text-muted-foreground" : "text-sm text-destructive"} role="status">

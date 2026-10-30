@@ -1,14 +1,15 @@
 // SS-09 SSH key manager, on the Vault page: generate keys straight into the vault (Ed25519 by default,
 // RSA 4096 for older hosts), show and copy the public key in OpenSSH format, use a key for sessions, and
 // push its public key to hosts (a command through the bus, see PushKeyDialog). Private keys never reach
-// this page: it holds labels, IDs and public keys only.
+// this page: it holds labels, IDs and public keys only. UX-07: generating a key and pushing a pasted one are asked
+// from the Vault page's header (`request`); each key's actions are its row menu.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { CopyIcon, EllipsisIcon, KeySquareIcon, PlusIcon, SearchIcon, UploadIcon } from "lucide-react";
+import { CopyIcon, KeySquareIcon, PlusIcon, SearchIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -18,21 +19,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { EmptyState } from "@/components/EmptyState";
+import { HelpTip } from "@/components/HelpTip";
 import { PushKeyDialog } from "@/components/PushKeyDialog";
+import { RowMenu } from "@/components/RowMenu";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
   errorMessage,
@@ -45,12 +43,20 @@ import {
 } from "@/lib/api";
 import { plural } from "@/lib/format";
 
+/** The Vault page's header asks for a dialog: a new key, or pushing a pasted public key. */
+export interface SshKeyRequest {
+  kind: "generate" | "push";
+  /** Bumped with each ask. */
+  n: number;
+}
+
 interface Props {
   vault: VaultInfo;
   /** True while the page is shown, so the list is read again when the user comes back. */
   active: boolean;
   /** Bumped when the vault's secrets change elsewhere on the page. */
   version: number;
+  request?: SshKeyRequest | null;
   onSubmit: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenSessions: () => void;
 }
@@ -90,11 +96,16 @@ async function copy(key: PublicKeyInfo) {
   }
 }
 
-export function SshKeysCard({ vault, active, version, onSubmit, onOpenSessions }: Props) {
+export function SshKeysCard({ vault, active, version, request = null, onSubmit, onOpenSessions }: Props) {
   const [keys, setKeys] = useState<SshKey[]>([]);
   const [listVersion, setListVersion] = useState(0);
   const [dialog, setDialog] = useState<DialogState>(null);
   const unlocked = vault.status === "unlocked";
+  const [asked, setAsked] = useState(request?.n ?? 0);
+  if (request && request.n !== asked) {
+    setAsked(request.n);
+    setDialog(request.kind === "generate" ? { kind: "generate" } : { kind: "push", key: null });
+  }
   const reload = useCallback(() => setListVersion((v) => v + 1), []);
 
   useEffect(() => {
@@ -125,36 +136,27 @@ export function SshKeysCard({ vault, active, version, onSubmit, onOpenSessions }
   return (
     <Card>
       <CardHeader>
-        <CardTitle>SSH keys</CardTitle>
-        <CardDescription>
-          Private keys in the vault. Generate one here, copy its public key, use it for sessions, and push it to hosts
-          (added to ~/.ssh/authorized_keys, with the approval its tier needs).
-        </CardDescription>
-        <CardAction className="flex gap-2">
-          <Button variant="outline" onClick={() => setDialog({ kind: "push", key: null })}>
-            <UploadIcon data-icon="inline-start" />
-            Push a pasted key…
-          </Button>
-          <Button disabled={!unlocked} onClick={() => setDialog({ kind: "generate" })}>
-            <PlusIcon data-icon="inline-start" />
-            Generate key
-          </Button>
-        </CardAction>
+        <CardTitle className="flex items-center gap-1">
+          SSH keys
+          <HelpTip topic="sshKeys" />
+        </CardTitle>
+        <CardDescription>Private keys in the vault that sessions log in with instead of a password.</CardDescription>
       </CardHeader>
       <CardContent>
         {keys.length === 0 ? (
-          <Empty className="border">
-            <EmptyHeader>
-              <EmptyMedia variant="icon">
-                <KeySquareIcon />
-              </EmptyMedia>
-              <EmptyTitle>No SSH keys yet</EmptyTitle>
-              <EmptyDescription>
-                Generate an Ed25519 key{unlocked ? "" : " once the vault is unlocked"}, push its public key to your
-                hosts, then let sessions log in with it instead of a password.
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
+          <EmptyState
+            icon={KeySquareIcon}
+            title="No SSH keys yet"
+            description="Generate one, push its public key to your hosts, then let sessions use it."
+            action={
+              <WhyDisabled reason={unlocked ? null : "Unlock the vault first"}>
+                <Button variant="outline" disabled={!unlocked} onClick={() => setDialog({ kind: "generate" })}>
+                  <PlusIcon data-icon="inline-start" />
+                  Generate a key
+                </Button>
+              </WhyDisabled>
+            }
+          />
         ) : (
           <div className="rounded-lg border">
             <Table>
@@ -192,28 +194,22 @@ export function SshKeysCard({ vault, active, version, onSubmit, onOpenSessions }
                       {k.usedBy > 0 ? plural(k.usedBy, "session") : "—"}
                     </TableCell>
                     <TableCell>
-                      <DropdownMenu>
-                        <DropdownMenuTrigger asChild>
-                          <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${k.label}`}>
-                            <EllipsisIcon />
-                          </Button>
-                        </DropdownMenuTrigger>
-                        <DropdownMenuContent align="end">
-                          <DropdownMenuItem disabled={!k.public && !unlocked} onSelect={() => void open(k, "show")}>
-                            Show the public key
-                          </DropdownMenuItem>
-                          <DropdownMenuItem disabled={!k.public && !unlocked} onSelect={() => void open(k, "copy")}>
-                            Copy the public key
-                          </DropdownMenuItem>
-                          <DropdownMenuSeparator />
-                          <DropdownMenuItem onSelect={() => setDialog({ kind: "attach", key: k })}>
-                            Use for sessions…
-                          </DropdownMenuItem>
-                          <DropdownMenuItem disabled={!k.public && !unlocked} onSelect={() => void open(k, "push")}>
-                            Push to hosts…
-                          </DropdownMenuItem>
-                        </DropdownMenuContent>
-                      </DropdownMenu>
+                      <RowMenu label={k.label}>
+                        <DropdownMenuItem disabled={!k.public && !unlocked} onSelect={() => void open(k, "show")}>
+                          Show the public key
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={!k.public && !unlocked} onSelect={() => void open(k, "copy")}>
+                          <CopyIcon />
+                          Copy the public key
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuItem onSelect={() => setDialog({ kind: "attach", key: k })}>
+                          Use for sessions…
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={!k.public && !unlocked} onSelect={() => void open(k, "push")}>
+                          Push to hosts…
+                        </DropdownMenuItem>
+                      </RowMenu>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -233,12 +229,7 @@ export function SshKeysCard({ vault, active, version, onSubmit, onOpenSessions }
         />
       )}
       {dialog?.kind === "show" && dialog.key.public && (
-        <PublicKeyDialog
-          sshKey={dialog.key}
-          publicKey={dialog.key.public}
-          onPush={() => setDialog({ kind: "push", key: dialog.key })}
-          onClose={() => setDialog(null)}
-        />
+        <PublicKeyDialog sshKey={dialog.key} publicKey={dialog.key.public} onClose={() => setDialog(null)} />
       )}
       {dialog?.kind === "attach" && (
         <AttachKeyDialog
@@ -365,15 +356,14 @@ function GenerateKeyDialog({ onGenerated, onClose }: { onGenerated: (key: SshKey
   );
 }
 
+/** A public key to copy. Pushing it to hosts is the key's row menu's. */
 function PublicKeyDialog({
   sshKey,
   publicKey,
-  onPush,
   onClose,
 }: {
   sshKey: SshKey;
   publicKey: PublicKeyInfo;
-  onPush: () => void;
   onClose: () => void;
 }) {
   return (
@@ -382,8 +372,10 @@ function PublicKeyDialog({
         <DialogHeader>
           <DialogTitle>Public key of &lsquo;{sshKey.label}&rsquo;</DialogTitle>
           <DialogDescription>
-            {keyTypeLabel(publicKey)}, {publicKey.fingerprint}. Not secret: add it to a host&apos;s
-            ~/.ssh/authorized_keys, or push it from here.
+            Not secret: it goes in a host&apos;s ~/.ssh/authorized_keys.{" "}
+            <span className="font-mono text-xs" title={keyTypeLabel(publicKey)}>
+              {publicKey.fingerprint}
+            </span>
           </DialogDescription>
         </DialogHeader>
         <Textarea
@@ -399,10 +391,6 @@ function PublicKeyDialog({
           <Button type="button" variant="outline" onClick={() => void copy(publicKey)}>
             <CopyIcon data-icon="inline-start" />
             Copy
-          </Button>
-          <Button type="button" variant="outline" onClick={onPush}>
-            <UploadIcon data-icon="inline-start" />
-            Push to hosts…
           </Button>
           <Button type="button" onClick={onClose}>
             Done

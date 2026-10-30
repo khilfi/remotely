@@ -3,7 +3,8 @@
 // its trade-off), pick folders of VMs to scan, and import sessions (the Sessions page's import dialog, SS-02). It
 // offers itself at start when there is no vault and no session (lib/first-run.ts); every step can be left, and
 // Settings, General opens it again. Each step calls the same commands as those pages, so the core checks and audits
-// what it saves exactly as it does there.
+// what it saves exactly as it does there. UX-07: the intro counts the steps it lists (Done is not one), the last step
+// shows only Finish, and each tool reads "Found ✓ · Change" with its path field only after Change.
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -12,6 +13,8 @@ import {
   CheckIcon,
   CircleDashedIcon,
   CircleIcon,
+  CircleSlashIcon,
+  FlagIcon,
   FolderIcon,
   FolderOpenIcon,
   UploadIcon,
@@ -29,7 +32,10 @@ import {
   dismissFirstRun,
   nextStep,
   previousStep,
+  SETUP_STEPS,
+  stepButtons,
   stepMark,
+  stepsIntro,
   type FirstRunFacts,
   type FirstRunStep,
 } from "@/lib/first-run";
@@ -85,6 +91,9 @@ export function FirstRunWizard({
     scanFolders: settings?.scanFolders.length ?? 0,
   };
 
+  const buttons = stepButtons(step);
+  const stepHasAction = (step === "vault" && vault?.status === "notSetUp") || step === "sessions";
+
   function close(how: "done" | "skipped") {
     dismissFirstRun(how);
     onOpenChange(false);
@@ -95,15 +104,13 @@ export function FirstRunWizard({
       <DialogContent className="max-h-[90vh] overflow-hidden sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Set up Remotely</DialogTitle>
-          <DialogDescription>
-            Four steps, each one optional and each one in Settings, the Vault page or the Sessions page later. Settings,
-            General opens this again.
-          </DialogDescription>
+          <DialogDescription>{stepsIntro()}</DialogDescription>
         </DialogHeader>
         <div className="grid min-h-0 min-w-0 gap-6 overflow-auto md:grid-cols-[13rem_minmax(0,1fr)]">
           <ol className="flex flex-col gap-1" aria-label="Steps">
-            {FIRST_RUN_STEPS.map((s, i) => {
+            {FIRST_RUN_STEPS.map((s) => {
               const mark = stepMark(s.id, facts);
+              const number = SETUP_STEPS.findIndex((x) => x.id === s.id) + 1;
               return (
                 <li key={s.id}>
                   <button
@@ -116,7 +123,9 @@ export function FirstRunWizard({
                     onClick={() => setStep(s.id)}
                   >
                     <span className="mt-0.5">
-                      {mark === "done" ? (
+                      {s.id === "done" ? (
+                        <FlagIcon className="size-4 text-muted-foreground" aria-hidden />
+                      ) : mark === "done" ? (
                         <CheckIcon className="size-4 text-success" aria-label="Done" />
                       ) : mark === "todo" ? (
                         <CircleIcon className="size-4 text-muted-foreground" aria-label="To do" />
@@ -124,9 +133,7 @@ export function FirstRunWizard({
                         <CircleDashedIcon className="size-4 text-muted-foreground" aria-label="Optional" />
                       )}
                     </span>
-                    <span>
-                      {i + 1}. {s.title}
-                    </span>
+                    <span>{number > 0 ? `${number}. ${s.title}` : s.title}</span>
                   </button>
                 </li>
               );
@@ -169,18 +176,25 @@ export function FirstRunWizard({
           </div>
         </div>
         <div className="flex items-center gap-2 border-t pt-4">
-          <Button variant="ghost" onClick={() => close("skipped")}>
-            Skip for now
-          </Button>
-          <div className="ml-auto flex gap-2">
-            <Button variant="outline" disabled={step === "hypervisors"} onClick={() => setStep(previousStep(step))}>
-              <ArrowLeftIcon /> Back
+          {buttons.skip && (
+            <Button variant="ghost" onClick={() => close("skipped")}>
+              Skip for now
             </Button>
-            {step === "done" ? (
+          )}
+          <div className="ml-auto flex gap-2">
+            {!buttons.finish && (
+              <Button variant="outline" disabled={!buttons.back} onClick={() => setStep(previousStep(step))}>
+                <ArrowLeftIcon data-icon="inline-start" />
+                Back
+              </Button>
+            )}
+            {buttons.finish ? (
               <Button onClick={() => close("done")}>Finish</Button>
             ) : (
-              <Button onClick={() => setStep(nextStep(step))}>
-                Next <ArrowRightIcon />
+              // One filled button per view: Next steps back while the step has its own action to take.
+              <Button variant={stepHasAction ? "outline" : "default"} onClick={() => setStep(nextStep(step))}>
+                Next
+                <ArrowRightIcon data-icon="inline-end" />
               </Button>
             )}
           </div>
@@ -199,7 +213,7 @@ function StatusLine({ message }: { message: Message }) {
   );
 }
 
-/** A tool's path: in use as Settings resolves it, and a path to use instead. */
+/** A tool: "Found ✓ · Change" (or not found), and its path field only after Change. */
 function PathField({
   id,
   label,
@@ -216,6 +230,7 @@ function PathField({
   onSave: (path: string | null) => Promise<string | null>;
 }) {
   const [path, setPath] = useState(saved ?? "");
+  const [editing, setEditing] = useState(false);
   const [message, setMessage] = useState<Message>(null);
   // The saved path changed (saved here, or read again): the field shows it.
   const [shownSaved, setShownSaved] = useState(saved);
@@ -226,41 +241,68 @@ function PathField({
   async function save(next: string | null) {
     try {
       const used = await onSave(next);
-      setMessage({ ok: used !== null, text: used ? `Using ${used}` : missing });
+      setMessage(used ? null : { ok: false, text: missing });
+      if (used) setEditing(false);
     } catch (err) {
       setMessage({ ok: false, text: errorMessage(err) });
     }
   }
   return (
     <div className="grid grid-cols-1 gap-2">
-      <Label htmlFor={id}>{label}</Label>
-      <p className="text-sm">
-        {inUse ? (
-          <>
-            Found: <span className="font-mono break-all">{inUse}</span>
-          </>
-        ) : (
-          <span className="text-muted-foreground">{missing}</span>
-        )}
-      </p>
-      <div className="flex gap-2">
-        <Input
-          id={id}
-          className="font-mono"
-          placeholder="Found automatically"
-          spellCheck={false}
-          value={path}
-          onChange={(e) => setPath(e.currentTarget.value)}
-        />
-        <Button variant="outline" disabled={!path.trim()} onClick={() => void save(path.trim())}>
-          Use this path
-        </Button>
-        {saved && (
-          <Button variant="ghost" onClick={() => void save(null)}>
-            Find automatically
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Label htmlFor={editing ? id : undefined}>{label}</Label>
+        <span className="flex items-center gap-1 text-sm" title={inUse ?? undefined}>
+          {inUse ? (
+            <>
+              <CheckIcon className="size-4 text-success" aria-hidden />
+              Found
+            </>
+          ) : (
+            <>
+              <CircleSlashIcon className="size-4 text-muted-foreground" aria-hidden />
+              <span className="text-muted-foreground">Not found</span>
+            </>
+          )}
+        </span>
+        {!editing && (
+          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => setEditing(true)}>
+            Change
           </Button>
         )}
       </div>
+      {inUse && <p className="truncate font-mono text-xs text-muted-foreground">{inUse}</p>}
+      {!inUse && !editing && <p className="text-sm text-muted-foreground">{missing}</p>}
+      {editing && (
+        <form
+          className="flex flex-wrap gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (path.trim()) void save(path.trim());
+          }}
+        >
+          <Input
+            id={id}
+            className="min-w-48 flex-1 font-mono"
+            placeholder="Full path"
+            spellCheck={false}
+            autoFocus
+            value={path}
+            onChange={(e) => setPath(e.currentTarget.value)}
+          />
+          <Button type="submit" variant="outline" disabled={!path.trim()}>
+            Use this path
+          </Button>
+          {saved ? (
+            <Button type="button" variant="ghost" onClick={() => void save(null)}>
+              Find automatically
+            </Button>
+          ) : (
+            <Button type="button" variant="ghost" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          )}
+        </form>
+      )}
       <StatusLine message={message} />
     </div>
   );
@@ -285,7 +327,7 @@ function HypervisorsStep({
         id="first-run-vmrun"
         label="VMware Workstation (vmrun.exe)"
         inUse={settings?.vmrunPathInUse ?? null}
-        missing="Not found. Install Workstation Pro 17 or later, or give the path."
+        missing="Install Workstation Pro 17 or later, or give the path."
         saved={settings?.vmrunPathSaved ?? null}
         onSave={async (path) => {
           const s = await api.setVmrunPath(path);
@@ -298,7 +340,7 @@ function HypervisorsStep({
         id="first-run-vboxmanage"
         label="Oracle VirtualBox (VBoxManage.exe)"
         inUse={settings?.vboxmanagePathInUse ?? null}
-        missing="Not found (VirtualBox 7.0 or later isn't installed, or give the path)."
+        missing="Install VirtualBox 7.0 or later, or give the path."
         saved={settings?.vboxmanagePathSaved ?? null}
         onSave={async (path) => {
           const s = await api.setVboxmanagePath(path);
@@ -348,8 +390,7 @@ function FoldersStep({
   return (
     <div className="grid grid-cols-1 gap-4">
       <p className="text-sm text-muted-foreground">
-        Every VM in Workstation&apos;s library and every VM registered in VirtualBox is listed already. Add folders that
-        hold other Workstation VMs: they are searched for .vmx files up to five folder levels down.
+        Workstation&apos;s library and VirtualBox&apos;s VMs are listed already. Add folders with other Workstation VMs.
       </p>
       {folders.length > 0 && (
         <ul className="grid grid-cols-1 gap-1">
@@ -431,8 +472,7 @@ function SessionsStep({
   return (
     <div className="grid grid-cols-1 gap-4">
       <p className="text-sm text-muted-foreground">
-        Bring your saved sessions from PuTTY (this PC&apos;s or an exported .reg file), MobaXterm, an OpenSSH config or
-        a CSV file. You see what would be imported before anything is saved; passwords are never read from them.
+        From PuTTY, MobaXterm, an OpenSSH config or a CSV file. You see what comes in first; passwords are never read.
       </p>
       <p className="text-sm">
         {count === null

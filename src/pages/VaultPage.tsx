@@ -2,29 +2,27 @@
 // Windows login unlocks it, and add, replace, rename or delete secrets. Values are write-only: this page
 // only ever holds labels, kinds and IDs. SS-09's SSH keys live here too (public keys only). UX-08: Known hosts (SS-05)
 // is the page's second tab.
+//
+// UX-07: one primary action, "Add", in the header (a secret or a generated SSH key); Lock now, the password change
+// and pushing a pasted key are in its "⋯". The vault's state shows once, in the status bar: the page shows it only
+// when it is locked, with the unlock form. The Windows-login switch and its warning are in one place, the Unlocking
+// card; how secrets are kept (AES-256-GCM, Argon2id) is behind "?".
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
-  EllipsisIcon,
+  ChevronDownIcon,
   KeyRoundIcon,
+  KeySquareIcon,
   LockIcon,
-  LockOpenIcon,
   PlusIcon,
+  ShieldAlertIcon,
   ShieldCheckIcon,
-  type LucideIcon,
+  UploadIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -54,10 +52,12 @@ import type { VaultTab } from "@/lib/navigation";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { NewPasswordField } from "@/components/NewPasswordField";
+import { useReadOnlyReason } from "@/components/Presentation";
+import { RowMenu } from "@/components/RowMenu";
 import { SecretDialog } from "@/components/SecretDialog";
-import { SshKeysCard } from "@/components/SshKeysCard";
+import { SshKeysCard, type SshKeyRequest } from "@/components/SshKeysCard";
 import { VaultUnlock } from "@/components/VaultUnlock";
-import { WindowsLoginNotice } from "@/components/WindowsLoginNotice";
+import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type SecretKind, type SecretMeta, type SubmitOutcome, type VaultInfo } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 import { usePasswordStrength } from "@/hooks/use-password-strength";
@@ -84,6 +84,7 @@ type DialogState =
   | { kind: "rename"; secret: SecretMeta }
   | { kind: "delete"; secret: SecretMeta }
   | { kind: "windowsLogin"; enable: boolean }
+  | { kind: "password" }
   | null;
 
 const ADD: { kind: SecretKind; label: string }[] = [
@@ -92,12 +93,78 @@ const ADD: { kind: SecretKind; label: string }[] = [
   { kind: "passphrase", label: "Key passphrase" },
 ];
 
+/** What the header asks the Secrets tab to open. */
+type Ask = { what: DialogState | SshKeyRequest["kind"]; n: number };
+
 /** The page: its header with the Secrets and Known hosts tabs. Both stay mounted, as pages do while hidden. */
 export function VaultPage({ tab, onTabChange, active, ...props }: Props) {
+  const { vault, onVaultChanged } = props;
+  const readOnly = useReadOnlyReason();
+  const [ask, setAsk] = useState<Ask | null>(null);
+  const open = (what: Ask["what"]) => setAsk((a) => ({ what, n: (a?.n ?? 0) + 1 }));
+  const set = vault !== null && vault.status !== "notSetUp";
+  const unlocked = vault?.status === "unlocked";
+  const lockedReason = readOnly ?? (unlocked ? null : "Unlock the vault first");
+
+  async function lock() {
+    try {
+      onVaultChanged(await api.vaultLock());
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
+  const secrets = tab === "secrets" && set;
   return (
     <Tabs value={tab} onValueChange={(v) => onTabChange(v as VaultTab)} className="gap-4">
       <PageHeader
         page="vault"
+        primary={
+          secrets ? (
+            <WhyDisabled reason={lockedReason}>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button disabled={lockedReason !== null}>
+                    <PlusIcon data-icon="inline-start" />
+                    Add
+                    <ChevronDownIcon data-icon="inline-end" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="min-w-52">
+                  {ADD.map((a) => (
+                    <DropdownMenuItem key={a.kind} onSelect={() => open({ kind: "add", secretKind: a.kind })}>
+                      <KeyRoundIcon />
+                      {a.label}…
+                    </DropdownMenuItem>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => open("generate")}>
+                    <KeySquareIcon />
+                    Generate an SSH key…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </WhyDisabled>
+          ) : undefined
+        }
+        tools={
+          secrets ? (
+            <>
+              <DropdownMenuItem disabled={!unlocked} onSelect={() => void lock()}>
+                <LockIcon />
+                Lock now
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={readOnly !== null} onSelect={() => open({ kind: "password" })}>
+                <KeyRoundIcon />
+                Change the vault password…
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => open("push")}>
+                <UploadIcon />
+                Push a pasted public key…
+              </DropdownMenuItem>
+            </>
+          ) : undefined
+        }
         tabs={
           <TabsList>
             <TabsTrigger value="secrets">
@@ -112,7 +179,7 @@ export function VaultPage({ tab, onTabChange, active, ...props }: Props) {
         }
       />
       <TabsContent value="secrets" forceMount className="data-[state=inactive]:hidden">
-        <VaultSecrets {...props} active={active && tab === "secrets"} />
+        <VaultSecrets {...props} active={active && tab === "secrets"} ask={ask} />
       </TabsContent>
       <TabsContent value="knownHosts" forceMount className="data-[state=inactive]:hidden">
         <KnownHostsPage active={active && tab === "knownHosts"} />
@@ -127,10 +194,21 @@ function VaultSecrets({
   active,
   onSubmitted,
   onOpenSessions,
-}: Omit<Props, "tab" | "onTabChange">) {
+  ask,
+}: Omit<Props, "tab" | "onTabChange"> & { ask: Ask | null }) {
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [listVersion, setListVersion] = useState(0);
   const [dialog, setDialog] = useState<DialogState>(null);
+  const [keyRequest, setKeyRequest] = useState<SshKeyRequest | null>(null);
+  const readOnly = useReadOnlyReason();
+
+  // The header's Add and "⋯" menus.
+  const [asked, setAsked] = useState(ask?.n ?? 0);
+  if (ask && ask.n !== asked) {
+    setAsked(ask.n);
+    if (ask.what === "generate" || ask.what === "push") setKeyRequest({ kind: ask.what, n: ask.n });
+    else setDialog(ask.what);
+  }
 
   const reload = useCallback(() => setListVersion((v) => v + 1), []);
 
@@ -150,36 +228,36 @@ function VaultSecrets({
   }
 
   const unlocked = vault.status === "unlocked";
+  const lockedReason = readOnly ?? (unlocked ? null : "Unlock the vault first");
 
   return (
     <div className="flex max-w-3xl flex-col gap-6">
-      <WindowsLoginNotice vault={vault} onVaultChanged={onVaultChanged} />
-      <StatusCard vault={vault} onVaultChanged={onVaultChanged} />
+      {!unlocked && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <LockIcon className="size-4" aria-hidden />
+              Unlock the vault
+            </CardTitle>
+            <CardDescription>
+              {vault.windowsLogin
+                ? "With your Windows login or the vault password."
+                : "Sessions that log in with a saved password or key need it."}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <VaultUnlock info={vault} onUnlocked={onVaultChanged} />
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
-          <CardTitle>Secrets</CardTitle>
-          <CardDescription>
-            Passwords, private keys and passphrases that sessions log in with. Each is encrypted with AES-256-GCM;
-            values can be replaced but never shown.
-          </CardDescription>
-          <CardAction>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button disabled={!unlocked}>
-                  <PlusIcon data-icon="inline-start" />
-                  Add
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                {ADD.map((a) => (
-                  <DropdownMenuItem key={a.kind} onSelect={() => setDialog({ kind: "add", secretKind: a.kind })}>
-                    {a.label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </CardAction>
+          <CardTitle className="flex items-center gap-1">
+            Secrets
+            <HelpTip topic="vaultEncryption" />
+          </CardTitle>
+          <CardDescription>What sessions log in with. A value can be replaced but never shown.</CardDescription>
         </CardHeader>
         <CardContent>
           {secrets.length === 0 ? (
@@ -187,6 +265,18 @@ function VaultSecrets({
               icon={KeyRoundIcon}
               title="No secrets yet"
               description="Add them here, or from the session editor when you choose how a session logs in."
+              action={
+                <WhyDisabled reason={lockedReason}>
+                  <Button
+                    variant="outline"
+                    disabled={lockedReason !== null}
+                    onClick={() => setDialog({ kind: "add", secretKind: "password" })}
+                  >
+                    <PlusIcon data-icon="inline-start" />
+                    Add a password
+                  </Button>
+                </WhyDisabled>
+              }
             />
           ) : (
             <div className="rounded-lg border">
@@ -216,44 +306,27 @@ function VaultSecrets({
                       </TableCell>
                       <TableCell className="text-muted-foreground">{formatWhen(s.updatedAt)}</TableCell>
                       <TableCell>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon-sm" aria-label={`Actions for ${s.label}`}>
-                              <EllipsisIcon />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem
-                              disabled={!unlocked}
-                              onSelect={() => setDialog({ kind: "replace", secret: s })}
-                            >
-                              Replace the value…
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              disabled={!unlocked}
-                              onSelect={() => setDialog({ kind: "rename", secret: s })}
-                            >
-                              Rename…
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              variant="destructive"
-                              disabled={!unlocked}
-                              onSelect={() => setDialog({ kind: "delete", secret: s })}
-                            >
-                              Delete…
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                        <RowMenu label={s.label} disabled={lockedReason !== null}>
+                          <DropdownMenuItem onSelect={() => setDialog({ kind: "replace", secret: s })}>
+                            Replace the value…
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onSelect={() => setDialog({ kind: "rename", secret: s })}>
+                            Rename…
+                          </DropdownMenuItem>
+                          <DropdownMenuSeparator />
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => setDialog({ kind: "delete", secret: s })}
+                          >
+                            Delete…
+                          </DropdownMenuItem>
+                        </RowMenu>
                       </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
               </Table>
             </div>
-          )}
-          {!unlocked && secrets.length > 0 && (
-            <p className="mt-3 text-sm text-muted-foreground">Unlock the vault to add, replace or delete secrets.</p>
           )}
         </CardContent>
       </Card>
@@ -262,13 +335,14 @@ function VaultSecrets({
         vault={vault}
         active={active}
         version={listVersion}
+        request={keyRequest}
         onSubmit={onSubmitted}
         onOpenSessions={onOpenSessions}
       />
 
-      <PasswordCard
+      <UnlockingCard
         vault={vault}
-        onVaultChanged={onVaultChanged}
+        onChangePassword={() => setDialog({ kind: "password" })}
         onWindowsLogin={(enable) => {
           // SS-04: turning it off removes a way in, so it needs no password; turning it on does.
           if (enable) setDialog({ kind: "windowsLogin", enable });
@@ -329,16 +403,15 @@ function VaultSecrets({
       )}
       {dialog?.kind === "windowsLogin" && (
         <ConfirmPasswordDialog
-          title={dialog.enable ? "Unlock with the Windows login" : "Stop unlocking with the Windows login"}
-          description={
-            dialog.enable
-              ? "Anyone signed in to this Windows account can then unlock the vault with one click, and so can any program running under it, even from a copy of Remotely's database, without the vault password. Critical actions still ask for the vault password. Leave it off on a shared PC or one you don't manage."
-              : "Only the vault password will unlock the vault."
-          }
-          submitLabel={dialog.enable ? "Turn on" : "Turn off"}
-          onSubmit={async (password) => onVaultChanged(await api.vaultSetWindowsLogin(password, dialog.enable))}
+          title="Unlock with your Windows login?"
+          description="Anyone signed in to this Windows account, and any program running under it, can then unlock the vault without its password. Critical actions still ask for it."
+          submitLabel="Turn on"
+          onSubmit={async (password) => onVaultChanged(await api.vaultSetWindowsLogin(password, true))}
           onClose={() => setDialog(null)}
         />
+      )}
+      {dialog?.kind === "password" && (
+        <ChangePasswordDialog onVaultChanged={onVaultChanged} onClose={() => setDialog(null)} />
       )}
     </div>
   );
@@ -348,7 +421,7 @@ function VaultSecrets({
 export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: VaultInfo) => void }) {
   const [password, setPassword] = useState("");
   const [repeat, setRepeat] = useState("");
-  // SS-04: off unless the user turns it on (the trade-off is spelt out next to the switch).
+  // SS-04: off unless the user turns it on (the trade-off is behind its "?").
   const [windowsLogin, setWindowsLogin] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -382,14 +455,13 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
         }}
       >
         <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <ShieldCheckIcon className="size-4" aria-hidden />
+          <CardTitle className="flex items-center gap-1">
+            <ShieldCheckIcon className="mr-1 size-4" aria-hidden />
             Set up the vault
+            <HelpTip topic="vaultEncryption" />
           </CardTitle>
           <CardDescription>
-            The vault keeps the passwords, private keys and passphrases your sessions log in with, encrypted on this PC.
-            Choose a vault password: it unlocks the vault, and Critical actions, such as a hard power-off, ask for it
-            again, as does sending a vault password to a host that doesn&apos;t get it yet.
+            Passwords and keys your sessions log in with, encrypted on this PC. The vault password unlocks them.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4">
@@ -401,7 +473,7 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
             onChange={setPassword}
             onGenerated={setRepeat}
             strength={strength}
-            description={`At least ${MIN_PASSWORD} characters and hard to guess. A few unrelated words make a good one. There is no way to recover it.`}
+            description={`At least ${MIN_PASSWORD} characters. It can't be recovered.`}
           />
           <div className="grid gap-2">
             <Label htmlFor="vault-repeat-password">Type it again</Label>
@@ -416,24 +488,18 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
             />
             {mismatch && <p className="text-sm text-destructive">The two passwords differ.</p>}
           </div>
-          <div className="flex items-start gap-3">
+          <div className="flex items-center gap-3">
             <Switch
               id="vault-windows-login"
               checked={windowsLogin}
               onCheckedChange={setWindowsLogin}
               disabled={!vault.windowsLoginAvailable}
             />
-            <div className="grid gap-1">
-              <span className="flex items-center gap-1">
-                <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
-                <HelpTip topic="windowsUnlock" />
-              </span>
-              <p className="text-sm text-muted-foreground">
-                {vault.windowsLoginAvailable
-                  ? "Off by default. Turn it on only on a PC that's yours alone."
-                  : "Not available on this PC; the vault password unlocks it."}
-              </p>
-            </div>
+            <Label htmlFor="vault-windows-login">Also unlock with my Windows login</Label>
+            <HelpTip topic="windowsUnlock" />
+            {!vault.windowsLoginAvailable && (
+              <span className="text-sm text-muted-foreground">Not available on this PC</span>
+            )}
           </div>
           {error && (
             <p className="text-sm text-destructive" role="alert">
@@ -451,63 +517,88 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
   );
 }
 
-function StatusCard({ vault, onVaultChanged }: { vault: VaultInfo; onVaultChanged: (info: VaultInfo) => void }) {
-  const unlocked = vault.status === "unlocked";
-  const Icon: LucideIcon = unlocked ? LockOpenIcon : LockIcon;
-
-  async function lock() {
-    try {
-      onVaultChanged(await api.vaultLock());
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
-  }
-
+/** SS-04, AP-06: how the vault unlocks and locks, in one place: the Windows login with its warning, the idle lock, and
+ * the vault password. */
+function UnlockingCard({
+  vault,
+  onChangePassword,
+  onWindowsLogin,
+}: {
+  vault: VaultInfo;
+  onChangePassword: () => void;
+  onWindowsLogin: (enable: boolean) => void;
+}) {
+  const readOnly = useReadOnlyReason();
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Icon className={unlocked ? "size-4 text-success" : "size-4"} aria-hidden />
-          {unlocked ? "Unlocked" : "Locked"}
+        <CardTitle className="flex items-center gap-1">
+          Unlocking
+          <HelpTip topic="vaultIdleLock" />
         </CardTitle>
         <CardDescription>
-          {unlocked
-            ? `Locks itself after ${vault.idleLockMinutes} minutes without you typing or clicking in Remotely (background reads don't count), and whenever you lock it.`
-            : vault.windowsLogin
-              ? "Unlock it with your Windows login or the vault password."
-              : "Unlock it with the vault password."}
+          Locks itself after {vault.idleLockMinutes} minutes without you typing or clicking in Remotely.
         </CardDescription>
-        {unlocked && (
-          <CardAction>
-            <Button variant="outline" onClick={() => void lock()}>
-              <LockIcon data-icon="inline-start" />
-              Lock now
-            </Button>
-          </CardAction>
-        )}
       </CardHeader>
-      {!unlocked && (
-        <CardContent>
-          <VaultUnlock info={vault} onUnlocked={onVaultChanged} />
-        </CardContent>
-      )}
+      <CardContent className="grid gap-4">
+        <div className="grid gap-1">
+          <div className="flex items-center gap-3">
+            <WhyDisabled reason={vault.windowsLogin ? null : readOnly}>
+              <Switch
+                id="vault-windows-login-toggle"
+                checked={vault.windowsLogin}
+                onCheckedChange={(enable) => onWindowsLogin(enable)}
+                disabled={(!vault.windowsLoginAvailable && !vault.windowsLogin) || (!vault.windowsLogin && !!readOnly)}
+              />
+            </WhyDisabled>
+            <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
+            <HelpTip topic="windowsUnlock" />
+          </div>
+          {vault.windowsLogin ? (
+            <p className="flex items-center gap-1.5 pl-12 text-sm text-amber-700 dark:text-amber-400">
+              <ShieldAlertIcon className="size-4 shrink-0" aria-hidden />
+              On: any program under your Windows account can unlock the vault too.
+            </p>
+          ) : (
+            !vault.windowsLoginAvailable && (
+              <p className="pl-12 text-sm text-muted-foreground">Not available on this PC.</p>
+            )
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+          <span className="flex items-center gap-1 text-sm">
+            Vault password
+            <HelpTip topic="vaultReauth" />
+          </span>
+          <WhyDisabled reason={readOnly}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto"
+              disabled={readOnly !== null}
+              onClick={onChangePassword}
+            >
+              Change the password…
+            </Button>
+          </WhyDisabled>
+        </div>
+      </CardContent>
     </Card>
   );
 }
 
-function PasswordCard({
-  vault,
+/** SS-04: a new vault password; the current one is asked, so nobody can replace it from an unlocked PC. */
+function ChangePasswordDialog({
   onVaultChanged,
-  onWindowsLogin,
+  onClose,
 }: {
-  vault: VaultInfo;
   onVaultChanged: (info: VaultInfo) => void;
-  onWindowsLogin: (enable: boolean) => void;
+  onClose: () => void;
 }) {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [repeat, setRepeat] = useState("");
-  const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const strength = usePasswordStrength(next);
   const weak = !strength?.acceptable;
@@ -515,14 +606,15 @@ function PasswordCard({
 
   async function change() {
     setBusy(true);
-    setMessage(null);
+    setError(null);
     try {
       onVaultChanged(await api.vaultChangePassword(current, next));
       setNext("");
       setRepeat("");
-      setMessage({ ok: true, text: "The vault password is changed. Critical actions ask for the new one." });
+      toast.success("The vault password is changed");
+      onClose();
     } catch (err) {
-      setMessage({ ok: false, text: errorMessage(err) });
+      setError(errorMessage(err));
     } finally {
       setCurrent("");
       setBusy(false);
@@ -530,30 +622,26 @@ function PasswordCard({
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-1">
-          Vault password
-          <HelpTip topic="vaultReauth" />
-        </CardTitle>
-        <CardDescription>
-          Changing it needs the current one, so nobody can replace it from an unlocked PC.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+      <DialogContent className="sm:max-w-md">
         <form
-          className="grid max-w-sm gap-3"
+          className="grid gap-4"
           onSubmit={(e) => {
             e.preventDefault();
             if (current && next && !weak && !mismatch && repeat) void change();
           }}
         >
+          <DialogHeader>
+            <DialogTitle>Change the vault password</DialogTitle>
+            <DialogDescription>Critical actions ask for the new one from then on.</DialogDescription>
+          </DialogHeader>
           <div className="grid gap-2">
             <Label htmlFor="vault-current">Current password</Label>
             <Input
               id="vault-current"
               type="password"
               autoComplete="current-password"
+              autoFocus
               value={current}
               onChange={(e) => setCurrent(e.currentTarget.value)}
             />
@@ -579,41 +667,22 @@ function PasswordCard({
             />
             {mismatch && <p className="text-sm text-destructive">The two passwords differ.</p>}
           </div>
-          <Button
-            type="submit"
-            variant="outline"
-            className="justify-self-start"
-            disabled={!current || !next || !repeat || weak || mismatch || busy}
-          >
-            Change the password
-          </Button>
-          {message && (
-            <p className={message.ok ? "text-sm text-muted-foreground" : "text-sm text-destructive"} role="status">
-              {message.text}
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
             </p>
           )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button type="submit" disabled={!current || !next || !repeat || weak || mismatch || busy}>
+              Change the password
+            </Button>
+          </DialogFooter>
         </form>
-        <div className="flex items-start gap-3 border-t pt-4">
-          <Switch
-            id="vault-windows-login-toggle"
-            checked={vault.windowsLogin}
-            onCheckedChange={(enable) => onWindowsLogin(enable)}
-            disabled={!vault.windowsLoginAvailable && !vault.windowsLogin}
-          />
-          <div className="grid gap-1">
-            <span className="flex items-center gap-1">
-              <Label htmlFor="vault-windows-login-toggle">Unlock with my Windows login</Label>
-              <HelpTip topic="windowsUnlock" />
-            </span>
-            <p className="text-sm text-muted-foreground">
-              {vault.windowsLoginAvailable
-                ? "Any program running under your Windows account could unlock it too. Turning it on asks for the vault password."
-                : "Not available on this PC."}
-            </p>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+      </DialogContent>
+    </Dialog>
   );
 }
 
