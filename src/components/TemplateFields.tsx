@@ -152,7 +152,7 @@ interface Props {
   keys: SshKey[];
   /** For the template editor: an image or size that was deleted is still named. */
   deletedImageId?: string;
-  /** Shown beside the environment: the template editor's default count, the Deploy dialog's count. */
+  /** Shown beside the network: the template editor's default count, the Deploy dialog's count. */
   count: React.ReactNode;
   idPrefix: string;
   onError: (message: string) => void;
@@ -354,26 +354,25 @@ export function TemplateFields({
             )}
           </div>
         </div>
-        <div className="grid grid-cols-[1fr_8rem] gap-3">
-          <div className="grid gap-2">
-            <Label>
-              <Term id="environment" />
-            </Label>
-            <ToggleGroup
-              type="single"
-              variant="outline"
-              size="sm"
-              value={value.environment}
-              onValueChange={(v) => v && set({ environment: v as Environment })}
-            >
-              {ENVIRONMENTS.map((e) => (
-                <ToggleGroupItem key={e.value} value={e.value} className={e.className}>
-                  {e.label}
-                </ToggleGroupItem>
-              ))}
-            </ToggleGroup>
-          </div>
-          {count}
+        {count}
+        <div className="col-span-2 grid gap-2">
+          <Label>
+            <Term id="environment" />
+          </Label>
+          <ToggleGroup
+            type="single"
+            variant="outline"
+            size="sm"
+            className="justify-start"
+            value={value.environment}
+            onValueChange={(v) => v && set({ environment: v as Environment })}
+          >
+            {ENVIRONMENTS.map((e) => (
+              <ToggleGroupItem key={e.value} value={e.value} className={e.className}>
+                {e.label}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </div>
       </div>
       {value.environment === "prod" && (
