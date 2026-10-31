@@ -129,6 +129,7 @@ import { useVisibility } from "@/hooks/use-poll";
 import { CloneDialog } from "@/components/CloneDialog";
 import { PageHeader } from "@/components/PageHeader";
 import { RefreshButton } from "@/components/RefreshButton";
+import { plural } from "@/lib/format";
 import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { refreshDue } from "@/lib/job-events";
 import { compareNullsLast, formatPct, HOST_SHARE_HINT, useThresholds } from "@/lib/metrics";
@@ -313,10 +314,6 @@ type Dialog =
 function formatRam(mb: number | null) {
   if (!mb) return "—";
   return mb % 1024 === 0 ? `${mb / 1024} GB` : `${(mb / 1024).toFixed(1)} GB`;
-}
-
-function plural(n: number, word: string) {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }
 
 function labelName(env: Environment) {

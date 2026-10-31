@@ -152,6 +152,8 @@ test("every event the core writes has plain words, and none is a code", () => {
   assert.equal(eventLabel("job_started"), "Started");
   assert.equal(eventLabel("job_finished"), "Finished");
   assert.equal(eventLabel("folder_hook_installed"), "Folder tracking set up");
+  // The core writes it only for a wrong vault password (command_bus.rs, standing.rs).
+  assert.equal(eventLabel("approval_rejected"), "Approval refused: wrong vault password");
   // Something the core adds later still reads as words.
   assert.equal(eventLabel("something_new"), "Something new");
   assert.equal(eventLabel(""), "Event");

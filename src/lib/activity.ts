@@ -19,7 +19,7 @@ export const EVENT_LABELS: Record<string, string> = {
   // A job's life, and its approval.
   approval_requested: "Approval asked",
   approval_granted: "Approved",
-  approval_rejected: "Approval refused",
+  approval_rejected: "Approval refused: wrong vault password",
   approval_cancelled: "Approval cancelled",
   approval_expired: "Approval expired",
   approval_refused: "Refused: no standing approval",
