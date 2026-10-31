@@ -169,28 +169,6 @@ export function mergeTimeline(earlier: TimelineEntry[], next: TimelineEntry[]): 
   return [...earlier, ...next.filter((e) => !seen.has(e.seq))];
 }
 
-const EVENT_LABELS: Record<string, string> = {
-  approval_requested: "Approval asked",
-  approval_granted: "Approved",
-  approval_rejected: "Approval refused (wrong vault password)",
-  approval_cancelled: "Approval cancelled",
-  approval_expired: "Approval expired",
-  job_started: "Started",
-  job_finished: "Finished",
-  job_cancelled: "Cancelled",
-  canary_go_on: "Went on after the first host",
-  vm_label_changed: "Environment changed",
-  vm_console_opened: "Console opened",
-};
-
-/** "Approved", "Finished", or the event's name in words. */
-export function eventLabel(event: string): string {
-  const known = EVENT_LABELS[event];
-  if (known) return known;
-  const words = event.replace(/_/g, " ");
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
 /** How a job went for the VM, in a word, and whether that's good. */
 export function outcomeText(outcome: TimelineOutcome | null): { text: string; tone: "ok" | "bad" | "neutral" } | null {
   if (!outcome) return null;

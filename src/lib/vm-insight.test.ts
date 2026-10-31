@@ -9,7 +9,6 @@ import {
   EMPTY_FORWARD,
   describeForward,
   deleteVmReason,
-  eventLabel,
   followLog,
   followReason,
   forwardCommand,
@@ -145,9 +144,7 @@ test("a job's entries group together and the rest stand alone", () => {
   assert.equal(groupTimeline(merged).length, 1, "a job split across pages is one group");
 });
 
-test("events and outcomes read as words", () => {
-  assert.equal(eventLabel("approval_granted"), "Approved");
-  assert.equal(eventLabel("something_new"), "Something new");
+test("outcomes read as words", () => {
   assert.deepEqual(
     outcomeText({ status: "failed", error: "x", durationMs: null, safetySnapshot: null, finishedAt: null }),
     {

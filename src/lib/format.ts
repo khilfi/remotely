@@ -1,7 +1,9 @@
 // Small text formatters shared by pages.
 
+/** "1 session", "3 sessions"; a consonant and y takes "ies" ("2 entries", but "2 keys"). */
 export function plural(n: number, word: string) {
-  return `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (n === 1) return `${n} ${word}`;
+  return `${n} ${/[^aeiou]y$/i.test(word) ? `${word.slice(0, -1)}ies` : `${word}s`}`;
 }
 
 /** "3 h 12 min", "4 min", "2 d 5 h". */

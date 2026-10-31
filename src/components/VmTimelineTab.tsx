@@ -12,11 +12,12 @@ import { TierBadge } from "@/components/Badges";
 import { EmptyState } from "@/components/EmptyState";
 import { HelpTip } from "@/components/HelpTip";
 import { RefreshButton } from "@/components/RefreshButton";
+import { eventLabel } from "@/lib/activity";
 import { errorMessage, type Tier, type VmRecord } from "@/lib/api";
 import { formatDuration, formatWhen } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { insightApi, type TimelineEntry } from "@/lib/vm-insight-api";
-import { eventLabel, groupTimeline, mergeTimeline, outcomeText } from "@/lib/vm-insight";
+import { groupTimeline, mergeTimeline, outcomeText } from "@/lib/vm-insight";
 
 const TONE: Record<"ok" | "bad" | "neutral", string> = {
   ok: "border-tier-low/40 text-tier-low",
