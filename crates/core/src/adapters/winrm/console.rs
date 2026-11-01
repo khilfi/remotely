@@ -51,43 +51,45 @@ pub struct ConsoleShell {
 }
 
 /// BX-13: what Type in all tabs needs to know of a console: whether it is at its prompt (a line typed is a statement)
-/// or a statement runs (a line typed is that statement's input, `Read-Host`), and how many lines of a statement left
-/// open it holds (`>> `). Published by the [`Editor`] after every key and every output, so it is never a guess from
-/// what the screen shows.
+/// or a statement runs (a line typed is that statement's input, `Read-Host`), the lines of a statement left open it
+/// holds (`>> `), and the line being typed now. Published by the [`Editor`] after every key and every output, so Type
+/// in all tabs reads what the console really holds, not a guess from the keys or the screen: before it lets a line run,
+/// it checks each console holds exactly the line and open statement it followed, and refuses otherwise (a recalled
+/// history line, keys dropped while a statement ran, a desync).
 #[derive(Debug, Default)]
 pub struct ConsoleStatus {
-    /// 0 starting, 1 at the prompt, 2 running.
-    phase: std::sync::atomic::AtomicU8,
-    open: std::sync::atomic::AtomicUsize,
+    inner: std::sync::Mutex<ConsoleView>,
 }
 
 /// BX-13: a console's status at one moment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConsoleView {
     /// At the prompt (or the `>> ` of a statement left open): a line typed is a statement.
     pub at_prompt: bool,
-    /// Lines of a statement left open.
-    pub open_lines: usize,
+    /// Lines of a statement left open, sent together once it closes.
+    pub open: Vec<String>,
+    /// The line being typed now (at the prompt): empty once it is sent.
+    pub line: String,
+}
+
+impl ConsoleView {
+    pub fn open_lines(&self) -> usize {
+        self.open.len()
+    }
 }
 
 impl ConsoleStatus {
     pub fn view(&self) -> ConsoleView {
-        use std::sync::atomic::Ordering;
-        ConsoleView {
-            at_prompt: self.phase.load(Ordering::SeqCst) == 1,
-            open_lines: self.open.load(Ordering::SeqCst),
-        }
+        self.inner.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
-    fn publish(&self, state: State, open: usize) {
-        use std::sync::atomic::Ordering;
-        let phase = match state {
-            State::Starting => 0,
-            State::Idle => 1,
-            State::Running => 2,
-        };
-        self.phase.store(phase, Ordering::SeqCst);
-        self.open.store(open, Ordering::SeqCst);
+    fn publish(&self, state: State, open: &[String], line: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.at_prompt = state == State::Idle;
+            inner.open = open.to_vec();
+            inner.line.clear();
+            inner.line.push_str(line);
+        }
     }
 }
 
@@ -422,7 +424,14 @@ impl Editor {
     }
 
     fn publish(&self) {
-        self.status.publish(self.state, self.open.len());
+        // BX-13: a line typed while a statement runs is its input (masked), not a statement, so Type in all tabs must
+        // not read it as the prompt line; only publish the line at the prompt.
+        let line = if self.state == State::Idle && !self.masked {
+            self.line.as_str()
+        } else {
+            ""
+        };
+        self.status.publish(self.state, &self.open, line);
     }
 
     fn prompt(&self) -> String {
@@ -1130,7 +1139,8 @@ mod tests {
         editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
         assert!(editor.status().view().at_prompt);
         editor.keys(b"function f {\r", false);
-        assert_eq!(editor.status().view().open_lines, 1);
+        assert_eq!(editor.status().view().open_lines(), 1);
+        assert_eq!(editor.status().view().open, ["function f {"]);
         let sent_now = editor.keys(b"1 }\r", false);
         assert!(sent(&sent_now)[0].contains("Create('function f {' + \"`n\" + '1 }')"));
         assert!(!editor.status().view().at_prompt, "a statement runs");

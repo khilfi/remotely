@@ -397,6 +397,37 @@ async fn a_failed_windows_host_is_retried_and_the_journal_keeps_its_certificate(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_winrm_sign_in_parks_the_session_so_the_next_run_does_not_try_it_again() {
+    // Review C2: the login guard, so one run (or Retry after it) can't keep signing in to a host that refused and lock
+    // a domain account. A refused sign-in parks the session; the next run is refused up front, with no new attempt.
+    let core = core().await;
+    let (server, win01) = windows(&core, "win01").await;
+    // The host's password changes under the saved one: every sign-in is now refused.
+    server.set_password(&new_password());
+
+    let job = run(&core, exec("Get-Service", &[win01])).await;
+    assert_eq!(finished(&core, job).await, JobStatus::Failed);
+    let after_first = server.stats().refused_sign_ins;
+    assert!(after_first >= 1, "the first run tried to sign in");
+
+    let job = run(&core, exec("Get-Service", &[win01])).await;
+    assert_eq!(finished(&core, job).await, JobStatus::Failed);
+    assert_eq!(
+        server.stats().refused_sign_ins,
+        after_first,
+        "the session was parked, so the second run signed in again zero times"
+    );
+    let error = core.store.job_targets(&core.ctx(), job).await.unwrap()[0]
+        .error
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        error.to_lowercase().contains("refused") || error.to_lowercase().contains("sign"),
+        "{error}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_powershell_tab_picks_its_session_for_compare_hosts_only() {
     let core = core().await;
     let ctx = core.ctx();
@@ -795,6 +826,40 @@ async fn a_running_statements_input_is_rated_unless_at_a_password_prompt_and_mix
         .unwrap_err()
         .to_string();
     assert!(refused.contains("not both at once"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recalled_history_line_is_refused_not_run_unrated() {
+    // Review B1: MultiExec follows the keys, but each console's history is its own. Pressing Up recalls a line the
+    // keys didn't carry, so what each console would run is unknown: the line is refused and the consoles cleared,
+    // never run unrated.
+    let mut fleet = Fleet::new(2).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    // Run a line so it is in each tab's history.
+    fleet.type_in(0, "hostname").await;
+    let (line, _, _) = held(fleet.type_in(0, "\r").await);
+    assert!(line_done(&mut events, line).await);
+    for pane in &mut fleet.panes {
+        pane.expect("PS C:\\Users\\alice> ").await;
+    }
+
+    // Up recalls the history line in each console; MultiExec followed an empty line. Enter is refused, not run.
+    fleet.type_in(0, "\x1b[A").await;
+    let outcome = fleet.type_in(0, "\r").await;
+    assert!(matches!(outcome, InputOutcome::Refused { .. }), "{outcome:?}");
+    for pane in &mut fleet.panes {
+        pane.expect("PS C:\\Users\\alice> ").await;
+    }
+    // Only the one line it ran reached each host; the recalled line never did.
+    for i in 0..2 {
+        assert_eq!(
+            fleet.statements(i).len(),
+            1,
+            "only the first run reached the host: {:?}",
+            fleet.statements(i)
+        );
+    }
 }
 
 // ---- Support bundles from Windows hosts -------------------------------------------------------------------

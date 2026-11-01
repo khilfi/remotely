@@ -1128,7 +1128,7 @@ impl MultiExec {
                 }
                 // BX-13: a PowerShell tab running a statement takes a typed line as its input (`Read-Host`), and may run
                 // it as the next statement.
-                Some(s) if reason.is_none() && s.console.is_some_and(|c| !c.at_prompt) => Some(
+                Some(s) if reason.is_none() && s.console.as_ref().is_some_and(|c| !c.at_prompt) => Some(
                     "a statement is running: a line typed goes to it as input, rated first (type a password it asks \
                      for in this tab on its own)"
                         .to_owned(),
@@ -1294,7 +1294,7 @@ impl MultiExec {
         // At its own prompt a PowerShell console runs whatever line it gets as a statement, whatever the screen shows
         // (output printed after the prompt could look like a password prompt, or switch xterm to its alternate
         // screen, which no PowerShell tab has a full-screen program behind): never straight through there.
-        let running = !powershell || info.console.is_some_and(|c| !c.at_prompt);
+        let running = !powershell || info.console.as_ref().is_some_and(|c| !c.at_prompt);
         Some(Seen {
             id,
             name: target.as_ref().map_or_else(|| info.name.clone(), |t| t.name.clone()),
@@ -1441,6 +1441,20 @@ impl MultiExec {
                     });
                 }
                 LineMode::Password => {
+                    // Review B5: a PowerShell tab's password prompt can end mid-line (the statement that asked finishes),
+                    // and the console goes back to its prompt, where straight-through keys would run as a statement
+                    // unrated. Before forwarding, re-check the console: if it is no longer running, drop password mode and
+                    // let the rest start a fresh, rated line.
+                    if current.powershell
+                        && self
+                            .seen(from)
+                            .await
+                            .and_then(|s| s.console)
+                            .is_some_and(|c| c.at_prompt)
+                    {
+                        state.current = None;
+                        continue;
+                    }
                     // Straight through up to and with Enter (or Ctrl+C), never kept.
                     let end = data[at..]
                         .iter()
@@ -1622,7 +1636,8 @@ impl MultiExec {
         reached: Vec<Uuid>,
         left_out: Vec<LeftOut>,
     ) -> Result<InputOutcome> {
-        let mut lines = vec![state.ps.text().to_owned()];
+        let line_text = state.ps.text().to_owned();
+        let mut lines = vec![line_text.clone()];
         let mut unreliable = state.ps.unreliable();
         state.ps.clear();
         state.current = None;
@@ -1644,16 +1659,37 @@ impl MultiExec {
             keys.extend_from_slice(pasted.as_bytes());
             keys.push(b'\r');
         }
-        // Every tab's console must be at its prompt holding the statement MultiExec followed. One running a statement
-        // takes the line as input (and PowerShell may run it as the next statement); one may have dropped an open
-        // statement with a Ctrl+C typed into it alone. When they don't agree, what each runs isn't known: nothing goes
-        // unrated, the line is unreliable (at least "other"), and what is rated is every line MultiExec followed.
-        let agree = self.consoles_hold(&to, state.ps_open.len()).await;
-        unreliable |= !agree;
+        // Review B1 to B4: before a line is rated as a statement, every tab's console must be at its prompt holding
+        // exactly the open statement and the line MultiExec followed. Reading the keys is not enough — a console may
+        // have recalled a different history line (Up), dropped keys typed while it was busy, been cleared by Ctrl+C, or
+        // desynced on a stray byte. When a console is at its prompt but holding something else, what it would run is
+        // unknown, so nothing is sent unrated: every console is cleared (Ctrl+C) and the line refused. When the consoles
+        // are instead running a statement, the line is its input (`Read-Host`), which PowerShell may run as the next
+        // statement — it is rated as an unreliable line, not refused.
+        //
+        // `unreliable` here means MultiExec couldn't follow the line (Up/Down recalled history, or a terminal had text
+        // typed outside MultiExec). The console then holds something the keys didn't carry, and may not even have
+        // processed the recall yet, so a matching `consoles_hold` can't be trusted: treat it as a mismatch.
+        if unreliable || !self.consoles_hold(&to, &state.ps_open, &line_text).await {
+            if self.any_console_at_prompt(&to).await {
+                self.interrupt(&to).await;
+                forget_open(state);
+                return Ok(InputOutcome::Refused {
+                    reason: "The PowerShell tabs aren't all holding the same line (one recalled history, dropped keys \
+                             typed while it was busy, or was interrupted), so this line wasn't run anywhere. The tabs \
+                             were cleared — type it again at the prompt."
+                        .into(),
+                    reached,
+                    left_out,
+                });
+            }
+            // A statement is running: this line goes to it as input, and may run as the next statement.
+            unreliable = true;
+        }
         let (sent, held) = console::statements(&state.ps_open, &lines);
         let open_before = std::mem::replace(&mut state.ps_open, held);
         unreliable |= state.ps_open_unreliable;
-        if sent.is_empty() && agree {
+        if sent.is_empty() {
             // The console holds the lines (`>> `), or an empty line asks for a fresh prompt: nothing runs yet. The
             // statement is rated whole once a line closes it.
             state.ps_open_unreliable = unreliable && !state.ps_open.is_empty();
@@ -1691,9 +1727,11 @@ impl MultiExec {
         self.hold(state, line, reached, left_out).await
     }
 
-    /// BX-13: whether every PowerShell tab's console is at its prompt holding `open` lines of a statement, as MultiExec
-    /// followed them. A console takes the keys sent to it a moment later, so it is asked again for a little while.
-    async fn consoles_hold(&self, to: &[Uuid], open: usize) -> bool {
+    /// BX-13: whether every PowerShell tab's console is at its prompt holding exactly the open statement `open` and the
+    /// line `line` MultiExec followed, so what it will run is known. A console takes the keys sent to it a moment later,
+    /// so it is asked again for a little while; if any console ends up holding something else (history, dropped keys, a
+    /// desync), they never all match and this returns false.
+    async fn consoles_hold(&self, to: &[Uuid], open: &[String], line: &str) -> bool {
         const TRIES: u32 = 50;
         for attempt in 0..TRIES {
             let all = to.iter().all(|id| {
@@ -1701,7 +1739,7 @@ impl MultiExec {
                     .terminals
                     .pane_info(*id)
                     .and_then(|info| info.console)
-                    .is_some_and(|c| c.at_prompt && c.open_lines == open)
+                    .is_some_and(|c| c.at_prompt && c.open == open && c.line == line)
             });
             if all {
                 return true;
@@ -1711,6 +1749,19 @@ impl MultiExec {
             }
         }
         false
+    }
+
+    /// BX-13: whether any target console is at its prompt. After [`Self::consoles_hold`] fails, this tells a console
+    /// holding the wrong line (at its prompt: a desync, refuse) apart from one running a statement (the line is its
+    /// input).
+    async fn any_console_at_prompt(&self, to: &[Uuid]) -> bool {
+        to.iter().any(|id| {
+            self.shared
+                .terminals
+                .pane_info(*id)
+                .and_then(|info| info.console)
+                .is_some_and(|c| c.at_prompt)
+        })
     }
 
     /// A line whose run key waits: recorded in each terminal (QL-12), sent to the bus as a
