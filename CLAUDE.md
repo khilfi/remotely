@@ -144,6 +144,22 @@ crates/core/          remotely-core: all app logic
                       thread per port, Send Break), launcher.rs (SS-12 ConsoleLauncher: mstsc.exe from System32 on a
                       .rdp file in this user's temp folder, deleted once read; the VNC viewer found like the other tools,
                       locate_vnc_viewer, `consoles.vncViewerPath`; NoLauncher under `fakes`),
+                      winrm/ (F4, SS-12, MO-05, MO-13: Remotely's own WinRM client behind WinrmAdapter and WinrmSession, which
+                      is an ExecSession whose script_kind() is PowerShell; HttpWinrm, NoWinrm until Core sets it:
+                      http.rs one hyper HTTP/1.1 connection per sign-in, a Client keeping up to 4; HTTPS checked before
+                      anything is sent: Windows' trust and the name, else (the session's rule) the leaf's SHA-256 in
+                      known_hosts as key type `tls-certificate`, asked like a host key; Basic over HTTPS only; NTLM and
+                      Negotiate through sspi.rs, Windows' SSPI (AcquireCredentialsHandleW, the vault password zeroized once
+                      it returns; InitializeSecurityContextW off the runtime's threads; EncryptMessage and DecryptMessage),
+                      every message sealed over HTTP (encryption.rs, multipart/encrypted, read by position); answers capped
+                      at 1 MB and read with describe.rs's parse_xml_limited (soap.rs: Create, Command, Send, Receive,
+                      Signal, Delete, faults; ids checked); shell.rs run_script (one `powershell.exe -Command -` a run,
+                      the script on stdin, the shell deleted, also when dropped) and Runner (one PowerShell kept for
+                      reads, each read's lines then a marker line), every Receive paced (MIN_EMPTY_GAP) and every run
+                      timed; console.rs the PowerShell console: line editing, history, the prompt drawn from an OSC 7790
+                      marker with a nonce, each statement one line (statement_line: the typed text single-quoted with
+                      PowerShell's quotes doubled, [scriptblock]::Create, dot-sourced, then the marker), Syntax for `>>`;
+                      MAX_SHELLS 4 a connection),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
                       VBoxHeadless.exe; MO-15 `paging()`), paging.rs (MO-15 this PC's paging files and commit charge:
@@ -295,7 +311,10 @@ crates/core/          remotely-core: all app logic
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
                       GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
                       POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
-                      minute (DF_EVERY), and their parsers); HostProcessSource reads no inventory with no VM process;
+                      minute (DF_EVERY), and their parsers); windows.rs (MO-05 METRICS_SCRIPT, one CIM read a round in
+                      the PowerShell a watched WinRM host keeps open; idle and timestamp counters made CpuJiffies,
+                      bytes made 512-byte sectors, so rates() treats it as a Linux reading); guest.rs read_windows and
+                      connect_windows (login_guard's parks and caps); HostProcessSource reads no inventory with no VM process;
                       FD-02 the samples are the shown workspace's VMs, and other workspaces' running VMs go only to
                       their own workspace's history (SourceRound::elsewhere, one Rollup per workspace) so VM-14's idle
                       check works in a hidden workspace; guest polling, the hub and MO-07 alerts follow the shown
@@ -309,7 +328,10 @@ crates/core/          remotely-core: all app logic
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests), networks.rs (QL-21
                       every VM's adapters for the map from the stored hardware; only VMs never read are read, `fresh`
-                      reads all, NETWORK_READS_AT_ONCE; VM-11's report takes its VMs' adapters from here too)
+                      reads all, NETWORK_READS_AT_ONCE; VM-11's report takes its VMs' adapters from here too), windows.rs
+                      (F4 MO-13 FACTS_SCRIPT, one CIM run over WinRM, into the same HostSpecs plus WindowsInfo, NetAdapter
+                      with MACs and WindowsListeningPort; SpecsCollector picks the script by ExecSession::script_kind; MO-14's
+                      reads refuse a Windows host; every cmdlet a read, assert_only_reads)
     alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
@@ -517,8 +539,10 @@ crates/core/          remotely-core: all app logic
                       try, and the runs between are skipped: nothing kept, the status stays, waiting_until shown),
                       http.rs a GET with hyper over Reach's stream (direct or a jump host's channel, never a proxy;
                       headers 64 KB, body 256 KB read only to find text, 5 redirects to http(s) only; HTTPS checked by
-                      Windows' trust and the name unless allowed), service.rs the ServiceReader trait (F4 adds Windows
-                      services; check_service_name by the session's kind) and SystemdOverSsh (`systemctl is-active
+                      Windows' trust and the name unless allowed), service.rs the ServiceReader trait (close_all on a
+                      vault lock and a switch; check_service_name by the session's kind: check_unit, or
+                      check_windows_service), WindowsServices (F4: `Get-Service` in the kept PowerShell of a WinRM
+                      connection held until the next run, a sweep closing it after; login_guard), ByKind (picks by kind) and SystemdOverSsh (`systemctl is-active
                       'unit'` on the session's connection), mod.rs Checks: the runner (tick each second on a Clock for
                       the shown workspace only, 8 at once; leave() on a switch, which loads nothing of the workspace
                       left until another is shown, resume() when the switch fails), history and sparkline buckets,
@@ -636,6 +660,10 @@ crates/core/          remotely-core: all app logic
                       FakeSerialPorts (COM ports in memory, one open at a time, unplug, breaks)
     fakes/telnet_server.rs  SS-12 TelnetTestServer: a router console on 127.0.0.1 with a login (sizes, terminal type
                       and raw bytes kept; a dropped connection resets), also in dev_ssh_server
+    fakes/winrm_server.rs  F4 WinrmTestServer on 127.0.0.1: HTTPS (an rcgen certificate) with Basic, or HTTP with
+                      NTLM and every message sealed (winrm_server/ntlm.rs: the server side of NTLMv2 with a MIC, MD4, RC4
+                      and HMAC-MD5 written out, checked against MS-NLMP 4.2.4), and a toy PowerShell that answers the
+                      console, the metrics, facts and service reads; stats, rotated passwords, dropped connections
     fakes/github_server.rs  FD-14 fake GitHub API, github.com download links and release storage on 127.0.0.1
                       (private or public, rate limits), throwaway update-signing key
     fakes/net_tools.rs  FD-09 FakeNetworkTools: echoes along routes the test sets, DNS answers from a table, ports that
@@ -659,7 +687,9 @@ crates/core/          remotely-core: all app logic
                       switching; change_ids.rs: AP-08; support_bundle.rs: FD-04 on the test SSH server, zips in the
                       temp folder; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
-                      127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; checks.rs: MO-08 on a
+                      127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; winrm.rs: F4 the real client
+                      (Windows' SSPI NTLM) against WinrmTestServer: the console, sealing, certificates, metrics, facts,
+                      service checks, parks; checks.rs: MO-08 on a
                       FakeClock with FakeNetworkTools, HTTP and TLS servers on 127.0.0.1 (rcgen), the test SSH server's
                       `systemctl is-active` and a jump host held to one login); opt-in workstation_it.rs,
                       virtualbox_it.rs and
@@ -1114,6 +1144,35 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   again up to three times (`host_networks::showvminfo_pairs`, `vbox_busy`), and the waste finder reads each VM once
   per report, in sequence.
 
+## WinRM facts
+
+F4, from 0.7.0 (`docs/plan-0.7.md`, SS-12, MO-05, MO-13). The protocol side follows MS-WSMV and what pywinrm does;
+nothing here was tried against a real WinRM listener (none was at hand), so Kerberos, Negotiate's SPNEGO tokens and a
+real host's answers to the empty sign-in POST are as documented, not as seen. The PowerShell and CIM side was checked
+by hand on Windows 11 with Windows PowerShell 5.1.
+
+- Shells are the `http://schemas.microsoft.com/wbem/wsman/1/windows/shell/cmd` resource: Create (with
+  `WINRS_NOPROFILE` and `WINRS_CODEPAGE=65001`, so stdin and stdout are UTF-8), Command (`WINRS_SKIP_CMD_SHELL` TRUE
+  to start `powershell.exe` directly, FALSE to go through `cmd.exe /c` for `2>&1`; `WINRS_CONSOLEMODE_STDIN` FALSE so
+  stdin is a pipe), Send (base64, `End="true"` closes stdin), Receive (a long poll up to the `OperationTimeout`; with
+  nothing to say the host answers fault code 2150858793, `w:TimedOut`), Signal (`ctrl_c`, `terminate`) and Delete. The
+  shell id comes back as `rsp:ShellId` and as a `ShellId` selector.
+- Sign-in (NTLM, Negotiate): an empty POST with `Authorization: Negotiate <token>`, the host's 401 with
+  `WWW-Authenticate: Negotiate <token>`, then the answer; raw NTLM tokens go under the `Negotiate` scheme. Over HTTP each
+  later message is `multipart/encrypted;protocol="application/HTTP-SPNEGO-session-encrypted"` with the
+  `OriginalContent: ...;Length=` part, then a 4-byte little-endian signature length, the signature and the sealed bytes.
+  The Kerberos SPN is `HTTP/<host>`. Basic needs HTTPS and the host's `Basic` setting; Remotely never sends it over HTTP.
+- Windows PowerShell 5.1 with `-Command -` reads statements from stdin a line at a time: `Read-Host` takes the next
+  stdin line (so a line queued after a statement is eaten by it) and shows no prompt while stdin is a pipe; a
+  multi-line string sent raw waits for a blank line; a parse error inside `. { ... }` sent over several lines makes it
+  wait for more. So the console sends each statement as one line, `try { . ([scriptblock]::Create('<typed text>')) }
+  catch { ... }; "<marker>"`, which parses, runs in the console's scope, survives a parse error, `throw` and `exit N`,
+  and gives `Read-Host` the line typed next. A single-quoted string ends at `'` and at U+2018 to U+201B, so each is
+  doubled.
+- CIM: `Win32_PerfRawData_PerfOS_Processor` `_Total`'s `PercentProcessorTime` counts idle time in 100 ns averaged over
+  the CPUs beside `Timestamp_Sys100NS` (checked on 32 CPUs); the facts script runs in about 3 s; booleans print `True`
+  and `False`; `Get-NetTCPConnection -State Listen` and `Win32_NetworkAdapterConfiguration` give ports and adapters.
+
 ## Conversion tools facts
 
 CV-01 to CV-03, VM-17, from 0.5.0 (`docs/plan-0.5.md`, R5). Checked by hand with Workstation 26's vdiskmanager and
@@ -1162,6 +1221,10 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   feature `Terminals` starts with `NoLauncher` and an empty `FakeSerialPorts`, so a test that forgets its fakes fails
   instead; tests give `FakeLauncher` and `FakeSerialPorts` (`set_launcher`, `set_serial_ports`) and talk Telnet to
   `fakes::TelnetTestServer` on 127.0.0.1 (`tests/consoles.rs`).
+- WinRM (F4): never reach a real Windows host in a test. `tests/winrm.rs` runs the real client (Windows' SSPI NTLM on
+  this PC, which sends nothing beyond 127.0.0.1) against `fakes::WinrmTestServer`, whose certificate rcgen makes at run
+  time; its trust comes from `FakeNetworkTools::with_verdict`. Kerberos (my Windows sign-in) can only be tried by hand
+  against a domain host.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, or refuse new ones for a while
   (`set_refusing`, R9 reconnect tests), and runs exec requests in a toy shell with sudo modes, /proc files, a `grep`
@@ -1227,7 +1290,10 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
   `web.test:80`, for trying chains and tunnels. CT-01: each has `docker` and `podman` with a small shop of containers
   (from the second server on, docker needs sudo); mark a session as a container host on the Containers page. SS-12: a
-  Telnet router console listens on the port after the web page (alice and the same password), for a Telnet session.
+  Telnet router console listens on the port after the web page (alice and the same password), for a Telnet session. F4:
+  a fake WinRM host on the next two ports, HTTPS with Basic (trust its certificate by fingerprint) then HTTP with NTLM
+  (alice and the same password), for a WinRM session's PowerShell console, Windows guest metrics, facts and service
+  checks.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Opt-in test against real VirtualBox (reads only: `list vms`, then for `it-` VMs only `showvminfo`, snapshots, guest properties and their processes): `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`
 - Opt-in test against the real conversion tools (vdiskmanager, VBoxManage, qemu-img when installed, ovftool; temp images and an `it-` VM's files only): `REMOTELY_IT=1 cargo test -p remotely-core --test conversion_it -- --nocapture`
