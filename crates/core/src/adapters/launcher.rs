@@ -59,7 +59,8 @@ pub fn mstsc_path() -> PathBuf {
     root.join("System32").join("mstsc.exe")
 }
 
-/// A file name made of the session's name: letters, digits, `-`, `_` and `.` only.
+/// A file name made of the session's name: letters, digits, `-`, `_` and `.` only, and never a DOS device's name
+/// (`NUL`, `CON`, `COM1`...), which Windows would open instead of a file.
 pub fn file_stem(name: &str) -> String {
     let stem: String = name
         .chars()
@@ -75,6 +76,8 @@ pub fn file_stem(name: &str) -> String {
     let stem = stem.trim_matches('.').to_owned();
     if stem.is_empty() {
         "remote-desktop".to_owned()
+    } else if crate::untrusted::is_device_name(&stem) || crate::untrusted::is_device_name(&format!("{stem}.rdp")) {
+        format!("remote-desktop-{stem}")
     } else {
         stem
     }
@@ -175,6 +178,12 @@ impl Viewer {
                 Viewer::TightVnc | Viewer::UltraVnc => "-viewonly".to_owned(),
             });
         }
+        // An IPv6 address in brackets, as everywhere else: `[2001:db8::5]::5900`.
+        let host = if host.contains(':') && !host.starts_with('[') {
+            format!("[{host}]")
+        } else {
+            host.to_owned()
+        };
         args.push(format!("{host}::{port}"));
         args
     }
@@ -258,6 +267,15 @@ mod tests {
             Viewer::RealVnc
         );
         assert_eq!(Viewer::TigerVnc.args("127.0.0.1", 50123, false), ["127.0.0.1::50123"]);
+        // IPv6 in brackets, never `2001:db8::5::5900`.
+        assert_eq!(
+            Viewer::TigerVnc.args("2001:db8::5", 5900, false),
+            ["[2001:db8::5]::5900"]
+        );
+        assert_eq!(
+            Viewer::TigerVnc.args("[2001:db8::5]", 5900, false),
+            ["[2001:db8::5]::5900"]
+        );
     }
 
     #[test]
@@ -273,6 +291,13 @@ mod tests {
         assert_eq!(file_stem("win01 (Prod)"), "win01__Prod_");
         assert_eq!(file_stem("..\\..\\x"), "_.._x");
         assert_eq!(file_stem("..."), "remote-desktop");
+        // A DOS device's name would open the device, not a file.
+        for device in ["NUL", "con", "COM1", "lpt3", "AUX.backup"] {
+            let stem = file_stem(device);
+            assert!(stem.starts_with("remote-desktop-"), "{device}: {stem}");
+            assert!(!crate::untrusted::is_device_name(&format!("{stem}.rdp")), "{stem}");
+        }
+        assert_eq!(file_stem("console"), "console");
     }
 
     #[test]

@@ -106,6 +106,7 @@ import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { MultiExecGroupsDialog, type GroupsDialogStart } from "@/components/MultiExecGroupsDialog";
 import { MultiExecGroupsSubmenu } from "@/components/MultiExecGroupsMenu";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
 import { usePresentation } from "@/components/Presentation";
 import { ScrollbackSearchPanel, type SearchPane } from "@/components/ScrollbackSearchPanel";
@@ -449,6 +450,8 @@ export function TerminalPage({
   const filesShown = side === "files";
   /** SS-07: the current terminal's tunnels, from the "⋯" menu (or a link to them). */
   const [tunnelsOpen, setTunnelsOpen] = useState(false);
+  /** SS-12: a break on a Prod or protected serial line waits for this confirm. */
+  const [breakAsk, setBreakAsk] = useState<{ pane: PaneSession; name: string } | null>(null);
   /** SS-08: files picked or dropped for upload that are in the folder already. */
   const [conflict, setConflict] = useState<{
     pane: PaneSession;
@@ -1691,12 +1694,20 @@ export function TerminalPage({
             {currentPane.kind === "serial" && (
               <DropdownMenuItem
                 disabled={!currentPane.connected}
-                onSelect={() =>
+                onSelect={() => {
+                  // A break can halt a running console: a Prod or protected session asks first.
+                  const session = currentPane.sessionId ? sessionById.get(currentPane.sessionId) : undefined;
+                  const sensitive =
+                    session && (session.protected || appliedEnvironment(session, vmById).environment === "prod");
+                  if (sensitive) {
+                    setBreakAsk({ pane: currentPane, name: currentName });
+                    return;
+                  }
                   void currentPane.sendBreak().then(
                     () => toast.success("Break sent"),
                     (err) => toast.error(errorMessage(err)),
-                  )
-                }
+                  );
+                }}
               >
                 <ZapIcon />
                 <span>
@@ -1998,6 +2009,18 @@ export function TerminalPage({
             <DropdownMenuItem onSelect={() => void fileMenu.pane.pasteFromClipboard()}>Paste</DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
+      )}
+      {breakAsk && (
+        <ConfirmDialog
+          title={`Send a break to ${breakAsk.name}?`}
+          description="A break can halt a running console: a Cisco router drops to ROMMON, a SPARC to its boot prompt."
+          confirmLabel="Send break"
+          onConfirm={async () => {
+            await breakAsk.pane.sendBreak(true);
+            toast.success("Break sent");
+          }}
+          onClose={() => setBreakAsk(null)}
+        />
       )}
       {pasteAsk && (
         <PasteConfirmDialog

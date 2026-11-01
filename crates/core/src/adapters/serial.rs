@@ -5,14 +5,16 @@
 //! A port is read and written on one thread of its own ([`serial_shell`]): reads wait at most [`READ_WAIT`] for the
 //! first byte (`ReadIntervalTimeout` and `ReadTotalTimeoutMultiplier` at `MAXDWORD`), so what is typed goes out at
 //! once and a device's output shows as it comes. Windows opens a COM port for one program at a time, and Remotely
+//! waits for a pane's thread to let go of its port ([`SerialShell::released`]) before opening it again, and
 //! keeps one pane per port (`crate::terminal`).
 
 use std::time::Duration;
 
 use serde::Serialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
+use zeroize::Zeroizing;
 
-use super::remote::{ShellEnd, ShellInput, ShellOutput};
+use super::remote::{SecretPromptShown, ShellEnd, ShellInput, ShellOutput};
 use crate::error::Result;
 use crate::sessions::kinds::SerialOptions;
 
@@ -61,15 +63,27 @@ pub fn sorted(mut ports: Vec<ComPort>) -> Vec<ComPort> {
     ports
 }
 
+/// A serial pane's two ends, and when its thread let go of the port.
+pub struct SerialShell {
+    pub input: mpsc::Sender<ShellInput>,
+    pub output: mpsc::Receiver<ShellOutput>,
+    /// True once the thread has closed the port (after a Close, the pane going away, or the port failing), so the
+    /// next open of it (a reconnect, or another tab) waits for this instead of finding it taken.
+    pub released: watch::Receiver<bool>,
+}
+
 /// A serial pane's two ends, like an SSH shell's: Enter goes as the session's line ending, what is typed shows here
-/// too with local echo on, and Break holds the line. A port that goes away (an unplugged USB adapter) ends it as
-/// lost, so the pane tries again by itself.
+/// too with local echo on (nothing of it while `secret_prompt` says a password prompt shows, nor of a vault
+/// secret), and Break holds the line. A port that goes away (an unplugged USB adapter) ends it as lost, so the pane
+/// tries again by itself.
 pub fn serial_shell(
     mut link: Box<dyn SerialLink>,
     options: SerialOptions,
-) -> (mpsc::Sender<ShellInput>, mpsc::Receiver<ShellOutput>) {
+    secret_prompt: SecretPromptShown,
+) -> SerialShell {
     let (input_tx, mut input_rx) = mpsc::channel::<ShellInput>(256);
     let (output_tx, output_rx) = mpsc::channel::<ShellOutput>(256);
+    let (released_tx, released) = watch::channel(false);
     std::thread::spawn(move || {
         let mut buf = vec![0u8; 4096];
         let lost = |err: std::io::Error| ShellEnd::Lost {
@@ -78,9 +92,14 @@ pub fn serial_shell(
         let end = 'run: loop {
             loop {
                 match input_rx.try_recv() {
-                    Ok(ShellInput::Data(bytes)) => {
-                        let mut out = Vec::with_capacity(bytes.len());
-                        for b in &bytes {
+                    Ok(input @ (ShellInput::Data(_) | ShellInput::Secret(_))) => {
+                        let (bytes, typed_secret) = match input {
+                            ShellInput::Secret(bytes) => (Zeroizing::new(bytes), true),
+                            ShellInput::Data(bytes) => (Zeroizing::new(bytes), false),
+                            _ => continue,
+                        };
+                        let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
+                        for b in bytes.iter() {
                             match b {
                                 b'\r' => out.extend_from_slice(options.line_ending.bytes()),
                                 b => out.push(*b),
@@ -90,7 +109,7 @@ pub fn serial_shell(
                             break 'run Some(lost(err));
                         }
                         if options.local_echo {
-                            let shown = super::telnet::local_echo(&bytes);
+                            let shown = super::telnet::local_echo(&bytes, typed_secret || secret_prompt());
                             if !shown.is_empty() && output_tx.blocking_send(ShellOutput::Data(shown)).is_err() {
                                 break 'run None;
                             }
@@ -120,11 +139,16 @@ pub fn serial_shell(
         };
         // The port closes here, so the next pane (or a reconnect) can open it.
         drop(link);
+        let _ = released_tx.send(true);
         if let Some(end) = end {
             let _ = output_tx.blocking_send(ShellOutput::Closed(end));
         }
     });
-    (input_tx, output_rx)
+    SerialShell {
+        input: input_tx,
+        output: output_rx,
+        released,
+    }
 }
 
 /// The real ports.

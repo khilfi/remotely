@@ -119,6 +119,8 @@ struct DeviceInner {
     unplugged: Mutex<bool>,
     /// The settings it was last opened with.
     opened_with: Mutex<Option<SerialOptions>>,
+    /// How long closing the port takes.
+    release_delay: Mutex<Duration>,
 }
 
 impl FakeSerialDevice {
@@ -150,6 +152,11 @@ impl FakeSerialDevice {
     /// The settings the port was last opened with.
     pub fn opened_with(&self) -> Option<SerialOptions> {
         *locks::lock(&self.inner.opened_with)
+    }
+
+    /// Closing the port takes this long from now on (a write held up by flow control), so it stays taken meanwhile.
+    pub fn set_release_delay(&self, delay: Duration) {
+        *locks::lock(&self.inner.release_delay) = delay;
     }
 
     /// The adapter is pulled out: an open link fails, and opening fails until it is plugged in again.
@@ -218,7 +225,12 @@ impl SerialLink for FakeLink {
 }
 
 impl Drop for FakeLink {
+    /// Lets go of the port, after [`FakeSerialDevice::set_release_delay`] (a write held up by flow control).
     fn drop(&mut self) {
+        let delay = *locks::lock(&self.device.inner.release_delay);
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
         locks::lock(&self.device.inner.to_link).take();
     }
 }
@@ -241,6 +253,7 @@ impl FakeSerialPorts {
                 to_link: Mutex::default(),
                 unplugged: Mutex::new(false),
                 opened_with: Mutex::default(),
+                release_delay: Mutex::default(),
             }),
         };
         locks::lock(&self.devices).insert(name.to_ascii_uppercase(), device.clone());

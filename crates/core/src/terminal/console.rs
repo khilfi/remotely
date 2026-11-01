@@ -288,9 +288,10 @@ impl Terminals {
         Ok(saved.flatten().map(PathBuf::from))
     }
 
-    /// SS-12: sends a break on a serial pane's line (Telnet's IAC BRK on a Telnet pane). Dropped while it is not
-    /// connected.
-    pub async fn send_break(&self, id: Uuid) -> Result<()> {
+    /// SS-12: sends a break on a serial pane's line (Telnet's IAC BRK on a Telnet pane). A break can halt a running
+    /// console (a Cisco router drops to ROMMON, a SPARC to its OpenBoot prompt), so on a Prod or protected session it
+    /// needs `confirmed` (the UI asks first). No tier; audited (`terminal_break_sent`). Refused while not connected.
+    pub async fn send_break(&self, ctx: &Context, id: Uuid, confirmed: bool) -> Result<()> {
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id} has closed")))?;
@@ -299,8 +300,46 @@ impl Terminals {
                 "Send Break is for serial and Telnet terminals.".into(),
             ));
         }
-        let _ = control.input.send(super::TerminalInput::Break).await;
-        Ok(())
+        if !control.screen().connected {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is not connected, so no break was sent.",
+                super::quoted_name(&control)
+            )));
+        }
+        let target = self.target(ctx, id).await?;
+        let sensitive = target.environment == Environment::Prod || target.protected;
+        if sensitive && !confirmed {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is {}, and a break can halt a running console: confirm it first.",
+                super::quoted_name(&control),
+                if target.protected { "protected" } else { "Prod" }
+            )));
+        }
+        let mut detail = match control.kind {
+            PaneKind::Serial => format!(
+                "a break on {} ({} ms)",
+                control.serial_port.as_deref().unwrap_or("the line"),
+                crate::adapters::serial::BREAK_LENGTH.as_millis()
+            ),
+            _ => "Telnet's break (IAC BRK)".to_owned(),
+        };
+        if sensitive {
+            detail.push_str("; confirmed first");
+        }
+        audit(
+            &self.inner.store,
+            ctx,
+            "terminal_break_sent",
+            &format!("Sent a break to {}", super::quoted_name(&control)),
+            control.targets(),
+            &detail,
+        )
+        .await?;
+        control
+            .input
+            .send(super::TerminalInput::Break)
+            .await
+            .map_err(|_| CoreError::UnknownTarget(format!("terminal {id} has closed")))
     }
 
     /// SS-12: opens an RDP or VNC session's window (`mstsc.exe`, or the VNC viewer), which asks for the password.
@@ -399,17 +438,31 @@ impl Terminals {
                 })
             }
         };
-        let window = self.launcher().launch(launch).await?;
-        audit(
-            &self.inner.store,
-            ctx,
-            event,
-            &action,
-            std::slice::from_ref(&session.target()),
-            &detail,
-        )
-        .await?;
-        Ok(window)
+        // Rule 4: audited before it starts (as a terminal is before it connects), so no window opens unrecorded; one
+        // that doesn't start gets a second entry saying why.
+        let target = session.target();
+        let targets = std::slice::from_ref(&target);
+        audit(&self.inner.store, ctx, event, &action, targets, &detail).await?;
+        match self.launcher().launch(launch).await {
+            Ok(window) => Ok(window),
+            Err(err) => {
+                let failed = format!("{action}: it did not start");
+                if let Err(audit_err) = super::audit_entry_result(
+                    &self.inner.store,
+                    ctx,
+                    event,
+                    &failed,
+                    targets,
+                    &err.to_string(),
+                    "failed",
+                )
+                .await
+                {
+                    tracing::error!(error = %audit_err, "could not audit a window that did not start");
+                }
+                Err(err)
+            }
+        }
     }
 
     /// SS-12: a Telnet or serial session's pane. One pane per COM port.

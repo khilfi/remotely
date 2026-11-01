@@ -741,9 +741,9 @@ export class PaneSession {
     if (kind !== this.snapshot.paneKind) this.update({ paneKind: kind });
   }
 
-  /** SS-12: Send Break on a serial line (Telnet: IAC BRK). */
-  sendBreak() {
-    if (this.coreId) return api.terminalSendBreak(this.coreId);
+  /** SS-12: Send Break on a serial line (Telnet: IAC BRK); `confirmed` after asking, for a Prod or protected session. */
+  sendBreak(confirmed = false) {
+    if (this.coreId) return api.terminalSendBreak(this.coreId, confirmed);
     return Promise.resolve();
   }
 

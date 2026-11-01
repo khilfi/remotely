@@ -396,8 +396,9 @@ pub async fn serial_ports_list(state: State<'_, AppState>) -> IpcResult<Vec<ComP
     Ok(state.core.terminals.serial_ports().await?)
 }
 
-/// SS-12: Send Break on a serial (or Telnet) pane.
+/// SS-12: Send Break on a serial (or Telnet) pane; a Prod or protected one needs `confirmed` (the UI asks). Audited.
 #[tauri::command]
-pub async fn terminal_send_break(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
-    Ok(state.core.terminals.send_break(id).await?)
+pub async fn terminal_send_break(state: State<'_, AppState>, id: Uuid, confirmed: bool) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.terminals.send_break(&core.ctx(), id, confirmed).await?)
 }

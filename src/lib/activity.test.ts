@@ -93,6 +93,7 @@ test("every event the core writes has plain words, and none is a code", () => {
     "host_key_removed",
     "terminal_opened",
     "rdp_opened",
+    "terminal_break_sent",
     "vnc_opened",
     "terminal_closed",
     "terminal_output_saved",

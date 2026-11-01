@@ -383,9 +383,12 @@ crates/core/          remotely-core: all app logic
                       names)
     terminal/         SS-12 console.rs: PaneKind (SSH, Telnet, serial, a tunnel tab); Telnet and serial panes connect
                       through their adapters into the same supervisor (logs and output scrubbed, reconnects, alerts; no
-                      SFTP, tunnels, hook or startup command; never MultiExec or Compare); one pane per COM port;
+                      SFTP, tunnels, hook or startup command; never MultiExec or Compare); one pane per COM port,
+                      reopened only once the last connection's thread let go of it (SerialShell::released); local
+                      echo shows nothing at a secret prompt, nor a typed vault secret (ShellInput::Secret);
                       a vault password typed into Telnet asks for the vault password on each connection
-                      (SecretBindings::confirm_given); open_window starts RDP or VNC (audited rdp_opened, vnc_opened);
+                      (SecretBindings::confirm_given); Send break audited (terminal_break_sent), confirmed on Prod or
+                      protected; open_window starts RDP or VNC (audited rdp_opened, vnc_opened, before it starts);
                       behind a jump host, a tunnel tab to it opens a loopback forward through the bus, then the window
                       on it, and closes when the window does; rdp_file;
                       SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:

@@ -1322,6 +1322,18 @@ impl BulkRuns {
         for id in &picks.terminal_ids {
             let info = self.terminals.as_ref().and_then(|t| t.pane_info(*id));
             match info {
+                // SS-12: a tunnel tab's connection is its jump host's, and a Telnet or serial tab is no shell:
+                // none of them is a host Compare hosts runs on.
+                Some(info) if !info.kind.joins_multiexec() => {
+                    let note = format!(
+                        "{} is a {} tab, so it was left out: Compare hosts runs over SSH only.",
+                        info.name,
+                        info.kind.label()
+                    );
+                    if !picked.notes.contains(&note) {
+                        picked.notes.push(note);
+                    }
+                }
                 Some(info) => match info.session_id {
                     Some(session) if by_id.contains_key(&session) => picked.session(session, "open tab".into()),
                     Some(_) => picked

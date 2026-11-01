@@ -2769,7 +2769,7 @@ pub fn loopback_shell_with(files: FakeFiles, shell: Option<PromptShell>) -> Shel
             let bytes = match msg {
                 ShellInput::Close => break,
                 ShellInput::Resize { .. } | ShellInput::Break => continue,
-                ShellInput::Data(bytes) => bytes,
+                ShellInput::Data(bytes) | ShellInput::Secret(bytes) => bytes,
             };
             let mut out = Vec::new();
             for byte in bytes {

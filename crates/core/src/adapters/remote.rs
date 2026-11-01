@@ -302,6 +302,9 @@ pub struct ExecResult {
 #[derive(Debug)]
 pub enum ShellInput {
     Data(Vec<u8>),
+    /// QL-06: a vault secret typed at a prompt, then Enter: sent like `Data`, but never echoed locally (SS-12's
+    /// Telnet and serial local echo).
+    Secret(Vec<u8>),
     Resize {
         cols: u16,
         rows: u16,
@@ -310,6 +313,10 @@ pub enum ShellInput {
     Break,
     Close,
 }
+
+/// SS-12: whether the pane's screen shows a password, passphrase or code prompt now (QL-06, SS-10's detection), so a
+/// console's local echo shows nothing of what is typed.
+pub type SecretPromptShown = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Output of an interactive shell: raw bytes (never decoded here, so a character split across two
 /// reads arrives whole in xterm.js), then one `Closed`.
@@ -1785,7 +1792,7 @@ fn pump_pty(
                         }
                     }
                     msg = input_rx.recv() => match msg {
-                        Some(ShellInput::Data(bytes)) => {
+                        Some(ShellInput::Data(bytes) | ShellInput::Secret(bytes)) => {
                             // A failed write shows up as the channel closing below.
                             let _ = channel.data_bytes(bytes).await;
                         }

@@ -19,7 +19,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
-use super::remote::{PtySize, ShellEnd, ShellInput, ShellOutput};
+use zeroize::Zeroizing;
+
+use super::remote::{PtySize, SecretPromptShown, ShellEnd, ShellInput, ShellOutput};
 use crate::error::{CoreError, Result};
 use crate::sessions::kinds::LineEnding;
 
@@ -54,6 +56,8 @@ pub struct TelnetRequest<'a> {
     pub connect_timeout: Duration,
     /// The terminal type it announces (TTYPE), e.g. `XTERM-256COLOR`.
     pub term: &'a str,
+    /// Whether a password or code prompt shows now: local echo then shows only the line break.
+    pub secret_prompt: SecretPromptShown,
 }
 
 /// A connected Telnet session's two ends.
@@ -93,6 +97,7 @@ pub async fn connect(request: TelnetRequest<'_>) -> Result<TelnetShell> {
         size: request.size,
         line_ending: request.line_ending,
         started: Instant::now(),
+        secret_prompt: request.secret_prompt,
     };
     tokio::spawn(session.run(stream, input_rx, output_tx));
     Ok(TelnetShell {
@@ -264,8 +269,10 @@ pub fn encode_input(data: &[u8], line_ending: LineEnding) -> Vec<u8> {
 }
 
 /// What local echo shows for typed bytes: Enter as a new line, Backspace as rubbing out a character; the escape
-/// sequences of arrow and function keys and other control keys show nothing.
-pub fn local_echo(data: &[u8]) -> Vec<u8> {
+/// sequences of arrow and function keys and other control keys show nothing. `secret`: a password or code prompt
+/// shows (or a vault secret is being typed), so only the line break shows: nothing of it reaches the screen, the
+/// session log or saved output.
+pub fn local_echo(data: &[u8], secret: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut escape = 0u8;
     for &b in data {
@@ -276,6 +283,7 @@ pub fn local_echo(data: &[u8]) -> Vec<u8> {
             (2, 0x40..=0x7e) => escape = 0,
             (2, _) => {}
             (_, b'\r') => out.extend(*b"\r\n"),
+            _ if secret => {}
             (_, 0x7f | 0x08) => out.extend(*b"\x08 \x08"),
             (_, b) if b < 0x20 => {}
             (_, b) => out.push(b),
@@ -382,6 +390,8 @@ struct Session {
     size: PtySize,
     line_ending: LineEnding,
     started: Instant,
+    /// A password or code prompt shows now (local echo shows nothing of what is typed).
+    secret_prompt: SecretPromptShown,
 }
 
 impl Session {
@@ -410,9 +420,14 @@ impl Session {
         let end = loop {
             tokio::select! {
                 msg = input.recv() => match msg {
-                    Some(ShellInput::Data(bytes)) => {
+                    Some(input @ (ShellInput::Data(_) | ShellInput::Secret(_))) => {
+                        let (bytes, typed_secret) = match input {
+                            ShellInput::Secret(bytes) => (Zeroizing::new(bytes), true),
+                            ShellInput::Data(bytes) => (Zeroizing::new(bytes), false),
+                            _ => continue,
+                        };
                         if self.echo_here() {
-                            let shown = local_echo(&bytes);
+                            let shown = local_echo(&bytes, typed_secret || (self.secret_prompt)());
                             if !shown.is_empty() && output.send(ShellOutput::Data(shown)).await.is_err() {
                                 break None;
                             }
@@ -551,7 +566,9 @@ mod tests {
 
     #[test]
     fn local_echo_shows_what_is_typed() {
-        assert_eq!(local_echo(b"ab\x7f\r"), b"ab\x08 \x08\r\n");
-        assert_eq!(local_echo(b"\x1b[Ax\x1bOPy\x1b[15~z"), b"xyz");
+        assert_eq!(local_echo(b"ab\x7f\r", false), b"ab\x08 \x08\r\n");
+        assert_eq!(local_echo(b"\x1b[Ax\x1bOPy\x1b[15~z", false), b"xyz");
+        // At a password prompt, or for a vault secret, only the line break shows.
+        assert_eq!(local_echo(b"hunter2\x7f\r", true), b"\r\n");
     }
 }

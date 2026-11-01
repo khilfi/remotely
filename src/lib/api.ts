@@ -3730,8 +3730,8 @@ export const api = {
   consoleOpenWindow: (sessionId: string) => invoke<WindowOpened>("console_open_window", { sessionId }),
   /** SS-12: this PC's COM ports. */
   serialPorts: () => invoke<ComPort[]>("serial_ports_list"),
-  /** SS-12: Send Break on a serial (or Telnet) pane. */
-  terminalSendBreak: (id: string) => invoke<void>("terminal_send_break", { id }),
+  /** SS-12: Send Break on a serial (or Telnet) pane; a Prod or protected one needs `confirmed` (the UI asks first). */
+  terminalSendBreak: (id: string, confirmed: boolean) => invoke<void>("terminal_send_break", { id, confirmed }),
   /** SS-12: the VNC viewer; null or empty finds it again. */
   setVncViewerPath: (path: string | null) => invoke<Settings>("settings_set_vnc_viewer_path", { path }),
   /** SS-10: turns MultiExec on for these terminals, or changes them. */

@@ -330,8 +330,25 @@ async fn behind_a_jump_host_a_tunnel_tab_opens_the_window_and_closes_with_it() {
     let mut back = [0u8; 9];
     timeout(WAIT, socket.read_exact(&mut back)).await.unwrap().unwrap();
     assert_eq!(&back, b"rdp-hello");
-    // It doesn't join Type in all tabs.
+    // It doesn't join Type in all tabs, nor Compare hosts (its connection is the jump host's, not a host to run on).
     assert!(core.multiexec.set_targets(vec![pane.id]).await.is_err());
+    let resolved = core
+        .bulk
+        .resolve(
+            &core.ctx(),
+            &TargetPicks {
+                terminal_ids: vec![pane.id],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(resolved.hosts.is_empty(), "{:?}", resolved.hosts);
+    assert!(
+        resolved.notes.iter().any(|n| n.contains("tunnel tab")),
+        "{:?}",
+        resolved.notes
+    );
 
     // The window closes: so does the tab, and the tunnel with it.
     launcher.close(0);
@@ -532,7 +549,7 @@ async fn a_serial_pane_sends_its_line_ending_and_breaks_and_holds_its_port() {
     assert!(device.wait_for(b"show run\r\n", WAIT).await, "{:?}", device.received());
     assert!(device.send(b"Router#"));
     pane.expect_output("Router#").await;
-    core.terminals.send_break(pane.id).await.unwrap();
+    core.terminals.send_break(&core.ctx(), pane.id, false).await.unwrap();
     timeout(WAIT, async {
         while device.breaks() == 0 {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -689,4 +706,150 @@ async fn only_ssh_sessions_log_in_with_the_vault_jump_or_reach_ssh_features() {
         .find(|e| e.action == "Created session 'sw01'")
         .unwrap();
     assert!(created.detail.unwrap().contains("Telnet, Enter sends CR LF"));
+}
+
+// ---- Review fixes ---------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_serial_reconnect_or_reopen_waits_for_the_old_connection_to_let_go_of_the_port() {
+    let (core, _, ports) = core().await;
+    let device = ports.with_port("COM5");
+    // Closing the port takes a while (a write held up by flow control): the port stays taken meanwhile.
+    device.set_release_delay(Duration::from_millis(400));
+    let id = create(
+        &core,
+        input("console", "COM5", 1, SessionKind::Serial(SerialOptions::default())),
+    )
+    .await;
+    let mut pane = Pane::open(&core, id).await;
+    pane.connected().await;
+    core.terminals.reconnect(pane.id).await;
+    pane.connected().await;
+    assert!(device.is_open());
+    pane.type_text(&core, "again\r").await;
+    assert!(device.wait_for(b"again\r", WAIT).await);
+
+    // Closing the tab and opening it again at once waits too.
+    core.terminals.close(pane.id).await;
+    pane.expect_status(|s| *s == TerminalStatus::Closed).await;
+    let mut again = Pane::open(&core, id).await;
+    again.connected().await;
+    core.terminals.close(again.id).await;
+}
+
+#[tokio::test]
+async fn local_echo_shows_nothing_typed_at_a_password_prompt() {
+    let (core, _, ports) = core().await;
+    // Telnet: a server that won't echo, so what is typed is echoed here, but not the password.
+    let server = TelnetTestServer::without_echo("alice", "unused").await.unwrap();
+    let id = create(
+        &core,
+        input(
+            "old02",
+            "127.0.0.1",
+            server.port(),
+            SessionKind::Telnet(TelnetOptions::default()),
+        ),
+    )
+    .await;
+    let mut pane = Pane::open(&core, id).await;
+    pane.connected().await;
+    pane.expect_output("login: ").await;
+    pane.type_text(&core, "bob\r").await;
+    pane.expect_output("bob").await;
+    pane.expect_output("Password: ").await;
+    pane.type_text(&core, "s3cret-typed\r").await;
+    let shown = pane.expect_output("% Login invalid").await;
+    assert!(!shown.contains("s3cret-typed"), "{shown:?}");
+
+    // Serial with local echo on: the device asks, and the answer isn't shown.
+    let device = ports.with_port("COM6");
+    let options = SerialOptions {
+        local_echo: true,
+        ..SerialOptions::default()
+    };
+    let id = create(&core, input("console", "COM6", 1, SessionKind::Serial(options))).await;
+    let mut pane = Pane::open(&core, id).await;
+    pane.connected().await;
+    pane.type_text(&core, "enable\r").await;
+    pane.expect_output("enable").await;
+    assert!(device.send(b"\r\nPassword: "));
+    pane.expect_output("Password: ").await;
+    pane.type_text(&core, "hunter2-typed\r").await;
+    assert!(
+        device.wait_for(b"hunter2-typed\r", WAIT).await,
+        "it still reaches the device"
+    );
+    assert!(device.send(b"\r\nRouter#"));
+    let shown = pane.expect_output("Router#").await;
+    assert!(!shown.contains("hunter2-typed"), "{shown:?}");
+    core.terminals.close(pane.id).await;
+}
+
+#[tokio::test]
+async fn a_window_is_audited_before_it_starts_and_again_when_it_does_not() {
+    let (core, launcher, _) = core().await;
+    let id = create(
+        &core,
+        input(
+            "win02",
+            "win02.example.com",
+            3389,
+            SessionKind::Rdp(RdpOptions::default()),
+        ),
+    )
+    .await;
+    launcher.set_failing(Some("mstsc.exe could not be started: test"));
+    let err = core.terminals.open_window(&core.ctx(), id).await.unwrap_err();
+    assert!(matches!(err, CoreError::Console(_)), "{err}");
+    let entries: Vec<AuditEntry> = audit(&core)
+        .await
+        .into_iter()
+        .filter(|e| e.event == "rdp_opened")
+        .collect();
+    // Newest first: the failure, then the entry written before it started.
+    assert_eq!(entries.len(), 2, "{entries:?}");
+    assert_eq!(entries[0].result.as_deref(), Some("failed"));
+    assert!(entries[0].action.contains("did not start"));
+    assert_eq!(entries[1].result, None);
+    assert_eq!(entries[1].action, "Opened the remote desktop of 'win02'");
+}
+
+#[tokio::test]
+async fn send_break_is_audited_and_asks_first_on_prod() {
+    let (core, _, ports) = core().await;
+    let device = ports.with_port("COM8");
+    let mut prod = input("core-switch", "COM8", 1, SessionKind::Serial(SerialOptions::default()));
+    prod.environment = Environment::Prod;
+    let id = create(&core, prod).await;
+    let mut pane = Pane::open(&core, id).await;
+    pane.connected().await;
+    let err = core
+        .terminals
+        .send_break(&core.ctx(), pane.id, false)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("confirm it first"), "{err}");
+    assert_eq!(device.breaks(), 0);
+    core.terminals.send_break(&core.ctx(), pane.id, true).await.unwrap();
+    timeout(WAIT, async {
+        while device.breaks() == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let entry = audit(&core)
+        .await
+        .into_iter()
+        .find(|e| e.event == "terminal_break_sent")
+        .expect("audited");
+    assert_eq!(entry.action, "Sent a break to 'core-switch'");
+    assert!(entry.detail.unwrap().contains("confirmed first"));
+    // Not connected: nothing is sent.
+    device.unplug(true);
+    pane.expect_status(|s| matches!(s, TerminalStatus::Disconnected { .. }))
+        .await;
+    assert!(core.terminals.send_break(&core.ctx(), pane.id, true).await.is_err());
+    core.terminals.close(pane.id).await;
 }

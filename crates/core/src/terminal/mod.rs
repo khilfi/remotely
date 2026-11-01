@@ -838,7 +838,13 @@ struct Inner {
     launcher: std::sync::RwLock<Arc<dyn ConsoleLauncher>>,
     /// SS-12: this PC's COM ports.
     serial: std::sync::RwLock<Arc<dyn SerialPorts>>,
+    /// SS-12: each COM port a pane's thread opened, by name, and whether that thread has let go of it since.
+    serial_held: Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
 }
+
+/// SS-12: the longest a serial pane waits for the port's last connection to let go of it (a write held up by flow
+/// control gives up after 5 s).
+const SERIAL_RELEASE_WAIT: Duration = Duration::from_secs(10);
 
 /// SS-12: the programs and ports a new `Terminals` uses. Under the `fakes` feature (tests only) they start and open
 /// nothing until a test gives its fakes, so no test ever starts mstsc or a viewer or opens a real COM port.
@@ -913,6 +919,7 @@ impl Terminals {
                 alert_timing: Mutex::new(AlertTiming::default()),
                 launcher: std::sync::RwLock::new(launcher),
                 serial: std::sync::RwLock::new(serial),
+                serial_held: Mutex::default(),
             }),
         }
     }
@@ -2175,6 +2182,34 @@ async fn audit_entry(
         .map(drop)
 }
 
+/// SS-12: an audit entry with its result (`failed`), e.g. a window that did not start.
+async fn audit_entry_result(
+    store: &Store,
+    ctx: &Context,
+    event: &str,
+    action: &str,
+    targets: &[Target],
+    detail: &str,
+    result: &str,
+) -> Result<()> {
+    store
+        .append_audit(
+            ctx,
+            NewAuditEntry {
+                event,
+                action,
+                tier: None,
+                job_id: None,
+                targets,
+                approval: None,
+                result: Some(result),
+                detail: Some(detail),
+            },
+        )
+        .await
+        .map(drop)
+}
+
 /// Worth retrying by itself: the network or the server, not the login or a host key.
 fn retryable(err: &CoreError) -> bool {
     matches!(err, CoreError::Ssh(_) | CoreError::Io(_) | CoreError::Timeout { .. })
@@ -2664,6 +2699,13 @@ impl Pane {
         ))
     }
 
+    /// SS-12: whether this pane's screen shows a password, passphrase or code prompt now, for a console's local echo
+    /// (which then shows nothing of what is typed). Holds the pane weakly.
+    fn secret_prompt_shown(&self) -> crate::adapters::remote::SecretPromptShown {
+        let control = Arc::downgrade(&self.control);
+        Arc::new(move || control.upgrade().is_some_and(|c| c.screen().at_secret_prompt()))
+    }
+
     /// SS-12: a Telnet or serial pane's connection: the session as saved now, then the transport. Nothing logs in
     /// for the user here (the remote side asks), and nothing is typed by itself.
     async fn connect_console(&mut self) -> Result<(ShellHandle, Typed)> {
@@ -2694,6 +2736,7 @@ impl Pane {
                     line_ending: options.line_ending,
                     connect_timeout: tuning.connect_timeout,
                     term: "xterm-256color",
+                    secret_prompt: self.secret_prompt_shown(),
                 })
                 .await?;
                 if let Some(ip) = shell.peer_ip {
@@ -2708,14 +2751,28 @@ impl Pane {
                     inner: Arc::clone(&self.inner),
                 }
                 .serial();
+                // A reconnect, or a tab opened right after another to the same port closed: the old pane's thread
+                // lets go of the port first (after its current read, or a write held up by flow control).
+                let port_key = session.host.to_ascii_uppercase();
+                let held = locks::lock(&self.inner.serial_held).get(&port_key).cloned();
+                if let Some(mut released) = held {
+                    let waited = tokio::time::timeout(SERIAL_RELEASE_WAIT, released.wait_for(|done| *done)).await;
+                    if waited.is_err() {
+                        return Err(CoreError::SerialPort(format!(
+                            "{} is still held by this tab's last connection; try again in a moment",
+                            session.host
+                        )));
+                    }
+                }
                 let port = session.host.clone();
                 let link = tokio::task::spawn_blocking(move || ports.open(&port, &options))
                     .await
                     .map_err(|err| CoreError::SerialPort(format!("the COM port could not be opened: {err}")))??;
-                let (input, output) = crate::adapters::serial::serial_shell(link, options);
+                let shell = crate::adapters::serial::serial_shell(link, options, self.secret_prompt_shown());
+                locks::lock(&self.inner.serial_held).insert(port_key, shell.released);
                 self.learn(|facts| facts.learn_hostname(&session.host, FactSource::Host))
                     .await;
-                console::console_handle(input, output, None)
+                console::console_handle(shell.input, shell.output, None)
             }
             _ => {
                 return Err(CoreError::WrongSessionKind {
@@ -3220,7 +3277,8 @@ impl Pane {
                             }
                             let mut bytes = Zeroizing::new(secret.expose().as_bytes().to_vec());
                             bytes.push(b'\r');
-                            let _ = live.input.send(ShellInput::Data(bytes.to_vec())).await;
+                            // SS-12: never echoed locally by a console.
+                            let _ = live.input.send(ShellInput::Secret(bytes.to_vec())).await;
                             live.watch.input(b"\r", Instant::now());
                             live.users.input(b"\r");
                             let _ = reply.send(Ok(prompt));

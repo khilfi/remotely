@@ -169,7 +169,8 @@ Remote desktop and consoles (0.7.0, SS-12, `docs/plan-0.7.md` "Approval tiers").
 
 | Action | Tier |
 | --- | --- |
-| Open an RDP window (mstsc on a `.rdp` file), a VNC viewer, or a Telnet or serial terminal | No tier; audited (`rdp_opened`, `vnc_opened`, or `terminal_opened`) |
+| Open an RDP window (mstsc on a `.rdp` file), a VNC viewer, or a Telnet or serial terminal | No tier; audited (`rdp_opened`, `vnc_opened`, or `terminal_opened`) before it starts |
+| Send a break on a serial (or Telnet) line (it can halt a running console) | No tier; audited (`terminal_break_sent`); a confirm first on a Prod or protected session |
 | Open an RDP or VNC session behind a jump host: a tunnel tab to the jump host, then the window | The tunnel at SS-07's tier (a loopback local forward: Low; Medium when the jump host or the session is Prod), audited `tunnel_opened`; the window as above |
 
 | ID | Requirement | Phase |
