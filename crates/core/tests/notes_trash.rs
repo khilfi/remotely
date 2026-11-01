@@ -28,6 +28,7 @@ use remotely_core::snippets::FavouriteInput;
 use remotely_core::stacks::{Readiness, StackInput, StackStep};
 use remotely_core::stars::{RecentKind, StarKind, MAX_RECENTS};
 use remotely_core::store::AuditEntry;
+use remotely_core::terminal::rules::{RuleScope, RuleStyle, TerminalRuleInput};
 use remotely_core::trash::TrashKind;
 use remotely_core::vault::{SecretId, SecretKind, SecretString};
 use remotely_core::{Core, CoreError};
@@ -156,6 +157,7 @@ async fn a_note_is_saved_rendered_and_audited_without_its_text() {
         .contains("handover pack"));
     let handover = core.notes.for_handover(&ctx).await.unwrap();
     assert_eq!(handover.len(), 1);
+    assert!(!handover[0].0.looks_secret);
     assert!(handover[0].1.contains("<a href=\"https://example.com/runbooks/nginx\""));
     assert!(!handover[0].1.contains("data-note-link"));
 
@@ -209,6 +211,43 @@ async fn notes_say_when_they_look_like_a_secret_and_are_refused_while_presenting
     // QL-26: stars and recents are not locked.
     core.stars.set(&ctx, StarKind::Vm, &vmx("it-web"), true).await.unwrap();
     core.stars.opened(&ctx, RecentKind::Page, "dashboard").await.unwrap();
+}
+
+#[tokio::test]
+async fn the_handover_pack_never_carries_a_secret_from_a_note() {
+    let core = core().await;
+    let ctx = core.ctx();
+    let web = core
+        .sessions
+        .create(&ctx, session("web01", "web01.example.com"))
+        .await
+        .unwrap();
+    let body = "Admin login: `password=Hunter2Hunter2!`\n\n```\nmysql --password=Hunter2Hunter2!\n```";
+    core.notes
+        .save(
+            &ctx,
+            &NoteTarget::session(web.id),
+            NoteInput {
+                body: body.into(),
+                handover: true,
+            },
+        )
+        .await
+        .unwrap();
+    let pack = core.notes.for_handover(&ctx).await.unwrap();
+    assert_eq!(pack.len(), 1);
+    let (note, html) = &pack[0];
+    assert!(note.looks_secret);
+    assert!(!html.contains("Hunter2"), "{html}");
+    assert!(!note.body.contains("Hunter2"), "{}", note.body);
+    // The user's own note is left as written.
+    let mine = core
+        .notes
+        .get(&ctx, &NoteTarget::session(web.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(mine.body.contains("Hunter2"));
 }
 
 #[tokio::test]
@@ -340,8 +379,32 @@ async fn a_deleted_session_comes_back_with_everything_that_hung_off_it() {
         .set(&ctx, StarKind::Session, &web.id.to_string(), true)
         .await
         .unwrap();
+    let own_rules = |rules: Vec<remotely_core::terminal::rules::TerminalRule>| {
+        rules
+            .into_iter()
+            .filter(|r| !r.builtin)
+            .map(|r| (r.name, r.scope))
+            .collect::<Vec<_>>()
+    };
+    core.terminal_rules
+        .create(
+            &ctx,
+            TerminalRuleInput {
+                name: "web01 errors".into(),
+                pattern: "upstream timed out".into(),
+                case_sensitive: false,
+                color: None,
+                style: RuleStyle::Text,
+                alert: true,
+                scope: RuleScope::Session { session_id: web.id },
+                enabled: true,
+            },
+        )
+        .await
+        .unwrap();
 
     core.sessions.delete(&ctx, web.id).await.unwrap();
+    assert!(own_rules(core.terminal_rules.list(&ctx).await.unwrap()).is_empty());
     assert!(core.sessions.get(&ctx, web.id).await.is_err());
     assert!(core.forwards.list(&ctx, web.id).await.unwrap().is_empty());
     assert_eq!(
@@ -363,7 +426,7 @@ async fn a_deleted_session_comes_back_with_everything_that_hung_off_it() {
     assert_eq!(trash[0].place, "Sessions › Customer A");
     assert_eq!(
         trash[0].detail,
-        "1 port forward, its container host mark, its place in 1 MultiExec group, its note"
+        "1 port forward, its container host mark, its place in 1 saved group, 1 highlight rule, its note"
     );
 
     let report = core.trash.restore(&ctx, trash[0].id, None).await.unwrap();
@@ -395,6 +458,11 @@ async fn a_deleted_session_comes_back_with_everything_that_hung_off_it() {
         .unwrap()
         .iter()
         .any(|s| s.key == web.id.to_string()));
+    assert_eq!(
+        own_rules(core.terminal_rules.list(&ctx).await.unwrap()),
+        vec![("web01 errors".to_owned(), RuleScope::Session { session_id: web.id })],
+        "its own highlight rule came back"
+    );
     assert!(core.trash.list(&ctx).await.unwrap().is_empty());
     let restored = audit(&core).await.remove(0);
     assert_eq!(restored.event, "trash_restored");
@@ -440,6 +508,34 @@ async fn a_restore_takes_a_free_name_and_leaves_out_what_is_gone() {
         core.trash.list(&ctx).await.unwrap().len(),
         1,
         "the bastion is still in the trash"
+    );
+}
+
+#[tokio::test]
+async fn a_restored_jump_host_says_which_sessions_still_go_without_it() {
+    let core = core().await;
+    let ctx = core.ctx();
+    let bastion = core
+        .sessions
+        .create(&ctx, session("bastion", "bastion.example.com"))
+        .await
+        .unwrap();
+    let mut input = session("web01", "web01.example.com");
+    input.jump_session_id = Some(bastion.id);
+    let web = core.sessions.create(&ctx, input).await.unwrap();
+    core.sessions.delete(&ctx, bastion.id).await.unwrap();
+    assert_eq!(core.sessions.get(&ctx, web.id).await.unwrap().jump_session_id, None);
+    let report = core
+        .trash
+        .undo(&ctx, TrashKind::Session, &bastion.id.to_string(), None)
+        .await
+        .unwrap();
+    let notes = report.notes.join(" | ");
+    assert!(notes.contains("'web01' used it as its jump host"), "{notes}");
+    assert_eq!(
+        core.sessions.get(&ctx, web.id).await.unwrap().jump_session_id,
+        None,
+        "another session is never changed by a restore"
     );
 }
 

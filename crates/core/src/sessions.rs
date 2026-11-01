@@ -1084,13 +1084,15 @@ impl SessionLibrary {
         self.store.read_only().check(Change::Sessions)?;
         let session = self.get(ctx, id).await?;
         // QL-16: sessions whose own jump host it is; a folder's is named apart.
-        let jumpers = self
+        let jumper_names: Vec<String> = self
             .store
             .list_sessions(ctx)
             .await?
             .iter()
             .filter(|s| s.own.jump_session_id == Some(id))
-            .count();
+            .map(|s| quoted(&s.name))
+            .collect();
+        let jumpers = jumper_names.len();
         let folders_using: Vec<String> = self
             .folders(ctx)
             .await?
@@ -1111,6 +1113,11 @@ impl SessionLibrary {
             name: &session.name,
             place: crate::trash::session_place(&tree, session.folder_id),
             sent: Some((place, sent)),
+            jump_users: jumper_names
+                .iter()
+                .cloned()
+                .chain(folders_using.iter().map(|f| format!("folder {f}")))
+                .collect(),
         };
         let Some(trashed) = crate::trash::move_to_trash(&self.store, ctx, item).await? else {
             return Err(CoreError::UnknownTarget(format!("session {id}")));

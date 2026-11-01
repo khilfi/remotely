@@ -707,8 +707,8 @@ export function TerminalPage({
   const current = tabs.find((t) => t.key === activeTab) ?? null;
   const currentPane = current ? findPane(current.layout, current.activePane) : undefined;
   const currentSnapshot = usePane(currentPane);
-  // FD-06: a note's code block goes to the current terminal as a paste, which asks first when it has a line break
-  // (QL-05) and never presses Enter.
+  // FD-06: a note's code block goes to the current terminal as a paste without its last line break (note-send.ts),
+  // asked about first when it has one inside, whatever the paste setting (QL-05).
   const notePane = useRef(currentPane);
   useEffect(() => {
     notePane.current = currentPane;
@@ -717,7 +717,7 @@ export function TerminalPage({
     setNoteSendHandler((text) => {
       const pane = notePane.current;
       if (!pane || !pane.connected) return false;
-      void pane.paste(text);
+      void pane.paste(text, { alwaysAsk: true });
       return true;
     });
     return () => setNoteSendHandler(null);

@@ -413,7 +413,9 @@ impl Notes {
         Ok(render(body, &names, LinkMode::App))
     }
 
-    /// F6: the notes marked for the handover pack, each with its HTML for a file read outside the app.
+    /// F6: the notes marked for the handover pack, each with its HTML for a file read outside the app. Rule 7: the
+    /// pack is an unencrypted file, so both the HTML and the note's `body` here have anything that looks like a secret
+    /// replaced (`export::redact_secrets`); the user's note itself is left as written.
     pub async fn for_handover(&self, ctx: &Context) -> Result<Vec<(Note, String)>> {
         let names = self.link_names(ctx).await?;
         Ok(self
@@ -421,8 +423,9 @@ impl Notes {
             .await?
             .into_iter()
             .filter(|n| n.handover)
-            .map(|n| {
+            .map(|mut n| {
                 let html = render(&n.body, &names, LinkMode::Static).html;
+                n.body = crate::export::redact_secrets(&n.body).0;
                 (n, html)
             })
             .collect())

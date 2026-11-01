@@ -324,7 +324,8 @@ crates/core/          remotely-core: all app logic
                       UI's AppLink JSON, kept as given; not audited, not locked
     notes/            FD-06 (0.7.0, migration 0033): mod.rs Notes (Core.notes): one markdown note per session, VM (by
                       its key) and folder; save, set_handover, list (QL-20), import (FD-07), audited note_changed
-                      without the text, Change::Notes; for_handover (F6) renders the marked ones with LinkMode::Static;
+                      without the text, Change::Notes; for_handover (F6) renders the marked ones with LinkMode::Static,
+                      which redacts secrets first (rule 7: the pack is an unencrypted file), and redacts their body too;
                       a session's note goes to the trash with it, a folder's is deleted with it; render.rs
                       pulldown-cmark (tables, task lists, strikethrough): raw HTML and images become text, only http(s)
                       and app links (session:, vm:, vault: by label, command:, runbook:) are links, each
@@ -335,8 +336,9 @@ crates/core/          remotely-core: all app logic
                       (a terminal's session notes itself in Store::record_session_opened); per workspace, not audited,
                       not locked, kept by key so a restored session keeps its star
     trash/            QL-27 (migration 0033): mod.rs Trash (Core.trash): move_to_trash, in the delete's transaction, for
-                      a session (with its port forwards, container marks, group places, secret grants, tags, note, and
-                      where it went and what it sent, SentThen), a favourite command, size, image, launch template or
+                      a session (with its port forwards, container marks, saved group places, secret grants, its own
+                      QL-17 highlight rules (reloaded on restore), tags, note, where it went and what it sent, SentThen,
+                      and the sessions and folders whose jump host it was, named on restore), a favourite command, size, image, launch template or
                       stack (SessionLibrary, Snippets, Catalog and Stacks call it); restore under the item's own id (a
                       new one if taken), " (restored)" for a taken name, gone folders, jump hosts, VMs, vault items and
                       groups left out with notes, AP-06 confirm when a restored session would send a vault password
@@ -747,7 +749,8 @@ src/                  React + TypeScript UI
                       density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
                       shortcut), first-run.ts (QL-23); 0.7.0 F5: comfort-api.ts (notes, stars, recents, trash, bulk
                       edit: types and wrappers), notes.ts (FD-06 link actions and titles, excerpts, the note link),
-                      note-send.ts (a code block to the Terminal page's current pane), stars.ts and stars-store.ts
+                      note-send.ts (a code block to the Terminal page's current pane, its last line break taken off, and asked
+                      about whatever the paste setting when it has more lines: PaneSession.paste's alwaysAsk), stars.ts and stars-store.ts
                       (QL-26 sets, starred first, the search boost; one shared store), trash.ts and undo-delete.ts
                       (QL-27 names, messages, the delete toast's Undo), bulk-edit.ts (QL-28 the form as a BulkEdit);
                       pure helpers with

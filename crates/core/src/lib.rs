@@ -682,7 +682,7 @@ impl Core {
             groups: MultiExecGroups::new(store.clone()),
             files,
             snippets,
-            terminal_rules,
+            terminal_rules: terminal_rules.clone(),
             reachability,
             metrics,
             history,
@@ -691,7 +691,9 @@ impl Core {
             notifications: Notifications::new(),
             notes: notes::Notes::new(store.clone()),
             stars: stars::Stars::new(store.clone()),
-            trash: trash::Trash::new(store.clone(), current.clone()).with_bindings(bindings.clone()),
+            trash: trash::Trash::new(store.clone(), current.clone())
+                .with_bindings(bindings.clone())
+                .with_terminal_rules(terminal_rules.clone()),
             host_details,
             login_guard,
             presentation,

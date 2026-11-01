@@ -2,12 +2,12 @@
 //! and can be put back.
 //!
 //! * Deleting one moves a snapshot of its rows into the `trash` table, with what hangs off it: a session's port
-//!   forwards, VM link (its own columns), container host marks, places in MultiExec groups, the vault passwords it was
-//!   allowed to send, its tags and its note ([`rows`] keeps each row column by column). The live tables keep their hard
+//!   forwards, VM link (its own columns), container host marks, places in saved (MultiExec) groups, its own highlight
+//!   and alert rules (QL-17), the vault passwords it was allowed to send, its tags and its note ([`rows`] keeps each row column by column). The live tables keep their hard
 //!   deletes, in the same transaction, so no read of them changes.
 //! * Restore puts the rows back under the item's own id (a template finds its image again, a group its session; a
 //!   session id taken since gets a new one). A name taken since gets " (restored)". A folder, jump host, VM, vault item
-//!   or MultiExec group that is gone is left out, with a note; a template whose image or size is gone, or a stack whose
+//!   or saved group that is gone is left out, with a note; a template whose image or size is gone, or a stack whose
 //!   template is gone, comes back and says why it can't deploy, as it would have. SS-04, AP-06: a restored session that
 //!   would send a vault password somewhere it didn't go before it was deleted (a jump host gone, or a folder whose login
 //!   changed) asks for the vault password, as an edit would.
@@ -139,6 +139,7 @@ impl TrashKind {
                 ("container_hosts", "session_id"),
                 ("multiexec_group_members", "session_id"),
                 ("session_secret_grants", "session_id"),
+                ("terminal_rules", "session_id"),
             ],
             _ => &[],
         }
@@ -174,6 +175,9 @@ struct Snapshot {
     note: Option<RowValues>,
     #[serde(default)]
     sent: Option<SentThen>,
+    /// Sessions and folders whose own jump host it was: they lost it with the delete and stay without it.
+    #[serde(default)]
+    jump_users: Vec<String>,
 }
 
 /// One item in the trash, as Settings lists it.
@@ -223,6 +227,8 @@ pub(crate) struct TrashItem<'a> {
     pub place: String,
     /// A session's place and the vault passwords it sends (SS-04), for its restore.
     pub sent: Option<(Destination, Vec<SecretId>)>,
+    /// A session's: the sessions (by name) and folders ("folder 'X'") whose own jump host it is.
+    pub jump_users: Vec<String>,
 }
 
 fn plural(n: usize, noun: &str) -> String {
@@ -281,8 +287,12 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
     }
     match count("multiexec_group_members") {
         0 => {}
-        1 => came.push("its place in 1 MultiExec group".to_owned()),
-        n => came.push(format!("its places in {n} MultiExec groups")),
+        1 => came.push("its place in 1 saved group".to_owned()),
+        n => came.push(format!("its places in {n} saved groups")),
+    }
+    match count("terminal_rules") {
+        0 => {}
+        n => came.push(plural(n, "highlight rule")),
     }
     if note.is_some() {
         came.push("its note".to_owned());
@@ -299,6 +309,7 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
             jump: place.jump,
             secrets: secrets.into_iter().map(|s| s.0).collect(),
         }),
+        jump_users: item.jump_users,
     };
     let id = Uuid::new_v4();
     let now = now_rfc3339();
@@ -451,7 +462,35 @@ pub struct Trash {
     store: Store,
     current: Current,
     bindings: Option<SecretBindings>,
+    /// QL-17: reloaded when a restored session brings its own highlight and alert rules back.
+    terminal_rules: Option<crate::terminal::rules::TerminalRules>,
     purging: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// What fitting a session's rows to what is here now did.
+struct SessionFix {
+    notes: Vec<String>,
+    /// How the vault password was given, when it was asked.
+    asked: Option<&'static str>,
+    /// The vault passwords to settle once it is saved.
+    confirmed: Vec<SecretId>,
+    /// Its own highlight rules came back.
+    rules: bool,
+}
+
+/// "'web01' and folder 'Prod' used it as their jump host and still connect without it; choose it again there".
+fn jump_users_note(users: &[String]) -> String {
+    let shown: Vec<&str> = users.iter().take(3).map(String::as_str).collect();
+    let mut list = match shown.as_slice() {
+        [one] => (*one).to_owned(),
+        [first @ .., last] => format!("{} and {last}", first.join(", ")),
+        [] => String::new(),
+    };
+    if users.len() > shown.len() {
+        list = format!("{} and {} more", shown.join(", "), users.len() - shown.len());
+    }
+    let their = if users.len() == 1 { "its" } else { "their" };
+    format!("{list} used it as {their} jump host and still go without it; choose it again there if you want")
 }
 
 impl Trash {
@@ -460,8 +499,15 @@ impl Trash {
             store,
             current,
             bindings: None,
+            terminal_rules: None,
             purging: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// QL-17: a restored session's own highlight and alert rules reach open panes at once.
+    pub fn with_terminal_rules(mut self, rules: crate::terminal::rules::TerminalRules) -> Self {
+        self.terminal_rules = Some(rules);
+        self
     }
 
     /// SS-04, AP-06: a restored session that would send a vault password to a new place asks for it first.
@@ -628,14 +674,16 @@ impl Trash {
 
         let mut confirmed: Vec<SecretId> = Vec::new();
         let mut asked: Option<&'static str> = None;
+        let mut rules_back = false;
         match kind {
             TrashKind::Session => {
-                let (n, a, c) = self
+                let fix = self
                     .fix_session(ctx, &mut snap, &item_id, &entry.name, vault_password)
                     .await?;
-                notes.extend(n);
-                asked = a;
-                confirmed = c;
+                notes.extend(fix.notes);
+                asked = fix.asked;
+                confirmed = fix.confirmed;
+                rules_back = fix.rules;
             }
             TrashKind::Command => {
                 let folder = rows::text(&snap.row, "folder").unwrap_or("").to_owned();
@@ -687,6 +735,14 @@ impl Trash {
         if let Some(bindings) = &self.bindings {
             bindings.settle(&confirmed);
         }
+        // QL-17: open panes follow the restored session's own alert rules again.
+        if rules_back {
+            if let Some(rules) = &self.terminal_rules {
+                if let Err(err) = rules.switch_to(ctx).await {
+                    tracing::warn!(error = %err, "could not reload the highlight rules after a restore");
+                }
+            }
+        }
 
         let mut detail = vec![format!("from the trash ({})", entry.place)];
         if !entry.detail.is_empty() {
@@ -734,7 +790,7 @@ impl Trash {
         item_id: &str,
         name: &str,
         vault_password: Option<&SecretString>,
-    ) -> Result<(Vec<String>, Option<&'static str>, Vec<SecretId>)> {
+    ) -> Result<SessionFix> {
         let mut notes = Vec::new();
         let folders = self.store.session_folders(ctx).await?;
         let sessions: HashMap<Uuid, String> = self
@@ -793,6 +849,16 @@ impl Trash {
                 .await?
                 .into_iter()
                 .collect();
+        let rules: Vec<(String, String, i64)> =
+            sqlx::query_as("SELECT id, name, position FROM terminal_rules WHERE workspace_id = ?")
+                .bind(ctx.workspace_id.to_string())
+                .fetch_all(self.store.pool())
+                .await?;
+        let mut rules_here = rules.len();
+        let mut rule_names: HashSet<String> = rules.iter().map(|(_, n, _)| n.to_lowercase()).collect();
+        let rule_ids: HashSet<String> = rules.iter().map(|(id, _, _)| id.to_lowercase()).collect();
+        let mut rule_position = rules.iter().map(|(_, _, p)| *p).max().unwrap_or(-1);
+        let mut restored_rules = false;
         let mut kept = Vec::new();
         let mut sends: Vec<SecretId> = effective.sent_secret().into_iter().collect();
         for mut attached in std::mem::take(&mut snap.attached) {
@@ -818,7 +884,7 @@ impl Trash {
                 "multiexec_group_members" => {
                     let group = rows::text(r, "group_id").unwrap_or_default().to_owned();
                     if !groups.contains(&group) {
-                        notes.push("a MultiExec group it was in is gone".into());
+                        notes.push("a saved group it was in is gone".into());
                         continue;
                     }
                     let members: i64 =
@@ -827,9 +893,32 @@ impl Trash {
                             .fetch_one(self.store.pool())
                             .await?;
                     if usize::try_from(members).unwrap_or(usize::MAX) >= crate::multiexec_groups::MAX_MEMBERS {
-                        notes.push("a MultiExec group it was in is full, so it was left out".into());
+                        notes.push("a saved group it was in is full, so it was left out".into());
                         continue;
                     }
+                }
+                "terminal_rules" => {
+                    // QL-17: under the workspace's cap, with a free name, after the rules there now.
+                    if rules_here >= crate::terminal::rules::MAX_RULES {
+                        notes.push("a highlight rule was left out: there are as many rules as there can be".into());
+                        continue;
+                    }
+                    let name = rows::text(r, "name").unwrap_or("rule").to_owned();
+                    let free = free_name(&name, &rule_names, crate::terminal::rules::MAX_NAME_CHARS);
+                    if free != name {
+                        notes.push(format!(
+                            "its highlight rule '{name}' is '{free}' now: the name was taken"
+                        ));
+                    }
+                    rule_names.insert(free.to_lowercase());
+                    r.insert("name".into(), Value::String(free));
+                    if rows::text(r, "id").is_some_and(|id| rule_ids.contains(&id.to_lowercase())) {
+                        r.insert("id".into(), Value::String(Uuid::new_v4().to_string()));
+                    }
+                    rule_position += 1;
+                    r.insert("position".into(), Value::from(rule_position));
+                    rules_here += 1;
+                    restored_rules = true;
                 }
                 "session_secret_grants" => {
                     let Some(secret) = uuid_in(r, "secret_id") else {
@@ -845,6 +934,9 @@ impl Trash {
             kept.push(attached);
         }
         snap.attached = kept;
+        if !snap.jump_users.is_empty() {
+            notes.push(jump_users_note(&snap.jump_users));
+        }
         if let Some(note) = snap.note.as_mut() {
             note.insert("target_key".into(), Value::String(item_id.to_owned()));
             note.insert("user_id".into(), Value::String(ctx.user_id.to_string()));
@@ -852,7 +944,12 @@ impl Trash {
 
         // SS-04, AP-06: what it sent there before it was deleted may go there again; anything else asks.
         let Some(bindings) = &self.bindings else {
-            return Ok((notes, None, Vec::new()));
+            return Ok(SessionFix {
+                notes,
+                asked: None,
+                confirmed: Vec::new(),
+                rules: restored_rules,
+            });
         };
         let already: Vec<SecretId> = if same_place {
             then.secrets.iter().copied().map(SecretId).collect()
@@ -872,7 +969,12 @@ impl Trash {
             new.push(bindings.describe(ctx, secret).await?);
         }
         if new.is_empty() {
-            return Ok((notes, None, confirmed));
+            return Ok(SessionFix {
+                notes,
+                asked: None,
+                confirmed,
+                rules: restored_rules,
+            });
         }
         let reason = format!(
             "This would send the {} to {}:{}, where no saved session sends it yet",
@@ -888,7 +990,12 @@ impl Trash {
                 &reason,
             )
             .await?;
-        Ok((notes, Some(how), confirmed))
+        Ok(SessionFix {
+            notes,
+            asked: Some(how),
+            confirmed,
+            rules: restored_rules,
+        })
     }
 
     async fn template_notes(&self, ctx: &Context, row: &RowValues) -> Result<Vec<String>> {
@@ -1115,6 +1222,16 @@ mod tests {
                 assert!(rows::TABLES.contains(table));
             }
         }
+    }
+
+    #[test]
+    fn jump_users_are_named_a_few_at_a_time() {
+        let one = jump_users_note(&["'web01'".into()]);
+        assert!(one.starts_with("'web01' used it as its jump host"), "{one}");
+        let two = jump_users_note(&["'web01'".into(), "folder 'Prod'".into()]);
+        assert!(two.starts_with("'web01' and folder 'Prod' used it as their"), "{two}");
+        let many: Vec<String> = (1..=5).map(|n| format!("'s{n}'")).collect();
+        assert!(jump_users_note(&many).starts_with("'s1', 's2', 's3' and 2 more used it"));
     }
 
     #[test]

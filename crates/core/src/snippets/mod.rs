@@ -342,6 +342,7 @@ impl Snippets {
                 format!("Favourite commands › {}", row.folder)
             },
             sent: None,
+            jump_users: Vec::new(),
         };
         if crate::trash::move_to_trash(&self.store, ctx, item).await?.is_none() {
             return Err(CoreError::UnknownTarget(format!("favourite {id}")));

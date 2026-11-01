@@ -82,3 +82,12 @@ export function noteExcerpt(body: string, max = 120): string {
       .find((l) => l !== "") ?? "";
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
+
+/**
+ * What a code block's "Send to terminal" pastes: its text without the line break(s) at its end, which would press
+ * Enter (the core keeps a block's text as written, and CommonMark ends it with one). A block with a line break inside
+ * still holds them; the terminal asks about it first, whatever the paste setting.
+ */
+export function noteCodeToSend(code: string): string {
+  return code.replace(/[\r\n]+$/, "");
+}

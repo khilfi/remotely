@@ -183,6 +183,7 @@ export function NoteSheet({ target, onClose }: Props) {
     if (!target || !note) return;
     try {
       show(await comfortApi.setNoteHandover({ kind: target.kind, key: target.key }, on));
+      if (on && note.looksSecret) toast.warning("Its secret-looking part goes into the handover pack as [redacted]");
     } catch (err) {
       toast.error(errorMessage(err));
     }
@@ -322,6 +323,11 @@ export function NoteSheet({ target, onClose }: Props) {
                 Include in the handover pack
               </Label>
             </div>
+            {handover && looksSecret && (
+              <p className="order-last w-full text-xs text-tier-high" role="status">
+                The handover pack shows what looks like a secret as [redacted]. Keep it in the vault instead.
+              </p>
+            )}
             {editing ? (
               <div className="flex items-center gap-2">
                 <Button variant="outline" disabled={saving} onClick={() => setEditing(false)}>

@@ -464,7 +464,7 @@ export const HELP = {
     title: "Notes",
     body: [
       "One note per session, VM and folder, written in markdown. Link a web page, or the app's own items by name: [db](<vault:DB admin>), <session:web01>, <vm:web-01>, <command:Disk usage> or <runbook:Disk full>.",
-      "A vault link names the item and never shows its secret. A code block can be sent to the open terminal; it asks first and never presses Enter.",
+      "A vault link names the item and never shows its secret. A code block can be sent to the open terminal without pressing Enter; one with several lines asks first. The handover pack hides what looks like a secret.",
     ],
   },
   trash: {

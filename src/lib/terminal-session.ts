@@ -1024,12 +1024,14 @@ export class PaneSession {
 
   /**
    * QL-05: a paste from the clipboard (keys, right-click, the menu): cleaned (paste.ts), and asked about first when
-   * it holds a line break, unless the setting is off.
+   * it holds a line break, unless the setting is off. FD-06: `alwaysAsk` (a note's code block) asks whatever the
+   * setting, and a paste with a line break and nobody to ask is not made.
    */
-  async paste(text: string) {
+  async paste(text: string, { alwaysAsk = false }: { alwaysAsk?: boolean } = {}) {
     const clean = sanitizePaste(text);
     if (!clean || this.closed) return;
-    if (this.confirmMultilinePaste && this.onPasteConfirm && pasteHasLineBreak(clean)) {
+    if (alwaysAsk && !this.onPasteConfirm && pasteHasLineBreak(clean)) return;
+    if ((this.confirmMultilinePaste || alwaysAsk) && this.onPasteConfirm && pasteHasLineBreak(clean)) {
       const ask = { preview: pastePreview(clean), bracketed: this.screen.modes.bracketedPasteMode };
       const ok = await this.onPasteConfirm(this, ask);
       if (!ok || this.closed) return;

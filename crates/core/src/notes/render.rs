@@ -14,8 +14,10 @@
 //! * Code blocks are `data-note-code="N"`, their text in [`RenderedNote::code_blocks`], so the window can offer "Send to
 //!   terminal" through the multi-line paste confirm (QL-05). Nothing runs by itself.
 //!
-//! [`LinkMode::Static`] is for a file read outside the app (F6's handover pack): app links become their name, and web
-//! links ordinary links that a reader's browser opens when clicked (nothing is fetched to show them).
+//! [`LinkMode::Static`] is for a file read outside the app (F6's handover pack): the text goes through
+//! `export::redact_secrets` first (rule 7: a note that holds a password must not carry it into an unencrypted file),
+//! app links become their name, and web links ordinary links that a reader's browser opens when clicked (nothing is
+//! fetched to show them).
 
 use std::collections::{HashMap, HashSet};
 
@@ -209,6 +211,15 @@ enum Open {
 
 /// The note as HTML, with its links and code blocks. `names` resolves app links in the workspace.
 pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
+    let secret = looks_secret(text);
+    let redacted;
+    let text = match mode {
+        LinkMode::App => text,
+        LinkMode::Static => {
+            redacted = export::redact_secrets(text).0;
+            redacted.as_str()
+        }
+    };
     let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
     let mut links: Vec<NoteLink> = Vec::new();
     let mut code_blocks: Vec<String> = Vec::new();
@@ -305,7 +316,7 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
         html,
         links,
         code_blocks,
-        looks_secret: looks_secret(text),
+        looks_secret: secret,
     }
 }
 
@@ -444,6 +455,23 @@ mod tests {
     fn a_note_that_looks_like_a_secret_says_so() {
         assert!(app("db password: hunter2hunter2").looks_secret || app("password=hunter2hunter2").looks_secret);
         assert!(!app("Restart nginx after a deploy.").looks_secret);
+    }
+
+    #[test]
+    fn a_file_read_elsewhere_never_carries_a_secret() {
+        let text = "DB: `password=Hunter2Hunter2!`
+
+```
+mysql --user=alice --password=Hunter2Hunter2!
+export API_KEY=Hunter2Hunter2!
+```";
+        let out = render(text, &names(), LinkMode::Static);
+        assert!(!out.html.contains("Hunter2"), "{}", out.html);
+        assert!(out.looks_secret);
+        assert!(
+            render(text, &names(), LinkMode::App).html.contains("Hunter2"),
+            "the app shows the user's own text"
+        );
     }
 
     #[test]

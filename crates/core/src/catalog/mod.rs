@@ -461,6 +461,7 @@ impl Catalog {
             name,
             place: place.to_owned(),
             sent: None,
+            jump_users: Vec::new(),
         };
         match crate::trash::move_to_trash(&self.store, ctx, item).await? {
             Some(_) => Ok(()),

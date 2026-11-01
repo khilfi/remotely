@@ -425,6 +425,7 @@ impl Stacks {
             name: &row.input.name,
             place: "Templates › Stacks".to_owned(),
             sent: None,
+            jump_users: Vec::new(),
         };
         if crate::trash::move_to_trash(&self.store, ctx, item).await?.is_none() {
             return Err(CoreError::UnknownTarget(format!("stack {id}")));
