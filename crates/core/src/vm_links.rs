@@ -325,9 +325,9 @@ impl VmLinks {
             .await?
             .into_iter()
             .filter(|s| only.is_none_or(|id| s.id == id))
-            // SS-12: a VM link is for SSH sessions (bulk runs and guest metrics go over it); a serial session's
-            // COM port is never looked up as a name.
-            .filter(|s| s.kind.is_ssh())
+            // SS-12: a VM link is for SSH and (F4) WinRM sessions (guest metrics and facts go over it); a serial
+            // session's COM port is never looked up as a name.
+            .filter(|s| s.kind.links_to_vms())
             .filter(|s| !matches!(s.vm_link, Some(VmLink::Manual)) && (s.vm_link.is_some() || s.vm_id.is_none()))
             .collect();
         let vms = self.store.list_vms(ctx).await?;

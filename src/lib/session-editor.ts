@@ -66,6 +66,8 @@ export function advancedSummary(values: AdvancedValues): string {
         return "Line ending, colour and tags";
       case "serial":
         return "Line settings, colour and tags";
+      case "winrm":
+        return "Connection, sign-in, certificate, VM, colour and tags";
     }
   }
   const text = parts.join(" · ");

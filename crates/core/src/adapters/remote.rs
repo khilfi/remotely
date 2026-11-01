@@ -295,6 +295,12 @@ pub trait ExecSession: Send + Sync {
         None
     }
 
+    /// F4: what [`ExecSession::run`] runs its script in: a POSIX shell over SSH, PowerShell over WinRM. Every wrapper
+    /// forwards it, so a reader picks its script by it (MO-13's facts) and F8 its rules.
+    fn script_kind(&self) -> ScriptKind {
+        ScriptKind::Posix
+    }
+
     /// FD-09: a TCP connection the host opens to `host:port` (an SSH direct-tcpip channel), for the toolbox's port
     /// and certificate checks of a host behind it (SS-07). Nothing runs on the host. A connection that can't open
     /// one says so.
@@ -307,6 +313,17 @@ pub trait ExecSession: Send + Sync {
             "this connection can't reach another host".into(),
         ))
     }
+}
+
+/// F4: the language an [`ExecSession`]'s scripts are in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ScriptKind {
+    /// `sh` and its kin, over SSH.
+    #[default]
+    Posix,
+    /// Windows PowerShell 5.1 (`powershell.exe -Command -`), over WinRM.
+    PowerShell,
 }
 
 /// FD-09: a direct-tcpip channel from the host at the far end of `handle` to `host:port`, as a stream.

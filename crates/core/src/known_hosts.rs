@@ -69,6 +69,15 @@ pub enum HostKeyCheck {
     },
 }
 
+/// "host key", or F4's "HTTPS certificate" for a WinRM host's certificate trusted by its fingerprint.
+fn what(key_type: &str) -> &'static str {
+    if key_type == crate::adapters::winrm::http::CERT_KEY_TYPE {
+        "HTTPS certificate"
+    } else {
+        "host key"
+    }
+}
+
 pub(crate) fn address(host: &str, port: u16) -> String {
     if host.contains(':') && !host.starts_with('[') {
         format!("[{host}]:{port}")
@@ -151,12 +160,12 @@ impl KnownHosts {
         let (event, action, detail) = match previous {
             None => (
                 "host_key_trusted",
-                format!("Trusted the host key of {}", key.address()),
+                format!("Trusted the {} of {}", what(&key.key_type), key.address()),
                 format!("{} {}", key.key_type, key.fingerprint),
             ),
             Some(previous) => (
                 "host_key_retrusted",
-                format!("Replaced the trusted host key of {}", key.address()),
+                format!("Replaced the trusted {} of {}", what(&key.key_type), key.address()),
                 format!(
                     "{}: {} -> {} (trusted since {})",
                     key.key_type, previous.fingerprint, key.fingerprint, previous.first_seen_at
@@ -174,7 +183,11 @@ impl KnownHosts {
         previous: &KnownHost,
         via: Option<&Target>,
     ) -> Result<()> {
-        let action = format!("Blocked the connection to {}: its host key changed", key.address());
+        let action = format!(
+            "Blocked the connection to {}: its {} changed",
+            key.address(),
+            what(&key.key_type)
+        );
         let detail = format!(
             "{}: trusted {}, presented {}",
             key.key_type, previous.fingerprint, key.fingerprint
@@ -214,7 +227,11 @@ impl KnownHosts {
             .ok_or_else(|| CoreError::UnknownTarget(format!("known host {id}")))?;
         self.store.delete_known_host(ctx, id).await?;
         self.changed();
-        let action = format!("Removed the trusted host key of {}", address(&known.host, known.port));
+        let action = format!(
+            "Removed the trusted {} of {}",
+            what(&known.key_type),
+            address(&known.host, known.port)
+        );
         let detail = format!(
             "{} {} (trusted since {})",
             known.key_type, known.fingerprint, known.first_seen_at

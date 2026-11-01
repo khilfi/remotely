@@ -68,6 +68,13 @@ test("the editor refuses what the core refuses, with a reason", () => {
     checkProblem(input({ target: { kind: "session", sessionId: "s" }, spec: { kind: "service", unit: "nginx" } })),
     null,
   );
+  // F4: a WinRM session's service is a Windows service: `$` and spaces are fine, wildcards and quotes are not.
+  const windows = (unit: string) =>
+    checkProblem(input({ target: { kind: "session", sessionId: "s" }, spec: { kind: "service", unit } }), true);
+  assert.equal(windows("MSSQL$SQLEXPRESS"), null);
+  assert.equal(windows("My Service"), null);
+  assert.match(windows("Spool*")!, /Windows service/);
+  assert.match(windows("x'; Stop-Computer")!, /Windows service/);
   const dns = { kind: "dns", recordType: "A", server: null, expect: null } as const;
   assert.match(checkProblem(input({ target: { kind: "address", host: "192.0.2.10" }, spec: dns }))!, /not an address/);
   assert.match(checkProblem(input({ spec: { ...dns, expect: "web01" } }))!, /expected address/);

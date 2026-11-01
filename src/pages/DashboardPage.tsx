@@ -123,6 +123,7 @@ import type { DashboardTab } from "@/lib/navigation";
 import { shouldPoll } from "@/lib/polling";
 import type { ResolvedTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
+import { kindOf, readsGuest } from "@/lib/session-kinds";
 import { MapPage } from "@/pages/MapPage";
 
 interface Props {
@@ -343,31 +344,33 @@ function WatchPicker({
           <CommandInput placeholder="Find a session…" />
           <CommandList>
             <CommandEmpty>{sessions === null ? "Loading…" : "No session matches."}</CommandEmpty>
-            <CommandGroup heading="Guest metrics over SSH (Linux)">
-              {(sessions ?? []).map((s) => {
-                const on = watched.has(s.id);
-                return (
-                  <CommandItem
-                    key={s.id}
-                    value={`${s.name} ${s.host} ${s.tags.join(" ")} ${vmOf.get(s.id) ?? ""}`}
-                    onSelect={() => onWatch(s.id, !on)}
-                  >
-                    <CheckIcon className={cn("size-4", on ? "opacity-100" : "opacity-0")} />
-                    <span className="truncate">{s.name}</span>
-                    {vmOf.has(s.id) && (
-                      <span className="shrink-0 text-xs text-muted-foreground">VM {vmOf.get(s.id)}</span>
-                    )}
-                    <span className="ml-auto truncate text-xs text-muted-foreground" data-mask="host">
-                      {s.host}
-                    </span>
-                  </CommandItem>
-                );
-              })}
+            <CommandGroup heading="Linux over SSH, Windows over WinRM">
+              {(sessions ?? [])
+                .filter((s) => readsGuest(kindOf(s)))
+                .map((s) => {
+                  const on = watched.has(s.id);
+                  return (
+                    <CommandItem
+                      key={s.id}
+                      value={`${s.name} ${s.host} ${s.tags.join(" ")} ${vmOf.get(s.id) ?? ""}`}
+                      onSelect={() => onWatch(s.id, !on)}
+                    >
+                      <CheckIcon className={cn("size-4", on ? "opacity-100" : "opacity-0")} />
+                      <span className="truncate">{s.name}</span>
+                      {vmOf.has(s.id) && (
+                        <span className="shrink-0 text-xs text-muted-foreground">VM {vmOf.get(s.id)}</span>
+                      )}
+                      <span className="ml-auto truncate text-xs text-muted-foreground" data-mask="host">
+                        {s.host}
+                      </span>
+                    </CommandItem>
+                  );
+                })}
             </CommandGroup>
           </CommandList>
         </Command>
         <p className="flex items-center gap-1 border-t px-3 py-1.5 text-xs text-muted-foreground">
-          Linux hosts, read over SSH; nothing on them changes.
+          Linux hosts over SSH, Windows hosts over WinRM; nothing on them changes.
           <HelpTip topic="dashboardPolling" side="top" />
         </p>
       </PopoverContent>

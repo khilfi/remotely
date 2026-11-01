@@ -47,6 +47,12 @@ pub struct HostSpecs {
     /// "none" (bare metal)...
     pub virtualization: Option<String>,
     pub uptime_secs: Option<u64>,
+    /// F4: what only a Windows host says (edition, build, domain, last boot); `None` for Linux hosts.
+    pub windows: Option<super::windows::WindowsInfo>,
+    /// F4: network adapters with their MACs and addresses (Windows hosts; Linux's are MO-14's).
+    pub adapters: Vec<super::windows::NetAdapter>,
+    /// F4: listening TCP ports (Windows hosts' System tab; Linux's are MO-14's admin read).
+    pub listening: Vec<super::windows::ListeningPort>,
 }
 
 impl HostSpecs {

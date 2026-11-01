@@ -15,6 +15,7 @@ pub mod net_tools;
 pub mod ssh_server;
 pub mod stack_clock;
 pub mod telnet_server;
+pub mod winrm_server;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1183,6 +1184,7 @@ pub use containers::FakeContainers;
 pub use disk_tools::FakeDiskTools;
 pub use net_tools::FakeNetworkTools;
 pub use telnet_server::TelnetTestServer;
+pub use winrm_server::{FakeWinrm, Tamper, WinrmTestServer};
 
 /// VM-18: VirtualBox in memory. VMs are registered with a UUID, a name and a state; power calls
 /// change the state and snapshot calls the tree the way VBoxManage would, through the same checks as

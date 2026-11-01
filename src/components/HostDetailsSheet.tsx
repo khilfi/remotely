@@ -123,6 +123,8 @@ export function SystemFacts({
 }) {
   const s = read.specs;
   const memory = s.memory;
+  // F4: what only a Windows host says (read over WinRM).
+  const win = s.windows ?? null;
   const swapUsed =
     memory.swapTotalBytes != null && memory.swapFreeBytes != null ? memory.swapTotalBytes - memory.swapFreeBytes : null;
   return (
@@ -131,14 +133,28 @@ export function SystemFacts({
         rows={[
           { label: "OS", value: s.os.prettyName ?? s.os.name ?? s.system },
           {
-            label: "Kernel",
-            value: s.kernel ? (
-              <span className="font-mono text-xs">
-                {s.kernel}
-                {s.architecture ? ` · ${s.architecture}` : ""}
-              </span>
-            ) : null,
+            label: win ? "Build" : "Kernel",
+            value:
+              (win?.build ?? s.kernel) ? (
+                <span className="font-mono text-xs">
+                  {win?.build ?? s.kernel}
+                  {s.architecture ? ` · ${s.architecture}` : ""}
+                </span>
+              ) : null,
           },
+          ...(win
+            ? [
+                { label: "Edition", value: win.edition },
+                {
+                  label: win.partOfDomain ? "Domain" : "Workgroup",
+                  value: win.partOfDomain ? <span data-mask="host">{win.domain}</span> : (win.workgroup ?? win.domain),
+                },
+                {
+                  label: "Hardware",
+                  value: [win.manufacturer, win.model].filter(Boolean).join(" · ") || null,
+                },
+              ]
+            : []),
           {
             label: "Host name",
             value: s.hostname ? (
@@ -261,6 +277,64 @@ export function SystemFacts({
                     <TableCell className="font-mono text-xs">{d.mountpoint ?? ""}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {[d.model, d.transport].filter(Boolean).join(" · ")}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </Section>
+      )}
+
+      {!compact && (s.adapters?.length ?? 0) > 0 && (
+        <Section title="Network adapters">
+          <div className="rounded-lg border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Adapter</TableHead>
+                  <TableHead>MAC</TableHead>
+                  <TableHead>Addresses</TableHead>
+                  <TableHead>Gateway</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(s.adapters ?? []).map((a, i) => (
+                  <TableRow key={`${a.mac ?? a.name}-${i}`}>
+                    <TableCell className="max-w-48 truncate text-xs" title={a.name}>
+                      {a.name}
+                      {a.dhcp ? <span className="text-muted-foreground"> · DHCP</span> : null}
+                    </TableCell>
+                    <TableCell className="font-mono text-xs">{a.mac ?? "—"}</TableCell>
+                    <TableCell className="font-mono text-xs">{a.addresses.join(", ")}</TableCell>
+                    <TableCell className="font-mono text-xs text-muted-foreground">{a.gateways.join(", ")}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        </Section>
+      )}
+
+      {!compact && (s.listening?.length ?? 0) > 0 && (
+        <Section title="Listening ports" aside={<span className="text-xs text-muted-foreground">TCP</span>}>
+          <div className="rounded-lg border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-20">Port</TableHead>
+                  <TableHead>Address</TableHead>
+                  <TableHead>Process</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(s.listening ?? []).map((p, i) => (
+                  <TableRow key={`${p.port}-${p.address}-${i}`}>
+                    <TableCell className="font-mono text-xs tabular-nums">{p.port}</TableCell>
+                    <TableCell className="font-mono text-xs">{p.address}</TableCell>
+                    <TableCell className="text-xs">
+                      {p.process ?? "—"}
+                      {p.pid != null && <span className="text-muted-foreground"> · {p.pid}</span>}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -785,6 +859,26 @@ export function HostDetailsSheet({ session, tab, thresholds, onClose }: Props) {
   if (shown === "admin" && !adminSeen) setAdminSeen(true);
   const sessionId = session?.id ?? null;
 
+  // F4: a Windows host (WinRM) has no Admin tab: MO-14's reads are Linux's; its ports are on the System tab.
+  const [windowsFor, setWindowsFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (!sessionId) return;
+    let live = true;
+    api.sessions().then(
+      (list) => {
+        const found = list.find((s) => s.id === sessionId);
+        if (live && found?.kind?.protocol === "winrm") setWindowsFor(sessionId);
+      },
+      () => undefined,
+    );
+    return () => {
+      live = false;
+    };
+  }, [sessionId]);
+  const windows = sessionId !== null && windowsFor === sessionId;
+  // A Windows host opened on Admin (a link, the last tab) shows System instead of an empty tab.
+  const tabShown: HostDetailsTab = windows ? "system" : shown;
+
   // Remotely's own connection, if a read made one, closes with the panel.
   useEffect(() => {
     if (!sessionId) return;
@@ -808,18 +902,18 @@ export function HostDetailsSheet({ session, tab, thresholds, onClose }: Props) {
               Reads only: nothing here changes the host. Commands offered for fixes are copied, never run.
             </SheetDescription>
           </SheetHeader>
-          <Tabs value={shown} onValueChange={(v) => setShown(v as HostDetailsTab)} className="min-h-0 flex-1 gap-0">
+          <Tabs value={tabShown} onValueChange={(v) => setShown(v as HostDetailsTab)} className="min-h-0 flex-1 gap-0">
             <div className="border-b px-4 pb-2">
               <TabsList>
                 <TabsTrigger value="system">System</TabsTrigger>
-                <TabsTrigger value="admin">Admin</TabsTrigger>
+                {!windows && <TabsTrigger value="admin">Admin</TabsTrigger>}
               </TabsList>
             </div>
             <TabsContent value="system" className="min-h-0 overflow-auto p-4">
               <SystemTab key={session.id} sessionId={session.id} thresholds={thresholds} />
             </TabsContent>
             <TabsContent value="admin" className="min-h-0 overflow-auto p-4">
-              {adminSeen && <AdminTab key={session.id} sessionId={session.id} />}
+              {adminSeen && !windows && <AdminTab key={session.id} sessionId={session.id} />}
             </TabsContent>
           </Tabs>
         </SheetContent>

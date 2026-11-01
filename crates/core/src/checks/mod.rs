@@ -50,7 +50,7 @@ use crate::toolbox::{ProbeTarget, Toolbox};
 use crate::workspaces::Current;
 
 pub use probe::Probed;
-pub use service::{ServiceReader, ServiceRequest, ServiceState, SystemdOverSsh};
+pub use service::{ByKind, ServiceReader, ServiceRequest, ServiceState, SystemdOverSsh, WindowsServices};
 pub use spec::{CheckInput, CheckSpec, HealthCheck};
 
 /// How often the runner looks for checks that are due.
@@ -311,9 +311,16 @@ impl Checks {
         *locks::write(&self.inner.clock) = clock;
     }
 
-    /// F4: how service checks read a service (systemd over SSH by default; F4 adds Windows services over WinRM).
+    /// F4: how service checks read a service (systemd over SSH by default; Core sets [`ByKind`], which reads Windows
+    /// services over WinRM too).
     pub fn set_service_reader(&self, reader: Arc<dyn ServiceReader>) {
         *locks::write(&self.inner.services) = reader;
+    }
+
+    /// F4: closes the connections the service reader keeps (a vault lock; a workspace switch through [`Self::leave`]).
+    pub async fn close_connections(&self) {
+        let reader = Arc::clone(&*locks::read(&self.inner.services));
+        reader.close_all().await;
     }
 
     fn now_ms(&self) -> i64 {
@@ -454,15 +461,18 @@ impl Checks {
                     .await?
                     .ok_or_else(|| CoreError::InvalidInput("Choose a saved session for the check.".into()))?;
                 match &input.spec {
-                    // SS-12: an SSH session only (the store refuses other kinds too); F4 adds WinRM sessions'
-                    // Windows services.
+                    // SS-12: a systemd unit on an SSH session, or (F4) a Windows service on a WinRM session; the store
+                    // refuses other kinds too.
                     CheckSpec::Service { unit } => {
                         service::check_service_name(&session.kind, &session.name, unit)?;
-                        self.inner
-                            .store
-                            .session_spec(ctx, *session_id)
-                            .await?
-                            .ok_or_else(|| CoreError::InvalidInput("Choose a saved session for the check.".into()))?;
+                        let found = if session.kind.is_winrm() {
+                            self.inner.store.winrm_spec(ctx, *session_id).await?.is_some()
+                        } else {
+                            self.inner.store.session_spec(ctx, *session_id).await?.is_some()
+                        };
+                        if !found {
+                            return Err(CoreError::InvalidInput("Choose a saved session for the check.".into()));
+                        }
                     }
                     CheckSpec::Ping => {
                         let route = self.inner.toolbox.route(ctx, &input.target).await?;
@@ -686,6 +696,8 @@ impl Checks {
         }
         self.inner.backoffs.clear_all();
         self.inner.toolbox.release_holds(&HashSet::new()).await;
+        // F4: Windows hosts' kept WinRM connections.
+        self.close_connections().await;
     }
 
     /// FD-02: a switch that [`Checks::leave`] began didn't happen: the workspace still shown runs its checks again.

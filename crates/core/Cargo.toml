@@ -12,7 +12,7 @@ workspace = true
 [features]
 # Fake adapters (VMware, remote, vault, host counters, updater) and a local SSH server for tests.
 # Never enabled in the app.
-fakes = ["getrandom/sys_rng", "dep:futures", "dep:blake2"]
+fakes = ["getrandom/sys_rng", "dep:futures", "dep:blake2", "dep:md-5", "dep:rcgen"]
 
 [dependencies]
 async-trait.workspace = true
@@ -63,6 +63,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 url = { version = "2", features = ["serde"] }
 # FD-14 tests (fakes only): minisign signatures from a throwaway key, made at run time (base64, above, too).
 blake2 = { version = "0.11", optional = true }
+# F4 (fakes only): the fake WinRM server's NTLM (MD5 from here; MD4, RC4 and HMAC are written out in the fake) and its HTTPS
+# certificate, made at run time. The versions the dependencies already pull in.
+md-5 = { version = "0.11", optional = true }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"], optional = true }
 # FD-14 (C3): checks an update signature's trusted comment against the app's public key before the
 # version it names is believed; the fakes sign with it. The version russh already pulls in.
 ed25519-dalek = "3"
@@ -105,6 +109,11 @@ windows = { version = "0.62", features = [
     "Win32_System_IO",
     "Win32_Networking_WinSock",
     "Win32_Security_Cryptography",
+    # SS-12: WinRM's sign-in and message sealing through Windows' own NTLM and Negotiate (SSPI: AcquireCredentialsHandleW,
+    # InitializeSecurityContextW, EncryptMessage, DecryptMessage; SEC_WINNT_AUTH_IDENTITY_W is in System_Rpc).
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_System_Rpc",
     # SS-07: other users signed in to this PC (WTSEnumerateSessionsW), who share its loopback.
     "Win32_System_RemoteDesktop",
     "Win32_Storage_FileSystem",

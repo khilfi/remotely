@@ -102,6 +102,17 @@ export const GLOSSARY = {
     definition: "Runs one command on several hosts and groups the hosts whose output is the same.",
     aliases: ["compare output", "bulk run"],
   },
+  winrm: {
+    term: "WinRM",
+    definition:
+      "Windows Remote Management: how Remotely opens a PowerShell console on a Windows host and reads its metrics and facts.",
+    aliases: ["windows remote management", "powershell remoting", "wsman"],
+  },
+  powershellConsole: {
+    term: "PowerShell console",
+    definition: "A tab that runs PowerShell on a Windows host over WinRM, line by line, with a prompt Remotely draws.",
+    aliases: ["powershell", "ps console"],
+  },
   pickedTabs: {
     term: "Picked tabs",
     definition: "The terminal tabs you chose with Ctrl+click or Shift+click, for Type in all tabs and Compare hosts.",

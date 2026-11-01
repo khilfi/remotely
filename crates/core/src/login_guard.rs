@@ -55,6 +55,7 @@ impl ParkReason {
             CoreError::AuthFailed(_) | CoreError::AgentUnavailable(_) => Some(Self::LoginRefused),
             CoreError::SudoPasswordRefused => Some(Self::SudoRefused),
             CoreError::HostKeyChanged { .. } => Some(Self::HostKeyChanged),
+            CoreError::CertificateChanged { .. } => Some(Self::HostKeyChanged),
             CoreError::NoSudoPassword(_) | CoreError::UnknownTarget(_) => Some(Self::SecretMissing),
             _ => None,
         }
