@@ -228,7 +228,11 @@ mod tests {
         let mut out = Vec::new();
         assert_eq!(line.feed(b'\r', &mut out), Step::Run(RunKey::Enter(b'\r')));
         line.clear();
-        assert_eq!(line.feed(b'\n', &mut out), Step::Key, "the LF of CR LF runs nothing more");
+        assert_eq!(
+            line.feed(b'\n', &mut out),
+            Step::Key,
+            "the LF of CR LF runs nothing more"
+        );
         assert_eq!(line.feed(b'\n', &mut out), Step::Run(RunKey::Enter(b'\n')));
         // In a bracketed paste too: the console sends a line at every Enter.
         let (_, _, steps, _) = typed(b"\x1b[200~Get-Date\rhostname\x1b[201~");

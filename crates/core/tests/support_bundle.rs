@@ -437,7 +437,7 @@ async fn a_cancelled_bundle_leaves_no_file() {
 }
 
 #[tokio::test]
-async fn only_ssh_sessions_are_hosts_of_a_bundle() {
+async fn only_ssh_and_winrm_sessions_are_hosts_of_a_bundle() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let ctx = core.ctx();
     let ssh = core
@@ -470,7 +470,10 @@ async fn only_ssh_sessions_are_hosts_of_a_bundle() {
         ] {
             assert_eq!(err.code(), "wrong_session_kind", "{err}");
             let text = err.to_string();
-            assert!(text.contains(name) && text.contains("SSH sessions only"), "{text}");
+            assert!(
+                text.contains(name) && text.contains("SSH and WinRM sessions only"),
+                "{text}"
+            );
         }
     }
     assert!(
@@ -494,6 +497,7 @@ async fn only_ssh_sessions_are_hosts_of_a_bundle() {
             &ctx,
             &TargetPicks {
                 session_ids: vec![ssh, telnet, rdp],
+                winrm: true,
                 ..TargetPicks::default()
             },
         )
@@ -503,7 +507,10 @@ async fn only_ssh_sessions_are_hosts_of_a_bundle() {
     assert_eq!(hosts, vec![ssh]);
     assert_eq!(resolved.notes.len(), 2, "{:?}", resolved.notes);
     for note in &resolved.notes {
-        assert!(note.contains("over SSH only") && !note.contains("Compare"), "{note}");
+        assert!(
+            note.contains("over SSH and WinRM only") && !note.contains("Compare"),
+            "{note}"
+        );
     }
     let _ = std::fs::remove_dir_all(output.parent().unwrap());
 }

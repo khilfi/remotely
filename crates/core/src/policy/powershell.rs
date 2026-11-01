@@ -76,7 +76,9 @@ pub fn default_dangerous_patterns() -> Vec<DangerousPattern> {
         ),
         p(
             "Remove-Item -Recurse / rd /s",
-            format!(r"{S}remove-item\s+(?:{R}\s)?-r[a-z]*(?::\S*)?(?:$|\s)|{S}(?:rd|rmdir|del|erase)\s+(?:{R}\s)?/s(?:$|\s)"),
+            format!(
+                r"{S}remove-item\s+(?:{R}\s)?-r[a-z]*(?::\S*)?(?:$|\s)|{S}(?:rd|rmdir|del|erase)\s+(?:{R}\s)?/s(?:$|\s)"
+            ),
         ),
         p(
             "Format-Volume / Clear-Disk / diskpart",
@@ -97,7 +99,9 @@ pub fn default_dangerous_patterns() -> Vec<DangerousPattern> {
         ),
         p(
             "disable a network adapter or address",
-            format!(r"{S}(?:disable-netadapter|remove-netipaddress|remove-netroute){E}|{S}netsh(?:\.exe)?\s{R}\bdisabled?\b"),
+            format!(
+                r"{S}(?:disable-netadapter|remove-netipaddress|remove-netroute){E}|{S}netsh(?:\.exe)?\s{R}\bdisabled?\b"
+            ),
         ),
         p(
             "remove firewall rules / block outbound",
@@ -123,7 +127,9 @@ pub fn default_dangerous_patterns() -> Vec<DangerousPattern> {
         ),
         p(
             "delete registry keys",
-            format!(r"{S}reg(?:\.exe)?\s+delete\b|{S}remove-item(?:property)?\s{R}\b(?:hklm|hkcu|hkcr|hku|hkcc|registry):"),
+            format!(
+                r"{S}reg(?:\.exe)?\s+delete\b|{S}remove-item(?:property)?\s{R}\b(?:hklm|hkcu|hkcr|hku|hkcc|registry):"
+            ),
         ),
         p(
             "turn off Windows Defender",
@@ -163,7 +169,10 @@ pub fn default_dangerous_patterns() -> Vec<DangerousPattern> {
             "DROP DATABASE / TABLE",
             r#"\bdrop\s+(?:database|schema)\b|\bdrop\s+table\s+[\w"`\[]|\btruncate\s+table\s+[\w"`\[]"#.into(),
         ),
-        p("kubectl delete", format!(r"{S}(?:kubectl|oc)(?:\.exe)?\s+(?:{R}\s)?delete{E}")),
+        p(
+            "kubectl delete",
+            format!(r"{S}(?:kubectl|oc)(?:\.exe)?\s+(?:{R}\s)?delete{E}"),
+        ),
         p(
             "docker / podman prune",
             format!(
@@ -462,7 +471,9 @@ const RUNS_ANYTHING: &[&str] = &[
 
 /// Interpreters named by a prefix (`python3.12`, `perl5`), and scripts by their extension.
 const RUNS_ANYTHING_PREFIXES: &[&str] = &["python", "perl", "php", "lua", "pypy", "ruby", "node"];
-const SCRIPT_EXTENSIONS: &[&str] = &[".ps1", ".psm1", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".hta"];
+const SCRIPT_EXTENSIONS: &[&str] = &[
+    ".ps1", ".psm1", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".hta",
+];
 
 /// Why a command with this key runs anything it is given, if it does.
 fn runs_anything_key(key: &str) -> Option<&'static str> {
@@ -486,7 +497,10 @@ fn special(c: char) -> bool {
     matches!(
         c,
         ';' | '&' | '|' | '>' | '<' | '`' | '$' | '@' | '(' | ')' | '{' | '}' | ',' | '#' | '\'' | '"' | '\n' | '\r'
-    ) || matches!(c, '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' | '\u{201c}' | '\u{201d}' | '\u{201e}')
+    ) || matches!(
+        c,
+        '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}' | '\u{201c}' | '\u{201d}' | '\u{201e}'
+    )
 }
 
 /// BX-13: why a PowerShell read-only entry can't be one, if it can't.
@@ -616,10 +630,16 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
         "foreach-object" => foreach_writes(command),
         "ipconfig.exe" => args_match(command, |args| {
             args.iter().any(|a| {
-                option(a).is_some_and(|o| ["release", "renew", "flushdns", "registerdns", "setclassid"].iter().any(|w| o.starts_with(w)))
+                option(a).is_some_and(|o| {
+                    ["release", "renew", "flushdns", "registerdns", "setclassid"]
+                        .iter()
+                        .any(|w| o.starts_with(w))
+                })
             })
         }),
-        "arp.exe" => args_match(command, |args| args.iter().any(|a| matches!(option(a), Some("d" | "s")))),
+        "arp.exe" => args_match(command, |args| {
+            args.iter().any(|a| matches!(option(a), Some("d" | "s")))
+        }),
         "route.exe" => args_match(command, |args| {
             args.iter()
                 .any(|a| matches!(a.as_str(), "add" | "delete" | "change") || matches!(option(a), Some("f" | "p")))
@@ -628,22 +648,46 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
             args.iter().any(|a| {
                 matches!(
                     a.as_str(),
-                    "set" | "add" | "delete" | "del" | "reset" | "install" | "uninstall" | "import" | "export" | "dump"
-                        | "trace" | "start" | "stop" | "connect" | "disconnect" | "exec" | "flush"
+                    "set"
+                        | "add"
+                        | "delete"
+                        | "del"
+                        | "reset"
+                        | "install"
+                        | "uninstall"
+                        | "import"
+                        | "export"
+                        | "dump"
+                        | "trace"
+                        | "start"
+                        | "stop"
+                        | "connect"
+                        | "disconnect"
+                        | "exec"
+                        | "flush"
                 )
             })
         }),
         // With no name to look up, nslookup waits for typed lines.
         "nslookup.exe" => args_match(command, |args| !args.iter().any(|a| !a.starts_with('-'))),
         "gpresult.exe" => args_match(command, |args| {
-            args.iter().any(|a| option(a).is_some_and(|o| o.starts_with('h') || o.starts_with('x') || o == "f"))
+            args.iter()
+                .any(|a| option(a).is_some_and(|o| o.starts_with('h') || o.starts_with('x') || o == "f"))
         }),
         "sc.exe" => args_match(command, |args| {
             args.first().is_none_or(|verb| {
                 !matches!(
                     verb.as_str(),
-                    "query" | "queryex" | "qc" | "qdescription" | "qfailure" | "qtriggerinfo" | "getdisplayname"
-                        | "getkeyname" | "enumdepend" | "sdshow"
+                    "query"
+                        | "queryex"
+                        | "qc"
+                        | "qdescription"
+                        | "qfailure"
+                        | "qtriggerinfo"
+                        | "getdisplayname"
+                        | "getkeyname"
+                        | "enumdepend"
+                        | "sdshow"
                 )
             })
         }),
@@ -653,11 +697,16 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
         }),
         "reg.exe" => args_match(command, |args| args.first().is_none_or(|verb| verb != "query")),
         "wevtutil.exe" => args_match(command, |args| {
-            args.first()
-                .is_none_or(|verb| !matches!(verb.as_str(), "qe" | "query-events" | "el" | "enum-logs" | "gl" | "get-log" | "gli" | "get-log-info"))
+            args.first().is_none_or(|verb| {
+                !matches!(
+                    verb.as_str(),
+                    "qe" | "query-events" | "el" | "enum-logs" | "gl" | "get-log" | "gli" | "get-log-info"
+                )
+            })
         }),
         "w32tm.exe" => args_match(command, |args| {
-            args.iter().any(|a| option(a).is_some_and(|o| matches!(o, "resync" | "config" | "register" | "unregister")))
+            args.iter()
+                .any(|a| option(a).is_some_and(|o| matches!(o, "resync" | "config" | "register" | "unregister")))
         }),
         "bcdedit.exe" => args_match(command, |args| {
             args.iter().any(|a| option(a).is_some_and(|o| o != "enum" && o != "v"))
@@ -666,7 +715,9 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
             args.first().is_none_or(|verb| option(verb) != Some("status"))
         }),
         "vssadmin.exe" => args_match(command, |args| args.first().is_none_or(|verb| verb != "list")),
-        "tzutil.exe" => args_match(command, |args| args.iter().any(|a| option(a).is_some_and(|o| o != "g" && o != "l"))),
+        "tzutil.exe" => args_match(command, |args| {
+            args.iter().any(|a| option(a).is_some_and(|o| o != "g" && o != "l"))
+        }),
         _ => false,
     }
 }
@@ -699,7 +750,9 @@ fn foreach_writes(command: &PsCommand) -> bool {
                 let flag = FLAGS.iter().any(|p| p.starts_with(&name));
                 // A prefix of a parameter that may call a method (`-m`, `-a` for -MemberName, -ArgumentList) or of two
                 // kinds at once can't be trusted.
-                let refused = ["membername", "argumentlist", "asjob"].iter().any(|p| p.starts_with(&name));
+                let refused = ["membername", "argumentlist", "asjob"]
+                    .iter()
+                    .any(|p| p.starts_with(&name));
                 if refused || u8::from(block) + u8::from(value) + u8::from(flag) != 1 {
                     return true;
                 }

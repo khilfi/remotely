@@ -328,14 +328,19 @@ export interface WakeSpec {
 
 // ---- FD-04 support bundles ----
 
-export type BundlePresetId = "system" | "logs" | "containers" | "network";
+/** BX-13: the Windows presets are PowerShell reads, for Windows hosts (WinRM sessions). */
+export type BundlePresetId =
+  "system" | "logs" | "containers" | "network" | "windowsSystem" | "windowsLogs" | "windowsNetwork";
+
+/** BX-13: which hosts a preset is for: Linux (SSH) or Windows (WinRM). */
+export type BundleHostKind = "linux" | "windows";
 
 /** One thing collected from each host: a command's output, or a file read over SFTP as the login user. */
 export type BundleItem = { kind: "command"; command: string } | { kind: "file"; path: string };
 
 export interface BundlePreset {
   id: BundlePresetId;
-  hostKind: "linux";
+  hostKind: BundleHostKind;
   label: string;
   description: string;
   items: BundleItem[];
@@ -354,6 +359,10 @@ export interface BundleRequest {
   presets: BundlePresetId[];
   commands: string[];
   files: string[];
+  /** BX-13: PowerShell commands for the Windows hosts. */
+  windowsCommands: string[];
+  /** BX-13: full paths on the Windows hosts (C:\...). */
+  windowsFiles: string[];
   sudo: boolean;
   sudoPasswordId: string | null;
   trustNewHostKeys: boolean;
@@ -560,7 +569,14 @@ export interface ExecDetails {
   runKey: string | null;
   /** H9: one host first, and a stop after failures. */
   rollout: Rollout;
+  /** BX-13: the languages its targets run it in, whose rules rated it. */
+  languages: ScriptKind[];
+  /** BX-13: a support bundle's Windows commands (`script` is its Linux hosts'). */
+  windowsScript: string | null;
 }
+
+/** BX-13: what a host runs a script in: a shell over SSH, or PowerShell over WinRM. */
+export type ScriptKind = "posix" | "powerShell";
 
 export interface ApprovalRequest {
   id: string;
@@ -1007,6 +1023,14 @@ export interface PolicyRules {
   readOnlyCommands: string[];
   countdownSeconds: number;
   safetySnapshotDefault: boolean;
+  /** BX-13: the rules for PowerShell on WinRM hosts and PowerShell tabs. */
+  powershell: PowerShellRules;
+}
+
+/** BX-13: PowerShell's dangerous commands and read-only commands (by full name, never an alias). */
+export interface PowerShellRules {
+  dangerousCommands: DangerousPattern[];
+  readOnlyCommands: string[];
 }
 
 export interface PolicyCatalog {
@@ -2440,6 +2464,8 @@ export interface TargetPicks {
   tags?: string[];
   /** Saved VM filters, by id. */
   filterIds?: string[];
+  /** BX-13: WinRM sessions are hosts too (Compare hosts, support bundles); the key push leaves them out. */
+  winrm?: boolean;
 }
 
 /** BX-01: a host a run reaches (a saved session). */
@@ -2455,6 +2481,8 @@ export interface BulkHost {
   vmName: string | null;
   /** How it was picked: "session", "VM 'web01'", "tag 'web'", "filter 'Lab'". */
   via: string[];
+  /** BX-13: a shell over SSH, or PowerShell over WinRM. */
+  scriptKind: ScriptKind;
 }
 
 export interface VmWithoutSession {

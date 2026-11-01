@@ -9,7 +9,7 @@ use crate::domain::{Environment, Target, TargetRef};
 use crate::support_bundle::presets::{self, HostKind, PresetId};
 use crate::support_bundle::{BundleItem, BundleSpec};
 
-use ScriptKind::{PowerShell, Posix};
+use ScriptKind::{Posix, PowerShell};
 
 fn engine() -> PolicyEngine {
     PolicyEngine::new(PolicyRules::default()).expect("default rules are valid")
@@ -56,19 +56,33 @@ fn a_powershell_read_is_low_another_command_medium_and_a_dangerous_one_high() {
     let hosts = [host(0, Environment::Lab)];
     let rate = |script: &str| engine.evaluate_on(&run(script, &hosts), &hosts, &[PowerShell]);
     let read = rate("Get-Service | Where-Object Status -eq Running");
-    assert_eq!((read.action, read.tier), (ActionKind::ExecReadOnly, Tier::Low), "{:?}", read.reasons);
+    assert_eq!(
+        (read.action, read.tier),
+        (ActionKind::ExecReadOnly, Tier::Low),
+        "{:?}",
+        read.reasons
+    );
     assert!(read.reasons.iter().any(|r| r == "rated by the PowerShell rules"));
     let other = rate("Restart-Service Spooler");
     assert_eq!((other.action, other.tier), (ActionKind::ExecOther, Tier::Medium));
     let dangerous = rate("Stop-Computer -Force");
-    assert_eq!((dangerous.action, dangerous.tier), (ActionKind::ExecDangerous, Tier::High));
-    assert!(dangerous.reasons.iter().any(|r| r.contains("Stop-Computer / Restart-Computer")));
+    assert_eq!(
+        (dangerous.action, dangerous.tier),
+        (ActionKind::ExecDangerous, Tier::High)
+    );
+    assert!(dangerous
+        .reasons
+        .iter()
+        .any(|r| r.contains("Stop-Computer / Restart-Computer")));
     // What the parser can't read rates like an unknown command.
     let unknown = rate("(Get-Item C:\\x).Delete()");
     assert_eq!(unknown.action, ActionKind::ExecOther);
     // The same text by the shell's rules is not PowerShell's: `Get-Service` is no Linux command.
     assert_eq!(engine.classify_script("Get-Service"), ActionKind::ExecOther);
-    assert_eq!(engine.classify_script_as("Get-Service", PowerShell), ActionKind::ExecReadOnly);
+    assert_eq!(
+        engine.classify_script_as("Get-Service", PowerShell),
+        ActionKind::ExecReadOnly
+    );
     // A Prod host moves it up one, as for SSH hosts.
     let prod = [host(1, Environment::Prod)];
     let decision = engine.evaluate_on(&run("Get-Date", &prod), &prod, &[PowerShell]);
@@ -101,7 +115,13 @@ fn a_mixed_selection_rates_each_host_by_its_own_rules() {
     let dangerous = engine.evaluate_on(&run("shutdown /r /t 0", &hosts), &hosts, &[Posix, PowerShell]);
     assert_eq!(dangerous.action, ActionKind::ExecDangerous);
     // No kinds: the shell's rules, as before F8.
-    assert_eq!(engine.evaluate(&run("Get-Service", &hosts), &hosts).script_kinds.get(&hosts[0].target.key()), Some(&Posix));
+    assert_eq!(
+        engine
+            .evaluate(&run("Get-Service", &hosts), &hosts)
+            .script_kinds
+            .get(&hosts[0].target.key()),
+        Some(&Posix)
+    );
 }
 
 #[test]
@@ -180,7 +200,10 @@ fn a_windows_bundle_rates_its_own_commands_by_the_powershell_rules() {
     let presets_only = bundle(items.clone(), windows_items.clone());
     let decision = engine.evaluate_on(&presets_only, &hosts, &[Posix, PowerShell]);
     assert_eq!(decision.tier, Tier::Low, "{:?}", decision.reasons);
-    assert!(decision.reasons.iter().any(|r| r.contains("Windows commands are rated together")));
+    assert!(decision
+        .reasons
+        .iter()
+        .any(|r| r.contains("Windows commands are rated together")));
     // A Windows custom command that changes something rates the bundle Medium.
     let mut changed = windows_items.clone();
     changed.push(BundleItem::command("Restart-Service Spooler"));
@@ -215,7 +238,10 @@ fn the_powershell_rules_are_validated() {
     let mut rules = PolicyRules::default();
     rules.powershell.read_only_commands.push("Invoke-Expression".into());
     let err = rules.validate().unwrap_err().to_string();
-    assert!(err.contains("Read-only PowerShell commands") && err.contains("can't be read-only"), "{err}");
+    assert!(
+        err.contains("Read-only PowerShell commands") && err.contains("can't be read-only"),
+        "{err}"
+    );
 
     let mut rules = PolicyRules::default();
     rules.powershell.read_only_commands.push("gsv".into());
@@ -230,7 +256,11 @@ fn the_powershell_rules_are_validated() {
         name: "everything".into(),
         pattern: ".*".into(),
     });
-    assert!(rules.validate().unwrap_err().to_string().contains("matches every command"));
+    assert!(rules
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("matches every command"));
 
     let mut rules = PolicyRules::default();
     rules.powershell.dangerous_commands.push(DangerousPattern {
@@ -248,14 +278,21 @@ fn the_powershell_rules_are_validated() {
         name: "broken".into(),
         pattern: "(".into(),
     });
-    assert!(rules.validate().unwrap_err().to_string().contains("not a valid regular expression"));
+    assert!(rules
+        .validate()
+        .unwrap_err()
+        .to_string()
+        .contains("not a valid regular expression"));
 }
 
 #[test]
 fn loosening_the_powershell_rules_is_named_and_audited() {
     let before = PolicyRules::default();
     let mut after = before.clone();
-    after.powershell.dangerous_commands.retain(|p| p.name != "Invoke-Expression");
+    after
+        .powershell
+        .dangerous_commands
+        .retain(|p| p.name != "Invoke-Expression");
     after.powershell.read_only_commands.push("Restart-Service".into());
     let loosened = before.loosened(&after);
     assert!(loosened.contains(&"dangerous PowerShell command 'Invoke-Expression' removed".to_owned()));
@@ -267,7 +304,9 @@ fn loosening_the_powershell_rules_is_named_and_audited() {
     let mut tighter = before.clone();
     tighter.powershell.read_only_commands.retain(|c| c != "Get-Process");
     assert!(before.loosened(&tighter).is_empty());
-    assert!(before.changes(&tighter).contains(&"Read-only PowerShell command removed: Get-Process".to_owned()));
+    assert!(before
+        .changes(&tighter)
+        .contains(&"Read-only PowerShell command removed: Get-Process".to_owned()));
     // A changed pattern loosens too.
     let mut changed = before.clone();
     changed.powershell.dangerous_commands[0].pattern = "(?i)nothing-like-it".into();

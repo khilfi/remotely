@@ -878,7 +878,11 @@ fn validate_patterns(patterns: &[DangerousPattern], label: &str, taken: &str) ->
     };
     let mut names = std::collections::HashSet::new();
     for p in patterns {
-        let shown = if p.name.trim().is_empty() { label } else { p.name.as_str() };
+        let shown = if p.name.trim().is_empty() {
+            label
+        } else {
+            p.name.as_str()
+        };
         if p.name.trim().is_empty() {
             return invalid(shown, "give the pattern a name".into());
         }
@@ -1312,8 +1316,7 @@ impl PolicyEngine {
             // stays open in every terminal and runs `!command` typed into it.
             Command::TerminalLine { line, unreliable, .. } => match self.classify_script_as(line, kind) {
                 ActionKind::ExecReadOnly
-                    if *unreliable
-                        || (kind == ScriptKind::Posix && commands::interactive_program(line).is_some()) =>
+                    if *unreliable || (kind == ScriptKind::Posix && commands::interactive_program(line).is_some()) =>
                 {
                     ActionKind::ExecOther
                 }
@@ -1557,7 +1560,13 @@ impl PolicyEngine {
         // BX-13: which rules rated the script, when PowerShell's did.
         if scripted && langs.contains(&ScriptKind::PowerShell) {
             let count = |kind: ScriptKind| active_kinds.iter().filter(|k| **k == kind).count();
-            let noun = |n: usize| if n == 1 { "1 target".to_owned() } else { format!("{n} targets") };
+            let noun = |n: usize| {
+                if n == 1 {
+                    "1 target".to_owned()
+                } else {
+                    format!("{n} targets")
+                }
+            };
             let rated = |kind: ScriptKind| exec_word(self.classify_script_command(command, kind));
             if langs.len() == 1 {
                 reasons.push("rated by the PowerShell rules".into());
@@ -1592,12 +1601,17 @@ impl PolicyEngine {
                     .into_iter()
                     .map(|c| commands::ShellCommand {
                         at: c.at,
-                        words: std::iter::once(c.name).chain(c.args.into_iter().map(|a| a.text)).collect(),
+                        words: std::iter::once(c.name)
+                            .chain(c.args.into_iter().map(|a| a.text))
+                            .collect(),
                     })
                     .collect(),
             };
             for found in commands::container_actions(&shell_commands) {
-                if !found_actions.iter().any(|f: &commands::ContainerAction| f.what == found.what) {
+                if !found_actions
+                    .iter()
+                    .any(|f: &commands::ContainerAction| f.what == found.what)
+                {
                     found_actions.push(found);
                 }
             }

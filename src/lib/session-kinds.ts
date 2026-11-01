@@ -283,22 +283,41 @@ export function kindAddress(session: { host: string; port: number; username: str
 }
 
 /**
- * Why a pane can't join Type in all tabs or Compare hosts (WhyDisabled), or null for an SSH pane. Telnet and serial
- * panes are network gear, whose commands the rules for shells don't rate.
+ * Why a pane can't join Type in all tabs or Compare hosts (WhyDisabled), or null for an SSH or PowerShell pane.
+ * Telnet and serial panes are network gear, whose commands the rules for shells and PowerShell don't rate.
  */
 export function joinReason(kind: PaneKind | null | undefined): string | null {
   switch (kind ?? "ssh") {
     case "ssh":
+    case "powershell":
       return null;
     case "telnet":
-      return "Telnet tabs don't join: typing in all tabs and Compare hosts are for SSH shells.";
+      return "Telnet tabs don't join: typing in all tabs and Compare hosts are for SSH and PowerShell tabs.";
     case "serial":
-      return "Serial tabs don't join: typing in all tabs and Compare hosts are for SSH shells.";
+      return "Serial tabs don't join: typing in all tabs and Compare hosts are for SSH and PowerShell tabs.";
     case "tunnel":
       return "Tunnel tabs carry a remote desktop or VNC window, so they don't join.";
-    case "powershell":
-      return "PowerShell tabs don't join yet: typing in all tabs and Compare hosts are for SSH shells.";
   }
+}
+
+/** A pane that joins Type in all tabs and Compare hosts: SSH, and PowerShell over WinRM. */
+export function joinsTyping(kind: PaneKind): boolean {
+  return kind === "ssh" || kind === "powershell";
+}
+
+/**
+ * The kind of tab Type in all tabs types into: SSH or PowerShell, one at a time, since a shell and the PowerShell
+ * console read the same keys differently. The current tab's kind when it joins, else the first picked one's.
+ */
+export function typingKind(current: PaneKind[], picked: PaneKind[]): PaneKind | null {
+  return current.find(joinsTyping) ?? picked.find(joinsTyping) ?? null;
+}
+
+/** Why a picked pane gets no typing while tabs of the other kind do, or null. */
+export function typingKindReason(kind: PaneKind, typing: PaneKind | null): string | null {
+  if (!typing || !joinsTyping(kind) || kind === typing) return null;
+  const now = typing === "powershell" ? "PowerShell tabs" : "SSH tabs";
+  return `Typing goes to ${now} now: SSH and PowerShell tabs don't take it at once.`;
 }
 
 /** The pane kind a session's tab gets. */

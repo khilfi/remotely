@@ -95,6 +95,7 @@ The key feature is grouped output: identical results collapse into one group, so
 | BX-10 | Bulk file upload and download with checksum check | v2 |
 | BX-11 | Scheduled and recurring jobs | v2 |
 | BX-12 | Export the selection as an Ansible inventory file; playbooks run outside the app | v2 |
+| BX-13 | Windows in bulk (0.7.0): Compare hosts and Type in all tabs on WinRM hosts and PowerShell tabs, and support bundles from Windows hosts, rated by editable PowerShell rules (read-only commands Low, dangerous ones High, anything else, or anything the parser can't read, Medium); a selection with SSH and WinRM hosts rates each host by its own rules | 0.7.0 |
 
 ## Approvals and audit
 
@@ -175,12 +176,13 @@ Notes, stars and recents, the trash and bulk edit (0.7.0, `docs/plan-0.7.md` "Ap
 | Bulk edit sessions: folder, port, user, login, jump host, environment, tags (QL-28) | No tier; one audit entry naming every session, refused by the read-only lock; asks for the vault password once when a login would send one somewhere new (AP-06) |
 | Star a session, VM or command; the items opened last (QL-26) | Not audited, not locked (like the notification centre) |
 
-Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved SSH sessions (SS-12: an RDP, VNC, Telnet or serial session is refused); a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
+Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved SSH sessions and (BX-13) WinRM sessions, each kind with its own presets and custom items (SS-12: an RDP, VNC, Telnet or serial session is refused); a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
 
 | Action | Tier |
 | --- | --- |
 | Collect a support bundle of the presets (System, Logs, Containers, Network) or other read-only commands, and files (read over SFTP as the login user, never with sudo) | Low; Medium on Prod |
 | A bundle with a command that is not read-only, or one flagged dangerous | As a Compare hosts run of its commands: Medium (High on 5 or more hosts), or High for a dangerous one |
+| Windows hosts' presets (Windows system, Windows logs, Windows network: `Get-ComputerInfo`, `Get-HotFix`, `Get-Service`, `Get-WinEvent` errors, `ipconfig /all`, `Get-NetTCPConnection -State Listen`) and files (read by PowerShell as the sign-in user) | Low; Medium on Prod; their custom commands rated by the PowerShell rules |
 | Save the zip (audited `data_exported`, never into a Git working tree) | Part of the bundle's job |
 
 Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from this PC; a session behind a jump host has its ports and certificate checked from that jump host (SS-07). A Prod-labelled target moves Wake-on-LAN up one tier, and a protected one is skipped:
@@ -202,13 +204,24 @@ Remote desktop and consoles (0.7.0, SS-12, `docs/plan-0.7.md` "Approval tiers").
 | Send a break on a serial (or Telnet) line (it can halt a running console) | No tier; audited (`terminal_break_sent`); a confirm first on a Prod or protected session |
 | Open an RDP or VNC session behind a jump host: a tunnel tab to the jump host, then the window | The tunnel at SS-07's tier (a loopback local forward: Low; Medium when the jump host or the session is Prod), audited `tunnel_opened`; the window as above |
 
-WinRM (0.7.0, SS-12, MO-05, MO-13, F4). Remotely's own WinRM client signs in with the session's user and vault password (NTLM through Windows' SSPI, or Basic over HTTPS only) or this PC's Windows sign-in (Kerberos only: it never falls back to NTLM, and needs the host's name), and changes nothing on this PC. Lines typed in a PowerShell console are not rated in 0.7.0's F4 (as an SSH terminal's keys aren't); F8 brings PowerShell rules for Type in all tabs and Compare hosts:
+WinRM (0.7.0, SS-12, MO-05, MO-13, F4). Remotely's own WinRM client signs in with the session's user and vault password (NTLM through Windows' SSPI, or Basic over HTTPS only) or this PC's Windows sign-in (Kerberos only: it never falls back to NTLM, and needs the host's name), and changes nothing on this PC. Lines typed in one PowerShell console are not rated (as an SSH terminal's keys aren't); Type in all tabs and Compare hosts are (BX-13, below):
 
 | Action | Tier |
 | --- | --- |
 | Open a PowerShell console (a WinRM session's tab) | No tier; audited (`terminal_opened`, "Opened a PowerShell console") before it connects, and `terminal_closed` |
 | Trust a WinRM host's HTTPS certificate by its fingerprint, or replace a changed one | No tier; audited like an SSH host key (SS-05); a changed certificate blocks and is audited |
 | Windows guest metrics (MO-05), a Windows host's facts (MO-13) and a Windows service's state for a health check (`Get-Service`) | Reads: no tier, not audited; on kept connections through the login guard's parks and caps |
+
+Windows in bulk (0.7.0, BX-13, F8). A PowerShell parser finds every command a script runs (aliases resolved, script blocks, `&` and dot-sourcing, subexpressions, and what `powershell -Command`/`-EncodedCommand`, `cmd /c` and `Invoke-Expression` would run) and rates a script as the statements PowerShell runs it as. What it can't read (a method call, `& $x`, a redirection into a file, splatting) is never read-only. Interpreters and command runners can never be read-only entries:
+
+| Action | Tier |
+| --- | --- |
+| A Compare hosts run on WinRM hosts, or a PowerShell line in Type in all tabs, that only reads (every command on the PowerShell read-only list) | Low; Medium on Prod |
+| One that changes something, or that the parser can't read | Medium; High on 5 or more hosts (BX-06's bulk threshold) |
+| One that matches a dangerous PowerShell rule (`Stop-Computer`, `Remove-Item -Recurse`, `Format-Volume`, `Invoke-Expression`, `-EncodedCommand`, stopping WinRM...) | High |
+| A selection with SSH and WinRM hosts | Each host rated by its own rules; the highest counts |
+| A line typed in all tabs while a PowerShell tab runs a statement (it goes to that statement, and may run as the next one) | Rated like any line, at least Medium; keys pass straight through only at a password prompt the tab shows |
+| sudo with WinRM hosts in a Compare hosts run | Refused: PowerShell runs as the session's sign-in user |
 
 Health checks (0.7.0, MO-08, `docs/plan-0.7.md` "Approval tiers"). Checks run from this PC on their schedule, for the workspace shown; a session behind a jump host is checked from that jump host on one kept connection:
 

@@ -276,7 +276,12 @@ mod tests {
             ]
         );
         // BX-13: a Windows preset gives Windows hosts its items, never Linux ones.
-        let windows = expand(HostKind::Windows, &[PresetId::Containers, PresetId::WindowsNetwork], &[], &[]);
+        let windows = expand(
+            HostKind::Windows,
+            &[PresetId::Containers, PresetId::WindowsNetwork],
+            &[],
+            &[],
+        );
         assert_eq!(windows[0], BundleItem::command("ipconfig /all"));
         assert_eq!(windows.len(), 2);
     }

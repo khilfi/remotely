@@ -12,6 +12,7 @@ import {
   multiExecReason,
   READ_ONLY_REASON,
   splitReason,
+  sudoWindowsReason,
   uploadReason,
 } from "./disabled-reasons.ts";
 
@@ -51,8 +52,8 @@ test("MultiExec needs an open terminal, and says when no picked one gets the key
   assert.equal(multiExecReason({ tabs: 0, on: false }), "Open a terminal first: Type in all tabs needs open tabs");
   assert.equal(multiExecReason({ tabs: 1, on: false }), null);
   // SS-12: Telnet, serial and tunnel tabs never join.
-  assert.match(multiExecReason({ tabs: 2, on: false, sshTabs: 0 }) ?? "", /Only SSH tabs join/);
-  assert.equal(multiExecReason({ tabs: 2, on: false, sshTabs: 1 }), null);
+  assert.match(multiExecReason({ tabs: 2, on: false, joinTabs: 0 }) ?? "", /Only SSH and PowerShell tabs join/);
+  assert.equal(multiExecReason({ tabs: 2, on: false, joinTabs: 1 }), null);
   assert.equal(multiExecReason({ tabs: 0, on: true }), null, "it can always be turned off");
   assert.equal(multiExecIdleReason([]), "No tab is picked: Ctrl+click tabs, or pick them by folder or environment");
   assert.equal(
@@ -122,4 +123,10 @@ test("FD-03: with the read-only lock on, changing actions say so first", () => {
   assert.equal(uploadReason({ open: true, connected: true, readOnly: true }), READ_ONLY_REASON);
   assert.equal(uploadReason({ open: true, connected: true }), null);
   assert.match(READ_ONLY_REASON, /read-only lock/);
+});
+
+test("sudo is off while Windows hosts are picked, and says why", () => {
+  assert.equal(sudoWindowsReason(0), null);
+  assert.match(sudoWindowsReason(1) ?? "", /1 Windows host runs PowerShell/);
+  assert.match(sudoWindowsReason(3) ?? "", /3 Windows hosts run/);
 });

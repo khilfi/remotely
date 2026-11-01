@@ -947,10 +947,12 @@ impl TargetDirectory for StoreDirectory {
                 Some(session) if session.kind.is_winrm() => ScriptKind::PowerShell,
                 _ => ScriptKind::Posix,
             },
-            TargetRef::Terminal { terminal_id, .. } => match self.terminals.as_ref().and_then(|t| t.pane_info(*terminal_id)) {
-                Some(info) if info.kind == crate::terminal::PaneKind::Powershell => ScriptKind::PowerShell,
-                _ => ScriptKind::Posix,
-            },
+            TargetRef::Terminal { terminal_id, .. } => {
+                match self.terminals.as_ref().and_then(|t| t.pane_info(*terminal_id)) {
+                    Some(info) if info.kind == crate::terminal::PaneKind::Powershell => ScriptKind::PowerShell,
+                    _ => ScriptKind::Posix,
+                }
+            }
             _ => ScriptKind::Posix,
         })
     }

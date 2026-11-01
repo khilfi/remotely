@@ -4,8 +4,8 @@
 // the picked VMs no session reaches: commands reach a VM over SSH, and running them through VMware
 // Tools without SSH (VM-09) comes in a later version. A4, H11: a VM linked only automatically (by the
 // address its guest reports, which a hostile guest can make up) is reached once the user confirms the link.
-// SS-12: only SSH sessions are listed, since both pickers' runs (a key push, a support bundle) go over SSH; the
-// core leaves out any other kind a tag brings in, saying so.
+// SS-12: only SSH sessions are listed for a key push, which goes over SSH; BX-13: a support bundle lists WinRM
+// sessions too (`winrm`). The core leaves out any other kind a tag brings in, saying so.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -48,6 +48,8 @@ interface Props {
   /** The hosts the picks reach, as the core resolved them. */
   resolved: ResolvedTargets | null;
   onOpenSessions: () => void;
+  /** BX-13: WinRM sessions are hosts too (a support bundle); off for the key push. */
+  winrm?: boolean;
 }
 
 type Kind = "sessionIds" | "vmPaths" | "tags" | "filterIds";
@@ -66,9 +68,16 @@ function sessionAddress(s: SessionRecord) {
   return `${s.username ? `${s.username}@` : ""}${s.host}:${s.port}`;
 }
 
-export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpenSessions }: Props) {
+export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpenSessions, winrm = false }: Props) {
   const [allSessions, setSessions] = useState<SessionRecord[]>([]);
-  const sessions = useMemo(() => allSessions.filter((s) => kindOf(s).protocol === "ssh"), [allSessions]);
+  const sessions = useMemo(
+    () =>
+      allSessions.filter((s) => {
+        const protocol = kindOf(s).protocol;
+        return protocol === "ssh" || (winrm && protocol === "winrm");
+      }),
+    [allSessions, winrm],
+  );
   const otherKinds = allSessions.length - sessions.length;
   const [vms, setVms] = useState<VmRecord[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
@@ -194,7 +203,9 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
               sessions.length > 0
                 ? "No session matches."
                 : otherKinds > 0
-                  ? "No SSH sessions yet."
+                  ? winrm
+                    ? "No SSH or WinRM sessions yet."
+                    : "No SSH sessions yet."
                   : "No saved sessions yet."
             }
           >
@@ -218,8 +229,9 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
           </PickList>
           {otherKinds > 0 && (
             <p className="mt-2 text-xs text-muted-foreground">
-              {plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH
-              only.
+              {winrm
+                ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH and WinRM only.`
+                : `${plural(otherKinds, "session")} not listed: this works over SSH only.`}
             </p>
           )}
         </TabsContent>

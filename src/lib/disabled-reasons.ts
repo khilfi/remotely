@@ -5,6 +5,13 @@
 /** FD-03: an action that changes something, while presenting with the read-only lock on (the core refuses it too). */
 export const READ_ONLY_REASON = "Read-only while presenting: turn the read-only lock off first (Presenting menu)";
 
+/** BX-13: Compare hosts' sudo switch while Windows hosts are picked: sudo is a Linux host's. */
+export function sudoWindowsReason(windowsHosts: number): string | null {
+  if (windowsHosts <= 0) return null;
+  const which = windowsHosts === 1 ? "1 Windows host runs" : `${windowsHosts} Windows hosts run`;
+  return `sudo is for Linux hosts: ${which} PowerShell as the session's sign-in user`;
+}
+
 /** BX-03 Compare: the Run button. */
 export function compareRunReason(input: {
   /** Saved sessions on this computer. */
@@ -44,14 +51,14 @@ export function multiExecReason(input: {
   tabs: number;
   on: boolean;
   readOnly?: boolean;
-  /** SS-12: the tabs with an SSH terminal (Telnet, serial, PowerShell and tunnel tabs never join). */
-  sshTabs?: number;
+  /** SS-12, BX-13: the tabs with an SSH or PowerShell terminal (Telnet, serial and tunnel tabs never join). */
+  joinTabs?: number;
 }): string | null {
   if (input.on) return null;
   if (input.readOnly) return READ_ONLY_REASON;
   if (input.tabs === 0) return "Open a terminal first: Type in all tabs needs open tabs";
-  if (input.sshTabs === 0) {
-    return "Only SSH tabs join: Telnet, serial and tunnel tabs are for one device each, and PowerShell tabs don't join yet";
+  if (input.joinTabs === 0) {
+    return "Only SSH and PowerShell tabs join: Telnet, serial and tunnel tabs are for one device each";
   }
   return null;
 }

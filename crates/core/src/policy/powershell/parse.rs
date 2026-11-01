@@ -426,7 +426,10 @@ impl Parser {
                 // keeps it), so a definition is never read-only; its body's commands count.
                 self.unreadable("a function definition");
                 self.skip_space(false);
-                while self.peek().is_some_and(|c| !c.is_whitespace() && !matches!(c, '{' | '(' | ';')) {
+                while self
+                    .peek()
+                    .is_some_and(|c| !c.is_whitespace() && !matches!(c, '{' | '(' | ';'))
+                {
                     self.bump();
                 }
                 self.clauses();
@@ -470,7 +473,10 @@ impl Parser {
         while self.chars.get(at).copied().is_some_and(|c| c.is_whitespace()) {
             at += 1;
         }
-        self.chars.get(at).copied().is_some_and(|n| if c == '-' { is_dash(n) } else { n == c })
+        self.chars
+            .get(at)
+            .copied()
+            .is_some_and(|n| if c == '-' { is_dash(n) } else { n == c })
     }
 
     fn at_statement_end(&self) -> bool {
@@ -494,7 +500,9 @@ impl Parser {
                     let save = self.i;
                     self.skip_space(true);
                     match self.word_ahead() {
-                        Some(w) if matches!(w.as_str(), "else" | "elseif" | "catch" | "finally" | "while" | "until") => {
+                        Some(w)
+                            if matches!(w.as_str(), "else" | "elseif" | "catch" | "finally" | "while" | "until") =>
+                        {
                             self.take_word(&w);
                         }
                         _ => {
@@ -608,7 +616,10 @@ impl Parser {
         loop {
             self.pipeline();
             self.skip_space(false);
-            let chain = matches!((self.peek(), self.peek_at(1)), (Some('&'), Some('&')) | (Some('|'), Some('|')));
+            let chain = matches!(
+                (self.peek(), self.peek_at(1)),
+                (Some('&'), Some('&')) | (Some('|'), Some('|'))
+            );
             if !chain {
                 return;
             }
@@ -799,7 +810,7 @@ impl Parser {
                 self.bump();
                 true
             }
-            (Some(c), n) if is_dash(c) && n != Some('=') && !n.is_some_and(|n| is_dash(n)) => {
+            (Some(c), n) if is_dash(c) && n != Some('=') && !n.is_some_and(is_dash) => {
                 self.bump();
                 true
             }
@@ -1000,11 +1011,16 @@ impl Parser {
         if self.peek() != Some('(') {
             return;
         }
-        let shown = if dynamic { "a member named at run time".to_owned() } else { name.clone() };
+        let shown = if dynamic {
+            "a member named at run time".to_owned()
+        } else {
+            name.clone()
+        };
         let args_start = self.i + 1;
-        let first_is_block = self.chars.get(args_start..).is_some_and(|rest| {
-            rest.iter().find(|c| !c.is_whitespace()).copied() == Some('{')
-        });
+        let first_is_block = self
+            .chars
+            .get(args_start..)
+            .is_some_and(|rest| rest.iter().find(|c| !c.is_whitespace()).copied() == Some('{'));
         let pure = !dynamic && pure_method(&name, is_static, first_is_block);
         if !pure {
             let sep = if is_static { "::" } else { "." };
@@ -1127,7 +1143,10 @@ impl Parser {
                 if self.peek() == Some(':') && self.peek_at(1).is_some_and(|c| c != ':' && !c.is_whitespace()) {
                     qualified = true;
                     self.bump();
-                    while self.peek().is_some_and(|c| is_var_char(c) || matches!(c, '\\' | '/' | '.' | '-')) {
+                    while self
+                        .peek()
+                        .is_some_and(|c| is_var_char(c) || matches!(c, '\\' | '/' | '.' | '-'))
+                    {
                         self.bump();
                     }
                 }
@@ -1205,7 +1224,10 @@ impl Parser {
                 }
                 Some(_) => {
                     let start = self.i;
-                    while self.peek().is_some_and(|c| !c.is_whitespace() && !matches!(c, '=' | ';' | '}')) {
+                    while self
+                        .peek()
+                        .is_some_and(|c| !c.is_whitespace() && !matches!(c, '=' | ';' | '}'))
+                    {
                         self.bump();
                     }
                     if self.i == start {
@@ -1491,7 +1513,11 @@ impl Parser {
                     }
                     return args;
                 }
-                c if is_dash(c) && self.peek_at(1).is_some_and(|n| n.is_alphabetic() || n == '_' || n == '?') => {
+                c if is_dash(c)
+                    && self
+                        .peek_at(1)
+                        .is_some_and(|n| n.is_alphabetic() || n == '_' || n == '?') =>
+                {
                     args.push(self.parameter());
                 }
                 _ => {
@@ -1786,7 +1812,12 @@ fn decode_encoded(text: &str) -> Option<String> {
     if bytes.len() % 2 != 0 || bytes.len() > MAX_NESTED_BYTES * 2 {
         return None;
     }
-    let units: Vec<u16> = bytes.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).collect();
+    let units: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| u16::from_le_bytes(*p))
+        .collect();
     String::from_utf16(&units).ok()
 }
 
@@ -1875,14 +1906,56 @@ fn cmd_script(text: &str, at: usize, nested: usize) -> PsScript {
 /// PowerShell's operators written as a dash and a word (`-eq`, `-and`, `-replace`; `c` and `i` forms included).
 fn is_operator(word: &str) -> bool {
     const OPERATORS: &[&str] = &[
-        "eq", "ne", "gt", "ge", "lt", "le", "like", "notlike", "match", "notmatch", "replace", "contains",
-        "notcontains", "in", "notin", "split", "join", "is", "isnot", "as", "and", "or", "xor", "not", "band", "bor",
-        "bxor", "bnot", "shl", "shr", "f",
+        "eq",
+        "ne",
+        "gt",
+        "ge",
+        "lt",
+        "le",
+        "like",
+        "notlike",
+        "match",
+        "notmatch",
+        "replace",
+        "contains",
+        "notcontains",
+        "in",
+        "notin",
+        "split",
+        "join",
+        "is",
+        "isnot",
+        "as",
+        "and",
+        "or",
+        "xor",
+        "not",
+        "band",
+        "bor",
+        "bxor",
+        "bnot",
+        "shl",
+        "shr",
+        "f",
     ];
     /// The ones with a case-sensitive (`-ceq`) and an insensitive (`-ieq`) form.
     const CASED: &[&str] = &[
-        "eq", "ne", "gt", "ge", "lt", "le", "like", "notlike", "match", "notmatch", "replace", "contains",
-        "notcontains", "in", "notin", "split",
+        "eq",
+        "ne",
+        "gt",
+        "ge",
+        "lt",
+        "le",
+        "like",
+        "notlike",
+        "match",
+        "notmatch",
+        "replace",
+        "contains",
+        "notcontains",
+        "in",
+        "notin",
+        "split",
     ];
     if OPERATORS.contains(&word) {
         return true;

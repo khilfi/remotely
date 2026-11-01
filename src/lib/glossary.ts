@@ -113,6 +113,12 @@ export const GLOSSARY = {
     definition: "A tab that runs PowerShell on a Windows host over WinRM, line by line, with a prompt Remotely draws.",
     aliases: ["powershell", "ps console"],
   },
+  powershellRules: {
+    term: "PowerShell rules",
+    definition:
+      "The approval rules for commands on Windows hosts: read-only commands are Low, dangerous ones High, anything else, or anything Remotely can't read, Medium.",
+    aliases: ["powershell approval rules", "windows commands"],
+  },
   pickedTabs: {
     term: "Picked tabs",
     definition: "The terminal tabs you chose with Ctrl+click or Shift+click, for Type in all tabs and Compare hosts.",

@@ -1107,13 +1107,19 @@ mod tests {
     fn statements_say_what_the_console_sends_for_typed_lines() {
         let lines = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
         // One line that closes: one statement.
-        assert_eq!(statements(&[], &lines(&["Get-Date"])), (vec![lines(&["Get-Date"])], vec![]));
+        assert_eq!(
+            statements(&[], &lines(&["Get-Date"])),
+            (vec![lines(&["Get-Date"])], vec![])
+        );
         // An open one is held, then sent whole with the line that closes it.
         let (none, held) = statements(&[], &lines(&["foreach ($i in 1..3) {"]));
         assert!(none.is_empty());
         assert_eq!(held, lines(&["foreach ($i in 1..3) {"]));
         let (sent_all, held) = statements(&held, &lines(&["  $i", "}", "hostname"]));
-        assert_eq!(sent_all, vec![lines(&["foreach ($i in 1..3) {", "  $i", "}"]), lines(&["hostname"])]);
+        assert_eq!(
+            sent_all,
+            vec![lines(&["foreach ($i in 1..3) {", "  $i", "}"]), lines(&["hostname"])]
+        );
         assert!(held.is_empty());
         // An empty line at the prompt sends nothing; one inside an open statement ends it.
         assert_eq!(statements(&[], &lines(&[""])), (vec![], vec![]));

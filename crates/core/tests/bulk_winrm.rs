@@ -249,18 +249,39 @@ async fn compare_hosts_runs_powershell_on_a_winrm_host_rated_by_the_powershell_r
         .await
         .unwrap();
     assert!(ssh_only.hosts.is_empty());
-    assert!(ssh_only.notes.iter().any(|n| n.contains("this works over SSH only")), "{:?}", ssh_only.notes);
+    assert!(
+        ssh_only.notes.iter().any(|n| n.contains("this works over SSH only")),
+        "{:?}",
+        ssh_only.notes
+    );
 
     // A read by the PowerShell rules is Low and runs at once.
-    let preview = core.bus.preview(&ctx, &exec("hostname; Get-Date", &[win01])).await.unwrap();
-    assert_eq!((preview.action, preview.tier), (ActionKind::ExecReadOnly, Tier::Low), "{:?}", preview.reasons);
+    let preview = core
+        .bus
+        .preview(&ctx, &exec("hostname; Get-Date", &[win01]))
+        .await
+        .unwrap();
+    assert_eq!(
+        (preview.action, preview.tier),
+        (ActionKind::ExecReadOnly, Tier::Low),
+        "{:?}",
+        preview.reasons
+    );
     assert!(preview.reasons.iter().any(|r| r == "rated by the PowerShell rules"));
     let job = run(&core, exec("hostname", &[win01])).await;
     assert_eq!(finished(&core, job).await, JobStatus::Succeeded);
     let results = core.bulk.results(&ctx, job, GroupOptions::default()).await.unwrap();
     assert_eq!(results.groups.len(), 1);
     assert!(results.groups[0].ok);
-    assert!(results.groups[0].stdout.as_deref().unwrap_or_default().contains("WIN01"), "{:?}", results.groups[0]);
+    assert!(
+        results.groups[0]
+            .stdout
+            .as_deref()
+            .unwrap_or_default()
+            .contains("WIN01"),
+        "{:?}",
+        results.groups[0]
+    );
     assert!(
         server.stats().commands.iter().any(|c| c.contains("-Command -")),
         "a PowerShell of its own ran it: {:?}",
@@ -268,20 +289,27 @@ async fn compare_hosts_runs_powershell_on_a_winrm_host_rated_by_the_powershell_r
     );
 
     // A dangerous one asks for the full approval and says why.
-    let preview = core.bus.preview(&ctx, &exec("Restart-Computer -Force", &[win01])).await.unwrap();
-    assert_eq!(preview.tier, Tier::High);
-    assert!(preview.dangerous.iter().any(|d| d.rule == "Stop-Computer / Restart-Computer"));
-    let SubmitOutcome::NeedsApproval { request } = core
+    let preview = core
         .bus
-        .submit(&ctx, exec("rm -r C:\\Data", &[win01]))
+        .preview(&ctx, &exec("Restart-Computer -Force", &[win01]))
         .await
-        .unwrap()
+        .unwrap();
+    assert_eq!(preview.tier, Tier::High);
+    assert!(preview
+        .dangerous
+        .iter()
+        .any(|d| d.rule == "Stop-Computer / Restart-Computer"));
+    let SubmitOutcome::NeedsApproval { request } =
+        core.bus.submit(&ctx, exec("rm -r C:\\Data", &[win01])).await.unwrap()
     else {
         panic!("a dangerous PowerShell command asks first");
     };
     let details = request.exec.as_ref().unwrap();
     assert_eq!(details.languages, [ScriptKind::PowerShell]);
-    assert!(details.dangerous.iter().any(|d| d.rule == "Remove-Item -Recurse / rd /s"));
+    assert!(details
+        .dangerous
+        .iter()
+        .any(|d| d.rule == "Remove-Item -Recurse / rd /s"));
     core.bus.cancel_approval(request.id).await.unwrap();
 
     // sudo is a Linux host's.
@@ -304,7 +332,10 @@ async fn a_mixed_selection_rates_each_host_by_its_own_rules_and_groups_their_out
     // `hostname` reads in both languages: Low, and each host gives its own name.
     let preview = core.bus.preview(&ctx, &exec("hostname", &both)).await.unwrap();
     assert_eq!(preview.tier, Tier::Low, "{:?}", preview.reasons);
-    assert!(preview.reasons.iter().any(|r| r.contains("each target is rated by its own rules")));
+    assert!(preview
+        .reasons
+        .iter()
+        .any(|r| r.contains("each target is rated by its own rules")));
     let job = run(&core, exec("hostname", &both)).await;
     finished(&core, job).await;
     let results = core.bulk.results(&ctx, job, GroupOptions::default()).await.unwrap();
@@ -342,7 +373,11 @@ async fn a_failed_windows_host_is_retried_and_the_journal_keeps_its_certificate(
         *trust_new_host_keys = true;
     }
     let job = run(&core, trusting).await;
-    assert_eq!(finished(&core, job).await, JobStatus::Failed, "Write-Error ends with exit code 1");
+    assert_eq!(
+        finished(&core, job).await,
+        JobStatus::Failed,
+        "Write-Error ends with exit code 1"
+    );
     let targets = core.store.job_targets(&ctx, job).await.unwrap();
     let host_key = targets[0].host_key.clone().unwrap_or_default();
     assert!(
@@ -379,17 +414,15 @@ async fn a_powershell_tab_picks_its_session_for_compare_hosts_only() {
     assert_eq!(resolved.hosts[0].session_id, win01);
     let ssh_only = core
         .bulk
-        .resolve(
-            &ctx,
-            &TargetPicks {
-                winrm: false,
-                ..picks
-            },
-        )
+        .resolve(&ctx, &TargetPicks { winrm: false, ..picks })
         .await
         .unwrap();
     assert!(ssh_only.hosts.is_empty());
-    assert!(ssh_only.notes.iter().any(|n| n.contains("PowerShell tab")), "{:?}", ssh_only.notes);
+    assert!(
+        ssh_only.notes.iter().any(|n| n.contains("PowerShell tab")),
+        "{:?}",
+        ssh_only.notes
+    );
 }
 
 // ---- MultiExec groups ------------------------------------------------------------------------------------
@@ -569,7 +602,16 @@ async fn a_powershell_line_is_held_rated_as_powershell_and_recorded_in_each_tab(
 
     // A read: Low, sent at once to both tabs, recorded, one notice for the line.
     let outcome = fleet.type_in(0, "hostname").await;
-    assert!(matches!(outcome, InputOutcome::Typed { mode: LineMode::Command, .. }), "{outcome:?}");
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Typed {
+                mode: LineMode::Command,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
     let (line, tier, request) = held(fleet.type_in(0, "\r").await);
     assert_eq!(tier, Tier::Low);
     assert!(request.is_none());
@@ -581,7 +623,15 @@ async fn a_powershell_line_is_held_rated_as_powershell_and_recorded_in_each_tab(
     assert_eq!(line_finished(&mut events, line).await, 2);
     let recorded = fleet.core.multiexec.recorded(line, GroupOptions::default()).unwrap();
     assert_eq!(recorded.groups.len(), 1, "both tabs said the same");
-    assert!(recorded.groups[0].stdout.as_deref().unwrap_or_default().contains("WIN01"), "{:?}", recorded.groups[0]);
+    assert!(
+        recorded.groups[0]
+            .stdout
+            .as_deref()
+            .unwrap_or_default()
+            .contains("WIN01"),
+        "{:?}",
+        recorded.groups[0]
+    );
 
     // A dangerous one needs the full approval; cancelling clears the line everywhere.
     fleet.type_in(0, "Stop-Computer -Force").await;
@@ -613,7 +663,10 @@ async fn a_statement_left_open_goes_whole_and_is_rated_whole() {
     for pane in &mut fleet.panes {
         pane.expect(">> ").await;
     }
-    assert!(matches!(fleet.type_in(0, "  'inside'\r").await, InputOutcome::Typed { .. }));
+    assert!(matches!(
+        fleet.type_in(0, "  'inside'\r").await,
+        InputOutcome::Typed { .. }
+    ));
     // The line that closes it sends the whole statement, which is what is rated: a read.
     let (line, tier, _) = held(fleet.type_in(0, "}\r").await);
     assert_eq!(tier, Tier::Low);
@@ -622,7 +675,8 @@ async fn a_statement_left_open_goes_whole_and_is_rated_whole() {
         fleet.panes[i].expect("PS C:\\Users\\alice> ").await;
         let sent = fleet.statements(i);
         assert!(
-            sent.iter().any(|s| s.contains("Create('if ($true) {' + \"`n\" + '  ''inside''' + \"`n\" + '}')")),
+            sent.iter()
+                .any(|s| s.contains("Create('if ($true) {' + \"`n\" + '  ''inside''' + \"`n\" + '}')")),
             "{sent:?}"
         );
     }
@@ -633,7 +687,10 @@ async fn a_statement_left_open_goes_whole_and_is_rated_whole() {
     let (line, tier, request) = held(fleet.type_in(0, "}\r").await);
     assert_eq!(tier, Tier::Medium);
     let script = request.unwrap().exec.unwrap().script;
-    assert!(script.starts_with("foreach ($s in 'Spooler') {") && script.contains("Restart-Service"), "{script}");
+    assert!(
+        script.starts_with("foreach ($s in 'Spooler') {") && script.contains("Restart-Service"),
+        "{script}"
+    );
     fleet.core.multiexec.cancel(line).await.unwrap();
 }
 
@@ -673,7 +730,12 @@ async fn a_running_statements_input_is_rated_unless_at_a_password_prompt_and_mix
     // At a password prompt the keys pass straight through, never rated or journaled.
     fleet.type_in(0, "Read-Host 'Password'").await;
     let (line, _, request) = held(fleet.type_in(0, "\r").await);
-    fleet.core.multiexec.approve(line, answers(&request.unwrap())).await.unwrap();
+    fleet
+        .core
+        .multiexec
+        .approve(line, answers(&request.unwrap()))
+        .await
+        .unwrap();
     assert!(line_done(&mut events, line).await);
     for pane in &mut fleet.panes {
         pane.expect("Password: ").await;
@@ -687,7 +749,10 @@ async fn a_running_statements_input_is_rated_unless_at_a_password_prompt_and_mix
     for pane in &mut fleet.panes {
         pane.expect("PS C:\\Users\\alice> ").await;
     }
-    assert_eq!(fleet.core.store.recent_jobs(&fleet.core.ctx(), 50).await.unwrap().len(), jobs);
+    assert_eq!(
+        fleet.core.store.recent_jobs(&fleet.core.ctx(), 50).await.unwrap().len(),
+        jobs
+    );
 
     // An SSH tab and a PowerShell tab can't be typed into at once.
     let (_server, web01) = linux(&fleet.core, "web01").await;
@@ -728,7 +793,10 @@ async fn a_support_bundle_collects_windows_presets_and_files_beside_a_linux_host
     let request = BundleRequest {
         session_ids: vec![win01, web01],
         presets: vec![PresetId::WindowsSystem, PresetId::WindowsNetwork, PresetId::System],
-        windows_files: vec![r"C:\ProgramData\App\app.conf".into(), r"C:\ProgramData\App\missing.log".into()],
+        windows_files: vec![
+            r"C:\ProgramData\App\app.conf".into(),
+            r"C:\ProgramData\App\missing.log".into(),
+        ],
         timeout_secs: Some(60),
         ..BundleRequest::default()
     };
@@ -760,8 +828,14 @@ async fn a_support_bundle_collects_windows_presets_and_files_beside_a_linux_host
     let conf = get("app.conf");
     assert!(conf.contains("port=8080") && !conf.contains("hunter2"), "{conf}");
     // The Linux host gave the Linux preset only.
-    assert!(!files.keys().any(|k| !k.starts_with(&windows_folder) && k.contains("get-computerinfo")));
-    assert!(files.keys().any(|k| !k.starts_with(&windows_folder) && k.contains("uname-a")));
-    assert!(manifest["windowsItems"].as_array().is_some_and(|items| !items.is_empty()));
+    assert!(!files
+        .keys()
+        .any(|k| !k.starts_with(&windows_folder) && k.contains("get-computerinfo")));
+    assert!(files
+        .keys()
+        .any(|k| !k.starts_with(&windows_folder) && k.contains("uname-a")));
+    assert!(manifest["windowsItems"]
+        .as_array()
+        .is_some_and(|items| !items.is_empty()));
     std::fs::remove_dir_all(&folder).ok();
 }

@@ -61,9 +61,9 @@ use crate::adapters::remote::{
     AgentSource, AuthMethod, ConnectOptions, ConnectRequest, Credentials, ExecRequest, HostKeyVerifier, RemoteAdapter,
     ScriptKind, SessionSpec,
 };
-use crate::adapters::winrm::{NoWinrm, WinrmAdapter, WinrmConnect, WinrmSession, WinrmTuning};
 use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::{path_key, ToolsState};
+use crate::adapters::winrm::{NoWinrm, WinrmAdapter, WinrmConnect, WinrmSession, WinrmTuning};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, Rollout, SnapshotOp, StopMode};
 use crate::containers::ContainerActions;
 use crate::domain::{Context, PowerState, Target, TargetRef, WorkspaceId};
@@ -498,12 +498,15 @@ struct RemoteRun<'a> {
     timeout_secs: Option<u64>,
 }
 
+/// BX-13: a WinRM connection being made, signed in and checked to run PowerShell.
+type WinrmConnecting = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn WinrmSession>>> + Send>>;
+
 /// BX-13: a Windows host's connection, about to be made: its address and sign-in password (for the bundle's
 /// manifest and scrubbing), the connection itself, and the verifier that saw its certificate.
 struct WinrmLogin {
     address: String,
     secrets: Vec<SecretString>,
-    connect: std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn WinrmSession>>> + Send>>,
+    connect: WinrmConnecting,
     verifier: Arc<BulkVerifier>,
 }
 

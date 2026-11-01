@@ -193,7 +193,15 @@ import { formatSize } from "@/lib/transfers";
 import { transferStore } from "@/lib/transfers-store";
 import { liveTunnels, routeText, viaText } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
-import { joinReason, kindOf, opensWindow, paneKindOf } from "@/lib/session-kinds";
+import {
+  joinReason,
+  joinsTyping,
+  kindOf,
+  opensWindow,
+  paneKindOf,
+  typingKind,
+  typingKindReason,
+} from "@/lib/session-kinds";
 import { openSessionWindow, warnUnmasked } from "@/lib/console-open";
 
 /** A tab's panes: one pane, or a split of several side by side or stacked. */
@@ -886,10 +894,15 @@ export function TerminalPage({
   }, [everyPane, multiExec, compareOpen]);
 
   const pickedTabs = multiExec ? tabs.filter((t) => selection.keys.includes(t.key)) : [];
-  // SS-12: Type in all tabs and Compare hosts take SSH panes only (Telnet, serial and tunnel tabs say why).
-  const pickedPanes = pickedTabs.flatMap((t) => allPanes(t.layout)).filter((p) => p.kind === "ssh");
-  /** SS-12: the tabs that can join Type in all tabs (an SSH terminal in them). */
-  const sshTabs = tabs.filter((t) => allPanes(t.layout).some((p) => p.kind === "ssh")).length;
+  // SS-12: Type in all tabs and Compare hosts take SSH and (BX-13) PowerShell panes (Telnet, serial and tunnel tabs
+  // say why); typing goes to one kind at a time, the current tab's when it joins.
+  const typing = typingKind(
+    current ? allPanes(current.layout).map((p) => p.kind) : [],
+    pickedTabs.flatMap((t) => allPanes(t.layout)).map((p) => p.kind),
+  );
+  const pickedPanes = pickedTabs.flatMap((t) => allPanes(t.layout)).filter((p) => p.kind === typing);
+  /** SS-12: the tabs that can join Type in all tabs (an SSH or PowerShell terminal in them). */
+  const joinTabs = tabs.filter((t) => allPanes(t.layout).some((p) => joinsTyping(p.kind))).length;
   const pickedIds = pickedPanes.map((p) => p.terminalId).filter((id): id is string => id !== null);
   const pickedIdsKey = pickedIds.join(",");
   // `paneTick` is read so a pane that just got its id is picked up.
@@ -1785,7 +1798,7 @@ export function TerminalPage({
         }
         onClick={() => (multiExec ? stopMultiExec() : startMultiExec())}
         className={cn(multiExec && "bg-primary/15 text-primary")}
-        disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec, readOnly, sshTabs })}
+        disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec, readOnly, joinTabs })}
         pressed={multiExec}
       >
         <RadioTowerIcon />
@@ -1830,6 +1843,8 @@ export function TerminalPage({
         {tabs.map((tab) => {
           const pane = findPane(tab.layout, tab.activePane);
           const target = mxStatus?.targets.find((t) => t.terminalId === pane?.terminalId);
+          // BX-13: a picked tab of the other kind (SSH or PowerShell) gets no typing now, and says why.
+          const otherKind = multiExec && pane ? typingKindReason(pane.kind, typing) : null;
           return (
             <TabButton
               key={tab.key}
@@ -1842,11 +1857,11 @@ export function TerminalPage({
               multiExec={
                 multiExec
                   ? selection.keys.includes(tab.key)
-                    ? (target?.reason ?? target?.note ?? "receives")
+                    ? (otherKind ?? target?.reason ?? target?.note ?? "receives")
                     : "off"
                   : null
               }
-              multiExecOk={target ? target.receives : true}
+              multiExecOk={otherKind ? false : target ? target.receives : true}
               attention={attention.includes(tab.key)}
               onSelect={(modifiers) => pickTab(tab.key, modifiers)}
               onClose={() => closeTab(tab)}

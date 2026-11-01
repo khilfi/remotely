@@ -756,11 +756,7 @@ mod tests {
         assert!(PaneKind::Ssh.joins_multiexec());
         // BX-13.
         assert!(PaneKind::Powershell.joins_multiexec());
-        for kind in [
-            PaneKind::Telnet,
-            PaneKind::Serial,
-            PaneKind::Tunnel,
-        ] {
+        for kind in [PaneKind::Telnet, PaneKind::Serial, PaneKind::Tunnel] {
             assert!(!kind.joins_multiexec(), "{kind:?}");
         }
         assert_eq!(higher(Environment::Lab, Environment::Prod), Environment::Prod);

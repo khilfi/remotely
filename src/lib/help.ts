@@ -226,14 +226,14 @@ export const HELP = {
   compareHosts: {
     title: "Compare hosts",
     body: [
-      "Runs one command once on each picked host, in its own login shell rather than in your terminals, and groups the hosts whose output is the same.",
+      "Runs one command once on each picked host, in its own login shell (PowerShell on a Windows host) rather than in your terminals, and groups the hosts whose output is the same. Each host is rated by its own rules: the shell's or PowerShell's.",
       "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
     ],
   },
   supportBundle: {
     title: "Support bundle",
     body: [
-      "Runs the same commands on each host over SSH and reads the chosen files over SFTP as the session's user (never with sudo), into one zip with a folder per host and a manifest of what ran, sizes and checksums. Remote desktop, VNC, Telnet and serial sessions can't be hosts. The presets only read.",
+      "Runs the same commands on each host and reads the chosen files as the session's user (never with sudo), into one zip with a folder per host and a manifest. Linux hosts are reached over SSH, Windows hosts over WinRM, each with presets that only read. Remote desktop, VNC, Telnet and serial sessions can't be hosts.",
       "What looks like a password, token or private key is redacted in every file, but look through the zip before you share it. Each file keeps up to 10 MB, each host 100 MB and the bundle 1 GB; what is cut or left out is in the manifest.",
     ],
   },
@@ -323,6 +323,20 @@ export const HELP = {
     body: [
       "A command whose every part starts with one of these, and that writes no file, is Low. Entries can't hold shell operators such as ; | > or $.",
       "Forms that change something, such as ip link set or date -s, are never read-only. Nor is a command set up with an environment variable other than the locale, time zone, terminal or colours.",
+    ],
+  },
+  powershellDangerous: {
+    title: "Dangerous PowerShell commands",
+    body: [
+      "A PowerShell command that matches one of these regular expressions is High. Each is tested against the script as typed and against each command as PowerShell resolves it: an alias is its command (rm is Remove-Item), quotes are removed.",
+      "What powershell -Command, -EncodedCommand, cmd /c and Invoke-Expression would run is read too. A pattern that matches every command is refused.",
+    ],
+  },
+  powershellReadOnly: {
+    title: "Read-only PowerShell commands",
+    body: [
+      "A script whose every command is one of these is Low. Name each by its full name (Get-ChildItem, not dir), and a program that shares an alias's name with .exe (sc.exe). Words after the command match only that form (route print).",
+      "Anything Remotely can't read is Medium: a method call such as .Kill(), & $x, a redirection into a file. Programs that run other commands (powershell, cmd, Invoke-Expression, Start-Process) can't be entries, and forms that change something (ipconfig /release) are never read-only.",
     ],
   },
   pasteConfirm: {
