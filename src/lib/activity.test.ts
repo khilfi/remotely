@@ -146,6 +146,11 @@ test("every event the core writes has plain words, and none is a code", () => {
     "catalog_changed",
     "stack_changed",
     "database_set_aside",
+    "note_changed",
+    "trash_restored",
+    "trash_deleted",
+    "trash_emptied",
+    "trash_purged",
   ];
   for (const event of events) {
     assert.ok(EVENT_LABELS[event], `${event} has words`);

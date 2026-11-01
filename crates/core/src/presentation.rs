@@ -129,13 +129,18 @@ pub enum Change {
     /// FD-02: creating, renaming, colouring, archiving and switching workspaces, and adding VMs to a workspace or
     /// taking them out. (Switching closes the terminals open in the workspace, so it is refused too.)
     Workspaces,
+    /// FD-06: writing, changing, marking or deleting a note.
+    Notes,
+    /// QL-27: restoring from the trash, deleting from it for good, and emptying it. (Deleting an item moves it to the
+    /// trash, refused by its own kind of edit.)
+    Trash,
     /// MO-08: adding, changing, pausing and deleting health checks. (Their runs only read, so they go on.)
     HealthChecks,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 23] = [
+    pub const ALL: [Change; 25] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -158,6 +163,8 @@ impl Change {
         Change::Stacks,
         Change::Schedules,
         Change::Workspaces,
+        Change::Notes,
+        Change::Trash,
         Change::HealthChecks,
     ];
 
@@ -185,6 +192,8 @@ impl Change {
             Change::Stacks => "Edit stacks and their instances",
             Change::Schedules => "Edit, approve, pause or delete schedules",
             Change::Workspaces => "Change or switch workspaces",
+            Change::Notes => "Edit notes",
+            Change::Trash => "Restore or delete items in the trash",
             Change::HealthChecks => "Add, change, pause or delete health checks",
         }
     }

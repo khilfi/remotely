@@ -18,6 +18,7 @@ mod jobs;
 mod known_hosts;
 mod metrics;
 mod multiexec_groups;
+mod notes;
 mod quick_connect;
 #[cfg(test)]
 mod retention_tests;
@@ -25,6 +26,7 @@ mod schedules;
 mod sessions;
 mod ssh_keys;
 mod stacks;
+mod stars;
 mod tags;
 mod terminal_rules;
 #[cfg(test)]
@@ -65,7 +67,7 @@ pub(crate) use multiexec_groups::GroupRow;
 pub use quick_connect::MAX_QUICK_CONNECT_HISTORY;
 pub use schedules::MAX_RUNS_KEPT;
 pub(crate) use schedules::{RunRow, ScheduleRow, SnapshotEnd, TakenSnapshot};
-pub(crate) use sessions::unsaved_spec;
+pub(crate) use sessions::{delete_unused_tags, set_session_tags, unsaved_spec};
 pub use stacks::MemberOrigin;
 pub(crate) use stacks::{InstanceRow, NewInstance, StackRow};
 pub(crate) use tags::{clean_name, MAX_TAG_LEN};

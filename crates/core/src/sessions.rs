@@ -402,6 +402,91 @@ impl SessionFilter {
     }
 }
 
+/// QL-28: the folder a bulk edit moves sessions to (`None`: the top level).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderChoice {
+    #[serde(default)]
+    pub folder_id: Option<Uuid>,
+}
+
+/// QL-28: the user a bulk edit sets (`None`: as their folders say).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserChoice {
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+/// QL-28: the jump host a bulk edit sets.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum JumpChoice {
+    /// As their folders say.
+    Folder,
+    /// No jump host, whatever their folders set.
+    Direct,
+    /// This saved session.
+    Session { id: Uuid },
+}
+
+/// QL-28: what the Sessions page's bulk Edit changes. A field left out stays as each session has it; tags are added
+/// and taken off, the others set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BulkEdit {
+    pub folder: Option<FolderChoice>,
+    pub port: Option<u16>,
+    pub username: Option<UserChoice>,
+    /// [`SessionAuth::Folder`]: as their folders say.
+    pub auth: Option<SessionAuth>,
+    pub jump: Option<JumpChoice>,
+    /// [`Environment::None`]: none of their own (their folders' label applies).
+    pub environment: Option<Environment>,
+    pub tags_add: Vec<String>,
+    pub tags_remove: Vec<String>,
+}
+
+/// QL-28: one field a bulk edit changes on a session, as the preview shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldChange {
+    pub field: String,
+    pub before: String,
+    pub after: String,
+}
+
+/// QL-28: a session in the preview; `changes` is empty when the edit leaves it as it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkEditRow {
+    pub id: Uuid,
+    pub name: String,
+    pub changes: Vec<FieldChange>,
+    /// SS-12: the edit's fields its kind doesn't take, which stay as they are ("Login stays as it is: a Telnet
+    /// session takes none"): only SSH logs in with a login of the app's, Telnet and serial take no jump host, serial
+    /// has no port.
+    pub skipped: Vec<String>,
+}
+
+/// QL-28: before and after for each picked session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BulkEditPreview {
+    pub rows: Vec<BulkEditRow>,
+    /// How many sessions it changes.
+    pub changed: usize,
+}
+
+/// QL-28: a bulk edit worked out.
+struct BulkPlan {
+    tree: Folders,
+    before: Vec<SessionRecord>,
+    after: Vec<SessionRecord>,
+    inputs: Vec<(Uuid, SessionInput)>,
+    preview: BulkEditPreview,
+}
+
 pub const MAX_SESSION_NAME: usize = 100;
 pub const MAX_FOLDER_NAME: usize = 60;
 pub const MAX_HOST_LEN: usize = 253;
@@ -658,6 +743,8 @@ pub struct SessionLibrary {
     /// SS-04, AP-06: a session that would send a vault password somewhere it doesn't go yet asks for
     /// the master password first.
     bindings: Option<SecretBindings>,
+    /// MO-08, QL-27: a deleted session's health checks go to the trash with it; the runner then reads them again.
+    checks: Option<crate::checks::Checks>,
 }
 
 impl SessionLibrary {
@@ -667,7 +754,14 @@ impl SessionLibrary {
             links,
             policy: None,
             bindings: None,
+            checks: None,
         }
+    }
+
+    /// MO-08: the health checks, read again once a deleted session's checks went to the trash with it.
+    pub fn with_checks(mut self, checks: crate::checks::Checks) -> Self {
+        self.checks = Some(checks);
+        self
     }
 
     /// SS-04, AP-06: the checks before a session sends a vault password to a new place.
@@ -1042,18 +1136,21 @@ impl SessionLibrary {
         self.create(ctx, input).await
     }
 
-    /// Sessions that jumped through it lose their jump host; the vault keeps its credentials.
+    /// Sessions that jumped through it lose their jump host; the vault keeps its credentials. QL-27: it goes to the
+    /// trash with its port forwards, container marks, group places and note, and can be restored for 30 days.
     pub async fn delete(&self, ctx: &Context, id: Uuid) -> Result<()> {
         self.store.read_only().check(Change::Sessions)?;
         let session = self.get(ctx, id).await?;
         // QL-16: sessions whose own jump host it is; a folder's is named apart.
-        let jumpers = self
+        let jumper_names: Vec<String> = self
             .store
             .list_sessions(ctx)
             .await?
             .iter()
             .filter(|s| s.own.jump_session_id == Some(id))
-            .count();
+            .map(|s| quoted(&s.name))
+            .collect();
+        let jumpers = jumper_names.len();
         let folders_using: Vec<String> = self
             .folders(ctx)
             .await?
@@ -1061,10 +1158,39 @@ impl SessionLibrary {
             .filter(|f| f.defaults.jump_session_id == Some(id))
             .map(|f| quoted(&f.name))
             .collect();
-        if !self.store.delete_session(ctx, id).await? {
+        // QL-27: into the trash, with what hangs off it, where it went and what it sent (for its restore).
+        let tree = self.store.session_folders(ctx).await?;
+        let sent = match &self.bindings {
+            Some(bindings) => bindings.sent_by(ctx, id).await?,
+            None => session.auth.sent_secret().into_iter().collect(),
+        };
+        let place = Destination::new(&session.host, session.port, session.jump_session_id);
+        let item = crate::trash::TrashItem {
+            kind: crate::trash::TrashKind::Session,
+            item_id: &id.to_string(),
+            name: &session.name,
+            place: crate::trash::session_place(&tree, session.folder_id),
+            sent: Some((place, sent)),
+            jump_users: jumper_names
+                .iter()
+                .cloned()
+                .chain(folders_using.iter().map(|f| format!("folder {f}")))
+                .collect(),
+        };
+        let Some(trashed) = crate::trash::move_to_trash(&self.store, ctx, item).await? else {
             return Err(CoreError::UnknownTarget(format!("session {id}")));
+        };
+        // MO-08: its checks are in the trash now, so the runner stops running them.
+        if let Some(checks) = &self.checks {
+            if let Err(err) = checks.reload(*ctx).await {
+                tracing::warn!(error = %err, "could not reload the health checks after a delete");
+            }
         }
         let mut detail = session.address();
+        if !trashed.detail.is_empty() {
+            detail.push_str(&format!("; with {}", trashed.detail));
+        }
+        detail.push_str(&format!("; moved to the trash for {} days", crate::trash::KEEP_DAYS));
         match jumpers {
             0 => {}
             1 => detail.push_str("; 1 session used it as its jump host and now has none"),
@@ -1150,6 +1276,288 @@ impl SessionLibrary {
             )
             .await
             .map(drop)
+    }
+
+    /// QL-28: what a bulk edit would change on each session, before and after, without saving anything.
+    pub async fn bulk_preview(&self, ctx: &Context, ids: &[Uuid], edit: &BulkEdit) -> Result<BulkEditPreview> {
+        let plan = self.plan_bulk(ctx, ids, edit).await?;
+        Ok(plan.preview)
+    }
+
+    /// QL-28: changes folder, port, user, login, jump host, environment and tags of several sessions at once, each
+    /// checked like an edit of it, in one transaction, with one audit entry naming every session changed. A change
+    /// that would send a vault password somewhere it doesn't go yet asks for the vault password once for all of them
+    /// (SS-04, AP-06: otherwise [`CoreError::ReauthRequired`]).
+    pub async fn bulk_edit(
+        &self,
+        ctx: &Context,
+        ids: &[Uuid],
+        edit: &BulkEdit,
+        vault_password: Option<&SecretString>,
+    ) -> Result<BulkEditPreview> {
+        self.store.read_only().check(Change::Sessions)?;
+        let plan = self.plan_bulk(ctx, ids, edit).await?;
+        let changed: Vec<Uuid> = plan
+            .preview
+            .rows
+            .iter()
+            .filter(|r| !r.changes.is_empty())
+            .map(|r| r.id)
+            .collect();
+        if changed.is_empty() {
+            return Ok(plan.preview);
+        }
+        let what = match changed.len() {
+            1 => format!(
+                "session {}",
+                quoted(
+                    plan.preview
+                        .rows
+                        .iter()
+                        .find(|r| r.id == changed[0])
+                        .map_or("", |r| &r.name)
+                )
+            ),
+            n => format!("{n} sessions"),
+        };
+        let action = format!("Failed to change {what}");
+        let (asked, sent) = self
+            .confirm_folder_change(
+                ctx,
+                &plan.tree,
+                &plan.before,
+                &plan.after,
+                Reauth::Ask(vault_password),
+                &action,
+            )
+            .await?;
+        let edits: Vec<(Uuid, SessionInput)> = plan.inputs.into_iter().filter(|(id, _)| changed.contains(id)).collect();
+        self.store.update_sessions(ctx, &edits).await?;
+        self.settle(&sent);
+        let targets: Vec<Target> = plan
+            .after
+            .iter()
+            .filter(|s| changed.contains(&s.id))
+            .map(SessionRecord::target)
+            .collect();
+        let mut detail = self.describe_bulk(ctx, edit).await?;
+        detail.push(format!("{} changed", plural(changed.len(), "session")));
+        let skipped = plan.preview.rows.iter().filter(|r| !r.skipped.is_empty()).count();
+        if skipped > 0 {
+            detail.push(format!(
+                "{} kept a field its kind doesn't take",
+                plural(skipped, "session")
+            ));
+        }
+        if let Some(how) = asked {
+            detail.push(how.into());
+        }
+        self.store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "session_changed",
+                    action: &format!("Changed {what} at once"),
+                    tier: None,
+                    job_id: None,
+                    targets: &targets,
+                    approval: None,
+                    result: None,
+                    detail: Some(&detail.join("; ")),
+                },
+            )
+            .await?;
+        Ok(plan.preview)
+    }
+
+    /// QL-28: each session's input after the edit, checked; every session before and after; and the preview.
+    async fn plan_bulk(&self, ctx: &Context, ids: &[Uuid], edit: &BulkEdit) -> Result<BulkPlan> {
+        let mut unique: Vec<Uuid> = Vec::new();
+        for id in ids {
+            if !unique.contains(id) {
+                unique.push(*id);
+            }
+        }
+        if unique.is_empty() {
+            return Err(CoreError::NoTargets);
+        }
+        if let Some(0) = edit.port {
+            return invalid("The port must be 1 to 65535.");
+        }
+        let username = match &edit.username {
+            Some(choice) => Some(clean_username(choice.username.clone())?),
+            None => None,
+        };
+        let add = clean_tags(&edit.tags_add, "A session")?;
+        let remove = clean_tags(&edit.tags_remove, "A session")?;
+        let tree = self.store.session_folders(ctx).await?;
+        if let Some(FolderChoice {
+            folder_id: Some(folder),
+        }) = &edit.folder
+        {
+            if tree.get(*folder).is_none() {
+                return Err(CoreError::UnknownTarget(format!("folder {folder}")));
+            }
+        }
+        let before = self.store.list_sessions_in(ctx, &tree).await?;
+        let mut inputs = Vec::with_capacity(unique.len());
+        for id in &unique {
+            let session = before
+                .iter()
+                .find(|s| s.id == *id)
+                .ok_or_else(|| CoreError::UnknownTarget(format!("session {id}")))?;
+            let mut input = session.input();
+            if let Some(choice) = &edit.folder {
+                input.folder_id = choice.folder_id;
+            }
+            if let Some(port) = edit.port {
+                input.port = port;
+            }
+            if let Some(user) = &username {
+                input.username.clone_from(user);
+            }
+            if let Some(auth) = &edit.auth {
+                input.auth = auth.clone();
+            }
+            match &edit.jump {
+                None => {}
+                Some(JumpChoice::Folder) => {
+                    input.jump_session_id = None;
+                    input.jump_direct = false;
+                }
+                Some(JumpChoice::Direct) => {
+                    input.jump_session_id = None;
+                    input.jump_direct = true;
+                }
+                Some(JumpChoice::Session { id: jump }) => {
+                    input.jump_session_id = Some(*jump);
+                    input.jump_direct = false;
+                }
+            }
+            if let Some(environment) = edit.environment {
+                input.environment = environment;
+            }
+            if !add.is_empty() || !remove.is_empty() {
+                let mut tags: Vec<String> = input
+                    .tags
+                    .iter()
+                    .filter(|t| !remove.iter().any(|r| r.eq_ignore_ascii_case(t)))
+                    .cloned()
+                    .collect();
+                for tag in &add {
+                    if !tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                        tags.push(tag.clone());
+                    }
+                }
+                input.tags = tags;
+            }
+            let checked = self.check(ctx, Some(*id), input).await.map_err(|err| match err {
+                CoreError::InvalidInput(message) => {
+                    CoreError::InvalidInput(format!("{}: {message}", quoted(&session.name)))
+                }
+                other => other,
+            })?;
+            inputs.push((*id, checked));
+        }
+        let after: Vec<SessionRecord> = before
+            .iter()
+            .map(|s| {
+                let mut s = s.clone();
+                if let Some((_, input)) = inputs.iter().find(|(id, _)| *id == s.id) {
+                    s.folder_id = input.folder_id;
+                    s.port = input.port;
+                    s.own = input.own();
+                    let effective = s.resolve_in(&tree);
+                    s.apply(effective);
+                }
+                s
+            })
+            .collect();
+        check_jump_loops(&after, |s| unique.contains(&s.id))?;
+        let (folders, sessions) = self.names(ctx).await?;
+        // The preview compares the saved sessions with the checked inputs, so it shows what `tidy` keeps of the edit
+        // for each kind, not what was asked.
+        let rows = unique
+            .iter()
+            .filter_map(|id| {
+                let a = before.iter().find(|s| s.id == *id)?;
+                let b = after.iter().find(|s| s.id == *id)?;
+                Some(BulkEditRow {
+                    id: *id,
+                    name: a.name.clone(),
+                    changes: bulk_changes(&folders, &sessions, a, b),
+                    skipped: skipped_for_kind(&a.kind, edit),
+                })
+            })
+            .collect::<Vec<_>>();
+        let changed = rows.iter().filter(|r| !r.changes.is_empty()).count();
+        Ok(BulkPlan {
+            tree,
+            before,
+            after,
+            inputs,
+            preview: BulkEditPreview { rows, changed },
+        })
+    }
+
+    /// QL-28: what a bulk edit sets, for its audit entry.
+    async fn describe_bulk(&self, ctx: &Context, edit: &BulkEdit) -> Result<Vec<String>> {
+        let (folders, sessions) = self.names(ctx).await?;
+        let mut out = Vec::new();
+        if let Some(choice) = &edit.folder {
+            out.push(format!(
+                "folder -> {}",
+                choice
+                    .folder_id
+                    .and_then(|f| folders.get(&f))
+                    .map_or_else(|| "top level".to_owned(), |n| quoted(n))
+            ));
+        }
+        if let Some(port) = edit.port {
+            out.push(format!("port -> {port}"));
+        }
+        if let Some(choice) = &edit.username {
+            out.push(format!(
+                "user -> {}",
+                choice
+                    .username
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or("as its folders say")
+            ));
+        }
+        if let Some(auth) = &edit.auth {
+            out.push(format!("login -> {}", auth.describe()));
+        }
+        if let Some(jump) = &edit.jump {
+            out.push(format!(
+                "jump host -> {}",
+                match jump {
+                    JumpChoice::Folder => "as its folders say".to_owned(),
+                    JumpChoice::Direct => "none".to_owned(),
+                    JumpChoice::Session { id } => sessions
+                        .get(id)
+                        .map_or_else(|| "a deleted session".to_owned(), |n| quoted(n)),
+                }
+            ));
+        }
+        if let Some(environment) = edit.environment {
+            out.push(format!("environment -> {}", environment.as_str()));
+        }
+        if !edit.tags_add.is_empty() {
+            out.push(format!(
+                "tags added: {}",
+                clean_tags(&edit.tags_add, "A session")?.join(", ")
+            ));
+        }
+        if !edit.tags_remove.is_empty() {
+            out.push(format!(
+                "tags removed: {}",
+                clean_tags(&edit.tags_remove, "A session")?.join(", ")
+            ));
+        }
+        Ok(out)
     }
 
     pub async fn create_folder(&self, ctx: &Context, name: &str, parent: Option<Uuid>) -> Result<SessionFolder> {
@@ -1292,6 +1700,11 @@ impl SessionLibrary {
             .await?;
         self.store.delete_session_folder(ctx, id, folder.parent_id).await?;
         self.settle(&sent);
+        // FD-06: a folder's note goes with it.
+        let had_note = self
+            .store
+            .delete_note(ctx, crate::notes::NoteKind::Folder, &id.to_string())
+            .await?;
         let mut detail = format!(
             "{} and {} moved to {place}",
             plural(sessions, "session"),
@@ -1299,6 +1712,9 @@ impl SessionLibrary {
         );
         if !folder.defaults.is_empty() {
             detail.push_str("; its defaults no longer apply");
+        }
+        if had_note {
+            detail.push_str("; its note was deleted");
         }
         if let Some(how) = asked {
             detail.push_str(&format!("; {how}"));
@@ -1960,6 +2376,89 @@ fn resolved_after(
             s
         })
         .collect()
+}
+
+/// QL-28: what a bulk edit changes on one session (`a` before, `b` after, both resolved), field by field; a value it
+/// has from a folder says which.
+/// QL-28, SS-12: the fields of a bulk edit a session of this kind doesn't take, which [`tidy`] leaves as they are.
+fn skipped_for_kind(kind: &SessionKind, edit: &BulkEdit) -> Vec<String> {
+    let mut out = Vec::new();
+    for (asked, applies, field, verb) in [
+        (edit.port.is_some(), kind.has_port(), "Port", "has"),
+        (edit.auth.is_some(), kind.is_ssh(), "Login", "takes"),
+        (edit.jump.is_some(), kind.takes_jump_host(), "Jump host", "takes"),
+    ] {
+        if asked && !applies {
+            out.push(format!(
+                "{field} stays as it is: a {} session {verb} none",
+                kind.label()
+            ));
+        }
+    }
+    out
+}
+
+fn bulk_changes(
+    folders: &HashMap<Uuid, String>,
+    sessions: &HashMap<Uuid, String>,
+    a: &SessionRecord,
+    b: &SessionRecord,
+) -> Vec<FieldChange> {
+    let folder = |f: Option<Uuid>| {
+        f.and_then(|f| folders.get(&f))
+            .map_or_else(|| "top level".to_owned(), |n| n.clone())
+    };
+    let jump = |j: Option<Uuid>| {
+        j.and_then(|j| sessions.get(&j))
+            .map_or_else(|| "none".to_owned(), |n| n.clone())
+    };
+    let shown = |value: String, from: &Option<FromFolder>| match from {
+        Some(f) => format!("{value} (from folder {})", quoted(&f.name)),
+        None => value,
+    };
+    let tags = |t: &[String]| if t.is_empty() { "none".to_owned() } else { t.join(", ") };
+    let mut out = Vec::new();
+    let mut field = |name: &str, before: String, after: String| {
+        if before != after {
+            out.push(FieldChange {
+                field: name.to_owned(),
+                before,
+                after,
+            });
+        }
+    };
+    field("Folder", folder(a.folder_id), folder(b.folder_id));
+    field("Port", a.port.to_string(), b.port.to_string());
+    field(
+        "User",
+        shown(
+            a.username.clone().unwrap_or_else(|| "none".into()),
+            &a.inherited.username,
+        ),
+        shown(
+            b.username.clone().unwrap_or_else(|| "none".into()),
+            &b.inherited.username,
+        ),
+    );
+    let mut login_a = shown(a.auth.describe(), &a.inherited.auth);
+    let mut login_b = shown(b.auth.describe(), &b.inherited.auth);
+    if a.auth != b.auth && login_a == login_b {
+        login_a.push_str(" (one vault item)");
+        login_b.push_str(" (another vault item)");
+    }
+    field("Login", login_a, login_b);
+    field(
+        "Jump host",
+        shown(jump(a.jump_session_id), &a.inherited.jump),
+        shown(jump(b.jump_session_id), &b.inherited.jump),
+    );
+    field(
+        "Environment",
+        shown(a.environment.as_str().to_owned(), &a.inherited.environment),
+        shown(b.environment.as_str().to_owned(), &b.inherited.environment),
+    );
+    field("Tags", tags(&a.tags), tags(&b.tags));
+    out
 }
 
 /// SS-07, QL-16: no session `which` picks reaches itself through its jump hosts, or through more than

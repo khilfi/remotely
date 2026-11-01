@@ -249,15 +249,6 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn delete_catalog_size(&self, ctx: &Context, id: &str) -> Result<bool> {
-        let done = sqlx::query("DELETE FROM catalog_sizes WHERE workspace_id = ? AND id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
-        Ok(done.rows_affected() > 0)
-    }
-
     // ---- Images ----
 
     /// Every image, by name.
@@ -446,14 +437,5 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
-    }
-
-    pub(crate) async fn delete_catalog_template(&self, ctx: &Context, id: Uuid) -> Result<bool> {
-        let done = sqlx::query("DELETE FROM catalog_templates WHERE workspace_id = ? AND id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(done.rows_affected() > 0)
     }
 }

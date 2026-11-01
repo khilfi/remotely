@@ -37,6 +37,10 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { RiskBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FavouriteDialog } from "@/components/FavouriteDialog";
+import { StarButton } from "@/components/StarButton";
+import { commandStarKey, isStarred, starredFirst } from "@/lib/stars";
+import { useStars } from "@/lib/stars-store";
+import { toastDeleted } from "@/lib/undo-delete";
 import { FillCommandDialog } from "@/components/FillCommandDialog";
 import { ReasonLine } from "@/components/WhyDisabled";
 import {
@@ -156,6 +160,12 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
 
+  // QL-26: starred commands first in each group.
+  const stars = useStars();
+  const starredItem = useCallback(
+    (item: Item) => isStarred(stars, "command", commandStarKey(item.favourite ? "favourite" : "library", item.key)),
+    [stars],
+  );
   const favouriteGroups = useMemo<Group[]>(() => {
     const groups = new Map<string, Group>();
     for (const f of favourites) {
@@ -172,8 +182,8 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
       });
       groups.set(key, group);
     }
-    return [...groups.values()];
-  }, [favourites]);
+    return [...groups.values()].map((g) => ({ ...g, items: starredFirst(g.items, starredItem) }));
+  }, [favourites, starredItem]);
 
   const libraryGroups = useMemo<Group[]>(() => {
     const groups = new Map<string, Group>();
@@ -193,8 +203,8 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
       });
       groups.set(key, group);
     }
-    return [...groups.values()];
-  }, [library]);
+    return [...groups.values()].map((g) => ({ ...g, items: starredFirst(g.items, starredItem) }));
+  }, [library, starredItem]);
 
   const folders = useMemo(
     () => favouriteGroups.map((g) => g.folder).filter((f): f is string => Boolean(f)),
@@ -416,11 +426,13 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
       {deleting && (
         <ConfirmDialog
           title={`Delete '${deleting.name}'?`}
-          description="It goes from your favourite commands. The Library's commands stay."
+          description="It goes to the trash for 30 days. The Library's commands stay."
           confirmLabel="Delete"
           onConfirm={async () => {
-            await api.deleteFavourite(deleting.id);
+            const { id, name } = deleting;
+            await api.deleteFavourite(id);
             load();
+            toastDeleted("command", id, name, load);
           }}
           onClose={() => setDeleting(null)}
         />
@@ -495,6 +507,13 @@ function CommandRow({
           Manual
         </button>
       )}
+      <StarButton
+        kind="command"
+        itemKey={commandStarKey(item.favourite ? "favourite" : "library", item.key)}
+        name={item.name}
+        hoverGroup="row"
+        className="mt-0.5"
+      />
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button

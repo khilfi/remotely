@@ -44,6 +44,8 @@ futures-util = { version = "0.3", default-features = false }
 zeroize = "1"
 # SS-02: session lists imported from CSV.
 csv = "1"
+# FD-06: notes are markdown (CommonMark with tables and task lists), rendered by the core; F6's handover pack reuses it.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 # FD-07: the encrypted export file's envelope; FD-14's test signatures. The version the dependencies already
 # pull in.
 base64 = "0.23"

@@ -5,6 +5,7 @@
 mod catalog;
 mod checks;
 mod clipboard;
+mod comfort;
 mod command_panel;
 mod containers;
 mod convert;
@@ -379,6 +380,10 @@ fn forward_events(app: &App, core: &Arc<Core>) {
         let retention = Arc::clone(&core.retention);
         tauri::async_runtime::spawn(async move { retention.run(CancellationToken::new()).await });
 
+        // QL-27: the trash's purge of items deleted more than 30 days ago, at start and daily.
+        let trash = core.trash.clone();
+        tauri::async_runtime::spawn(async move { trash.run(CancellationToken::new()).await });
+
         // MO-06: the dashboard history's prune, at start and daily.
         let history = Arc::clone(&core.history);
         tauri::async_runtime::spawn(async move { history.run(CancellationToken::new()).await });
@@ -602,6 +607,23 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         navigation::notifications_add,
         navigation::notifications_mark_read,
         navigation::notifications_clear,
+        comfort::note_get,
+        comfort::note_save,
+        comfort::note_set_handover,
+        comfort::notes_list,
+        comfort::note_render,
+        comfort::note_open_link,
+        comfort::stars_list,
+        comfort::stars_set,
+        comfort::recents_list,
+        comfort::recents_opened,
+        comfort::trash_list,
+        comfort::trash_restore,
+        comfort::trash_undo,
+        comfort::trash_delete,
+        comfort::trash_empty,
+        comfort::sessions_bulk_preview,
+        comfort::sessions_bulk_edit,
         navigation::topology_vm_networks,
         navigation::vm_folder_pick,
         terminal::terminal_open,
