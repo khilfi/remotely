@@ -324,7 +324,7 @@ impl RequestLog {
         if !self.refusals.is_empty() || c.refusals_unlisted > 0 {
             text.push_str("refused or failed before a transfer, by client:\n");
             let mut rows: Vec<&LogRow> = self.refusals.iter().collect();
-            rows.sort_by(|a, b| b.times.cmp(&a.times));
+            rows.sort_by_key(|r| std::cmp::Reverse(r.times));
             for row in rows.iter().take(JOB_REFUSAL_ROWS) {
                 text.push_str(&format!(
                     "{} {}: {} from {} to {}; last {} {}{}\n",
@@ -387,7 +387,7 @@ impl RequestLog {
 
 fn newest(rows: &[LogRow], n: usize) -> Vec<LogRow> {
     let mut order: Vec<usize> = (0..rows.len()).collect();
-    order.sort_unstable_by(|a, b| rows[*b].touched.cmp(&rows[*a].touched));
+    order.sort_unstable_by_key(|i| std::cmp::Reverse(rows[*i].touched));
     order.into_iter().take(n).map(|i| rows[i].clone()).collect()
 }
 

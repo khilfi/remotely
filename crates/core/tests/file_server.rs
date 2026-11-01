@@ -1542,7 +1542,7 @@ async fn one_client_holds_neither_the_quota_nor_every_slot_and_explorer_files_ne
     core.file_server.runner().set_tuning(FileServerTuning {
         uploads: UploadLimits {
             per_client: 2,
-            window: Duration::from_millis(400),
+            window: Duration::from_millis(600),
             min_bytes: 64 * 1024,
         },
         ..fast()
@@ -1565,8 +1565,8 @@ async fn one_client_holds_neither_the_quota_nor_every_slot_and_explorer_files_ne
     second.write_all(&head("second.bin", 10)).await.unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(put(server.http, "/third.bin", b"x").await.status, 429);
-    // Under 64 KB in 400 ms: cut off at its next bytes, and its part deleted.
-    tokio::time::sleep(Duration::from_millis(450)).await;
+    // Under 64 KB in 600 ms: cut off at its next bytes, and its part deleted.
+    tokio::time::sleep(Duration::from_millis(650)).await;
     slow.write_all(b"y").await.unwrap();
     let cut = parse_response(&read_all(&mut slow).await);
     assert_eq!(cut.status, 408, "{:?}", String::from_utf8_lossy(&cut.body));

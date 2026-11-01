@@ -228,6 +228,8 @@ impl Uploads {
         locks::lock(&self.state).writing.insert(key.clone());
         upload.key = Some(key);
         upload.file = Some(tokio::fs::File::from_std(file));
+        // The minimum rate counts from when the file is ready to take bytes, not from when its creation was asked.
+        upload.window_start = Instant::now();
         Ok(upload)
     }
 }
@@ -474,17 +476,17 @@ mod tests {
         let dir = folder();
         let limits = UploadLimits {
             per_client: 2,
-            window: Duration::from_millis(100),
+            window: Duration::from_millis(300),
             min_bytes: 1000,
         };
         let uploads = Arc::new(Uploads::new(dir.clone(), MB, MB, limits));
         let mut fast = uploads.claim("fast.bin", None, client(7)).await.unwrap();
         fast.write(&[0u8; 2000]).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
         fast.write(&[0u8; 10]).await.unwrap();
         let mut slow = uploads.claim("slow.bin", None, client(7)).await.unwrap();
         slow.write(b"x").await.unwrap();
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(350)).await;
         assert!(matches!(slow.write(b"x").await, Err(UploadRefused::TooSlow { .. })));
         drop(slow);
         assert!(!dir.join("slow.bin").exists());
