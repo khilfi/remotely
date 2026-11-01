@@ -134,7 +134,8 @@ time, each owning its pages.
 
 ## Features (0.7.0)
 
-Planned in detail when 0.6.0 ships; in scope now, as picked by the owner:
+Planned in detail in `docs/plan-0.7.md` (1 Nov 2026), which splits these into F1 to F9 and adds the subnet calculator,
+VNC, bulk runs on Windows (BX-13) and a quick file server. As first picked by the owner:
 
 | # | Package | IDs |
 | --- | --- | --- |
