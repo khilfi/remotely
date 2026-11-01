@@ -165,6 +165,16 @@ Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 | A run after the schedule was edited, a VM became Prod or protected, got its tag or joined its stack, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
 | Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
 
+Notes, stars and recents, the trash and bulk edit (0.7.0, `docs/plan-0.7.md` "Approval tiers"; FD-06, QL-26 to QL-28). The app's own data, so nothing goes through the bus:
+
+| Action | Tier |
+| --- | --- |
+| Write, change, mark for the handover pack or delete a note (FD-06) | No tier; audited without the note's text, refused by the read-only lock |
+| Delete a session, favourite command, size, image, launch template or stack (it moves to the trash); restore one, delete one for good, or empty the trash (QL-27) | No tier; audited, refused by the read-only lock; a restored session that would send a vault password somewhere it didn't go before asks for the vault password again (AP-06) |
+| The trash's daily purge of items deleted more than 30 days ago | No tier; audited when it removed something; the read-only lock doesn't stop it |
+| Bulk edit sessions: folder, port, user, login, jump host, environment, tags (QL-28) | No tier; one audit entry naming every session, refused by the read-only lock; asks for the vault password once when a login would send one somewhere new (AP-06) |
+| Star a session, VM or command; the items opened last (QL-26) | Not audited, not locked (like the notification centre) |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |

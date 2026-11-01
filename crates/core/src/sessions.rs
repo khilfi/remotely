@@ -1240,8 +1240,7 @@ impl SessionLibrary {
             1 => format!(
                 "session {}",
                 quoted(
-                    &plan
-                        .preview
+                    plan.preview
                         .rows
                         .iter()
                         .find(|r| r.id == changed[0])
