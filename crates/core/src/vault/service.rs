@@ -49,9 +49,25 @@ impl VaultService {
         self
     }
 
+    /// A secret was added: parked logins get one more try, but no account gate is reopened (an unrelated new secret is
+    /// not a changed password).
     fn credentials_changed(&self) {
         if let Some(guard) = &self.guard {
             guard.credentials_changed();
+        }
+    }
+
+    /// A secret was replaced or deleted: also reopen the WinRM account gates that use it, so a run re-verifies it.
+    fn secret_changed(&self, id: SecretId) {
+        if let Some(guard) = &self.guard {
+            guard.secret_changed(id);
+        }
+    }
+
+    /// The vault was unlocked: also reopen every WinRM account gate.
+    fn vault_unlocked(&self) {
+        if let Some(guard) = &self.guard {
+            guard.vault_unlocked();
         }
     }
 
@@ -90,7 +106,7 @@ impl VaultService {
         };
         match self.vault.unlock(method).await {
             Ok(()) => {
-                self.credentials_changed();
+                self.vault_unlocked();
                 self.audit(ctx, "vault_unlocked", "Unlocked the vault", Some(how))
                     .await?;
                 Ok(self.info())
@@ -179,7 +195,7 @@ impl VaultService {
     pub async fn replace(&self, ctx: &Context, id: SecretId, secret: SecretString) -> Result<SecretMeta> {
         self.store.read_only().check(Change::Vault)?;
         self.vault.replace(ctx, id, secret).await?;
-        self.credentials_changed();
+        self.secret_changed(id);
         let meta = self.meta(ctx, id).await?;
         let action = format!("Replaced the {} '{}'", meta.kind.label(), meta.label);
         let detail = uses(meta.used_by, "now use the new value");
@@ -209,7 +225,7 @@ impl VaultService {
         self.store.read_only().check(Change::Vault)?;
         let meta = self.meta(ctx, id).await?;
         self.vault.delete(ctx, id).await?;
-        self.credentials_changed();
+        self.secret_changed(id);
         let action = format!("Deleted the {} '{}' from the vault", meta.kind.label(), meta.label);
         let detail = uses(meta.used_by, "no longer have it");
         self.audit(ctx, "vault_changed", &action, detail.as_deref()).await

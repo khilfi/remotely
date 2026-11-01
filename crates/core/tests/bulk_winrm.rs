@@ -565,6 +565,53 @@ async fn runs_at_the_same_time_share_one_account_gate() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trusting_new_certificates_mid_run_does_not_reopen_a_refused_account() {
+    // Review (fifth): a run with "trust new certificates" on trusts each host's pinned certificate as it connects —
+    // a host-key change, not a password change. It must not reopen the shared account's gate, or the wave of hosts
+    // past the parallel limit would sign in again with the refused password. Exactly one refusal over 24 hosts.
+    let core = core_with(Arc::new(FakeNetworkTools::new().with_verdict(untrusted()))).await;
+    let shared = password_item(&core, "shared domain login", &new_password()).await;
+    let mut servers = Vec::new();
+    let mut sessions = Vec::new();
+    for i in 0..24 {
+        let server = WinrmTestServer::start(FakeWinrm::HttpsBasic, "alice", &new_password())
+            .await
+            .unwrap();
+        let id = core
+            .sessions
+            .create_with(
+                &core.ctx(),
+                input(
+                    &format!("win{i:02}"),
+                    server.port(),
+                    shared,
+                    winrm(WinrmCertificate::Fingerprint),
+                ),
+                Some(&SecretString::new(VAULT_PASSWORD)),
+            )
+            .await
+            .unwrap()
+            .id;
+        servers.push(server);
+        sessions.push(id);
+    }
+    let mut command = exec("Get-Service", &sessions);
+    if let Command::RemoteExec {
+        trust_new_host_keys, ..
+    } = &mut command
+    {
+        *trust_new_host_keys = true;
+    }
+    let job = run(&core, command).await;
+    assert_eq!(finished(&core, job).await, JobStatus::Failed);
+    let refused: usize = servers.iter().map(|s| s.stats().refused_sign_ins).sum();
+    assert_eq!(
+        refused, 1,
+        "trusting the certificates must not reopen the refused account"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preview_refuses_a_script_over_the_size_cap_before_parsing_it() {
     // Review A5/A8: preview applies the 64 KB script cap before anything parses, so a huge paste can't be rated in a
     // preview (where submit's full validate does not run) and can't drive the recursive parser deep. The script here

@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::adapters::remote::{AuthMethod, SessionSpec};
 use crate::error::CoreError;
 use crate::locks;
+use crate::vault::SecretId;
 
 /// Background logins one host takes in an hour, at most.
 pub const DEFAULT_LOGINS_PER_HOUR: usize = 10;
@@ -120,8 +121,10 @@ struct State {
 /// Only an accepted sign-in opens the gate (they then go in parallel); a refused one closes it (they are skipped until
 /// credentials change); any other result — unreachable, timeout, a changed certificate, a cancel, or a leader dropped
 /// without a result — leaves the account unverified and hands the lead to the next waiting host, since the password was
-/// never checked. The map lives in the login guard, so it is shared by every job and cleared on the same events as
-/// parks (credentials changed, Retry).
+/// never checked. The map lives in the login guard, so it is shared by every job. A vault secret change reopens the
+/// gates that use it (and the vault unlock, all of them); a host key or an added secret does not, since neither is a
+/// password. Reopening resets a gate to unverified but keeps it in the map, so a host arriving while a leader is busy
+/// still waits behind it (never a second gate for the account).
 type WinrmGate = Arc<Mutex<HashMap<String, Arc<AccountGate>>>>;
 
 #[derive(Default)]
@@ -135,16 +138,26 @@ struct GateInner {
 
 /// One account's gate. The watch wakes waiters whenever leadership frees up or the outcome is set.
 struct AccountGate {
+    /// The vault secret this account signs in with, so a change to just that secret reopens only its gates.
+    secret: Option<SecretId>,
     inner: Mutex<GateInner>,
     wake: tokio::sync::watch::Sender<u64>,
 }
 
-impl Default for AccountGate {
-    fn default() -> Self {
+impl AccountGate {
+    fn new(secret: Option<SecretId>) -> Self {
         Self {
+            secret,
             inner: Mutex::new(GateInner::default()),
             wake: tokio::sync::watch::channel(0).0,
         }
+    }
+
+    /// Review C2: reopen the gate — the account is unverified again — but keep the entry, so a host arriving while a
+    /// leader is busy waits behind it instead of starting a second sign-in.
+    fn reopen(&self) {
+        locks::lock(&self.inner).outcome = None;
+        self.wake.send_modify(|g| *g = g.wrapping_add(1));
     }
 }
 
@@ -229,23 +242,46 @@ impl LoginGuard {
         *locks::write(&self.limits) = limits;
     }
 
-    /// The vault was unlocked, a secret changed, or a host key was trusted or removed: every parked
-    /// session gets one more try, and every account gate is forgotten so runs re-verify.
+    /// A host key was trusted or removed, or a secret was added: every parked session gets one more try. Neither is a
+    /// password change, so the account gates are left alone — only a vault unlock ([`Self::vault_unlocked`]) or a change
+    /// to a secret ([`Self::secret_changed`]) reopens them.
     pub fn credentials_changed(&self) {
-        {
-            let mut state = locks::lock(&self.state);
-            state.generation = state.generation.wrapping_add(1);
-        }
-        self.clear_winrm_gate();
+        let mut state = locks::lock(&self.state);
+        state.generation = state.generation.wrapping_add(1);
     }
 
-    /// Review C2: a host's role at `account`'s gate (lower-cased user and vault item) for `session`. See [`GateRole`].
-    pub async fn winrm_gate_role(&self, session: Uuid, account: &str) -> GateRole {
+    /// Review C2: a vault secret was replaced or deleted. Parks get one more try, and the account gates that use that
+    /// secret are reopened, so a run re-verifies the new password instead of skipping on the old refusal. A change to
+    /// another secret leaves a refused account closed.
+    pub fn secret_changed(&self, id: SecretId) {
+        self.credentials_changed();
+        let map = locks::lock(&self.winrm_gate);
+        for gate in map.values() {
+            if gate.secret == Some(id) {
+                gate.reopen();
+            }
+        }
+    }
+
+    /// Review C2: the vault was unlocked. Parks get one more try, and every account gate is reopened.
+    pub fn vault_unlocked(&self) {
+        self.credentials_changed();
+        let map = locks::lock(&self.winrm_gate);
+        for gate in map.values() {
+            gate.reopen();
+        }
+    }
+
+    /// Review C2: a host's role at `account`'s gate (lower-cased user and `secret`) for `session`. See [`GateRole`].
+    pub async fn winrm_gate_role(&self, session: Uuid, secret: Option<SecretId>, account: &str) -> GateRole {
         // Remember the account this session used, so its own Retry reopens only this account.
         locks::lock(&self.winrm_accounts).insert(session, account.to_owned());
         let entry = {
             let mut map = locks::lock(&self.winrm_gate);
-            Arc::clone(map.entry(account.to_owned()).or_default())
+            Arc::clone(
+                map.entry(account.to_owned())
+                    .or_insert_with(|| Arc::new(AccountGate::new(secret))),
+            )
         };
         let mut rx = entry.wake.subscribe();
         loop {
@@ -273,21 +309,13 @@ impl LoginGuard {
         }
     }
 
-    /// Review C2: forget every account gate, so later runs re-verify. Called when credentials change (as parks are).
-    fn clear_winrm_gate(&self) {
-        let mut map = locks::lock(&self.winrm_gate);
-        for gate in map.values() {
-            gate.wake.send_modify(|g| *g = g.wrapping_add(1));
-        }
-        map.clear();
-        locks::lock(&self.winrm_accounts).clear();
-    }
-
-    /// Review C2: forget one account gate, so the next host re-verifies it. Used by Retry, which clears only the
-    /// account the retried session used — not every refused account.
+    /// Review C2: reopen one account gate, so the next host re-verifies it. Used by Retry, which reopens only the
+    /// account the retried session used — not every refused account. The entry stays in the map, so a host arriving
+    /// while a leader is busy waits behind it.
     fn forget_winrm_account(&self, account: &str) {
-        if let Some(gate) = locks::lock(&self.winrm_gate).remove(account) {
-            gate.wake.send_modify(|g| *g = g.wrapping_add(1));
+        let gate = locks::lock(&self.winrm_gate).get(account).map(Arc::clone);
+        if let Some(gate) = gate {
+            gate.reopen();
         }
     }
 
@@ -554,17 +582,22 @@ mod tests {
         }
     }
 
+    fn sec() -> SecretId {
+        SecretId(Uuid::new_v4())
+    }
+
     #[tokio::test]
     async fn an_inconclusive_leader_hands_the_lead_on_without_opening_the_gate() {
         // Review C2: a leader whose sign-in failed for any reason but a refusal — unreachable, timeout, a changed
         // certificate, a cancel — never checked the password, so the account stays unverified and the next host leads.
         let guard = LoginGuard::new();
-        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), "alice|Some(1)").await else {
+        let (s, a) = (sec(), "alice|1");
+        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await else {
             panic!("the first host leads");
         };
         leader.finish(None);
         assert_eq!(
-            role(&guard.winrm_gate_role(Uuid::new_v4(), "alice|Some(1)").await),
+            role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await),
             "leader",
             "the next host must verify the password itself, not proceed or skip",
         );
@@ -574,41 +607,38 @@ mod tests {
     async fn a_dropped_leader_hands_the_lead_on_too() {
         // Review C2: a leader dropped without a result (a cancel) must not open the gate.
         let guard = LoginGuard::new();
-        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), "alice|Some(1)").await else {
+        let (s, a) = (sec(), "alice|1");
+        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await else {
             panic!("the first host leads");
         };
         drop(leader);
-        assert_eq!(
-            role(&guard.winrm_gate_role(Uuid::new_v4(), "alice|Some(1)").await),
-            "leader"
-        );
+        assert_eq!(role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await), "leader");
     }
 
     #[tokio::test]
     async fn a_refused_leader_closes_the_gate_and_an_accepted_one_is_re_verified() {
         let guard = LoginGuard::new();
-        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), "bob|Some(2)").await else {
+        let (s2, b) = (sec(), "bob|2");
+        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), Some(s2), b).await else {
             panic!("leads");
         };
         leader.finish(Some(false));
         assert_eq!(
-            role(&guard.winrm_gate_role(Uuid::new_v4(), "bob|Some(2)").await),
+            role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s2), b).await),
             "skip",
             "a refused login stays refused until credentials change",
         );
-        assert_eq!(
-            role(&guard.winrm_gate_role(Uuid::new_v4(), "bob|Some(2)").await),
-            "skip"
-        );
+        assert_eq!(role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s2), b).await), "skip");
 
         // An accepted account is dropped from the map, so a later run re-verifies it (catching a password changed on
         // the host itself).
-        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), "carol|Some(3)").await else {
+        let (s3, c) = (sec(), "carol|3");
+        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), Some(s3), c).await else {
             panic!("leads");
         };
         leader.finish(Some(true));
         assert_eq!(
-            role(&guard.winrm_gate_role(Uuid::new_v4(), "carol|Some(3)").await),
+            role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s3), c).await),
             "leader"
         );
     }
@@ -619,13 +649,13 @@ mod tests {
         // waiter and a host arriving afterwards share one gate. Dropping it let the newcomer make a second gate and
         // lead a second sign-in with the same unverified account.
         let guard = LoginGuard::new();
-        let account = "alice|Some(1)";
-        let GateRole::Leader(first) = guard.winrm_gate_role(Uuid::new_v4(), account).await else {
+        let (s, a) = (sec(), "alice|1");
+        let GateRole::Leader(first) = guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await else {
             panic!("the first host leads");
         };
         // A second host waits behind the leader.
         let g2 = guard.clone();
-        let waiter = tokio::spawn(async move { g2.winrm_gate_role(Uuid::new_v4(), account).await });
+        let waiter = tokio::spawn(async move { g2.winrm_gate_role(Uuid::new_v4(), Some(s), a).await });
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!waiter.is_finished(), "host 2 waits behind host 1");
         // The leader fails inconclusively: host 2 takes the lead on the same gate.
@@ -636,7 +666,7 @@ mod tests {
         // A third host arrives while host 2 is still leading: it must wait, not start a second sign-in.
         let third = tokio::time::timeout(
             Duration::from_millis(200),
-            guard.winrm_gate_role(Uuid::new_v4(), account),
+            guard.winrm_gate_role(Uuid::new_v4(), Some(s), a),
         )
         .await;
         assert!(
@@ -645,31 +675,84 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn credentials_changed_and_a_session_s_own_retry_forget_a_refused_gate() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopening_a_gate_while_a_leader_is_busy_keeps_newcomers_waiting() {
+        // Review (fifth): a vault event that reopens gates must keep a busy leader's entry, not drop it — else a
+        // newcomer would make a second gate and sign in alongside the leader.
         let guard = LoginGuard::new();
-        let dan = Uuid::new_v4();
-        let GateRole::Leader(leader) = guard.winrm_gate_role(dan, "dan|Some(4)").await else {
+        let (s, a) = (sec(), "alice|1");
+        let GateRole::Leader(_first) = guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await else {
+            panic!("the first host leads");
+        };
+        // The vault is unlocked (or a secret changed) while the leader is still signing in.
+        guard.vault_unlocked();
+        // A newcomer must wait behind the busy leader, not start a second sign-in.
+        let newcomer = tokio::time::timeout(
+            Duration::from_millis(200),
+            guard.winrm_gate_role(Uuid::new_v4(), Some(s), a),
+        )
+        .await;
+        assert!(newcomer.is_err(), "the newcomer waits behind the busy leader");
+    }
+
+    #[tokio::test]
+    async fn a_host_key_change_leaves_a_refused_gate_closed_but_its_own_secret_change_reopens_it() {
+        // Review (fifth): trusting a certificate mid-run (credentials_changed) must not reopen a refused account; nor
+        // does a change to another secret. Only a change to this account's own secret, or a vault unlock, reopens it.
+        let guard = LoginGuard::new();
+        let (s, a) = (sec(), "dan|secret");
+        let GateRole::Leader(leader) = guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await else {
             panic!("leads");
         };
         leader.finish(Some(false));
-        assert_eq!(role(&guard.winrm_gate_role(dan, "dan|Some(4)").await), "skip");
+        assert_eq!(role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await), "skip");
+
         guard.credentials_changed();
         assert_eq!(
-            role(&guard.winrm_gate_role(dan, "dan|Some(4)").await),
+            role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await),
+            "skip",
+            "a host key change is not a password change",
+        );
+        guard.secret_changed(sec());
+        assert_eq!(
+            role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await),
+            "skip",
+            "a change to another secret leaves it closed",
+        );
+        guard.secret_changed(s);
+        assert_eq!(
+            role(&guard.winrm_gate_role(Uuid::new_v4(), Some(s), a).await),
             "leader",
-            "a credentials change re-verifies the account",
+            "a change to its own secret reopens it",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vault_unlock_or_a_session_s_own_retry_reopen_a_refused_gate() {
+        let guard = LoginGuard::new();
+        let (s, a) = (sec(), "dan|secret");
+        let dan = Uuid::new_v4();
+        let GateRole::Leader(leader) = guard.winrm_gate_role(dan, Some(s), a).await else {
+            panic!("leads");
+        };
+        leader.finish(Some(false));
+        assert_eq!(role(&guard.winrm_gate_role(dan, Some(s), a).await), "skip");
+        guard.vault_unlocked();
+        assert_eq!(
+            role(&guard.winrm_gate_role(dan, Some(s), a).await),
+            "leader",
+            "a vault unlock reopens every gate",
         );
 
-        let GateRole::Leader(leader) = guard.winrm_gate_role(dan, "dan|Some(4)").await else {
+        let GateRole::Leader(leader) = guard.winrm_gate_role(dan, Some(s), a).await else {
             panic!("leads");
         };
         leader.finish(Some(false));
         guard.retry(dan);
         assert_eq!(
-            role(&guard.winrm_gate_role(dan, "dan|Some(4)").await),
+            role(&guard.winrm_gate_role(dan, Some(s), a).await),
             "leader",
-            "the session's own Retry re-verifies its account",
+            "the session's own Retry reopens its account",
         );
     }
 
@@ -677,23 +760,24 @@ mod tests {
     async fn retry_on_an_unrelated_session_leaves_other_refused_accounts_closed() {
         // Review (fourth): Retry on a dashboard tile or a Containers host must not reopen a bulk run's refused account.
         let guard = LoginGuard::new();
+        let (s, a) = (sec(), "alice|secret");
         let used = Uuid::new_v4();
-        let GateRole::Leader(leader) = guard.winrm_gate_role(used, "alice|Some(5)").await else {
+        let GateRole::Leader(leader) = guard.winrm_gate_role(used, Some(s), a).await else {
             panic!("leads");
         };
         leader.finish(Some(false));
-        assert_eq!(role(&guard.winrm_gate_role(used, "alice|Some(5)").await), "skip");
+        assert_eq!(role(&guard.winrm_gate_role(used, Some(s), a).await), "skip");
 
         guard.retry(Uuid::new_v4());
         assert_eq!(
-            role(&guard.winrm_gate_role(used, "alice|Some(5)").await),
+            role(&guard.winrm_gate_role(used, Some(s), a).await),
             "skip",
             "an unrelated session's Retry leaves the account refused",
         );
 
         guard.retry(used);
         assert_eq!(
-            role(&guard.winrm_gate_role(used, "alice|Some(5)").await),
+            role(&guard.winrm_gate_role(used, Some(s), a).await),
             "leader",
             "the session that used the account reopens it",
         );
