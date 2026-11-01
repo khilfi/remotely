@@ -83,6 +83,7 @@ pub mod locks;
 pub mod login_guard;
 pub mod metrics;
 pub mod multiexec_groups;
+pub mod notes;
 pub mod notifications;
 pub mod policy;
 pub mod presentation;
@@ -96,9 +97,11 @@ pub mod snapshots;
 pub mod snippets;
 pub mod ssh_keys;
 pub mod stacks;
+pub mod stars;
 pub mod store;
 pub mod terminal;
 pub mod transfer;
+pub mod trash;
 pub mod untrusted;
 pub mod updates;
 pub mod vault;
@@ -304,6 +307,13 @@ pub struct Core {
     schedules: schedules::Schedules,
     /// QL-25: the notification centre's history, in memory (the module says why not on disk).
     pub notifications: Notifications,
+    /// FD-06: one markdown note per session, VM and folder; edits audited without their text.
+    pub notes: notes::Notes,
+    /// QL-26: starred sessions, VMs and commands, and the items opened last. Not audited, not locked.
+    pub stars: stars::Stars,
+    /// QL-27: deleted sessions, saved commands, sizes, images, templates and stacks, kept 30 days. The shell starts its
+    /// daily purge with [`trash::Trash::run`].
+    pub trash: trash::Trash,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
@@ -677,8 +687,11 @@ impl Core {
             metrics,
             history,
             alerts,
-            layouts: Layouts::new(store.clone(), current),
+            layouts: Layouts::new(store.clone(), current.clone()),
             notifications: Notifications::new(),
+            notes: notes::Notes::new(store.clone()),
+            stars: stars::Stars::new(store.clone()),
+            trash: trash::Trash::new(store.clone(), current.clone()).with_bindings(bindings.clone()),
             host_details,
             login_guard,
             presentation,

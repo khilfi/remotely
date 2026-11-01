@@ -1305,3 +1305,81 @@ async fn port_forwards_stay_behind_unless_ticked() {
     );
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn notes_travel_with_their_sessions_folders_and_vms() {
+    use remotely_core::notes::{NoteInput, NoteTarget};
+    let dir = temp_folder("fd07-notes");
+    let vmware = || common::listed(FakeVmware::default(), &["it-web"]);
+    let a = laptop_with(vmware()).await;
+    let ctx = a.ctx();
+    let folder = a.sessions.create_folder(&ctx, "Customer A", None).await.unwrap();
+    let mut web = input("web01", "web01.example.com");
+    web.folder_id = Some(folder.id);
+    let web = a.sessions.create(&ctx, web).await.unwrap();
+    let note = |body: &str, handover: bool| NoteInput {
+        body: body.into(),
+        handover,
+    };
+    a.notes
+        .save(&ctx, &NoteTarget::session(web.id), note("Deploys on Fridays.", true))
+        .await
+        .unwrap();
+    a.notes
+        .save(
+            &ctx,
+            &NoteTarget::folder(folder.id),
+            note("Change window: Sundays.", false),
+        )
+        .await
+        .unwrap();
+    a.notes
+        .save(
+            &ctx,
+            &NoteTarget::vm(&vmx("it-web")),
+            note("Golden image source.", false),
+        )
+        .await
+        .unwrap();
+    let path = export(&a, &dir, false).await;
+    assert!(audit(&a).await[0].detail.as_deref().unwrap_or("").contains("3 notes"));
+
+    let b = laptop_with(vmware()).await;
+    let preview = open(&b, &path).await;
+    let index = index_of(&preview, "web01");
+    let report = commit(&b, &preview, &[(index, ItemAction::Import)]).await;
+    assert_eq!(report.notes, 3, "{report:?}");
+    let here = by_name(&b, "web01").await;
+    let session_note = b
+        .notes
+        .get(&b.ctx(), &NoteTarget::session(here.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session_note.body, "Deploys on Fridays.");
+    assert!(session_note.handover);
+    let folder_here = here.folder_id.unwrap();
+    assert_eq!(
+        b.notes
+            .get(&b.ctx(), &NoteTarget::folder(folder_here))
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
+        "Change window: Sundays."
+    );
+    assert_eq!(
+        b.notes
+            .get(&b.ctx(), &NoteTarget::vm(&vmx("it-web")))
+            .await
+            .unwrap()
+            .unwrap()
+            .body,
+        "Golden image source."
+    );
+    let imported = audit(&b).await;
+    assert!(imported
+        .iter()
+        .any(|e| e.event == "note_changed" && e.action.starts_with("Imported the note")));
+    let _ = std::fs::remove_dir_all(dir);
+}

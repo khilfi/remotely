@@ -59,6 +59,7 @@ use crate::error::{CoreError, Result};
 use crate::forwards::{ForwardInput, Forwards};
 use crate::known_hosts::{address, HostKey, KnownHost, KnownHosts};
 use crate::locks;
+use crate::notes::{NoteKind, NoteTarget, Notes};
 use crate::policy::PolicyEngine;
 use crate::presentation::Change;
 use crate::sessions::{
@@ -124,6 +125,31 @@ struct Payload {
     /// VM-19 to VM-21. Files from before 0.5.0 have none.
     #[serde(default)]
     catalog: catalog::CatalogEntries,
+    /// FD-06: VMs' notes, by the VM's key. Files from before 0.7.0 have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vm_notes: Vec<VmNoteEntry>,
+}
+
+/// FD-06: a note that travels with its session or folder. Files from before 0.7.0 have none.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NoteEntry {
+    body: String,
+    /// F6: marked for the handover pack.
+    #[serde(default)]
+    handover: bool,
+}
+
+/// FD-06: a VM's note, imported where a VM with the same key is in the workspace and has no note yet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VmNoteEntry {
+    vm_key: String,
+    #[serde(default)]
+    name: String,
+    body: String,
+    #[serde(default)]
+    handover: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,6 +175,9 @@ struct FolderEntry {
     /// from before 0.5.0 have none.
     #[serde(default, skip_serializing_if = "FolderDefaults::is_empty")]
     defaults: FolderDefaults,
+    /// FD-06: its note. Files from before 0.7.0 have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    note: Option<NoteEntry>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -187,6 +216,9 @@ struct SessionEntry {
     /// CT-01: the container engines it is marked with. Files from before 0.4.0 have none.
     #[serde(default)]
     containers: Vec<ContainerEntry>,
+    /// FD-06: its note. Files from before 0.7.0 have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    note: Option<NoteEntry>,
 }
 
 impl Payload {
@@ -391,6 +423,8 @@ pub struct ExportReport {
     pub groups: usize,
     /// VM-19 to VM-21: own sizes, images and launch templates.
     pub catalog: CatalogCounts,
+    /// FD-06: notes of sessions, folders and VMs.
+    pub notes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -590,6 +624,8 @@ pub struct TransferReport {
     pub folder_defaults: Counts,
     /// Sessions imported without the password or key they used (not in the file, not here).
     pub without_credentials: usize,
+    /// FD-06: notes saved with the imported sessions, folders and VMs.
+    pub notes: usize,
     pub problems: Vec<ItemProblem>,
 }
 
@@ -1373,6 +1409,19 @@ impl Transfer {
         }
         let mut forwards = self.store.all_forwards(ctx).await?;
         let mut container_marks = self.store.container_marks_by_session(ctx).await?;
+        // FD-06: each note goes with its session, folder or VM.
+        let mut notes: HashMap<(NoteKind, String), (String, bool)> = self
+            .store
+            .list_notes(ctx)
+            .await?
+            .into_iter()
+            .map(|n| ((n.kind, n.key.to_lowercase()), (n.body, n.handover)))
+            .collect();
+        let mut take_note = |kind: NoteKind, key: &str| {
+            notes
+                .remove(&(kind, key.to_lowercase()))
+                .map(|(body, handover)| NoteEntry { body, handover })
+        };
         let mut entries = Vec::with_capacity(sessions.len());
         for s in sessions {
             let vm = match &s.vm_id {
@@ -1383,7 +1432,9 @@ impl Transfer {
                 }),
                 None => None,
             };
+            let note = take_note(NoteKind::Session, &s.id.to_string());
             entries.push(SessionEntry {
+                note,
                 id: s.id,
                 folder_id: s.folder_id,
                 name: s.name,
@@ -1425,6 +1476,18 @@ impl Transfer {
                     .collect(),
             });
         }
+        // FD-06: the VMs' notes, for VMs in this workspace.
+        let mut vm_notes = Vec::new();
+        for vm in self.store.list_vms(ctx).await? {
+            if let Some(note) = take_note(NoteKind::Vm, &vm.vmx_path) {
+                vm_notes.push(VmNoteEntry {
+                    vm_key: vm.vmx_path,
+                    name: vm.display_name,
+                    body: note.body,
+                    handover: note.handover,
+                });
+            }
+        }
         let payload = Payload {
             exported_at: now_rfc3339(),
             exported_by: exported_by.to_owned(),
@@ -1440,9 +1503,11 @@ impl Transfer {
                     parent_id: f.parent_id,
                     name: f.name.clone(),
                     defaults: f.defaults.clone(),
+                    note: take_note(NoteKind::Folder, &f.id.to_string()),
                 })
                 .collect(),
             sessions: entries,
+            vm_notes,
             known_hosts: known_hosts
                 .iter()
                 .map(|k| KnownHostEntry {
@@ -1480,6 +1545,9 @@ impl Transfer {
             folder_defaults: payload.folders.iter().filter(|f| !f.defaults.is_empty()).count(),
             groups: payload.groups.len(),
             catalog: payload.catalog.counts(),
+            notes: payload.sessions.iter().filter(|s| s.note.is_some()).count()
+                + payload.folders.iter().filter(|f| f.note.is_some()).count()
+                + payload.vm_notes.len(),
         };
         let version = payload.format_version();
         let plain = Zeroizing::new(serde_json::to_vec(&payload)?);
@@ -1494,7 +1562,7 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, {}, {}, {}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, {}, {}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
@@ -1503,6 +1571,7 @@ impl Transfer {
             plural(report.container_hosts, "container host"),
             plural(report.groups, "MultiExec group"),
             report.catalog.describe(),
+            plural(report.notes, "note"),
             report.path
         );
         self.audit(
@@ -2012,6 +2081,30 @@ impl Transfer {
         // 3. Sessions, jump hosts first (so each keeps its jump host link), with their port forwards.
         let forwards = Forwards::new(self.store.clone());
         let marks = ContainerMarks::new(self.store.clone());
+        let notes = Notes::new(self.store.clone());
+        // FD-06: a folder's note, where the folder landed here and has none yet.
+        for f in &payload.folders {
+            let (Some(note), Some(target)) = (&f.note, folder_map.get(&f.id)) else {
+                continue;
+            };
+            match notes
+                .import(
+                    ctx,
+                    &NoteTarget::folder(*target),
+                    &note.body,
+                    note.handover,
+                    false,
+                    SOURCE,
+                )
+                .await
+            {
+                Ok(saved) => report.notes += usize::from(saved),
+                Err(err) => report.problems.push(ItemProblem {
+                    name: format!("{} (note)", f.name),
+                    reason: err.to_string(),
+                }),
+            }
+        }
         let mut session_map: HashMap<Uuid, Uuid> = HashMap::new();
         let mut taken_names: HashSet<String> = local.sessions.iter().map(|s| s.name.to_lowercase()).collect();
         let mut used_ids: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
@@ -2109,6 +2202,27 @@ impl Transfer {
                             Ok(saved_forwards) => report.forwards += saved_forwards.len(),
                             Err(err) => report.problems.push(ItemProblem {
                                 name: format!("{} (port forwards)", entry.name),
+                                reason: err.to_string(),
+                            }),
+                        }
+                    }
+                    // FD-06: its note; a replaced session takes the file's, a new one gets it.
+                    if let Some(note) = &entry.note {
+                        let replace = action == ItemAction::Replace;
+                        match notes
+                            .import(
+                                ctx,
+                                &NoteTarget::session(saved.id),
+                                &note.body,
+                                note.handover,
+                                replace,
+                                SOURCE,
+                            )
+                            .await
+                        {
+                            Ok(saved_note) => report.notes += usize::from(saved_note),
+                            Err(err) => report.problems.push(ItemProblem {
+                                name: format!("{} (note)", entry.name),
                                 reason: err.to_string(),
                             }),
                         }
@@ -2273,6 +2387,31 @@ impl Transfer {
         )
         .await?;
 
+        // FD-06: VMs' notes, for VMs with the same key in this workspace that have none yet.
+        for vm_note in &payload.vm_notes {
+            if !self.store.vm_in_workspace(ctx, &vm_note.vm_key).await? {
+                continue;
+            }
+            match notes
+                .import(
+                    ctx,
+                    &NoteTarget::vm(&vm_note.vm_key),
+                    &vm_note.body,
+                    vm_note.handover,
+                    false,
+                    SOURCE,
+                )
+                .await
+            {
+                Ok(saved) => report.notes += usize::from(saved),
+                Err(CoreError::UnknownTarget(_)) => {}
+                Err(err) => report.problems.push(ItemProblem {
+                    name: format!("{} (note)", vm_note.name),
+                    reason: err.to_string(),
+                }),
+            }
+        }
+
         let mut detail = format!(
             "from {}: sessions {}; folders {} added; folder defaults {}; known host keys {}; vault secrets {}; favourite commands {}",
             path.display(),
@@ -2312,6 +2451,9 @@ impl Transfer {
                 "; {} marked as container hosts",
                 plural(report.container_hosts, "session")
             ));
+        }
+        if report.notes > 0 {
+            detail.push_str(&format!("; {} saved", plural(report.notes, "note")));
         }
         if report.without_credentials > 0 {
             detail.push_str(&format!(
@@ -2669,6 +2811,7 @@ mod tests {
             imported_from: None,
             forwards: vec![],
             containers: vec![],
+            note: None,
         }
     }
 
@@ -2680,6 +2823,32 @@ mod tests {
         let entry: SessionEntry = serde_json::from_str(old).unwrap();
         assert!(entry.forwards.is_empty());
         assert_eq!(entry.name, "web01");
+    }
+
+    #[test]
+    fn files_from_before_notes_still_read_and_notes_are_left_out_when_none() {
+        // FD-06: a session and a payload as 0.6.x wrote them: no `note`, no `vmNotes`.
+        let old = r#"{"id":"7d1f0f0e-63f8-4a5b-9f3a-2f9d8f1d2c3b","name":"web01","host":"web01.example.com",
+            "port":22,"auth":{"method":"agent"}}"#;
+        let entry: SessionEntry = serde_json::from_str(old).unwrap();
+        assert!(entry.note.is_none());
+        let payload: Payload = serde_json::from_str(r#"{"exportedAt":"2026-10-01T00:00:00Z"}"#).unwrap();
+        assert!(payload.vm_notes.is_empty());
+        // A session without a note writes no `note` field, so 0.6.x reads the file as before.
+        let written = serde_json::to_string(&entry).unwrap();
+        assert!(!written.contains("\"note\""));
+        let with_note = SessionEntry {
+            note: Some(NoteEntry {
+                body: "Restart nginx after deploys.".into(),
+                handover: true,
+            }),
+            ..entry
+        };
+        let back: SessionEntry = serde_json::from_str(&serde_json::to_string(&with_note).unwrap()).unwrap();
+        assert_eq!(
+            back.note.map(|n| (n.body, n.handover)),
+            Some(("Restart nginx after deploys.".into(), true))
+        );
     }
 
     #[test]

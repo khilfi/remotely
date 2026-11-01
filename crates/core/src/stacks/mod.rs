@@ -418,9 +418,24 @@ impl Stacks {
     pub async fn delete(&self, ctx: &Context, id: Uuid) -> Result<()> {
         self.store.read_only().check(Change::Stacks)?;
         let row = self.row(ctx, id).await?;
-        self.store.delete_stack(ctx, id).await?;
-        self.audit(ctx, &format!("Deleted the stack '{}'", row.input.name), "", &[])
-            .await
+        // QL-27: into the trash, in one transaction with the delete.
+        let item = crate::trash::TrashItem {
+            kind: crate::trash::TrashKind::Stack,
+            item_id: &id.to_string(),
+            name: &row.input.name,
+            place: "Templates › Stacks".to_owned(),
+            sent: None,
+        };
+        if crate::trash::move_to_trash(&self.store, ctx, item).await?.is_none() {
+            return Err(CoreError::UnknownTarget(format!("stack {id}")));
+        }
+        self.audit(
+            ctx,
+            &format!("Deleted the stack '{}'", row.input.name),
+            &format!("moved to the trash for {} days", crate::trash::KEEP_DAYS),
+            &[],
+        )
+        .await
     }
 
     // ---- Deploy ---------------------------------------------------------------------------------------------------

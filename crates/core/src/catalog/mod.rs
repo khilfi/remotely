@@ -43,6 +43,7 @@ use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::presentation::Change;
 use crate::store::{NewAuditEntry, NewImage, Store, TemplateRow, VmRecord};
+use crate::trash::TrashKind;
 use crate::vault::{SecretId, SecretKind};
 
 /// How the audit log names a catalogue change.
@@ -442,11 +443,29 @@ impl Catalog {
         let used = self
             .templates_using(ctx, |t| t.size_id.eq_ignore_ascii_case(id))
             .await?;
-        if !self.store.delete_catalog_size(ctx, id).await? {
-            return Err(CoreError::UnknownTarget(format!("size {id}")));
+        self.to_trash(ctx, TrashKind::Size, &size.id, &size.name, "Templates › Sizes")
+            .await?;
+        self.audit(
+            ctx,
+            &format!("Deleted the size '{}'", size.name),
+            &format!("{}; {}", used_by(&used), in_trash()),
+        )
+        .await
+    }
+
+    /// QL-27: the item's row into the trash, in one transaction with its delete.
+    async fn to_trash(&self, ctx: &Context, kind: TrashKind, id: &str, name: &str, place: &str) -> Result<()> {
+        let item = crate::trash::TrashItem {
+            kind,
+            item_id: id,
+            name,
+            place: place.to_owned(),
+            sent: None,
+        };
+        match crate::trash::move_to_trash(&self.store, ctx, item).await? {
+            Some(_) => Ok(()),
+            None => Err(CoreError::UnknownTarget(format!("{} {id}", kind.noun()))),
         }
-        self.audit(ctx, &format!("Deleted the size '{}'", size.name), &used_by(&used))
-            .await
     }
 
     // ---- Images ---------------------------------------------------------------------------------------------
@@ -645,14 +664,22 @@ impl Catalog {
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(format!("image {id}")))?;
         let used = self.templates_using(ctx, |t| t.image_id == id).await?;
-        self.store.delete_catalog_image(ctx, id).await?;
+        self.to_trash(
+            ctx,
+            TrashKind::Image,
+            &id.to_string(),
+            &image.name,
+            "Templates › Images",
+        )
+        .await?;
         self.audit(
             ctx,
             &format!("Deleted the image '{}'", image.name),
             &format!(
-                "{}; the file or VM stays; {}",
+                "{}; the file or VM stays; {}; {}",
                 image.source.describe(None),
-                used_by(&used)
+                used_by(&used),
+                in_trash()
             ),
         )
         .await
@@ -743,9 +770,20 @@ impl Catalog {
     pub async fn delete_template(&self, ctx: &Context, id: Uuid) -> Result<()> {
         self.store.read_only().check(Change::Catalog)?;
         let row = self.template_row(ctx, id).await?;
-        self.store.delete_catalog_template(ctx, id).await?;
-        self.audit(ctx, &format!("Deleted the launch template '{}'", row.spec.name), "")
-            .await
+        self.to_trash(
+            ctx,
+            TrashKind::Template,
+            &id.to_string(),
+            &row.spec.name,
+            "Templates › Launch templates",
+        )
+        .await?;
+        self.audit(
+            ctx,
+            &format!("Deleted the launch template '{}'", row.spec.name),
+            &in_trash(),
+        )
+        .await
     }
 
     async fn templates_using(&self, ctx: &Context, uses: impl Fn(&TemplateInput) -> bool) -> Result<Vec<String>> {
@@ -1038,6 +1076,11 @@ fn describe_template(spec: &TemplateInput, facts: &Facts) -> String {
         templates::tags_text(&spec.packages),
         spec.clone_mode.label()
     )
+}
+
+/// QL-27: the end of a delete's audit entry.
+fn in_trash() -> String {
+    format!("moved to the trash for {} days", crate::trash::KEEP_DAYS)
 }
 
 fn used_by(templates: &[String]) -> String {
