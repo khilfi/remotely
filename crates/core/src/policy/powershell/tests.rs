@@ -701,3 +701,156 @@ fn deep_nesting_is_refused_not_overflowed() {
     let blocks = format!("{}Get-Date{}", "& {".repeat(200), "}".repeat(200));
     assert!(!read_only(&blocks));
 }
+
+// ---- Review PR #78: classifier bypasses, one test per finding (A1 to A10) -----------------------------------------
+
+#[test]
+fn a1_a_comment_glued_to_a_token_is_not_a_comment() {
+    // PowerShell starts a comment only at a token boundary; `#` and `<#` glued to a token are part of it, so the text
+    // after still runs and must be seen.
+    for trick in [
+        "Get-Date $x#; Stop-Service Spooler",
+        "Get-Date ${x}#; Stop-Service Spooler",
+        "Get-Date $env:x#; Stop-Service Spooler",
+        "Get-Date 1#; Stop-Service Spooler",
+        "whoami#; Stop-Service Spooler",
+        "Get-Date -a#; Stop-Service Spooler",
+        "whoami<# ; Stop-Service Spooler #>",
+        "Get-Date $x#; & ([scriptblock]::Create('Stop-' + 'Service Spooler'))",
+    ] {
+        assert!(
+            names(trick).iter().any(|n| n == "Stop-Service") || !unreadable(trick).is_empty(),
+            "the hidden statement must be seen or the line unreadable: {trick}"
+        );
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // A comment after whitespace or a boundary still works (the common case).
+    assert!(read_only("Get-Date # today's date"));
+    assert!(read_only("(Get-Date)# a comment"));
+    assert!(read_only("Get-Date <# inline #> -Format o"));
+}
+
+#[test]
+fn a2_a_method_called_with_a_script_block_is_a_call() {
+    // `.Name{ }` is a method call with one argument, like `.Name()`.
+    for trick in [
+        "(Get-Item C:\\data).Delete{}",
+        "Get-Process x | ForEach-Object { $_.Delete{} }",
+        "(Get-Service Spooler).Start{}",
+    ] {
+        assert!(!unreadable(trick).is_empty(), "{trick} should not read");
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // `.Where{ }` and `.ForEach{ }` filtering stay read-only.
+    assert!(read_only("(Get-Process).Where{ $_.CPU -gt 10 }"));
+}
+
+#[test]
+fn a3_a_cast_to_a_non_value_type_runs_a_constructor() {
+    for trick in [
+        "[IO.StreamWriter]'C:\\data\\f.txt'",
+        "'C:\\data\\f.txt' -as [IO.StreamWriter]",
+        "[System.IO.StreamWriter]'C:\\x'",
+        "$w = [Diagnostics.Process]'notepad'",
+    ] {
+        assert!(!unreadable(trick).is_empty(), "{trick} should not read");
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // Plain value-type casts and `-as` still read.
+    for ok in [
+        "[int]'5' + 1",
+        "[datetime]'2026-01-01'",
+        "'5' -as [int]",
+        "[ipaddress]'192.0.2.1'",
+        "[int[]]@(1, 2, 3)",
+    ] {
+        assert!(unreadable(ok).is_empty(), "{ok}: {:?}", unreadable(ok));
+        assert!(read_only(ok), "{ok} should be read-only");
+    }
+}
+
+#[test]
+fn a4_default_parameter_values_and_invoked_blocks_are_not_read_only() {
+    for trick in [
+        // Assigning an execution-steering automatic variable.
+        "$PSDefaultParameterValues = @{ '*:MemberName' = 'Kill' }",
+        "$PSDefaultParameterValues=@{'*:MemberName'='Kill'}; Get-Process x | ForEach-Object",
+        "$ExecutionContext = $null",
+        // A bare ForEach-Object with no literal block (it runs whatever the default value sets).
+        "Get-Process x | ForEach-Object",
+        // A script block given to an invoker as a variable or subexpression.
+        "Get-Service | Where-Object $sb",
+        "Measure-Command $sb",
+        "Get-Service | Sort-Object $sb",
+        "Get-Service | Select-Object @{ n = 'x'; e = $sb }",
+    ] {
+        assert!(
+            !read_only(trick),
+            "{trick} should not be read-only ({:?})",
+            commands(trick)
+        );
+    }
+    // `$null = <command>` and property-name lists stay read-only.
+    assert!(read_only("$null = Get-Service"));
+    assert!(read_only(
+        "Get-Service | Sort-Object Status, Name | Select-Object Name, Status"
+    ));
+    assert!(read_only("Get-Service | Where-Object Status -eq 'Running'"));
+}
+
+#[test]
+fn a5_deep_expressions_do_not_overflow_the_stack() {
+    // Long prefix-operator and assignment chains recurse; the depth limit must stop them instead of crashing.
+    let unary = format!("{}1", "-not ".repeat(20_000));
+    assert!(!read_only(&unary));
+    let assign = format!("{}1", "$a=".repeat(20_000));
+    assert!(!read_only(&assign));
+    let casts = format!("{}$x", "[int]".repeat(20_000));
+    assert!(!read_only(&casts));
+    let bang = format!("{}$x", "!".repeat(20_000));
+    assert!(!read_only(&bang));
+}
+
+#[test]
+fn a6_an_option_after_a_quote_is_its_own_argument() {
+    // PowerShell ends an argument at a closing quote; the option glued after it is separate and must be seen.
+    assert!(!read_only("gpresult /scope 'computer'/h 'out.html'/f"));
+    assert!(flagged(
+        "Remove-Item 'C:\\data'-Recurse",
+        "Remove-Item -Recurse / rd /s"
+    ));
+}
+
+#[test]
+fn a7_run_together_switches_are_flagged() {
+    assert!(flagged("cmd /c \"rd /s/q C:\\data\"", "Remove-Item -Recurse / rd /s"));
+    assert!(flagged("shutdown /sg /t 0", "shutdown / logoff"));
+    assert!(flagged("shutdown /r/t:0", "shutdown / logoff"));
+}
+
+#[test]
+fn a9_digit_programs_interactive_tools_and_more_runners() {
+    // A token that starts with a digit but is not a number is a command (a program that runs anything).
+    assert_eq!(names("7z.exe Get-Date").first().map(String::as_str), Some("7z"));
+    assert!(!read_only("7z.exe Get-Date"));
+    assert!(!read_only("1z Get-Date"));
+    // A real number literal is still an expression (read-only).
+    assert!(read_only("1..3 | ForEach-Object { $_ }"));
+    assert!(read_only("1kb + 1mb"));
+    assert!(read_only("0x1F"));
+    // nslookup with a lone `-` waits for typed lines.
+    assert!(!read_only("nslookup - 192.0.2.1"));
+    // More runners can't be read-only entries.
+    for entry in [
+        "dotnet.exe",
+        "pcalua.exe",
+        "ftp.exe",
+        "diskshadow.exe",
+        "odbcconf.exe",
+        "Import-PSSession",
+        "Trace-Command",
+    ] {
+        let why = entry_problem(entry).unwrap_or_default();
+        assert!(why.contains("can't be read-only"), "{entry}: {why}");
+    }
+}

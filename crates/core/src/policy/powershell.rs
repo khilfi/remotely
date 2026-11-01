@@ -72,12 +72,13 @@ pub fn default_dangerous_patterns() -> Vec<DangerousPattern> {
         ),
         p(
             "shutdown / logoff",
-            format!(r"{S}shutdown(?:\.exe)?\s+(?:{R}\s)?[/-][srpghlei](?:$|\s)|{S}logoff(?:\.exe)?{E}"),
+            // A7: the switch letters may run together (`/sg`) or be followed by `/` or `:`, not only a space.
+            format!(r"{S}shutdown(?:\.exe)?\s+(?:{R}\s)?[/-][srpghlei]+(?:$|[\s/:])|{S}logoff(?:\.exe)?{E}"),
         ),
         p(
             "Remove-Item -Recurse / rd /s",
             format!(
-                r"{S}remove-item\s+(?:{R}\s)?-r[a-z]*(?::\S*)?(?:$|\s)|{S}(?:rd|rmdir|del|erase)\s+(?:{R}\s)?/s(?:$|\s)"
+                r"{S}remove-item\s+(?:{R}\s)?-r[a-z]*(?::\S*)?(?:$|\s)|{S}(?:rd|rmdir|del|erase)\s+(?:{R}\s)?/s(?:$|[\s/])"
             ),
         ),
         p(
@@ -448,8 +449,15 @@ const RUNS_ANYTHING: &[&str] = &[
     "wmic.exe",
     "forfiles.exe",
     "at.exe",
+    "dotnet.exe",
+    "pcalua.exe",
+    "ftp.exe",
+    "diskshadow.exe",
+    "odbcconf.exe",
     "invoke-expression",
     "invoke-command",
+    "import-pssession",
+    "trace-command",
     "start-process",
     "start-job",
     "start-threadjob",
@@ -628,6 +636,16 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
     };
     match key {
         "foreach-object" => foreach_writes(command),
+        // A4: cmdlets that invoke a script block given as a value run arbitrary code when the block comes from a
+        // variable or subexpression (`Where-Object $sb`, `Sort-Object $sb`, `Measure-Command $sb`, a calculated
+        // property from `$ht`). A block written in the script is read like any other, and a comma list of property
+        // names (`Sort-Object Status, Name`) is literal; only a dynamic value (`$…`, `(…)`, `@…`) could be an invoked
+        // block, so that is what makes it write.
+        "where-object" | "sort-object" | "group-object" | "select-object" | "measure-command" | "format-table"
+        | "format-list" | "format-wide" | "format-custom" => command
+            .args
+            .iter()
+            .any(|a| a.kind == ArgKind::Expression && a.text.trim_start().starts_with(['$', '(', '@'])),
         // `-Online` opens the help's address with the host's shell, whatever a function's HelpUri says.
         "get-help" => command
             .args
@@ -673,8 +691,10 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
                 )
             })
         }),
-        // With no name to look up, nslookup waits for typed lines.
-        "nslookup.exe" => args_match(command, |args| !args.iter().any(|a| !a.starts_with('-'))),
+        // With no name to look up, or a lone `-`, nslookup enters interactive mode and waits for typed lines.
+        "nslookup.exe" => args_match(command, |args| {
+            args.iter().any(|a| a == "-") || !args.iter().any(|a| !a.starts_with('-'))
+        }),
         "gpresult.exe" => args_match(command, |args| {
             args.iter()
                 .any(|a| option(a).is_some_and(|o| o.starts_with('h') || o.starts_with('x') || o == "f"))
@@ -742,10 +762,13 @@ fn foreach_writes(command: &PsCommand) -> bool {
     const BLOCKS: &[&str] = &["begin", "process", "end", "remainingscripts", "parallel"];
     const VALUES: &[&str] = &["inputobject", "throttlelimit", "timeoutseconds"];
     const FLAGS: &[&str] = &["whatif", "confirm", "usenewrunspace"];
+    // A4: a bare `ForEach-Object` with no literal script block runs whatever `$PSDefaultParameterValues` sets for its
+    // `-MemberName`/`-Process`, so read-only needs at least one block written in the script.
+    let mut saw_block = false;
     let mut args = command.args.iter();
     while let Some(arg) = args.next() {
         match arg.kind {
-            ArgKind::Block => {}
+            ArgKind::Block => saw_block = true,
             ArgKind::Parameter => {
                 let Some(name) = arg.parameter().filter(|n| !n.is_empty()) else {
                     return true;
@@ -764,8 +787,11 @@ fn foreach_writes(command: &PsCommand) -> bool {
                 if arg.attached() {
                     // `-Process:{ … }`: what follows the colon is in the parameter's text.
                     let attached = arg.text.split_once(':').map(|(_, v)| v.trim()).unwrap_or_default();
-                    if block && !(attached.starts_with('{') && attached.ends_with('}')) {
-                        return true;
+                    if block {
+                        if !(attached.starts_with('{') && attached.ends_with('}')) {
+                            return true;
+                        }
+                        saw_block = true;
                     }
                     continue;
                 }
@@ -774,6 +800,10 @@ fn foreach_writes(command: &PsCommand) -> bool {
                 }
                 match args.next() {
                     Some(next) if block && next.kind != ArgKind::Block => return true,
+                    Some(next) if block => {
+                        let _ = next;
+                        saw_block = true;
+                    }
                     Some(_) => {}
                     None => return true,
                 }
@@ -781,7 +811,7 @@ fn foreach_writes(command: &PsCommand) -> bool {
             ArgKind::Value | ArgKind::Expression => return true,
         }
     }
-    false
+    !saw_block
 }
 
 /// BX-13: every command the script runs, as the dangerous-command rules see them: in the whole of it and in each

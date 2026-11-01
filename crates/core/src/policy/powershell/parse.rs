@@ -246,6 +246,21 @@ impl Parser {
         }
     }
 
+    /// A6, A1: a `#` or `<#` begins a comment only at a token boundary. PowerShell starts a comment when the `#` is
+    /// preceded by whitespace, the start of the input, or a token delimiter; glued to a token (`$x#`, `whoami<#`, `1#`,
+    /// `-a#`) it is part of that token, and the text after it still runs. So we treat `#` as a comment only when the
+    /// character before it is a boundary; otherwise we leave it, and the token readers take it (or a redirect/junk
+    /// token results), which keeps the hidden statement visible. Boundaries are chosen so a wrong guess never hides a
+    /// statement: PowerShell always treats `#` after one of these (or whitespace) as a comment, never as a word char.
+    fn comment_boundary(&self) -> bool {
+        match self.i.checked_sub(1).and_then(|p| self.chars.get(p).copied()) {
+            None => true,
+            // `}` is left out: it closes a `${name}` variable too (`${x}#` is a glued token, not a comment), and the
+            // safe guess when unsure is to not start a comment (a hidden statement stays visible).
+            Some(c) => c.is_whitespace() || matches!(c, ';' | '(' | ')' | '{' | '|' | '&'),
+        }
+    }
+
     /// Spaces, comments and backtick line continuations; line breaks too when `newlines`.
     fn skip_space(&mut self, newlines: bool) {
         while let Some(c) = self.peek() {
@@ -256,11 +271,11 @@ impl Parser {
                 if self.bump() == Some('\r') && self.peek() == Some('\n') {
                     self.bump();
                 }
-            } else if c == '#' {
+            } else if c == '#' && self.comment_boundary() {
                 while self.peek().is_some_and(|c| !is_newline(c)) {
                     self.bump();
                 }
-            } else if c == '<' && self.peek_at(1) == Some('#') {
+            } else if c == '<' && self.peek_at(1) == Some('#') && self.comment_boundary() {
                 self.i += 2;
                 loop {
                     match self.bump() {
@@ -499,7 +514,9 @@ impl Parser {
             self.skip_space(false);
             match self.peek() {
                 Some('(') => self.paren_group(),
-                Some('[') => self.type_literal(),
+                Some('[') => {
+                    self.type_literal();
+                }
                 Some(',') => {
                     self.bump();
                 }
@@ -674,10 +691,17 @@ impl Parser {
                 self.command(Invocation::Dot)
             }
             c if self.starts_expression(c) => {
-                if !first {
-                    self.unreadable("an expression after a pipe");
+                // A9: a token beginning with a digit (or `.digit`) is an expression only when it is a real number
+                // literal (`1`, `0x1F`, `1kb`, `1.5e3`); otherwise PowerShell runs it as a program (`7z.exe`, `1z`),
+                // which runs anything, so it is a command here.
+                if (c.is_ascii_digit() || c == '.') && !self.number_literal_ahead() {
+                    self.command(Invocation::Plain);
+                } else {
+                    if !first {
+                        self.unreadable("an expression after a pipe");
+                    }
+                    self.expression_statement();
                 }
-                self.expression_statement();
             }
             _ => self.command(Invocation::Plain),
         }
@@ -692,8 +716,92 @@ impl Parser {
             || (c == '.' && self.peek_at(1).is_some_and(|n| n.is_ascii_digit()))
     }
 
+    /// A9: whether the token at the cursor is a real PowerShell number literal (and not a command name that starts with
+    /// a digit). Reads without moving: a numeric core (`0x1F`, digits with one decimal point and an exponent), an
+    /// optional type suffix and multiplier (`1kb`, `1lgb`, `1d`), then a boundary. Trailing letters that aren't a known
+    /// suffix (`7z`, `1z`, `0x1G`, `1kbx`), or a second `.`-joined word (`1.2.3`, `1.a`), make it a command.
+    fn number_literal_ahead(&self) -> bool {
+        let get = |at: usize| self.chars.get(at).copied();
+        let mut at = self.i;
+        if get(at) == Some('0') && matches!(get(at + 1), Some('x' | 'X' | 'b' | 'B')) {
+            let hex = matches!(get(at + 1), Some('x' | 'X'));
+            at += 2;
+            let digits_start = at;
+            while get(at).is_some_and(|c| {
+                if hex {
+                    c.is_ascii_hexdigit()
+                } else {
+                    matches!(c, '0' | '1')
+                }
+            }) {
+                at += 1;
+            }
+            if at == digits_start {
+                return false;
+            }
+        } else {
+            let mut saw_digit = false;
+            while get(at).is_some_and(|c| c.is_ascii_digit()) {
+                at += 1;
+                saw_digit = true;
+            }
+            if get(at) == Some('.') && get(at + 1).is_some_and(|c| c.is_ascii_digit()) {
+                at += 1;
+                while get(at).is_some_and(|c| c.is_ascii_digit()) {
+                    at += 1;
+                    saw_digit = true;
+                }
+            }
+            if !saw_digit {
+                return false;
+            }
+            if matches!(get(at), Some('e' | 'E')) {
+                let mut e = at + 1;
+                if matches!(get(e), Some('+' | '-')) {
+                    e += 1;
+                }
+                if get(e).is_some_and(|c| c.is_ascii_digit()) {
+                    while get(e).is_some_and(|c| c.is_ascii_digit()) {
+                        e += 1;
+                    }
+                    at = e;
+                }
+            }
+        }
+        // A type suffix and/or a byte multiplier, as letters right after the digits.
+        let mut tail = String::new();
+        while let Some(c) = get(at).filter(|c| c.is_ascii_alphabetic()) {
+            tail.push(c.to_ascii_lowercase());
+            at += 1;
+        }
+        if !tail.is_empty() {
+            let base = ["kb", "mb", "gb", "tb", "pb"]
+                .iter()
+                .find_map(|m| tail.strip_suffix(m))
+                .unwrap_or(&tail);
+            if !matches!(base, "" | "y" | "uy" | "s" | "us" | "l" | "u" | "ul" | "lu" | "d" | "n") {
+                return false;
+            }
+        }
+        // After a valid number, more identifier characters, or a `.` joined to a word, make it a command.
+        match get(at) {
+            Some(c) if is_ident_char(c) => false,
+            Some('.') => !get(at + 1).is_some_and(is_ident_char),
+            _ => true,
+        }
+    }
+
     /// An expression on its own, or an assignment (`$x = <statement>`), then any redirection.
     fn expression_statement(&mut self) {
+        // A5: an assignment's right side is another statement (`$a = $b = …`), so this recurses; count the depth.
+        if !self.enter() {
+            return;
+        }
+        self.expression_statement_inner();
+        self.leave();
+    }
+
+    fn expression_statement_inner(&mut self) {
         let lhs = self.expression();
         self.skip_space(false);
         let assignment = match (self.peek(), self.peek_at(1), self.peek_at(2)) {
@@ -778,7 +886,21 @@ impl Parser {
         loop {
             let save = self.i;
             self.skip_space(false);
-            if self.binary_operator() {
+            if self.consume_as_operator() {
+                // A3: `-as [type]` converts, running the type's constructor for anything but a value type; the string
+                // form (`$x -as 'IO.StreamWriter'`) can't be read either.
+                self.skip_space(true);
+                if self.peek() == Some('[') {
+                    let type_text = self.type_literal();
+                    if !is_value_type(&type_text) {
+                        self.unreadable("a conversion that may run a constructor (-as)");
+                    }
+                } else {
+                    self.unreadable("a conversion that may run a constructor (-as)");
+                    self.unary();
+                }
+                expr.plain_variable = false;
+            } else if self.binary_operator() {
                 self.skip_space(true);
                 self.unary();
                 expr.plain_variable = false;
@@ -786,6 +908,28 @@ impl Parser {
                 self.i = save;
                 return expr;
             }
+        }
+    }
+
+    /// Consumes a `-as` conversion operator if one is next (so the caller checks its target type).
+    fn consume_as_operator(&mut self) -> bool {
+        let (Some(c), Some(n)) = (self.peek(), self.peek_at(1)) else {
+            return false;
+        };
+        if !is_dash(c) || !n.is_ascii_alphabetic() {
+            return false;
+        }
+        let mut word = String::new();
+        let mut at = self.i + 1;
+        while let Some(ch) = self.chars.get(at).copied().filter(|c| c.is_ascii_alphabetic()) {
+            word.push(ch.to_ascii_lowercase());
+            at += 1;
+        }
+        if word == "as" {
+            self.i = at;
+            true
+        } else {
+            false
         }
     }
 
@@ -827,6 +971,17 @@ impl Parser {
     }
 
     fn unary(&mut self) -> Expr {
+        // A5: prefix operators (`-not -not …`, `!!…`, repeated casts) and the recursion through them can run deep, so
+        // count it against the same limit as brackets.
+        if !self.enter() {
+            return Expr::default();
+        }
+        let expr = self.unary_inner();
+        self.leave();
+        expr
+    }
+
+    fn unary_inner(&mut self) -> Expr {
         self.skip_space(false);
         match (self.peek(), self.peek_at(1)) {
             (Some('!' | ','), _) => {
@@ -873,7 +1028,7 @@ impl Parser {
                 Expr::default()
             }
             (Some('['), _) => {
-                self.type_literal();
+                let type_text = self.type_literal();
                 // `[type]::Member`: the postfix part reads it.
                 if self.peek() == Some(':') && self.peek_at(1) == Some(':') {
                     self.postfix_after(Expr::default());
@@ -886,6 +1041,11 @@ impl Parser {
                     .peek()
                     .is_some_and(|c| self.starts_operand(c) || c == '!' || (is_dash(c) && save == self.i))
                 {
+                    // A3: a cast runs the target type's constructor (`[IO.StreamWriter]'path'` truncates a file), so
+                    // only plain value types (`[int]`, `[string]`, `[datetime]`...) are read-only.
+                    if !is_value_type(&type_text) {
+                        self.unreadable("a cast to a type that may run a constructor");
+                    }
                     self.unary();
                 } else {
                     self.i = save;
@@ -1016,25 +1176,35 @@ impl Parser {
                 }
             }
         }
-        if self.peek() != Some('(') {
-            return;
-        }
+        // A2: PowerShell parses a member followed at once by `{` as a call with one script-block argument
+        // (`$x.Delete{}`), like `(` does; a space before the bracket is not a call. Either way it invokes the method.
+        let call = match self.peek() {
+            Some('(') => '(',
+            Some('{') => '{',
+            _ => return,
+        };
         let shown = if dynamic {
             "a member named at run time".to_owned()
         } else {
             name.clone()
         };
-        let args_start = self.i + 1;
-        let first_is_block = self
-            .chars
-            .get(args_start..)
-            .is_some_and(|rest| rest.iter().find(|c| !c.is_whitespace()).copied() == Some('{'));
+        let first_is_block = if call == '{' {
+            true
+        } else {
+            let args_start = self.i + 1;
+            self.chars
+                .get(args_start..)
+                .is_some_and(|rest| rest.iter().find(|c| !c.is_whitespace()).copied() == Some('{'))
+        };
         let pure = !dynamic && pure_method(&name, is_static, first_is_block);
         if !pure {
             let sep = if is_static { "::" } else { "." };
             self.unreadable(format!("a method call ({sep}{shown}())"));
         }
-        if self.enter() {
+        if call == '{' {
+            // `block` guards its own depth.
+            self.block();
+        } else if self.enter() {
             self.bump();
             self.statements_until(')');
             self.leave();
@@ -1143,10 +1313,12 @@ impl Parser {
                 Expr::default()
             }
             Some(c) if is_var_char(c) => {
+                let start = self.i;
                 let mut qualified = false;
                 while self.peek().is_some_and(is_var_char) {
                     self.bump();
                 }
+                let name: String = self.chars[start..self.i].iter().collect();
                 // `$env:PATH`, `$global:x`, `$c:file`: a scope or a drive, never `::`.
                 if self.peek() == Some(':') && self.peek_at(1).is_some_and(|c| c != ':' && !c.is_whitespace()) {
                     qualified = true;
@@ -1159,7 +1331,10 @@ impl Parser {
                     }
                 }
                 Expr {
-                    plain_variable: !qualified,
+                    // A4: assigning an execution-steering automatic variable changes what later commands do
+                    // (`$PSDefaultParameterValues=@{'*:MemberName'='Kill'}` turns a bare ForEach-Object into a method
+                    // call), so it is never a read-only "plain variable". `$env:…` is qualified, so already excluded.
+                    plain_variable: !qualified && !is_execution_variable(&name),
                 }
             }
             _ => Expr::default(),
@@ -1256,18 +1431,21 @@ impl Parser {
     }
 
     /// `[type]`, `[System.Collections.Generic.List[string]]`; an attribute (`[ValidateScript({ … })]`) has its
-    /// arguments read for commands, and can't be read-only.
-    fn type_literal(&mut self) {
+    /// arguments read for commands, and can't be read-only. Returns the type's text (between the outer brackets).
+    fn type_literal(&mut self) -> String {
         if !self.enter() {
-            return;
+            return String::new();
         }
         self.bump();
+        let start = self.i;
+        let mut text_end = self.i;
         let mut depth = 1;
         while let Some(c) = self.peek() {
             match c {
                 '[' => {
                     depth += 1;
                     self.bump();
+                    text_end = self.i;
                 }
                 ']' => {
                     depth -= 1;
@@ -1275,6 +1453,7 @@ impl Parser {
                     if depth == 0 {
                         break;
                     }
+                    text_end = self.i;
                 }
                 '(' => {
                     self.unreadable("an attribute");
@@ -1283,6 +1462,7 @@ impl Parser {
                         self.statements_until(')');
                         self.leave();
                     }
+                    text_end = self.i;
                 }
                 c if is_newline(c) => {
                     self.unreadable("a type name left open");
@@ -1290,6 +1470,7 @@ impl Parser {
                 }
                 _ => {
                     self.bump();
+                    text_end = self.i;
                 }
             }
         }
@@ -1297,6 +1478,9 @@ impl Parser {
             self.unreadable("a type name left open");
         }
         self.leave();
+        self.chars[start.min(self.chars.len())..text_end.min(self.chars.len())]
+            .iter()
+            .collect()
     }
 
     // ---- Strings -----------------------------------------------------------------------------------------------------
@@ -1566,18 +1750,21 @@ impl Parser {
     /// One argument's value, with the elements of an array (`a,b`).
     fn arg_value(&mut self) -> Arg {
         let start = self.i;
-        let mut arg = self.arg_element();
+        let arg = self.arg_element();
+        // A8: build the array's source once at the end, not per element, so `a,a,a,…` is read in linear time.
+        if self.peek() != Some(',') {
+            return arg;
+        }
         while self.peek() == Some(',') {
             self.bump();
             self.skip_space(true);
             self.arg_element();
-            arg = Arg {
-                text: self.source(start),
-                literal: false,
-                kind: ArgKind::Expression,
-            };
         }
-        arg
+        Arg {
+            text: self.source(start),
+            literal: false,
+            kind: ArgKind::Expression,
+        }
     }
 
     fn arg_element(&mut self) -> Arg {
@@ -1589,15 +1776,10 @@ impl Parser {
         };
         match self.peek() {
             Some(c) if is_squote(c) || is_dquote(c) => {
+                // A6: PowerShell ends an argument that starts with a quote at the closing quote; what follows at once
+                // (`'computer'/h`) is a new argument, not joined. Joining hid an option (`/h`, `-Recurse`) from the
+                // write checks, so we keep them apart.
                 let (text, literal) = self.string();
-                let mut text = text;
-                let mut literal = literal;
-                // A string followed at once by more of a word: `'a'b` is `ab`.
-                if self.peek().is_some_and(|c| !self.ends_word(c)) {
-                    let (more, more_literal) = self.bare_word();
-                    text.push_str(&more);
-                    literal &= more_literal;
-                }
                 Arg {
                     text: if literal { text } else { self.source(start) },
                     literal,
@@ -1971,6 +2153,63 @@ fn is_operator(word: &str) -> bool {
     word.strip_prefix('c')
         .or_else(|| word.strip_prefix('i'))
         .is_some_and(|rest| CASED.contains(&rest))
+}
+
+/// A4: automatic variables whose assignment changes how later commands run, so assigning to one is never read-only.
+/// `$null = <command>` and the like stay read-only, so only these execution-steering names count, not every automatic
+/// variable.
+fn is_execution_variable(name: &str) -> bool {
+    matches!(
+        name.to_lowercase().as_str(),
+        "psdefaultparametervalues" | "executioncontext" | "psmoduleautoloadingpreference"
+    )
+}
+
+/// A3: types a cast or `-as` may use and still only compute a value. Any other type runs its constructor, which can
+/// do anything (`[IO.StreamWriter]'path'` truncates the file, `[xml]` and COM types have side effects), so a cast to it
+/// is never read-only. Array and generic-list suffixes are stripped; a `System.`/`Net.` prefix is allowed off.
+fn is_value_type(text: &str) -> bool {
+    let mut t = text.trim().to_lowercase();
+    while let Some(stripped) = t.strip_suffix("[]").or_else(|| t.strip_suffix("[,]")) {
+        t = stripped.trim_end().to_owned();
+    }
+    let t = t.strip_prefix("system.").unwrap_or(&t);
+    let t = t.strip_prefix("net.").unwrap_or(t);
+    const VALUE_TYPES: &[&str] = &[
+        "int",
+        "int16",
+        "int32",
+        "int64",
+        "uint",
+        "uint16",
+        "uint32",
+        "uint64",
+        "long",
+        "ulong",
+        "short",
+        "ushort",
+        "byte",
+        "sbyte",
+        "double",
+        "single",
+        "float",
+        "decimal",
+        "bool",
+        "boolean",
+        "string",
+        "char",
+        "datetime",
+        "datetimeoffset",
+        "timespan",
+        "version",
+        "guid",
+        "ipaddress",
+        "bigint",
+        "biginteger",
+        "void",
+        "switch",
+    ];
+    VALUE_TYPES.contains(&t)
 }
 
 /// Methods that only compute a value from what they are given, on the types PowerShell scripts use them on (strings,
