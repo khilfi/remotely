@@ -109,7 +109,7 @@ export const HELP = {
     title: "Accept uploads",
     body: [
       "Lets other computers send files to this PC, over TFTP or HTTP PUT, into one empty folder outside any Git repository. A file never replaces one that is there, and each is marked as from the internet, so Windows warns before opening it.",
-      "A file larger than its limit, or past the limit for all of them, is cut off and deleted. Starting with uploads on needs the full approval.",
+      "A file past its limits, or slower than 1 KB a second, is cut off and deleted; one address sends two at a time. Shortcuts and other files Explorer opens by itself, such as desktop.ini, are refused. Starting with uploads on needs the full approval.",
     ],
   },
   "page.dashboard": {

@@ -1883,7 +1883,8 @@ impl JobRunner {
                         report.log.as_bytes(),
                         b"",
                         &[],
-                        MAX_OUTPUT_PER_STREAM,
+                        // Sized so every transfer row fits (the log folds repeats and refusals).
+                        crate::toolbox::file_server::MAX_JOB_OUTPUT,
                     )),
                     note: Some(report.note),
                     ..TargetOutcome::done()

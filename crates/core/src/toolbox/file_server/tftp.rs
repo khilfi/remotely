@@ -441,6 +441,7 @@ async fn read_transfer(shared: &Arc<Shared>, socket: &UdpSocket, request: Reques
         );
         return;
     }
+    pending.transfer();
     let mut file = tokio::fs::File::from_std(file);
     let mut buf = vec![0u8; DATAGRAM];
     let mut options: Vec<(&str, u64)> = Vec::new();
@@ -536,6 +537,8 @@ fn upload_failure(refused: &UploadRefused) -> Failure {
         UploadRefused::FileTooLarge(_) | UploadRefused::TotalTooLarge(_) | UploadRefused::TooManyFiles => {
             Failure::new(code::DISK_FULL, "Over the upload limit")
         }
+        UploadRefused::ClientBusy(_) => Failure::new(code::NOT_DEFINED, "Too many uploads from this address"),
+        UploadRefused::TooSlow { .. } => Failure::new(code::NOT_DEFINED, "Upload too slow"),
         UploadRefused::Outside => Failure::new(code::ACCESS, "Access violation"),
         UploadRefused::Io(_) => Failure::new(code::NOT_DEFINED, "Write error"),
     }
@@ -579,7 +582,7 @@ async fn write_transfer(
             return;
         }
     }
-    let mut upload = match uploads.claim(&name, request.tsize).await {
+    let mut upload = match uploads.claim(&name, request.tsize, peer.ip()).await {
         Ok(upload) => upload,
         Err(refused) => {
             send_failure(socket, &upload_failure(&refused)).await;
@@ -587,6 +590,7 @@ async fn write_transfer(
             return;
         }
     };
+    pending.transfer();
     let mut options: Vec<(&str, u64)> = Vec::new();
     if request.blksize.is_some() {
         options.push(("blksize", block as u64));

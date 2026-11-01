@@ -3,14 +3,20 @@
 //!
 //! * A file is created only when its name is free (`create_new`), so an upload never replaces a file, whatever the
 //!   name maps onto (another letter case, an 8.3 short name).
-//! * Each file and all of them together are capped; a client that sends more is cut off and its file deleted.
-//! * A file that doesn't arrive whole (the client went away, the server stopped) is deleted.
+//! * Each file and all of them together are capped. A declared size (`Content-Length`, `tsize`) that can't fit is
+//!   refused before any byte, but only the bytes that arrive count against the caps, so a client that declares a
+//!   large file and then sends nothing holds no quota.
+//! * One client address holds at most [`UploadLimits::per_client`] uploads at once, and every upload must move at
+//!   least [`UploadLimits::min_bytes`] in each [`UploadLimits::window`], or it is cut off.
+//! * A file that doesn't arrive whole (the client went away or was too slow, the server stopped) is deleted.
 //! * A finished file gets the Mark of the Web (SS-08's `Zone.Identifier`, A8), so Windows treats it as from the
 //!   internet.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::io::AsyncWriteExt;
 
@@ -23,6 +29,27 @@ pub const MAX_UPLOAD_FILES: usize = 1000;
 /// One MB, as the caps are given.
 pub const MB: u64 = 1024 * 1024;
 
+/// How hard a client may lean on the upload folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadLimits {
+    /// Uploads one client address may have under way at once (TFTP and HTTP together).
+    pub per_client: usize,
+    /// Each window of this long must bring at least [`UploadLimits::min_bytes`].
+    pub window: Duration,
+    pub min_bytes: u64,
+}
+
+impl Default for UploadLimits {
+    fn default() -> Self {
+        Self {
+            per_client: 2,
+            window: Duration::from_secs(60),
+            // 1 KB/s over each minute: a link far slower than any switch's.
+            min_bytes: 60 * 1024,
+        }
+    }
+}
+
 /// Why an upload was refused or cut off.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UploadRefused {
@@ -34,6 +61,10 @@ pub enum UploadRefused {
     TotalTooLarge(u64),
     /// [`MAX_UPLOAD_FILES`] files arrived already.
     TooManyFiles,
+    /// This client has [`UploadLimits::per_client`] uploads under way already.
+    ClientBusy(usize),
+    /// Less than [`UploadLimits::min_bytes`] arrived in a window.
+    TooSlow { bytes: u64, window: Duration },
     /// The new file's real place isn't in the folder (it was swapped for a link).
     Outside,
     /// Writing failed.
@@ -47,6 +78,12 @@ impl UploadRefused {
             UploadRefused::FileTooLarge(cap) => format!("larger than the {} a file may be", size_text(*cap)),
             UploadRefused::TotalTooLarge(cap) => format!("over the {} uploads may take in all", size_text(*cap)),
             UploadRefused::TooManyFiles => format!("{MAX_UPLOAD_FILES} files arrived already"),
+            UploadRefused::ClientBusy(n) => format!("this address has {n} uploads under way already"),
+            UploadRefused::TooSlow { bytes, window } => format!(
+                "too slow: less than {} arrived in {} seconds",
+                size_text(*bytes),
+                window.as_secs().max(1)
+            ),
             UploadRefused::Outside => "the upload folder changed (a link or junction)".into(),
             UploadRefused::Io(err) => format!("could not write the file: {err}"),
         }
@@ -66,10 +103,12 @@ pub struct Uploaded {
 
 #[derive(Default)]
 struct State {
-    /// Bytes written or set aside for uploads under way (a declared size counts at once).
+    /// Bytes that arrived, in finished uploads and those under way.
     used: u64,
-    /// Files claimed so far, finished or not.
+    /// Files claimed so far, finished or under way.
     claimed: usize,
+    /// Uploads under way per client address.
+    clients: HashMap<IpAddr, usize>,
     /// The real paths (lower case) being written now, which nothing may serve yet.
     writing: HashSet<String>,
     done: Vec<Uploaded>,
@@ -80,16 +119,18 @@ pub struct Uploads {
     folder: PathBuf,
     max_file: u64,
     max_total: u64,
+    limits: UploadLimits,
     state: Mutex<State>,
 }
 
 impl Uploads {
     /// `folder` is its final path (`canonicalize`), checked empty and outside Git when the server started.
-    pub fn new(folder: PathBuf, max_file: u64, max_total: u64) -> Self {
+    pub fn new(folder: PathBuf, max_file: u64, max_total: u64, limits: UploadLimits) -> Self {
         Self {
             folder,
             max_file,
             max_total,
+            limits,
             state: Mutex::default(),
         }
     }
@@ -106,7 +147,7 @@ impl Uploads {
         self.max_total
     }
 
-    /// Bytes taken by finished uploads and those under way.
+    /// Bytes that arrived (finished uploads and those under way).
     pub fn used(&self) -> u64 {
         locks::lock(&self.state).used
     }
@@ -123,11 +164,16 @@ impl Uploads {
             .contains(&real.to_string_lossy().to_lowercase())
     }
 
-    /// Creates `name` (already checked by [`super::paths::upload_name`]) in the folder, setting `expected` bytes
-    /// aside when the client said how many it sends.
-    pub async fn claim(self: &Arc<Self>, name: &str, expected: Option<u64>) -> Result<Upload, UploadRefused> {
-        let reserved = expected.unwrap_or(0);
-        if reserved > self.max_file {
+    /// Creates `name` (already checked by [`super::paths::upload_name`]) in the folder for `client`. `expected` is
+    /// the size the client declared: one that can't fit now is refused at once, but nothing is set aside for it.
+    pub async fn claim(
+        self: &Arc<Self>,
+        name: &str,
+        expected: Option<u64>,
+        client: IpAddr,
+    ) -> Result<Upload, UploadRefused> {
+        let declared = expected.unwrap_or(0);
+        if declared > self.max_file {
             return Err(UploadRefused::FileTooLarge(self.max_file));
         }
         {
@@ -135,21 +181,27 @@ impl Uploads {
             if state.claimed >= MAX_UPLOAD_FILES {
                 return Err(UploadRefused::TooManyFiles);
             }
-            if state.used.saturating_add(reserved) > self.max_total {
+            if state.used.saturating_add(declared) > self.max_total {
                 return Err(UploadRefused::TotalTooLarge(self.max_total));
             }
-            state.used += reserved;
+            let mine = state.clients.get(&client).copied().unwrap_or(0);
+            if mine >= self.limits.per_client {
+                return Err(UploadRefused::ClientBusy(mine));
+            }
+            state.clients.insert(client, mine + 1);
             state.claimed += 1;
         }
-        // From here, giving back what was set aside is the guard's job.
+        // From here, giving the client's slot and the file's place back is the guard's job.
         let mut upload = Upload {
             uploads: Arc::clone(self),
             name: name.to_owned(),
             path: self.folder.join(name),
+            client,
             key: None,
             file: None,
             written: 0,
-            reserved,
+            window_start: Instant::now(),
+            window_bytes: 0,
             finished: false,
             created: false,
         };
@@ -180,15 +232,19 @@ impl Uploads {
     }
 }
 
-/// An upload under way. Dropped before [`Upload::finish`], its file is deleted and what it set aside given back.
+/// An upload under way. Dropped before [`Upload::finish`], its file is deleted and its bytes, file and client slot
+/// given back.
 pub struct Upload {
     uploads: Arc<Uploads>,
     name: String,
     path: PathBuf,
+    client: IpAddr,
     key: Option<String>,
     file: Option<tokio::fs::File>,
     written: u64,
-    reserved: u64,
+    /// The minimum rate: when the current window started, and what arrived in it.
+    window_start: Instant,
+    window_bytes: u64,
     finished: bool,
     created: bool,
 }
@@ -202,30 +258,41 @@ impl Upload {
         self.written
     }
 
-    /// Writes the next bytes, within the caps.
+    /// Writes the next bytes, within the caps and the minimum rate.
     pub async fn write(&mut self, data: &[u8]) -> Result<(), UploadRefused> {
+        let limits = self.uploads.limits;
+        let now = Instant::now();
+        if now.duration_since(self.window_start) >= limits.window {
+            if self.window_bytes < limits.min_bytes {
+                return Err(UploadRefused::TooSlow {
+                    bytes: limits.min_bytes,
+                    window: limits.window,
+                });
+            }
+            self.window_start = now;
+            self.window_bytes = 0;
+        }
         let len = data.len() as u64;
         let after = self.written.saturating_add(len);
         if after > self.uploads.max_file {
             return Err(UploadRefused::FileTooLarge(self.uploads.max_file));
         }
-        let extra = after.saturating_sub(self.reserved);
-        if extra > 0 {
+        {
             let mut state = locks::lock(&self.uploads.state);
-            if state.used.saturating_add(extra) > self.uploads.max_total {
+            if state.used.saturating_add(len) > self.uploads.max_total {
                 return Err(UploadRefused::TotalTooLarge(self.uploads.max_total));
             }
-            state.used += extra;
-            self.reserved += extra;
+            state.used += len;
         }
+        // Counted before the write, so a failing write is given back by the guard with the rest.
+        self.written = after;
+        self.window_bytes = self.window_bytes.saturating_add(len);
         let Some(file) = self.file.as_mut() else {
             return Err(UploadRefused::Io("the file is closed".into()));
         };
         file.write_all(data)
             .await
-            .map_err(|err| UploadRefused::Io(err.to_string()))?;
-        self.written = after;
-        Ok(())
+            .map_err(|err| UploadRefused::Io(err.to_string()))
     }
 
     /// The whole file arrived: written out, closed and marked as from the internet.
@@ -248,14 +315,21 @@ impl Upload {
             note,
         };
         let mut state = locks::lock(&self.uploads.state);
-        // A client that declared more than it sent: only what arrived counts.
-        state.used = state.used.saturating_sub(self.reserved.saturating_sub(self.written));
-        self.reserved = self.written;
+        release_client(&mut state, self.client);
         if let Some(key) = self.key.take() {
             state.writing.remove(&key);
         }
         state.done.push(uploaded.clone());
         Ok(uploaded)
+    }
+}
+
+fn release_client(state: &mut State, client: IpAddr) {
+    if let Some(n) = state.clients.get_mut(&client) {
+        *n = n.saturating_sub(1);
+        if *n == 0 {
+            state.clients.remove(&client);
+        }
     }
 }
 
@@ -273,9 +347,10 @@ impl Drop for Upload {
             }
         }
         let mut state = locks::lock(&self.uploads.state);
-        state.used = state.used.saturating_sub(self.reserved);
+        state.used = state.used.saturating_sub(self.written);
         // A refused name or a deleted part takes no place among the files a server takes.
         state.claimed = state.claimed.saturating_sub(1);
+        release_client(&mut state, self.client);
         if let Some(key) = self.key.take() {
             state.writing.remove(&key);
         }
@@ -308,22 +383,27 @@ mod tests {
         std::fs::canonicalize(dir).unwrap()
     }
 
+    fn client(last: u8) -> IpAddr {
+        IpAddr::from([192, 0, 2, last])
+    }
+
     #[tokio::test]
     async fn an_upload_never_replaces_a_file_and_a_cut_off_one_is_deleted() {
         let dir = folder();
         std::fs::write(dir.join("taken.bin"), b"keep").unwrap();
-        let uploads = Arc::new(Uploads::new(dir.clone(), 10, 15));
+        let uploads = Arc::new(Uploads::new(dir.clone(), 10, 15, UploadLimits::default()));
+        let me = client(7);
         assert_eq!(
-            uploads.claim("taken.bin", None).await.err(),
+            uploads.claim("taken.bin", None, me).await.err(),
             Some(UploadRefused::Exists)
         );
         assert_eq!(
-            uploads.claim("TAKEN.BIN", None).await.err(),
+            uploads.claim("TAKEN.BIN", None, me).await.err(),
             Some(UploadRefused::Exists)
         );
         assert_eq!(std::fs::read(dir.join("taken.bin")).unwrap(), b"keep");
 
-        let mut upload = uploads.claim("new.bin", None).await.unwrap();
+        let mut upload = uploads.claim("new.bin", None, me).await.unwrap();
         assert!(uploads.is_writing(&dir.join("new.bin")));
         upload.write(b"12345").await.unwrap();
         assert_eq!(
@@ -334,17 +414,17 @@ mod tests {
         assert!(!dir.join("new.bin").exists(), "a cut-off upload is deleted");
         assert_eq!(uploads.used(), 0);
 
-        let mut one = uploads.claim("one.bin", Some(8)).await.unwrap();
+        let mut one = uploads.claim("one.bin", Some(8), me).await.unwrap();
         one.write(b"12345678").await.unwrap();
         let done = one.finish("192.0.2.7").await.unwrap();
         assert_eq!(done.bytes, 8);
         assert_eq!(std::fs::read(dir.join("one.bin")).unwrap(), b"12345678");
-        // 8 of 15 taken: a declared 8 more doesn't fit, and neither do 8 more written.
+        // 8 of 15 arrived: a declared 8 more doesn't fit, and neither do 8 more written.
         assert_eq!(
-            uploads.claim("two.bin", Some(8)).await.err(),
+            uploads.claim("two.bin", Some(8), me).await.err(),
             Some(UploadRefused::TotalTooLarge(15))
         );
-        let mut two = uploads.claim("two.bin", None).await.unwrap();
+        let mut two = uploads.claim("two.bin", None, me).await.unwrap();
         two.write(b"1234567").await.unwrap();
         assert_eq!(two.write(b"8").await.err(), Some(UploadRefused::TotalTooLarge(15)));
         drop(two);
@@ -357,6 +437,58 @@ mod tests {
             let mark = std::fs::read_to_string(PathBuf::from(stream)).unwrap();
             assert!(mark.contains("ZoneId=3"), "{mark}");
         }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_declared_size_holds_no_quota_and_one_client_holds_few_slots() {
+        let dir = folder();
+        let uploads = Arc::new(Uploads::new(dir.clone(), 10, 10, UploadLimits::default()));
+        let (slow, other) = (client(7), client(8));
+        // Declares the whole quota, then sends a byte: only that byte counts.
+        let mut big = uploads.claim("big.bin", Some(10), slow).await.unwrap();
+        big.write(b"x").await.unwrap();
+        assert_eq!(uploads.used(), 1);
+        let mut fits = uploads.claim("fits.bin", Some(9), other).await.unwrap();
+        fits.write(b"123456789").await.unwrap();
+        fits.finish("192.0.2.8").await.unwrap();
+        // Two uploads under way per address, then refused; one ending frees its slot.
+        let second = uploads.claim("b.bin", None, slow).await.unwrap();
+        assert_eq!(
+            uploads.claim("c.bin", None, slow).await.err(),
+            Some(UploadRefused::ClientBusy(2))
+        );
+        assert!(
+            uploads.claim("d.bin", None, other).await.is_ok(),
+            "another address has its own"
+        );
+        drop(second);
+        assert!(uploads.claim("e.bin", None, slow).await.is_ok());
+        drop(big);
+        assert_eq!(uploads.used(), 9, "a deleted part gives its bytes back");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn an_upload_slower_than_the_minimum_rate_is_cut_off() {
+        let dir = folder();
+        let limits = UploadLimits {
+            per_client: 2,
+            window: Duration::from_millis(100),
+            min_bytes: 1000,
+        };
+        let uploads = Arc::new(Uploads::new(dir.clone(), MB, MB, limits));
+        let mut fast = uploads.claim("fast.bin", None, client(7)).await.unwrap();
+        fast.write(&[0u8; 2000]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        fast.write(&[0u8; 10]).await.unwrap();
+        let mut slow = uploads.claim("slow.bin", None, client(7)).await.unwrap();
+        slow.write(b"x").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(matches!(slow.write(b"x").await, Err(UploadRefused::TooSlow { .. })));
+        drop(slow);
+        assert!(!dir.join("slow.bin").exists());
+        drop(fast);
         let _ = std::fs::remove_dir_all(dir);
     }
 

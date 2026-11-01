@@ -2,7 +2,8 @@
 // time limit; with "Accept uploads" on, other computers can also send files into one empty folder. Starting is a
 // command on the bus (Medium serving, High with uploads), refused by the read-only lock; the server stops at its time
 // limit, on Stop, when another workspace opens, the vault locks, the window reloads or Remotely closes. While it runs
-// (and after it stopped) the tab lists the requests, newest first.
+// (and after it stopped) the tab lists the transfers (repeats summed) and the refused requests by client, the last
+// changed first. Paths never go back to the core: a dialog's choice is a token the core handed out.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CopyIcon, FileIcon, FolderIcon, PlayIcon, SquareIcon } from "lucide-react";
@@ -25,11 +26,14 @@ import {
   minutesText,
   outcomeText,
   requestText,
+  refusalText,
+  requestOf,
   requestTime,
+  rowsNote,
   sizeText,
-  specOf,
   startReason,
   TIME_LIMITS,
+  timesText,
   type FileServerForm,
 } from "@/lib/file-server";
 import { fileServerApi, type PickFor, type ServeAddress, type ServerStatus } from "@/lib/file-server-api";
@@ -112,11 +116,12 @@ export function FileServerTool({
     if (!form) return;
     setError(null);
     try {
-      const current = purpose === "uploads" ? form.uploadFolder : form.root;
-      const chosen = await fileServerApi.pick(purpose, current || null);
+      // The core keeps what the dialog chose; the form keeps only its token and the path to show.
+      const chosen = await fileServerApi.pick(purpose);
       if (!chosen) return;
-      if (purpose === "uploads") update({ uploadFolder: chosen });
-      else update({ root: chosen, folder: purpose === "folder" });
+      const picked = { path: chosen.path, choice: { kind: "picked", token: chosen.token } as const };
+      if (purpose === "uploads") update({ uploadFolder: picked });
+      else update({ root: picked, folder: purpose === "folder" });
     } catch (err) {
       setError(errorMessage(err));
     }
@@ -127,7 +132,7 @@ export function FileServerTool({
     setBusy(true);
     setError(null);
     try {
-      onSubmitted(await fileServerApi.start(specOf(form)));
+      onSubmitted(await fileServerApi.start(requestOf(form)));
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -200,7 +205,7 @@ function ServerForm({
       <div className="grid gap-3 sm:grid-cols-2">
         <Field label="Serve" htmlFor="fs-root" className="grid gap-1.5 sm:col-span-2">
           <div className="flex flex-wrap items-center gap-2">
-            <PathBox id="fs-root" path={form.root} folder={form.folder} empty="Nothing chosen yet" />
+            <PathBox id="fs-root" path={form.root?.path ?? ""} folder={form.folder} empty="Nothing chosen yet" />
             <Button variant="outline" size="sm" onClick={() => onPick("folder")}>
               <FolderIcon data-icon="inline-start" />
               Choose a folder…
@@ -268,7 +273,7 @@ function ServerForm({
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Upload folder" htmlFor="fs-upload-folder" className="grid gap-1.5 sm:col-span-2">
               <div className="flex flex-wrap items-center gap-2">
-                <PathBox id="fs-upload-folder" path={form.uploadFolder} folder empty="An empty folder" />
+                <PathBox id="fs-upload-folder" path={form.uploadFolder?.path ?? ""} folder empty="An empty folder" />
                 <Button variant="outline" size="sm" onClick={() => onPick("uploads")}>
                   <FolderIcon data-icon="inline-start" />
                   Choose a folder…
@@ -411,13 +416,14 @@ function RunningView({ status, busy, onStop }: { status: ServerStatus; busy: boo
 }
 
 function RequestList({ status }: { status: ServerStatus }) {
+  const note = rowsNote(status);
   return (
-    <div className="grid gap-2">
+    <div className="grid gap-3">
       <p className="text-sm">
         <span className="font-medium">{countsText(status)}</span>
         {!status.running && status.stopped && <span className="text-muted-foreground"> · {endText(status)}</span>}
       </p>
-      {status.requests.length > 0 && (
+      {status.transfers.length > 0 && (
         <Table>
           <TableHeader>
             <TableRow>
@@ -429,21 +435,23 @@ function RequestList({ status }: { status: ServerStatus }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {status.requests.map((r, i) => {
+            {status.transfers.map((r, i) => {
               const { what, path } = requestText(r);
+              const times = timesText(r);
               return (
-                <TableRow key={`${r.at}-${r.port}-${i}`}>
+                <TableRow key={`${r.firstAt}-${r.ip}-${r.path}-${i}`}>
                   <TableCell className="text-muted-foreground tabular-nums">{requestTime(r)}</TableCell>
                   <TableCell className="font-mono text-xs">
-                    <span data-mask="ip">{r.ip}</span>
+                    {r.ip ? <span data-mask="ip">{r.ip}</span> : <span className="text-muted-foreground">Many</span>}
                   </TableCell>
                   <TableCell className="max-w-80 whitespace-normal">
                     <span className="text-muted-foreground">{what} </span>
                     <span className="font-mono text-xs break-all">{path}</span>
+                    {times && <span className="text-muted-foreground"> {times}</span>}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{r.bytes > 0 ? sizeText(r.bytes) : ""}</TableCell>
                   <TableCell className="max-w-72 whitespace-normal">
-                    <span className={cn(r.outcome === "refused" || r.outcome === "failed" ? "text-destructive" : "")}>
+                    <span className={cn(r.outcome === "failed" || r.outcome === "refused" ? "text-destructive" : "")}>
                       {outcomeText(r.outcome)}
                     </span>
                     {r.detail && <span className="text-muted-foreground">: {r.detail}</span>}
@@ -454,11 +462,22 @@ function RequestList({ status }: { status: ServerStatus }) {
           </TableBody>
         </Table>
       )}
-      {status.counts.requests > status.requests.length && (
-        <p className="text-xs text-muted-foreground">
-          Only the last {status.requests.length} are shown; the job in Activity keeps the last 500.
-        </p>
+      {status.refusals.length > 0 && (
+        <div className="grid gap-1">
+          <p className="text-sm font-medium">Refused, by client</p>
+          <ul className="grid gap-1 text-sm">
+            {status.refusals.map((r) => (
+              <li key={`${r.protocol}-${r.ip}`} className="flex min-w-0 gap-2">
+                <span className="shrink-0 font-mono text-xs leading-5" data-mask="ip">
+                  {r.ip}
+                </span>
+                <span className="min-w-0 break-all text-muted-foreground">{refusalText(r)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
+      {note && <p className="text-xs text-muted-foreground">{note}</p>}
     </div>
   );
 }

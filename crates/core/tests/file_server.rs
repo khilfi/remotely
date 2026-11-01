@@ -19,7 +19,8 @@ use remotely_core::jobs::JobStatus;
 use remotely_core::policy::Tier;
 use remotely_core::presentation::Presentation;
 use remotely_core::toolbox::file_server::{
-    FileServerEvent, FileServerSpec, FileServerTuning, Outcome, ServerStatus, UploadSpec,
+    FileServerEvent, FileServerRequest, FileServerSpec, FileServerTuning, Outcome, PathChoice, PickFor, ServerStatus,
+    UploadLimits, UploadRequest, UploadSpec,
 };
 use remotely_core::workspaces::WorkspaceInput;
 use remotely_core::Core;
@@ -104,6 +105,42 @@ fn with_uploads(spec: FileServerSpec, folder: &Path, max_file_mb: u64, max_total
     }
 }
 
+/// What the window sends for `spec`: its paths picked as the shell's dialogs pick them (tokens), never as paths.
+async fn request_for(core: &Core, spec: &FileServerSpec) -> remotely_core::Result<FileServerRequest> {
+    let ctx = core.ctx();
+    let root = PathBuf::from(&spec.root);
+    let purpose = if root.is_file() { PickFor::File } else { PickFor::Folder };
+    let root = core.file_server.remember_pick(&ctx, purpose, root).await?;
+    let uploads = match &spec.uploads {
+        Some(u) => {
+            let folder = core
+                .file_server
+                .remember_pick(&ctx, PickFor::Uploads, PathBuf::from(&u.folder))
+                .await?;
+            Some(UploadRequest {
+                folder: PathChoice::Picked { token: folder.token },
+                max_file_mb: u.max_file_mb,
+                max_total_mb: u.max_total_mb,
+            })
+        }
+        None => None,
+    };
+    Ok(FileServerRequest {
+        root: PathChoice::Picked { token: root.token },
+        address: spec.address,
+        tftp_port: spec.tftp_port,
+        http_port: spec.http_port,
+        minutes: spec.minutes,
+        uploads,
+    })
+}
+
+/// Submits `spec` as the window would.
+async fn submit(core: &Core, spec: FileServerSpec) -> remotely_core::Result<SubmitOutcome> {
+    let request = request_for(core, &spec).await?;
+    core.file_server.submit(&core.ctx(), request).await
+}
+
 /// A running server.
 struct Running {
     job: Uuid,
@@ -113,8 +150,14 @@ struct Running {
 
 /// Submits, approves what the tier asks, and waits until the server listens.
 async fn start(core: &Core, spec: FileServerSpec) -> Running {
+    let request = request_for(core, &spec).await.unwrap();
+    start_request(core, request).await
+}
+
+/// [`start`] for a request as the window sends it.
+async fn start_request(core: &Core, request: FileServerRequest) -> Running {
     let mut events = core.file_server.subscribe();
-    let outcome = core.file_server.submit(&core.ctx(), spec).await.unwrap();
+    let outcome = core.file_server.submit(&core.ctx(), request).await.unwrap();
     let job = match outcome {
         SubmitOutcome::NeedsApproval { request } => {
             let high = request.tier >= Tier::High;
@@ -328,26 +371,43 @@ async fn read_all(stream: &mut TcpStream) -> Vec<u8> {
     raw
 }
 
+/// The request with `Host: <server>` after its first line, as any client puts it, unless it names a Host itself.
+fn with_host(server: SocketAddr, request: &[u8]) -> Vec<u8> {
+    let head_end = request
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .unwrap_or(request.len());
+    let head = String::from_utf8_lossy(&request[..head_end]).to_lowercase();
+    let Some(line_end) = request.windows(2).position(|w| w == b"\r\n") else {
+        return request.to_vec();
+    };
+    if head.contains("\r\nhost:") {
+        return request.to_vec();
+    }
+    let mut out = request[..line_end + 2].to_vec();
+    out.extend_from_slice(format!("Host: {server}\r\n").as_bytes());
+    out.extend_from_slice(&request[line_end + 2..]);
+    out
+}
+
+/// Sends a request (with the server's Host) and reads the whole answer.
 async fn http_raw(server: SocketAddr, request: &[u8]) -> Response {
+    http_exact(server, &with_host(server, request)).await
+}
+
+/// Sends a request exactly as given.
+async fn http_exact(server: SocketAddr, request: &[u8]) -> Response {
     let mut stream = TcpStream::connect(server).await.unwrap();
     stream.write_all(request).await.unwrap();
     parse_response(&read_all(&mut stream).await)
 }
 
 async fn get(server: SocketAddr, target: &str) -> Response {
-    http_raw(
-        server,
-        format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes(),
-    )
-    .await
+    http_raw(server, format!("GET {target} HTTP/1.1\r\n\r\n").as_bytes()).await
 }
 
 async fn put(server: SocketAddr, target: &str, body: &[u8]) -> Response {
-    let mut request = format!(
-        "PUT {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n",
-        body.len()
-    )
-    .into_bytes();
+    let mut request = format!("PUT {target} HTTP/1.1\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
     request.extend_from_slice(body);
     http_raw(server, &request).await
 }
@@ -404,7 +464,7 @@ async fn a_folder_is_served_over_tftp_and_http_and_every_request_is_listed() {
         .header("content-disposition")
         .unwrap()
         .starts_with("attachment; filename=\"fw.bin\""));
-    let head = http_raw(server.http, b"HEAD /sub/b.txt HTTP/1.1\r\nHost: x\r\n\r\n").await;
+    let head = http_raw(server.http, b"HEAD /sub/b.txt HTTP/1.1\r\n\r\n").await;
     assert_eq!(head.status, 200);
     assert_eq!(head.header("content-length").as_deref(), Some("14"));
     assert!(head.body.is_empty());
@@ -436,9 +496,9 @@ async fn a_folder_is_served_over_tftp_and_http_and_every_request_is_listed() {
     let seen = logged(&core, 16).await;
     assert_eq!(seen.counts.sent, 10);
     assert!(seen.urls.iter().any(|u| u.starts_with("http://127.0.0.1:")));
-    assert!(seen.requests.iter().all(|r| r.ip == "127.0.0.1"));
+    assert!(seen.transfers.iter().all(|r| r.ip == "127.0.0.1"));
     assert!(seen
-        .requests
+        .transfers
         .iter()
         .any(|r| r.method == "read" && r.path == "fw.bin" && r.bytes == 5000 && r.outcome == Outcome::Sent));
 
@@ -577,7 +637,15 @@ async fn every_traversal_form_is_refused_on_both_protocols() {
     }
     let seen = logged(&core, (http_targets.len() + tftp_names.len()) as u64).await;
     assert_eq!(seen.counts.sent, 0, "nothing was served");
-    assert!(seen.requests.iter().all(|r| r.outcome == Outcome::Refused));
+    assert_eq!(seen.transfer_rows, 0, "no request reached a file");
+    // Folded: one row per client and protocol.
+    assert_eq!(seen.refusal_rows, 2);
+    assert!(seen
+        .refusals
+        .iter()
+        .all(|r| r.outcome == Outcome::Refused && r.ip == "127.0.0.1"));
+    let times: u64 = seen.refusals.iter().map(|r| r.times).sum();
+    assert_eq!(times, seen.counts.requests);
     stop(&core, &server).await;
 }
 
@@ -660,7 +728,10 @@ async fn uploads_go_into_the_empty_folder_capped_marked_and_never_replace_a_file
     assert_eq!(created.status, 201, "{:?}", String::from_utf8_lossy(&created.body));
     let mut stream = TcpStream::connect(server.http).await.unwrap();
     stream
-        .write_all(b"PUT /with-expect.bin HTTP/1.1\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n")
+        .write_all(&with_host(
+            server.http,
+            b"PUT /with-expect.bin HTTP/1.1\r\nContent-Length: 4\r\nExpect: 100-continue\r\n\r\n",
+        ))
         .await
         .unwrap();
     let mut interim = [0u8; 25];
@@ -737,7 +808,10 @@ async fn uploads_go_into_the_empty_folder_capped_marked_and_never_replace_a_file
     // A body that stops short: the part is deleted.
     let mut short = TcpStream::connect(server.http).await.unwrap();
     short
-        .write_all(b"PUT /short.bin HTTP/1.1\r\nContent-Length: 1000\r\n\r\nonly a bit")
+        .write_all(&with_host(
+            server.http,
+            b"PUT /short.bin HTTP/1.1\r\nContent-Length: 1000\r\n\r\nonly a bit",
+        ))
         .await
         .unwrap();
     short.shutdown().await.unwrap();
@@ -795,38 +869,28 @@ async fn the_upload_folder_must_be_empty_outside_git_and_on_this_pc() {
     let ctx = core.ctx();
     let not_empty = tree.uploads();
     std::fs::write(not_empty.join("there.bin"), b"x").unwrap();
-    let err = core
-        .file_server
-        .submit(&ctx, with_uploads(spec(&tree.root), &not_empty, 1, 1))
+    let err = submit(&core, with_uploads(spec(&tree.root), &not_empty, 1, 1))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("isn't empty"), "{err}");
     let repo = tree.parent.join("repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir_all(repo.join("in")).unwrap();
-    let err = core
-        .file_server
-        .submit(&ctx, with_uploads(spec(&tree.root), &repo.join("in"), 1, 1))
+    let err = submit(&core, with_uploads(spec(&tree.root), &repo.join("in"), 1, 1))
         .await
         .unwrap_err();
     assert!(err.to_string().contains("inside a Git repository"), "{err}");
-    let err = core
-        .file_server
-        .submit(&ctx, with_uploads(spec(&tree.root), &tree.root.join("missing"), 1, 1))
+    let err = submit(&core, with_uploads(spec(&tree.root), &tree.root.join("missing"), 1, 1))
         .await
         .unwrap_err();
-    assert!(err.to_string().contains("can't take uploads"), "{err}");
+    assert!(err.to_string().contains("can't be used"), "{err}");
     // A file or folder that isn't there, an address this PC doesn't have, and every address are refused.
-    assert!(core
-        .file_server
-        .submit(&ctx, spec(&tree.root.join("gone")))
-        .await
-        .is_err());
+    assert!(submit(&core, spec(&tree.root.join("gone"))).await.is_err());
     let elsewhere = FileServerSpec {
         address: "192.0.2.10".parse().unwrap(),
         ..spec(&tree.root)
     };
-    let err = core.file_server.submit(&ctx, elsewhere).await.unwrap_err();
+    let err = submit(&core, elsewhere).await.unwrap_err();
     assert!(
         err.to_string().contains("no adapter with the address 192.0.2.10"),
         "{err}"
@@ -835,10 +899,161 @@ async fn the_upload_folder_must_be_empty_outside_git_and_on_this_pc() {
         address: "0.0.0.0".parse().unwrap(),
         ..spec(&tree.root)
     };
-    assert!(core.file_server.submit(&ctx, all).await.is_err());
+    assert!(submit(&core, all).await.is_err());
     // Nothing ran, so nothing was kept as the last choices.
     assert!(core.file_server.options(&ctx).await.unwrap().last.is_none());
     assert!(core.jobs.open_jobs() == 0);
+}
+
+#[tokio::test]
+async fn paths_come_only_from_the_dialogs_or_the_last_choices_and_never_from_the_window() {
+    let tree = Tree::new();
+    let core = core().await;
+    let ctx = core.ctx();
+    let request = |root: PathChoice| FileServerRequest {
+        root,
+        address: "127.0.0.1".parse().unwrap(),
+        tftp_port: Some(0),
+        http_port: Some(0),
+        minutes: 30,
+        uploads: None,
+    };
+    // A token nobody handed out, one for another purpose, one from another workspace: refused.
+    let made_up = core
+        .file_server
+        .submit(&ctx, request(PathChoice::Picked { token: Uuid::new_v4() }))
+        .await
+        .unwrap_err();
+    assert!(
+        made_up.to_string().contains("Choose the file or folder again"),
+        "{made_up}"
+    );
+    let uploads_pick = core
+        .file_server
+        .remember_pick(&ctx, PickFor::Uploads, tree.uploads())
+        .await
+        .unwrap();
+    assert!(core
+        .file_server
+        .submit(
+            &ctx,
+            request(PathChoice::Picked {
+                token: uploads_pick.token
+            })
+        )
+        .await
+        .is_err());
+    let elsewhere = remotely_core::domain::Context {
+        workspace_id: remotely_core::domain::WorkspaceId(Uuid::new_v4()),
+        user_id: ctx.user_id,
+    };
+    let theirs = core
+        .file_server
+        .remember_pick(&elsewhere, PickFor::Folder, tree.root.clone())
+        .await
+        .unwrap();
+    assert!(core
+        .file_server
+        .submit(&ctx, request(PathChoice::Picked { token: theirs.token }))
+        .await
+        .is_err());
+    // A file picked as a folder, and the other way round, are refused at the pick.
+    assert!(core
+        .file_server
+        .remember_pick(&ctx, PickFor::Folder, tree.root.join("fw.bin"))
+        .await
+        .is_err());
+    assert!(core
+        .file_server
+        .remember_pick(&ctx, PickFor::File, tree.root.clone())
+        .await
+        .is_err());
+    // No last choice yet; then the last choice is used, and checked again like a new one.
+    assert!(core.file_server.submit(&ctx, request(PathChoice::Last)).await.is_err());
+    let server = start(&core, spec(&tree.root)).await;
+    stop(&core, &server).await;
+    let again = start_request(&core, request(PathChoice::Last)).await;
+    assert!(status(&core).served.to_lowercase().ends_with("served"));
+    stop(&core, &again).await;
+    std::fs::remove_dir_all(&tree.root).unwrap();
+    let gone = core
+        .file_server
+        .submit(&ctx, request(PathChoice::Last))
+        .await
+        .unwrap_err();
+    assert!(gone.to_string().contains("can't be served"), "{gone}");
+}
+
+#[tokio::test]
+async fn remotelys_data_a_drive_root_and_the_profile_folder_are_never_served() {
+    let tree = Tree::new();
+    let core = core().await;
+    let ctx = core.ctx();
+    // As the core does for its database's folder at start.
+    let data = tree.parent.join("data");
+    std::fs::create_dir_all(data.join("logs")).unwrap();
+    std::fs::write(data.join("remotely.db"), b"the database").unwrap();
+    core.file_server.runner().protect(&data);
+    for (purpose, path) in [
+        (PickFor::Folder, data.clone()),
+        (PickFor::Folder, data.join("logs")),
+        (PickFor::File, data.join("remotely.db")),
+        (PickFor::Uploads, data.join("logs")),
+        // Holding it: the data folder would be served inside it.
+        (PickFor::Folder, tree.parent.clone()),
+    ] {
+        let err = core
+            .file_server
+            .remember_pick(&ctx, purpose, path.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Remotely's own data"),
+            "{}: {err}",
+            path.display()
+        );
+    }
+    // A folder beside it is fine.
+    assert!(core
+        .file_server
+        .remember_pick(&ctx, PickFor::Folder, tree.root.clone())
+        .await
+        .is_ok());
+    // A whole drive, and the user's own folder.
+    let drive = std::path::absolute(&tree.root)
+        .unwrap()
+        .ancestors()
+        .last()
+        .unwrap()
+        .to_path_buf();
+    let err = core
+        .file_server
+        .remember_pick(&ctx, PickFor::Folder, drive)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("whole drive"), "{err}");
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        let err = core
+            .file_server
+            .remember_pick(&ctx, PickFor::Folder, PathBuf::from(profile))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("whole user folder"), "{err}");
+    }
+    // A last choice that became protected is refused when it is used again.
+    let server = start(&core, spec(&tree.root)).await;
+    stop(&core, &server).await;
+    core.file_server.runner().protect(&tree.root);
+    let request = FileServerRequest {
+        root: PathChoice::Last,
+        address: "127.0.0.1".parse().unwrap(),
+        tftp_port: Some(0),
+        http_port: None,
+        minutes: 30,
+        uploads: None,
+    };
+    let err = core.file_server.submit(&ctx, request).await.unwrap_err();
+    assert!(err.to_string().contains("Remotely's own data"), "{err}");
 }
 
 // ---- Bounds ----------------------------------------------------------------------------------------------------------
@@ -851,7 +1066,9 @@ async fn slow_and_flooding_http_clients_are_bounded() {
 
     // Slowloris: a head that never ends gets 408 once its time is up.
     let mut slow = TcpStream::connect(server.http).await.unwrap();
-    slow.write_all(b"GET /fw.bin HTTP/1.1\r\nHost: x\r\n").await.unwrap();
+    slow.write_all(b"GET /fw.bin HTTP/1.1\r\nX-Slow: yes\r\n")
+        .await
+        .unwrap();
     let started = std::time::Instant::now();
     let answer = parse_response(&read_all(&mut slow).await);
     assert_eq!(answer.status, 408);
@@ -956,7 +1173,7 @@ async fn tftp_retransmits_only_on_timeout_a_bounded_number_of_times() {
 
     let seen = logged(&core, 5).await;
     assert!(seen
-        .requests
+        .transfers
         .iter()
         .any(|r| r.outcome == Outcome::Failed && r.detail.contains("stopped answering")));
     stop(&core, &server).await;
@@ -1061,7 +1278,7 @@ async fn cancel_stops_it_mid_transfer_and_deletes_the_half_upload() {
     let seen = status(&core);
     assert_eq!(seen.stopped.as_deref(), Some("cancelled"));
     assert!(seen
-        .requests
+        .transfers
         .iter()
         .any(|r| r.path == "half.bin" && r.detail.contains("cut off: the server stopped")));
 }
@@ -1126,7 +1343,7 @@ async fn a_server_still_in_its_countdown_never_starts_after_a_switch_or_a_reload
 
     // A workspace switch cancels it in its countdown, so it never serves in a workspace nobody shows.
     let mut jobs = core.jobs.subscribe();
-    let outcome = core.file_server.submit(&core.ctx(), spec.clone()).await.unwrap();
+    let outcome = submit(&core, spec.clone()).await.unwrap();
     let job = approve(&core, outcome).await.unwrap();
     let other = core
         .workspaces
@@ -1142,7 +1359,7 @@ async fn a_server_still_in_its_countdown_never_starts_after_a_switch_or_a_reload
     assert!(core.file_server.runner().running().is_none());
 
     // So does a window reload.
-    let outcome = core.file_server.submit(&core.ctx(), spec).await.unwrap();
+    let outcome = submit(&core, spec).await.unwrap();
     let job = approve(&core, outcome).await.unwrap();
     let shown = core.ui_snapshot();
     assert_eq!(shown.file_servers, [job]);
@@ -1193,7 +1410,7 @@ async fn one_at_a_time_never_while_presenting_and_the_last_choices_are_kept_per_
     let ctx = core.ctx();
     let chosen = spec(&tree.root);
     let server = start(&core, chosen.clone()).await;
-    let err = core.file_server.submit(&ctx, spec(&tree.root)).await.unwrap_err();
+    let err = submit(&core, spec(&tree.root)).await.unwrap_err();
     assert!(err.to_string().contains("running already"), "{err}");
     let options = core.file_server.options(&ctx).await.unwrap();
     assert_eq!(options.last, Some(chosen));
@@ -1216,6 +1433,160 @@ async fn one_at_a_time_never_while_presenting_and_the_last_choices_are_kept_per_
         })
         .await
         .unwrap();
-    let err = core.file_server.submit(&ctx, spec(&tree.root)).await.unwrap_err();
+    let err = submit(&core, spec(&tree.root)).await.unwrap_err();
     assert!(err.to_string().to_lowercase().contains("read-only"), "{err}");
+}
+
+// ---- Review fixes: rebinding, the log, Explorer's files, the upload quota ---------------------------------------------
+
+#[tokio::test]
+async fn a_web_page_reaching_the_server_by_a_name_of_its_own_is_refused() {
+    let tree = Tree::new();
+    let uploads = tree.uploads();
+    let core = core().await;
+    let server = start(&core, with_uploads(spec(&tree.root), &uploads, 1, 1)).await;
+    let port = server.http.port();
+    // DNS rebinding: the page's own name (or anything but this address and port) in Host.
+    for host in [
+        format!("attacker.example:{port}"),
+        "attacker.example".to_owned(),
+        format!("localhost:{port}"),
+        "127.0.0.1".to_owned(),
+        format!("127.0.0.1:{}", port.wrapping_add(1)),
+    ] {
+        let file = http_exact(
+            server.http,
+            format!("GET /fw.bin HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes(),
+        )
+        .await;
+        assert_eq!(file.status, 421, "{host}");
+        assert_ne!(file.body, pattern(5000));
+        let listing = http_exact(
+            server.http,
+            format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes(),
+        )
+        .await;
+        assert_eq!(listing.status, 421, "{host}");
+        assert!(!String::from_utf8_lossy(&listing.body).contains("fw.bin"));
+        let upload = http_exact(
+            server.http,
+            format!("PUT /evil.bin HTTP/1.1\r\nHost: {host}\r\nContent-Length: 4\r\n\r\nevil").as_bytes(),
+        )
+        .await;
+        assert_eq!(upload.status, 421, "{host}");
+        assert!(!uploads.join("evil.bin").exists());
+    }
+    // HTTP/1.1 without Host is refused; HTTP/1.0 without one (U-Boot's wget) and the right Host are served.
+    assert_eq!(
+        http_exact(server.http, b"GET /fw.bin HTTP/1.1\r\n\r\n").await.status,
+        400
+    );
+    let old = http_exact(server.http, b"GET /fw.bin HTTP/1.0\r\n\r\n").await;
+    assert_eq!((old.status, old.body.len()), (200, 5000));
+    let right = http_exact(
+        server.http,
+        format!("GET /fw.bin HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").as_bytes(),
+    )
+    .await;
+    assert_eq!(right.body, pattern(5000));
+    let seen = logged(&core, 18).await;
+    // The 15 with another Host and the one without: refused, folded into this client's row.
+    assert_eq!(seen.counts.refused, 16);
+    assert_eq!((seen.refusal_rows, seen.refusals[0].times), (1, 16));
+    assert_eq!(seen.counts.sent, 2);
+    stop(&core, &server).await;
+}
+
+#[tokio::test]
+async fn a_flood_of_bogus_requests_never_hides_a_transfer() {
+    let tree = Tree::new();
+    let core = core().await;
+    let server = start(&core, spec(&tree.root)).await;
+    assert_eq!(tftp_get(server.tftp, b"fw.bin", &[]).await.unwrap(), pattern(5000));
+    // More bogus datagrams than the old log kept, from the same socket a spoofer would use.
+    let flood = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    for i in 0..700u32 {
+        let packet = if i % 2 == 0 {
+            request(1, b"../secret.txt", &[])
+        } else {
+            vec![0, 1, b'x']
+        };
+        flood.send_to(&packet, server.tftp).await.unwrap();
+        if i % 20 == 0 {
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    }
+    let seen = logged(&core, 551).await;
+    assert!(seen
+        .transfers
+        .iter()
+        .any(|r| r.path == "fw.bin" && r.outcome == Outcome::Sent && r.bytes == 5000));
+    assert_eq!(seen.transfer_rows, 1);
+    assert_eq!(seen.refusal_rows, 1, "one client's refusals are one row");
+    assert!(seen.refusals[0].times >= 550);
+    assert_eq!(stop(&core, &server).await, JobStatus::Succeeded);
+    let output = core.store.job_targets(&core.ctx(), server.job).await.unwrap()[0]
+        .output
+        .clone()
+        .unwrap();
+    assert!(output.contains("TFTP read 127.0.0.1:"), "{output}");
+    assert!(output.contains("fw.bin sent 5 KB"), "{output}");
+    assert!(output.contains("127.0.0.1 TFTP:"), "{output}");
+}
+
+#[tokio::test]
+async fn one_client_holds_neither_the_quota_nor_every_slot_and_explorer_files_never_arrive() {
+    let tree = Tree::new();
+    let uploads = tree.uploads();
+    let core = core().await;
+    core.file_server.runner().set_tuning(FileServerTuning {
+        uploads: UploadLimits {
+            per_client: 2,
+            window: Duration::from_millis(400),
+            min_bytes: 64 * 1024,
+        },
+        ..fast()
+    });
+    let server = start(&core, with_uploads(spec(&tree.root), &uploads, 2, 2)).await;
+    let head = |name: &str, length: u64| {
+        with_host(
+            server.http,
+            format!("PUT /{name} HTTP/1.1\r\nContent-Length: {length}\r\n\r\nx").as_bytes(),
+        )
+    };
+    // Declares nearly all of the 2 MB, sends a byte: only that byte counts, so another upload fits beside it.
+    let mut slow = TcpStream::connect(server.http).await.unwrap();
+    slow.write_all(&head("big.bin", 2_000_000)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let fits = put(server.http, "/fits.bin", &pattern(1_500_000)).await;
+    assert_eq!(fits.status, 201, "{:?}", String::from_utf8_lossy(&fits.body));
+    // Two under way from one address: a third is refused until one ends.
+    let mut second = TcpStream::connect(server.http).await.unwrap();
+    second.write_all(&head("second.bin", 10)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(put(server.http, "/third.bin", b"x").await.status, 429);
+    // Under 64 KB in 400 ms: cut off at its next bytes, and its part deleted.
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    slow.write_all(b"y").await.unwrap();
+    let cut = parse_response(&read_all(&mut slow).await);
+    assert_eq!(cut.status, 408, "{:?}", String::from_utf8_lossy(&cut.body));
+    assert!(!uploads.join("big.bin").exists());
+    drop(second);
+    // Files Explorer acts on by itself (a .url's icon on a share would send the user's sign-in there).
+    for name in ["readme.url", "Desktop.ini", "x.lnk", "lib.library-ms"] {
+        assert_eq!(
+            put(server.http, &format!("/{name}"), b"[x]").await.status,
+            403,
+            "{name}"
+        );
+        assert_eq!(
+            tftp_put(server.tftp, name.as_bytes(), b"[x]", &[]).await.unwrap_err().0,
+            2,
+            "{name}"
+        );
+        assert!(!uploads.join(name).exists());
+    }
+    stop(&core, &server).await;
+    assert!(uploads.join("fits.bin").exists());
+    assert!(!uploads.join("second.bin").exists());
 }

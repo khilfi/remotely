@@ -1,8 +1,18 @@
-//! FD-09: the file server's request log: every request (who asked, for what, how many bytes, what came of it), the
-//! last [`MAX_LOG_ENTRIES`] kept in memory with totals of all of them. The window reads it while the server runs; the
-//! job keeps it as its output when the server stops, so Activity lists every request kept.
+//! FD-09: the file server's request log. Kept so that nothing a client does can push a file it fetched or sent out of
+//! the record:
+//!
+//! * **Transfers** (a request that reached a file, a folder listing or an upload: sent, received, or cut off on the
+//!   way) are never dropped. Repeats of the same one (protocol, method, path, client and result) are summed into one
+//!   row with a count and the bytes of all of them; past [`MAX_TRANSFER_ROWS`] rows, new ones are summed per file.
+//! * **Refusals** (a path refused, a file not there, a malformed or slow request, a busy server) are folded into one
+//!   row per client and protocol, with a count and the last path asked for; past [`MAX_REFUSAL_ROWS`] clients, the rest
+//!   are only counted. So a flood of bogus datagrams (whose source TFTP can't check) costs a counter, not the record.
+//! * Totals of everything.
+//!
+//! The window reads it while the server runs; the job keeps it whole as its output when the server stops (sized so
+//! every transfer row fits, [`MAX_JOB_OUTPUT`]).
 
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 
 use serde::Serialize;
@@ -11,14 +21,21 @@ use super::uploads::size_text;
 use crate::export::redact_secrets;
 use crate::untrusted::is_format_char;
 
-/// The requests kept; older ones are counted, not kept.
-pub const MAX_LOG_ENTRIES: usize = 500;
-/// The requests a status shows, newest first.
-pub const STATUS_ENTRIES: usize = 200;
-/// The longest path a log entry keeps, in characters.
+/// Transfer rows kept with their client; past this, new ones are summed per file (any client).
+pub const MAX_TRANSFER_ROWS: usize = 10_000;
+/// Clients whose refusals get a row of their own; past this, refusals are only counted.
+pub const MAX_REFUSAL_ROWS: usize = 1000;
+/// The rows of each kind a status shows, newest first.
+pub const STATUS_ROWS: usize = 200;
+/// Refusal rows the job's output lists (the most frequent first); the rest are counted.
+const JOB_REFUSAL_ROWS: usize = 200;
+/// The job's output: every transfer row (at most [`MAX_TRANSFER_ROWS`] and the per-file sums, each line well under
+/// 700 bytes) and the refusal rows fit.
+pub const MAX_JOB_OUTPUT: usize = 8 * 1024 * 1024;
+/// The longest path or detail a row keeps, in characters.
 const MAX_LOGGED_PATH: usize = 200;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Protocol {
     Tftp,
@@ -35,7 +52,7 @@ impl Protocol {
 }
 
 /// What came of a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Outcome {
     /// A file or a listing went out whole.
@@ -48,14 +65,12 @@ pub enum Outcome {
     Failed,
 }
 
-/// One request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// One request, as it ends.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestEntry {
     /// When it came (RFC 3339, UTC).
     pub at: String,
     pub protocol: Protocol,
-    /// The client's address (FD-03 masks it as an IP).
     pub ip: String,
     pub port: u16,
     /// `read` or `write` for TFTP, the method for HTTP.
@@ -67,9 +82,38 @@ pub struct RequestEntry {
     pub outcome: Outcome,
     /// Why, for a refusal or a failure; what, for the rest ("a listing of 12 entries").
     pub detail: String,
+    /// It reached a file, a listing or an upload (a transfer row), rather than being refused before.
+    pub transfer: bool,
 }
 
-/// Totals over every request, kept or not.
+/// A row of the log: one request, or repeats of it summed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogRow {
+    pub first_at: String,
+    /// The last one's time.
+    pub at: String,
+    pub protocol: Protocol,
+    /// The client's address (FD-03 masks it as an IP); empty for a row summed over clients.
+    pub ip: String,
+    /// The last one's port.
+    pub port: u16,
+    pub method: String,
+    /// The path (for a refusal row: the last one asked for).
+    pub path: String,
+    /// Bytes of all of them.
+    pub bytes: u64,
+    pub outcome: Outcome,
+    /// The last one's detail.
+    pub detail: String,
+    /// How many requests the row stands for.
+    pub times: u64,
+    /// When the row last changed, for "newest first".
+    #[serde(skip)]
+    touched: u64,
+}
+
+/// Totals over every request.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Counts {
@@ -80,20 +124,36 @@ pub struct Counts {
     pub failed: u64,
     pub bytes_sent: u64,
     pub bytes_received: u64,
-    /// Requests no longer kept in the log (past [`MAX_LOG_ENTRIES`]).
-    pub dropped: u64,
+    /// Requests refused from clients past [`MAX_REFUSAL_ROWS`]: counted only.
+    pub refusals_unlisted: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TransferKey {
+    protocol: Protocol,
+    method: String,
+    path: String,
+    /// Empty: summed over clients (past [`MAX_TRANSFER_ROWS`]).
+    ip: String,
+    outcome: Outcome,
 }
 
 #[derive(Debug, Default)]
 pub struct RequestLog {
-    entries: VecDeque<RequestEntry>,
+    transfers: Vec<LogRow>,
+    transfer_keys: HashMap<TransferKey, usize>,
+    refusals: Vec<LogRow>,
+    refusal_keys: HashMap<(Protocol, String), usize>,
     counts: Counts,
+    clock: u64,
 }
 
 impl RequestLog {
     pub fn push(&mut self, entry: RequestEntry) {
+        self.clock += 1;
         let c = &mut self.counts;
         c.requests += 1;
+        let upload = entry.method == "write" || entry.method == "PUT";
         match entry.outcome {
             Outcome::Sent => {
                 c.sent += 1;
@@ -107,28 +167,122 @@ impl RequestLog {
             Outcome::Failed => {
                 c.failed += 1;
                 // A download cut off still sent what it sent; an upload cut off was deleted.
-                if entry.method != "write" && entry.method != "PUT" {
+                if !upload {
                     c.bytes_sent = c.bytes_sent.saturating_add(entry.bytes);
                 }
             }
         }
-        if self.entries.len() >= MAX_LOG_ENTRIES {
-            self.entries.pop_front();
-            c.dropped += 1;
+        let transfer = entry.transfer || matches!(entry.outcome, Outcome::Sent | Outcome::Received);
+        if transfer {
+            self.push_transfer(entry);
+        } else {
+            self.push_refusal(entry);
         }
-        self.entries.push_back(entry);
+    }
+
+    fn push_transfer(&mut self, entry: RequestEntry) {
+        let mut key = TransferKey {
+            protocol: entry.protocol,
+            method: entry.method.clone(),
+            path: entry.path.clone(),
+            ip: entry.ip.clone(),
+            outcome: entry.outcome,
+        };
+        // A new row past the cap is summed per file instead.
+        if !self.transfer_keys.contains_key(&key) && self.transfers.len() >= MAX_TRANSFER_ROWS {
+            key.ip = String::new();
+        }
+        match self.transfer_keys.get(&key) {
+            Some(&i) => {
+                let row = &mut self.transfers[i];
+                row.at = entry.at;
+                row.port = entry.port;
+                row.bytes = row.bytes.saturating_add(entry.bytes);
+                row.detail = entry.detail;
+                row.times += 1;
+                row.touched = self.clock;
+            }
+            None => {
+                self.transfer_keys.insert(key.clone(), self.transfers.len());
+                self.transfers.push(LogRow {
+                    first_at: entry.at.clone(),
+                    at: entry.at,
+                    protocol: entry.protocol,
+                    ip: key.ip,
+                    port: entry.port,
+                    method: entry.method,
+                    path: entry.path,
+                    bytes: entry.bytes,
+                    outcome: entry.outcome,
+                    detail: entry.detail,
+                    times: 1,
+                    touched: self.clock,
+                });
+            }
+        }
+    }
+
+    fn push_refusal(&mut self, entry: RequestEntry) {
+        let key = (entry.protocol, entry.ip.clone());
+        match self.refusal_keys.get(&key) {
+            Some(&i) => {
+                let row = &mut self.refusals[i];
+                row.at = entry.at;
+                row.port = entry.port;
+                row.method = entry.method;
+                row.path = entry.path;
+                row.detail = entry.detail;
+                row.outcome = entry.outcome;
+                row.times += 1;
+                row.touched = self.clock;
+            }
+            None if self.refusals.len() >= MAX_REFUSAL_ROWS => {
+                self.counts.refusals_unlisted += 1;
+            }
+            None => {
+                self.refusal_keys.insert(key, self.refusals.len());
+                self.refusals.push(LogRow {
+                    first_at: entry.at.clone(),
+                    at: entry.at,
+                    protocol: entry.protocol,
+                    ip: entry.ip,
+                    port: entry.port,
+                    method: entry.method,
+                    path: entry.path,
+                    bytes: 0,
+                    outcome: entry.outcome,
+                    detail: entry.detail,
+                    times: 1,
+                    touched: self.clock,
+                });
+            }
+        }
     }
 
     pub fn counts(&self) -> Counts {
         self.counts
     }
 
-    /// The newest `n`, newest first.
-    pub fn recent(&self, n: usize) -> Vec<RequestEntry> {
-        self.entries.iter().rev().take(n).cloned().collect()
+    pub fn transfer_rows(&self) -> usize {
+        self.transfers.len()
     }
 
-    /// The log as the job keeps it: a line of totals, then one line a request, oldest first.
+    pub fn refusal_rows(&self) -> usize {
+        self.refusals.len()
+    }
+
+    /// The `n` transfer rows that changed last, newest first.
+    pub fn recent_transfers(&self, n: usize) -> Vec<LogRow> {
+        newest(&self.transfers, n)
+    }
+
+    /// The `n` refusal rows that changed last, newest first.
+    pub fn recent_refusals(&self, n: usize) -> Vec<LogRow> {
+        newest(&self.refusals, n)
+    }
+
+    /// The log as the job keeps it: the totals, every transfer row in the order they first came, then the refusals
+    /// by client, the most frequent first.
     pub fn text(&self) -> String {
         let c = self.counts;
         let mut text = format!(
@@ -141,29 +295,64 @@ impl RequestLog {
             size_text(c.bytes_sent),
             size_text(c.bytes_received),
         );
-        if c.dropped > 0 {
-            text.push_str(&format!(
-                "the first {} are not kept; the last {MAX_LOG_ENTRIES} follow\n",
-                plural(c.dropped, "request", "requests")
-            ));
-        }
-        for e in &self.entries {
-            let detail = if e.detail.is_empty() {
-                String::new()
+        text.push_str(&format!(
+            "transfers ({}; repeats summed):\n",
+            plural(self.transfers.len() as u64, "row", "rows")
+        ));
+        for row in &self.transfers {
+            let client = if row.ip.is_empty() {
+                "(clients summed)".to_owned()
             } else {
-                format!(" ({})", e.detail)
+                format!("{}:{}", row.ip, row.port)
+            };
+            let times = if row.times > 1 {
+                format!(" ×{} since {}", row.times, row.first_at)
+            } else {
+                String::new()
             };
             text.push_str(&format!(
-                "{} {} {} {}:{} {} {} {}{detail}\n",
-                e.at,
-                e.protocol.label(),
-                e.method,
-                e.ip,
-                e.port,
-                if e.path.is_empty() { "/" } else { &e.path },
-                outcome_word(e.outcome),
-                size_text(e.bytes),
+                "{} {} {} {client} {} {} {}{times}{}\n",
+                row.at,
+                row.protocol.label(),
+                row.method,
+                shown_path(&row.path),
+                outcome_word(row.outcome),
+                size_text(row.bytes),
+                detail_text(&row.detail),
             ));
+        }
+        if !self.refusals.is_empty() || c.refusals_unlisted > 0 {
+            text.push_str("refused or failed before a transfer, by client:\n");
+            let mut rows: Vec<&LogRow> = self.refusals.iter().collect();
+            rows.sort_by(|a, b| b.times.cmp(&a.times));
+            for row in rows.iter().take(JOB_REFUSAL_ROWS) {
+                text.push_str(&format!(
+                    "{} {}: {} from {} to {}; last {} {}{}\n",
+                    row.ip,
+                    row.protocol.label(),
+                    plural(row.times, "request", "requests"),
+                    row.first_at,
+                    row.at,
+                    row.method,
+                    shown_path(&row.path),
+                    detail_text(&row.detail),
+                ));
+            }
+            let rest = rows.len().saturating_sub(JOB_REFUSAL_ROWS);
+            if rest > 0 {
+                let more: u64 = rows.iter().skip(JOB_REFUSAL_ROWS).map(|r| r.times).sum();
+                text.push_str(&format!(
+                    "and {} from {} more clients\n",
+                    plural(more, "request", "requests"),
+                    rest
+                ));
+            }
+            if c.refusals_unlisted > 0 {
+                text.push_str(&format!(
+                    "and {} from clients past the first {MAX_REFUSAL_ROWS}, counted only\n",
+                    plural(c.refusals_unlisted, "request", "requests")
+                ));
+            }
         }
         text
     }
@@ -196,6 +385,28 @@ impl RequestLog {
     }
 }
 
+fn newest(rows: &[LogRow], n: usize) -> Vec<LogRow> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_unstable_by(|a, b| rows[*b].touched.cmp(&rows[*a].touched));
+    order.into_iter().take(n).map(|i| rows[i].clone()).collect()
+}
+
+fn shown_path(path: &str) -> &str {
+    if path.is_empty() {
+        "/"
+    } else {
+        path
+    }
+}
+
+fn detail_text(detail: &str) -> String {
+    if detail.is_empty() {
+        String::new()
+    } else {
+        format!(" ({detail})")
+    }
+}
+
 fn outcome_word(outcome: Outcome) -> &'static str {
     match outcome {
         Outcome::Sent => "sent",
@@ -213,7 +424,7 @@ pub(crate) fn plural(n: u64, one: &str, many: &str) -> String {
     }
 }
 
-/// A request's path as the log keeps it: what the client sent, made safe to show and keep.
+/// A request's path or detail as the log keeps it: what the client sent, made safe to show and keep.
 pub fn clean_path(raw: &str) -> String {
     let mut out = String::new();
     for (i, c) in raw.chars().enumerate() {
@@ -244,6 +455,7 @@ pub fn entry(protocol: Protocol, peer: SocketAddr, method: &str, path: &str) -> 
         bytes: 0,
         outcome: Outcome::Failed,
         detail: String::new(),
+        transfer: false,
     }
 }
 
@@ -252,28 +464,110 @@ pub fn entry(protocol: Protocol, peer: SocketAddr, method: &str, path: &str) -> 
 mod tests {
     use super::*;
 
-    fn peer() -> SocketAddr {
-        "192.0.2.7:51234".parse().unwrap()
+    fn peer(last: u8, port: u16) -> SocketAddr {
+        SocketAddr::from(([192, 0, 2, last], port))
+    }
+
+    fn done(mut e: RequestEntry, outcome: Outcome, bytes: u64) -> RequestEntry {
+        e.outcome = outcome;
+        e.bytes = bytes;
+        e
     }
 
     #[test]
-    fn the_log_keeps_the_last_entries_and_counts_them_all() {
+    fn a_flood_of_refusals_never_pushes_a_transfer_out() {
         let mut log = RequestLog::default();
-        for i in 0..(MAX_LOG_ENTRIES + 5) {
-            let mut e = entry(Protocol::Http, peer(), "GET", &format!("/f{i}"));
-            e.outcome = Outcome::Sent;
-            e.bytes = 10;
-            log.push(e);
+        log.push(done(
+            entry(Protocol::Tftp, peer(7, 50000), "read", "secrets.zip"),
+            Outcome::Sent,
+            4096,
+        ));
+        for i in 0..20_000u32 {
+            // Spoofed sources: a new address for every datagram.
+            let ip = SocketAddr::from(([198, 51, (i / 250) as u8, (i % 250) as u8], 1024));
+            log.push(done(entry(Protocol::Tftp, ip, "read", "../x"), Outcome::Refused, 0));
         }
         let c = log.counts();
-        assert_eq!(c.requests, (MAX_LOG_ENTRIES + 5) as u64);
-        assert_eq!(c.dropped, 5);
-        assert_eq!(c.bytes_sent, 10 * (MAX_LOG_ENTRIES + 5) as u64);
-        let recent = log.recent(3);
-        assert_eq!(recent[0].path, format!("/f{}", MAX_LOG_ENTRIES + 4));
+        assert_eq!(c.requests, 20_001);
+        assert_eq!(c.refused, 20_000);
+        assert_eq!(
+            log.refusal_rows(),
+            MAX_REFUSAL_ROWS,
+            "one row per client, up to the cap"
+        );
+        assert_eq!(c.refusals_unlisted, 20_000 - MAX_REFUSAL_ROWS as u64);
+        assert_eq!(log.transfer_rows(), 1);
+        assert_eq!(log.recent_transfers(10)[0].path, "secrets.zip");
         let text = log.text();
-        assert!(text.contains("the first 5 requests are not kept"), "{text}");
-        assert_eq!(text.lines().count(), 2 + MAX_LOG_ENTRIES);
+        assert!(
+            text.contains("secrets.zip sent 4 KB"),
+            "{}",
+            &text[..text.len().min(500)]
+        );
+        assert!(text.contains("counted only"));
+        assert!(text.len() < MAX_JOB_OUTPUT);
+    }
+
+    #[test]
+    fn repeats_are_summed_and_refusals_folded_per_client() {
+        let mut log = RequestLog::default();
+        for port in 0..5u16 {
+            log.push(done(
+                entry(Protocol::Http, peer(7, 40000 + port), "GET", "/fw.bin"),
+                Outcome::Sent,
+                100,
+            ));
+        }
+        log.push(done(
+            entry(Protocol::Http, peer(8, 40000), "GET", "/fw.bin"),
+            Outcome::Sent,
+            100,
+        ));
+        let mut cut = entry(Protocol::Tftp, peer(7, 1), "write", "half.bin");
+        cut.transfer = true;
+        log.push(done(cut, Outcome::Failed, 512));
+        for _ in 0..3 {
+            log.push(done(
+                entry(Protocol::Http, peer(9, 1), "GET", "/../secret"),
+                Outcome::Refused,
+                0,
+            ));
+        }
+        log.push(done(
+            entry(Protocol::Http, peer(9, 1), "GET", "/other"),
+            Outcome::Refused,
+            0,
+        ));
+        assert_eq!(log.transfer_rows(), 3);
+        let rows = log.recent_transfers(10);
+        let summed = rows
+            .iter()
+            .find(|r| r.ip == "192.0.2.7" && r.path == "/fw.bin")
+            .unwrap();
+        assert_eq!((summed.times, summed.bytes, summed.port), (5, 500, 40004));
+        assert!(rows
+            .iter()
+            .any(|r| r.path == "half.bin" && r.outcome == Outcome::Failed));
+        assert_eq!(log.refusal_rows(), 1);
+        let refusal = &log.recent_refusals(1)[0];
+        assert_eq!((refusal.times, refusal.path.as_str()), (4, "/other"));
+        assert_eq!(log.recent_transfers(1)[0].path, "half.bin", "newest first");
+        let text = log.text();
+        assert!(text.contains("×5 since"), "{text}");
+        assert!(text.contains("192.0.2.9 HTTP: 4 requests"), "{text}");
+    }
+
+    #[test]
+    fn past_the_row_cap_transfers_are_summed_per_file() {
+        let mut log = RequestLog::default();
+        for i in 0..(MAX_TRANSFER_ROWS as u32 + 50) {
+            let ip = SocketAddr::from(([10, (i / 65536) as u8, (i / 256 % 256) as u8, (i % 256) as u8], 1));
+            log.push(done(entry(Protocol::Tftp, ip, "read", "fw.bin"), Outcome::Sent, 1));
+        }
+        assert_eq!(log.transfer_rows(), MAX_TRANSFER_ROWS + 1);
+        let summed = log.recent_transfers(1);
+        assert_eq!((summed[0].ip.as_str(), summed[0].times), ("", 50));
+        assert!(log.text().len() < MAX_JOB_OUTPUT);
     }
 
     #[test]
@@ -288,13 +582,16 @@ mod tests {
     fn the_summary_says_what_came_of_them() {
         let mut log = RequestLog::default();
         assert_eq!(log.summary(), "no requests");
-        let mut sent = entry(Protocol::Tftp, peer(), "read", "fw.bin");
-        sent.outcome = Outcome::Sent;
-        sent.bytes = 2048;
-        log.push(sent);
-        let mut refused = entry(Protocol::Tftp, peer(), "read", "../x");
-        refused.outcome = Outcome::Refused;
-        log.push(refused);
+        log.push(done(
+            entry(Protocol::Tftp, peer(7, 1), "read", "fw.bin"),
+            Outcome::Sent,
+            2048,
+        ));
+        log.push(done(
+            entry(Protocol::Tftp, peer(7, 1), "read", "../x"),
+            Outcome::Refused,
+            0,
+        ));
         assert_eq!(log.summary(), "2 requests: 1 sent, 1 refused; 2 KB sent");
     }
 }

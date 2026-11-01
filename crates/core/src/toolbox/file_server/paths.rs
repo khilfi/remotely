@@ -55,12 +55,51 @@ pub enum Refused {
     NotFound,
     /// An upload into a subfolder: uploads go into the one folder.
     Subfolder,
+    /// An upload named like a file Windows Explorer reads by itself when it shows the folder (a `.url`'s or `.lnk`'s
+    /// icon, `desktop.ini`): one naming a `\\server\share` would send the user's sign-in there.
+    ShellFile,
+}
+
+/// Extensions of files Windows Explorer opens by itself, or that point it at another place, when it shows or opens a
+/// folder: shortcuts, Internet shortcuts, Explorer commands, libraries, search connectors, themes, setting links.
+const SHELL_EXTENSIONS: &[&str] = &[
+    "lnk",
+    "url",
+    "website",
+    "scf",
+    "library-ms",
+    "searchconnector-ms",
+    "search-ms",
+    "settingcontent-ms",
+    "appref-ms",
+    "pif",
+    "theme",
+    "themepack",
+    "deskthemepack",
+    "ms-shortcut",
+];
+
+/// Names Explorer reads by itself in a folder.
+const SHELL_NAMES: &[&str] = &["desktop.ini", "autorun.inf", "folder.htt", "thumbs.db"];
+
+/// Whether Windows Explorer acts on a file of this name by itself (see [`Refused::ShellFile`]). Without case.
+pub fn is_shell_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    if SHELL_NAMES.contains(&lower.as_str()) {
+        return true;
+    }
+    lower
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| SHELL_EXTENSIONS.contains(&extension))
 }
 
 impl Refused {
     /// "the path leaves the served folder"... for the request log.
     pub fn describe(self) -> &'static str {
         match self {
+            Refused::ShellFile => {
+                "a file type Windows Explorer acts on by itself (a shortcut, an Internet shortcut, desktop.ini...)"
+            }
             Refused::Empty => "no file named",
             Refused::Traversal => "the path leaves the served folder (. or .., or a backslash)",
             Refused::Absolute => "an absolute path, a drive or a share",
@@ -279,7 +318,7 @@ pub fn tftp_path(name: &[u8]) -> Result<RequestPath, Refused> {
 
 /// The name an upload takes in the upload folder, from what the client sent (HTTP's path decoded, or TFTP's name):
 /// one part, Unicode format characters turned into `_`, then checked like any part, at most
-/// [`MAX_UPLOAD_NAME_CHARS`] characters.
+/// [`MAX_UPLOAD_NAME_CHARS`] characters, and never a file Explorer acts on by itself ([`is_shell_file`]).
 pub fn upload_name(path: &RequestPath) -> Result<String, Refused> {
     match path.parts.as_slice() {
         [] => Err(Refused::Empty),
@@ -290,6 +329,9 @@ pub fn upload_name(path: &RequestPath) -> Result<String, Refused> {
                 return Err(Refused::TooLong);
             }
             check_part(&name)?;
+            if is_shell_file(&name) {
+                return Err(Refused::ShellFile);
+            }
             Ok(name)
         }
         _ => Err(Refused::Subfolder),
@@ -497,6 +539,36 @@ mod tests {
         assert_eq!(http_upload_name(&long), Err(Refused::TooLong));
         assert_eq!(tftp_upload_name(b"..\\x"), Err(Refused::Traversal));
         assert_eq!(tftp_upload_name(b"C:\\x"), Err(Refused::Absolute));
+    }
+
+    #[test]
+    fn files_explorer_acts_on_by_itself_are_never_uploaded() {
+        for name in [
+            "readme.url",
+            "README.URL",
+            "Report.lnk",
+            "x.scf",
+            "Docs.library-ms",
+            "share.searchConnector-ms",
+            "desktop.ini",
+            "Desktop.INI",
+            "autorun.inf",
+            "a.website",
+            "dark.theme",
+            "s.settingcontent-ms",
+        ] {
+            assert_eq!(
+                http_upload_name(&format!("/{}", percent_encode(name))),
+                Err(Refused::ShellFile),
+                "{name}"
+            );
+            assert_eq!(tftp_upload_name(name.as_bytes()), Err(Refused::ShellFile), "{name}");
+        }
+        // The same names are fine to serve, and look-alikes are fine to upload.
+        assert!(http_path("/readme.url").is_ok());
+        for name in ["url.txt", "readme.url.txt", "lnk", "desktop.ini.bak", "sw1-confg"] {
+            assert!(tftp_upload_name(name.as_bytes()).is_ok(), "{name}");
+        }
     }
 
     #[test]

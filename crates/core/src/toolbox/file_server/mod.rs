@@ -4,7 +4,11 @@
 //! * **A job on the bus.** Running it is [`crate::command_bus::Command::FileServer`]: Medium while it only serves,
 //!   High with "Accept uploads" on. Never built by the UI: [`FileServers::submit`] checks the paths, the folder and
 //!   the address first. The job runs as long as the server: its start and end are audited, and its output lists the
-//!   requests ([`log`]).
+//!   requests ([`log`]: every transfer, refusals folded per client).
+//! * **No path from the window.** The served file or folder and the upload folder come from the shell's dialogs,
+//!   kept here and named by a token ([`FileServers::remember_pick`]), or from this workspace's last choices, checked
+//!   again. Never Remotely's own data folder, anything holding it, a drive's root or the user profile's own folder
+//!   ([`Runner::protect`]).
 //! * **One address.** It listens on one address of this PC the user chose (an adapter's, or loopback), never on all
 //!   of them. Windows Firewall may ask the first time; Remotely changes no firewall rule.
 //! * **Stops.** At its time limit (30 minutes by default, 8 hours at most), Stop, the job's Cancel, a workspace
@@ -45,9 +49,10 @@ use crate::save_guard::{self, Saved};
 use crate::store::Store;
 use crate::untrusted::path_refusal;
 
-use log::{plural, RequestLog, STATUS_ENTRIES};
-pub use log::{Counts, Outcome, Protocol, RequestEntry};
+use log::{plural, RequestLog, STATUS_ROWS};
+pub use log::{Counts, LogRow, Outcome, Protocol, RequestEntry, MAX_JOB_OUTPUT};
 use served::{display_path, Served};
+pub use uploads::UploadLimits;
 use uploads::{size_text, Uploads, MB};
 
 /// The time limit unless chosen.
@@ -224,6 +229,8 @@ pub struct FileServerTuning {
     pub max_http_per_client: usize,
     /// How often the window hears that the request list changed.
     pub change_every: Duration,
+    /// Uploads per client, and the minimum rate each must keep.
+    pub uploads: UploadLimits,
 }
 
 impl Default for FileServerTuning {
@@ -239,6 +246,7 @@ impl Default for FileServerTuning {
             max_http: 32,
             max_http_per_client: 8,
             change_every: Duration::from_millis(500),
+            uploads: UploadLimits::default(),
         }
     }
 }
@@ -296,8 +304,13 @@ pub struct ServerStatus {
     /// Why it stopped, once it has.
     pub stopped: Option<String>,
     pub counts: Counts,
-    /// The last requests, newest first.
-    pub requests: Vec<RequestEntry>,
+    /// Transfers (files and listings sent, uploads received, or cut off on the way), repeats summed, the last
+    /// changed first; at most 200 (`transfer_rows` says how many the job keeps).
+    pub transfers: Vec<LogRow>,
+    pub transfer_rows: usize,
+    /// Refused requests, folded per client, the last changed first; at most 200.
+    pub refusals: Vec<LogRow>,
+    pub refusal_rows: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -366,6 +379,8 @@ pub(crate) struct Shared {
     tuning: FileServerTuning,
     /// The address transfers are sent from (TFTP's transfer sockets).
     ip: IpAddr,
+    /// Where HTTP listens: a request's `Host` must name it (no DNS rebinding).
+    http_at: Option<SocketAddr>,
     /// A request was logged since the window last heard.
     dirty: AtomicBool,
 }
@@ -446,6 +461,13 @@ impl Pending {
         }
     }
 
+    /// The request reached a file, a listing or an upload: it is a transfer, kept whatever comes after.
+    pub(crate) fn transfer(&mut self) {
+        if let Some(entry) = self.entry.as_mut() {
+            entry.transfer = true;
+        }
+    }
+
     pub(crate) fn done(&mut self, outcome: Outcome, detail: &str) {
         if let Some(mut entry) = self.entry.take() {
             entry.outcome = outcome;
@@ -517,6 +539,8 @@ pub struct Runner {
     state: Mutex<RunnerState>,
     events: broadcast::Sender<FileServerEvent>,
     tuning: RwLock<FileServerTuning>,
+    /// Folders never served, written into or held by what is: Remotely's data folder ([`Runner::protect`]).
+    protected: RwLock<Vec<PathBuf>>,
 }
 
 impl Default for Runner {
@@ -532,12 +556,30 @@ impl Runner {
             state: Mutex::default(),
             events,
             tuning: RwLock::new(FileServerTuning::default()),
+            protected: RwLock::new(Vec::new()),
         }
     }
 
     /// From the next server on.
     pub fn set_tuning(&self, tuning: FileServerTuning) {
         *locks::write(&self.tuning) = tuning;
+    }
+
+    /// Never serves `folder`, anything in it or anything holding it, nor writes uploads there: Remotely's data folder
+    /// (the core protects its database's folder; the shell adds the logs folder).
+    pub fn protect(&self, folder: &std::path::Path) {
+        let real = std::fs::canonicalize(folder).unwrap_or_else(|_| std::path::absolute(folder).unwrap_or_default());
+        if real.as_os_str().is_empty() {
+            return;
+        }
+        let mut protected = locks::write(&self.protected);
+        if !protected.contains(&real) {
+            protected.push(real);
+        }
+    }
+
+    fn protected(&self) -> Vec<PathBuf> {
+        locks::read(&self.protected).clone()
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<FileServerEvent> {
@@ -647,7 +689,10 @@ fn status_of(job_id: Uuid, facts: &Facts, shared: &Shared, stopped: Option<Strin
         ends_at: facts.ends_at.clone(),
         stopped,
         counts: log.counts(),
-        requests: log.recent(STATUS_ENTRIES),
+        transfers: log.recent_transfers(STATUS_ROWS),
+        transfer_rows: log.transfer_rows(),
+        refusals: log.recent_refusals(STATUS_ROWS),
+        refusal_rows: log.refusal_rows(),
     }
 }
 
@@ -656,8 +701,9 @@ fn rfc3339(at: time::OffsetDateTime) -> String {
         .unwrap_or_default()
 }
 
-/// Opens the upload folder for a server: there, a folder, empty, and outside any Git working tree.
-fn open_upload_folder(spec: &UploadSpec) -> Result<Uploads> {
+/// Opens the upload folder for a server: there, a folder, empty, outside any Git working tree and outside what is
+/// never served or written ([`check_place`]).
+fn open_upload_folder(spec: &UploadSpec, limits: UploadLimits, protected: &[PathBuf]) -> Result<Uploads> {
     let folder = PathBuf::from(&spec.folder);
     let meta = std::fs::metadata(&folder)
         .map_err(|err| CoreError::InvalidInput(format!("{} can't take uploads: {err}", spec.folder)))?;
@@ -665,6 +711,7 @@ fn open_upload_folder(spec: &UploadSpec) -> Result<Uploads> {
         return Err(CoreError::InvalidInput(format!("{} is not a folder.", spec.folder)));
     }
     let real = std::fs::canonicalize(&folder)?;
+    check_place(&real, protected, "Uploads can't go into")?;
     save_guard::refuse_repository_folder(&real, Saved::Upload)?;
     if std::fs::read_dir(&real)?.next().is_some() {
         return Err(CoreError::InvalidInput(format!(
@@ -673,7 +720,52 @@ fn open_upload_folder(spec: &UploadSpec) -> Result<Uploads> {
             spec.folder
         )));
     }
-    Ok(Uploads::new(real, spec.max_file_mb * MB, spec.max_total_mb * MB))
+    Ok(Uploads::new(
+        real,
+        spec.max_file_mb * MB,
+        spec.max_total_mb * MB,
+        limits,
+    ))
+}
+
+/// Opens what a server serves, refusing what is never served ([`check_place`]).
+fn open_served(root: &str, protected: &[PathBuf]) -> Result<Served> {
+    let served = Served::open(std::path::Path::new(root))?;
+    let real = match &served {
+        Served::Folder { root } => root.clone(),
+        Served::File { path, .. } => path.clone(),
+    };
+    check_place(&real, protected, "Remotely doesn't serve")?;
+    Ok(served)
+}
+
+/// Refuses a place (its final path) that a file server must never serve or write into: a drive's or share's root,
+/// the Windows user profile's own folder, Remotely's data folder (the database, the vault, logs, WebView2's profile)
+/// or anything inside it, and any folder holding it.
+fn check_place(real: &std::path::Path, protected: &[PathBuf], verb: &str) -> Result<()> {
+    let shown = display_path(real);
+    let refused = |why: &str| Err(CoreError::InvalidInput(format!("{verb} {shown}: {why}.")));
+    if real.parent().is_none() {
+        return refused("it is a whole drive or share; choose a folder or a file in it");
+    }
+    let same = |a: &std::path::Path, b: &std::path::Path| {
+        a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+    };
+    let profile = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .and_then(|p| std::fs::canonicalize(p).ok());
+    if profile.as_deref().is_some_and(|p| same(p, real)) {
+        return refused("it is your whole user folder; choose a folder in it, such as Downloads");
+    }
+    for folder in protected {
+        if paths::is_under(folder, real) {
+            return refused("it is Remotely's own data (its database, vault and logs)");
+        }
+        if paths::is_under(real, folder) {
+            return refused("it holds Remotely's own data (its database, vault and logs); choose a folder beside it");
+        }
+    }
+    Ok(())
 }
 
 fn bind_error(what: &str, address: IpAddr, port: u16, err: &std::io::Error) -> CoreError {
@@ -705,11 +797,16 @@ impl FileServerActions for Runner {
             ));
         }
         let tuning = *locks::read(&self.tuning);
-        let root = PathBuf::from(&spec.root);
+        let root = spec.root.clone();
         let upload_spec = spec.uploads.clone();
+        let protected = self.protected();
+        // Checked again here: the folders may have changed since the submit (and its approval).
         let (served, uploads) = tokio::task::spawn_blocking(move || {
-            let served = Served::open(&root)?;
-            let uploads = upload_spec.as_ref().map(open_upload_folder).transpose()?;
+            let served = open_served(&root, &protected)?;
+            let uploads = upload_spec
+                .as_ref()
+                .map(|u| open_upload_folder(u, tuning.uploads, &protected))
+                .transpose()?;
             Ok::<_, CoreError>((served, uploads))
         })
         .await
@@ -732,7 +829,8 @@ impl FileServerActions for Runner {
             None => None,
         };
         let tftp_port = tftp.as_ref().and_then(|s| s.local_addr().ok()).map(|a| a.port());
-        let http_port = http.as_ref().and_then(|l| l.local_addr().ok()).map(|a| a.port());
+        let http_at = http.as_ref().and_then(|l| l.local_addr().ok());
+        let http_port = http_at.map(|a| a.port());
 
         let file_name = match &served {
             Served::File { name, .. } => Some(name.clone()),
@@ -756,6 +854,7 @@ impl FileServerActions for Runner {
             log: Mutex::default(),
             tuning,
             ip: spec.address,
+            http_at,
             dirty: AtomicBool::new(false),
         });
         let stop = CancellationToken::new();
@@ -872,6 +971,8 @@ pub struct FileServers {
     store: Store,
     tools: Arc<dyn NetworkTools>,
     bus: Arc<CommandBus>,
+    /// What the shell's dialogs chose, by token.
+    picks: Arc<Mutex<Vec<Pick>>>,
 }
 
 impl FileServers {
@@ -881,6 +982,7 @@ impl FileServers {
             store,
             tools,
             bus,
+            picks: Arc::default(),
         }
     }
 
@@ -954,9 +1056,111 @@ impl FileServers {
         self.runner.stop(ctx.workspace_id, job_id, StopReason::User)
     }
 
-    /// Checks the choices against this PC, then submits [`Command::FileServer`] to the bus. The choices are kept for
+    /// A file or folder the shell's dialog chose: kept here, and named by a token the window sends back to start the
+    /// server, so no path ever comes from the window. Refused at once when it is something a server never serves or
+    /// writes into.
+    pub async fn remember_pick(&self, ctx: &Context, purpose: PickFor, path: PathBuf) -> Result<PickedPath> {
+        let protected = self.runner.protected();
+        let real = tokio::task::spawn_blocking(move || {
+            let meta = std::fs::metadata(&path)
+                .map_err(|err| CoreError::InvalidInput(format!("{} can't be used: {err}", path.display())))?;
+            let fits = match purpose {
+                PickFor::File => meta.is_file(),
+                PickFor::Folder | PickFor::Uploads => meta.is_dir(),
+            };
+            if !fits {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} is not a {}.",
+                    path.display(),
+                    if purpose == PickFor::File { "file" } else { "folder" }
+                )));
+            }
+            let real = std::fs::canonicalize(&path)?;
+            let verb = if purpose == PickFor::Uploads {
+                "Uploads can't go into"
+            } else {
+                "Remotely doesn't serve"
+            };
+            check_place(&real, &protected, verb)?;
+            Ok::<_, CoreError>(real)
+        })
+        .await
+        .map_err(|err| CoreError::InvalidInput(format!("could not check that: {err}")))??;
+        let picked = PickedPath {
+            token: Uuid::new_v4(),
+            path: display_path(&real),
+        };
+        let mut picks = locks::lock(&self.picks);
+        if picks.len() >= MAX_PICKS {
+            picks.remove(0);
+        }
+        picks.push(Pick {
+            token: picked.token,
+            workspace: ctx.workspace_id,
+            purpose,
+            path: picked.path.clone(),
+        });
+        Ok(picked)
+    }
+
+    /// The path a choice stands for: a pick of this workspace for that purpose, or the last choice kept here.
+    fn resolve(
+        &self,
+        ctx: &Context,
+        choice: &PathChoice,
+        uploads: bool,
+        last: Option<&FileServerSpec>,
+    ) -> Result<String> {
+        match choice {
+            PathChoice::Picked { token } => locks::lock(&self.picks)
+                .iter()
+                .find(|p| {
+                    p.token == *token && p.workspace == ctx.workspace_id && (p.purpose == PickFor::Uploads) == uploads
+                })
+                .map(|p| p.path.clone())
+                .ok_or_else(|| {
+                    CoreError::InvalidInput("Choose the file or folder again: that choice is no longer known.".into())
+                }),
+            PathChoice::Last => {
+                let path = last.and_then(|l| {
+                    if uploads {
+                        l.uploads.as_ref().map(|u| u.folder.clone())
+                    } else {
+                        Some(l.root.clone())
+                    }
+                });
+                path.ok_or_else(|| CoreError::InvalidInput("There is no last choice here: choose one.".into()))
+            }
+        }
+    }
+
+    /// Checks the choices against this PC, then submits [`Command::FileServer`] to the bus. The paths come from the
+    /// dialogs' picks or this workspace's last choices, which are checked again like new ones. The choices are kept for
     /// next time in this workspace.
-    pub async fn submit(&self, ctx: &Context, spec: FileServerSpec) -> Result<SubmitOutcome> {
+    pub async fn submit(&self, ctx: &Context, request: FileServerRequest) -> Result<SubmitOutcome> {
+        let last = self
+            .store
+            .get_setting::<FileServerSpec>(ctx, LAST_KEY)
+            .await
+            .ok()
+            .flatten();
+        let root = self.resolve(ctx, &request.root, false, last.as_ref())?;
+        let uploads = match &request.uploads {
+            Some(u) => Some(UploadSpec {
+                folder: self.resolve(ctx, &u.folder, true, last.as_ref())?,
+                max_file_mb: u.max_file_mb,
+                max_total_mb: u.max_total_mb,
+            }),
+            None => None,
+        };
+        let spec = FileServerSpec {
+            root,
+            address: request.address,
+            tftp_port: request.tftp_port,
+            http_port: request.http_port,
+            minutes: request.minutes,
+            uploads,
+        };
         spec.validate()?;
         if self.runner.running().is_some() {
             return Err(CoreError::InvalidInput(
@@ -972,10 +1176,12 @@ impl FileServers {
             )));
         }
         let check = spec.clone();
+        let protected = self.runner.protected();
+        let limits = locks::read(&self.runner.tuning).uploads;
         tokio::task::spawn_blocking(move || {
-            Served::open(std::path::Path::new(&check.root))?;
+            open_served(&check.root, &protected)?;
             if let Some(uploads) = &check.uploads {
-                open_upload_folder(uploads)?;
+                open_upload_folder(uploads, limits, &protected)?;
             }
             Ok::<_, CoreError>(())
         })
@@ -996,6 +1202,68 @@ impl FileServers {
         }
         Ok(outcome)
     }
+}
+
+/// What a dialog chooses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PickFor {
+    /// A folder to serve.
+    Folder,
+    /// One file to serve.
+    File,
+    /// The empty folder uploads go into.
+    Uploads,
+}
+
+/// A dialog's choice, as the window gets it: a token to send back, and the path to show.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedPath {
+    pub token: Uuid,
+    pub path: String,
+}
+
+/// Picks kept at once; the oldest goes first.
+const MAX_PICKS: usize = 32;
+
+#[derive(Debug, Clone)]
+struct Pick {
+    token: Uuid,
+    workspace: WorkspaceId,
+    purpose: PickFor,
+    path: String,
+}
+
+/// Where a path comes from: never the window itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum PathChoice {
+    /// What the shell's dialog chose ([`FileServers::remember_pick`]).
+    Picked { token: Uuid },
+    /// This workspace's last choice for it, checked again.
+    Last,
+}
+
+/// What the File server tab sends to start a server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileServerRequest {
+    pub root: PathChoice,
+    pub address: IpAddr,
+    pub tftp_port: Option<u16>,
+    pub http_port: Option<u16>,
+    pub minutes: u32,
+    #[serde(default)]
+    pub uploads: Option<UploadRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadRequest {
+    pub folder: PathChoice,
+    pub max_file_mb: u64,
+    pub max_total_mb: u64,
 }
 
 #[cfg(test)]

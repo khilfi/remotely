@@ -9,13 +9,15 @@
 //! * each read of an upload's body and each write of a response must make progress within
 //!   [`super::FileServerTuning::http_idle`];
 //! * a PUT needs a `Content-Length` (chunked bodies are refused), which the caps are checked against before any byte
-//!   is read; `Expect: 100-continue` is answered once the upload is accepted.
+//!   is read; `Expect: 100-continue` is answered once the upload is accepted;
+//! * `Host` must name the address and port it listens on ([`check_host`]), so a web page can't reach it through DNS
+//!   rebinding (421 Misdirected Request).
 //!
 //! Requests are parsed by `httparse` (the parser hyper uses, already in the tree with reqwest). Files go out with
 //! `Content-Type`, `Content-Disposition: attachment` and `X-Content-Type-Options: nosniff`; a listing escapes every
 //! name and has a `Content-Security-Policy` that allows no script.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +53,88 @@ pub struct Head {
     pub headers: Vec<(String, Vec<u8>)>,
     /// Where the body starts in what was read.
     pub len: usize,
+    /// HTTP/1.0 (else 1.1).
+    pub http10: bool,
+}
+
+/// Why a request's `Host` is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostRefused {
+    /// HTTP/1.1 without one (RFC 9112 requires it).
+    Missing,
+    /// More than one.
+    Repeated,
+    /// Not the address and port the server listens on: a web page reaching it by a name of its own (DNS rebinding).
+    Elsewhere,
+}
+
+impl HostRefused {
+    fn status(self) -> u16 {
+        match self {
+            HostRefused::Missing | HostRefused::Repeated => 400,
+            HostRefused::Elsewhere => 421,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            HostRefused::Missing => "no Host header (HTTP/1.1 needs one)",
+            HostRefused::Repeated => "more than one Host header",
+            HostRefused::Elsewhere => {
+                "the Host header doesn't name this server's address and port (a web page could be reaching it by a \
+                 name of its own: DNS rebinding)"
+            }
+        }
+    }
+}
+
+/// DNS rebinding: a web page the user opens can make its own name resolve to this server's address, and then read
+/// (and write) what is served as if it were its own site. Its requests carry its name in `Host`, so a request is
+/// served only when `Host` is the address the server listens on, as an IP literal (IPv6 in brackets), with the port
+/// (which may be left out only for port 80); compared as addresses, so letter case and IPv6 spellings don't matter.
+/// An HTTP/1.0 request without `Host` is served: browsers always send one, and firmware loaders such as U-Boot's
+/// `wget` send none.
+pub fn check_host(head: &Head, at: SocketAddr) -> Result<(), HostRefused> {
+    match head.all("host").as_slice() {
+        [] if head.http10 => Ok(()),
+        [] => Err(HostRefused::Missing),
+        [one] if host_names(one, at) => Ok(()),
+        [_] => Err(HostRefused::Elsewhere),
+        _ => Err(HostRefused::Repeated),
+    }
+}
+
+/// Whether a `Host` value is `at`'s address and port.
+fn host_names(value: &[u8], at: SocketAddr) -> bool {
+    let Ok(text) = std::str::from_utf8(value) else {
+        return false;
+    };
+    let text = text.trim();
+    let (address, port): (Option<IpAddr>, Option<&str>) = if let Some(rest) = text.strip_prefix('[') {
+        let Some((inside, after)) = rest.split_once(']') else {
+            return false;
+        };
+        let port = match after {
+            "" => None,
+            other => match other.strip_prefix(':') {
+                Some(port) => Some(port),
+                None => return false,
+            },
+        };
+        (inside.parse::<Ipv6Addr>().ok().map(IpAddr::V6), port)
+    } else {
+        match text.split_once(':') {
+            Some((host, port)) => (host.parse::<Ipv4Addr>().ok().map(IpAddr::V4), Some(port)),
+            None => (text.parse::<Ipv4Addr>().ok().map(IpAddr::V4), None),
+        }
+    };
+    let port_fits = match port {
+        None => at.port() == 80,
+        Some(port) => {
+            port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().ok() == Some(at.port())
+        }
+    };
+    address == Some(at.ip()) && port_fits
 }
 
 impl Head {
@@ -100,6 +184,7 @@ pub fn parse_head(buf: &[u8]) -> Result<Option<Head>, HeadError> {
                     .map(|h| (h.name.to_ascii_lowercase(), h.value.to_vec()))
                     .collect(),
                 len,
+                http10: request.version == Some(0),
             }))
         }
         Ok(httparse::Status::Partial) if buf.len() > MAX_HEAD => Err(HeadError::TooLarge),
@@ -208,6 +293,15 @@ async fn connection(shared: &Arc<Shared>, mut stream: TcpStream, peer: SocketAdd
         close(stream).await;
         return;
     }
+    if let Some(at) = shared.http_at {
+        if let Err(refused) = check_host(&head, at) {
+            let status = refused.status();
+            let _ = respond_text(&mut stream, &tuning, status, &[], &format!("{}.\n", refused.describe())).await;
+            pending.done(Outcome::Refused, refused.describe());
+            close(stream).await;
+            return;
+        }
+    }
     match method.as_str() {
         "GET" | "HEAD" => get(shared, &mut stream, &head, method == "HEAD", &mut pending).await,
         "PUT" if shared.uploads.is_some() => {
@@ -267,6 +361,8 @@ fn reason(status: u16) -> &'static str {
         413 => "Content Too Large",
         414 => "URI Too Long",
         417 => "Expectation Failed",
+        421 => "Misdirected Request",
+        429 => "Too Many Requests",
         431 => "Request Header Fields Too Large",
         501 => "Not Implemented",
         _ => "Internal Server Error",
@@ -355,6 +451,7 @@ async fn get(shared: &Arc<Shared>, stream: &mut TcpStream, head: &Head, head_onl
                 pending.done(Outcome::Refused, "the file is still being uploaded");
                 return;
             }
+            pending.transfer();
             send_file(
                 shared,
                 stream,
@@ -387,6 +484,7 @@ async fn get(shared: &Arc<Shared>, stream: &mut TcpStream, head: &Head, head_onl
                     return;
                 }
             };
+            pending.transfer();
             let html = listing_html(&path, &listing);
             let headers = [
                 ("Content-Type", "text/html; charset=utf-8".to_owned()),
@@ -513,15 +611,10 @@ async fn put(
         Ok(name) => name,
         Err(refused) => return refuse(stream, shared, pending, refused).await,
     };
-    let mut upload = match uploads.claim(&name, Some(length)).await {
+    let mut upload = match uploads.claim(&name, Some(length), peer.ip()).await {
         Ok(upload) => upload,
         Err(refused) => {
-            let status = match refused {
-                UploadRefused::Exists => 409,
-                UploadRefused::FileTooLarge(_) | UploadRefused::TotalTooLarge(_) | UploadRefused::TooManyFiles => 413,
-                UploadRefused::Outside => 403,
-                UploadRefused::Io(_) => 500,
-            };
+            let status = upload_status(&refused);
             let _ = respond_text(
                 stream,
                 &tuning,
@@ -534,6 +627,7 @@ async fn put(
             return;
         }
     };
+    pending.transfer();
     if continues {
         if let Err(err) = write_timed(stream, tuning.http_idle, b"HTTP/1.1 100 Continue\r\n\r\n").await {
             pending.done(Outcome::Failed, &err.to_string());
@@ -596,6 +690,18 @@ async fn put(
     }
 }
 
+/// The status an upload's refusal answers with.
+fn upload_status(refused: &UploadRefused) -> u16 {
+    match refused {
+        UploadRefused::Exists => 409,
+        UploadRefused::FileTooLarge(_) | UploadRefused::TotalTooLarge(_) | UploadRefused::TooManyFiles => 413,
+        UploadRefused::ClientBusy(_) => 429,
+        UploadRefused::TooSlow { .. } => 408,
+        UploadRefused::Outside => 403,
+        UploadRefused::Io(_) => 500,
+    }
+}
+
 /// An upload refused part way: its part is deleted (the upload dropped) before the client hears why.
 async fn cut_off(
     stream: &mut TcpStream,
@@ -605,11 +711,7 @@ async fn cut_off(
     received: u64,
 ) {
     drop(upload);
-    let status = if matches!(refused, UploadRefused::Io(_)) {
-        500
-    } else {
-        413
-    };
+    let status = upload_status(refused);
     let _ = respond_text(
         stream,
         &shared.tuning,
@@ -754,6 +856,68 @@ mod tests {
             let junk: Vec<u8> = (0..len).map(|i| (i * 131 % 256) as u8).collect();
             let _ = parse_head(&junk);
         }
+    }
+
+    fn host_of(request: &str, at: &str) -> Result<(), HostRefused> {
+        let head = parse_head(request.as_bytes()).unwrap().unwrap();
+        check_host(&head, at.parse().unwrap())
+    }
+
+    #[test]
+    fn only_the_servers_own_address_and_port_are_a_host() {
+        let at = "192.0.2.10:8080";
+        assert_eq!(host_of("GET / HTTP/1.1\r\nHost: 192.0.2.10:8080\r\n\r\n", at), Ok(()));
+        assert_eq!(host_of("GET / HTTP/1.1\r\nhost:  192.0.2.10:8080 \r\n\r\n", at), Ok(()));
+        for host in [
+            "attacker.example:8080",
+            "ATTACKER.example",
+            "192.0.2.10",
+            "192.0.2.10:80",
+            "192.0.2.10:08080x",
+            "192.0.2.11:8080",
+            "192.000.002.010:8080",
+            "3221225994:8080",
+            "localhost:8080",
+            "[::ffff:192.0.2.10]:8080",
+            "alice@192.0.2.10:8080",
+            "192.0.2.10:8080.attacker.example",
+            "",
+        ] {
+            let request = format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n");
+            assert_eq!(host_of(&request, at), Err(HostRefused::Elsewhere), "{host}");
+        }
+        assert_eq!(host_of("GET / HTTP/1.1\r\n\r\n", at), Err(HostRefused::Missing));
+        assert_eq!(
+            host_of(
+                "GET / HTTP/1.1\r\nHost: 192.0.2.10:8080\r\nHost: attacker.example\r\n\r\n",
+                at
+            ),
+            Err(HostRefused::Repeated)
+        );
+        // HTTP/1.0 without one (U-Boot's wget); with one, it is checked like any.
+        assert_eq!(host_of("GET /fw.bin HTTP/1.0\r\n\r\n", at), Ok(()));
+        assert_eq!(
+            host_of("GET /fw.bin HTTP/1.0\r\nHost: attacker.example\r\n\r\n", at),
+            Err(HostRefused::Elsewhere)
+        );
+        // Port 80 may be left out; IPv6 in brackets, in any spelling.
+        assert_eq!(
+            host_of("GET / HTTP/1.1\r\nHost: 192.0.2.10\r\n\r\n", "192.0.2.10:80"),
+            Ok(())
+        );
+        let v6 = "[2001:db8::10]:8080";
+        assert_eq!(
+            host_of("GET / HTTP/1.1\r\nHost: [2001:DB8:0::10]:8080\r\n\r\n", v6),
+            Ok(())
+        );
+        assert_eq!(
+            host_of("GET / HTTP/1.1\r\nHost: 2001:db8::10:8080\r\n\r\n", v6),
+            Err(HostRefused::Elsewhere)
+        );
+        assert_eq!(
+            host_of("GET / HTTP/1.1\r\nHost: [2001:db8::10]\r\n\r\n", v6),
+            Err(HostRefused::Elsewhere)
+        );
     }
 
     #[test]

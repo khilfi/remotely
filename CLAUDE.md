@@ -475,22 +475,32 @@ crates/core/          remotely-core: all app logic
                       Medium serving, High with uploads (ActionKind::FileServer, FileServerUploads), target
                       TargetRef::App named "this PC (<address>)"; never built by the UI: Core.file_server's
                       FileServers::submit checks the root, the empty upload folder (save_guard) and that the address is
-                      this PC's; the job runs as long as the server, its output the request log, its end note the
+                      this PC's; no path comes from the window: the shell's dialogs hand the core each choice
+                      (remember_pick) and the window sends back its token (PathChoice::Picked) or PathChoice::Last,
+                      this workspace's last choice, checked again; Runner::protect: Remotely's data folder (the
+                      database's, set at init; the shell adds the logs folder), anything in it or holding it, a drive's
+                      root and the user profile's own folder are never served or written into; the job runs as long as
+                      the server, its output the request log (MAX_JOB_OUTPUT, 8 MB), its end note the
                       uploads; Runner serves for the job runner, one at a time, and stops on Stop, the time limit (30
                       minutes by default, 8 hours at most), the job's cancel, a workspace switch (open_user_jobs leaves
                       it out, switch_workspace stops it), a vault lock, release_ui and Core::shutdown; the last choices
                       are `fileServer.last`, per workspace): paths.rs (a request as text: `.` `..` `\` `//`, drives,
                       `:` (streams), trailing dots and spaces, control and Cf characters, device names, one
-                      percent-decoding and nothing still encoded; an upload name is one part, Cf to `_`), served.rs
+                      percent-decoding and nothing still encoded; an upload name is one part, Cf to `_`, never a file
+                      Explorer acts on by itself: is_shell_file, `.lnk`, `.url`, `.scf`, `.library-ms`, desktop.ini...),
+                      served.rs
                       (each part looked up without following links or junctions; a file served only when its handle's
                       final path is under the root; folder listings), tftp.rs (RFC 1350, blksize and tsize; a socket
                       per transfer connected to the client; resent only on timeout; at most 65,535 blocks, so no
                       wraparound; transfers capped in all and per client), http.rs (httparse: GET, HEAD, PUT with a
                       Content-Length, Expect: 100-continue; the head within its timeout, 16 KB, 32 headers, a 4 KB
-                      target; one request a connection; nosniff, attachments, an escaped listing with a CSP),
-                      uploads.rs (create_new in the folder, never a replace; caps per file and in all; a part deleted;
-                      the Mark of the Web through terminal::files::mark_downloaded), log.rs (the last 500 requests,
-                      totals of all)
+                      target; one request a connection; check_host: `Host` must be the bound IP literal and port, 421
+                      otherwise (DNS rebinding), none only for HTTP/1.0; nosniff, attachments, an escaped listing with
+                      a CSP), uploads.rs (create_new in the folder, never a replace; caps per file and in all, counted
+                      as bytes arrive (a declared size is checked, never set aside); UploadLimits: 2 uploads per
+                      client, at least 60 KB a minute; a part deleted; the Mark of the Web through
+                      terminal::files::mark_downloaded), log.rs (transfers kept, repeats summed, never pushed out;
+                      refusals folded per client, past 1,000 clients counted only; totals of all)
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only; each shows in the host's
                       sshd log): every 5 minutes by default, a host that is down less often (next_check_after: doubling
                       up to 30 minutes), none for a host with an open connection (OpenConnections: connected terminals,

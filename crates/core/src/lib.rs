@@ -446,7 +446,8 @@ impl Core {
         // SS-04: the vault in this database, unlocked by the Windows login (DPAPI) or the master password.
         let vault = LocalVault::open(store.clone(), ctx, Arc::new(Dpapi), VaultOptions::default()).await?;
         let qemu_img = saved_qemu_img_path(&store, &ctx).await?;
-        Self::assemble(
+        let data_folder = config.db_path.parent().map(std::path::Path::to_path_buf);
+        let core = Self::assemble(
             store,
             ctx,
             Adapters {
@@ -463,7 +464,12 @@ impl Core {
             },
             JobLimits::default(),
         )
-        .await
+        .await?;
+        // FD-09: the database's folder (the vault, logs and WebView2's profile beside it) is never served.
+        if let Some(folder) = data_folder.filter(|f| !f.as_os_str().is_empty()) {
+            core.file_server.runner().protect(&folder);
+        }
+        Ok(core)
     }
 
     /// Wires the modules together. Tests pass fake adapters here.

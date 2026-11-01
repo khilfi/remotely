@@ -1,8 +1,16 @@
 // FD-09: the File server tab's pure helpers: the form and its defaults (the last choices in this workspace), why Start
-// is off, the spec the core gets, and the words the status and the request list are shown in. Tested in
-// file-server.test.ts.
+// is off, the request the core gets (paths only as a dialog's token or "the last choice"), and the words the status
+// and the request log are shown in. Tested in file-server.test.ts.
 
-import type { FileServerSpec, RequestEntry, RequestOutcome, ServeAddress, ServerStatus } from "./file-server-api.ts";
+import type {
+  FileServerRequest,
+  FileServerSpec,
+  LogRow,
+  PathChoice,
+  RequestOutcome,
+  ServeAddress,
+  ServerStatus,
+} from "./file-server-api.ts";
 
 /** The time limits offered, in minutes (30 by default, 8 hours at most, as the core allows). */
 export const TIME_LIMITS: readonly number[] = [5, 15, 30, 60, 120, 240, 480];
@@ -14,9 +22,15 @@ export const DEFAULT_MAX_TOTAL_MB = 4096;
 /** The largest upload cap, in MB (the core's 64 GB). */
 export const MAX_UPLOAD_MB = 65536;
 
+/** A chosen file or folder: the path to show, and how the core finds it again (it never takes the path itself). */
+export interface ChosenPath {
+  path: string;
+  choice: PathChoice;
+}
+
 /** What the form holds, as typed. */
 export interface FileServerForm {
-  root: string;
+  root: ChosenPath | null;
   /** The root is a folder (else one file). */
   folder: boolean;
   address: string;
@@ -26,7 +40,7 @@ export interface FileServerForm {
   httpPort: string;
   minutes: number;
   uploads: boolean;
-  uploadFolder: string;
+  uploadFolder: ChosenPath | null;
   maxFileMb: string;
   maxTotalMb: string;
 }
@@ -36,8 +50,9 @@ export function initialForm(last: FileServerSpec | null, addresses: ServeAddress
   const known = (address: string | undefined) => addresses.some((a) => a.address === address);
   const firstAdapter = addresses.find((a) => !a.loopback) ?? addresses[0];
   const address = last && known(last.address) ? last.address : (firstAdapter?.address ?? "");
+  const lastChoice: PathChoice = { kind: "last" };
   return {
-    root: last?.root ?? "",
+    root: last ? { path: last.root, choice: lastChoice } : null,
     folder: last ? !looksLikeFile(last.root) : true,
     address,
     tftp: last ? last.tftpPort !== null : true,
@@ -46,7 +61,7 @@ export function initialForm(last: FileServerSpec | null, addresses: ServeAddress
     httpPort: String(last?.httpPort ?? DEFAULT_HTTP_PORT),
     minutes: last && TIME_LIMITS.includes(last.minutes) ? last.minutes : DEFAULT_MINUTES,
     uploads: false,
-    uploadFolder: last?.uploads?.folder ?? "",
+    uploadFolder: last?.uploads ? { path: last.uploads.folder, choice: lastChoice } : null,
     maxFileMb: String(last?.uploads?.maxFileMb ?? DEFAULT_MAX_FILE_MB),
     maxTotalMb: String(last?.uploads?.maxTotalMb ?? DEFAULT_MAX_TOTAL_MB),
   };
@@ -76,7 +91,7 @@ export function parseMb(text: string): number | null {
 
 /** Why Start is off, or null when the form is ready. */
 export function startReason(form: FileServerForm): string | null {
-  if (!form.root.trim()) return "Choose a file or folder to serve";
+  if (!form.root) return "Choose a file or folder to serve";
   if (!form.address) return "Choose the address to serve on";
   if (!form.tftp && !form.http) return "Turn on TFTP, HTTP or both";
   if (form.tftp && parsePort(form.tftpPort) === null) return "Type a TFTP port from 1 to 65535";
@@ -86,7 +101,7 @@ export function startReason(form: FileServerForm): string | null {
     return "Give TFTP and HTTP different ports";
   }
   if (form.uploads) {
-    if (!form.uploadFolder.trim()) return "Choose an empty folder for uploads";
+    if (!form.uploadFolder) return "Choose an empty folder for uploads";
     const file = parseMb(form.maxFileMb);
     const total = parseMb(form.maxTotalMb);
     if (file === null) return `Type the largest file in MB, from 1 to ${MAX_UPLOAD_MB}`;
@@ -96,21 +111,22 @@ export function startReason(form: FileServerForm): string | null {
   return null;
 }
 
-/** The spec the core gets, once [`startReason`] is null. */
-export function specOf(form: FileServerForm): FileServerSpec {
+/** The request the core gets, once [`startReason`] is null: the paths only as their choices. */
+export function requestOf(form: FileServerForm): FileServerRequest {
   return {
-    root: form.root.trim(),
+    root: form.root?.choice ?? { kind: "last" },
     address: form.address,
     tftpPort: form.tftp ? parsePort(form.tftpPort) : null,
     httpPort: form.http ? parsePort(form.httpPort) : null,
     minutes: form.minutes,
-    uploads: form.uploads
-      ? {
-          folder: form.uploadFolder.trim(),
-          maxFileMb: parseMb(form.maxFileMb) ?? DEFAULT_MAX_FILE_MB,
-          maxTotalMb: parseMb(form.maxTotalMb) ?? DEFAULT_MAX_TOTAL_MB,
-        }
-      : null,
+    uploads:
+      form.uploads && form.uploadFolder
+        ? {
+            folder: form.uploadFolder.choice,
+            maxFileMb: parseMb(form.maxFileMb) ?? DEFAULT_MAX_FILE_MB,
+            maxTotalMb: parseMb(form.maxTotalMb) ?? DEFAULT_MAX_TOTAL_MB,
+          }
+        : null,
   };
 }
 
@@ -185,15 +201,45 @@ export function outcomeText(outcome: RequestOutcome): string {
   return OUTCOME_WORDS[outcome];
 }
 
-/** What a request asked for, as the list shows it: `/` for the root, TFTP's `read`/`write` as words. */
-export function requestText(entry: RequestEntry): { what: string; path: string } {
-  const what = entry.protocol === "tftp" ? (entry.method === "write" ? "TFTP upload" : "TFTP") : `HTTP ${entry.method}`;
-  const path = entry.path === "" ? "/" : entry.path;
+/** What a row asked for, as the list shows it: `/` for the root, TFTP's `read`/`write` as words. */
+export function requestText(row: LogRow): { what: string; path: string } {
+  const what = row.protocol === "tftp" ? (row.method === "write" ? "TFTP upload" : "TFTP") : `HTTP ${row.method}`;
+  const path = row.path === "" ? "/" : row.path;
   return { what, path };
 }
 
-/** The local time of a request, `14:03:12`. */
-export function requestTime(entry: RequestEntry): string {
-  const at = new Date(entry.at);
-  return Number.isNaN(at.getTime()) ? entry.at : at.toLocaleTimeString([], { hour12: false });
+/** The local time of a row's last request, `14:03:12`. */
+export function requestTime(row: LogRow): string {
+  const at = new Date(row.at);
+  return Number.isNaN(at.getTime()) ? row.at : at.toLocaleTimeString([], { hour12: false });
+}
+
+/** "×3" for repeats summed into one row, else nothing. */
+export function timesText(row: LogRow): string {
+  return row.times > 1 ? `×${row.times}` : "";
+}
+
+/** A refusal row in words: "12 requests refused or failed, last: ../x (the path leaves the served folder)". */
+export function refusalText(row: LogRow): string {
+  const head = row.times === 1 ? "1 request" : `${row.times} requests`;
+  const what = requestText(row);
+  const detail = row.detail ? ` (${row.detail})` : "";
+  return `${head}, last: ${what.what} ${what.path}${detail}`;
+}
+
+/** The line under the lists: how many rows the tab shows of the ones the job keeps. */
+export function rowsNote(status: ServerStatus): string | null {
+  const parts: string[] = [];
+  if (status.transferRows > status.transfers.length) {
+    parts.push(`${status.transfers.length} of ${status.transferRows} transfers shown`);
+  }
+  if (status.refusalRows > status.refusals.length) {
+    parts.push(`${status.refusals.length} of ${status.refusalRows} clients with refusals shown`);
+  }
+  if (status.counts.refusalsUnlisted > 0) {
+    const n = status.counts.refusalsUnlisted;
+    parts.push(`${n} more ${n === 1 ? "refusal" : "refusals"} from other clients counted`);
+  }
+  if (parts.length === 0) return null;
+  return `${parts.join("; ")}. The job in Activity keeps every transfer.`;
 }
