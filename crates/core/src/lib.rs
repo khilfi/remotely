@@ -655,6 +655,7 @@ impl Core {
         jobs.set_network_tools(Arc::clone(&adapters.network_tools));
         // BX-13: Compare hosts runs and support bundles reach Windows hosts with the same WinRM client.
         jobs.set_winrm(Arc::clone(&winrm));
+        jobs.set_login_guard(login_guard.clone());
         let file_server_runner = Arc::new(toolbox::file_server::Runner::new());
         jobs.set_file_servers(file_server_runner.clone());
         // MO-06: a prune compacts the file only while no job runs.
