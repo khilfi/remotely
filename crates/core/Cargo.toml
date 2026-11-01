@@ -77,6 +77,9 @@ zip = { version = "9.2", default-features = false, features = ["deflate-flate2-z
 # and a certificate's SHA-1 fingerprint beside its SHA-256 one. The versions reqwest and russh already pull in.
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 sha1 = "0.11"
+# FD-09: the quick file server's HTTP requests (request line and headers, bounded). The parser hyper uses, already
+# in the tree through reqwest.
+httparse = "1"
 # MO-08: an HTTP(S) health check's request over the stream F1's probes open (a TCP connection from this PC, or a jump
 # host's channel), so it goes the same way either way and never through a proxy. HTTP/1.1 client only; the versions
 # reqwest already pulls in.

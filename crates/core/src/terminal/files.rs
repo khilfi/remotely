@@ -420,8 +420,9 @@ const ZONE_IDENTIFIER: &str = "[ZoneTransfer]\r\nZoneId=3\r\n";
 
 /// A8: writes the Mark of the Web, the `Zone.Identifier` stream, on a downloaded file. `None` when it
 /// is written; otherwise what to tell the user (the folder's file system may have no alternate data
-/// streams, as FAT and exFAT drives don't), and the download still counts. Windows only.
-async fn mark_downloaded(path: &Path) -> Option<String> {
+/// streams, as FAT and exFAT drives don't), and the download still counts. Windows only. FD-09's file server marks
+/// each upload it receives the same way.
+pub(crate) async fn mark_downloaded(path: &Path) -> Option<String> {
     #[cfg(windows)]
     {
         let mut stream = path.as_os_str().to_owned();

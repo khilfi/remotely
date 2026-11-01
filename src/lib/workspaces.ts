@@ -77,6 +77,8 @@ export interface SwitchCounts {
   terminals: number;
   multiexec: boolean;
   approvals: number;
+  /** FD-09: the file server runs here; it stops. */
+  fileServer?: boolean;
 }
 
 function plural(n: number, one: string, many: string) {
@@ -100,6 +102,7 @@ export function switchCloses(p: SwitchCounts): string[] {
   }
   if (p.multiexec) out.push("Type in all tabs stops.");
   if (p.approvals > 0) out.push(`${plural(p.approvals, "approval", "approvals")} waiting for an answer: cancelled.`);
+  if (p.fileServer) out.push("The file server stops.");
   return out;
 }
 

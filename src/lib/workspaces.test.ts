@@ -47,6 +47,7 @@ test("FD-02: a switch is refused while jobs started here run, and says what it c
     "Type in all tabs stops.",
     "1 approval waiting for an answer: cancelled.",
   ]);
+  assert.deepEqual(switchCloses({ ...nothing, fileServer: true }), ["The file server stops."]);
 });
 
 test("FD-02: only unprotected, non-Prod VMs leave a workspace, and only when another workspace exists", () => {

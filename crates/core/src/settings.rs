@@ -29,6 +29,7 @@ use crate::schedules::{ChainLimits, CHAIN_LIMITS_KEY};
 use crate::store::{self, NewAuditEntry, Store};
 use crate::terminal::console::VNC_VIEWER_PATH_KEY;
 use crate::terminal::{TerminalSettings, TERMINAL_SETTINGS_KEY};
+use crate::toolbox::file_server::{FileServerSpec, LAST_KEY as FILE_SERVER_LAST_KEY};
 use crate::updates::{UPDATE_TOKEN_EXPIRES_KEY, UPDATE_TOKEN_KEY};
 use crate::vault::SecretId;
 use crate::vm_settings::ADDED_VMS_KEY;
@@ -64,8 +65,8 @@ pub const MACHINE_KEYS: [&str; 22] = [
 ];
 
 /// FD-02: each engagement's own settings: the dashboard's layout, the hosts it watches, and whether a High or
-/// Critical action on a Prod target needs a change ID (AP-08).
-pub const WORKSPACE_KEYS: [&str; 3] = [LAYOUT_KEY, WATCHED_KEY, CHANGE_ID_KEY];
+/// Critical action on a Prod target needs a change ID (AP-08), and the file server's last choices (FD-09).
+pub const WORKSPACE_KEYS: [&str; 4] = [LAYOUT_KEY, WATCHED_KEY, CHANGE_ID_KEY, FILE_SERVER_LAST_KEY];
 
 /// Whether `key` is one of this PC's settings rather than an engagement's.
 pub fn is_machine_key(key: &str) -> bool {
@@ -175,6 +176,14 @@ pub async fn repair_workspace(store: &Store, ctx: &Context) -> Result<Vec<&'stat
     check::<Option<DashboardLayout>>(store, ctx, LAYOUT_KEY, "the dashboard layout", &mut reset).await?;
     check::<Vec<Uuid>>(store, ctx, WATCHED_KEY, "the hosts the dashboard watches", &mut reset).await?;
     check::<ChangeIdRules>(store, ctx, CHANGE_ID_KEY, "the change ID rule", &mut reset).await?;
+    check::<Option<FileServerSpec>>(
+        store,
+        ctx,
+        FILE_SERVER_LAST_KEY,
+        "the file server's last choices",
+        &mut reset,
+    )
+    .await?;
     Ok(reset)
 }
 

@@ -198,6 +198,7 @@ const TOOLBOX_KEYWORDS: Record<ToolboxTool, string> = {
   certificate: "certificate tls ssl https cert expiry chain x509 pem crt",
   subnet: "subnet cidr calculator mask netmask broadcast ipv4 ipv6 split",
   wake: "wake on lan wol magic packet power on mac",
+  fileServer: "file server tftp http share serve firmware config upload transfer",
 };
 
 /** Each page's sidebar icon; the pages themselves, in order, are lib/navigation.ts's PAGES. */

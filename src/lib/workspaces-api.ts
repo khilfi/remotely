@@ -40,6 +40,8 @@ export interface SwitchPreview {
   terminals: number;
   multiexec: boolean;
   approvals: number;
+  /** FD-09: the file server runs here (it stops; it doesn't hold the switch back). */
+  fileServer: boolean;
 }
 
 /** A VM on this PC that no workspace has (crates/core/src/inventory.rs). */

@@ -194,6 +194,8 @@ struct JobOwner {
     workspace: WorkspaceId,
     /// A schedule's run (VM-14, VM-27), which goes on whichever workspace is shown.
     scheduled: bool,
+    /// FD-09: the file server, which a workspace switch stops rather than waits for.
+    stops_on_switch: bool,
 }
 
 /// A command the bus has cleared to run.
@@ -619,6 +621,8 @@ pub struct JobRunner {
     bundles: RwLock<Option<Arc<dyn crate::support_bundle::BundleActions>>>,
     /// FD-09: what sends Wake-on-LAN's magic packet (set once the core is put together).
     network_tools: RwLock<Option<Arc<dyn crate::adapters::net_tools::NetworkTools>>>,
+    /// FD-09: what runs the quick file server (set once the core is put together).
+    file_servers: RwLock<Option<Arc<dyn crate::toolbox::file_server::FileServerActions>>>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -667,6 +671,7 @@ impl JobRunner {
             converter: RwLock::new(None),
             bundles: RwLock::new(None),
             network_tools: RwLock::new(None),
+            file_servers: RwLock::new(None),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -739,6 +744,11 @@ impl JobRunner {
         *locks::write(&self.network_tools) = Some(tools);
     }
 
+    /// FD-09: what runs the quick file server.
+    pub fn set_file_servers(&self, servers: Arc<dyn crate::toolbox::file_server::FileServerActions>) {
+        *locks::write(&self.file_servers) = Some(servers);
+    }
+
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
     pub fn set_exec_tuning(&self, tuning: ExecTuning) {
         *locks::write(&self.exec_tuning) = tuning;
@@ -756,13 +766,31 @@ impl JobRunner {
 
     /// FD-02: the jobs started from the UI in the workspace that are still open (queued, in their countdown, running,
     /// or waiting for the go-ahead after their canary). A schedule's runs are left out: they go on whichever
-    /// workspace is shown.
+    /// workspace is shown. So is the file server (FD-09), which the switch stops.
     pub fn open_user_jobs(&self, workspace: WorkspaceId) -> usize {
         let owners = locks::lock(&self.owners);
         locks::lock(&self.running)
             .keys()
-            .filter(|id| owners.get(id).is_some_and(|o| o.workspace == workspace && !o.scheduled))
+            .filter(|id| {
+                owners
+                    .get(id)
+                    .is_some_and(|o| o.workspace == workspace && !o.scheduled && !o.stops_on_switch)
+            })
             .count()
+    }
+
+    /// FD-09: the file server's jobs still open (queued, in their countdown, or serving), in `workspace` or in all.
+    pub fn file_server_jobs(&self, workspace: Option<WorkspaceId>) -> Vec<Uuid> {
+        let owners = locks::lock(&self.owners);
+        locks::lock(&self.running)
+            .keys()
+            .filter(|id| {
+                owners
+                    .get(id)
+                    .is_some_and(|o| o.stops_on_switch && workspace.is_none_or(|w| w == o.workspace))
+            })
+            .copied()
+            .collect()
     }
 
     /// BX-02: runs `work` while no job is open, and holds back new ones until it is done (a submit waits for it, so
@@ -905,6 +933,7 @@ impl JobRunner {
             JobOwner {
                 workspace: spec.ctx.workspace_id,
                 scheduled: spec.approval.as_ref().is_some_and(|a| a.standing.is_some()),
+                stops_on_switch: matches!(spec.command, Command::FileServer { .. }),
             },
         );
         locks::lock(&self.running).insert(id, token.clone());
@@ -1878,6 +1907,27 @@ impl JobRunner {
                     ..TargetOutcome::done()
                 })
             }
+            // FD-09: the target runs as long as the server; its output is the request log. Cancel stops it.
+            (Command::FileServer { spec: serve, .. }, TargetRef::App) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let servers = locks::read(&self.file_servers)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("the file server"))?;
+                let report = servers.serve(&spec.ctx, job_id, serve, token).await?;
+                Ok(TargetOutcome {
+                    output: Some(OutputCollector::collect(
+                        report.log.as_bytes(),
+                        b"",
+                        &[],
+                        // Sized so every transfer row fits (the log folds repeats and refusals).
+                        crate::toolbox::file_server::MAX_JOB_OUTPUT,
+                    )),
+                    note: Some(report.note),
+                    ..TargetOutcome::done()
+                })
+            }
             // VM-21, VM-22, VM-10: one new VM, with its after-deploy steps. Cancel stops it and removes what this job
             // made for it; VMs already made stay.
             (Command::Deploy { spec: deploy, .. }, TargetRef::NewVm { name, .. }) => {
@@ -2428,7 +2478,8 @@ impl JobRunner {
             Command::FileUpload { .. }
             | Command::OpenTunnel { .. }
             | Command::HostNetwork { .. }
-            | Command::WakeOnLan { .. } => 1,
+            | Command::WakeOnLan { .. }
+            | Command::FileServer { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
             // VM-08: within a step, as the commands it stands for.
@@ -2599,6 +2650,7 @@ fn safety_verb(command: &Command) -> &'static str {
         },
         Command::HostNetwork { .. } => "port forward",
         Command::WakeOnLan { .. } => "wake-up",
+        Command::FileServer { .. } => "file server",
         Command::ImageConvert { .. } => "conversion",
         Command::VmExport { .. } => "export",
         Command::SupportBundle { .. } => "support bundle",
