@@ -21,7 +21,7 @@ export const KINDS: { value: CheckKind; label: string; hint: string }[] = [
   { value: "ping", label: "Ping", hint: "One echo request from this PC" },
   { value: "certificate", label: "Certificate", hint: "A TLS certificate: valid, trusted, and its days left" },
   { value: "dns", label: "DNS", hint: "A name resolves, optionally to a given address" },
-  { value: "service", label: "Service", hint: "A systemd unit on a session's host, over SSH" },
+  { value: "service", label: "Service", hint: "A systemd unit over SSH, or a Windows service over WinRM" },
 ];
 
 /** How often a check may run, as the editor offers it (30 s to 1 h). */
@@ -140,6 +140,8 @@ export function specText(spec: CheckSpec): string {
 }
 
 const UNIT = /^[A-Za-z0-9][A-Za-z0-9:_.@-]{0,254}$/;
+/** F4: a Windows service's name: letters, digits, spaces and _ - . $ @ + #, no wildcards (the core checks again). */
+const WINDOWS_SERVICE = /^[\p{L}\p{N} _.$@+#-]{1,256}$/u;
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 
 /** An IPv4 address, or something IPv6-shaped (the core checks it properly). */
@@ -149,7 +151,11 @@ export function looksLikeIp(text: string): boolean {
 }
 
 /** Why the check can't be saved yet, or null. The core checks the same things. */
-export function checkProblem(input: CheckInput): string | null {
+/**
+ * What the editor's fields refuse, or null. `windowsService`: the chosen session is a WinRM one, so a service check names
+ * a Windows service rather than a systemd unit.
+ */
+export function checkProblem(input: CheckInput, windowsService = false): string | null {
   const name = input.name.trim();
   if (!name) return "Give the check a name.";
   if (name.length > 80) return "A check's name can be at most 80 characters.";
@@ -200,6 +206,12 @@ export function checkProblem(input: CheckInput): string | null {
       if (spec.expect && !looksLikeIp(spec.expect)) return "Type the expected address as an IP address.";
       break;
     case "service":
+      if (windowsService) {
+        if (!WINDOWS_SERVICE.test(spec.unit.trim())) {
+          return "A Windows service's name is letters, digits, spaces and _ - . $ @ + # (its name, like Spooler, not its display name).";
+        }
+        break;
+      }
       if (!UNIT.test(spec.unit.trim())) {
         return "A unit's name is letters, digits and : _ . @ - (like nginx.service), starting with a letter or digit.";
       }

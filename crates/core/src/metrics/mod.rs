@@ -15,6 +15,7 @@
 pub mod guest;
 pub mod history;
 pub mod procfs;
+pub mod windows;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
@@ -1040,9 +1041,13 @@ impl Metrics {
             .get_session(ctx, session_id)
             .await?
             .ok_or(crate::error::CoreError::UnknownTarget(session_id.to_string()))?;
-        // SS-12: guest metrics are read over SSH.
-        if watch {
-            session.require_ssh("the dashboard reads a guest's metrics over SSH only")?;
+        // SS-12: guest metrics are read over SSH, and (F4, MO-05) over WinRM from Windows hosts.
+        if watch && !session.kind.reads_guest() {
+            return Err(crate::error::CoreError::WrongSessionKind {
+                session: session.name.clone(),
+                kind: session.kind.label(),
+                needs: "the dashboard reads a guest's metrics over SSH or WinRM only".into(),
+            });
         }
         let mut watched = self.guest.watched().await?;
         if watched.contains(&session_id) == watch {

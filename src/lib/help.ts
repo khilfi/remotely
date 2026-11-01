@@ -272,6 +272,20 @@ export const HELP = {
       "Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed. Recordings stay in memory until Type in all tabs is turned off.",
     ],
   },
+  "winrm.signIn": {
+    title: "Signing in to WinRM",
+    body: [
+      "NTLM signs in with the session's user and a vault password through Windows' own NTLM, for workgroup hosts and domain hosts that allow it; over HTTP every message is encrypted. Basic sends them in each request, so it needs HTTPS and a host that allows it.",
+      "My Windows sign-in uses your account on this PC with Kerberos only, for hosts in a trusted domain reached by their name; it never falls back to NTLM, so nothing derived from your Windows password goes to the host. No password is stored, and Remotely changes nothing on this PC, such as TrustedHosts.",
+    ],
+  },
+  "winrm.certificate": {
+    title: "The host's HTTPS certificate",
+    body: [
+      "Trusted by Windows: the certificate must chain to a root this PC trusts and name the session's host.",
+      "By its fingerprint: a certificate Windows doesn't trust, such as a self-signed one, is shown the first time with its fingerprint, like an SSH host key. Once you trust it, a different one blocks the connection. Trusted certificates are listed on the Vault page's Known hosts tab.",
+    ],
+  },
   vmLink: {
     title: "VM it reaches",
     body: [
@@ -556,7 +570,7 @@ export const HELP = {
     title: "Edit several sessions",
     body: [
       "Set the folder, port, user, login, jump host or environment of every selected session at once, and add or remove tags. Fields left as they are stay as each session has them.",
-      "You see each session before and after first. If a login would send a vault password somewhere new, the vault password is asked once. Only SSH sessions take a login, and Telnet and serial take no jump host, so they keep theirs.",
+      "You see each session before and after first. If a login would send a vault password somewhere new, the vault password is asked once. Only SSH and WinRM sessions take a login (WinRM a password, unless it uses your Windows sign-in), and only SSH, RDP and VNC take a jump host, so the others keep theirs.",
     ],
   },
   checks: {

@@ -20,6 +20,11 @@ import {
   serialProblem,
   SERIAL_DEFAULTS,
   takesJumpHost,
+  logsInWithVault,
+  readsGuest,
+  winrmPortAfterTransport,
+  winrmProblem,
+  WINRM_DEFAULTS,
 } from "./session-kinds.ts";
 
 test("each kind's defaults, and what it opens", () => {
@@ -88,4 +93,33 @@ test("only SSH tabs join typing in all tabs and Compare hosts", () => {
   for (const kind of ["telnet", "serial", "tunnel"] as const) assert.ok(joinReason(kind), kind);
   assert.equal(paneKindOf(defaultKind("rdp"), true), "tunnel");
   assert.equal(paneKindOf(defaultKind("telnet"), false), "telnet");
+});
+
+test("WinRM: a PowerShell tab, its sign-in, its port and Basic only over HTTPS", () => {
+  const winrm = defaultKind("winrm");
+  assert.deepEqual(winrm, { protocol: "winrm", ...WINRM_DEFAULTS });
+  assert.ok(opensInTab(winrm) && !opensWindow(winrm) && !takesJumpHost(winrm));
+  assert.equal(paneKindOf(winrm, false), "powershell");
+  assert.ok(joinReason("powershell"));
+  assert.ok(logsInWithVault(winrm) && readsGuest(winrm));
+  const windows = { protocol: "winrm" as const, ...WINRM_DEFAULTS, signIn: "windows" as const };
+  assert.ok(!logsInWithVault(windows));
+  assert.equal(
+    kindAddress({ host: "win01.example.com", port: 5986, username: "alice", kind: windows }),
+    "win01.example.com:5986",
+    "the Windows sign-in names no user",
+  );
+  assert.equal(portAfterKindChange("22", "ssh", "winrm"), "5986");
+  assert.equal(winrmPortAfterTransport("5986", "http"), "5985");
+  assert.equal(winrmPortAfterTransport("15986", "http"), "15986");
+  assert.ok(winrmProblem({ ...WINRM_DEFAULTS, transport: "http", signIn: "basic" }));
+  assert.equal(winrmProblem(WINRM_DEFAULTS), null);
+  // The Windows sign-in is Kerberos only, which needs a name.
+  const kerberos = { ...WINRM_DEFAULTS, signIn: "windows" as const };
+  assert.ok(winrmProblem(kerberos, "192.0.2.10"));
+  assert.ok(winrmProblem(kerberos, "[2001:db8::1]"));
+  assert.equal(winrmProblem(kerberos, "win01.example.com"), null);
+  assert.equal(winrmProblem(WINRM_DEFAULTS, "192.0.2.10"), null);
+  assert.equal(kindSummary(winrm), "HTTPS · NTLM");
+  assert.equal(kindSummary({ protocol: "winrm", ...WINRM_DEFAULTS, transport: "http" }), "HTTP, encrypted · NTLM");
 });

@@ -514,13 +514,28 @@ fn tidy(mut input: SessionInput) -> Result<SessionInput> {
     let kind = input.kind;
     kind.tidy(&mut input.host, &mut input.port)?;
     if !kind.is_ssh() {
-        // Its own program or the remote side asks for the login: no vault password goes anywhere through it
-        // (QL-16: not a folder's either). The startup command, prompt hook and VM link are SSH's.
-        input.auth = SessionAuth::Password { password_id: None };
+        // The startup command and prompt hook are SSH's.
         input.startup_command = None;
         input.startup_on_reconnect = false;
         input.prompt_hook = None;
-        input.vm_id = None;
+        if !kind.links_to_vms() {
+            input.vm_id = None;
+        }
+        if !kind.logs_in_with_vault() {
+            // Its own program or the remote side asks for the login (or, for WinRM with "my Windows sign-in",
+            // Windows signs in as the user of this PC): no vault password goes anywhere through it (QL-16: not a
+            // folder's either).
+            input.auth = SessionAuth::Password { password_id: None };
+            if kind.is_winrm() {
+                input.username = None;
+            }
+        } else if !kind.takes_keys() && matches!(input.auth, SessionAuth::Key { .. } | SessionAuth::Agent) {
+            // F4: WinRM signs in with a user and password only.
+            return invalid(format!(
+                "A {} session signs in with a user and password from the vault, not a key or the SSH agent.",
+                kind.label()
+            ));
+        }
     }
     if !kind.takes_jump_host() {
         // Telnet and serial never go through a jump host, not even a folder's.
@@ -1416,7 +1431,7 @@ impl SessionLibrary {
             if let Some(user) = &username {
                 input.username.clone_from(user);
             }
-            if let Some(auth) = &edit.auth {
+            if let Some(auth) = edit.auth.as_ref().filter(|auth| takes_login(&session.kind, auth)) {
                 input.auth = auth.clone();
             }
             match &edit.jump {
@@ -2151,9 +2166,9 @@ impl SessionLibrary {
     async fn describe(&self, ctx: &Context, s: &SessionRecord) -> Result<String> {
         let (folders, sessions) = self.names(ctx).await?;
         let mut parts = vec![s.address()];
-        // SS-12: what it opens; only SSH logs in with a login of the app's.
+        // SS-12: what it opens; only SSH and WinRM log in with a login of the app's.
         parts.extend(s.kind.describe());
-        if s.kind.is_ssh() {
+        if s.kind.logs_in_with_vault() {
             parts.push(s.auth.describe());
         }
         if s.environment != Environment::None {
@@ -2378,6 +2393,13 @@ fn resolved_after(
         .collect()
 }
 
+/// QL-28, F4: whether a session of `kind` takes `auth` as its login: SSH any; WinRM a password (or its folders');
+/// the rest none.
+fn takes_login(kind: &SessionKind, auth: &SessionAuth) -> bool {
+    kind.logs_in_with_vault()
+        && (kind.takes_keys() || matches!(auth, SessionAuth::Password { .. } | SessionAuth::Folder))
+}
+
 /// QL-28: what a bulk edit changes on one session (`a` before, `b` after, both resolved), field by field; a value it
 /// has from a folder says which.
 /// QL-28, SS-12: the fields of a bulk edit a session of this kind doesn't take, which [`tidy`] leaves as they are.
@@ -2385,7 +2407,12 @@ fn skipped_for_kind(kind: &SessionKind, edit: &BulkEdit) -> Vec<String> {
     let mut out = Vec::new();
     for (asked, applies, field, verb) in [
         (edit.port.is_some(), kind.has_port(), "Port", "has"),
-        (edit.auth.is_some(), kind.is_ssh(), "Login", "takes"),
+        (
+            edit.auth.is_some(),
+            edit.auth.as_ref().is_some_and(|auth| takes_login(kind, auth)),
+            "Login",
+            "takes",
+        ),
         (edit.jump.is_some(), kind.takes_jump_host(), "Jump host", "takes"),
     ] {
         if asked && !applies {

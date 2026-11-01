@@ -16,9 +16,11 @@ use remotely_core::command_bus::{ApprovalAnswers, Command, SubmitOutcome};
 use remotely_core::domain::{Environment, TargetRef};
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
 use remotely_core::fakes::{FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeUpdater, FakeVirtualBox, FakeVmware};
+use remotely_core::fakes::{FakeWinrm, WinrmTestServer};
 use remotely_core::jobs::{ExecTuning, JobEvent, JobLimits, JobStatus};
 use remotely_core::known_hosts::HostKey;
-use remotely_core::sessions::{SessionAuth, SessionInput};
+use remotely_core::sessions::kinds::{WinrmCertificate, WinrmOptions, WinrmSignIn, WinrmTransport};
+use remotely_core::sessions::{SessionAuth, SessionInput, SessionKind};
 use remotely_core::store::Store;
 use remotely_core::terminal::{TerminalEvent, TerminalStatus, TerminalTuning};
 use remotely_core::vault::{LocalVault, SecretKind, SecretString, Vault, VaultOptions};
@@ -31,6 +33,16 @@ use uuid::Uuid;
 
 fn new_password() -> String {
     format!("pw-{}", Uuid::new_v4().simple())
+}
+
+/// `user:password` as WinRM's Basic header carries it (base64), from the client's own code.
+fn basic_header_of(user: &str, password: &str) -> String {
+    match remotely_core::adapters::winrm::http::SignIn::basic(user, &SecretString::new(password)) {
+        remotely_core::adapters::winrm::http::SignIn::Basic { header } => {
+            header.trim_start_matches("Basic ").to_owned()
+        }
+        remotely_core::adapters::winrm::http::SignIn::Sspi { .. } => unreachable!(),
+    }
 }
 
 fn everything_in(dir: &Path) -> String {
@@ -79,7 +91,14 @@ async fn the_log_file_never_holds_a_secret() {
         network: Arc::new(FakeNetwork::default()),
         containers: Arc::new(CliEngines::without_this_pc()),
         disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
-        network_tools: Arc::new(remotely_core::fakes::FakeNetworkTools::new()),
+        // F4: the WinRM host's HTTPS certificate passes the trust check.
+        network_tools: Arc::new(remotely_core::fakes::FakeNetworkTools::new().with_verdict(
+            remotely_core::adapters::net_tools::TrustVerdict {
+                trusted: true,
+                problems: Vec::new(),
+                built: Vec::new(),
+            },
+        )),
     };
     let core = Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
@@ -229,6 +248,96 @@ async fn the_log_file_never_holds_a_secret() {
     .unwrap();
     assert_eq!(status, JobStatus::PartiallyFailed, "one host refused the password");
 
+    // F4: PowerShell consoles over WinRM: NTLM through Windows' SSPI over HTTP (sealed), Basic over HTTPS; then the
+    // dashboard's guest metrics on a kept connection.
+    let winrm_ntlm = new_password();
+    let winrm_basic = new_password();
+    let ntlm_server = WinrmTestServer::start(FakeWinrm::HttpNtlm, "alice", &winrm_ntlm)
+        .await
+        .unwrap();
+    let basic_server = WinrmTestServer::start(FakeWinrm::HttpsBasic, "alice", &winrm_basic)
+        .await
+        .unwrap();
+    let mut winrm_sessions = Vec::new();
+    for (name, server, password, options) in [
+        (
+            "win-ntlm",
+            &ntlm_server,
+            &winrm_ntlm,
+            WinrmOptions {
+                transport: WinrmTransport::Http,
+                sign_in: WinrmSignIn::Ntlm,
+                certificate: WinrmCertificate::Windows,
+            },
+        ),
+        (
+            "win-basic",
+            &basic_server,
+            &winrm_basic,
+            WinrmOptions {
+                transport: WinrmTransport::Https,
+                sign_in: WinrmSignIn::Basic,
+                certificate: WinrmCertificate::Windows,
+            },
+        ),
+    ] {
+        let secret = core
+            .vault
+            .add(
+                &core.ctx(),
+                SecretKind::Password,
+                name,
+                SecretString::new(password.as_str()),
+            )
+            .await
+            .unwrap()
+            .id;
+        let input = SessionInput {
+            name: name.into(),
+            folder_id: None,
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            username: Some("alice".into()),
+            auth: SessionAuth::Password {
+                password_id: Some(secret),
+            },
+            jump_session_id: None,
+            jump_direct: false,
+            startup_command: None,
+            startup_on_reconnect: false,
+            prompt_hook: None,
+            environment: Environment::Lab,
+            color: None,
+            tags: vec![],
+            vm_id: None,
+            kind: SessionKind::Winrm(options),
+        };
+        let id = core.sessions.create(&core.ctx(), input).await.unwrap().id;
+        winrm_sessions.push(id);
+        let mut console = core
+            .terminals
+            .open(&core.ctx(), id, PtySize { cols: 80, rows: 24 })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while let Some(event) = console.events.recv().await {
+                if let TerminalEvent::Status {
+                    status: TerminalStatus::Connected,
+                } = event
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the PowerShell console connected");
+        core.terminals.write(console.id, b"hostname\r".to_vec()).await;
+        core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
+    }
+    core.metrics.collect_once().await;
+    core.metrics.collect_once().await;
+    assert!(ntlm_server.stats().sign_ins >= 1 && basic_server.stats().sign_ins >= 1);
+
     // A UI crash and a panic whose messages carry secrets by mistake.
     diagnostics::ui_error(
         "Terminal".into(),
@@ -244,6 +353,8 @@ async fn the_log_file_never_holds_a_secret() {
     .unwrap();
     core.shutdown().await;
     drop(servers);
+    drop(ntlm_server);
+    drop(basic_server);
 
     let text = everything_in(&logs);
     let _ = std::fs::remove_dir_all(&dir);
@@ -254,7 +365,12 @@ async fn the_log_file_never_holds_a_secret() {
         ("login password", &login),
         ("sudo password", &sudo),
         ("master password", &master),
+        ("WinRM NTLM password", &winrm_ntlm),
+        ("WinRM Basic password", &winrm_basic),
     ] {
         assert!(!text.contains(secret.as_str()), "the {what} is in the logs folder");
     }
+    // Basic's header holds the password in base64.
+    let basic = basic_header_of("alice", &winrm_basic);
+    assert!(!text.contains(&basic), "the Basic header is in the logs folder");
 }

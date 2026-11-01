@@ -534,6 +534,10 @@ impl ExecSession for Tracked {
         self.0.peer_ip()
     }
 
+    fn script_kind(&self) -> crate::adapters::remote::ScriptKind {
+        self.0.script_kind()
+    }
+
     async fn open_direct(
         &self,
         host: &str,

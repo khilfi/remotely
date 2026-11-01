@@ -272,6 +272,7 @@ fn kind(kind: &SessionKind) -> &'static str {
         SessionKind::Vnc(_) => "VNC",
         SessionKind::Telnet(_) => "Telnet",
         SessionKind::Serial(_) => "Serial",
+        SessionKind::Winrm(_) => "WinRM",
     }
 }
 

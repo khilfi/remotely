@@ -73,6 +73,9 @@ pub struct GuestReading {
     pub swap_free_bytes: Option<u64>,
     pub load: Option<[f64; 3]>,
     pub uptime_secs: Option<f64>,
+    /// The guest's own clock for rates, finer than its uptime where it has one: a Windows host's
+    /// `Timestamp_Sys100NS`, read with the CPU counter, in seconds. Linux's uptime has hundredths.
+    pub clock_secs: Option<f64>,
     /// Sectors (512 bytes each, whatever the disk's own sector size) read and written by whole disks.
     pub disk_sectors: Option<(u64, u64)>,
     /// Bytes received and sent by the network interfaces, loopback and container links left out.
@@ -326,8 +329,11 @@ pub fn rates(previous: Option<(&GuestReading, Instant)>, now: &GuestReading, at:
     let Some((before, then)) = previous else {
         return GuestRates::default();
     };
-    let secs = match (now.uptime_secs, before.uptime_secs) {
-        (Some(a), Some(b)) if a > b => a - b,
+    // Review F4 #11: a guest clock finer than whole seconds first (Windows' uptime is whole seconds, which would
+    // skew a 5 s round's rates by up to a fifth), then the uptime, then this PC's clock.
+    let secs = match (now.clock_secs, before.clock_secs, now.uptime_secs, before.uptime_secs) {
+        (Some(a), Some(b), _, _) if a > b => a - b,
+        (_, _, Some(a), Some(b)) if a > b => a - b,
         _ => at.saturating_duration_since(then).as_secs_f64(),
     };
     let per_sec = |a: u64, b: u64| -> Option<f64> { (secs > 0.0).then_some(a.checked_sub(b)? as f64 / secs) };

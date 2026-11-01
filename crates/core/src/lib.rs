@@ -406,6 +406,8 @@ struct LockParts {
     terminals: Terminals,
     transfer_closed: transfer::Closer,
     bindings: SecretBindings,
+    /// F4: the service checks' kept WinRM connections.
+    checks: checks::Checks,
     /// FD-09: nobody may be at the PC any more, so the file server stops too.
     file_server: Arc<toolbox::file_server::Runner>,
     jobs: Arc<JobRunner>,
@@ -429,6 +431,7 @@ impl LockParts {
         self.containers.close_all().await;
         self.host_details.close_all().await;
         self.toolbox.close_all().await;
+        self.checks.close_connections().await;
         if let Some(metrics) = self.guest.upgrade() {
             metrics.guest().close_all().await;
         }
@@ -546,6 +549,11 @@ impl Core {
             Arc::clone(&links),
         );
         terminals.set_bindings(bindings.clone());
+        // F4: one WinRM client for PowerShell consoles, Windows guest metrics and facts, and Windows service checks. It
+        // checks an HTTPS certificate against Windows' trust store through the network tools (a fake in tests).
+        let winrm: Arc<dyn adapters::winrm::WinrmAdapter> =
+            Arc::new(adapters::winrm::HttpWinrm::new(Arc::clone(&adapters.network_tools)));
+        terminals.set_winrm(Arc::clone(&winrm));
         // QL-17: every pane matches its output against the rules with an alert on, as they change.
         let terminal_rules = TerminalRules::load(store.clone(), &ctx).await?;
         terminals.set_rules(terminal_rules.subscribe());
@@ -570,6 +578,7 @@ impl Core {
             login_guard.clone(),
         );
         guest.set_specs(specs.clone());
+        guest.set_winrm(Arc::clone(&winrm));
         if let Some(secs) = store.get_setting::<u64>(&ctx, metrics::guest::POLL_KEY).await? {
             if metrics::guest::POLL_CHOICES.contains(&secs) {
                 guest.set_interval(Duration::from_secs(secs));
@@ -598,6 +607,7 @@ impl Core {
             known_hosts: Arc::clone(&known_hosts),
             login_guard: login_guard.clone(),
         });
+        host_details.set_winrm(Arc::clone(&winrm));
         // FD-09: the toolbox's reads; a session behind a jump host is reached over its jump host's connection.
         let toolbox = toolbox::Toolbox::new(toolbox::ToolboxParts {
             store: store.clone(),
@@ -616,6 +626,18 @@ impl Core {
             current: current.clone(),
             toolbox: toolbox.clone(),
         });
+        // F4: a service check reads a systemd unit over SSH, or a Windows service over WinRM.
+        checks.set_service_reader(Arc::new(checks::ByKind::new(
+            store.clone(),
+            Arc::new(checks::SystemdOverSsh::new(toolbox.clone())),
+            Arc::new(checks::WindowsServices::new(
+                store.clone(),
+                Arc::clone(&adapters.vault),
+                Arc::clone(&known_hosts),
+                login_guard.clone(),
+                Arc::clone(&winrm),
+            )),
+        )));
         alerts.set_checks(Arc::new(checks.clone()));
         let jobs = JobRunner::new(
             store.clone(),
@@ -846,6 +868,7 @@ impl Core {
             terminals: self.terminals.clone(),
             transfer_closed: self.transfer.closer(),
             bindings: self.bindings.clone(),
+            checks: self.checks.clone(),
             file_server: Arc::clone(self.file_server.runner()),
             jobs: Arc::clone(&self.jobs),
         };

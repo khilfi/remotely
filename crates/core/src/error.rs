@@ -323,6 +323,34 @@ pub enum CoreError {
     #[error("{0}")]
     SerialPort(String),
 
+    /// SS-12: a WinRM host answered in a way the protocol doesn't allow, or refused an operation (its fault, in words).
+    #[error("{0}")]
+    Winrm(String),
+
+    /// SS-12: a WinRM host's HTTPS certificate is not the one trusted for it by its fingerprint. Blocked, like a changed
+    /// SSH host key.
+    #[error(
+        "the HTTPS certificate of {address} has changed since it was trusted, so Remotely did not connect. Someone may be intercepting the connection, or the certificate was renewed: check it, then trust the new one on the Vault page's Known hosts tab"
+    )]
+    CertificateChanged { address: String },
+
+    /// SS-12: the user did not trust a WinRM host's certificate.
+    #[error("the HTTPS certificate of {address} was not trusted, so Remotely did not connect")]
+    CertificateRejected { address: String },
+
+    /// SS-12: a WinRM host's certificate Windows doesn't trust, met where no one can be asked (the dashboard, a check).
+    #[error(
+        "the HTTPS certificate of {address} is not trusted yet. Open the session's PowerShell console once to check and trust it"
+    )]
+    CertificateUnknown { address: String },
+
+    /// SS-12: a WinRM host's certificate Windows doesn't trust (or that doesn't name the host), for a session whose rule is
+    /// Windows' trust only.
+    #[error(
+        "Windows doesn't trust the HTTPS certificate of {address} ({why}). Install its issuer on this PC, or let the session trust certificates by their fingerprint"
+    )]
+    CertificateNotTrusted { address: String, why: String },
+
     /// VM-16: vmware-vdiskmanager.exe is not beside vmrun.exe (nor where `REMOTELY_VDISKMANAGER` says).
     #[error(
         "vmware-vdiskmanager.exe was not found next to vmrun.exe. It comes with VMware Workstation Pro: repair the install, or set REMOTELY_VDISKMANAGER to its full path"
@@ -512,6 +540,11 @@ impl CoreError {
             CoreError::WrongSessionKind { .. } => "wrong_session_kind",
             CoreError::VncViewerNotFound => "vnc_viewer_not_found",
             CoreError::Console(_) => "console_failed",
+            CoreError::Winrm(_) => "winrm",
+            CoreError::CertificateChanged { .. } => "certificate_changed",
+            CoreError::CertificateRejected { .. } => "certificate_rejected",
+            CoreError::CertificateUnknown { .. } => "certificate_unknown",
+            CoreError::CertificateNotTrusted { .. } => "certificate_not_trusted",
             CoreError::SerialPort(_) => "serial_port",
             CoreError::VdiskManagerNotFound => "vdiskmanager_not_found",
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",

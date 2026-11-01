@@ -96,8 +96,9 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         environment: Environment::parse(&env),
         tags,
     };
-    // SS-12: a protocol this version doesn't open (F4's `winrm` in a newer database) reads as SSH, but keeps its
-    // protocol, and `session_spec` refuses anything that is not `ssh`, so nothing connects to it over SSH.
+    // SS-12: a protocol this version doesn't open (one a newer version adds) reads as SSH, but keeps its protocol:
+    // `session_spec` refuses anything that is not `ssh`, so nothing connects to it over SSH, and an edit is refused
+    // (`newer_kind`), so its kind is never rewritten.
     let protocol: String = row.try_get("protocol")?;
     let options: Option<String> = row.try_get("kind_options")?;
     let kind = SessionKind::read(&protocol, options.as_deref()).unwrap_or_default();
@@ -360,6 +361,13 @@ impl Store {
     }
 }
 
+/// SS-12: a session whose kind a newer version of Remotely added: this one neither edits nor opens it.
+pub(crate) fn newer_kind(name: &str, protocol: &str) -> CoreError {
+    CoreError::InvalidInput(format!(
+        "'{name}' is a {protocol} session, which a newer version of Remotely made. This version can't open or change it."
+    ))
+}
+
 /// One checked edit, inside `tx`. False when there is no such session.
 async fn update_session_in(
     tx: &mut Transaction<'_, Sqlite>,
@@ -368,6 +376,18 @@ async fn update_session_in(
     input: &SessionInput,
 ) -> Result<bool> {
     {
+        // SS-12: a session of a kind a newer version added reads as SSH here; saving it would rewrite its kind.
+        let stored: Option<(String, String)> =
+            sqlx::query_as("SELECT protocol, name FROM sessions WHERE workspace_id = ? AND id = ?")
+                .bind(ctx.workspace_id.to_string())
+                .bind(id.to_string())
+                .fetch_optional(&mut **tx)
+                .await?;
+        if let Some((protocol, name)) = stored {
+            if !SessionKind::PROTOCOLS.contains(&protocol.as_str()) {
+                return Err(newer_kind(&name, &protocol));
+            }
+        }
         let done = sqlx::query(
             "UPDATE sessions SET folder_id = ?, name = ?, host = ?, port = ?, username = ?, auth_method = ?,
                  credential_id = ?, key_passphrase_id = ?, jump_session_id = ?, startup_command = ?,
@@ -772,6 +792,9 @@ impl Store {
         let Some(session) = self.get_session_in(ctx, id, &folders).await? else {
             return Ok(None);
         };
+        if !SessionKind::PROTOCOLS.contains(&session.protocol.as_str()) {
+            return Err(newer_kind(&session.name, &session.protocol));
+        }
         if session.protocol != "ssh" {
             return Err(CoreError::WrongSessionKind {
                 session: session.name.clone(),
@@ -780,6 +803,53 @@ impl Store {
             });
         }
         self.ssh_chain(ctx, session, &folders).await.map(Some)
+    }
+
+    /// F4: what a WinRM connection needs, for a WinRM session only ([`CoreError::WrongSessionKind`] otherwise). Its
+    /// login is the one that applies (QL-16: its own, then its folders'): a user and password, or none with the
+    /// Windows sign-in; a key from a folder can't sign in to WinRM and says so.
+    pub async fn winrm_spec(&self, ctx: &Context, id: Uuid) -> Result<Option<crate::adapters::winrm::WinrmSpec>> {
+        let folders = self.session_folders(ctx).await?;
+        let Some(session) = self.get_session_in(ctx, id, &folders).await? else {
+            return Ok(None);
+        };
+        let SessionKind::Winrm(options) = session.kind else {
+            if !SessionKind::PROTOCOLS.contains(&session.protocol.as_str()) {
+                return Err(newer_kind(&session.name, &session.protocol));
+            }
+            return Err(CoreError::WrongSessionKind {
+                session: session.name.clone(),
+                kind: session.kind.label(),
+                needs: "this works over WinRM only".into(),
+            });
+        };
+        let password_id = if options.uses_password() {
+            match &session.auth {
+                SessionAuth::Password { password_id } => *password_id,
+                _ => {
+                    return Err(CoreError::InvalidInput(format!(
+                        "'{}' signs in to WinRM with a user and password, but its login (from its folder) is a key or the SSH agent. Choose a password in the session.",
+                        session.name
+                    )))
+                }
+            }
+        } else {
+            None
+        };
+        Ok(Some(crate::adapters::winrm::WinrmSpec {
+            id: session.id,
+            name: session.name,
+            host: session.host,
+            port: session.port,
+            username: if options.uses_password() {
+                session.username
+            } else {
+                None
+            },
+            password_id,
+            options,
+            environment: session.environment,
+        }))
     }
 
     async fn ssh_chain(&self, ctx: &Context, session: SessionRecord, folders: &Folders) -> Result<SessionSpec> {

@@ -12,6 +12,7 @@ import type {
   SessionKind,
   SessionProtocol,
   StopBits,
+  WinrmOptions,
 } from "./api.ts";
 
 export const RDP_DEFAULTS: RdpOptions = {
@@ -33,6 +34,9 @@ export const SERIAL_DEFAULTS: SerialOptions = {
   localEcho: false,
 };
 
+/** F4: HTTPS, the user's vault password through NTLM, and Windows' trust for the certificate. */
+export const WINRM_DEFAULTS: WinrmOptions = { transport: "https", signIn: "ntlm", certificate: "windows" };
+
 /** The kinds in the editor's order, with the names it shows. */
 export const KINDS: { protocol: SessionProtocol; label: string }[] = [
   { protocol: "ssh", label: "SSH" },
@@ -40,6 +44,7 @@ export const KINDS: { protocol: SessionProtocol; label: string }[] = [
   { protocol: "vnc", label: "VNC" },
   { protocol: "telnet", label: "Telnet" },
   { protocol: "serial", label: "Serial" },
+  { protocol: "winrm", label: "WinRM" },
 ];
 
 /** A new kind's fields with their defaults. */
@@ -55,6 +60,8 @@ export function defaultKind(protocol: SessionProtocol): SessionKind {
       return { protocol, lineEnding: "crLf" };
     case "serial":
       return { protocol, ...SERIAL_DEFAULTS };
+    case "winrm":
+      return { protocol, ...WINRM_DEFAULTS };
   }
 }
 
@@ -71,6 +78,8 @@ export function defaultPort(protocol: SessionProtocol): number | null {
       return 23;
     case "serial":
       return null;
+    case "winrm":
+      return 5986;
   }
 }
 
@@ -96,9 +105,21 @@ export function kindOf(session: { kind?: SessionKind | null; protocol?: string }
   return session.kind ?? defaultKind((session.protocol as SessionProtocol | undefined) ?? "ssh");
 }
 
-/** Opens in a terminal tab (SSH, Telnet, serial); RDP and VNC open a window. */
+/** Opens in a terminal tab (SSH, Telnet, serial, WinRM's PowerShell console); RDP and VNC open a window. */
 export function opensInTab(kind: SessionKind): boolean {
-  return kind.protocol === "ssh" || kind.protocol === "telnet" || kind.protocol === "serial";
+  return (
+    kind.protocol === "ssh" || kind.protocol === "telnet" || kind.protocol === "serial" || kind.protocol === "winrm"
+  );
+}
+
+/** Signs in with the session's user and a password from the vault (SSH, and WinRM unless it uses the Windows sign-in). */
+export function logsInWithVault(kind: SessionKind): boolean {
+  return kind.protocol === "ssh" || (kind.protocol === "winrm" && kind.signIn !== "windows");
+}
+
+/** Gives guest metrics and host facts, and may be linked to its VM: SSH and WinRM. */
+export function readsGuest(kind: SessionKind): boolean {
+  return kind.protocol === "ssh" || kind.protocol === "winrm";
 }
 
 /** Opens a window of another program (mstsc, the VNC viewer). */
@@ -201,14 +222,63 @@ export function kindSummary(kind: SessionKind): string | null {
       ]
         .filter(Boolean)
         .join(" · ");
+    case "winrm":
+      return [
+        kind.transport === "https" ? "HTTPS" : "HTTP, encrypted",
+        WINRM_SIGN_INS.find((s) => s.value === kind.signIn)?.short,
+        kind.transport === "https" && kind.certificate === "fingerprint" ? "certificate by fingerprint" : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
   }
+}
+
+export const WINRM_TRANSPORTS: { value: WinrmOptions["transport"]; label: string }[] = [
+  { value: "https", label: "HTTPS (5986)" },
+  { value: "http", label: "HTTP, encrypted by the sign-in (5985)" },
+];
+
+export const WINRM_SIGN_INS: { value: WinrmOptions["signIn"]; label: string; short: string }[] = [
+  { value: "ntlm", label: "User and password (NTLM)", short: "NTLM" },
+  { value: "basic", label: "User and password (Basic, HTTPS only)", short: "Basic" },
+  { value: "windows", label: "My Windows sign-in (Kerberos only)", short: "my Windows sign-in" },
+];
+
+export const WINRM_CERTIFICATES: { value: WinrmOptions["certificate"]; label: string }[] = [
+  { value: "windows", label: "Trusted by Windows" },
+  { value: "fingerprint", label: "Trusted by Windows, or by its fingerprint" },
+];
+
+/** What a WinRM session's fields refuse, or null (the core checks again). */
+export function winrmProblem(o: WinrmOptions, host = ""): string | null {
+  if (o.signIn === "basic" && o.transport === "http") {
+    return "Basic sends the password as it is, so it needs HTTPS.";
+  }
+  if (o.signIn === "windows" && looksLikeIpAddress(host)) {
+    return "My Windows sign-in is Kerberos, which needs the host's name, not its IP address.";
+  }
+  return null;
+}
+
+/** An IPv4 address, or something IPv6-shaped (the core checks it properly). */
+function looksLikeIpAddress(text: string): boolean {
+  const t = text.trim().replace(/^\[(.*)\]$/, "$1");
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(t) || (t.includes(":") && /^[0-9a-fA-F:.]+$/.test(t));
+}
+
+/** The port after WinRM's transport changes: the other default when the port was one of them, else what was typed. */
+export function winrmPortAfterTransport(port: string, transport: WinrmOptions["transport"]): string {
+  const p = port.trim();
+  if (p === "" || p === "5985" || p === "5986") return transport === "https" ? "5986" : "5985";
+  return port;
 }
 
 /** Where it connects, as rows show it: `alice@web01:22`, `COM3 · 9600 8N1`, `win01:3389`. */
 export function kindAddress(session: { host: string; port: number; username: string | null; kind?: SessionKind }) {
   const kind = kindOf(session);
   if (kind.protocol === "serial") return `${session.host} · ${serialFrame(kind)}`;
-  const user = session.username && kind.protocol !== "vnc" ? `${session.username}@` : "";
+  const userShown = kind.protocol !== "vnc" && !(kind.protocol === "winrm" && kind.signIn === "windows");
+  const user = session.username && userShown ? `${session.username}@` : "";
   return `${user}${session.host}:${session.port}`;
 }
 
@@ -226,6 +296,8 @@ export function joinReason(kind: PaneKind | null | undefined): string | null {
       return "Serial tabs don't join: typing in all tabs and Compare hosts are for SSH shells.";
     case "tunnel":
       return "Tunnel tabs carry a remote desktop or VNC window, so they don't join.";
+    case "powershell":
+      return "PowerShell tabs don't join yet: typing in all tabs and Compare hosts are for SSH shells.";
   }
 }
 
@@ -233,6 +305,7 @@ export function joinReason(kind: PaneKind | null | undefined): string | null {
 export function paneKindOf(kind: SessionKind, viaJumpHost: boolean): PaneKind {
   if (kind.protocol === "telnet") return "telnet";
   if (kind.protocol === "serial") return "serial";
+  if (kind.protocol === "winrm") return "powershell";
   if (opensWindow(kind) && viaJumpHost) return "tunnel";
   return "ssh";
 }

@@ -2272,6 +2272,8 @@ function TabButton({
     via.length > 0 && `Through ${routeText(via)}`,
     session ? null : "Not saved as a session",
     snapshot.paneKind === "telnet" && "Telnet: what is typed, passwords too, crosses the network in clear text",
+    snapshot.paneKind === "powershell" &&
+      "PowerShell over WinRM: Remotely draws the prompt; no tab completion, and a reconnect starts a new PowerShell",
     multiExec && joinReason(snapshot.paneKind),
     snapshot.logPath && `Logging to ${snapshot.logPath}`,
     attention && "A long command finished, or an alert rule matched, here",
@@ -2319,6 +2321,11 @@ function TabButton({
           {snapshot.paneKind === "telnet" && (
             <Badge variant="outline" className="shrink-0 border-tier-high/50 px-1 py-0 text-[10px] text-tier-high">
               Clear text
+            </Badge>
+          )}
+          {snapshot.paneKind === "powershell" && (
+            <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px]">
+              PS
             </Badge>
           )}
         </span>

@@ -30,6 +30,7 @@ import {
   SearchIcon,
   StarIcon,
   TagIcon,
+  TerminalSquareIcon,
   UsbIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -67,7 +68,7 @@ import {
 } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { sessionAddress } from "@/lib/terminal-session";
-import { kindLabel } from "@/lib/session-kinds";
+import { kindLabel, kindOf, readsGuest } from "@/lib/session-kinds";
 import { cn } from "@/lib/utils";
 import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
 
@@ -548,7 +549,9 @@ function SessionRow({
         >
           Copy the address
         </DropdownMenuItem>
-        {onHostDetails && ssh && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
+        {onHostDetails && readsGuest(kindOf(session)) && (
+          <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>
+        )}
         <DropdownMenuItem onSelect={() => requestLink(noteLink("session", session.id, session.name))}>
           Note…
         </DropdownMenuItem>
@@ -582,7 +585,9 @@ function KindIcon({ protocol }: { protocol: string }) {
         ? UsbIcon
         : protocol === "telnet"
           ? NetworkIcon
-          : null;
+          : protocol === "winrm"
+            ? TerminalSquareIcon
+            : null;
   if (!Icon) return null;
   return <Icon className="size-3 shrink-0 text-muted-foreground" aria-label={kindLabel(protocol)} />;
 }

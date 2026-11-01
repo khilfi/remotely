@@ -41,11 +41,14 @@ function address(key: HostKey) {
   return `${host}:${key.port}`;
 }
 
+/** F4: a WinRM host's HTTPS certificate, trusted by its fingerprint like a host key. */
+const CERT_KEY_TYPE = "tls-certificate";
+
 function Fingerprint({ label, keyType, fingerprint }: { label: string; keyType: string; fingerprint: string }) {
   return (
     <div className="grid gap-1">
       <span className="text-xs font-medium text-muted-foreground">
-        {label} · {keyType}
+        {label} · {keyType === CERT_KEY_TYPE ? "HTTPS certificate" : keyType}
       </span>
       <code className="rounded-md border bg-muted px-2 py-1.5 font-mono text-xs break-all select-all">
         {fingerprint}
@@ -76,6 +79,7 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
   const hop = question.jump ? `the jump host '${question.jump}', on the way to ${sessionName}` : sessionName;
   if (question.kind === "unknown") {
     const { key, otherKeyTypes } = question;
+    const certificate = key.keyType === CERT_KEY_TYPE;
     return (
       <AlertDialog open onOpenChange={(open) => !open && !busy && void run(onReject)}>
         <AlertDialogContent className="data-[size=default]:sm:max-w-md">
@@ -84,11 +88,16 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
               <ShieldQuestionIcon />
             </AlertDialogMedia>
             <AlertDialogTitle>
-              {question.jump ? `Trust the jump host ${address(key)}?` : `Trust ${address(key)}?`}
+              {certificate
+                ? `Trust the HTTPS certificate of ${address(key)}?`
+                : question.jump
+                  ? `Trust the jump host ${address(key)}?`
+                  : `Trust ${address(key)}?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Remotely has not connected to this host before ({hop}). Check that the fingerprint below matches the
-              host's own, for example with its owner or on its console, before you trust it.
+              {certificate
+                ? `Windows doesn't trust this host's certificate (${hop}), as with a self-signed one. Check that the fingerprint below matches the certificate on the host, for example with its owner, before you trust it for this host and port.`
+                : `Remotely has not connected to this host before (${hop}). Check that the fingerprint below matches the host's own, for example with its owner or on its console, before you trust it.`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <Fingerprint label="Fingerprint (SHA-256)" keyType={key.keyType} fingerprint={key.fingerprint} />
@@ -125,6 +134,7 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
   }
 
   const { key, previous } = question;
+  const certificate = key.keyType === CERT_KEY_TYPE;
   return (
     <AlertDialog open onOpenChange={(open) => !open && !busy && onDismiss()}>
       <AlertDialogContent className="data-[size=default]:sm:max-w-lg">
@@ -133,7 +143,8 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
             <ShieldAlertIcon />
           </AlertDialogMedia>
           <AlertDialogTitle>
-            The host key of {question.jump ? `the jump host ${address(key)}` : address(key)} has changed
+            The {certificate ? "HTTPS certificate" : "host key"} of{" "}
+            {question.jump ? `the jump host ${address(key)}` : address(key)} has changed
           </AlertDialogTitle>
           <AlertDialogDescription>
             The key this host ({hop}) presented is not the one you trusted, so Remotely did not connect and sent nothing
@@ -157,7 +168,8 @@ export function HostKeyDialog({ question, sessionName, onTrust, onReject, onRepl
             disabled={busy}
           />
           <Label htmlFor="host-key-confirm" className="text-sm leading-snug font-normal">
-            The host's owner confirmed that the new fingerprint is right. Replace the saved key and connect.
+            The host's owner confirmed that the new fingerprint is right. Replace the saved{" "}
+            {certificate ? "certificate" : "key"} and connect.
           </Label>
         </div>
         {error && (
