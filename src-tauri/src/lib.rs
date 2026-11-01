@@ -19,6 +19,7 @@ mod host_details;
 mod ipc;
 mod multiexec;
 mod navigation;
+mod reports;
 mod schedules;
 mod stacks;
 mod support_bundle;
@@ -99,6 +100,8 @@ pub fn run() {
         .manage(PageLoads::default())
         // FD-09: the toolbox's runs going on, so the UI can stop one.
         .manage(toolbox::ToolRuns::default())
+        // FD-05, BX-12, FD-08: the files the exports saved in this run, for Show in folder.
+        .manage(reports::SavedReports::default())
         .setup(move |app| {
             // Tauri turns a setup error into a panic, so a failed start is explained here and ends here.
             if let Err(err) = start(app, setup_logs.as_deref()) {
@@ -782,6 +785,14 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         support_bundle::bundle_preview,
         support_bundle::bundle_submit,
         support_bundle::bundle_show_folder,
+        // FD-05, BX-12, FD-08 exports.
+        reports::reports_overview,
+        reports::inventory_export,
+        reports::ansible_preview,
+        reports::ansible_export,
+        reports::handover_preview,
+        reports::handover_export,
+        reports::reports_show_file,
         // FD-02 workspaces, AP-08 change ID rule.
         workspaces::workspaces_list,
         workspaces::workspace_current,

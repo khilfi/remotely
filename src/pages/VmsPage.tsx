@@ -36,6 +36,7 @@ import {
   FlagIcon,
   FolderPlusIcon,
   FolderSearchIcon,
+  FileSpreadsheetIcon,
   InfoIcon,
   MonitorOffIcon,
   NetworkIcon,
@@ -192,6 +193,8 @@ interface Props {
   onImport?: () => void;
   /** VM-17, CV-02: opens the Export dialog on a VM. */
   onExport?: (vmxPath: string) => void;
+  /** FD-05: the inventory to Excel. */
+  onExportInventory?: () => void;
   onOpenSettings: () => void;
   /** FD-01: the command palette on one VM's actions. */
   onActions: (vmxPath: string) => void;
@@ -352,6 +355,7 @@ export function VmsPage({
   onDeploy,
   onImport,
   onExport,
+  onExportInventory,
   onOpenSettings,
   onActions,
   request,
@@ -1310,6 +1314,15 @@ export function VmsPage({
         Unassigned VMs
         {unassigned.length > 0 && <DropdownMenuShortcut>{unassigned.length}</DropdownMenuShortcut>}
       </DropdownMenuItem>
+      {onExportInventory && (
+        <>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onExportInventory}>
+            <FileSpreadsheetIcon />
+            Export the inventory to Excel…
+          </DropdownMenuItem>
+        </>
+      )}
       <DropdownMenuSeparator />
       <DropdownMenuItem onSelect={onOpenSettings}>
         <FolderSearchIcon />

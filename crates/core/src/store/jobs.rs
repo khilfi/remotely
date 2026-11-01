@@ -727,4 +727,31 @@ impl Store {
         sqlx::query("VACUUM").execute(&self.pool).await?;
         self.checkpoint().await
     }
+
+    /// FD-08: the workspace's jobs created from `from` up to `to` (RFC 3339 text, compared as stored: UTC), oldest
+    /// first, each with its target counts and the approval it ran under (JSON, as journaled), on the `jobs_by_time`
+    /// index.
+    pub async fn jobs_between(&self, ctx: &Context, from: &str, to: &str) -> Result<Vec<(JobSummary, Option<String>)>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            job_columns!(),
+            ", j.approval_json,
+                    COUNT(t.target_key) AS total,
+                    COALESCE(SUM(t.status = 'succeeded'), 0) AS succeeded,
+                    COALESCE(SUM(t.status = 'failed'), 0) AS failed,
+                    COALESCE(SUM(t.status = 'unknown'), 0) AS unknown
+             FROM jobs j LEFT JOIN job_targets t ON t.job_id = j.id
+             WHERE j.workspace_id = ? AND j.created_at >= ? AND j.created_at < ?
+             GROUP BY j.id
+             ORDER BY j.created_at"
+        ))
+        .bind(ctx.workspace_id.to_string())
+        .bind(from)
+        .bind(to)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| Ok((row_to_summary(r)?, r.try_get("approval_json")?)))
+            .collect()
+    }
 }

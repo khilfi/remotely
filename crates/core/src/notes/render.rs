@@ -16,8 +16,8 @@
 //!
 //! [`LinkMode::Static`] is for a file read outside the app (F6's handover pack): the text goes through
 //! `export::redact_secrets` first (rule 7: a note that holds a password must not carry it into an unencrypted file),
-//! app links become their name, and web links ordinary links that a reader's browser opens when clicked (nothing is
-//! fetched to show them).
+//! app links become their name, and a web link its text with the address after it in brackets, as text: the pack holds
+//! no address in any attribute (no `href`, no `title`), so nothing in it leads anywhere, and the address still prints.
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,7 +32,8 @@ use crate::export;
 pub enum LinkMode {
     /// In the app: `data-note-link` and [`RenderedNote::links`].
     App,
-    /// In a file read elsewhere (F6's handover pack): web links as `<a href>`, app links as their name.
+    /// In a file read elsewhere (F6's handover pack): web links as their text and address, app links as their name;
+    /// no attribute holds an address.
     Static,
 }
 
@@ -207,6 +208,11 @@ pub fn classify(dest: &str, names: &LinkNames) -> NoteLink {
 enum Open {
     Anchor,
     Span,
+    /// [`LinkMode::Static`]: a web link's address follows its text, unless the text is the address.
+    Web {
+        url: String,
+        text: String,
+    },
 }
 
 /// The note as HTML, with its links and code blocks. `names` resolves app links in the workspace.
@@ -227,6 +233,9 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
     let mut code: Option<String> = None;
     let mut events: Vec<Event<'_>> = Vec::new();
     for event in Parser::new_ext(text, options) {
+        if let (Event::Text(t) | Event::Code(t), Some(Open::Web { text, .. })) = (&event, open_links.last_mut()) {
+            text.push_str(t);
+        }
         if let Some(block) = code.as_mut() {
             match event {
                 Event::End(TagEnd::CodeBlock) => {
@@ -268,7 +277,8 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
             }
             Event::Start(Tag::Link { dest_url, title, .. }) => {
                 let link = classify(&dest_url, names);
-                let title = if title.is_empty() {
+                // A file read elsewhere carries no attribute text a reader didn't see (an address in a title).
+                let title = if title.is_empty() || mode == LinkMode::Static {
                     String::new()
                 } else {
                     format!(" title=\"{}\"", escape(&title))
@@ -276,8 +286,11 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
                 let (html, open) = match (mode, &link) {
                     (_, NoteLink::Refused { .. }) => (format!("<span class=\"note-link-refused\"{title}>"), Open::Span),
                     (LinkMode::Static, NoteLink::Web { url }) => (
-                        format!("<a href=\"{}\" rel=\"noopener noreferrer\"{title}>", escape(url)),
-                        Open::Anchor,
+                        "<span class=\"note-link\">".to_owned(),
+                        Open::Web {
+                            url: url.clone(),
+                            text: String::new(),
+                        },
                     ),
                     (LinkMode::Static, _) => (format!("<span class=\"note-link\"{title}>"), Open::Span),
                     (LinkMode::App, _) => (
@@ -296,8 +309,16 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
             }
             Event::End(TagEnd::Link) => {
                 let close = match open_links.pop() {
-                    Some(Open::Anchor) => "</a>",
-                    _ => "</span>",
+                    Some(Open::Anchor) => "</a>".to_owned(),
+                    Some(Open::Web { url, text }) => {
+                        let shown = text.trim();
+                        if shown == url || shown == url.trim_end_matches('/') {
+                            "</span>".to_owned()
+                        } else {
+                            format!("</span> <span class=\"note-url\">({})</span>", escape(&url))
+                        }
+                    }
+                    _ => "</span>".to_owned(),
                 };
                 events.push(Event::Html(CowStr::from(close)));
             }
@@ -481,10 +502,23 @@ export API_KEY=Hunter2Hunter2!
             &names(),
             LinkMode::Static,
         );
-        assert!(out
-            .html
-            .contains("<a href=\"https://example.org/\" rel=\"noopener noreferrer\">site</a>"));
+        // F6: the address is text after the link's, never an attribute.
+        assert!(
+            out.html.contains(
+                "<span class=\"note-link\">site</span> <span class=\"note-url\">(https://example.org/)</span>"
+            ),
+            "{}",
+            out.html
+        );
+        assert!(!out.html.contains("href"));
         assert!(out.html.contains("<span class=\"note-link\">db</span>"));
+        let bare = render(
+            "<https://example.org/x> [t](https://example.org/y \"https://example.org/z\")",
+            &names(),
+            LinkMode::Static,
+        );
+        assert!(bare.html.contains("<span class=\"note-link\">https://example.org/x</span> <span class=\"note-link\">t</span> <span class=\"note-url\">(https://example.org/y)</span>"), "{}", bare.html);
+        assert!(!bare.html.contains("title="), "{}", bare.html);
         assert!(!out.html.contains("data-note-link"));
         assert!(!out.html.contains("javascript"));
         assert!(!out.html.contains("data-note-code"));

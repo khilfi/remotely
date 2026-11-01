@@ -216,6 +216,34 @@ export const HELP = {
       "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
     ],
   },
+  "reports.inventory": {
+    title: "Inventory to Excel",
+    body: [
+      "One workbook of this workspace: VMs with their hardware, every saved session with its host's OS, CPU, memory, disks, listening ports and pending updates, the host networks, and the health checks with their uptime.",
+      "It uses what Remotely has read before. Read reachable hosts again logs in with each session's saved login only (never asking), a few at a time, and a host that can't be reached keeps what was read before. Every value is written as text or a number, never a formula.",
+    ],
+  },
+  "reports.readAgain": {
+    title: "Read reachable hosts again",
+    body: [
+      "Each SSH host's facts and listening ports are read now on an open terminal's connection, the dashboard's, or a login of Remotely's own with the saved login. A login that is refused stops further tries to that host until something changes, and each host takes at most 10 such logins an hour.",
+      "Pending updates can take a minute a host while dnf refreshes its lists. Installed packages come from dpkg or rpm, and only read.",
+    ],
+  },
+  "reports.ansible": {
+    title: "Ansible inventory",
+    body: [
+      "Each SSH session becomes a host with its address, port and user; a jump host goes in as ProxyJump. Groups follow the folders (nested), tags, environments and this workspace, and protected sessions are also in a protected group, so a playbook can leave them out.",
+      "No password, key or vault item goes in the file: give them to Ansible yourself. Names are made valid for Ansible and every value is quoted, so nothing in a name becomes part of the inventory's syntax. Remote desktop, VNC, Telnet and serial sessions are left out.",
+    ],
+  },
+  "reports.handover": {
+    title: "Handover pack",
+    body: [
+      "A zip to give the customer: one page that opens and prints to PDF in any browser, with a cover, the inventory, the network diagram, what was done in the dates you choose (each job with its approval, change ID and result), the health checks' uptime and the notes marked for it.",
+      "The page runs no script and loads nothing from anywhere; the workbook and a CSV per table are beside it. Anything that looks like a password, token or key is replaced with [redacted], but read the pack before you share it. Outputs of what ran are left out unless you add them.",
+    ],
+  },
   supportBundle: {
     title: "Support bundle",
     body: [

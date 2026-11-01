@@ -33,6 +33,10 @@ pub const SERVICES_SCRIPT: &str =
 echo @@failed; systemctl list-units --type=service --state=failed --no-pager --no-legend --plain 2>/dev/null; \
 echo @@other-init; type systemctl >/dev/null 2>&1 || rc-status 2>/dev/null || service --status-all 2>&1";
 
+/// FD-05: the inventory's listening ports: only the ports part of [`ADMIN_SCRIPT`].
+pub const PORTS_SCRIPT: &str =
+    "echo @@ports; ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null";
+
 /// Pending updates, from apt's lists as they are (no `apt update`: that needs root and changes them)
 /// or dnf, which refreshes its metadata first when it is old: that can take a minute or more.
 pub const UPDATES_SCRIPT: &str =
@@ -717,7 +721,7 @@ mod tests {
     #[test]
     fn every_command_only_reads() {
         let policy = PolicyEngine::new(PolicyRules::default()).unwrap();
-        for script in [ADMIN_SCRIPT, UPDATES_SCRIPT, SERVICES_SCRIPT] {
+        for script in [ADMIN_SCRIPT, UPDATES_SCRIPT, SERVICES_SCRIPT, PORTS_SCRIPT] {
             assert_eq!(policy.classify_script(script), ActionKind::ExecReadOnly, "{script}");
             for part in script.split(';') {
                 assert_eq!(policy.classify_script(part), ActionKind::ExecReadOnly, "{part}");

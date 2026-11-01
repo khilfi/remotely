@@ -307,9 +307,12 @@ crates/core/          remotely-core: all app logic
                       session and VM, migration 0014), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
-                      apt or dnf; every command checked read-only by `classify_script` in tests), networks.rs (QL-21
-                      every VM's adapters for the map from the stored hardware; only VMs never read are read, `fresh`
-                      reads all, NETWORK_READS_AT_ONCE; VM-11's report takes its VMs' adapters from here too)
+                      apt or dnf; every command checked read-only by `classify_script` in tests; FD-05 PORTS_SCRIPT),
+                      networks.rs (QL-21 every VM's adapters for the map from the stored hardware; only VMs never read
+                      are read, `fresh` reads all, NETWORK_READS_AT_ONCE; VM-11's report takes its VMs' adapters from
+                      here too), packages.rs (FD-05 PACKAGES_SCRIPT: `dpkg-query -W -f=...` or `rpm -qa`, never stored,
+                      MAX_PACKAGES); FD-05 HostDetails::inventory_read (facts stored, ports, and as asked updates and
+                      packages, on the connection a Refresh uses; its own logins through the LoginGuard: parks, cap)
     alerts/           MO-07 rules.rs (metrics, scopes, BUILTINS and why some start off, checks, messages), eval.rs (the
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
@@ -341,7 +344,8 @@ crates/core/          remotely-core: all app logic
     notes/            FD-06 (0.7.0, migration 0033): mod.rs Notes (Core.notes): one markdown note per session, VM (by
                       its key) and folder; save, set_handover, list (QL-20), import (FD-07), audited note_changed
                       without the text, Change::Notes; for_handover (F6) renders the marked ones with LinkMode::Static,
-                      which redacts secrets first (rule 7: the pack is an unencrypted file), and redacts their body too;
+                      which redacts secrets first (rule 7: the pack is an unencrypted file), makes a web link its text
+                      and address as text (no href or title in the pack), and redacts their body too;
                       a session's note goes to the trash with it, a folder's is deleted with it; render.rs
                       pulldown-cmark (tables, task lists, strikethrough): raw HTML and images become text, only http(s)
                       and app links (session:, vm:, vault: by label, command:, runbook:) are links, each
@@ -556,6 +560,26 @@ crates/core/          remotely-core: all app logic
                       HOSTS_NEED); spec.rs zip_path (a name given `.zip` never replaces a file
                       unasked). The policy engine rates a bundle's commands as a Compare hosts run
                       (Command::rated_script). FD-03: presentation.ts masks the workspace in a bundle's file name
+    reports/          0.7.0 F6 exports (Core.reports; reads only: no tier, no bus, allowed by the read-only lock like
+                      FD-07's and the audit log's exports; each audited `data_exported`; one workspace each, the ctx
+                      the shell passes; the path from the shell's save dialog, save_guard::refuse_repository, written
+                      through a `.part`): table.rs one Sheet and Cell model for Excel, CSV (export::push_row, A10) and
+                      HTML, every text through `clean` (redact_secrets, no control or Cf characters, capped by
+                      character); inventory.rs FD-05 the sheets (VMs with MO-13's stored hardware, hosts: every session,
+                      an SSH host's facts, ports, updates; VM-11's networks; MO-08's checks with 24 h and 7 day uptime;
+                      packages), "Read again first" through HostDetails::inventory_read, READS_AT_ONCE (4),
+                      HOST_READ_LIMIT; xlsx.rs rust_xlsxwriter, text always `write_string`, never a formula; ansible.rs
+                      BX-12 YAML and INI from BX-01's targets (none picked: every SSH session), groups by folder
+                      (nested), tag, environment, workspace, and `protected`; names made valid, YAML keys and strings
+                      double-quoted, Jinja markers `!unsafe` (INI leaves such a value out), hosts and users ssh could
+                      read as options refused, ProxyJump in ansible_ssh_common_args; F4's WinRM hook is
+                      `connection_vars`; activity.rs FD-08 the Activity page's grouping (jobs with their approvals and
+                      entries; other changes, this PC's own events left out); topology.rs QL-21's graph and layered
+                      layout ported, drawn as plain SVG (rect, path, text); html.rs escape, the page with its CSP (only
+                      the style's hash and data: images); pack.rs index.html (cover, inventory, the diagram as an
+                      `<img>` of a data: SVG, what was done with outputs only when chosen and capped, uptime from
+                      Store::check_uptime, Notes::for_handover) and the zip (index.html, inventory.xlsx, a CSV per
+                      table) through AtomicFile; mod.rs Reports, ReportClock (times in the window's offset), file names
     multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
                       characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
                       sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
@@ -622,7 +646,8 @@ crates/core/          remotely-core: all app logic
                       workspaces.rs (FD-02 rows, the home workspace, vm_assignments: require_vm_here, assign_vm,
                       release_vm); audit.rs one hash chain per workspace from chain_start, entries up to
                       `audit_legacy_until` checked against the old single chain; workspace_upgrade_tests.rs a database
-                      at migration 0028 with a row in every table, opened by 0029
+                      at migration 0028 with a row in every table, opened by 0029; reports.rs (FD-08 audit_between,
+                      user_display_name, workspace_name) and jobs.rs jobs_between (with each job's approval JSON)
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
@@ -630,7 +655,8 @@ crates/core/          remotely-core: all app logic
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
                       through another) and tcpip-forward; QL-09 `su [-] [user]` in its shell, a shell without the hook;
                       ssh_server/docker.rs CT-01 its `docker` and `podman` programs (each CLI's JSON from a fixture);
-                      ssh_server/host.rs MO-13, MO-14 a HostFixture (ubuntu, rhel) its exec shell describes itself with
+                      ssh_server/host.rs MO-13, MO-14 a HostFixture (ubuntu, rhel; FD-05 `dpkg-query` or `rpm -qa`
+                      from `installed`) its exec shell describes itself with
     fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
     fakes/consoles.rs  SS-12 FakeLauncher (records each .rdp file and viewer command; windows close on cue) and
                       FakeSerialPorts (COM ports in memory, one open at a time, unplug, breaks)
@@ -657,7 +683,10 @@ crates/core/          remotely-core: all app logic
                       VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
                       conversion.rs: CV-01 to CV-03, VM-17; workspaces.rs: FD-02 isolation of every service and
                       switching; change_ids.rs: AP-08; support_bundle.rs: FD-04 on the test SSH server, zips in the
-                      temp folder; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
+                      temp folder; reports.rs: FD-05, BX-12, FD-08 on the test SSH server's Ubuntu and RHEL hosts and
+                      the fakes, files in the temp folder read back (the xlsx's XML, both Ansible formats, the zip's
+                      members, the page's CSP and attributes, a secret in a note, an output, a name and a tag found in
+                      none); toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
                       127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; checks.rs: MO-08 on a
                       FakeClock with FakeNetworkTools, HTTP and TLS servers on 127.0.0.1 (rcgen), the test SSH server's
@@ -699,7 +728,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       after checked_qemu_site; Settings' qemu-img path in ipc.rs); FD-02, AP-08 workspaces.rs (the
                       switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-04
                       support_bundle.rs (presets, the tier preview, the zip's save dialog in Downloads, Show folder by
-                      job id); FD-09 toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events,
+                      job id); FD-05, BX-12, FD-08 reports.rs (each export's save dialog in Documents, chosen_path,
+                      Show in folder by the id the export returned, SavedReports); FD-09 toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events,
                       toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs); MO-08 checks.rs (the
                       runner, `checks://event`, the Checks tab's commands); 0.7.0 F5 comfort.rs (FD-06 notes, render, a
                       note's web link through ShellExecute after the window's confirm, http(s) only; QL-26 stars and
@@ -748,7 +778,10 @@ src/                  React + TypeScript UI
                       VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-04
                       SupportBundleDialog (hosts, presets, commands and files, options; then BulkResultsView's bundle
                       mode with Show folder; the Sessions page's "⋯" and Ctrl+K open it) and ApprovalDialog's
-                      BundleSummary; FD-02
+                      BundleSummary; 0.7.0 F6 InventoryExportDialog (FD-05; the Sessions and VMs pages' "⋯", Ctrl+K),
+                      AnsibleExportDialog (BX-12; BulkTargetPicker, YAML or INI, groups, the file's preview; the
+                      Sessions page's "⋯" and selection bar, Ctrl+K), HandoverPackDialog (FD-08; the Activity page's
+                      "⋯" on its date filter's days, Ctrl+K on the last 30); FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
                       after a switch), UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
                       approval rules' card) and the approval dialog's one reason or change ID field; UX-10 Settings:
@@ -855,6 +888,8 @@ src/                  React + TypeScript UI
                       workspaces.ts and workspaces-api.ts (FD-02 checks and texts; wrappers that teach the masker every
                       workspace name), rollout.ts (H9 canary, stop after failures, retry choices),
                       support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps),
+                      reports.ts and reports-api.ts (0.7.0 F6: local days as the core's range, the Activity filter as
+                      days, the dialogs' QL-08 reasons and toasts; the exports' types and wrappers),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that

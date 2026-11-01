@@ -30,6 +30,12 @@ pub enum Saved {
     Export,
     /// FD-04: a support bundle (what hosts printed, their logs and files).
     Bundle,
+    /// FD-05: the inventory as an Excel file.
+    Inventory,
+    /// BX-12: an Ansible inventory.
+    Ansible,
+    /// FD-08: a handover pack.
+    Handover,
 }
 
 impl Saved {
@@ -44,6 +50,9 @@ impl Saved {
             Saved::Image => "A disk image holds everything on the disk it came from,",
             Saved::Export => "An exported VM holds its disks and everything on them,",
             Saved::Bundle => "A support bundle holds your hosts' logs, settings and what they printed,",
+            Saved::Inventory => "The inventory names your VMs and hosts, their addresses and what runs on them,",
+            Saved::Ansible => "An Ansible inventory names your hosts, their addresses and users,",
+            Saved::Handover => "A handover pack holds your inventory, what was done and your notes,",
         }
     }
 }
@@ -198,6 +207,9 @@ mod tests {
             Saved::SessionLog,
             Saved::Download,
             Saved::Bundle,
+            Saved::Inventory,
+            Saved::Ansible,
+            Saved::Handover,
         ] {
             let err = refuse_repository(&root.join("docs").join("logs").join("x.txt"), saved).unwrap_err();
             assert!(err.to_string().contains("inside a Git repository"), "{err}");

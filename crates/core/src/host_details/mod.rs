@@ -18,6 +18,11 @@
 //!   and separately pending updates (which can take a minute). Nothing polls: each is one read when
 //!   the panel asks.
 //!
+//! * FD-05 ([`HostDetails::inventory_read`]): the inventory's "Read again first", for many hosts at once: the facts
+//!   (stored, like a Refresh), the listening ports, and on request pending updates and the installed packages
+//!   ([`packages`], never stored). Its own logins go through the [`LoginGuard`], like the dashboard's: a refused login
+//!   parks the host and every login counts against the hourly cap.
+//!
 //! Which connection a Refresh or an admin read uses: an open terminal's to the session, then the
 //! dashboard's kept one, then a connection of its own, made only because the user asked and kept for
 //! a few minutes for the next read. Never a login per read beyond those. Logins use the saved login
@@ -27,6 +32,7 @@
 pub mod admin;
 pub mod linux;
 pub mod networks;
+pub mod packages;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -37,8 +43,9 @@ use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-pub use admin::{AdminDetails, UpdatesReport};
+pub use admin::{AdminDetails, ListeningPort, UpdatesReport};
 pub use linux::HostSpecs;
+pub use packages::PackagesReport;
 
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::remote::{
@@ -49,6 +56,7 @@ use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::KnownHosts;
 use crate::locks;
+use crate::login_guard::{self, LoginGuard, ParkReason, ParkScope, Parked};
 use crate::metrics::guest::{spec_key, GuestVerifier};
 use crate::metrics::Metrics;
 use crate::store::Store;
@@ -172,6 +180,26 @@ pub struct UpdatesCheck {
     pub checked_at: String,
     pub took_ms: u64,
     pub via: Via,
+}
+
+/// FD-05: what [`HostDetails::inventory_read`] reads of a host now. The facts and listening ports always; the rest
+/// only when asked, since they can take a minute (dnf) or print thousands of lines.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InventoryReads {
+    pub updates: bool,
+    pub packages: bool,
+}
+
+/// FD-05: one host's reads for the inventory. A part that failed is `None`, with why in `problems`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InventoryRead {
+    /// Read now and stored, as a Refresh stores them.
+    pub specs: Option<SessionSpecs>,
+    pub ports: Option<Vec<ListeningPort>>,
+    pub updates: Option<UpdatesReport>,
+    pub packages: Option<PackagesReport>,
+    /// One line per part that could not be read: the login, a time limit, a host that isn't Linux.
+    pub problems: Vec<String>,
 }
 
 /// MO-13: a VM's hardware, and what its guest says when a linked session has facts.
@@ -441,6 +469,8 @@ struct Inner {
     vault: Arc<dyn Vault>,
     remote: Arc<dyn RemoteAdapter>,
     known_hosts: Arc<KnownHosts>,
+    /// FD-05: the inventory's logins to many hosts at once park and count like the dashboard's.
+    guard: LoginGuard,
     kept: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<Kept>>>>,
 }
 
@@ -454,6 +484,15 @@ pub struct HostDetailsParts {
     pub vault: Arc<dyn Vault>,
     pub remote: Arc<dyn RemoteAdapter>,
     pub known_hosts: Arc<KnownHosts>,
+    pub login_guard: LoginGuard,
+}
+
+/// How a connection of Remotely's own logs in: because the user asked for this one host (Refresh, the admin panel),
+/// or for many hosts at once (FD-05's inventory), through the login guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Login {
+    Asked,
+    Guarded,
 }
 
 /// The host details service. Cloning gives another handle to the same one.
@@ -473,6 +512,7 @@ impl HostDetails {
             vault: parts.vault,
             remote: parts.remote,
             known_hosts: parts.known_hosts,
+            guard: parts.login_guard,
             kept: Mutex::default(),
         });
         // Remotely's own connections close on their own when idle.
@@ -570,6 +610,73 @@ impl HostDetails {
         })
     }
 
+    /// FD-05: the inventory's "Read again first" for one SSH host: its facts (stored), listening ports and, as asked,
+    /// pending updates and installed packages, on the connection a Refresh would use, its own logins through the
+    /// login guard. Reads only. A part that fails is noted and the others are still read; `Err` only when no
+    /// connection could be made (the error says why: parked, capped, the vault locked...).
+    pub async fn inventory_read(
+        &self,
+        ctx: &Context,
+        session_id: Uuid,
+        reads: InventoryReads,
+    ) -> Result<InventoryRead> {
+        let (exec, _via) = self.connection_by(ctx, session_id, Login::Guarded).await?;
+        let tuning = self.inner.collector.tuning();
+        let mut read = InventoryRead::default();
+        match self
+            .inner
+            .collector
+            .collect(ctx, session_id, exec.as_ref(), CollectedBy::Refresh)
+            .await
+        {
+            Ok(specs) => read.specs = Some(specs),
+            Err(err) => read.problems.push(format!("facts: {err}")),
+        }
+        match run_with_timeout(
+            exec.as_ref(),
+            admin::PORTS_SCRIPT,
+            admin::MAX_OUTPUT,
+            tuning.admin_timeout,
+        )
+        .await
+        {
+            Ok(result) => {
+                let lines = linux::sections(&result.output.stdout)
+                    .remove("ports")
+                    .unwrap_or_default();
+                read.ports = Some(admin::parse_ports(&lines));
+            }
+            Err(err) => read.problems.push(format!("listening ports: {err}")),
+        }
+        if reads.updates {
+            match run_with_timeout(
+                exec.as_ref(),
+                admin::UPDATES_SCRIPT,
+                admin::MAX_OUTPUT,
+                tuning.updates_timeout,
+            )
+            .await
+            {
+                Ok(result) => read.updates = Some(admin::parse_updates(&result.output.stdout)),
+                Err(err) => read.problems.push(format!("pending updates: {err}")),
+            }
+        }
+        if reads.packages {
+            match run_with_timeout(
+                exec.as_ref(),
+                packages::PACKAGES_SCRIPT,
+                packages::MAX_OUTPUT,
+                tuning.updates_timeout,
+            )
+            .await
+            {
+                Ok(result) => read.packages = Some(packages::parse_packages(&result.output.stdout)),
+                Err(err) => read.problems.push(format!("installed packages: {err}")),
+            }
+        }
+        Ok(read)
+    }
+
     /// Closes Remotely's own connection to the session, if it has one (the panel closed).
     pub async fn release(&self, session_id: Uuid) {
         let slot = locks::lock(&self.inner.kept).remove(&session_id);
@@ -664,6 +771,15 @@ impl HostDetails {
 
     /// The connection a read uses: an open terminal's, the dashboard's, or Remotely's own.
     async fn connection(&self, ctx: &Context, session_id: Uuid) -> Result<(Arc<dyn ExecSession>, Via)> {
+        self.connection_by(ctx, session_id, Login::Asked).await
+    }
+
+    async fn connection_by(
+        &self,
+        ctx: &Context,
+        session_id: Uuid,
+        login: Login,
+    ) -> Result<(Arc<dyn ExecSession>, Via)> {
         if let Some(exec) = self.inner.terminals.commands_for(session_id) {
             return Ok((exec, Via::Terminal));
         }
@@ -676,10 +792,10 @@ impl HostDetails {
             .session_spec(ctx, session_id)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(session_id.to_string()))?;
-        Ok((self.own_connection(ctx, &spec).await?, Via::OwnConnection))
+        Ok((self.own_connection(ctx, &spec, login).await?, Via::OwnConnection))
     }
 
-    async fn own_connection(&self, ctx: &Context, spec: &SessionSpec) -> Result<Arc<dyn ExecSession>> {
+    async fn own_connection(&self, ctx: &Context, spec: &SessionSpec, login: Login) -> Result<Arc<dyn ExecSession>> {
         let slot = Arc::clone(locks::lock(&self.inner.kept).entry(spec.id).or_default());
         let mut kept = slot.lock().await;
         let key = spec_key(spec);
@@ -689,13 +805,54 @@ impl HostDetails {
             }
         }
         if kept.connection.is_none() {
-            kept.connection = Some(self.connect(ctx, spec).await?);
+            kept.connection = Some(match login {
+                Login::Asked => self.connect(ctx, spec).await?,
+                Login::Guarded => self.connect_guarded(ctx, spec).await?,
+            });
             kept.spec_key = key;
         }
         kept.used = Some(Instant::now());
         kept.connection
             .clone()
             .ok_or_else(|| CoreError::Ssh("no connection".into()))
+    }
+
+    /// FD-05: [`Self::connect`] for a login nobody asked for one by one: a parked session isn't tried, a missing
+    /// password or a refused login parks it, and every login counts against the hourly cap (jump hosts too).
+    async fn connect_guarded(&self, ctx: &Context, spec: &SessionSpec) -> Result<Arc<dyn ExecSession>> {
+        let guard = &self.inner.guard;
+        let key = login_guard::login_key(spec);
+        let park = |reason: ParkReason, what: &str| {
+            let parked = Parked {
+                reason,
+                message: login_guard::parked_message(what),
+            };
+            guard.park(spec.id, ParkScope::Login, &key, parked.clone());
+            parked.error()
+        };
+        if let Some(parked) = guard.parked(spec.id, ParkScope::Login, &key) {
+            return Err(parked.error());
+        }
+        if let Some(what) = login_guard::missing_password(spec) {
+            return Err(park(
+                ParkReason::SecretMissing,
+                &format!("no password is saved for {what}. Save it in the vault and choose it in that session"),
+            ));
+        }
+        if let Err(wait) = guard.admit(spec.id, &login_guard::login_hosts(spec)) {
+            let host = crate::known_hosts::address(&spec.host, spec.port);
+            return Err(CoreError::LoginsCapped {
+                message: login_guard::capped_message(&host, guard.per_hour(), wait),
+                wait_secs: wait.as_secs(),
+            });
+        }
+        match self.connect(ctx, spec).await {
+            Ok(connection) => Ok(connection),
+            Err(err) => match ParkReason::of(&err) {
+                Some(reason) => Err(park(reason, &err.to_string())),
+                None => Err(err),
+            },
+        }
     }
 
     /// Logs in with the saved login only: nothing is asked.
